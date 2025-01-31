@@ -6,8 +6,8 @@ import itertools
 from refinery.units import Arg, Unit, Chunk
 
 from refinery.lib.meta import SizeInt, metavars, check_variable_name
-from refinery.lib.structures import EOF, StructReader, StreamDetour
-from refinery.lib.argformats import ParserError, PythonExpression, multibin
+from refinery.lib.structures import StructReader, StreamDetour
+from refinery.lib.argformats import ParserError, PythonExpression, numseq
 from refinery.lib.types import INF
 
 
@@ -28,14 +28,20 @@ class struct(Unit):
 
     - `a` for null-terminated ASCII strings,
     - `u` to read encoded, null-terminated UTF16 strings,
-    - `w` to read decoded, null-terminated UTF16 strings.
+    - `w` to read decoded, null-terminated UTF16 strings,
+    - `g` to read Microsoft GUID values,
+    - `E` to read 7-bit encoded integers.
 
     For example, the string `LLxxHaa` will read two unsigned 32bit integers, then skip two bytes,
     then read one unsigned 16bit integer, then two null-terminated ASCII strings. The unit defaults
-    to using native byte order with no alignment.
+    to using native byte order with no alignment. The `spec` parameter may additionally contain
+    format expressions of the following form:
 
-    The `spec` parameter may additionally contain format expressions of the form `{name:format}`.
-    Here, `format` can either be an integer expression specifying a number of bytes to read, or any
+    {name[!alignment]:format}
+
+    The `alignment` parameter is optional. It must be an expression that evaluates to an integer
+    value. The current data pointer is aligned to a multiple of this value before reading the field.
+    The `format` can either be an integer expression specifying a number of bytes to read, or any
     format string. If `name` is specified for an extracted field, its value is made available as a
     meta variable under the given name. For example, the expression `LLxxH{foo:a}{bar:a}` would be
     parsed in the same way as the previous example, but the two ASCII strings would also be stored
@@ -73,12 +79,15 @@ class struct(Unit):
         until: Arg('-u', metavar='E', type=str, help=(
             'An expression evaluated on each chunk in multi mode. New chunks will be parsed '
             'only if the result is nonzero.')) = None,
+        field: Arg.String('-f', help=(
+            'Optionally specify a format string expression to auto-name extracted fields without a '
+            'given name based on their position.')) = None,
         more : Arg.Switch('-M', help=(
             'After parsing the struct, emit one chunk that contains the data that was left '
             'over in the buffer. If no data was left over, this chunk will be empty.')) = False
     ):
         outputs = outputs or [F'{{{_SHARP}}}']
-        super().__init__(spec=spec, outputs=outputs, until=until, count=count, multi=multi, more=more)
+        super().__init__(spec=spec, outputs=outputs, until=until, field=field, count=count, multi=multi, more=more)
 
     def process(self, data: Chunk):
         formatter = string.Formatter()
@@ -103,6 +112,8 @@ class struct(Unit):
         it = itertools.count() if self.args.multi else (0,)
         for index in it:
 
+            checkpoint = reader.tell()
+
             if reader.eof:
                 break
             if index >= self.args.count:
@@ -114,22 +125,25 @@ class struct(Unit):
 
             args = []
             last = None
-            checkpoint = reader.tell()
-            self.log_info(F'starting new read at: 0x{checkpoint:08X}')
+            self.log_debug(F'starting new read at: 0x{checkpoint:08X}')
 
             try:
                 for prefix, name, spec, conversion in formatter.parse(mainspec):
                     name: str
                     spec: str = spec and spec.strip()
                     if prefix:
-                        args.extend(reader.read_struct(fixorder(prefix)))
+                        fields = reader.read_struct(fixorder(prefix))
+                        if fmt := self.args.field:
+                            for k, field in enumerate(fields, len(args)):
+                                meta[fmt.format(k)] = field
+                        args.extend(fields)
                     if name is None:
                         continue
                     if name and not name.isdecimal():
                         check_variable_name(name)
                     if conversion:
                         _aa = reader.tell()
-                        reader.byte_align(PythonExpression.evaluate(conversion, meta))
+                        reader.byte_align(PythonExpression.Evaluate(conversion, meta))
                         _ab = reader.tell()
                         if _aa != _ab:
                             self.log_info(F'aligned from 0x{_aa:X} to 0x{_ab:X}')
@@ -138,7 +152,7 @@ class struct(Unit):
                         spec = meta.format_str(spec, self.codec, args)
                     if spec:
                         try:
-                            _exp = PythonExpression.evaluate(spec, meta)
+                            _exp = PythonExpression.Evaluate(spec, meta)
                         except ParserError:
                             pass
                         else:
@@ -162,7 +176,7 @@ class struct(Unit):
                             value = value[0]
 
                     if pipeline:
-                        value = multibin(pipeline, reverse=True, seed=value)
+                        value = numseq(pipeline, reverse=True, seed=value)
                     args.append(value)
 
                     if name == _SHARP:
@@ -178,8 +192,8 @@ class struct(Unit):
                     elif name:
                         meta[name] = value
 
-                if until and not until(meta):
-                    self.log_info(F'the expression ({until}) evaluated to zero; aborting.')
+                if until and until(meta):
+                    self.log_info(F'the expression ({until}) evaluated to true; aborting.')
                     break
 
                 with StreamDetour(reader, checkpoint) as detour:
@@ -188,10 +202,12 @@ class struct(Unit):
                     last = full
 
                 outputs = []
+                symbols = dict(meta)
+                symbols[_SHARP] = last
 
                 for template in self.args.outputs:
                     used = set()
-                    outputs.append(meta.format(template, self.codec, [full, *args], {_SHARP: last}, True, used=used))
+                    outputs.append(meta.format(template, self.codec, [full, *args], symbols, True, used=used))
                     for key in used:
                         if key in previously_existing_variables:
                             continue
@@ -203,7 +219,7 @@ class struct(Unit):
                     chunk.set_next_batch(index)
                     yield chunk
 
-            except EOF:
+            except EOFError:
                 break
 
         leftover = len(reader) - checkpoint

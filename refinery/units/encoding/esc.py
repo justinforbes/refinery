@@ -40,21 +40,26 @@ class esc(Unit):
         hex     : Arg.Switch('-x', help='Hex encode everything, do not use C escape sequences.') = False,
         unicode : Arg.Switch('-u', help='Use unicode escape sequences and UTF-8 encoding.') = False,
         greedy  : Arg.Switch('-g', help='Replace \\x by x and \\u by u when not followed by two or four hex digits, respectively.') = False,
-        quoted  : Arg.Switch('-q', help='Remove enclosing quotes while decoding and add them for encoding.') = False,
+        unquoted: Arg.Switch('-p', group='Q', help='Never remove enclosing quotes.') = False,
+        quoted  : Arg.Switch('-q', group='Q', help='Remove enclosing quotes while decoding and add them for encoding.') = False,
         bare    : Arg.Switch('-b', help='Do not escape quote characters.') = False,
-        expand  : Arg.Switch('-p', help='Decode sequences of the form \\uHHLL as two bytes when the upper byte is nonzero.') = False,
     ) -> Unit: pass  # noqa
 
     def process(self, data):
+        data = memoryview(data)
+
         if self.args.quoted:
             quote = data[0]
             if data[-1] != quote:
                 self.log_info('string is not correctly quoted')
             else:
                 data = data[1:-1]
-
-        if self.args.unicode:
-            return data.decode('UNICODE_ESCAPE').encode(self.codec)
+        elif not self.args.unquoted:
+            quote = data[:1]
+            strip = data[1:-1]
+            if data[-1:] == quote and not re.search(br'(?<!\\)' + re.escape(quote), strip):
+                self.log_info('removing automatically detected quotes')
+                data = strip
 
         def unescape(match):
             c = match[1]
@@ -63,8 +68,8 @@ class esc(Unit):
                     # unicode
                     upper = int(c[1:3], 16)
                     lower = int(c[3:5], 16)
-                    if self.args.expand:
-                        return bytes((upper, lower))
+                    if self.args.unicode:
+                        return bytes((lower, upper)).decode('utf-16le').encode(self.codec)
                     return bytes((lower,))
                 elif c[0] == 0x78:
                     # hexadecimal

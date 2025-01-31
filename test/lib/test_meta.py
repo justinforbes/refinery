@@ -26,9 +26,6 @@ class TestMeta(TestBase):
     def test_binary_formatter_literal(self):
         meta = metavars(B'')
         self.assertEqual(meta.format_bin('{726566696E657279!H}', 'utf8'), b'refinery')
-        self.assertEqual(meta.format_bin('{refinery!a}', 'utf8'), 'refinery'.encode('latin1'))
-        self.assertEqual(meta.format_bin('{refinery!s}', 'utf8'), 'refinery'.encode('utf8'))
-        self.assertEqual(meta.format_bin('{refinery!u}', 'utf8'), 'refinery'.encode('utf-16le'))
 
     def test_hex_byte_strings(self):
         pl = L('emit Hello [| cm -2 | cfmt {sha256!r} ]')
@@ -87,3 +84,9 @@ class TestMeta(TestBase):
     def test_regression_nulled_history(self):
         pl = L('emit FOO [[| put b [| emit BAR ]| rex . | swap k | swap b | cfmt {}/{k} | sep / ]]')
         self.assertEqual(pl(), B'FOO/B/FOO/A/FOO/R')
+
+    def test_wrapper_works_after_deserialization(self):
+        e1 = L('emit range:0x100 [| cm entropy | cfmt {entropy!r} ]') | str
+        e2 = L('emit range:0x100 | cfmt {entropy!r}') | str
+        self.assertEqual(e1, e2)
+        self.assertEqual(e1, '100.00%')

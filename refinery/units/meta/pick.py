@@ -3,6 +3,7 @@
 from typing import Iterable, Iterator, List, Deque, Optional
 from refinery.units import Arg, Unit, Chunk
 from refinery.lib.tools import begin
+from refinery.lib.argformats import sliceobj
 
 from collections import deque
 from dataclasses import dataclass, field
@@ -44,8 +45,8 @@ class pick(Unit):
     Picks sequences from the array of multiple inputs. For example, `pick 0 2:`
     will return all but the second ingested input (which has index `1`).
     """
-    def __init__(self, *slice: Arg.Bounds(nargs='*', default=[slice(None, None)])):
-        super().__init__(slice=slice)
+    def __init__(self, *bounds: Arg.Bounds(nargs='*', default=[0])):
+        super().__init__(bounds=[sliceobj(s) for s in bounds])
 
     def process(self, data: Chunk):
         if not data.visible:
@@ -95,9 +96,11 @@ class pick(Unit):
         if chunks is None:
             return
         container, chunks = chunks
+        if container.scope < 1:
+            raise RuntimeError(F'{self.__class__.__name__} cannot be used outside a frame; maybe you meant to use snip?')
         container = container.copy()
         container.visible = True
-        state = _PickState(deque(self.args.slice), chunks)
+        state = _PickState(deque(self.args.bounds), chunks)
         while state.next():
             if not state.consumed:
                 if not state.discardable():
@@ -110,3 +113,24 @@ class pick(Unit):
                     state.consumed = True
             container.temp = state
             yield container
+
+
+class p1(pick):
+    """
+    A shortcut for `refinery.pick` with the argument `0:1`.
+    """
+    def __init__(self): super().__init__(slice(0, 1))
+
+
+class p2(pick):
+    """
+    A shortcut for `refinery.pick` with the argument `0:2`.
+    """
+    def __init__(self): super().__init__(slice(0, 2))
+
+
+class p3(pick):
+    """
+    A shortcut for `refinery.pick` with the argument `0:3`.
+    """
+    def __init__(self): super().__init__(slice(0, 3))

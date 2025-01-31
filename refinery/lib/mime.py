@@ -13,6 +13,7 @@ class NoMagicAvailable(ModuleNotFoundError):
 
 
 FileTypeMap = {
+    'application/x-setupscript': 'ini',
     'applicaiton/x-bytecode.python': 'pyc',
     'application/acad': 'dwg',
     'application/arj': 'arj',
@@ -59,8 +60,8 @@ FileTypeMap = {
     'application/vnd.ms-cab-compressed': 'cab',
     'application/vnd.ms-excel': 'xls',
     'application/vnd.ms-fontobject': 'eot',
-    'application/vnd.ms-powerpoint': 'ppt',
     'application/vnd.ms-outlook': 'eml',
+    'application/vnd.ms-powerpoint': 'ppt',
     'application/vnd.oasis.opendocument.presentation': 'odp',
     'application/vnd.oasis.opendocument.spreadsheet': 'ods',
     'application/vnd.oasis.opendocument.text': 'odt',
@@ -85,8 +86,10 @@ FileTypeMap = {
     'application/x-csh': 'csh',
     'application/x-dosexec': 'exe',
     'application/x-dvi': 'dvi',
+    'application/x-elf-executable': 'elf',
     'application/x-excel': 'xls',
     'application/x-exe': 'exe',
+    'application/x-executable': 'elf',
     'application/x-freearc': 'arc',
     'application/x-gzip': 'gz',
     'application/x-helpfile': 'hlp',
@@ -177,6 +180,7 @@ FileTypeMap = {
     'image/x-quicktime': 'qtif',
     'image/x-tiff': 'tif',
     'image/x-windows-bmp': 'bmp',
+    'image/x-ms-bmp': 'bmp',
     'image/x-xpixmap': 'pm',
     'model/vrml': 'vrml',
     'multipart/x-gzip': 'gz',
@@ -267,7 +271,12 @@ class FileMagicInfo:
         if self.description == 'Microsoft OOXML':
             extension = 'docx'
         if extension == 'exe':
-            extension = 'dll' if '(DLL)' in self.description else 'exe'
+            if '(DLL)' in self.description:
+                extension = 'dll'
+            elif '(native)' in self.description:
+                extension = 'sys'
+            else:
+                extension = 'exe'
         elif extension in ('gz', 'gzip', 'bz2') and decompress:
             if extension == 'bz2':
                 import bz2

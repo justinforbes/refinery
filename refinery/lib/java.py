@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Parsing of the Java Class file format as per:
-https://docs.oracle.com/javase/specs/jvms/se14/html/jvms-4.html
+Parsing of the Java Class file format as per
+ [the official specification](https://docs.oracle.com/javase/specs/jvms/se14/html/jvms-4.html).
 """
 from typing import Union, Any, Dict, List, ByteString, Type, Optional, TypeVar, Generic
 from enum import IntEnum
@@ -115,9 +115,11 @@ class JvString(_HasPoolAndTag):
         super().__init__(reader, **kwargs)
         self.value = reader.u16()
 
-    def __repr__(self): return repr(self.value)
+    def __repr__(self):
+        return repr(self.value)
 
-    def __str__(self): return self.value
+    def __str__(self):
+        return self.value
 
 
 class JvClassProperty(_HasPoolAndTag):
@@ -129,7 +131,10 @@ class JvClassProperty(_HasPoolAndTag):
         self.name = reader.u16()
         self.info = reader.u16()
 
-    def __repr__(self): return F'{self.name}::{self.info}'
+    def __repr__(self):
+        name: str = str(self.name)
+        name = '.'.join(name.split('/'))
+        return F'{name}::{self.info}'
 
 
 class JvMethodHandle(_HasPoolAndTag):
@@ -413,6 +418,14 @@ class JvBaseType(IntEnum):
     def __repr__(self) -> str: return self.name
 
 
+class JvTypePath:
+    def __init__(self, object_path):
+        self._path = '.'.join(str(object_path).split('/'))
+
+    def __repr__(self):
+        return self._path
+
+
 class JvOpCode(Struct):
 
     OPC_ARGMAP = {
@@ -507,21 +520,23 @@ class JvOpCode(Struct):
                     self.arguments[0] = pool[self.arguments[0] - 1]
                 except (AttributeError, IndexError):
                     pass
+                if self.code == opc.new:
+                    self.arguments[0] = JvTypePath(self.arguments[0])
             elif self.code == opc.lookupswitch:
                 reader.byte_align(blocksize=4)
                 default, npairs = reader.read_struct('LL')
-                pairs = reader.read_struct(F'{npairs*2}L')
+                pairs = reader.read_struct(F'{npairs * 2}L')
                 self.table = dict(zip(*([iter(pairs)] * 2)))
                 self.table[None] = default
             elif self.code == opc.tableswitch:
                 reader.byte_align(blocksize=4)
                 default, low, high = reader.read_struct('LLL')
                 assert low <= high
-                offsets = reader.read_struct(F'{high-low+1}L')
+                offsets = reader.read_struct(F'{high - low + 1}L')
                 self.table = {k + low: offset for k, offset in enumerate(offsets)}
                 self.table[None] = default
             elif self.code == opc.wide:
-                argop = opc(reader.get_byte())
+                argop = opc(reader.u8())
                 self.arguments = (argop, reader.u16())
                 if argop == opc.iinc:
                     self.arguments += reader.i16(),
@@ -671,7 +686,7 @@ class JvClassFile(Struct):
             i += 1
         return new_string.decode('utf8')
 
-    def _read_pool(self, reader):
+    def _read_pool(self, reader: StructReader):
         assert not self.pool, 'pool can only be read once.'
         size = reader.u16() - 1
         reserved_slot = False

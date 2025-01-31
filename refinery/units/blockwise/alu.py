@@ -5,6 +5,7 @@ from __future__ import annotations
 from refinery.units.blockwise import Arg, ArithmeticUnit, FastBlockError
 from refinery.lib.meta import metavars
 from refinery.lib.argformats import PythonExpression
+from refinery.lib.types import INF
 
 
 class IndexCounter:
@@ -30,15 +31,19 @@ class alu(ArithmeticUnit):
 
     - the variable `A`: same as `V[0]`
     - the variable `B`: current block
+    - the variable `E`: block value of encoded input (not changed after update)
     - the variable `N`: number of bytes in the input
     - the variable `K`: current index in the input
     - the variable `S`: the internal state value
     - the variable `V`: the vector of arguments
     - the variable `I`: function that casts to a signed int in current precision
     - the variable `U`: function that casts to unsigned int in current precision
-    - the variable `R`: function that rotates right
-    - the variable `L`: function that rotates left
+    - the variable `R`: function; `R(x,4)` rotates x by 4 to the right
+    - the variable `L`: function; `L(x,4)` rotates x by 4 to the left
+    - the variable `M`: function; `M(x,8)` picks the lower 8 bits of x
     - the variable `X`: function that negates the bits of the input
+
+    (The rotation operations are interpreted as shifts when arbitrary precision is used.)
 
     Each block of the input is replaced by the value of this expression. Additionally, it is possible to
     specify prologue and epilogue expressions which are used to update the state variable `S` before and
@@ -47,16 +52,10 @@ class alu(ArithmeticUnit):
 
     @staticmethod
     def _parse_op(definition, default=None):
-        """
-        An argparse type which uses the `refinery.lib.argformats.PythonExpression` parser to parse the
-        expressions that can be passed to `refinery.alu`. Essentially, these are Python expressions which can
-        contain variables `B`, `A`, `S`, and `V`.
-        """
+        definition = definition or default
         if not definition:
-            if default is None:
-                raise ValueError('No definition given')
-            definition = default
-        return PythonExpression(definition, *'IBASNVRLX', all_variables_allowed=True)
+            raise ValueError('No definition given')
+        return definition
 
     def __init__(
         self, operator: Arg(type=str, help='A Python expression defining the operation.'), *argument,
@@ -70,7 +69,7 @@ class alu(ArithmeticUnit):
         inc: Arg('-I', group='EPI', help='equivalent to --epilogue=S+1') = False,
         dec: Arg('-D', group='EPI', help='equivalent to --epilogue=S-1') = False,
         cbc: Arg('-X', group='EPI', help='equivalent to --epilogue=(B)') = False,
-        bigendian=False, blocksize=1, precision=None
+        bigendian=False, blocksize=None, precision=None
     ):
         for flag, flag_is_set, expression in [
             ('--cbc', cbc, '(B)'),
@@ -109,16 +108,20 @@ class alu(ArithmeticUnit):
     def process(self, data):
         context = dict(metavars(data))
         seed = self.args.seed
+        fbits = self.fbits
+        fmask = self.fmask
         if isinstance(seed, str):
-            seed = PythonExpression(seed, 'N', constants=metavars(data))
+            seed = PythonExpression(seed, 'N', constants=metavars(data), mask=fmask)
         if callable(seed):
             seed = seed(context, N=len(data))
         self._index.init(self.fmask)
-        prologue = self.args.prologue.expression
-        epilogue = self.args.epilogue.expression
-        operator = self.args.operator.expression
-        fbits = self.fbits
-        fmask = self.fmask
+
+        def _expression(definition: str):
+            return PythonExpression(definition, *'IBEASMNVRLX', all_variables_allowed=True, mask=fmask)
+
+        prologue = _expression(self.args.prologue).expression
+        epilogue = _expression(self.args.epilogue).expression
+        operator = _expression(self.args.operator).expression
 
         def cast_unsigned(n) -> int:
             return int(n) & fmask
@@ -130,27 +133,32 @@ class alu(ArithmeticUnit):
             else:
                 return n
 
-        def rotate_right(n, k):
-            return (n >> k) | (n << (fbits - k)) & fmask
-
-        def rotate_left(n, k):
-            return (n << k) | (n >> (fbits - k)) & fmask
+        if fbits is INF:
+            def rotate_r(n, k): return n >> k
+            def rotate_l(n, k): return n << k
+        else:
+            def rotate_r(n, k): return (n >> k) | (n << (fbits - k)) & fmask
+            def rotate_l(n, k): return (n << k) | (n >> (fbits - k)) & fmask
 
         def negate_bits(n):
             return n ^ fmask
+
+        def mask_to_bits(x, b):
+            return x & ((1 << b) - 1)
 
         context.update(
             N=len(data),
             S=seed,
             I=cast_signed,
             U=cast_unsigned,
-            R=rotate_right,
-            L=rotate_left,
-            X=negate_bits
+            R=rotate_r,
+            L=rotate_l,
+            X=negate_bits,
+            M=mask_to_bits,
         )
 
         def operate(block, index, *args):
-            context.update(K=index, B=block, V=args)
+            context.update(K=index, B=block, E=block, V=args)
             if args:
                 context['A'] = args[0]
             context['S'] = eval(prologue, None, context)
@@ -160,8 +168,12 @@ class alu(ArithmeticUnit):
 
         placeholder = self.operate
         self.operate = operate
-        result = super().process(data)
-        self.operate = placeholder
+
+        try:
+            result = super().process(data)
+        finally:
+            self.operate = placeholder
+
         return result
 
     @staticmethod

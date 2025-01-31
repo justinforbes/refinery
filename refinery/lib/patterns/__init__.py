@@ -24,20 +24,21 @@ class pattern:
     bin_compiled: re.Pattern
     str_compiled: re.Pattern
 
-    def __init__(self, pattern: str):
+    def __init__(self, pattern: str, flags: int = 0):
         self.str_pattern = pattern
         self.bin_pattern = pattern.encode('ascii')
+        self.regex_flags = flags
 
     def __bytes__(self):
         return self.bin_pattern
 
     @cached_property
     def bin_compiled(self):
-        return re.compile(B'(%s)' % self.bin_pattern)
+        return re.compile(B'(%s)' % self.bin_pattern, flags=self.regex_flags)
 
     @cached_property
     def str_compiled(self):
-        return re.compile(self.str_pattern)
+        return re.compile(self.str_pattern, flags=self.regex_flags)
 
     def __str__(self):
         return self.str_pattern
@@ -90,9 +91,12 @@ class tokenize(pattern):
     before and after each token, its default value is the regular expression zero length
     match for a word boundary.
     """
-    def __init__(self, token, sep, bound='\\b', unique_sep=False, **kwargs):
+    def __init__(self, token, sep, bound='\\b', unique_sep=False, sep_ignores_whitespace=True, **kwargs):
         if unique_sep:
-            p = R'(?:{b}{t}{b}(?P<__sep>{s}))(?:(?:{b}{t}{b}(?P=__sep))+{b}{t}{b}|{b}{t}{b})'
+            if sep_ignores_whitespace:
+                p = R'(?:{b}{t}{b}\s{{0,50}}(?P<__sep>{s})\s{{0,50}})(?:(?:{b}{t}{b}\s{{0,50}}(?P=__sep)\s{{0,50}})+{b}{t}{b}|{b}{t}{b})'
+            else:
+                p = R'(?:{b}{t}{b}(?P<__sep>{s}))(?:(?:{b}{t}{b}(?P=__sep))+{b}{t}{b}|{b}{t}{b})'
         else:
             p = R'(?:{b}{t}{b}{s})+(?:{b}{t}{b})'
         pattern.__init__(self, p.format(s=sep, b=bound, t=token), **kwargs)
@@ -146,6 +150,7 @@ _format_defanged_domain = (
 )
 
 _pattern_utf8 = R'(?:[\x00-\x7F]|[\xC0-\xDF][\x80-\xBF]|[\xE0-\xEF][\x80-\xBF]{2}|[\xF0-\xF7][\x80-\xBF]{3})+'
+_pattern_b92 = R'~|(?:[!-_a-}]{2})+[!-_a-}]?'
 
 _pattern_serrated_domain = _format_serrated_domain.format(repeat='{0,20}', tlds=_TLDS)
 _pattern_defanged_domain = _format_defanged_domain.format(repeat='{0,20}', tlds=_TLDS)
@@ -192,8 +197,9 @@ _pattern_number = (
     '[-+]?(?:0[bB][01]+|0[xX][0-9a-fA-F]+|0[1-7][0-7]*|(?:[1-9][0-9]*|0)(?P<fp1>\\.[0-9]*)?|(?P<fp2>\\.[0-9]+))'
     '(?(fp1)(?:[eE][-+]?[0-9]+)?|(?(fp2)(?:[eE][-+]?[0-9]+)?|(?=[uU]?[iI]\\d{1,2}|[LlHh]|[^a-zA-Z0-9]|$)))'
 )
+
 _pattern_cmdstr = R'''(?:"(?:""|[^"])*"|'(?:''|[^'])*')'''
-_pattern_ps1str = R'''(?:@"\s*?[\r\n].*?[\r\n]"@|@'\s*?[\r\n].*?[\r\n]'@|"(?:`.|""|[^"])*"|'(?:''|[^'])*')'''
+_pattern_ps1str = R'''(?:(?:@"\s*?[\r\n].*?[\r\n]"@)|(?:@'\s*?[\r\n].*?[\r\n]'@)|(?:"(?:`.|""|[^"\n])*")|(?:'(?:''|[^'\n])*'))'''
 _pattern_vbastr = R'''"(?:""|[^"])*"'''
 _pattern_vbaint = R'(?:&[bB][01]+|&[hH][0-9a-fA-F]+|&[oO][0-7]*|[-+]?(?:[1-9][0-9]*|0))(?=\b|$)'
 _pattern_string = R'''(?:"(?:[^"\\\r\n]|\\[^\r\n])*"|'(?:[^'\\\r\n]|\\[^\r\n])*')'''
@@ -226,17 +232,17 @@ _pattern_win_path_element = R'(?:{n} ){{0,4}}{n}'.format(n=_pattern_pathpart_nos
 _pattern_nix_path_element = R'(?:{n} ){{0,1}}{n}'.format(n=_pattern_pathpart_nospace)
 _pattern_win_env_variable = R'%[a-zA-Z][a-zA-Z0-9_\-\(\)]*%'
 
-_pattern_win_path = R'(?:{s})(?P<__pathsep>[\\\/])(?:{p}(?P=__pathsep))*{p}(?:(?P=__pathsep)|\b)'.format(
+_pattern_win_path = R'(?:{s}|{p}|)(?P<__pathsep>[\\\/])(?:{p}(?P=__pathsep))*{p}(?:(?P=__pathsep)|\b)'.format(
     s='|'.join([
         _pattern_win_env_variable,    # environment variable
         R'[A-Za-z]:',                 # drive letter with colon
-        R'\\\\[a-zA-Z0-9_.$]{1,50}',  # UNC path
+        R'\\\\[a-zA-Z0-9_.$@]{1,50}', # UNC path
         R'HK[A-Z_]{1,30}',            # registry root key
     ]),
     p=_pattern_win_path_element
 )
 
-_pattern_nix_path = R'\b/?(?:{n}/){{2,}}{n}\b'.format(n=_pattern_nix_path_element)
+_pattern_nix_path = R'(?:/(?:{n}/)+|(?:{n}/){{2,}}){n}'.format(n=_pattern_nix_path_element)
 _pattern_any_path = R'(?:{nix})|(?:{win})'.format(
     nix=_pattern_nix_path,
     win=_pattern_win_path
@@ -259,7 +265,7 @@ _pattern_hexline = make_hexline_pattern(1)
 
 _pattern_pem = (
     R'-----BEGIN(?:\s[A-Z0-9]+)+-----{n}'
-    R'(?:{b}{{40,100}}{n})+{b}{{1,100}}={{0,3}}{n}'
+    R'(?:{b}{{40,100}}{n})*{b}{{1,100}}={{0,3}}{n}'
     R'-----END(?:\s[A-Z0-9]+)+-----'
 ).format(n=R'(?:\r\n|\n\r|\n)', b=R'[0-9a-zA-Z\+\/]')
 
@@ -295,7 +301,7 @@ class formats(PatternEnum):
     "C syntax string literal that also allows line breaks"
     cmdstr = pattern(_pattern_cmdstr)
     "Windows command line escaped string literal"
-    ps1str = pattern(_pattern_ps1str)
+    ps1str = pattern(_pattern_ps1str, flags=re.DOTALL)
     "PowerShell escaped string literal"
     vbastr = pattern(_pattern_vbastr)
     "VBS/VBA string literal"
@@ -309,9 +315,9 @@ class formats(PatternEnum):
     "Any sequence of url-encoded characters, coarser variant with more characters allowed"
     urlquote_narrow = pattern(_pattern_urlenc_narrow)
     "A hex-encoded buffer using URL escape sequences"
-    intarray = tokenize(_pattern_integer, sep=R'\s*[;,]\s*', bound='', unique_sep=True)
+    intarray = tokenize(_pattern_integer, sep=R'[;,]', bound='', unique_sep=True)
     "Sequences of integers, separated by commas or semicolons"
-    numarray = tokenize(_pattern_number, sep=R'\s*[;,]\s*', bound='', unique_sep=True)
+    numarray = tokenize(_pattern_number, sep=R'[;,]', bound='', unique_sep=True)
     "Sequences of numbers, separated by commas or semicolons"
     word = alphabet(R'\\w')
     "Sequences of word characters"
@@ -327,18 +333,27 @@ class formats(PatternEnum):
     "Base64 encoded strings"
     b85 = alphabet(R'[-!+*()#-&^-~0-9;-Z]')
     "Base85 encoded strings"
+    a85 = alphabet(R'[!-u]')
+    "Ascii85 encoded strings"
+    b92 = pattern(_pattern_b92)
+    "Base92 encoded strings"
     b64any = alphabet(R'(?:[-\w\+/]{4})', postfix=R'(?:(?:[-\w\+/]{2,3})={0,3})?')
     "Both URL-safe and normal Base64 alphabets."
-    b64space = alphabet(R'[-\s\w\+/]', postfix=R'(?:={0,3})?')
-    "Base64 encoded strings, separated by whitespace"
-    b85space = alphabet(R'[-!+*()#-&^-~0-9;-Z\s]')
-    "Base85 encoded string, separated by whitespace"
     b64url = alphabet(R'[-\w]{4}', postfix=R'(?:[-\w]{2,3}={0,3})?')
     "Base64 encoded strings using URL-safe alphabet"
     hex = alphabet(R'[0-9a-fA-F]{2}')
     "Hexadecimal strings"
     uppercase_hex = alphabet(R'[0-9A-F]{2}')
     "Uppercase hexadecimal strings"
+    spaced_hex = tokenize(R'[0-9a-fA-F]+', R'\s*', bound='')
+    "Hexadecimal strings"
+    spaced_b64 = alphabet(R'[-\s\w\+/]', postfix=R'(?:={0,3})?')
+    "Base64 encoded strings, separated by whitespace"
+    spaced_b85 = alphabet(R'[-!+*()#-&^-~0-9;-Z\s]')
+    "Base85 encoded string, separated by whitespace"
+    spaced_a85 = alphabet(R'[!-u\s]')
+    "Ascii85 encoded string, separated by whitespace"
+
     utf8 = pattern(_pattern_utf8)
     "A sequence of bytes that can be decoded as UTF8."
     hexdump = tokenize(_pattern_hexline, bound='', sep=R'\s*\n')
@@ -350,7 +365,7 @@ class formats(PatternEnum):
         46 4F 4F 0A 42 41 52 0A  FOO.BAR.
         F0 0B AA BA F0 0B        ......
     """
-    hexarray = tokenize(R'[0-9A-Fa-f]{2}', sep=R'\s*[;,]\s*', bound='')
+    hexarray = tokenize(R'[0-9A-Fa-f]{2}', sep=R'[;,]', bound='', unique_sep=True)
     "Arrays of hexadecimal strings, separated by commas or semicolons"
     uuencode = pattern(_pattern_uuencode)
     "UUEncoded data"
@@ -366,7 +381,7 @@ class wallets(PatternEnum):
     ATOM = pattern("cosmos[-\\w\\.]{10,}")
     BCH = pattern("(bitcoincash:)?(q|p)[a-z0-9]{41}|(BITCOINCASH:)?(Q|P)[A-Z0-9]{41}")
     BTC = pattern("(?:[13][a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[a-z0-9]{25,39})")
-    BTCP = pattern("5[HJK][1-9A-Za-z][^OIl]{48}")
+    BTCP = pattern("5[HJK][1-9A-Za-z][^A-HJ-NP-Za-km-z0-9]{48}")
     DASH = pattern("X[1-9A-HJ-NP-Za-km-z]{33}")
     DOGE = pattern("D{1}[5-9A-HJ-NP-U]{1}[1-9A-HJ-NP-Za-km-z]{32}")
     DOT = pattern("1[0-9a-zA-Z]{47}")
@@ -421,6 +436,10 @@ class indicators(PatternEnum):
     "Monero addresses"
     path = pattern(_pattern_any_path)
     "Windows and Linux path names"
+    winpath = pattern(_pattern_win_path)
+    "Windows path names"
+    nixpath = pattern(_pattern_nix_path)
+    "Posix path names"
     environment_variable = pattern(_pattern_win_env_variable)
     "Windows environment variables, i.e. something like `%APPDATA%`"
 

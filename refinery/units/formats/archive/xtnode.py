@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Dict
 
 import re
 import json
 
-from pathlib import Path
-
 from refinery.units.formats.archive import Arg, ArchiveUnit, UnpackResult
 from refinery.units.encoding.esc import esc
-from refinery.lib.structures import EOF, StructReader
+from refinery.lib.structures import StructReader
 from refinery.lib.patterns import formats
 from refinery.lib.types import ByteStr, JSON
 from refinery.units.pattern.carve_json import JSONCarver
@@ -66,6 +64,7 @@ class xtnode(ArchiveUnit):
     _PKG_PAYLOAD_S = B'PAYLOAD_SIZE'
     _PKG_PRELUDE_P = B'PRELUDE_POSITION'
     _PKG_PRELUDE_S = B'PRELUDE_SIZE'
+    _PKG_COMMON_JS = B'sourceMappingURL=common.js.map'
 
     def __init__(
         self, *paths, entry: Arg.Switch('-u', help='Only extract the entry point.') = False,
@@ -111,7 +110,7 @@ class xtnode(ArchiveUnit):
                 reader = StructReader(view[start:end])
                 code = reader.read_exactly(code_size)
                 blob = reader.read_exactly(blob_size)
-            except EOF:
+            except EOFError:
                 self.log_debug(F'found marker at 0x{marker.start():X}, but failed to read data')
                 continue
             else:
@@ -128,13 +127,13 @@ class xtnode(ArchiveUnit):
                     yield UnpackResult(path, blob[offset:end])
 
     def _unpack_pkg(self, data: ByteStr):
-        def _extract_coordinates(*v):
+        def _extract_coordinates(*v: bytes):
             for name in v:
-                pattern = BR'%s\s{0,3}=\s{0,3}(%s)' % (name, formats.string)
-                value, = re.findall(pattern, data)
-                yield int((value | esc(quoted=True) | str).strip())
+                pattern = name + BR'''\s{0,3}=\s{0,3}(['"])([\s\d]+)\1'''
+                value, = re.finditer(pattern, data)
+                yield int(value.group(2).decode('utf8').strip(), 0)
 
-        def _extract_data(*v):
+        def _extract_data(*v: bytes):
             try:
                 offset, length = _extract_coordinates(*v)
             except Exception:
@@ -143,62 +142,55 @@ class xtnode(ArchiveUnit):
 
         payload = _extract_data(self._PKG_PAYLOAD_P, self._PKG_PAYLOAD_S)
         if not payload:
-            return
+            raise ValueError('unable to extract payload')
         prelude = _extract_data(self._PKG_PRELUDE_P, self._PKG_PRELUDE_S)
         if not prelude:
-            return
-        mapping = re.search(BR'sourceMappingURL=common\.js\.map\s*\},\s*\{', prelude)
+            raise ValueError('unable to extract prelude')
+        mapping = re.search(re.escape(self._PKG_COMMON_JS) + BR'\s*\},\s*\{', prelude)
         if not mapping:
-            return
+            raise ValueError('unable to find common.js mapping')
 
         reader = JSONReader(prelude[mapping.end() - 1:])
 
-        files = reader.read_json()
+        files: Dict[str, dict] = reader.read_json()
+
+        if files is None:
+            raise ValueError('failed to read file list')
+
         entry = reader.skip_comma().read_string()
         links = reader.skip_comma().read_json()
 
         # _unknown1 = reader.skip_comma().read_json()
         # _unknown2 = reader.skip_comma().read_terminated_array(B')').strip()
 
-        if not files:
-            return
-
-        root = Path()
+        root = next(iter(files))
+        skip = 0
         view = memoryview(payload)
 
-        for part in Path(next(iter(files))).parts:
-            more = root / part
-            if not all(Path(path).is_relative_to(more) for path in files):
+        for k in range(len(root) + 1):
+            test = root[:k].rstrip('/').rstrip('\\')
+            if not all(path.startswith(test) for path in files):
+                root = test[:-1]
+                skip = k - 1
                 break
-            root = more
 
-        self.log_debug(F'detected root directory {root}')
-
-        try:
-            entry = Path(entry).relative_to(root)
-        except Exception:
-            entry = None
-            self.log_info(F'entry point not relative to root directory: {entry}')
-        else:
-            self.log_info(F'entry point is {entry}')
+        entry = entry[skip:]
+        self.log_info(F'detected root directory {root}, entry point is {entry}')
 
         for src, dst in links.items():
-            src_path = Path(src)
-            dst_path = Path(dst)
             new_files = {}
-            self.log_info('link src:', lambda: str(src_path.relative_to(root)))
-            self.log_info('link dst:', lambda: str(dst_path.relative_to(root)))
-            for p, location in files.items():
-                path = Path(p)
-                if not path.is_relative_to(src_path):
+            self.log_info('link src:', src[skip:])
+            self.log_info('link dst:', dst[skip:])
+            for path, location in files.items():
+                if not path.startswith(src):
                     continue
-                new_path = dst_path / path.relative_to(src_path)
+                new_path = dst + path[len(src):]
                 new_files[new_path] = location
-                self.log_debug('synthesizing linked file:', lambda: str(new_path.relative_to(root)))
+                self.log_debug('synthesizing linked file:', new_path)
             files.update(new_files)
 
-        for p, location in files.items():
-            path = Path(p).relative_to(root)
+        for path, location in files.items():
+            path = path[skip:]
             if entry and self.args.entry and path != entry:
                 continue
             data = None
@@ -211,7 +203,7 @@ class xtnode(ArchiveUnit):
                 if kind in '01':
                     data = view[offset:stop]
             if data is not None:
-                yield UnpackResult(str(path), data)
+                yield UnpackResult(path, data)
 
     @classmethod
     def _is_nexe(cls, data: ByteStr) -> bool:
@@ -226,6 +218,8 @@ class xtnode(ArchiveUnit):
         if cls._PKG_PRELUDE_P not in data:
             return False
         if cls._PKG_PRELUDE_S not in data:
+            return False
+        if cls._PKG_COMMON_JS not in data:
             return False
         return True
 

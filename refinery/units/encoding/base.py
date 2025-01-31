@@ -9,6 +9,8 @@ from refinery.lib.argformats import numseq
 _DEFAULT_ALPH_STR = R'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 _DEFAULT_ALPHABET = B'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 _LARGER_ALPHABETS = {
+    58: b'123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz',
+    62: b'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
     64: b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
     85: b'0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~'
 }
@@ -80,7 +82,12 @@ class base(Unit):
 
     def process(self, data: bytearray):
         base, alphabet = self._args
-        if base and base != 64 and not self.args.strict_digits:
+        be_lenient = not self.args.strict_digits
+        if be_lenient and alphabet.upper() == alphabet:
+            lcased = (c + 0x20 if 0x41 <= c <= 0x5a else c for c in data)
+            if all(x == y for x, y in zip(data, lcased)):
+                data = data.upper()
+        if base and base != 64 and be_lenient:
             check = set(alphabet)
             index = 0
             it = iter(data)
@@ -92,7 +99,7 @@ class base(Unit):
                 if b in check:
                     data[index] = b
                     index += 1
-            self.log_info(F'stripped {len(data)-index} invalid digits from input data')
+            self.log_info(F'stripped {len(data) - index} invalid digits from input data')
             del data[index:]
         if len(alphabet) <= len(_DEFAULT_ALPHABET):
             defaults = _DEFAULT_ALPHABET[:base]
@@ -122,9 +129,10 @@ class base(Unit):
                 result *= base
                 result += lookup[digit]
         if not base or self.args.strip_padding:
-            size, rest = divmod(result.bit_length(), 8)
-            size += int(bool(rest))
+            bits = result.bit_length()
         else:
-            size = (len(data) - 1 + alphabet.index(data[0]) / base) * math.log2(base) / 8
-            size = math.ceil(size)
+            bits = (len(data) - 1) * math.log2(base) + math.log2(max(alphabet.index(data[0]), 1))
+            bits = math.ceil(bits)
+        size, rest = divmod(bits, 8)
+        size += int(bool(rest))
         return result.to_bytes(size, byteorder=self.byteorder)

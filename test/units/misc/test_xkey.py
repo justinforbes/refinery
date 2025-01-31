@@ -22,3 +22,13 @@ class TestXKey(TestUnitBase):
             encrypted, = data | self.ldu('add', arg, blocksize=4)
             recovered, = encrypted | self.load(':80:4')
             self.assertEqual(recovered, key, F'failure for length={length}')
+
+    def test_early_abort(self):
+        data = self.download_sample('ccd495bae43f026e05f00ebc74f989d5657e010854ce4d8870e7b9371b0222b9')
+        for k in (32, 64, 128, 256):
+            test = data | self.load_pipeline(F'carve -dlt2 intarray [| xkey :{k} ]') | bytes
+            self.assertEqual(test, B'\x47\xB0')
+
+    def test_frame_scope_regression(self):
+        data = self.load_pipeline('emit rep[2000]:A | chop 500 [| autoxor | cfmt {key} ]')()
+        self.assertEqual(data, B'AAAA')

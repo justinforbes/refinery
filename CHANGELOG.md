@@ -1,5 +1,173 @@
 # Binary Refinery Changelog
 
+> [!NOTE]  
+> Almost every release contains bugfixes, but these are not usually included in the changelog.
+> If a release contains only bugfix, it is marked as a 'bugfix release'.
+> Otherwise, the changelog entries highlight only new or changed functionality.
+
+## Version 0.8.3 - bugfix release
+
+## Version 0.8.2
+- The `xtinno` unit was added to extracting files from InnoSetup installers.
+- Related; the `ifps` and `ifpsstr` units now accept a string encoding argument.
+- The `jvdasm` unit now has colored output.
+- Thanks to [@s3ven6][], the `speck` cipher and `maru` hash units were added.
+- The `dnarrays` unit was added for extracting hard-coded arrays from compiled .NET code.
+- The `iff` unit was extended with an `-ne` switch.
+- The `xjl` unit can now also collect the contents of one frame into a JSON list.
+
+## Version 0.8.1 - bugfix release
+
+## Version 0.8.0
+- The `binref` command was changed to use conjunctive search logic by default.
+- The `copy:` and `cut:` multibin handlers now accept arguments of the form `[offset]:[length]:[step]` instead of `[start]:[end]:[step]`.
+- The `vstack` unit now supports 3 emulator engines: `unicorn`, `speakeasy`, `icicle`.
+  This is somewhat experimental and `unicorn` remains the default. 
+- As part of the changes to `vstack`, the `vmemref` unit was changed to use `smda` rather than `angr`.
+
+## Version 0.7.12 - bugfix release
+
+## Version 0.7.11 - bugfix release
+
+## Version 0.7.10 - bugfix release
+
+## Version 0.7.9
+- Adds the `morse` unit for Morse code encoding and decoding.
+
+## Version 0.7.8
+- The `u16` unit is no longer limited to the little-endian variant of UTF-16.
+- The `snip` unit was given a new argument `--stream` which allows each offset to be relative to the end of the previously extracted data.
+- Path extraction units will now match paths case-insensitively when this does not cause ambiguity.
+- The `xtmsi` unit now extracts all MSI tables as CSV on top of the JSON blob.
+- The `xtnsis` unit now extracts `setup.bin` alongside `setup.nsis`, the former containing a full binary copy of the extracted header.
+- The `dedup` unit now has an optional argument which can specify a meta variable to deduplicate by.
+
+## Version 0.7.7
+- Adds the `httprequest` unit for parsing HTTP requests.
+- Adds the `b62` unit (thanks to [@lukaskuzmiak][]).
+- The `uuenc` unit was updated to remove reliance on the now deprecated `uu` module.
+- Adds support for aPLib compressed data with headers.
+
+## Version 0.7.6
+- Adds the `brotli` decompression unit.
+- The `pym` unit was added which provides an interface to Python's marshal serialization.
+- The units `xsalsa`, `xchacha`, and `chacha20poly1305` were added. The latter only performs the decryption part of the scheme.
+- Refinery pipelines used in Python code will now preserve the scope of a `Chunk` object when one is provided as input.
+- The argument handlers `prng` and `rng` were added for random number generation.
+
+## Version 0.7.5
+- The `b65536` unit was added (thanks to [@alphillips-lab][]).
+
+## Version 0.7.4
+- The `--join` option of all path extraction units has been improved for producing paths that can always be used for dumping data to disk. This includes units to unpack archives, resources, or other embedded data that can be referenced by a name.
+- The `ef` unit has a new option that specifies whether to follow (directory) symlinks / junctions or not.
+- The key scaling method for `autoxor` was adjusted to produce less false positives when scanning for larger keys.
+- Thanks to [@alphillips-lab][], the `a3x` unit is now capable of decrypting EA05 formatted scripts, previously only EA06 was supported.
+
+## Version 0.7.3 - bugfix release
+
+## Version 0.7.2
+- The `loop` unit was enhanced with more options to abort execution based on regular expression patterns. It now also offers better control over terminating the execution when an error occurs.
+- Conditional units (`iff`/`iffp`/`iffx`/`iffs`) were reworked to have less magic behavior. The `-R` switch now controls boolean negation and a separate switch controls whether chunks are hidden instead of being discarded. The `-s` switch was also removed from conditional units.
+- The `cull` unit was removed from refinery.
+- The units `p1`, `p2`, and `p3` were added, which are shortcuts for picking the first 1, 2, or 3 chunks from a frame, respectively.
+- Regular expression arguments now have a new handler `f:`, which initializes the regular expression entirely from one of the formats used in `carve`.
+
+
+## Version 0.7.1
+- The global `--iff` option was added to units; this allows you to apply the unit only to formats that it knows it can handle.
+- When using refinery in code, it is now possible to pipe a `Chunk` object directly to a pipeline.
+- The `csb` and `csd` shortcuts were added for common applications of `carve`.
+- The `loop` unit was added; it allows repeated application of a multibin suffix to the input data.
+- To match the `loop` unit, the `reduce` unit now also works with a multibin suffix rather than with a pipeline string.
+- The `vstack` unit now attempts to detect stack cookies and ignores them by default.
+- Adds a deobfuscator for the `kramer` obfuscator.
+- The `xtmsi` unit now automatically extracts embedded CAB files and infers the file names of these subfiles from the MSI manifest.
+
+## Version 0.7.0
+- Raises minimum Python requirement to 3.8.
+- Removes automatic escapes from `cfmt`; this now has to be done explicitly.
+- The `rsa` unit can now output keys in Microsoft BLOB format.
+- Adds the `urn` unit.
+- Adds several multibin handlers to modify file system paths (`pp`/`pb`/`pn`/`px`).
+
+## Version 0.6.43
+- Adds the hash units `sha3-224`, `sha3-256`, `sha3-384`, `sha3-512`, and `keccak256`.
+
+## Version 0.6.42 - bugfix release
+
+## Version 0.6.41 - bugfix release
+
+## Version 0.6.40 - bugfix release
+
+## Version 0.6.39
+- Adds the `b92` unit for Base92 encoding and decoding.
+- Improves the performance of AutoIt3 unpacking in `a3x`.
+- Adds the `SymHash` field to the `machometa` unit.
+
+## Version 0.6.38 - bugfix release
+
+## Version 0.6.37 - bugfix release
+
+## Version 0.6.36
+- Adds the `xtmacho` unit which can unpack MachO fat binaries.
+
+## Version 0.6.35
+- Adds the `nrv2b`, `nrv2d`, and `nrv2e` decompression units.
+- Adds the `fernet` unit to decrypt messages in Fernet format.
+
+## Version 0.6.34
+- The `chop` unit has a second argument now that allows to specify the step size.
+  Also, The `--into` argument has been removed because this can be done more succinctly using the `size` meta variable and long division.
+- The `alu` unit has been extended with a new helper function called `M`; it can be used to mask a value down to a certain number of bits.
+
+## Version 0.6.33
+- The `struct` unit was extended with an additional format string character, `g`, for reading GUID values.
+
+## Version 0.6.32 - bugfix release
+
+## Version 0.6.31 - bugfix release
+
+## Version 0.6.30 - bugfix release
+
+## Version 0.6.29 - bugfix release
+
+## Version 0.6.28
+- The `reduce` signature was changed; it is no longer possible to specify an initialization value, instead the first chunk in the frame is always used. Additionally, there is now an option to consume only a limited number of chunks.
+- The `queue` unit has been removed in favor of two units `qf` (queue front) and `qb` (queue back) to queue chunks into the current frame.
+
+## Version 0.6.27
+- The key derivation units `DESDerive`, `CryptDeriveKey`, and `PasswordDeriveBytes` have been renamed to `deskd`, `mscdk`, and `mspdb`, respectively, in order to match the common refinery unit naming convention of using indecipherable and consonant-heavy abbreviations.
+- When passing integer arguments to the units `xor`, `add`, and `sub`, the block size is now automatically adjusted to the smallest size that will contain the given argument.
+
+## Version 0.6.26
+- Thanks to [@EricFaehrmann][], `xtzip` (and `xt`) now support doubly-loaded ZIP archives.
+
+## Version 0.6.25
+- Fixes bugs that caused errors in Python 3.12 environments.
+
+## Version 0.6.24
+- The paths extracted by `xthtml`, `xtxml` and `xtjson` now avoid the use of parentheses to work better on Bash.
+- Adds the `sosemanuk` cipher unit.
+- Improves the capabilities of the `vbastr` unit.
+
+## Version 0.6.23 - bugfix release
+
+## Version 0.6.22
+- The `peek` unit in `--decode` mode now truncates long lines by default. Specifying the option twice has the same effect as the previous default, which is to wrap lines.
+- The `stego` unit has been modified to generate a single output by default and provides a switch to generate individual rows or columns.
+
+## Version 0.6.21
+- Adds the `xtzpaq` unit to unpack ZPAQ archives.
+
+## Version 0.6.20
+- Includes the preliminary fix for the PowerShell problem. PowerShell versions 7.4 and beyond support native to native pipelines.
+
+## Version 0.6.19
+- The `b85` unit is now resilient against white space.
+- The `vsect` unit can now extract "synthesized" sections. This also affects `vsnip`; it can now also extract data from, e.g., the header of an executable based on virtual addresses.
+- The possible extras for the `binary-refinery` Python package have been expanded and the default install has been slimmed even further to avoid having to install too many dependencies for just the core utilities.
+
 ## Version 0.6.18 - bugfix release
 
 ## Version 0.6.17
@@ -18,7 +186,7 @@
 - The `--more` option was added to the `struct` unit to give access to unparsed rest data.
 - The `--length` option was added to the `snip` unit as a qualit of life feature.
 - The `btoi` handler can now receive a second argument that allows reading interlaced integers from a byte stream.
-- Thanks to [@alphillips-lab], the `dnsfx` unit was added for extracting .NET file bundles.
+- Thanks to [@alphillips-lab][], the `dnsfx` unit was added for extracting .NET file bundles.
 - The `pestrip` unit was renamed to `pedebloat` and `petrim` was renamed back to `pestrip`.
 
 ## Version 0.6.14
@@ -37,7 +205,7 @@
 - Adds the `blabla` cipher unit.
 
 ## Version 0.6.11
-- The `machometa` unit was added thanks to [@cxiao].
+- The `machometa` unit was added thanks to [@cxiao][].
 - The `pestrip` unit was extended with more features, and the unit `petrim` was introduced as a unit to simply remove overlays.
 - The `xtnuitka` unit was added to extract Nuitka archives.
 
@@ -102,7 +270,7 @@
 - The color legend of the `iemap` unit is now optional and can be enabled with a switch.
 
 ## Version 0.5.5
-- Bugfix to account for changes in MacOS libmagic which lead to not correctly identifying `exe` and `dll` extensions.
+- Bugfix to account for changes in macOS libmagic which lead to not correctly identifying `exe` and `dll` extensions.
 - Importing refinery no longer changes the names of log levels globally.
 
 ## Version 0.5.4
@@ -580,7 +748,7 @@ Updates build system.
 - The `pemeta` unit was added.
 - The `carve-json` unit was added.
 - The `peslice` and `elfslice` units were given a unified interface.
-- The `b85` for base 85 encoding an decoding was added.
+- The `b85` for base 85 encoding and decoding was added.
 
 ## Version 0.1.3
 - Fixes a bug in the .NET header parser where the tables were sometimes parsed in the wrong order.
@@ -614,7 +782,7 @@ Updates build system.
 - The unit `jsonfmt` has been renamed to `ppjson` (for **p**retty-**p**rint **json**).
 - The unit `ppxml` (**p**retty-**p**rint **xml**) was added.
 - The unit `carve-pe` (carve PE files) was added.
-- The unit `winreg` (read windows registry hives) was added, also adding a dependency on the [python-registry][] package (also [on GitHub][python-registry-gh]).
+- The unit `winreg` (read Windows registry hives) was added, also adding a dependency on the [python-registry][] package (also [on GitHub][python-registry-gh]).
 - .NET managed resource extraction was improved, although it is still not perfect.
 - The unit `sorted` now only sorts the chunks of the input stream that are in scope.
 - The unit `dedup` can no longer sort the input stream because `sorted` can do this.
@@ -623,8 +791,11 @@ Updates build system.
 
 
 [@baderj]: https://github.com/baderj
-[@alphillips-lab] https://github.com/alphillips-lab
+[@alphillips-lab]: https://github.com/alphillips-lab
+[@lukaskuzmiak]: https://github.com/lukaskuzmiak
 [@cxiao]: https://github.com/cxiao
+[@s3ven6]: https://github.com/s3ven6
+[@EricFaehrmann]: https://github.com/EricFaehrmann
 [@larsborn]: https://github.com/larsborn
 [XLMMacroDeobfuscator]: https://github.com/DissectMalware/XLMMacroDeobfuscator
 [javaobj-issue-29]: https://github.com/tcalmant/python-javaobj/issues/29

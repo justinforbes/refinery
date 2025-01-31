@@ -34,31 +34,27 @@ various `refinery.units.Unit`s can be combined.
 4. `refinery.units`: writing custom units, add command-line arguments, and how to use refinery
    units within Python code.
 """
-__version__ = '0.6.18'
+__version__ = '0.8.3'
 __distribution__ = 'binary-refinery'
 
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Type, TypeVar, Iterable
 from importlib import resources
 from datetime import datetime
+from threading import RLock
 
 import pickle
 
 from refinery.units import Arg, Unit
 
+_T = TypeVar('_T')
 
-def _singleton(cls):
+
+def _singleton(cls: Type[_T]) -> _T:
     return cls()
 
 
-with resources.path(__name__, '__init__.py') as this:
-    # This is an annoying hack to allow this to work when __init__.pkl does not
-    # yet exist during setup. Starting with Python 3.9, we could use the slightly
-    # less awkward: resources.files(__name__).joinpath('__init__.pkl')
-    UNIT_CACHE_PATH = this.parent / '__init__.pkl'
-
-
 @_singleton
-class _cache:
+class __unit_loader__:
     """
     Every unit can be imported from the refinery base module. The import is performed on demand to
     reduce import times. The library ships with a pickled dictionary that maps unit names to their
@@ -67,8 +63,14 @@ class _cache:
     """
     units: Dict[str, str]
     cache: Dict[str, Type[Unit]]
+    _lock: RLock = RLock()
 
     def __init__(self):
+        with resources.path(__name__, '__init__.py') as current_file:
+            # This is an annoying hack to allow this to work when __init__.pkl does not
+            # yet exist during setup. Starting with Python 3.9, we could use the slightly
+            # less awkward: resources.files(__name__).joinpath('__init__.pkl')
+            self.path = current_file.parent / '__init__.pkl'
         self.reloading = False
         self.loaded = False
         self.units = {}
@@ -76,19 +78,43 @@ class _cache:
         self.last_reload = datetime(1985, 8, 5)
         self.load()
 
+    def __enter__(self):
+        self._lock.__enter__()
+        return self
+
+    def __exit__(self, et, ev, tb):
+        return self._lock.__exit__(et, ev, tb)
+
     def load(self):
         try:
-            with open(UNIT_CACHE_PATH, 'rb') as stream:
-                self.units = pickle.load(stream)
+            cache: dict = pickle.load(self.path.open('rb'))
         except (FileNotFoundError, EOFError):
+            cache = None
+        else:
+            try:
+                version = cache['version']
+            except KeyError:
+                cache = None
+            else:
+                if version != __version__:
+                    cache = None
+        if cache is None:
             self.reload()
         else:
+            self.units = cache['units']
             self.loaded = True
+
+    def clear(self):
+        self.loaded = False
+        self.units.clear()
+        self.cache.clear()
 
     def save(self):
         try:
-            with open(UNIT_CACHE_PATH, 'wb') as stream:
-                pickle.dump(self.units, stream)
+            pickle.dump({
+                'units': self.units,
+                'version': __version__,
+            }, self.path.open('wb'))
         except Exception:
             pass
         else:
@@ -98,14 +124,13 @@ class _cache:
         if not self.reloading:
             from refinery.lib.loader import get_all_entry_points
             self.reloading = True
-            self.units.clear()
-            self.cache.clear()
+            self.clear()
             for executable in get_all_entry_points():
                 name = executable.__qualname__
                 self.units[name] = executable.__module__
                 self.cache[name] = executable
-            self.reloading = False
             self.save()
+            self.reloading = False
 
     def resolve(self, name) -> Optional[Unit]:
         if not self.loaded:
@@ -127,7 +152,7 @@ class __pdoc__(dict):
         self._loaded = False
 
     def _strip_globals(self, hlp: str):
-        def _strip(lines):
+        def _strip(lines: Iterable[str]):
             triggered = False
             for line in lines:
                 if triggered:
@@ -146,28 +171,31 @@ class __pdoc__(dict):
         from .explore import get_help_string
         self['Unit'] = False
         self['Arg'] = False
-        for name in _cache.units:
-            unit = _cache.resolve(name)
-            for base in unit.mro():
-                try:
-                    abstractmethods: List[str] = base.__abstractmethods__
-                except AttributeError:
-                    break
-                for method in abstractmethods:
-                    if method.startswith('_'):
-                        continue
-                    at = getattr(unit, method, None)
-                    bt = getattr(unit.mro()[1], method, None)
-                    if at and at is not bt:
-                        self[F'{name}.{method}'] = False
-            hlp = get_help_string(unit, width=97)
-            hlp = hlp.replace('\x60', '')
-            hlp = self._strip_globals(hlp).strip()
-            hlp = (
-                F'This unit is implemented in `{unit.__module__}` and has the following '
-                F'commandline Interface:\n```text\n{hlp}\n```'
-            )
-            self[name] = hlp
+        with __unit_loader__ as ul:
+            for name in ul.units:
+                unit = ul.resolve(name)
+                if unit is None:
+                    continue
+                for base in unit.mro():
+                    try:
+                        abstractmethods: List[str] = base.__abstractmethods__
+                    except AttributeError:
+                        break
+                    for method in abstractmethods:
+                        if method.startswith('_'):
+                            continue
+                        at = getattr(unit, method, None)
+                        bt = getattr(unit.mro()[1], method, None)
+                        if at and at is not bt:
+                            self[F'{name}.{method}'] = False
+                hlp = get_help_string(unit, width=97)
+                hlp = hlp.replace('\x60', '')
+                hlp = self._strip_globals(hlp).strip()
+                hlp = (
+                    F'This unit is implemented in `{unit.__module__}` and has the following '
+                    F'commandline Interface:\n```text\n{hlp}\n```'
+                )
+                self[name] = hlp
         self._loaded = True
 
     def items(self):
@@ -175,12 +203,18 @@ class __pdoc__(dict):
         return super().items()
 
 
-__all__ = sorted(_cache.units, key=lambda x: x.lower()) + [
-    Unit.__name__, Arg.__name__, '__pdoc__', 'UNIT_CACHE_PATH']
+__all__ = sorted(__unit_loader__.units, key=lambda x: x.lower()) + [
+    Unit.__name__, Arg.__name__, '__unit_loader__', '__pdoc__']
+
+
+def load(name) -> Optional[Unit]:
+    with __unit_loader__ as ul:
+        return ul.resolve(name)
 
 
 def __getattr__(name):
-    unit = _cache.resolve(name)
+    with __unit_loader__ as ul:
+        unit = ul.resolve(name)
     if unit is None:
         raise AttributeError(name)
     return unit
@@ -188,7 +222,3 @@ def __getattr__(name):
 
 def __dir__():
     return __all__
-
-
-def load(name) -> Optional[Unit]:
-    return _cache.resolve(name)

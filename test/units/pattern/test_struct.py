@@ -60,3 +60,37 @@ class TestStructUnit(TestUnitBase):
     def test_auto_batch(self):
         pl = L(R'emit ABCDEF | struct -m {k:B}{:1}{:1} {2} {3} [[| pop a | cfmt {a}{k} ]]')
         self.assertEqual(pl(), B'B65E68')
+
+    def test_use_variables_in_output(self):
+        data = self.download_sample('4537fab9de768a668ab4e72ae2cce3169b7af2dd36a1723ddab09c04d31d61a5')
+        test = data | self.load_pipeline('vsect .bss | struct {n:L}{k:n}{c:} {c:rc4[var:k]:snip[::2]}') | bytes
+        self.assertIn(B'165.22.5'B'.66', test)
+
+    def test_until(self):
+        data = B'1A92750293738'
+        test = data | self.load('{k:B}', multi=True, until='k==0x30') | []
+        self.assertEqual(len(test), 6)
+
+    def test_argument_assignment_failure_regression_01(self):
+        test = self.load_pipeline('emit rep[10]:5szz | struct -m {k:1}{d:3} {k}{d:xor[var:k]} []') | bytes
+        self.assertEqual(test, 10 * B'5FOO')
+
+    def test_argument_assignment_failure_regression_02(self):
+        test = self.load_pipeline('emit rep[1000]:5szz | struct -m {k:1}{d:3} {k}{d:xor[var:k]} []') | bytes
+        self.assertEqual(test, 1000 * B'5FOO')
+
+    def test_correct_leftover_calculation(self):
+        test = self.load_pipeline('emit ABCDE | struct -mM {a:1}{b:1} {a} []')
+        self.assertEqual(test(), b'ACE')
+        test = self.load_pipeline('emit ABCDEF | struct -mM {a:1}{b:1} {a} []')
+        self.assertEqual(test(), b'ACE')
+        test = self.load_pipeline('emit ABCDE | struct -m {a:1}{b:1} {a} []')
+        self.assertEqual(test(), b'AC')
+        test = self.load_pipeline('emit ABCDEF | struct -m {a:1}{b:1} {a} []')
+        self.assertEqual(test(), b'ACE')
+
+    def test_variables_available_in_pipeline(self):
+        data = B'\x02xxREFINERY'
+        unit = self.load(r'{k:B}{d}', r'{d:snip[k:]}')
+        test = data | unit | bytes
+        self.assertEqual(test, B'REFINERY')

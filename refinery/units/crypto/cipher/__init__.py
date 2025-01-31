@@ -49,9 +49,10 @@ class CipherUnit(Unit, abstract=True):
         raise NotImplementedError
 
     def process(self, data: ByteString) -> ByteString:
-        if self.key_size and len(self.args.key) not in self.key_size:
+        ks = self.key_size
+        if ks and len(self.args.key) not in ks:
             import itertools
-            key_size_iter = iter(self.key_size)
+            key_size_iter = iter(ks)
             key_size_options = [str(k) for k in itertools.islice(key_size_iter, 0, 5)]
             try:
                 next(key_size_iter)
@@ -59,6 +60,8 @@ class CipherUnit(Unit, abstract=True):
                 pt = '.'
             else:
                 pt = ', ...'
+                if isinstance(ks, range):
+                    pt = F'{pt}, {ks.stop - 1}'
             if len(key_size_options) == 1:
                 msg = F'{self.name} requires a key size of {key_size_options[0]}'
             else:
@@ -88,7 +91,7 @@ class StreamCipherUnit(CipherUnit, abstract=True):
     def keystream(self) -> Iterable[int]:
         raise NotImplementedError
 
-    @Unit.Requires('numpy')
+    @Unit.Requires('numpy', 'speed', 'default', 'extended')
     def _numpy():
         import numpy
         return numpy
@@ -278,9 +281,13 @@ class StandardCipherUnit(CipherUnit, metaclass=StandardCipherExecutable):
 class StandardBlockCipherUnit(BlockCipherUnitBase, StandardCipherUnit):
 
     def __init__(
-        self, key, iv=B'', padding=None, mode=None, raw=False,
-        segment_size: Arg.Number('-S', '--segment-size',
-            help='Only for CFB: Number of bits into which data is segmented. It must be a multiple of 8.') = 0,
+        self, key, iv=B'', *,
+        padding=None, mode=None, raw=False,
+        little_endian: Arg.Switch('-e', '--little-endian',
+            help='Only for CTR: Use a little endian counter instead of the default big endian.') = False,
+        segment_size: Arg.Number('-S', '--segment-size', help=(
+            'Only for CFB: Number of bits into which data is segmented. It must be a multiple of 8. The default of {default} means '
+            'that the block size will be used as the segment size.')) = 0,
         mac_len: Arg.Number('-M', '--mac-len', bound=(4, 16),
             help='Only for EAX, GCM, OCB, and CCM: Length of the authentication tag, in bytes.') = 0,
         assoc_len: Arg.Number('-A', '--assoc-len',
@@ -291,8 +298,15 @@ class StandardBlockCipherUnit(BlockCipherUnitBase, StandardCipherUnit):
         if iv and mode.name == 'ECB':
             raise ValueError('No initialization vector can be specified for ECB mode.')
         super().__init__(
-            key=key, iv=iv, padding=padding, mode=mode, raw=raw,
-            segment_size=segment_size, mac_len=mac_len, assoc_len=assoc_len,
+            key=key,
+            iv=iv,
+            padding=padding,
+            mode=mode,
+            raw=raw,
+            segment_size=segment_size,
+            mac_len=mac_len,
+            assoc_len=assoc_len,
+            little_endian=little_endian,
             **keywords
         )
 
@@ -317,10 +331,14 @@ class StandardBlockCipherUnit(BlockCipherUnitBase, StandardCipherUnit):
         mode = self.args.mode.name
         if mode != 'ECB':
             iv = bytes(self.iv)
-            if mode == 'CTR' and len(iv) == self.block_size:
+            if mode == 'CTR':
                 from Cryptodome.Util import Counter
-                counter = Counter.new(self.block_size * 8,
-                    initial_value=int.from_bytes(iv, 'big'))
+                little_endian = self.args.little_endian
+                order = 'little' if little_endian else 'big'
+                counter = Counter.new(
+                    self.block_size * 8,
+                    initial_value=int.from_bytes(iv, order),
+                    little_endian=little_endian)
                 optionals['counter'] = counter
             elif mode in ('CCM', 'EAX', 'GCM', 'SIV', 'OCB', 'CTR'):
                 if mode in ('CCM', 'EAX', 'GCM', 'OCB'):
@@ -346,8 +364,9 @@ class StandardBlockCipherUnit(BlockCipherUnitBase, StandardCipherUnit):
                     sz = self.args.segment_size
                     if sz % 8 != 0:
                         raise ValueError(F'The given segment size {sz} is not a multiple of 8.')
-                    if sz > 0:
-                        optionals['segment_size'] = sz
+                    if not sz:
+                        sz = self.block_size * 8
+                    optionals['segment_size'] = sz
                 if len(iv) > self.block_size:
                     self.log_warn(F'The IV has length {len(self.args.iv)} and will be truncated to the block size {self.block_size}.')
                     iv = iv[:self.block_size]
@@ -369,7 +388,7 @@ class LatinCipherUnit(StreamCipherUnit, abstract=True):
         nonce: Arg(help='The nonce. Default is the string {default}.') = B'REFINERY',
         magic: Arg('-m', help='The magic constant; depends on the key size by default.') = B'',
         offset: Arg.Number('-x', help='Optionally specify the stream index, default is {default}.') = 0,
-        rounds: Arg.Number('-r', help='The number of rounds. Has to be an even number.') = 20,
+        rounds: Arg.Number('-r', help='The number of rounds. Has to be an even number. Default is {default}.') = 20,
     ):
         super().__init__(
             key=key,

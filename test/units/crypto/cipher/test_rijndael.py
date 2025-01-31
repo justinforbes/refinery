@@ -14,6 +14,24 @@ class TestRijndael(TestUnitBase):
                     decrypter = self.load(range(key_size), iv=range(block_size), mode=mode, block_size=block_size)
                     self.assertEqual(data, bytes(data | encrypter | decrypter), F'error for {mode}')
 
+    def test_against_aes_unit(self):
+        for size in (5, 16, 46, 77, 128, 500):
+            data = self.generate_random_buffer(size)
+            for mode in ('CBC', 'CFB', 'OFB', 'CTR'):
+                for key_size in (16, 24, 32):
+                    args = dict(key=bytes(range(key_size)), iv=bytes(range(16)), mode=mode)
+                    u1 = self.load(**args)
+                    u2 = self.ldu('aes', **args)
+                    self.assertEqual(
+                        data | -u1 | bytes,
+                        data | -u2 | bytes)
+
+    def test_le_ctr(self):
+        data = B'hello world! this is my plaintext.'
+        goal = bytes.fromhex('5a0b2cf06580897914906b84b53516ead23490ed2cca329054f94ae548a42e6c9475')
+        unit = self.load(key=b'1234567812345678', iv=b'12345678', mode='ctr', little_endian=True)
+        self.assertEqual(data | -unit | bytes, goal)
+
     def test_real_world_block_size_32(self):
         unit = self.load(
             key=bytes.fromhex('2e5f9489983c96aa2165a3fb6a6d55f0e7397c6488da72ff213452b2c7edccb6'),

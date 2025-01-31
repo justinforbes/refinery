@@ -7,15 +7,19 @@ class zstd(Unit):
     """
     ZStandard (ZSTD) compression and decompression.
     """
-    @Unit.Requires('pyzstd', optional=True)
+    @Unit.Requires('pyzstd', 'all')
     def _pyzstd():
         import pyzstd
         return pyzstd
 
     def process(self, data):
-        return self._pyzstd.ZstdDecompressor().decompress(data)
+        zd = self._pyzstd.ZstdDecompressor()
+        return zd.decompress(data)
 
     def reverse(self, data):
         zc = self._pyzstd.ZstdCompressor()
-        zc.compress(data)
-        return zc.flush()
+        return zc.compress(data) + zc.flush()
+
+    @classmethod
+    def handles(self, data: bytearray) -> bool:
+        return data[:4] == B'\x28\xB5\x2F\xFD'

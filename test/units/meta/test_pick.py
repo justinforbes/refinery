@@ -151,7 +151,7 @@ class TestPick(TestMetaBase):
             '   put i index',
             '   carve -d string [',
             '      pick 9+i*13 6+i*13',
-            '      queue var:p',
+            '      qb var:p',
             '      pop x n',
             '      ccp var:x ]]',
         ]))
@@ -169,5 +169,3 @@ class TestPick(TestMetaBase):
 
         self.assertEqual(sha256(out[b'\\msoev.exe']).hexdigest(),
             '06cea3a5ef9641bea4704e9f6d2ed13286f9e5ec7ab43f8067f15b5a41053d33')
-
-        return 0

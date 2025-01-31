@@ -36,14 +36,12 @@ class carve(PatternExtractor):
         if not decode:
             decoder = NotImplemented
         elif self.args.format in (formats.multiline_string, formats.string):
-            def decoder(chunk):
-                return decoder.unesc(chunk[1:-1])
             from ..encoding.esc import esc
-            decoder.unesc = esc()
+            decoder = esc(unicode=True, quoted=True)
         elif self.args.format is formats.integer:
             from ..encoding.base import base
             decoder = base()
-        elif self.args.format in (formats.uppercase_hex, formats.hex):
+        elif self.args.format in (formats.uppercase_hex, formats.spaced_hex, formats.hex):
             from ..encoding.hex import hex
             decoder = hex()
         elif self.args.format is formats.hexdump:
@@ -52,10 +50,10 @@ class carve(PatternExtractor):
         elif self.args.format is formats.intarray:
             from ..blockwise.pack import pack
             decoder = pack()
-        elif self.args.format in (formats.b64, formats.b64any, formats.b64space):
+        elif self.args.format in (formats.b64, formats.b64any, formats.spaced_b64):
             from ..encoding.b64 import b64
             decoder = b64()
-        elif self.args.format is formats.b85:
+        elif self.args.format in (formats.b85, formats.spaced_b85):
             from ..encoding.b85 import b85
             decoder = b85()
         elif self.args.format is formats.b64url:
@@ -91,7 +89,7 @@ class carve(PatternExtractor):
         self.decoder = decoder
 
     def process(self, data):
-        it = iter(self.matches_filtered(memoryview(data), bytes(self.args.format)))
+        it = iter(self.matches_filtered(memoryview(data), self.args.format.value.bin_compiled))
         if self.decoder is NotImplemented:
             yield from it
         for chunk in it:
@@ -99,3 +97,33 @@ class carve(PatternExtractor):
                 yield self.decoder(chunk)
             except Exception as E:
                 self.log_info(F'decoder failure: {E!s}')
+
+
+class csd(carve):
+    """
+    Short for carve & decode; carves the single largest buffer of a given format from the input
+    and decodes it with the appropriate decoder.
+    """
+    def __init__(self, format, utf16=True, ascii=True):
+        super().__init__(
+            format,
+            decode=True,
+            single=True,
+            utf16=utf16,
+            ascii=ascii,
+        )
+
+
+class csb(carve):
+    """
+    Short for carve single buffer; carves the single largest buffer of a given format from the
+    input data and returns it.
+    """
+    def __init__(self, format, utf16=True, ascii=True):
+        super().__init__(
+            format,
+            decode=False,
+            single=True,
+            utf16=utf16,
+            ascii=ascii,
+        )

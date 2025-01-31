@@ -10,16 +10,15 @@ import collections
 import fnmatch
 import os
 import re
-import uuid
 
-from pathlib import Path
 from zlib import adler32
 from collections import Counter
 from typing import ByteString, Iterable, Callable, List, Union, Optional
 
-from refinery.units import Arg, Unit
+from refinery.units import Arg, Unit, RefineryPartialResult, RefineryPotentialUserError
 from refinery.lib.meta import metavars, ByteStringWrapper, LazyMetaOracle
 from refinery.lib.xml import XMLNodeBase
+from refinery.lib.tools import exception_to_string
 
 
 def pathspec(expression):
@@ -51,24 +50,30 @@ class EndOfStringNotFound(ValueError):
 
 
 class PathPattern:
-    def __init__(self, pp: Union[str, re.Pattern], regex=False, fuzzy=0):
-        if isinstance(pp, re.Pattern):
-            self.stops = []
-            self.pattern = pp
-            return
-        elif not regex:
-            self.stops = [stop for stop in re.split(R'(.*?[/*?])', pp) if stop]
-            pp, _, _ = fnmatch.translate(pp).partition(r'\Z')
-        p1 = re.compile(pp)
-        p2 = re.compile(F'.*?{pp}')
-        self.matchers = [p1.fullmatch, p2.fullmatch, p1.search]
+    def __init__(self, query: Union[str, re.Pattern], regex=False, fuzzy=0):
+        self.query = query
+        self.regex = regex
         self.fuzzy = fuzzy
+        self.compile()
+
+    def compile(self, **kw):
+        query = self.query
+        if isinstance(query, re.Pattern):
+            self.stops = []
+            self.pattern = query
+            return
+        elif not self.regex:
+            self.stops = re.split(R'([/*?]+)', query)
+            query, _, _ = fnmatch.translate(query).partition(r'\Z')
+        p1 = re.compile(query, **kw)
+        p2 = re.compile(F'.*?{query}')
+        self.matchers = [p1.fullmatch, p2.fullmatch, p1.search]
 
     def reach(self, path):
         if not any(self.stops):
             return True
-        for stop in self.stops:
-            if fnmatch.fnmatch(path, stop):
+        for stop in self.stops[0::2]:
+            if fnmatch.fnmatch(path, F'*{stop}'):
                 return True
         return False
 
@@ -77,12 +82,16 @@ class PathPattern:
         return self.matchers[fuzzy](path)
 
     def __repr__(self):
-        return F'<PathPattern:{"//".join(self.stops) or "RE"}>'
+        return F'<PathPattern:{"".join(self.stops) or "RE"}>'
 
 
 class PathExtractorUnit(Unit, abstract=True):
 
-    _custom_path_separator = '/'
+    CustomPathSeparator = None
+    """
+    This class variable can be overwritten by child classes to change the path separator from the
+    default forward slash to something else.
+    """
 
     def __init__(
         self,
@@ -94,8 +103,10 @@ class PathExtractorUnit(Unit, abstract=True):
             'with it. This can be disabled using the --exact switch.')),
         list: Arg.Switch('-l',
             help='Return all matching paths as UTF8-encoded output chunks.') = False,
-        join_path: Arg.Switch('-j', group='PATH',
-            help='Join path names from container with previous path names.') = False,
+        join_path: Arg.Switch('-j', group='PATH', help=(
+            'Join path names with the previously existing one. If the previously existing path has '
+            'a file extension, it is removed. Then, if that path already exists on disk, a numeric '
+            'extension is appended to avoid conflict with the file system.')) = False,
         drop_path: Arg.Switch('-d', group='PATH',
             help='Do not modify the path variable for output chunks.') = False,
         fuzzy: Arg.Counts('-z', group='MATCH', help=(
@@ -122,6 +133,9 @@ class PathExtractorUnit(Unit, abstract=True):
             **keywords
         )
 
+    def _get_path_separator(self) -> str:
+        return self.CustomPathSeparator or '/'
+
     @property
     def _patterns(self):
         paths = self.args.paths
@@ -131,10 +145,17 @@ class PathExtractorUnit(Unit, abstract=True):
             else:
                 paths = [u'*']
         else:
-            def to_string(t):
+            def to_string(t: Union[str, bytes]) -> str:
                 if isinstance(t, str):
                     return t
-                return t.decode(self.codec)
+                try:
+                    return t.decode(self.codec)
+                except Exception as E:
+                    raise RefineryPotentialUserError(
+                        F'invalid path pattern of length {len(t)};'
+                        U' if that path exists on disk, these are the file contents.'
+                        U' to prevent this, specify s:path.txt rather than path.txt.'
+                    ) from E
             paths = [to_string(p) for p in paths]
         for path in paths:
             self.log_debug('path:', path)
@@ -159,32 +180,72 @@ class PathExtractorUnit(Unit, abstract=True):
         metavar = self.args.path.decode(self.codec)
         occurrences = collections.defaultdict(int)
         checksums = collections.defaultdict(set)
-        root = Path('.')
+        root = ''
+        uuid = 0
+
+        def path_exists(p: str):
+            try:
+                return os.path.exists(p) and not os.path.isdir(p)
+            except Exception:
+                return False
+
+        def get_data(result: UnpackResult):
+            try:
+                data = result.get_data()
+            except RefineryPartialResult as error:
+                if not self.args.lenient:
+                    raise
+                result.data = data = error.partial
+            return data
+
+        def _uuid():
+            nonlocal uuid
+            crc = meta['crc32'].decode('ascii').upper()
+            uid = uuid
+            uuid += 1
+            return F'_{crc}.{uid:04X}'
 
         def normalize(_path: str) -> str:
-            path = Path(_path.replace('\\', '/'))
-            try:
-                path = path.relative_to('/')
-            except ValueError:
-                pass
-            path = root / path
-            path = path.as_posix()
-            path = path.replace('/', self._custom_path_separator)
+            pathsep = self.CustomPathSeparator
+            pattern = '[\\\\/]'
+            if pathsep is None:
+                pathsep = '/'
+            else:
+                pattern = re.escape(pathsep)
+            parts = re.split(pattern, F'{root}{pathsep}{_path}')
+            while True:
+                for k, part in enumerate(parts):
+                    if not part.strip('.'):
+                        break
+                else:
+                    break
+                size = len(part)
+                j = max(k - size, 0)
+                del parts[j:k + 1]
+            path = pathsep.join(parts)
             return path
 
         if self.args.join:
             try:
-                root = ByteStringWrapper(meta[metavar], self.codec)
+                root = str(ByteStringWrapper(meta[metavar], self.codec))
             except KeyError:
                 pass
+            if path_exists(root):
+                root, _, rest = root.rpartition('.')
+                root = root or rest
+            _rr = root
+            _rk = 1
+            while path_exists(root):
+                root = F'{_rr}.{_rk}'
 
         for result in results:
             path = normalize(result.path)
             if not path:
                 from refinery.lib.mime import FileMagicInfo
-                ext = FileMagicInfo(result.get_data()).extension
-                name = uuid.uuid4()
-                path = F'{name}.{ext}'
+                path = _uuid()
+                ext = FileMagicInfo(get_data(result)).extension
+                if ext != 'bin':
+                    path = F'{path}.{ext}'
                 self.log_warn(F'read chunk with empty path; using generated name {path}')
             result.path = path
             occurrences[path] += 1
@@ -192,7 +253,7 @@ class PathExtractorUnit(Unit, abstract=True):
         for result in results:
             path = result.path
             if occurrences[path] > 1:
-                checksum = adler32(result.get_data())
+                checksum = adler32(get_data(result))
                 if checksum in checksums[path]:
                     continue
                 checksums[path].add(checksum)
@@ -200,10 +261,14 @@ class PathExtractorUnit(Unit, abstract=True):
                 base, extension = os.path.splitext(path)
                 width = len(str(occurrences[path]))
                 if any(F'{base}.v{c:0{width}d}{extension}' in occurrences for c in range(occurrences[path])):
-                    result.path = F'{base}.{uuid.uuid4()}{extension}'
+                    result.path = F'{base}.{_uuid()}{extension}'
                 else:
                     result.path = F'{base}.v{counter:0{width}d}{extension}'
                 self.log_warn(F'read chunk with duplicate path; deduplicating to {result.path}')
+
+        if len({r.path.lower() for r in results}) == len(results):
+            for p in patterns:
+                p.compile(flags=re.IGNORECASE)
 
         for p in patterns:
             for fuzzy in range(3):
@@ -219,14 +284,14 @@ class PathExtractorUnit(Unit, abstract=True):
                     if not self.args.drop:
                         result.meta[metavar] = path
                     try:
-                        data = result.get_data()
+                        chunk = get_data(result)
                     except Exception as error:
                         if self.log_debug():
                             raise
-                        self.log_warn(F'extraction failure for {path}: {error!s}')
+                        self.log_warn(F'extraction failure for {path}: {exception_to_string(error)}')
                     else:
                         self.log_debug(F'extraction success for {path}')
-                        yield self.labelled(data, **result.meta)
+                        yield self.labelled(chunk, **result.meta)
                 if done or self.args.fuzzy:
                     break
 
@@ -236,8 +301,8 @@ class XMLToPathExtractorUnit(PathExtractorUnit, abstract=True):
         self, *paths,
         format: Arg('-f', type=str, metavar='F', help=(
             'A format expression to be applied for computing the path of an item. This must use '
-            'metadata that is available on the item. The current tag can be accessed as {0}. If '
-            'no format is specified, the unit attempts to derive a good attribute from the XML '
+            'metadata that is available on the item. The current tag can be accessed as {{tag}}. '
+            'If no format is specified, the unit attempts to derive a good attribute from the XML '
             'tree to use for generating paths.'
         )) = None,
         list=False, join_path=False, drop_path=False, fuzzy=0, exact=False, regex=False,
@@ -276,50 +341,52 @@ class XMLToPathExtractorUnit(PathExtractorUnit, abstract=True):
         root: XMLNodeBase
     ) -> Callable[[XMLNodeBase, Optional[int]], str]:
 
-        path_attributes = Counter()
-
-        def walk(node: XMLNodeBase):
-            total = 1
-            for key, val in node.attributes.items():
-                if re.fullmatch(R'[-\s\w+,.;@(){}]{1,64}', self._normalize_val(val)):
-                    path_attributes[key] += 1
-            for child in node.children:
-                total += walk(child)
-            return total
-
-        total = walk(root)
-
-        if not path_attributes:
-            path_attribute = None
-            count = 0
-        else:
-            path_attribute, count = path_attributes.most_common(1)[0]
-            if 3 * count <= 2 * total:
-                path_attribute = None
-
+        nfmt = self.args.format
         nkey = self._normalize_key
         nval = self._normalize_val
-        node_format = self.args.format
+        nmap = {}
 
-        def path_builder(node: XMLNodeBase, index: Optional[int] = None) -> str:
+        if nfmt is None:
+            def rank_attribute(attribute: str):
+                length = len(attribute)
+                scount = length - len(re.sub(r'\s+', '', attribute))
+                return (1 / length, scount)
+
+            def walk(node: XMLNodeBase):
+                candidates = [
+                    candidate for candidate, count in Counter(
+                        key for child in node.children for key, val in child.attributes.items()
+                        if len(val) in range(2, 65) and re.fullmatch(R'[-\s\w+,.;@()]+', nval(val))
+                    ).items()
+                    if count == len(node.children) == len(
+                        {child.attributes[candidate] for child in node.children})
+                ]
+                if not candidates:
+                    attr = None
+                else:
+                    candidates.sort(key=rank_attribute)
+                    attr = candidates[0]
+                for child in node.children:
+                    nmap[child.path] = attr
+                    walk(child)
+
+            walk(root)
+
+        def path_builder(node: XMLNodeBase) -> str:
             attrs = node.attributes
-            if node_format and meta:
+            if nfmt and meta is not None:
                 try:
-                    return meta.format_str(
-                        node_format,
-                        self.codec,
-                        node.tag, **{
-                            nkey(key): nval(val)
-                            for key, val in attrs.items()
-                        }
-                    )
+                    symbols = {nkey(key): nval(val) for key, val in attrs.items()}
+                    return meta.format_str(nfmt, self.codec, node.tag, symbols)
                 except KeyError:
                     pass
-            if path_attribute is not None and path_attribute in attrs:
-                return self._normalize_val(attrs[path_attribute])
-            out = node.tag
-            if index is not None:
-                out = F'{out}({index})'
-            return nval(out)
+            try:
+                return nval(attrs[nmap[node.path]])
+            except KeyError:
+                index = node.index
+                name = nval(node.tag)
+                if index is not None:
+                    name = F'{name}/{index}'
+                return name
 
         return path_builder

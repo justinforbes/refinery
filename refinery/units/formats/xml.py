@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from collections import Counter
-
 from refinery.lib.structures import MemoryFile
-from refinery.lib.meta import metavars
+from refinery.lib.meta import metavars, is_valid_variable_name
 from refinery.lib import xml
 from refinery.units.sinks.ppxml import ppxml
 from refinery.units.formats import XMLToPathExtractorUnit, UnpackResult
@@ -25,17 +23,22 @@ class xtxml(XMLToPathExtractorUnit):
                 with MemoryFile() as stream:
                     node.write(stream)
                     return bytes(stream.getbuffer() | ppxml)
-            tag_pre_count = Counter()
-            tag_run_count = Counter()
+
+            attributes = {
+                self._normalize_key(k): self._normalize_val(v)
+                for k, v in node.attributes.items()
+            }
+
+            if not all(is_valid_variable_name(k) for k in attributes):
+                attributes = {F'_{k}': v for k, v in attributes.items()}
+
+            yield UnpackResult('/'.join(parts), extract, **attributes)
+
             for child in node.children:
-                tag_pre_count[child.tag] += 1
-            yield UnpackResult('/'.join(parts), extract, **node.attributes)
-            for child in node.children:
-                if tag_pre_count[child.tag] == 1:
-                    yield from walk(child, *parts, path(child))
-                    continue
-                tag_run_count[child.tag] += 1
-                index = tag_run_count[child.tag]
-                yield from walk(child, *parts, path(child, index))
+                yield from walk(child, *parts, path(child))
 
         yield from walk(root, path(root))
+
+    @classmethod
+    def handles(self, data):
+        return xml.is_xml(data)

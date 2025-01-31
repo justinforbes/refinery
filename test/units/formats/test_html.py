@@ -37,9 +37,9 @@ class TestHTMLExtractor(TestUnitBase):
                 'html/head/script',
                 'html/head/woober',
                 'html/body',
-                'html/body/p(1)',
-                'html/body/p(2)',
-                'html/body/p(3)',
+                'html/body/p/1',
+                'html/body/p/2',
+                'html/body/p/3',
                 'html/body/div',
                 'html/body/div/div',
             ))
@@ -47,7 +47,7 @@ class TestHTMLExtractor(TestUnitBase):
 
     def test_extraction(self):
         self.assertEqual(
-            str(self._TEST_DOCUMENT | self.load('p(1)')),
+            str(self._TEST_DOCUMENT | self.load('p/1')),
             'Paragraph 1 &#62; &#x3E;'
         )
 
@@ -62,4 +62,12 @@ class TestHTMLExtractor(TestUnitBase):
                 '        <woober oink=9 />',
                 '    </head>',
             ))
+        )
+
+    def test_javascript_regression(self):
+        data = self.download_sample('5775dd79d6529e77182ceccb5f0a1d9d22d4884017df41dade409caf6471e48f')
+        pipe = self.load_pipeline('loop 8 xthtml[script]:csd[string]:url | deob-ps1 | csd string | b64 | xtp url')
+        self.assertEqual(
+            data | pipe | str,
+            'http'':/''/198.46.178''.''151/65/seethebesthtingswithmewhichgivegreatoutputofmegood.tIF'
         )

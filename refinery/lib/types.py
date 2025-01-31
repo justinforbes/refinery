@@ -7,10 +7,9 @@ for certain command line arguments.
 """
 from typing import Union, Tuple, Type, Dict, Any, Optional, List
 
-__all__ = ['INF', 'AST', 'Singleton', 'ByteStr']
-
 
 ByteStr = Union[bytes, bytearray, memoryview]
+BufferOrStr = Union[bytes, bytearray, memoryview, str]
 
 JSON = Optional[Union[str, int, float, bool, Type[None], Dict[str, 'JSON'], List['JSON']]]
 JSONDict = Dict[str, JSON]
@@ -47,7 +46,7 @@ class Singleton(type):
         def __setstate__(self, _):
             pass
 
-        qualname = F'_singleton_{name}'
+        qualname = F'__singleton_{name}'
 
         namespace.setdefault('__repr__', __repr__)
 
@@ -63,11 +62,7 @@ class Singleton(type):
         return cls()
 
 
-class INF(metaclass=Singleton):
-    """
-    A crude object representing infinity, which is greater than anything it
-    is compared to, and only equal to itself.
-    """
+class _INF(metaclass=Singleton):
     def __lt__(self, other): return False
     def __le__(self, other): return False
     def __gt__(self, other): return True
@@ -90,19 +85,39 @@ class INF(metaclass=Singleton):
     def __truediv__(self, other): return self
     def __floordiv__(self, other): return self
     def __rrshift__(self, other): return 0
+    def __format__(self, *args): return str(self)
 
 
-class AST(metaclass=Singleton):
-    """
-    A wildcard object which is equal to everything.
-    """
+INF = _INF
+"""
+A crude object representing infinity, which is greater than anything it
+is compared to, and only equal to itself.
+"""
+
+
+class _AST(metaclass=Singleton):
     def __eq__(self, other): return True
     def __ne__(self, other): return False
     def __or__(self, other): return other
+    def __contains__(self, other): return True
     def __repr__(self): return '*'
 
 
+AST = _AST
+"""
+A wildcard object which is equal to everything.
+"""
+
+
 class bounds:
+    """
+    Can be used to specify certain upper and lower bounds. For example, the following is `True`:
+
+        5 in bounds[3:5]
+
+    This is notably different from how a `range` object functions since the upper bound is included
+    in the valid range.
+    """
 
     def __class_getitem__(cls, bounds):
         return cls(bounds)
@@ -136,3 +151,27 @@ class bounds:
         if value > self.max:
             return False
         return (value - self.min) % self.inc == 0
+
+
+class _NoMask(metaclass=Singleton):
+    def __rand__(self, other):
+        return other
+
+    def __and__(self, other):
+        return other
+
+
+NoMask = _NoMask
+"""
+The value of `NoMask & X` and `X & NoMask` is always equal to `X`. This singleton serves as a
+mock bitmask when the value `X` should not be masked at all.
+"""
+
+
+class RepeatedInteger(int):
+    """
+    This class serves as a dual-purpose result for `refinery.lib.argformats.numseq` types. It
+    is an integer, but can be infinitely iterated.
+    """
+    def __iter__(self): return self
+    def __next__(self): return self

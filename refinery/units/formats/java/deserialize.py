@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from refinery.units import Unit
-from refinery.lib.json import BytesAsArrayEncoder
+from refinery.lib.json import BytesAsStringEncoder
 
 
-class JavaEncoder(BytesAsArrayEncoder):
+class JavaEncoder(BytesAsStringEncoder):
 
     @classmethod
     def _is_byte_array(cls, obj) -> bool:
@@ -19,6 +19,21 @@ class JavaEncoder(BytesAsArrayEncoder):
         if all(t in range(0x100) for t in obj):
             return True
         return False
+
+    def convert_key(self, key):
+        if isinstance(key, dsjava._javaobj.beans.JavaString):
+            return str(key)
+        return key
+
+    def preprocess(self, obj):
+        if isinstance(obj, dict):
+            # Recursively convert dictionary keys
+            return {self.convert_key(k): self.preprocess(v) for k, v in obj.items()}
+        return obj
+
+    def encode(self, obj):
+        obj = self.preprocess(obj)
+        return super().encode(obj)
 
     def default(self, obj):
         try:
@@ -51,7 +66,7 @@ class dsjava(Unit):
     """
     Deserialize Java serialized data and re-serialize as JSON.
     """
-    @Unit.Requires('javaobj-py3>=0.4.0.1', optional=False)
+    @Unit.Requires('javaobj-py3>=0.4.0.1', 'formats')
     def _javaobj():
         import javaobj.v2
         return javaobj.v2

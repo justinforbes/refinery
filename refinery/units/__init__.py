@@ -37,10 +37,10 @@ very simple XOR unit (less versatile than the already existing `refinery.xor`):
                 data[k] ^= next(key)
             return data
 
-The `refinery.Arg` decorator is optional and only used here to provide a help
-message on the command line. It is also available as the `Arg` class property
-of the `refinery.Unit` class for convenience. The example also shows that the
-`__init__` code can be left empty: In this case, refinery automatically adds
+The `refinery.units.Arg` decorator is optional and only used here to provide a
+help message on the command line. It is also available as the `Arg` class property
+of the `refinery.units.Unit` class for convenience. The example also shows that
+the `__init__` code can be left empty: In this case, refinery automatically adds
 boilerplate code that copies all `__init__` parameters to the `args` member
 variable of the unit. In this case, the constructor will be completed to have
 the following code:
@@ -58,10 +58,7 @@ unit will look as follows:
       key            Encryption key
 
     generic options:
-      -h, --help     Show this help message and exit.
-      -Q, --quiet    Disables all log output.
-      -0, --devnull  Do not produce any output.
-      -v, --verbose  Specify up to two times to increase log level.
+      ...
 
 ### Refinery Syntax in Code
 
@@ -150,7 +147,7 @@ is always possible to use a literal ellipsis (`...`).
 You can connect pipelines to `bytearray` and (writable) `memoryview` instances.
 In this case, the output will be appended to the end of this buffer. Finally, if
 you connect a pipeline to `None`, this will execute the unit but discard all
-output. This is useful for using units with side-effects, like `refinery.peek`,
+output. This is useful for using units with side effects, like `refinery.peek`,
 in a REPL.
 """
 from __future__ import annotations
@@ -165,6 +162,7 @@ from abc import ABCMeta
 from enum import Enum
 from functools import wraps
 from collections import OrderedDict
+from threading import Lock
 
 from typing import (
     Dict,
@@ -177,9 +175,9 @@ from typing import (
     List,
     Optional,
     Callable,
+    ClassVar,
     Tuple,
     Any,
-    ByteString,
     Generator,
     overload,
     no_type_check,
@@ -195,7 +193,7 @@ from argparse import (
 )
 
 from refinery.lib.argparser import ArgumentParserWithKeywordHooks, ArgparseError
-from refinery.lib.frame import Framed, Chunk
+from refinery.lib.frame import generate_frame_header, Framed, Chunk, MAGIC, MSIZE
 from refinery.lib.structures import MemoryFile
 from refinery.lib.environment import LogLevel, Logger, environment, logger
 from refinery.lib.types import ByteStr, Singleton
@@ -208,6 +206,7 @@ from refinery.lib.argformats import (
     ParserVariableMissing,
     pending,
     regexp,
+    slicerange,
     sliceobj,
     VariableMissing,
 )
@@ -220,6 +219,7 @@ from refinery.lib.tools import (
     lookahead,
     normalize_to_display,
     normalize_to_identifier,
+    exception_to_string,
     one,
     skipfirst,
 )
@@ -232,7 +232,7 @@ class RefineryPartialResult(ValueError):
     """
     This exception indicates that a partial result is available.
     """
-    def __init__(self, message: str, partial: ByteString, rest: Optional[ByteString] = None):
+    def __init__(self, message: str, partial: ByteStr, rest: Optional[ByteStr] = None):
         super().__init__(message)
         self.message = message
         self.partial = partial
@@ -242,7 +242,12 @@ class RefineryPartialResult(ValueError):
         return self.message
 
 
-class RefineryImportMissing(ImportError):
+class RefineryImportMissing(ModuleNotFoundError):
+    """
+    A special variant of the `ModuleNotFoundError` exception which is raised when a dependency of a
+    refinery unit is not installed in the current environment. The exception also provides hints
+    about what package has to be installed in order to make that module available.
+    """
     def __init__(self, missing: str, *dependencies: str):
         super().__init__()
         import shlex
@@ -256,6 +261,14 @@ class RefineryCriticalException(RuntimeError):
     If this exception is thrown, processing of the entire input stream
     is aborted instead of just aborting the processing of the current
     chunk.
+    """
+    pass
+
+
+class RefineryPotentialUserError(RuntimeError):
+    """
+    This exception can be raised by a unit to inform the user about a
+    suspected input error.
     """
     pass
 
@@ -359,9 +372,14 @@ class Arg(Argument):
         super().__init__(*args, **kwargs)
 
     def update_help(self):
-        if 'help' not in self.kwargs:
-            return
-
+        """
+        This method is called to format the help text of the argument retroactively. The primary
+        purpose is to fill in default arguments via the formatting symbol `{default}`. These
+        default values are not necessarily part of the `refinery.units.Arg` object itself: They
+        may be a default value in the `__init__` function of the `refinery.units.Unit` subclass.
+        Therefore, it is necessary to format the help text after all information has been
+        compiled.
+        """
         class formatting(dict):
             arg = self
 
@@ -370,6 +388,11 @@ class Arg(Argument):
                     return ', '.join(self.arg.kwargs['choices'])
                 if key == 'default':
                     default: Union[bytes, int, str, slice] = self.arg.kwargs['default']
+                    if isinstance(default, (list, tuple, set)):
+                        if not default:
+                            return 'empty'
+                        elif len(default) == 1:
+                            default = default[0]
                     if isinstance(default, slice):
                         parts = [default.start or '', default.stop or '', default.step]
                         default = ':'.join(str(x) for x in parts if x is not None)
@@ -396,13 +419,24 @@ class Arg(Argument):
 
     @staticmethod
     def AsOption(value: Optional[Any], cls: Enum) -> Enum:
+        """
+        This method converts the input `value` to an instance of the enum `cls`. It is intended to
+        be used on values that are passed as an argument marked with the `refinery.units.Arg.Option`
+        decorator. If the input value is `None` or already an instance of `cls`, it is returned
+        unchanged. Otherwise, the function attempts to find an element of the enumeration that
+        matches the input, either by name or by value.
+        """
         if value is None or isinstance(value, cls):
             return value
         if isinstance(value, str):
-            try: return cls[value]
-            except KeyError: pass
+            try:
+                return cls[value]
+            except KeyError:
+                pass
             needle = normalize_to_identifier(value).casefold()
             for item in cls.__members__:
+                if not isinstance(item, str):
+                    break
                 if item.casefold() == needle:
                     return cls[item]
         try:
@@ -410,6 +444,14 @@ class Arg(Argument):
         except Exception as E:
             choices = ', '.join(normalize_to_display(m) for m in cls.__members__)
             raise ValueError(F'Could not transform {value} into {cls.__name__}; the choices are: {choices}') from E
+
+    @classmethod
+    def Delete(cls):
+        """
+        This should be specified when the argument is present for a (potentially abstract) parent
+        unit but should be removed on the child.
+        """
+        return cls(nargs=cls.delete)
 
     @classmethod
     def Counts(
@@ -508,17 +550,23 @@ class Arg(Argument):
     def Bounds(
         cls,
         *args   : str,
-        help    : Union[omit, str] = 'Specify start:end:step in Python slice syntax.',
+        help    : Optional[Union[omit, str]] = None,
         dest    : Union[omit, str] = omit,
         nargs   : Union[omit, int, str] = omit,
         default : Union[omit, Any] = omit,
+        range   : bool = False,
         metavar : Optional[str] = 'start:end:step',
         group   : Optional[str] = None,
     ):
         """
         Used to add argparse arguments that contain a slice.
         """
-        return cls(*args, group=group, help=help, default=default, nargs=nargs, dest=dest, type=sliceobj, metavar=metavar)
+        if help is None:
+            help = 'Specify start:end:step in Python slice syntax.'
+            if default is not cls.omit:
+                help = F'{help} The default is {{default}}.'
+        parser = slicerange if range else sliceobj
+        return cls(*args, group=group, help=help, default=default, nargs=nargs, dest=dest, type=parser, metavar=metavar)
 
     @classmethod
     def Number(
@@ -576,6 +624,10 @@ class Arg(Argument):
 
     @property
     def positional(self) -> bool:
+        """
+        Indicates whether the argument is positional. This is crudely determined by whether it has
+        a specifier that does not start with a dash.
+        """
         return any(a[0] != '-' for a in self.args)
 
     @property
@@ -701,6 +753,10 @@ class Arg(Argument):
         return cls(*guessed_pos_args, **guessed_kwd_args, guessed=guessed)
 
     def merge_args(self, them: Argument) -> None:
+        """
+        Merge the `args` component of another `refinery.units.Argument` into this one without
+        overwriting or removing any of the `args` in this instance.
+        """
         def iterboth():
             yield from them.args
             yield from self.args
@@ -710,15 +766,24 @@ class Arg(Argument):
         sflag = None
         lflag = None
         for a in iterboth():
-            if a[:2] == '--': lflag = lflag or a
-            elif a[0] == '-': sflag = sflag or a
+            if a[:2] == '--':
+                lflag = lflag or a
+            elif a[0] == '-':
+                sflag = sflag or a
         self.args = []
-        if sflag: self.args.append(sflag)
-        if lflag: self.args.append(lflag)
+        if sflag:
+            self.args.append(sflag)
+        if lflag:
+            self.args.append(lflag)
         if not self.args:
             self.args = list(them.args)
 
     def merge_all(self, them: Arg) -> None:
+        """
+        Merge another `refinery.units.Arg` into the current instance. This is an additive process
+        where no data on the present instance is destroyed unless `refinery.units.Arg.Delete` was
+        used on `them` to explicitly remove an option.
+        """
         for key, value in them.kwargs.items():
             if value is Arg.delete:
                 self.kwargs.pop(key, None)
@@ -760,7 +825,7 @@ class Arg(Argument):
 
 class ArgumentSpecification(OrderedDict):
     """
-    A container object that stores `refinery.units.arg` specifications.
+    A container object that stores `refinery.units.Arg` specifications.
     """
 
     def merge(self: Dict[str, Arg], argument: Arg):
@@ -774,15 +839,15 @@ class ArgumentSpecification(OrderedDict):
         self[dest] = argument
 
 
-DataType = TypeVar('DataType', bound=ByteString)
-ProcType = Callable[['Unit', ByteString], Optional[Union[DataType, Iterable[DataType]]]]
+DataType = TypeVar('DataType', bound=ByteStr)
+ProcType = Callable[['Unit', ByteStr], Optional[Union[DataType, Iterable[DataType]]]]
 
 _T = TypeVar('_T')
 
 
-def UnitProcessorBoilerplate(operation: ProcType[ByteString]) -> ProcType[Chunk]:
+def _UnitProcessorBoilerplate(operation: ProcType[ByteStr]) -> ProcType[Chunk]:
     @wraps(operation)
-    def wrapped(self: Unit, data: ByteString) -> Optional[Union[Chunk, Iterable[Chunk]]]:
+    def wrapped(self: Unit, data: ByteStr) -> Optional[Union[Chunk, Iterable[Chunk]]]:
         ChunkType = Chunk
         if data is None:
             data = B''
@@ -806,7 +871,7 @@ def UnitProcessorBoilerplate(operation: ProcType[ByteString]) -> ProcType[Chunk]
     return wrapped
 
 
-def UnitFilterBoilerplate(
+def _UnitFilterBoilerplate(
     operation : Callable[[Any, Iterable[Chunk]], Iterable[Chunk]]
 ) -> Callable[[Any, Iterable[Chunk]], Iterable[Chunk]]:
     @wraps(operation)
@@ -877,7 +942,7 @@ class Executable(ABCMeta):
             elif not any(len(a) > 2 for a in known.args):
                 flagname = normalize_to_display(known.destination, False)
                 known.args.append(F'--{flagname}')
-            action = known.kwargs.get('action', 'store')
+            action: str = known.kwargs.get('action', 'store')
             if action.startswith('store_'):
                 known.kwargs.pop('default', None)
                 continue
@@ -896,15 +961,15 @@ class Executable(ABCMeta):
                     continue
                 nmspc[method] = decorator(old)
         decorate(
-            filter=UnitFilterBoilerplate,
-            process=UnitProcessorBoilerplate,
-            reverse=UnitProcessorBoilerplate,
+            filter=_UnitFilterBoilerplate,
+            process=_UnitProcessorBoilerplate,
+            reverse=_UnitProcessorBoilerplate,
             __init__=no_type_check,
         )
         if not abstract and Entry not in bases:
-            bases = bases + (Entry,)
-            if not bases[0].is_reversible:
+            if not any(b.is_reversible for b in bases):
                 nmspc.setdefault('reverse', MissingFunction)
+            bases = bases + (Entry,)
         nmspc.setdefault('__doc__', '')
         return super(Executable, mcs).__new__(mcs, name, bases, nmspc)
 
@@ -1008,29 +1073,14 @@ class Executable(ABCMeta):
         return cls().__ror__(other)
 
     @property
-    def is_multiplex(cls) -> bool:
-        """
-        This proprety is `True` if and only if the unit's `process` or `reverse` method is a generator, i.e.
-        when the unit can generate multiple outputs.
-        """
-        if inspect.isgeneratorfunction(inspect.unwrap(cls.process)):
-            return True
-        if not cls.is_reversible:
-            return False
-        return inspect.isgeneratorfunction(inspect.unwrap(cls.reverse))
-
-    @property
-    def is_reversible(cls) -> bool:
+    def is_reversible(cls: Unit) -> bool:
         """
         This property is `True` if and only if the unit has a member function named `reverse`. By convention,
         this member function implements the inverse of `refinery.units.Unit.process`.
         """
         if cls.reverse is MissingFunction:
             return False
-        try:
-            return not cls.reverse.__isabstractmethod__
-        except AttributeError:
-            return True
+        return not getattr(cls.reverse, '__isabstractmethod__', False)
 
     @property
     def codec(cls) -> str:
@@ -1042,16 +1092,34 @@ class Executable(ABCMeta):
 
     @property
     def name(cls) -> str:
+        """
+        The name of the unit as it would be used on the command line. This is the application of
+        the function `refinery.lib.tools.normalize_to_display` to the class name.
+        """
         return normalize_to_display(cls.__name__)
 
     @property
     def logger(cls) -> Logger:
+        """
+        The debug logger instance for the unit.
+        """
         try:
             return cls._logger
         except AttributeError:
             pass
         cls._logger = _logger = logger(cls.name)
         return _logger
+
+    @property
+    def logger_locked(cls) -> bool:
+        try:
+            return cls._logger_locked
+        except AttributeError:
+            return False
+
+    @logger_locked.setter
+    def logger_locked(cls, value):
+        cls._logger_locked = value
 
 
 class DelayedArgumentProxy:
@@ -1061,24 +1129,23 @@ class DelayedArgumentProxy:
     can be computed only as soon as input data becomes available and which also have to be
     recomputed for each input.
     """
-    class PendingUpdate:
-        pass
-
     _argv: Namespace
     _argo: List[str]
     _args: Dict[str, Any]
     _done: bool
-    _guid: int
+    _uuid: Any
+    _lock: Lock
 
     def __copy__(self):
         cls = self.__class__
         clone = cls.__new__(cls)
         clone._store(
+            _lock=Lock(),
             _argv=self._argv,
             _argo=list(self._argo),
             _args=dict(self._args),
             _done=self._done,
-            _guid=self._guid,
+            _uuid=self._uuid,
         )
         return clone
 
@@ -1097,14 +1164,15 @@ class DelayedArgumentProxy:
             else:
                 done = False
         self._store(
+            _lock=Lock(),
             _argv=argv,
             _argo=list(argo),
             _args=args,
             _done=done,
-            _guid=None,
+            _uuid=None,
         )
 
-    def __call__(self, data: bytearray):
+    def __call__(self, data: Chunk):
         """
         Update the current arguments for the input `data`, regardless of whether or not this chunk
         has already been used. In most cases, the matrix-multiplication syntax should be used instead
@@ -1114,24 +1182,22 @@ class DelayedArgumentProxy:
         not be available for a second interpretation call.
         """
         for name in self._argo:
-            value = getattr(self._argv, name, None)
-            if value is self.PendingUpdate:
+            if self._lock.locked():
                 raise RuntimeError(F'Attempting to resolve {name} while an update for this argument is in flight')
-            if value and pending(value):
-                self._args[name] = self.PendingUpdate
-                self._args[name] = manifest(value, data)
-        self._store(_guid=id(data))
+            with self._lock:
+                value = getattr(self._argv, name, None)
+                if value and pending(value):
+                    self._args[name] = manifest(value, data)
+            self._store(_uuid=data.uuid)
         return data
 
-    def __matmul__(self, data: bytearray):
+    def __matmul__(self, data: Chunk):
         """
         Interpret the current arguments for the given input `data`.
         """
         if self._done:
             return data
-        if not isinstance(data, bytearray):
-            data = bytearray(data)
-        if id(data) == self._guid:
+        if self._uuid == data.uuid:
             return data
         return self(data)
 
@@ -1173,14 +1239,14 @@ class UnitBase(metaclass=Executable, abstract=True):
     """
 
     @abc.abstractmethod
-    def process(self, data: ByteString) -> Union[Optional[ByteString], Iterable[ByteString]]:
+    def process(self, data: ByteStr) -> Union[Optional[ByteStr], Iterable[ByteStr]]:
         """
         This routine is overridden by children of `refinery.units.Unit` to define how
         the unit processes a given chunk of binary data.
         """
 
     @abc.abstractmethod
-    def reverse(self, data: ByteString) -> Union[Optional[ByteString], Iterable[ByteString]]:
+    def reverse(self, data: ByteStr) -> Union[Optional[ByteStr], Iterable[ByteStr]]:
         """
         If this routine is overridden by children of `refinery.units.Unit`, then it must
         implement an operation that reverses the `refinery.units.Unit.process` operation.
@@ -1188,8 +1254,9 @@ class UnitBase(metaclass=Executable, abstract=True):
         `refinery.units.UnitBase`.
         """
 
-    @abc.abstractclassmethod
-    def handles(self, data: ByteString) -> Optional[bool]:
+    @classmethod
+    @abc.abstractmethod
+    def handles(self, data: ByteStr) -> Optional[bool]:
         """
         This tri-state routine returns `True` if the unit is certain that it can process the
         given input data, and `False` if it is convinced of the opposite. `None` is returned
@@ -1215,6 +1282,12 @@ class UnitBase(metaclass=Executable, abstract=True):
 
 
 class requirement(property):
+    """
+    An empty descendant of the builtin `property` class that is used to distinguish import
+    requirements on units from other properties. When `refinery.units.Unit.Requires` is used to
+    decorate a member function as an import, this member function becomes an instance of this
+    class.
+    """
     pass
 
 
@@ -1227,14 +1300,15 @@ class Unit(UnitBase, abstract=True):
     """
     Arg = Arg
 
-    optional_dependencies: Optional[Set[str]] = None
     required_dependencies: Optional[Set[str]] = None
+    optional_dependencies: Optional[Dict[str, Set[str]]] = None
 
     @staticmethod
-    def Requires(distribution: str, optional: bool = True):
+    def Requires(distribution: str, *_buckets: str):
+
         class Requirement(requirement):
-            dependency = distribution
-            required = not optional
+            dependency: ClassVar[str] = distribution
+            required: ClassVar[bool] = not _buckets
 
             def __init__(self, importer: Callable):
                 super().__init__(importer)
@@ -1243,15 +1317,16 @@ class Unit(UnitBase, abstract=True):
             def __set_name__(self, unit: Type[Unit], name: str):
                 if self.required:
                     bucket = unit.required_dependencies
+                    if bucket is None:
+                        unit.required_dependencies = bucket = set()
+                    buckets = [bucket]
                 else:
-                    bucket = unit.optional_dependencies
-                if bucket is None:
-                    bucket = set()
-                    if self.required:
-                        unit.required_dependencies = bucket
-                    else:
-                        unit.optional_dependencies = bucket
-                bucket.add(self.dependency)
+                    optmap = unit.optional_dependencies
+                    if optmap is None:
+                        unit.optional_dependencies = optmap = {}
+                    buckets = [optmap.setdefault(name, set()) for name in _buckets]
+                for bucket in buckets:
+                    bucket.add(self.dependency)
 
             def __get__(self, unit: Optional[Type[Unit]], tp: Optional[Type[Executable]] = None):
                 if self.module is not None:
@@ -1259,43 +1334,60 @@ class Unit(UnitBase, abstract=True):
                 try:
                     self.module = module = self.fget()
                 except ImportError as E:
-                    args = unit.optional_dependencies or ()
+                    deps = unit.optional_dependencies or {}
+                    args = set()
+                    for v in deps.values():
+                        args.update(v)
                     raise RefineryImportMissing(self.dependency, *args) from E
                 except Exception as E:
                     raise AttributeError(F'module import for distribution "{distribution}" failed: {E!s}')
                 else:
                     return module
 
+        Requirement.__qualname__ = F'Requirement({distribution!r})'
         return Requirement
 
     @property
     def is_reversible(self) -> bool:
+        """
+        Proxy to `refinery.units.Executable.is_reversible`.
+        """
         return self.__class__.is_reversible
 
     @property
     def codec(self) -> str:
+        """
+        Proxy to `refinery.units.Executable.codec`.
+        """
         return self.__class__.codec
 
     @property
     def logger(self):
+        """
+        Proxy to `refinery.units.Executable.logger`.
+        """
         logger: Logger = self.__class__.logger
         return logger
 
     @property
     def name(self) -> str:
+        """
+        Proxy to `refinery.units.Executable.name`.
+        """
         return self.__class__.name
 
     @property
     def is_quiet(self) -> bool:
-        try:
-            return self.args.quiet
-        except AttributeError:
-            return False
+        """
+        Returns whether the global `--quiet` flag is set, indicating that the unit should not
+        generate any log output.
+        """
+        return getattr(self.args, 'quiet', False)
 
     @property
     def log_level(self) -> LogLevel:
         """
-        Returns the current log level as an element of `refinery.units.LogLevel`.
+        Returns the current log level as an element of `refinery.lib.environment.LogLevel`.
         """
         if self.is_quiet:
             return LogLevel.NONE
@@ -1303,6 +1395,11 @@ class Unit(UnitBase, abstract=True):
 
     @log_level.setter
     def log_level(self, value: Union[int, LogLevel]) -> None:
+        """
+        Returns the current `refinery.lib.environment.LogLevel` that the unit adheres to.
+        """
+        if self.__class__.logger_locked:
+            return
         if not isinstance(value, LogLevel):
             value = LogLevel.FromVerbosity(value)
         self.logger.setLevel(value)
@@ -1322,9 +1419,12 @@ class Unit(UnitBase, abstract=True):
 
     @property
     def leniency(self) -> int:
+        """
+        Returns the value of the global `--lenient` flag.
+        """
         return getattr(self.args, 'lenient', 0)
 
-    def _exception_handler(self, exception: BaseException, data: Optional[ByteString]):
+    def _exception_handler(self, exception: BaseException, data: Optional[ByteStr]):
         if data is not None and self.leniency > 1:
             try:
                 return exception.partial
@@ -1334,7 +1434,7 @@ class Unit(UnitBase, abstract=True):
             if self.leniency >= 1:
                 return exception.partial
             if self.log_level < LogLevel.DETACHED:
-                self.log_warn(F'error, partial result returned: {exception}')
+                self.log_warn(F'A partial result was returned, use the -L switch to retrieve it: {exception}')
                 return None
             raise exception
         elif self.log_level >= LogLevel.DETACHED:
@@ -1342,6 +1442,8 @@ class Unit(UnitBase, abstract=True):
         elif isinstance(exception, RefineryCriticalException):
             self.log_warn(F'critical error, terminating: {exception}')
             raise exception
+        elif isinstance(exception, RefineryPotentialUserError):
+            self.log_warn(str(exception))
         elif isinstance(exception, VariableMissing):
             self.log_warn('critical error:', exception.args[0])
         elif isinstance(exception, GeneratorExit):
@@ -1363,20 +1465,23 @@ class Unit(UnitBase, abstract=True):
                 message = F'{message}; {explanation!s}'
             if self.log_level <= LogLevel.INFO and data is not None:
                 from refinery.units.sinks.peek import peek
-                peeked = str(data | peek(lines=2, decode=True, stdout=True))
-                message = F'{message}\n{peeked}'
+                preview = data | peek(lines=2, decode=True, stdout=True) | [str]
+                message = '\n'.join((message, *preview))
             self.log_fail(message)
 
         if self.log_debug():
             import traceback
             traceback.print_exc(file=sys.stderr)
 
-    def __next__(self) -> Chunk:
+    def output(self):
         if not self._chunks:
             self._chunks = iter(self._framehandler)
+        return self._chunks
+
+    def __next__(self) -> Chunk:
         while True:
             try:
-                return next(self._chunks)
+                chunk = next(self.output())
             except StopIteration:
                 raise
             except RefineryCriticalException as R:
@@ -1384,19 +1489,18 @@ class Unit(UnitBase, abstract=True):
             except BaseException as B:
                 self._exception_handler(B, None)
                 raise StopIteration from B
+            if not self.console and len(chunk) == MSIZE and chunk.startswith(MAGIC):
+                continue
+            return chunk
 
     @property
     def _framehandler(self) -> Framed:
         if self._framed:
             return self._framed
 
-        def normalized_action(data: ByteString) -> Generator[Chunk, None, None]:
+        def normalized_action(data: ByteStr) -> Generator[Chunk, None, None]:
             try:
-                result = self.act(data)
-                if inspect.isgenerator(result):
-                    yield from (x for x in result if x is not None)
-                elif result is not None:
-                    yield result
+                yield from self.act(data)
             except KeyboardInterrupt:
                 raise
             except BaseException as B:
@@ -1412,6 +1516,7 @@ class Unit(UnitBase, abstract=True):
             self.args.squeeze,
             self.filter,
             self.finish,
+            self.console
         )
         return self._framed
 
@@ -1446,6 +1551,8 @@ class Unit(UnitBase, abstract=True):
         if isinstance(stream, self.__class__.__class__):
             stream = stream()
         if not isinstance(stream, self.__class__):
+            if not isstream(stream):
+                raise TypeError(F'Cannot connect object of type {type(stream).__name__} to unit.')
             self.reset()
         self._source = stream
 
@@ -1485,7 +1592,7 @@ class Unit(UnitBase, abstract=True):
         except Exception:
             pass
 
-    def __neg__(self):
+    def __neg__(self) -> Unit:
         pipeline = []
         cursor = self
         while isinstance(cursor, Unit):
@@ -1500,13 +1607,37 @@ class Unit(UnitBase, abstract=True):
             reversed = reversed | pipeline.pop()
         return reversed
 
-    def __ror__(self, stream: Union[str, ByteIO, ByteString]):
+    def __ror__(self, stream: Union[str, Chunk, list[Chunk], ByteIO, ByteStr, None]):
         if stream is None:
             return self
-        if not isstream(stream):
+        if isinstance(stream, Chunk):
+            stream = [stream]
+        if isinstance(stream, (list, tuple)):
+            chunks = list(stream)
+            scopes = set()
+            stream = MemoryFile()
+            for k, chunk in enumerate(chunks):
+                if not isinstance(chunk, Chunk):
+                    chunks[k] = chunk = Chunk(chunk)
+                scopes.add(chunk.scope)
+            if len(scopes) != 1:
+                raise ValueError('Inconsistent scopes in iterable input')
+            chunk_scope = next(iter(scopes))
+            frame_scope = max(chunk_scope, 1)
+            delta = frame_scope - chunk_scope
+            stream.write(generate_frame_header(frame_scope))
+            for chunk in chunks:
+                stream.write(chunk.pack(delta))
+            if delta:
+                self.args.nesting -= delta
+            stream.seekset(0)
+        elif not isstream(stream):
             if isinstance(stream, str):
                 stream = stream.encode(self.codec)
-            stream = MemoryFile(stream) if stream else open(os.devnull, 'rb')
+            if stream:
+                stream = MemoryFile(stream)
+            else:
+                stream = open(os.devnull, 'rb')
         self.reset()
         self.nozzle.source = stream
         return self
@@ -1518,44 +1649,43 @@ class Unit(UnitBase, abstract=True):
         return self | bytes
 
     @overload
-    def __or__(self, stream: Callable[[ByteString], _T]) -> _T:
-        ...
+    def __or__(self, stream: Callable[[ByteStr], _T]) -> _T: ...
 
     @overload
-    def __or__(self, stream: Union[Unit, Type[Unit]]) -> Unit:
-        ...
+    def __or__(self, stream: Type[str]) -> str: ...
 
     @overload
-    def __or__(self, stream: dict) -> dict:
-        ...
+    def __or__(self, stream: Union[Unit, Type[Unit]]) -> Unit: ...
 
     @overload
-    def __or__(self, stream: list) -> list:
-        ...
+    def __or__(self, stream: dict) -> dict: ...
 
     @overload
-    def __or__(self, stream: set) -> set:
-        ...
+    def __or__(self, stream: Dict[str, Type[_T]]) -> Dict[str, _T]: ...
 
     @overload
-    def __or__(self, stream: bytearray) -> bytearray:
-        ...
+    def __or__(self, stream: Dict[str, Type[Ellipsis]]) -> Dict[str, bytearray]: ...
 
     @overload
-    def __or__(self, stream: memoryview) -> memoryview:
-        ...
+    def __or__(self, stream: List[Type[_T]]) -> List[_T]: ...
 
     @overload
-    def __or__(self, stream: Type[None]) -> None:
-        ...
+    def __or__(self, stream: Set[Type[_T]]) -> Set[_T]: ...
 
     @overload
-    def __or__(self, stream: Type[...]) -> bytearray:
-        ...
+    def __or__(self, stream: bytearray) -> bytearray: ...
 
     @overload
-    def __or__(self, stream: ByteIO) -> ByteIO:
-        ...
+    def __or__(self, stream: memoryview) -> memoryview: ...
+
+    @overload
+    def __or__(self, stream: Type[None]) -> None: ...
+
+    @overload
+    def __or__(self, stream: Type[bytearray]) -> bytearray: ...
+
+    @overload
+    def __or__(self, stream: ByteIO) -> ByteIO: ...
 
     def __or__(self, stream):
         def get_converter(it: Iterable):
@@ -1567,6 +1697,10 @@ class Unit(UnitBase, abstract=True):
                 def identity(x):
                     return x
                 return identity
+            if isinstance(c, type):
+                def converter(v):
+                    return v if isinstance(v, c) else c(v)
+                return converter
             if callable(c):
                 return c
 
@@ -1700,7 +1834,9 @@ class Unit(UnitBase, abstract=True):
         the result.
         """
         try:
-            out = self._buffer or next(self)
+            out = self._buffer or next(self.output())
+            if isinstance(out, Chunk) and out.scope > 0:
+                out = out.pack()
             if bytecount and bytecount > 0:
                 out, self._buffer = out[:bytecount], out[bytecount:]
             elif self._buffer:
@@ -1709,40 +1845,59 @@ class Unit(UnitBase, abstract=True):
         except StopIteration:
             return B''
 
-    def act(self, data: Union[Chunk, ByteString]) -> Union[Optional[ByteString], Generator[ByteString, None, None]]:
-        mode = self.args.reverse
-        data = self.args @ data
-        if not mode:
-            return self.process(data)
-        elif mode % 2:
-            return self.reverse(data)
-        else:
-            return self.reverse(self.process(data))
+    def act(self, data: Union[Chunk, ByteStr]) -> Generator[ByteStr, None, None]:
+        cls = self.__class__
+        iff = self.args.iff
+        lvl = cls.log_level
 
-    def __call__(self, data: Optional[Union[ByteString, Chunk]] = None) -> bytes:
+        if iff and not self.handles(data):
+            if iff < 2:
+                yield data
+            return
+        else:
+            data = self.args @ data
+            data = data
+
+        cls.log_level = lvl
+        cls.logger_locked = True
+
+        try:
+            if self.args.reverse:
+                it = self.reverse(data)
+            else:
+                it = self.process(data)
+            if not inspect.isgenerator(it):
+                it = (it,)
+            for out in it:
+                if out is not None:
+                    yield out
+        finally:
+            cls.logger_locked = False
+
+    def __call__(self, data: Optional[Union[ByteStr, Chunk]] = None) -> bytes:
         with MemoryFile(data) if data else open(os.devnull, 'rb') as stdin:
             stdin: ByteIO
             with MemoryFile() as stdout:
                 return (stdin | self | stdout).getvalue()
 
     @classmethod
-    def labelled(cls, data: Union[Chunk, ByteString], **meta) -> Chunk:
+    def labelled(cls, ___br___data: Union[Chunk, ByteStr], **meta) -> Chunk:
         """
         This class method can be used to label a chunk of binary output with metadata. This
         metadata will be visible inside pipeline frames, see `refinery.lib.frame`.
         """
-        if isinstance(data, Chunk):
-            data.meta.update(meta)
-            return data
-        return Chunk(data, meta=meta)
+        if isinstance(___br___data, Chunk):
+            ___br___data.meta.update(meta)
+            return ___br___data
+        return Chunk(___br___data, meta=meta)
 
-    def process(self, data: ByteString) -> Union[Optional[ByteString], Generator[ByteString, None, None]]:
+    def process(self, data: ByteStr) -> Union[Optional[ByteStr], Generator[ByteStr, None, None]]:
         return data
 
     @classmethod
     def log_fail(cls: Union[Executable, Type[Unit]], *messages, clip=False) -> bool:
         """
-        Log the message if and only if the current log level is at least `refinery.units.LogLevel.ERROR`.
+        Log the message if and only if the current log level is at least `refinery.lib.environment.LogLevel.ERROR`.
         """
         rv = cls.logger.isEnabledFor(LogLevel.ERROR)
         if rv and messages:
@@ -1752,7 +1907,7 @@ class Unit(UnitBase, abstract=True):
     @classmethod
     def log_warn(cls: Union[Executable, Type[Unit]], *messages, clip=False) -> bool:
         """
-        Log the message if and only if the current log level is at least `refinery.units.LogLevel.WARN`.
+        Log the message if and only if the current log level is at least `refinery.lib.environment.LogLevel.WARN`.
         """
         rv = cls.logger.isEnabledFor(LogLevel.WARNING)
         if rv and messages:
@@ -1762,7 +1917,7 @@ class Unit(UnitBase, abstract=True):
     @classmethod
     def log_info(cls: Union[Executable, Type[Unit]], *messages, clip=False) -> bool:
         """
-        Log the message if and only if the current log level is at least `refinery.units.LogLevel.INFO`.
+        Log the message if and only if the current log level is at least `refinery.lib.environment.LogLevel.INFO`.
         """
         rv = cls.logger.isEnabledFor(LogLevel.INFO)
         if rv and messages:
@@ -1772,7 +1927,7 @@ class Unit(UnitBase, abstract=True):
     @classmethod
     def log_debug(cls: Union[Executable, Type[Unit]], *messages, clip=False) -> bool:
         """
-        Log the pmessage if and only if the current log level is at least `refinery.units.LogLevel.DEBUG`.
+        Log the pmessage if and only if the current log level is at least `refinery.lib.environment.LogLevel.DEBUG`.
         """
         rv = cls.logger.isEnabledFor(LogLevel.DEBUG)
         if rv and messages:
@@ -1792,11 +1947,7 @@ class Unit(UnitBase, abstract=True):
             if callable(message):
                 message = message()
             if isinstance(message, Exception):
-                args = [arg for arg in message.args if isinstance(arg, str)]
-                if len(args) == 1:
-                    message = args[0]
-                else:
-                    message = str(message)
+                message = exception_to_string(message)
             if isinstance(message, str):
                 return message
             if isbuffer(message):
@@ -1813,7 +1964,8 @@ class Unit(UnitBase, abstract=True):
         if clip:
             from refinery.lib.tools import get_terminal_size
             length = get_terminal_size(75) - len(cls.name) - 27
-            message = message[:length] + "..."
+            if len(message) > length:
+                message = message[:length] + "..."
         return message
 
     @classmethod
@@ -1824,7 +1976,7 @@ class Unit(UnitBase, abstract=True):
         """
         base = argp.add_argument_group('generic options')
 
-        base.set_defaults(reverse=False, squeeze=False)
+        base.set_defaults(reverse=False, squeeze=False, iff=0)
         base.add_argument('-h', '--help', action='help', help='Show this help message and exit.')
         base.add_argument('-L', '--lenient', action='count', default=0, help='Allow partial results as output.')
         base.add_argument('-Q', '--quiet', action='store_true', help='Disables all log output.')
@@ -1833,8 +1985,12 @@ class Unit(UnitBase, abstract=True):
             help='Specify up to two times to increase log level.')
 
         if cls.is_reversible:
-            base.add_argument('-R', '--reverse', action='count', default=0,
-                help='Use the reverse operation; Specify twice to normalize (first decode, then encode).')
+            base.add_argument('-R', '--reverse', action='store_true',
+                help='Use the reverse operation.')
+
+        if cls.handles.__func__ is not Unit.handles.__func__:
+            base.add_argument('-F', '--iff', action='count', default=0,
+                help='Only apply unit if it can handle the input format. Specify twice to drop all other chunks.')
 
         groups = {None: argp}
 
@@ -1842,7 +1998,12 @@ class Unit(UnitBase, abstract=True):
             gp = argument.group
             if gp not in groups:
                 groups[gp] = argp.add_mutually_exclusive_group()
-            groups[gp].add_argument @ argument
+            try:
+                groups[gp].add_argument @ argument
+            except Exception as E:
+                raise RefineryCriticalException(F'Failed to queue argument: {argument!s}; {E!s}')
+            except Exception as E:
+                raise RefineryCriticalException(F'Failed to queue argument: {argument!s}; {E!s}')
 
         return argp
 
@@ -1905,6 +2066,7 @@ class Unit(UnitBase, abstract=True):
         else:
             unit.args._store(_argo=argp.order)
             unit.args.quiet = args.quiet
+            unit.args.iff = args.iff
             unit.args.lenient = args.lenient
             unit.args.squeeze = args.squeeze
             unit.args.nesting = args.nesting
@@ -1939,9 +2101,11 @@ class Unit(UnitBase, abstract=True):
         self._target = None
         self._framed = None
         self._chunks = None
+        self.console = False
 
         keywords.update(dict(
             nesting=0,
+            iff=0,
             reverse=False,
             squeeze=False,
             devnull=False,
@@ -1953,6 +2117,7 @@ class Unit(UnitBase, abstract=True):
         self.log_detach()
 
     _SECRET_DEBUG_TIMING_FLAG = '--debug-timing'
+    _SECRET_DEBUG_TRACES_FLAG = '--debug-traces'
     _SECRET_YAPPI_TIMING_FLAG = '--yappi-timing'
 
     @classmethod
@@ -1976,20 +2141,24 @@ class Unit(UnitBase, abstract=True):
         argv = argv if argv is not None else sys.argv[1:]
         clock = None
         yappi = None
+        trace = False
+
+        if cls._SECRET_DEBUG_TRACES_FLAG in argv:
+            trace = True
+            argv.remove(cls._SECRET_DEBUG_TRACES_FLAG)
 
         if cls._SECRET_DEBUG_TIMING_FLAG in argv:
             from time import process_time
             argv.remove(cls._SECRET_DEBUG_TIMING_FLAG)
             clock = process_time()
-            cls.logger.setLevel(LogLevel.INFO)
-            cls.logger.info('starting clock: {:.4f}'.format(clock))
+            cls.logger.log(LogLevel.PROFILE, 'starting clock: {:.4f}'.format(clock))
 
         if cls._SECRET_YAPPI_TIMING_FLAG in argv:
             argv.remove(cls._SECRET_YAPPI_TIMING_FLAG)
             try:
                 import yappi as _yappi
             except ImportError:
-                cls.logger.warn('unable to start yappi; package is missing')
+                cls.logger.log(LogLevel.PROFILE, 'unable to start yappi; package is missing')
             else:
                 yappi = _yappi
 
@@ -2003,10 +2172,12 @@ class Unit(UnitBase, abstract=True):
                 ap.parser.error_commandline(str(ap))
                 return
             except Exception as msg:
-                import traceback
-                cls.logger.critical(cls._output('initialization failed:', msg))
-                for line in traceback.format_exc().splitlines(keepends=False):
-                    cls.logger.critical(cls._output(line))
+                if not trace:
+                    cls.logger.critical(cls._output('initialization failed:', msg))
+                else:
+                    from traceback import format_exc
+                    for line in format_exc().splitlines(keepends=False):
+                        cls.logger.critical(cls._output(line))
                 return
 
             if ps1:
@@ -2017,12 +2188,13 @@ class Unit(UnitBase, abstract=True):
                 unit.log_level = loglevel
 
             if clock:
-                unit.log_level = min(unit.log_level, LogLevel.INFO)
-                unit.logger.info('unit launching: {:.4f}'.format(clock))
+                cls.logger.log(LogLevel.PROFILE, 'unit launching: {:.4f}'.format(clock))
 
             if yappi is not None:
                 yappi.set_clock_type('cpu')
                 yappi.start()
+
+            unit.console = True
 
             try:
                 with open(os.devnull, 'wb') if unit.args.devnull else sys.stdout.buffer as output:
@@ -2040,12 +2212,12 @@ class Unit(UnitBase, abstract=True):
                 stats = yappi.get_func_stats()
                 filename = F'{unit.name}.perf'
                 stats.save(filename, type='CALLGRIND')
-                cls.logger.info(F'wrote yappi results to file: {filename}')
+                cls.logger.log(LogLevel.PROFILE, F'wrote yappi results to file: {filename}')
 
             if clock:
                 stop_clock = process_time()
-                unit.logger.info('stopping clock: {:.4f}'.format(stop_clock))
-                unit.logger.info('time delta was: {:.4f}'.format(stop_clock - clock))
+                cls.logger.log(LogLevel.PROFILE, 'stopping clock: {:.4f}'.format(stop_clock))
+                cls.logger.log(LogLevel.PROFILE, 'time delta was: {:.4f}'.format(stop_clock - clock))
 
 
 __pdoc__ = {

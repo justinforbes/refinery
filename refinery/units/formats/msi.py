@@ -11,11 +11,14 @@ import re
 import struct
 
 from refinery.lib.structures import StructReader
+from refinery.units import Arg
 from refinery.units.formats.office.xtdoc import xtdoc, UnpackResult
 from refinery.lib import chunks
-from refinery.lib.types import ByteStr
+from refinery.lib.types import ByteStr, JSONDict
 from refinery.lib.mime import FileMagicInfo
 from refinery.lib.tools import cached_property
+
+from refinery.units.formats.csv import csv
 
 
 class MsiType(enum.IntEnum):
@@ -95,6 +98,8 @@ class MSIStringData:
         self._unknown = pool.u16()
         while not pool.eof:
             size, rc = pool.read_struct('<HH')
+            if size == 0 and rc != 0:
+                size = pool.u32()
             string = data.read_bytes(size)
             self.strings.append(string)
             self.provided_ref_count.append(rc)
@@ -136,6 +141,7 @@ class xtmsi(xtdoc):
     """
 
     _SYNTHETIC_STREAMS_FILENAME = 'MsiTables.json'
+    _SYNTHETIC_STREAMS_TOPLEVEL = 'MsiTables'
 
     # https://learn.microsoft.com/en-us/windows/win32/msi/summary-list-of-all-custom-action-types
     _CUSTOM_ACTION_TYPES = {
@@ -158,6 +164,24 @@ class xtmsi(xtdoc):
         0x36: 'VBScript text specified by a property value.',
     }
 
+    def __init__(
+            self, *paths,
+            list=False, path=b'path', join_path=False, drop_path=False, fuzzy=0, exact=False, regex=False,
+            nocab: Arg.Switch('-N', help='Do not list and extract embedded CAB archives.') = False, **kw,
+    ):
+        super().__init__(
+            *paths,
+            list=list,
+            path=path,
+            join_path=join_path,
+            drop_path=drop_path,
+            nocab=nocab,
+            fuzzy=fuzzy,
+            exact=exact,
+            regex=regex,
+            **kw,
+        )
+
     def unpack(self, data):
         streams = {result.path: result for result in super().unpack(data)}
 
@@ -171,7 +195,7 @@ class xtmsi(xtdoc):
             row_size = struct.calcsize(F'<{row_format}')
             row_count = int(len(data) / row_size)
             reader = StructReader(data)
-            columns = [reader.read_struct(F'<{sc*row_count}') for sc in row_format]
+            columns = [reader.read_struct(F'<{sc * row_count}') for sc in row_format]
             for i in range(row_count):
                 yield [c[i] for c in columns]
 
@@ -221,7 +245,7 @@ class xtmsi(xtdoc):
             while True:
                 _replace.done = True
                 string = re.sub(R'''(?x)
-                    \[             # open square brackent
+                    \[             # open square bracket
                       (?![~\\])    # not followed by escapes
                       ([%$!#]?)    # any of the valid prefix characters
                       ([^[\]{}]+)  # no brackets or braces
@@ -317,24 +341,79 @@ class xtmsi(xtdoc):
             streams.pop(ignored_stream, None)
 
         inconsistencies = 0
+        w1 = len(str(len(strings)))
+        w2 = len(str(max(max(strings.computed_ref_count), max(strings.provided_ref_count))))
         for k in range(len(strings)):
             c = strings.computed_ref_count[k]
             p = strings.provided_ref_count[k]
-            if c != p and not self.log_debug(F'string reference count computed={c} provided={p}:', strings.ref(k + 1, False)):
+            if c != p and not self.log_debug(F'string {k:0{w1}d} reference count computed={c:0{w2}d} provided={p:0{w2}d}'):
                 inconsistencies += 1
         if inconsistencies:
             self.log_info(F'found {inconsistencies} incorrect string reference counts')
 
         def fix_msi_path(path: str):
             prefix, dot, name = path.partition('.')
-            if dot == '.' and prefix.lower() == 'binary':
+            if dot == '.' and prefix in processed_table_data:
                 path = F'{prefix}/{name}'
             return path
+
+        if self.args.nocab:
+            cabs = {}
+        else:
+            def _iscab(path):
+                return media_info and any(item.get('Cabinet', '') == F'#{path}' for item in media_info)
+            media_info: List[JSONDict] = processed_table_data.get('Media', [])
+            cabs: Dict[str, UnpackResult] = {
+                path: item for path, item in streams.items() if _iscab(path)}
+            for cab in cabs:
+                self.log_info(F'found cab file: {cab}')
+        if cabs:
+            from refinery.units.formats.archive.xtcab import xtcab
+            file_names: Dict[str, JSONDict] = {}
+
+            for file_info in processed_table_data.get('File', []):
+                try:
+                    src_name = file_info['File']
+                    dst_name = file_info['FileName']
+                except KeyError:
+                    continue
+                _, _, long = dst_name.partition('|')
+                dst_name = long or dst_name
+                file_names[src_name] = dst_name
+
+            for path, cab in cabs.items():
+                try:
+                    unpacked: List[UnpackResult] = list(xtcab().unpack(cab.get_data()))
+                except Exception as e:
+                    self.log_info(F'unable to extract embedded cab file: {e!s}')
+                    continue
+                base, dot, ext = path.rpartition('.')
+                if dot == '.' and ext.lower() == 'cab':
+                    path = base
+                else:
+                    del streams[path]
+                    cab.path = F'{path}.cab'
+                    streams[cab.path] = cab
+                for result in unpacked:
+                    sub_path = file_names.get(result.path, result.path)
+                    sub_path = self._get_path_separator().join((path, sub_path))
+                    streams[sub_path] = result
 
         streams = {fix_msi_path(path): item for path, item in streams.items()}
         ds = UnpackResult(self._SYNTHETIC_STREAMS_FILENAME,
                 json.dumps(processed_table_data, indent=4).encode(self.codec))
         streams[ds.path] = ds
+
+        converter = csv()
+        for key, data in processed_table_data.items():
+            sk = key.strip('_')
+            if sk not in processed_table_data:
+                key = sk
+            try:
+                tbl = UnpackResult(F'{self._SYNTHETIC_STREAMS_TOPLEVEL}/{key}.csv', converter.json_to_csv(data))
+            except Exception:
+                continue
+            streams[tbl.path] = tbl
 
         for path in sorted(streams):
             streams[path].path = path

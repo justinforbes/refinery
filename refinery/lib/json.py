@@ -11,6 +11,8 @@ import json
 import re
 import uuid
 
+from refinery.lib.types import ByteStr
+
 
 class JSONEncoderExMeta(type):
     """
@@ -92,9 +94,9 @@ class JSONEncoderEx(json.JSONEncoder, metaclass=JSONEncoderExMeta):
         return False
 
 
-class BytesAsArrayEncoder(JSONEncoderEx):
+class BytesEncoder(JSONEncoderEx):
     """
-    This JSON Encoder encodes byte strings as arrays of integers.
+    A base class for JSON encoders that can encode byte arrays.
     """
 
     @classmethod
@@ -105,13 +107,33 @@ class BytesAsArrayEncoder(JSONEncoderEx):
     def handled(cls, obj) -> bool:
         return cls._is_byte_array(obj) or super().handled(obj)
 
-    def encode_bytes(self, obj):
-        return self.encode_raw('[{}]'.format(','.join(F'{b & 0xFF:d}' for b in obj)))
+    def encode_bytes(self, obj: ByteStr):
+        raise NotImplementedError
 
     def default(self, obj):
         if self._is_byte_array(obj):
             return self.encode_bytes(obj)
         return super().default(obj)
+
+
+class BytesAsArrayEncoder(BytesEncoder):
+    """
+    This JSON Encoder encodes byte strings as arrays of integers.
+    """
+    def encode_bytes(self, obj: ByteStr):
+        return self.encode_raw('[{}]'.format(','.join(str(b & 0xFF) for b in obj)))
+
+
+class BytesAsStringEncoder(BytesEncoder):
+    """
+    This JSON Encoder encodes byte strings as escaped strings.
+    """
+    def encode_bytes(self, obj: ByteStr):
+        if not isinstance(obj, (bytes, bytearray)):
+            if not isinstance(obj, memoryview):
+                obj = (b & 0xFF for b in obj)
+            obj = bytes(obj)
+        return obj.decode('latin1')
 
 
 def flattened(data: dict, prefix='', separator='.') -> List[Tuple[str, Union[int, float, str]]]:
@@ -121,7 +143,7 @@ def flattened(data: dict, prefix='', separator='.') -> List[Tuple[str, Union[int
                 new_prefix = key if not prefix else F'{prefix}{separator}{key}'
                 yield from flatten(value, new_prefix)
         elif isinstance(cursor, list):
-            width = len(F'{len(cursor)-1:X}')
+            width = len(F'{len(cursor) - 1:X}')
             for key, value in enumerate(cursor):
                 yield from flatten(value, F'{prefix}[0x{key:0{width}X}]')
         else:

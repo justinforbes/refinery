@@ -1,0 +1,9 @@
+[report]
+exclude_also =
+    if TYPE_CHECKING:
+    except ImportError
+    except KeyboardInterrupt
+    except ArgparseError
+    except Exception
+    raise NotImplementedError
+    yappi

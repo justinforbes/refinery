@@ -19,10 +19,10 @@ from refinery.units.formats.archive.xtzip import xtzip
 
 class doctxt(Unit):
     """
-    Extract text from Word Documents
+    Extracts the text body from Word documents.
     """
 
-    @Unit.Requires('olefile', optional=False)
+    @Unit.Requires('olefile', 'formats', 'office', 'extended')
     def _olefile():
         import olefile
         return olefile
@@ -43,6 +43,8 @@ class doctxt(Unit):
             self.log_debug(F'trying to extract as {filetype}')
             try:
                 result = extractor(data)
+            except ImportError:
+                raise
             except Exception as error:
                 self.log_info(F'failed extractring as {filetype}: {error!s}')
             else:
@@ -108,7 +110,7 @@ class doctxt(Unit):
         with self._olefile.OleFileIO(stream) as ole:
             doc = ole.openstream('WordDocument').read()
             with StructReader(doc) as reader:
-                table_name = F'{(doc[11]>>1)&1}Table'
+                table_name = F'{(doc[11] >> 1) & 1}Table'
                 reader.seek(0x1A2)
                 offset = reader.u32()
                 length = reader.u32()

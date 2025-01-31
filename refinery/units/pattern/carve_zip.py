@@ -17,11 +17,7 @@ class ZipEndOfCentralDirectory(Struct):
         self.entries_in_directory = reader.u16()
         self.directory_size = reader.u32()
         self.directory_offset = reader.u32()
-        try:
-            cl = reader.u32()
-            self.comment = cl and reader.read(cl) or None
-        except EOFError:
-            self.comment = None
+        self.comment_length = reader.u16()
 
 
 class ZipCentralDirectory(Struct):
@@ -58,6 +54,7 @@ class carve_zip(Unit):
     def process(self, data: bytearray):
         end = len(data)
         mem = memoryview(data)
+        rev = []
         while True:
             end = data.rfind(ZipEndOfCentralDirectory.SIGNATURE, 0, end)
             if end < 0:
@@ -79,8 +76,14 @@ class carve_zip(Unit):
             except ValueError:
                 self.log_debug('computed location of central directory is invalid')
                 end = end - len(ZipEndOfCentralDirectory.SIGNATURE)
-            else:
-                start = central_directory.header_offset + shift
-                zip = mem[start:end + len(end_marker)]
-                yield self.labelled(zip, offset=start)
-                end = start
+                continue
+            start = central_directory.header_offset + shift
+            if mem[start:start + 4] not in (B'PK\x03\x04', B'\0\0\0\0'):
+                # SFX payloads seem to have a nulled header, so we permit this.
+                self.log_debug('computed start of ZIP archive does not have the correct signature bytes')
+                continue
+            rev.append((start, end + len(end_marker)))
+            end = start
+        for start, end in reversed(rev):
+            zip = mem[start:end + len(end_marker)]
+            yield self.labelled(zip, offset=start)

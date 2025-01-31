@@ -2,15 +2,20 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from io import BytesIO
-from typing import Dict, List, TYPE_CHECKING
+from typing import Iterable, Dict, List, TYPE_CHECKING
+from hashlib import md5
+
+import plistlib
 
 from refinery.units import Arg, Unit
 from refinery.units.formats.pe.pemeta import pemeta
 from refinery.units.sinks.ppjson import ppjson
+from refinery.lib.tools import NoLogging
+from refinery.lib.structures import MemoryFile
 
 if TYPE_CHECKING:
     from ktool import Image
+    from ktool.loader import Symbol
     from ktool.codesign import BlobIndex, SuperBlob
 
 
@@ -44,19 +49,29 @@ class machometa(Unit):
             tabular=tabular,
         )
 
-    @Unit.Requires('k2l')
+    @Unit.Requires('k2l>=2.0', 'all')
     def _ktool():
         import ktool
         import ktool.macho
         import ktool.codesign
         return ktool
 
+    def compute_symhash(self, macho_image: Image) -> Dict:
+        def _symbols(symbols: Iterable[Symbol]):
+            for sym in symbols:
+                if sym.types:
+                    continue
+                yield sym.fullname
+        symbols = sorted(set(_symbols(macho_image.symbol_table.ext)))
+        symbols: str = ','.join(symbols)
+        return md5(symbols.encode('utf8')).hexdigest()
+
     def parse_macho_header(self, macho_image: Image, data=None) -> Dict:
         info = {}
         macho_header = macho_image.macho_header
         dyld_header = macho_image.macho_header.dyld_header
         if dyld_header is not None:
-            info['Type'] = dyld_header.typename()
+            info['Type'] = dyld_header.type_name
             info['Magic'] = dyld_header.magic
             info['CPUType'] = macho_image.slice.type.name
             info['CPUSubType'] = macho_image.slice.subtype.name
@@ -82,42 +97,25 @@ class machometa(Unit):
         _kc = self._ktool.codesign
 
         class CodeDirectoryBlob(_km.Struct):
-            _FIELDNAMES = [
-                'magic',
-                'length',
-                'version',
-                'flags',
-                'hashOffset',
-                'identOffset',
-                'nSpecialSlots',
-                'nCodeSlots',
-                'codeLimit',
-                'hashSize',
-                'hashType',
-                'platform',
-                'pageSize',
-                'spare2'
-            ]
-            _SIZES = [
-                _km.uint32_t,
-                _km.uint32_t,
-                _km.uint32_t,
-                _km.uint32_t,
-                _km.uint32_t,
-                _km.uint32_t,
-                _km.uint32_t,
-                _km.uint32_t,
-                _km.uint32_t,
-                _km.uint8_t,
-                _km.uint8_t,
-                _km.uint8_t,
-                _km.uint8_t,
-                _km.uint32_t
-            ]
-            SIZE = 44
+            FIELDS = {
+                'magic': _km.uint32_t,
+                'length': _km.uint32_t,
+                'version': _km.uint32_t,
+                'flags': _km.uint32_t,
+                'hashOffset': _km.uint32_t,
+                'identOffset': _km.uint32_t,
+                'nSpecialSlots': _km.uint32_t,
+                'nCodeSlots': _km.uint32_t,
+                'codeLimit': _km.uint32_t,
+                'hashSize': _km.uint8_t,
+                'hashType': _km.uint8_t,
+                'platform': _km.uint8_t,
+                'pageSize': _km.uint8_t,
+                'spare2': _km.uint32_t
+            }
 
             def __init__(self, byte_order='little'):
-                super().__init__(fields=self._FIELDNAMES, sizes=self._SIZES, byte_order=byte_order)
+                super().__init__(byte_order=byte_order)
                 self.magic = 0
                 self.length = 0
                 self.version = 0
@@ -144,7 +142,7 @@ class machometa(Unit):
                 # so we must do it ourselves here.
                 if blob.type == _kc.CSSLOT_CODEDIRECTORY:
                     start = superblob.off + blob.offset
-                    codedirectory_blob = macho_image.load_struct(start, CodeDirectoryBlob)
+                    codedirectory_blob = macho_image.read_struct(start, CodeDirectoryBlob)
 
                     # Ad-hoc signing
                     flags = _kc.swap_32(codedirectory_blob.flags)
@@ -155,15 +153,15 @@ class machometa(Unit):
 
                     # Signature identifier
                     identifier_offset = _kc.swap_32(codedirectory_blob.identOffset)
-                    identifier_data = macho_image.get_cstr_at(start + identifier_offset)
+                    identifier_data = macho_image.read_cstr(start + identifier_offset)
                     info['SignatureIdentifier'] = identifier_data
 
                 if blob.type == 0x10000:  # CSSLOT_CMS_SIGNATURE
                     start = superblob.off + blob.offset
-                    blob_data = macho_image.load_struct(start, _kc.Blob)
+                    blob_data = macho_image.read_struct(start, _kc.Blob)
                     blob_data.magic = _kc.swap_32(blob_data.magic)
                     blob_data.length = _kc.swap_32(blob_data.length)
-                    cms_signature = macho_image.get_bytes_at(start + _kc.Blob.SIZE, blob_data.length - _kc.Blob.SIZE)
+                    cms_signature = macho_image.read_bytearray(start + _kc.Blob.SIZE, blob_data.length - _kc.Blob.SIZE)
 
                     if len(cms_signature) != 0:
                         try:
@@ -178,7 +176,15 @@ class machometa(Unit):
                 # https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/RequirementLang/RequirementLang.html
                 info['Requirements'] = macho_image.codesign_info.req_dat.hex()
             if macho_image.codesign_info.entitlements is not None:
-                info['Entitlements'] = macho_image.codesign_info.entitlements
+                entitlements: str = macho_image.codesign_info.entitlements
+                if entitlements:
+                    try:
+                        entitlements = plistlib.loads(entitlements.encode('utf8'))
+                    except Exception as error:
+                        self.log_warn(F'failed to parse entitlements: {error!s}')
+                    else:
+                        info['Entitlements'] = entitlements
+
         return info
 
     def parse_version(self, macho_image: Image, data=None) -> Dict:
@@ -227,7 +233,8 @@ class machometa(Unit):
     def process(self, data: bytearray):
         result = {}
         ktool = self._ktool
-        macho = ktool.load_macho_file(fp=BytesIO(data), use_mmaped_io=False)
+        with NoLogging(NoLogging.Mode.ALL):
+            macho = ktool.load_macho_file(fp=MemoryFile(memoryview(data)), use_mmaped_io=False)
         if macho.type is ktool.MachOFileType.FAT:
             result['FileType'] = 'FAT'
         elif macho.type is ktool.MachOFileType.THIN:
@@ -262,6 +269,7 @@ class machometa(Unit):
             if macho_image.uuid is not None:
                 uuid: bytes = macho_image.uuid
                 slice_result['UUID'] = uuid.hex()
+            slice_result['SymHash'] = self.compute_symhash(macho_image)
             slice_result['BaseName'] = macho_image.base_name
             slice_result['InstallName'] = macho_image.install_name
             slices.append(slice_result)

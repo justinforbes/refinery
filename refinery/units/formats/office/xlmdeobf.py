@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from refinery.units.formats import Unit
 from refinery.lib.vfs import VirtualFileSystem
+from refinery.lib.tools import NoLogging
 
 
 class xlmdeobf(Unit):
@@ -73,7 +74,7 @@ class xlmdeobf(Unit):
         extract_only = sort_formulas or extract_only
         self.superinit(super(), **vars())
 
-    @Unit.Requires('XLMMacroDeobfuscator', optional=False)
+    @Unit.Requires('XLMMacroDeobfuscator', 'formats', 'office')
     def _process_file():
         from XLMMacroDeobfuscator.configs import settings
         settings.SILENT = True
@@ -81,7 +82,7 @@ class xlmdeobf(Unit):
         return process_file
 
     def process(self, data: bytearray):
-        with VirtualFileSystem() as vfs:
+        with VirtualFileSystem() as vfs, NoLogging():
             result = self._process_file(
                 file=vfs.new(data),
                 noninteractive=True,

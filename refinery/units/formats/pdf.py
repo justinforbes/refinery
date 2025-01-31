@@ -21,7 +21,7 @@ class xtpdf(PathExtractorUnit):
     """
     Extract objects from PDF documents.
     """
-    @PathExtractorUnit.Requires('pypdf>=3.1.0', optional=False)
+    @PathExtractorUnit.Requires('pypdf>=3.1.0', 'formats', 'default', 'extended')
     def _pypdf2():
         import pypdf
         import pypdf.generic
@@ -47,9 +47,12 @@ class xtpdf(PathExtractorUnit):
         else:
             path = *path[:-1], F'/{name}'
         try:
+            def extract():
+                with NoLogging():
+                    return get_data()
             if TYPE_CHECKING:
-                blob: EncodedStreamObject = cast(EncodedStreamObject, blob)
-            extract = blob.get_data
+                blob = cast(EncodedStreamObject, blob)
+            get_data = blob.get_data
         except AttributeError:
             pass
         else:

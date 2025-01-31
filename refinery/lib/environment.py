@@ -28,6 +28,7 @@ class LogLevel(IntEnum):
     an exception.
     """
     NONE = logging.CRITICAL + 50
+    PROFILE = logging.CRITICAL + 10
 
     @classmethod
     def FromVerbosity(cls, verbosity: int):
@@ -63,6 +64,9 @@ class LogLevel(IntEnum):
 
 
 class RefineryFormatter(logging.Formatter):
+    """
+    The binary refinery log formatter class.
+    """
 
     NAMES = {
         logging.CRITICAL : 'failure',
@@ -70,6 +74,7 @@ class RefineryFormatter(logging.Formatter):
         logging.WARNING  : 'warning',
         logging.INFO     : 'comment',
         logging.DEBUG    : 'verbose',
+        LogLevel.PROFILE : 'profile',
     }
 
     def __init__(self, format, **kwargs):
@@ -98,6 +103,9 @@ def logger(name: str) -> logging.Logger:
 
 
 class EnvironmentVariableSetting(Generic[_T]):
+    """
+    Abstraction of an environment variable based setting.
+    """
     key: str
     value: Optional[_T]
 
@@ -110,6 +118,11 @@ class EnvironmentVariableSetting(Generic[_T]):
 
 
 class EVBool(EnvironmentVariableSetting[bool]):
+    """
+    Boolean setting stored in an environment variable. Except for the strings `0`, `no`, `off`,
+    and `false`, every value is interpreted as `True`. If the variable does not exist, the value
+    is interpreted as `False`.
+    """
     def read(self):
         value = os.environ.get(self.key, None)
         if value is None:
@@ -124,6 +137,10 @@ class EVBool(EnvironmentVariableSetting[bool]):
 
 
 class EVInt(EnvironmentVariableSetting[int]):
+    """
+    An integer value stored in an environment variable. The variable is interpreted as a Python
+    integer literal. A non-existant variable is interpreted as zero.
+    """
     def read(self):
         try:
             return int(os.environ[self.key], 0)
@@ -132,6 +149,10 @@ class EVInt(EnvironmentVariableSetting[int]):
 
 
 class EVLog(EnvironmentVariableSetting[Optional[LogLevel]]):
+    """
+    A log level stored in an environment variable. This can be specified as either the name of the
+    log level or its integer value.
+    """
     def read(self):
         try:
             loglevel = os.environ[self.key]
@@ -151,6 +172,9 @@ class EVLog(EnvironmentVariableSetting[Optional[LogLevel]]):
 
 
 class environment:
+    """
+    Provides access to refinery-related configuration in environment variables.
+    """
     verbosity = EVLog('VERBOSITY')
     term_size = EVInt('TERM_SIZE')
     colorless = EVBool('COLORLESS')

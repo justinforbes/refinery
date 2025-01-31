@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-from refinery.units import Arg, Unit
+from refinery.units import Arg, Unit, RefineryPartialResult
 from refinery.lib.tools import splitchunks
 from refinery.lib.mscrypto import BCRYPT_RSAKEY_BLOB, CRYPTOKEY, TYPES
 from refinery.lib.xml import ForgivingParse
 
 from base64 import b64decode, b16decode
 from contextlib import suppress
-from enum import IntEnum
+from enum import IntEnum, Enum
+
 from Cryptodome.Random import get_random_bytes
 from Cryptodome.Cipher import PKCS1_OAEP
 from Cryptodome.PublicKey import RSA
 from Cryptodome.Util import number
+
+
+class KF(str, Enum):
+    TXT = 'custom'
+    XML = 'XML'
+    PEM = 'PEM'
+    DER = 'DER'
+    MSB = 'Microsoft key blob'
 
 
 def normalize_rsa_key(key: bytes, force_public=False):
@@ -20,7 +29,7 @@ def normalize_rsa_key(key: bytes, force_public=False):
         if colon == B':':
             mod = number.bytes_to_long(b16decode(mod, casefold=True))
             exp = number.bytes_to_long(b16decode(exp, casefold=True))
-            return RSA.construct((mod, exp))
+            return KF.TXT, RSA.construct((mod, exp))
     except Exception:
         pass
     try:
@@ -39,7 +48,7 @@ def normalize_rsa_key(key: bytes, force_public=False):
                 components += data['D'],
             if 'P' in data and 'Q' in data:
                 components += data['P'], data['Q']
-        return RSA.construct(components)
+        return KF.XML, RSA.construct(components)
     try:
         blob = CRYPTOKEY(key)
     except ValueError:
@@ -49,16 +58,17 @@ def normalize_rsa_key(key: bytes, force_public=False):
             raise ValueError(F'The provided key is of invalid type {blob.header.type!s}, the algorithm is {blob.header.algorithm!s}.')
         if force_public and blob.header.type is TYPES.PRIVATEKEYBLOB:
             blob = blob.pub
-        return blob.key.convert()
+        return KF.MSB, blob.key.convert()
     try:
         blob = BCRYPT_RSAKEY_BLOB(key)
     except ValueError:
+        fmt = KF.PEM if B'----' in key else KF.DER
         key = RSA.import_key(key)
         if force_public:
             key = key.public_key()
-        return key
+        return fmt, key
     else:
-        return blob.convert(force_public=force_public)
+        return KF.MSB, blob.convert(force_public=force_public)
 
 
 class PAD(IntEnum):
@@ -178,25 +188,20 @@ class rsa(Unit):
 
     def _decrypt_block_OAEP(self, data):
         self.log_debug('Attempting decryption with PyCrypto PKCS1 OAEP.')
-        result = PKCS1_OAEP.new(self.key).decrypt(data)
-        if result is not None:
-            return result
-        raise ValueError('OAEP decryption was unsuccessful.')
+        return PKCS1_OAEP.new(self.key).decrypt(data)
 
     def _encrypt_block_OAEP(self, data):
         self.log_debug('Attempting encryption with PyCrypto PKCS1 OAEP.')
-        result = PKCS1_OAEP.new(self.key).encrypt(data)
-        if result is None:
-            return result
-        raise ValueError('OAEP encryption was unsuccessful.')
+        return PKCS1_OAEP.new(self.key).encrypt(data)
 
     def _decrypt_block(self, data):
         if self._oaep and self._pads in {PAD.AUTO, PAD.OAEP}:
             try:
                 return self._decrypt_block_OAEP(data)
-            except ValueError:
-                if self._pads: raise
-                self.log_debug('PyCrypto primitives failed, no longer attempting OAEP.')
+            except ValueError as E:
+                if self._pads:
+                    raise
+                self.log_debug(F'{E!s} No longer attempting OAEP.')
                 self._oaep = False
 
         data = self._decrypt_raw(data)
@@ -220,9 +225,7 @@ class rsa(Unit):
                 self.log_info('Detected PKCS1.5 padding.')
                 self._pads = PAD.PKCS15
                 return data
-            self.log_warn('No padding worked, returning raw decrypted blocks.')
-            self._pads = PAD.NONE
-            return data
+            raise RefineryPartialResult('No padding worked, returning raw decrypted blocks.', data)
         else:
             raise ValueError(F'Invalid padding value: {self._pads!r}')
 
@@ -247,8 +250,10 @@ class rsa(Unit):
         key_blob = self.args.key
         key_hash = hash(key_blob)
         if key_hash != self._key_hash:
+            fmt, key_data = normalize_rsa_key(key_blob)
+            self.log_info(F'successfully parsed RSA key as {fmt.value}')
             self._key_hash = key_hash
-            self._key_data = normalize_rsa_key(key_blob)
+            self._key_data = key_data
         return self._key_data
 
     def process(self, data):

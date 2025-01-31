@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-from typing import Optional, List, Dict, Iterable, Generator, Set
-from datetime import datetime
+from typing import NamedTuple, Optional, Union, List, Dict, Iterable, Tuple, Generator, Set
 from enum import Enum
 
 import io
+import math
 import struct
 
 from refinery.lib.structures import Struct, StructReader, MemoryFile
-from refinery.lib.crypto import rotl32
 from refinery.units.formats import PathExtractorUnit, UnpackResult
+from refinery.lib.tools import date_from_timestamp
 
 
 A3X_KEYWORDS = [
@@ -65,8 +65,8 @@ A3X_KEYWORDS = [
 A3X_APICALLS = [
     'Abs',
     'Acos',
-    'Adlibregister',
-    'Adlibunregister',
+    'AdlibRegister',
+    'AdlibUnRegister',
     'Asc',
     'AscW',
     'ASin',
@@ -517,7 +517,24 @@ _PRETTY.update((name.lower(), name) for name in A3X_APICALLS)
 _PRETTY.update((name.lower(), name) for name in A3X_KEYWORDS)
 
 
-def a3x_decompile(bytecode: bytearray, tab='\x20\x20\x20\x20') -> str:
+def a3x_number_representation(value: Union[float, int]) -> str:
+    """
+    The AutoIt3 compiler will emit constants for -inf/inf/nan. However, AutoIt3 itself has no
+    keywords for these values; The output of this function is valid AutoIt3 code that will
+    produce these constants.
+
+    https://www.autoitscript.com/autoit3/docs/functions/Dec.htm
+    """
+    if isinstance(value, int):
+        return str(value)
+    elif math.isnan(value) or math.isinf(value):
+        value = struct.pack('>d', value).hex().upper()
+        return RF'Dec("{value}", 3)'
+    else:
+        return RF'{value!s}'
+
+
+def a3x_decompile(bytecode: bytearray) -> Generator[Tuple[int, str]]:
     class _decompiler(dict):
         def __missing__(self, key):
             if key == 's':
@@ -541,15 +558,11 @@ def a3x_decompile(bytecode: bytearray, tab='\x20\x20\x20\x20') -> str:
             if number < 0 and tokens and tokens[~0] == '+':
                 number = -number
                 tokens[~0] = '-'
-            if isinstance(number, int) and number > 0x80:
-                return hex(number)
-            else:
-                return str(number)
+            return a3x_number_representation(number)
 
     decompiler = _decompiler()
     reader = A3xReader(bytecode)
     num_lines = reader.u32()
-    output = io.StringIO()
     tokens: List[str] = []
     expected_terminators: List[str] = []
     line = 0
@@ -594,8 +607,8 @@ def a3x_decompile(bytecode: bytearray, tab='\x20\x20\x20\x20') -> str:
                     raise ValueError(F'Unexpected {tokens[0]} in line {line}, expected {_PRETTY[expected]}.')
                 indent -= 1
             if not indent and len(expected_terminators) > 0:
-                output.write('\n')
-            output.write(indent * tab)
+                yield (0, '')
+            output = io.StringIO()
             for k, token in enumerate(tokens):
                 space = True
                 space = space and k > 0
@@ -606,48 +619,43 @@ def a3x_decompile(bytecode: bytearray, tab='\x20\x20\x20\x20') -> str:
                 if space:
                     output.write(' ')
                 output.write(token)
-            output.write('\n')
+            yield (indent, output.getvalue())
             line += 1
             tokens.clear()
         else:
             tokens.append(A3X_OPCODES.get(opc).format_map(decompiler))
     if expected_terminators:
         raise ValueError('Script truncated.')
-    return output.getvalue()
 
 
-def a3x_decompress(data: bytearray) -> bytearray:
-    def bits(k):
-        nonlocal bit_buffer, bit_length
-        shift = bit_length - k
-        result = bit_buffer >> shift
-        bit_buffer ^= result << shift
-        bit_length -= k
-        return result
+def a3x_decompress(data: bytearray, is_current: bool) -> bytearray:
     output = MemoryFile()
     cursor = 0
     view = memoryview(data)
     size = int.from_bytes(view[4:8], 'big')
-    bit_buffer = int.from_bytes(view[8:], 'big')
-    bit_length = (len(view) - 8) * 8
-    ep = (
-        (0b00000011, 0x003, 3),
-        (0b00000111, 0x00A, 5),
-        (0b00011111, 0x029, 8),
-        (0b11111111, 0x128, 8))
+    bit_reader = StructReader(view[8:], bigendian=True)
+    bits = bit_reader.read_integer
     while cursor < size:
-        if bits(1) == 1:
+        check = bits(1)
+        if check == is_current:
             output.write_byte(bits(8))
             cursor += 1
             continue
         delta = 0
         offset = bits(15)
         length = bits(2)
-        for sentinel, d, n in ep:
-            if length != sentinel:
-                break
-            delta = d
-            length = bits(n)
+        if length == 0b00000011:
+            delta = 0x003
+            length = bits(3)
+            if length == 0b00000111:
+                delta = 0x00A
+                length = bits(5)
+                if length == 0b00011111:
+                    delta = 0x029
+                    length = bits(8)
+                    if length == 0b11111111:
+                        delta = 0x128
+                        length = bits(8)
         while length == 0b11111111:
             delta += 0xFF
             length = bits(8)
@@ -658,30 +666,112 @@ def a3x_decompress(data: bytearray) -> bytearray:
     return output.getvalue()
 
 
-def a3x_decrypt(data: memoryview, key: int) -> bytearray:
-    a, b, t = 0, 10, []
-    out = bytearray(len(data))
-
-    def _next():
-        nonlocal a, b, t
-        r = rotl32(t[a], 9) + rotl32(t[b], 13) & 0xFFFFFFFF
-        t[a] = r
-        a = (a - 1) % 17
-        b = (b - 1) % 17
-        L = (r << 0x14) & 0xFFFFFFFF
-        H = (0x3ff00000 | (r >> 0xc)) & 0xFFFFFFFF
-        d, = struct.unpack('<d', struct.pack('<II', L, H))
-        return d - 1
+def a3x_decrypt_current(data: memoryview, key: int) -> bytearray:
+    a, b, t = 16, 6, []
 
     for _ in range(17):
         key = 1 - key * 0x53A9B4FB & 0xFFFFFFFF
         t.append(key)
+
+    t.reverse()
+
     for _ in range(9):
-        _next()
-    for k, v in enumerate(data):
-        _next()
-        out[k] = min(0xFF, int(_next() * 0x100)) ^ v
-    return out
+        r = (t[a] << 9 | t[a] >> 23) + (t[b] << 13 | t[b] >> 19) & 0xFFFFFFFF
+        t[a] = r
+        a = (a + 1) % 17
+        b = (b + 1) % 17
+
+    def _decrypted():
+        nonlocal a, b, t
+        for v in data:
+            x = t[a]
+            y = t[b]
+            t[a] = (x << 9 | x >> 23) + (y << 13 | y >> 19) & 0xFFFFFFFF
+            a = (a + 1) % 17
+            b = (b + 1) % 17
+            x = t[a]
+            y = t[b]
+            r = (x << 9 | x >> 23) + (y << 13 | y >> 19) & 0xFFFFFFFF
+            t[a] = r
+            a = (a + 1) % 17
+            b = (b + 1) % 17
+            yield (r >> 24) ^ v
+
+    return bytearray(_decrypted())
+
+
+def a3x_decrypt_legacy(data: memoryview, key: int) -> bytearray:
+    a, b, t = 1, 0, []
+
+    t.append(key)
+    for i in range(1, 624):
+        key = ((((key ^ key >> 30) * 0x6C078965) & 0xFFFFFFFF) + i) & 0xFFFFFFFF
+        t.append(key)
+
+    def _refactor_state():
+        nonlocal t
+        for i in range(0, 0xe3):
+            x = t[i] ^ t[i + 1]
+            x &= 0x7FFFFFFE
+            x ^= t[i]
+            x >>= 1
+            y = 0x9908B0DF
+            if (t[i + 1] % 2 == 0):
+                y = 0
+            x ^= y
+            x ^= t[i + 397]
+            t[i] = x
+
+        for i in range(0xe3, 0x18c + 0xe3):
+            x = t[i] ^ t[i + 1]
+            x &= 0x7FFFFFFE
+            x ^= t[i]
+            x >>= 1
+            y = 0x9908B0DF
+            if (t[i + 1] % 2 == 0):
+                y = 0
+            x ^= y
+            x ^= t[i - 227]
+            t[i] = x
+
+        x = t[0]
+        y = t[0x18c + 0xe3] ^ x
+        y &= 0x7FFFFFFE
+        y ^= t[0x18c + 0xe3]
+        y >>= 1
+        if (x % 2 == 1):
+            x = 0x9908B0DF
+        else:
+            x = 0
+        y ^= x
+        y ^= t[0x18c + 0xe3 - 227]
+        t[0x18c + 0xe3] = y
+
+    def _decrypted():
+        nonlocal a, b, t
+        for v in data:
+            a -= 1
+            b += 1
+            if a == 0:
+                a = 0x270
+                b = 0
+                _refactor_state()
+            x = t[b]
+            x = x ^ x >> 11
+            y = ((x & 0xFF3A58AD) << 7) & 0xFFFFFFFF
+            x ^= y
+            y = ((x & 0xFFFFDF8C) << 15) & 0xFFFFFFFF
+            x ^= y
+            y = x ^ x >> 0x12
+            yield ((y >> 1) ^ v) & 0xFF
+
+    return bytearray(_decrypted())
+
+
+def a3x_decrypt(data: memoryview, key: int, is_current: bool = True) -> bytearray:
+    if is_current:
+        return a3x_decrypt_current(data, key)
+    return a3x_decrypt_legacy(data, key)
 
 
 class A3xType(str, Enum):
@@ -692,21 +782,68 @@ class A3xType(str, Enum):
     AHK_WITH_ICON = 'AHK WITH ICON'
 
 
+class A3xEncryptionConstants(NamedTuple):
+    version: bytes
+    tag_size: int
+    tag: int
+    path_size: int
+    path: int
+    compressed_size: int
+    decompressed_size: int
+    checksum: int
+    data: int
+    is_current: bool
+
+
+class A3xEncryptionType(A3xEncryptionConstants, Enum):
+    EA06 = A3xEncryptionConstants(
+        b'AU3!EA06',
+        tag_size=0xADBC,
+        tag=0xB33F,
+        path_size=0xF820,
+        path=0xF479,
+        compressed_size=0x87BC,
+        decompressed_size=0x87BC,
+        checksum=0xA685,
+        data=0x2477,
+        is_current=True
+    )
+    EA05 = A3xEncryptionConstants(
+        b'AU3!EA05',
+        tag_size=0x29BC,
+        tag=0xA25E,
+        path_size=0x29AC,
+        path=0xF25E,
+        compressed_size=0x45AA,
+        decompressed_size=0x45AA,
+        checksum=0xC3D2,
+        data=0x22AF,
+        is_current=False
+    )
+
+
 class A3xReader(StructReader[memoryview]):
 
-    def read_encrypted_data(self, size_key, seed):
-        size = 2 * (self.u32() ^ size_key)
-        seed = int(size // 2) + seed
-        return a3x_decrypt(self.read_exactly(size), seed)
+    def read_encrypted_data(self, size_key, seed, is_current=True):
+        if is_current:
+            size = 2 * (self.u32() ^ size_key)
+            seed = int(size // 2) + seed
+        else:
+            size = (self.u32() ^ size_key)
+            seed += size
 
-    def read_encrypted_string(self, size_key, seed):
-        return self.read_encrypted_data(size_key, seed).decode('utf-16le')
+        return a3x_decrypt(self.read_exactly(size), seed, is_current)
+
+    def read_encrypted_string(self, size_key, seed, is_current=True):
+        if is_current:
+            return self.read_encrypted_data(size_key, seed).decode('utf-16le')
+        return self.read_encrypted_data(size_key, seed, is_current=False).decode('utf-8')
 
     def read_time(self):
         H = self.u32()
         L = self.u32()
         T = (H << 32) | L
-        return datetime.utcfromtimestamp((T - 116444736000000000) / 10000000)
+        return date_from_timestamp((T - 116444736000000000) / 10000000)
 
     def read_length_prefixed_string(self):
         length = self.i32()
@@ -716,16 +853,24 @@ class A3xReader(StructReader[memoryview]):
 class A3xRecord(Struct, parser=A3xReader):
     MAGIC = b'\x6B\x43\xCA\x52'
 
-    def __init__(self, reader: A3xReader):
-        if reader.read(4) != self.MAGIC:
-            raise ValueError('Invalid record header magic.')
-        self.type = reader.read_encrypted_string(0xADBC, 0xB33F).lstrip('>').rstrip('<')
-        self.src_path = reader.read_encrypted_string(0xF820, 0xF479)
+    def __init__(self, reader: A3xReader, encryption_type: A3xEncryptionType):
+        self.magic = reader.read(4)
+        self.encryption_type = encryption_type
+        self.type = reader.read_encrypted_string(
+            encryption_type.tag_size,
+            encryption_type.tag,
+            encryption_type.is_current
+        ).lstrip('>').rstrip('<')
+        self.src_path = reader.read_encrypted_string(
+            encryption_type.path_size,
+            encryption_type.path,
+            encryption_type.is_current
+        )
         self.is_compressed = bool(reader.u8())
         self.is_encrypted = True
-        self.size = reader.u32() ^ 0x87BC
-        self.size_decompressed = reader.u32() ^ 0x87BC
-        self.checksum = reader.u32() ^ 0xA685
+        self.size = reader.u32() ^ encryption_type.compressed_size
+        self.size_decompressed = reader.u32() ^ encryption_type.decompressed_size
+        self.checksum = reader.u32() ^ encryption_type.checksum
         self.created = reader.read_time()
         self.written = reader.read_time()
         self.data = bytes(reader.read_exactly(self.size))
@@ -737,19 +882,36 @@ class A3xRecord(Struct, parser=A3xReader):
         return self.path == other.path and self.type == other.type
 
     def extract(self) -> bytearray:
+        output = io.BytesIO()
+        it = self.extract_linewise()
+        output.write(next(it))
+        for line in it:
+            output.write(B'\n')
+            output.write(line)
+        return output.getvalue()
+
+    def extract_linewise(self) -> Generator[bytes]:
         if self.is_encrypted:
             a3x.log_info('decryption:', self.path)
-            self.data = a3x_decrypt(self.data, 0x2477)
+            if self.encryption_type.is_current:
+                self.data = a3x_decrypt(self.data, self.encryption_type.data, self.encryption_type.is_current)
+            else:
+                seed = self.encryption_type.data + 0x849
+                self.data = a3x_decrypt(self.data, seed, self.encryption_type.is_current)
             self.is_encrypted = False
         if self.is_compressed:
             a3x.log_info('decompress:', self.path)
-            self.data = a3x_decompress(self.data)
+            self.data = a3x_decompress(self.data, self.encryption_type.is_current)
             self.is_compressed = False
-        if self.type == A3xType.SCRIPT:
-            a3x.log_info('decompiler:', self.path)
-            return a3x_decompile(self.data).encode(a3x.codec)
-        else:
-            return self.data
+        if not self.is_script():
+            yield self.data
+            return
+        a3x.log_info('decompiler:', self.path)
+        for indent, line in a3x_decompile(self.data):
+            yield F'{indent * 4 * " "}{line}'.encode(a3x.codec)
+
+    def is_script(self):
+        return self.type == A3xType.SCRIPT
 
     @property
     def path(self):
@@ -784,11 +946,13 @@ class A3xScript(Struct, parser=A3xReader):
             return
         self.body: List[A3xRecord] = []
         last_known_good_position = reader.tell()
+        types = {at.version: at for at in A3xEncryptionType}
         while not reader.eof:
             pos = reader.tell()
             try:
-                self.body.append(A3xRecord(reader))
-            except ValueError:
+                rt = types.get(self.type, A3xEncryptionType.EA06)
+                self.body.append(A3xRecord(reader, rt))
+            except (ValueError, EOFError):
                 reader.seekset(pos)
                 break
             else:
@@ -856,7 +1020,7 @@ class a3x(PathExtractorUnit):
                         cursor += len(A3xRecord.MAGIC)
                     continue
                 if script.truncated:
-                    _a = 'broken'
+                    _a = 'truncated'
                     truncated.update(script.body)
                 else:
                     script_count += 1

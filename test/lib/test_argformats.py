@@ -3,6 +3,7 @@
 from argparse import ArgumentTypeError
 
 from refinery.lib import argformats
+from refinery.lib.tools import entropy
 
 from .. import TestBase
 
@@ -56,12 +57,6 @@ class TestArgumentFormats(TestBase):
     def test_itob(self):
         data = argformats.DelayedArgument('itob:take[:4]:accu[0x1337]:A')()
         self.assertEqual(data, bytes.fromhex('3713371337133713'))
-
-    def test_accu_reduction(self):
-        xor1 = self.ldu('xor', 'accu[12]:(A*7+23)')
-        xor2 = self.ldu('xor', 'accu[12]:(A*7+23)&0xFF')
-        data = bytearray(48)
-        self.assertEqual(xor1(data), xor2(data))
 
     def test_range_can_use_variables(self):
         pipeline = self.ldu('put', 't', 0x30) [ self.ldu('xor', 'range:t:t+6') ] # noqa
@@ -135,3 +130,57 @@ class TestArgumentFormats(TestBase):
         t = argformats.multibin('take[:32]:accu[0xBA2,0,16]:A*0x5A7F+0x3079#(4*A)>>16')
         self.assertEqual(t, bytes.fromhex(
             '0003030100010303030302010301020003000202030202000300020203020200'))
+
+    def test_integer_nonempty(self):
+        self.assertEqual(argformats.multibin('le:e:0'), b'\0')
+        self.assertEqual(argformats.multibin('be:e:0'), b'\0')
+
+    def test_path_parts(self):
+        self.assertEqual(argformats.multibin('pp[:3]:/a/very/deep/path/to/some/file.exe'), b'to/some/file.exe')
+        self.assertEqual(argformats.multibin('pp[3:]:/a/very/deep/path/to/some/file.exe'), b'/a/very/deep/path')
+
+    def test_path_name(self):
+        self.assertEqual(argformats.multibin('pn:/a/very/deep/path/to/some/file.exe'), b'/a/very/deep/path/to/some/file')
+        self.assertEqual(argformats.multibin('pb:pn:/a/very/deep/path/to/some/file.exe'), b'file')
+
+    def test_path_extension(self):
+        self.assertEqual(argformats.multibin('px:/a/very/deep/path/to/some/file.exe'), b'exe')
+
+    def test_read_handler(self):
+        import os
+        import os.path
+        import tempfile
+
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as ntf:
+                name = os.path.abspath(ntf.name)
+                ntf.write(B'binary refinery')
+            self.assertEqual(argformats.multibin(F'read[6]:{name}'), b'binary')
+            self.assertEqual(argformats.multibin(F'read[0:6]:{name}'), b'binary')
+            self.assertEqual(argformats.multibin(F'read[7:]:{name}'), b'refinery')
+            self.assertEqual(argformats.multibin(F'read[7:20]:{name}'), b'refinery')
+            self.assertEqual(argformats.multibin(F'read[7:3]:{name}'), b'ref')
+        finally:
+            try:
+                os.unlink(name)
+            except Exception:
+                pass
+
+    def test_prng(self):
+        import random
+
+        try:
+            randbytes = random.randbytes
+        except AttributeError:
+            def randbytes(n):
+                return bytes(random.randint(0, 0xFF) for _ in range(n))
+        finally:
+            random.seed(0x1337)
+
+        goal = randbytes(2000)
+        test = argformats.multibin('prng[0x1337]:2000')
+        self.assertEqual(goal, test)
+
+    def test_rng(self):
+        test = argformats.multibin('rng:200000')
+        self.assertGreaterEqual(entropy(test), 0.99)

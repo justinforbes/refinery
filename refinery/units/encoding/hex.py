@@ -5,7 +5,7 @@ from refinery.units import Unit
 
 class hex(Unit):
     """
-    Hex-decodes and encodes binary data. Non hex characters are removed from
+    Hex-decodes and encodes binary data. Non-hex characters are removed from
     the input. For decoding, any odd trailing hex digits are stripped as two
     hex digits are required to represent a byte.
     """
@@ -21,3 +21,9 @@ class hex(Unit):
         if len(data) % 2:
             data = data[:-1]
         return base64.b16decode(data, casefold=True)
+
+    @classmethod
+    def handles(self, data: bytearray):
+        from refinery.lib.patterns import formats
+        if formats.spaced_hex.fullmatch(data):
+            return True

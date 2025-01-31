@@ -3,7 +3,23 @@
 from .. import TestUnitBase
 
 
+class TestALUInput(TestUnitBase):
+
+    def test_invalid_expression(self):
+        self.assertRaises(Exception, lambda: B'' | self.load() | None, '"§$%$$$§$§$$$UU')
+        self.assertRaises(Exception, lambda: B'' | self.load() | None, '(B + 9')
+
+    def test_not_an_expression(self):
+        self.assertRaises(Exception, lambda: B'' | self.load() | None, 'def foo(x):\n    return 29')
+
+
 class TestALU(TestUnitBase):
+
+    def test_eval_bug_01(self):
+        data = bytes(range(251, 256))
+        wish = bytes(((B + 5) % 255 for B in data))
+        result = next(data | self.load('-P0', '(B+5)%255'))
+        self.assertEqual(result, wish)
 
     def test_index_starts_at_zero(self):
         unit = self.load("B+K")
@@ -12,8 +28,14 @@ class TestALU(TestUnitBase):
     def test_real_world_01(self):
         data = bytes.fromhex('7C737376545F0808244368244668652724684643275F2424054B')
         goal = b'https'b'://45.41.204'b'.150:443\0'
-        unit = self.load('(41*(B-75))%127')
+        unit = self.load('(41*(B-75))%127', precision=0)
         self.assertEqual(data | unit | bytes, goal)
+
+    def test_real_world_02(self):
+        data = b'\x63\x0a\x9f\xf2\x21\x0e\x76\x45\xf4\xc8\x4d\xaa\x16\x04\x11\x1a\xc2\xca'
+        line = self.load_pipeline('put key le:x::4 [| alu -P4 -B1 -s=key -e=(S*0xBC8F%0x7FFFFFFF) B@S ]')
+        test = data | line | str
+        self.assertEqual(test, 'BCryptHashData')
 
     def test_signed_unsigned_methods(self):
         data = bytes.fromhex(
@@ -72,3 +94,10 @@ class TestALUAgainstOtherUnits(TestUnitBase):
         ror = self.ldu('rotr', '3')
         bop = self.load('(B >> 3) | (B << 5)')
         self.assertEqual(ror(self.buffer), bop(self.buffer))
+
+    def test_performance(self):
+        data = self.download_sample('bb41df67b503fef9bfd8f74757adcc50137365fbc25b92933573a64c7d419c1b')
+        pipe = self.load_pipeline("alu B@S -P2 -e=R(E*0x81F6+0xF3C7,8) | rev")
+        test = data | pipe | bytes
+        self.assertEqual(test[:2], B'MZ')
+        self.assertIn(B'This program cannot be run in DOS mode.', test)

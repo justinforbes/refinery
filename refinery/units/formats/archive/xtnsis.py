@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import BinaryIO, Dict, Iterable, Iterator, List, NamedTuple, Optional
 
 import enum
 import itertools
@@ -10,14 +9,69 @@ import struct
 import io
 import dataclasses
 
-import bz2
 import lzma
 import zlib
 
 from datetime import datetime
 
+from refinery.units import RefineryPartialResult
 from refinery.units.formats.archive import ArchiveUnit
 from refinery.lib.structures import MemoryFile, Struct, StructReader, StreamDetour
+
+from refinery.lib.thirdparty.pyflate import BZip2File, GZipFile
+from refinery.lib.tools import exception_to_string
+from refinery.lib.decompression import parse_lzma_properties
+
+from typing import (
+    BinaryIO,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    NamedTuple,
+    Optional,
+    Type,
+)
+
+
+class DeflateFile(io.RawIOBase):
+
+    data: MemoryFile
+    dc: zlib._Decompress
+
+    def __new__(cls, data: MemoryFile):
+        self = super().__new__(cls)
+        self.data = data
+        self.dc = zlib.decompressobj(-15)
+        return io.BufferedReader(self)
+
+    def readall(self) -> bytes:
+        return self.read()
+
+    def readinto(self, __buffer):
+        data = self.read(len(__buffer))
+        size = len(data)
+        __buffer[:size] = data
+        return size
+
+    def read(self, size=-1):
+        buffer = self.dc.unconsumed_tail or self.data.read(size)
+        kwargs = {}
+        if size > 0:
+            kwargs.update(max_length=size)
+        return self.dc.decompress(buffer, **kwargs)
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return False
+
+    def write(self, __b):
+        raise NotImplementedError
 
 
 class NSMethod(str, enum.Enum):
@@ -25,103 +79,104 @@ class NSMethod(str, enum.Enum):
     LZMA = 'LZMA'
     BZip2 = 'BZIP2'
     Deflate = 'DEFLATE'
+    NSGzip = 'NsisGzip'
 
 
 class Op(enum.IntEnum):
     INVALID_OPCODE     = 0              # noqa
-    RET                = enum.auto()    # noqa; Return
-    NOP                = enum.auto()    # noqa; Nop, Goto
-    ABORT              = enum.auto()    # noqa; Abort
-    QUIT               = enum.auto()    # noqa; Quit
-    CALL               = enum.auto()    # noqa; Call, InitPluginsDir
-    UPDATETEXT         = enum.auto()    # noqa; DetailPrint
-    SLEEP              = enum.auto()    # noqa; Sleep
-    BRINGTOFRONT       = enum.auto()    # noqa; BringToFront
-    CHDETAILSVIEW      = enum.auto()    # noqa; SetDetailsView
-    SETFILEATTRIBUTES  = enum.auto()    # noqa; SetFileAttributes
-    CREATEDIR          = enum.auto()    # noqa; CreateDirectory, SetOutPath
-    IFFILEEXISTS       = enum.auto()    # noqa; IfFileExists
-    SETFLAG            = enum.auto()    # noqa; SetRebootFlag, ...
-    IFFLAG             = enum.auto()    # noqa; IfAbort, IfSilent, IfErrors, IfRebootFlag
-    GETFLAG            = enum.auto()    # noqa; GetInstDirError, GetErrorLevel
-    RENAME             = enum.auto()    # noqa; Rename
-    GETFULLPATHNAME    = enum.auto()    # noqa; GetFullPathName
-    SEARCHPATH         = enum.auto()    # noqa; SearchPath
-    GETTEMPFILENAME    = enum.auto()    # noqa; GetTempFileName
-    EXTRACTFILE        = enum.auto()    # noqa; File
-    DELETEFILE         = enum.auto()    # noqa; Delete
-    MESSAGEBOX         = enum.auto()    # noqa; MessageBox
-    RMDIR              = enum.auto()    # noqa; RMDir
-    STRLEN             = enum.auto()    # noqa; StrLen
-    ASSIGNVAR          = enum.auto()    # noqa; StrCpy
-    STRCMP             = enum.auto()    # noqa; StrCmp
-    READENVSTR         = enum.auto()    # noqa; ReadEnvStr, ExpandEnvStrings
-    INTCMP             = enum.auto()    # noqa; IntCmp, IntCmpU
-    INTOP              = enum.auto()    # noqa; IntOp
-    INTFMT             = enum.auto()    # noqa; IntFmt/Int64Fmt
-    PUSHPOP            = enum.auto()    # noqa; Push/Pop/Exchange
-    FINDWINDOW         = enum.auto()    # noqa; FindWindow
-    SENDMESSAGE        = enum.auto()    # noqa; SendMessage
-    ISWINDOW           = enum.auto()    # noqa; IsWindow
-    GETDLGITEM         = enum.auto()    # noqa; GetDlgItem
-    SETCTLCOLORS       = enum.auto()    # noqa; SetCtlColors
-    SETBRANDINGIMAGE   = enum.auto()    # noqa; SetBrandingImage / LoadAndSetImage
-    CREATEFONT         = enum.auto()    # noqa; CreateFont
-    SHOWWINDOW         = enum.auto()    # noqa; ShowWindow, EnableWindow, HideWindow
-    SHELLEXEC          = enum.auto()    # noqa; ExecShell
-    EXECUTE            = enum.auto()    # noqa; Exec, ExecWait
-    GETFILETIME        = enum.auto()    # noqa; GetFileTime
-    GETDLLVERSION      = enum.auto()    # noqa; GetDLLVersion
-#   GETFONTVERSION     = enum.auto()    # noqa; Park : 2.46.2
-#   GETFONTNAME        = enum.auto()    # noqa; Park : 2.46.3
-    REGISTERDLL        = enum.auto()    # noqa; RegDLL, UnRegDLL, CallInstDLL
-    CREATESHORTCUT     = enum.auto()    # noqa; CreateShortCut
-    COPYFILES          = enum.auto()    # noqa; CopyFiles
-    REBOOT             = enum.auto()    # noqa; Reboot
-    WRITEINI           = enum.auto()    # noqa; WriteINIStr, DeleteINISec, DeleteINIStr, FlushINI
-    READINISTR         = enum.auto()    # noqa; ReadINIStr
-    DELREG             = enum.auto()    # noqa; DeleteRegValue, DeleteRegKey
-    WRITEREG           = enum.auto()    # noqa; WriteRegStr, WriteRegExpandStr, WriteRegBin, WriteRegDWORD
-    READREGSTR         = enum.auto()    # noqa; ReadRegStr, ReadRegDWORD
-    REGENUM            = enum.auto()    # noqa; EnumRegKey, EnumRegValue
-    FCLOSE             = enum.auto()    # noqa; FileClose
-    FOPEN              = enum.auto()    # noqa; FileOpen
-    FPUTS              = enum.auto()    # noqa; FileWrite, FileWriteByte
-    FGETS              = enum.auto()    # noqa; FileRead, FileReadByte
+    Ret                = enum.auto()    # noqa; Return
+    Nop                = enum.auto()    # noqa; Nop, Goto
+    Abort              = enum.auto()    # noqa; Abort
+    Quit               = enum.auto()    # noqa; Quit
+    Call               = enum.auto()    # noqa; Call, InitPluginsDir
+    UpdateText         = enum.auto()    # noqa; DetailPrint
+    Sleep              = enum.auto()    # noqa; Sleep
+    BringToFront       = enum.auto()    # noqa; BringToFront
+    SetDetailsView     = enum.auto()    # noqa; SetDetailsView
+    SetFileAttributes  = enum.auto()    # noqa; SetFileAttributes
+    CreateDirectory    = enum.auto()    # noqa; CreateDirectory, SetOutPath
+    IfFileExists       = enum.auto()    # noqa; IfFileExists
+    SetFlag            = enum.auto()    # noqa; SetRebootFlag, ...
+    IfFlag             = enum.auto()    # noqa; IfAbort, IfSilent, IfErrors, IfRebootFlag
+    GetFlag            = enum.auto()    # noqa; GetInstDirError, GetErrorLevel
+    Rename             = enum.auto()    # noqa; Rename
+    GetFullPathName    = enum.auto()    # noqa; GetFullPathName
+    SearchPath         = enum.auto()    # noqa; SearchPath
+    GetTempFileName    = enum.auto()    # noqa; GetTempFileName
+    ExtractFile        = enum.auto()    # noqa; File
+    DeleteFile         = enum.auto()    # noqa; Delete
+    MessageBox         = enum.auto()    # noqa; MessageBox
+    RmDir              = enum.auto()    # noqa; RMDir
+    StrLen             = enum.auto()    # noqa; StrLen
+    AssignVar          = enum.auto()    # noqa; StrCpy
+    StrCmp             = enum.auto()    # noqa; StrCmp
+    ReadEnvStr         = enum.auto()    # noqa; ReadEnvStr, ExpandEnvStrings
+    IntCmp             = enum.auto()    # noqa; IntCmp, IntCmpU
+    IntOp              = enum.auto()    # noqa; IntOp
+    IntFmt             = enum.auto()    # noqa; IntFmt/Int64Fmt
+    PushPop            = enum.auto()    # noqa; Push/Pop/Exchange
+    FindWindow         = enum.auto()    # noqa; FindWindow
+    SendMessage        = enum.auto()    # noqa; SendMessage
+    IsWindow           = enum.auto()    # noqa; IsWindow
+    GetDlgItem         = enum.auto()    # noqa; GetDlgItem
+    SetCtlColors       = enum.auto()    # noqa; SetCtlColors
+    SetBrandingImage   = enum.auto()    # noqa; SetBrandingImage / LoadAndSetImage
+    CreateFont         = enum.auto()    # noqa; CreateFont
+    ShowWindow         = enum.auto()    # noqa; ShowWindow, EnableWindow, HideWindow
+    ShellExec          = enum.auto()    # noqa; ExecShell
+    Execute            = enum.auto()    # noqa; Exec, ExecWait
+    GetFileTime        = enum.auto()    # noqa; GetFileTime
+    GetDLLVersion      = enum.auto()    # noqa; GetDLLVersion
+#   GetFontVersion     = enum.auto()    # noqa; Park : 2.46.2
+#   GetFontName        = enum.auto()    # noqa; Park : 2.46.3
+    RegisterDll        = enum.auto()    # noqa; RegDLL, UnRegDLL, CallInstDLL
+    CreateShortcut     = enum.auto()    # noqa; CreateShortcut
+    CopyFiles          = enum.auto()    # noqa; CopyFiles
+    Reboot             = enum.auto()    # noqa; Reboot
+    WriteINI           = enum.auto()    # noqa; WriteINIStr, DeleteINISec, DeleteINIStr, FlushINI
+    ReadINIStr         = enum.auto()    # noqa; ReadINIStr
+    DelReg             = enum.auto()    # noqa; DeleteRegValue, DeleteRegKey
+    WriteReg           = enum.auto()    # noqa; WriteRegStr, WriteRegExpandStr, WriteRegBin, WriteRegDWORD
+    ReadRegStr         = enum.auto()    # noqa; ReadRegStr, ReadRegDWORD
+    RegEnum            = enum.auto()    # noqa; EnumRegKey, EnumRegValue
+    FileClose          = enum.auto()    # noqa; FileClose
+    FileOpen           = enum.auto()    # noqa; FileOpen
+    FileWrite          = enum.auto()    # noqa; FileWrite, FileWriteByte
+    FileRead           = enum.auto()    # noqa; FileRead, FileReadByte
 #   Park:
-#   FPUTWS             = enum.auto()    # noqa; FileWriteUTF16LE, FileWriteWord
-#   FGETWS             = enum.auto()    # noqa; FileReadUTF16LE, FileReadWord
-    FSEEK              = enum.auto()    # noqa; FileSeek
-    FINDCLOSE          = enum.auto()    # noqa; FindClose
-    FINDNEXT           = enum.auto()    # noqa; FindNext
-    FINDFIRST          = enum.auto()    # noqa; FindFirst
-    WRITEUNINSTALLER   = enum.auto()    # noqa; WriteUninstaller
+#   FileWriteW         = enum.auto()    # noqa; FileWriteUTF16LE, FileWriteWord
+#   FileReadW          = enum.auto()    # noqa; FileReadUTF16LE, FileReadWord
+    FileSeek           = enum.auto()    # noqa; FileSeek
+    FindClose          = enum.auto()    # noqa; FindClose
+    FindNext           = enum.auto()    # noqa; FindNext
+    FindFirst          = enum.auto()    # noqa; FindFirst
+    WriteUninstaller   = enum.auto()    # noqa; WriteUninstaller
 #   Park : since 2.46.3 the log is enabled in main Park version
-#   LOG                = enum.auto()    # noqa; LogSet, LogText
-    SECTIONSET         = enum.auto()    # noqa; Get*, Set*
-    INSTTYPESET        = enum.auto()    # noqa; InstTypeSetText, InstTypeGetText, SetCurInstType, GetCurInstType
+#   Log                = enum.auto()    # noqa; LogSet, LogText
+    SectionSet         = enum.auto()    # noqa; Get*, Set*
+    InstTypeSet        = enum.auto()    # noqa; InstTypeSetText, InstTypeGetText, SetCurInstType, GetCurInstType
 #   Before NSIS v3.06: Instructions not actually implemented in exehead, but used in compiler.
 #   GETLABELADDR       = enum.auto()    # noqa; both of these get converted to ASSIGNVAR
 #   GETFUNCTIONADDR    = enum.auto()    # noqa
 #   In NSIS v3.06 and later it was changed to:
-    GETOSINFO          = enum.auto()    # noqa
-    RESERVEDOPCODE     = enum.auto()    # noqa
-    LOCKWINDOW         = enum.auto()    # noqa; LockWindow
+    GetOSInfo          = enum.auto()    # noqa
+    ReservedOpcode     = enum.auto()    # noqa
+    LockWindow         = enum.auto()    # noqa; LockWindow
 #   Two unicode commands available only in Unicode archive:
-    FPUTWS             = enum.auto()    # noqa; FileWriteUTF16LE, FileWriteWord
-    FGETWS             = enum.auto()    # noqa; FileReadUTF16LE, FileReadWord
+    FileWriteW         = enum.auto()    # noqa; FileWriteUTF16LE, FileWriteWord
+    FileReadW          = enum.auto()    # noqa; FileReadUTF16LE, FileReadWord
 #   Since NSIS v3.06 the fllowing IDs codes was moved here:
 #   Opcodes listed here are not actually used in exehead.
 #   No exehead opcodes should be present after these!
-#   GETLABELADDR       = enum.auto()    # noqa; ASSIGNVAR
-#   GETFUNCTIONADDR    = enum.auto()    # noqa; ASSIGNVAR
+#   GetLabelAddr       = enum.auto()    # noqa; ASSIGNVAR
+#   GetFunctionAddr    = enum.auto()    # noqa; ASSIGNVAR
 #   The following IDs are not IDs in real order.
 #   We just need some IDs to translate eny extended layout to main layout:
-    LOG                = enum.auto()    # noqa; LogSet, LogText
+    Log                = enum.auto()    # noqa; LogSet, LogText
 #   Park
-    FINDPROC           = enum.auto()    # noqa; FindProc
-    GETFONTVERSION     = enum.auto()    # noqa; GetFontVersion
-    GETFONTNAME        = enum.auto()    # noqa; GetFontName
+    FindProc           = enum.auto()    # noqa; FindProc
+    GetFontVersion     = enum.auto()    # noqa; GetFontVersion
+    GetFontName        = enum.auto()    # noqa; GetFontName
 
     @classmethod
     def FromInt(cls, value: int):
@@ -132,80 +187,80 @@ class Op(enum.IntEnum):
 
 
 _Op_PARAMETER_COUNT = {
-    Op.INVALID_OPCODE   : 0,
-    Op.RET              : 0,
-    Op.NOP              : 1,
-    Op.ABORT            : 1,
-    Op.QUIT             : 0,
-    Op.CALL             : 2,
-    Op.UPDATETEXT       : 6,
-    Op.SLEEP            : 1,
-    Op.BRINGTOFRONT     : 0,
-    Op.CHDETAILSVIEW    : 2,
-    Op.SETFILEATTRIBUTES: 2,
-    Op.CREATEDIR        : 3,
-    Op.IFFILEEXISTS     : 3,
-    Op.SETFLAG          : 3,
-    Op.IFFLAG           : 4,
-    Op.GETFLAG          : 2,
-    Op.RENAME           : 4,
-    Op.GETFULLPATHNAME  : 3,
-    Op.SEARCHPATH       : 2,
-    Op.GETTEMPFILENAME  : 2,
-    Op.EXTRACTFILE      : 6,
-    Op.DELETEFILE       : 2,
-    Op.MESSAGEBOX       : 6,
-    Op.RMDIR            : 2,
-    Op.STRLEN           : 2,
-    Op.ASSIGNVAR        : 4,
-    Op.STRCMP           : 5,
-    Op.READENVSTR       : 3,
-    Op.INTCMP           : 6,
-    Op.INTOP            : 4,
-    Op.INTFMT           : 4,
-    Op.PUSHPOP          : 6,
-    Op.FINDWINDOW       : 5,
-    Op.SENDMESSAGE      : 6,
-    Op.ISWINDOW         : 3,
-    Op.GETDLGITEM       : 3,
-    Op.SETCTLCOLORS     : 2,
-    Op.SETBRANDINGIMAGE : 4,
-    Op.CREATEFONT       : 5,
-    Op.SHOWWINDOW       : 4,
-    Op.SHELLEXEC        : 6,
-    Op.EXECUTE          : 3,
-    Op.GETFILETIME      : 3,
-    Op.GETDLLVERSION    : 4,
-    Op.REGISTERDLL      : 6,
-    Op.CREATESHORTCUT   : 6,
-    Op.COPYFILES        : 4,
-    Op.REBOOT           : 1,
-    Op.WRITEINI         : 5,
-    Op.READINISTR       : 4,
-    Op.DELREG           : 5,
-    Op.WRITEREG         : 6,
-    Op.READREGSTR       : 5,
-    Op.REGENUM          : 5,
-    Op.FCLOSE           : 1,
-    Op.FOPEN            : 4,
-    Op.FPUTS            : 3,
-    Op.FGETS            : 4,
-    Op.FSEEK            : 4,
-    Op.FINDCLOSE        : 1,
-    Op.FINDNEXT         : 2,
-    Op.FINDFIRST        : 3,
-    Op.WRITEUNINSTALLER : 4,
-    Op.SECTIONSET       : 5,
-    Op.INSTTYPESET      : 4,
-    Op.GETOSINFO        : 6,
-    Op.RESERVEDOPCODE   : 2,
-    Op.LOCKWINDOW       : 1,
-    Op.FPUTWS           : 4,
-    Op.FGETWS           : 4,
-    Op.LOG              : 2,
-    Op.FINDPROC         : 2,
-    Op.GETFONTVERSION   : 2,
-    Op.GETFONTNAME      : 2,
+    Op.INVALID_OPCODE    : 0,
+    Op.Ret               : 0,
+    Op.Nop               : 1,
+    Op.Abort             : 1,
+    Op.Quit              : 0,
+    Op.Call              : 2,
+    Op.UpdateText        : 6,
+    Op.Sleep             : 1,
+    Op.BringToFront      : 0,
+    Op.SetDetailsView    : 2,
+    Op.SetFileAttributes : 2,
+    Op.CreateDirectory   : 3,
+    Op.IfFileExists      : 3,
+    Op.SetFlag           : 3,
+    Op.IfFlag            : 4,
+    Op.GetFlag           : 2,
+    Op.Rename            : 4,
+    Op.GetFullPathName   : 3,
+    Op.SearchPath        : 2,
+    Op.GetTempFileName   : 2,
+    Op.ExtractFile       : 6,
+    Op.DeleteFile        : 2,
+    Op.MessageBox        : 6,
+    Op.RmDir             : 2,
+    Op.StrLen            : 2,
+    Op.AssignVar         : 4,
+    Op.StrCmp            : 5,
+    Op.ReadEnvStr        : 3,
+    Op.IntCmp            : 6,
+    Op.IntOp             : 4,
+    Op.IntFmt            : 4,
+    Op.PushPop           : 6,
+    Op.FindWindow        : 5,
+    Op.SendMessage       : 6,
+    Op.IsWindow          : 3,
+    Op.GetDlgItem        : 3,
+    Op.SetCtlColors      : 2,
+    Op.SetBrandingImage  : 4,
+    Op.CreateFont        : 5,
+    Op.ShowWindow        : 4,
+    Op.ShellExec         : 6,
+    Op.Execute           : 3,
+    Op.GetFileTime       : 3,
+    Op.GetDLLVersion     : 4,
+    Op.RegisterDll       : 6,
+    Op.CreateShortcut    : 6,
+    Op.CopyFiles         : 4,
+    Op.Reboot            : 1,
+    Op.WriteINI          : 5,
+    Op.ReadINIStr        : 4,
+    Op.DelReg            : 5,
+    Op.WriteReg          : 6,
+    Op.ReadRegStr        : 5,
+    Op.RegEnum           : 5,
+    Op.FileClose         : 1,
+    Op.FileOpen          : 4,
+    Op.FileWrite         : 3,
+    Op.FileRead          : 4,
+    Op.FileSeek          : 4,
+    Op.FindClose         : 1,
+    Op.FindNext          : 2,
+    Op.FindFirst         : 3,
+    Op.WriteUninstaller  : 4,
+    Op.SectionSet        : 5,
+    Op.InstTypeSet       : 4,
+    Op.GetOSInfo         : 6,
+    Op.ReservedOpcode    : 2,
+    Op.LockWindow        : 1,
+    Op.FileWriteW        : 4,
+    Op.FileReadW         : 4,
+    Op.Log               : 2,
+    Op.FindProc          : 2,
+    Op.GetFontVersion    : 2,
+    Op.GetFontName       : 2,
 }
 
 
@@ -336,6 +391,12 @@ class NSScriptInstruction(Struct):
         self.arguments = [reader.u32() for _ in range(6)]
 
 
+class NSScriptExtendedInstruction(Struct):
+    def __init__(self, reader: StructReader):
+        self.opcode = reader.u32()
+        self.arguments = [reader.u32() for _ in range(8)]
+
+
 class NSCharCode(enum.IntEnum):
     NONE = 0
     CHAR = enum.auto()
@@ -349,7 +410,7 @@ class NSCharCode(enum.IntEnum):
         return self > NSCharCode.CHAR
 
 
-@dataclasses.dataclass(eq=True)
+@dataclasses.dataclass
 class NSItem:
     offset: int
     name: Optional[str] = None
@@ -461,7 +522,7 @@ class NSHeader(Struct):
             varcount -= 2
         if index < 20:
             if index >= 10:
-                return F'$R{index-10}'
+                return F'$R{index - 10}'
             return F'$V{index}'
         else:
             if index < varcount:
@@ -478,7 +539,7 @@ class NSHeader(Struct):
     def _string_code_language(self, index: int) -> str:
         return F'$LSTR_{index:04X}'
 
-    def __init__(self, reader: StructReader[bytearray], size: int):
+    def __init__(self, reader: StructReader[bytearray], size: int, extended: bool):
         self.is64bit = size >= 4 + 12 * 8 and not any(struct.unpack('8xI' * 8, reader.peek(12 * 8)))
         if self.is64bit:
             xtnsis.log_debug('64bit archive detected')
@@ -504,7 +565,9 @@ class NSHeader(Struct):
         self.type = NSType.Nsis2
 
         reader.seekset(self.bh_entries.offset)
-        self.instructions: List[NSScriptInstruction] = [NSScriptInstruction(reader) for _ in range(self.bh_entries.count)]
+        InsnParser = NSScriptExtendedInstruction if extended else NSScriptInstruction
+        self.instructions: List[NSScriptInstruction] = [
+            InsnParser(reader) for _ in range(self.bh_entries.count)]
 
         if self.bh_entries.offset > size:
             raise ValueError(
@@ -521,7 +584,7 @@ class NSHeader(Struct):
         if string_table_size < 2:
             raise ValueError(F'The calculated string table size is {string_table_size}, too small to parse.')
         reader.seekset(self.bh_strings.offset)
-        strings = reader.read(string_table_size)
+        self.string_data = strings = reader.read(string_table_size)
         self.unicode = strings[:2] == B'\0\0'
         if strings[-1] != 0 or (self.unicode and strings[-2] != 0):
             raise ValueError(U'The last string table character was unexpectedly nonzero.')
@@ -541,9 +604,7 @@ class NSHeader(Struct):
 
         items: Dict[(str, int), NSItem] = {}
         for item in self._read_items():
-            if items.setdefault((item.path, item.offset), item) != item:
-                raise ValueError(F'Two different items with the same position {item.offset} and the same path: {item.path}.')
-
+            items.setdefault((item.path, item.offset), item)
         self.items = [items[t] for t in sorted(items.keys())]
 
     @property
@@ -698,34 +759,34 @@ class NSHeader(Struct):
         if self.type < NSType.Park1:
             if self._log_cmd_is_enabled:
                 return Op.FromInt(code)
-            if code < Op.SECTIONSET:
+            if code < Op.SectionSet:
                 return Op.FromInt(code)
-            if code is Op.SECTIONSET:
-                return Op.LOG
+            if code is Op.SectionSet:
+                return Op.Log
             return Op.FromInt(code - 1)
-        if code < Op.REGISTERDLL:
+        if code < Op.RegisterDll:
             return Op.FromInt(code)
         if self.type >= NSType.Park2:
-            if code == Op.REGISTERDLL:
-                return Op.GETFONTVERSION
+            if code == Op.RegisterDll:
+                return Op.GetFontVersion
             code -= 1
         if self.type >= NSType.Park3:
-            if code == Op.REGISTERDLL:
-                return Op.GETFONTNAME
+            if code == Op.RegisterDll:
+                return Op.GetFontName
             code -= 1
-        if code >= Op.FSEEK:
+        if code >= Op.FileSeek:
             if self.unicode:
-                if code == Op.FSEEK:
-                    return Op.FPUTWS
-                if code == Op.FSEEK + 1:
-                    return Op.FGETWS
+                if code == Op.FileSeek:
+                    return Op.FileWriteW
+                if code == Op.FileSeek + 1:
+                    return Op.FileReadW
                 code -= 2
-            if code >= Op.SECTIONSET and self._log_cmd_is_enabled:
-                if code == Op.SECTIONSET:
-                    return Op.LOG
+            if code >= Op.SectionSet and self._log_cmd_is_enabled:
+                if code == Op.SectionSet:
+                    return Op.Log
                 return Op.FromInt(code - 1)
-            if code == Op.FPUTWS:
-                return Op.FINDPROC
+            if code == Op.FileWriteW:
+                return Op.FindProc
         return Op.FromInt(code)
 
     def _find_bad_cmd(self):
@@ -738,15 +799,15 @@ class NSHeader(Struct):
             if cmd >= self._bad_cmd >= 0:
                 continue
             if self.type is NSType.Nsis3:
-                if cmd == Op.RESERVEDOPCODE:
+                if cmd == Op.ReservedOpcode:
                     self._bad_cmd = cmd
                     continue
             else:
-                if cmd == Op.RESERVEDOPCODE or cmd == Op.GETOSINFO:
+                if cmd == Op.ReservedOpcode or cmd == Op.GetOSInfo:
                     self._bad_cmd = cmd
                     continue
             u = max((k for k, a in enumerate(arg, 1) if a), default=0)
-            if cmd == Op.FINDPROC and u == 0:
+            if cmd == Op.FindProc and u == 0:
                 self._bad_cmd = cmd
                 continue
             if _Op_PARAMETER_COUNT[cmd] < u:
@@ -777,13 +838,13 @@ class NSHeader(Struct):
             for instruction in self.instructions:
                 cmd = self.opcode(instruction)
                 arg = instruction.arguments
-                if cmd is Op.GETDLGITEM:
+                if cmd is Op.GetDlgItem:
                     if self._is_var_str(arg[1], self.NS_HWNDPARENT_225):
                         self._is_nsis225 = True
                         if arg[0] == self.NS_OUTDIR_225:
                             self._is_nsis200 = True
                             break
-                if cmd is Op.ASSIGNVAR:
+                if cmd is Op.AssignVar:
                     if arg[0] == self.NS_OUTDIR_225 and arg[2] == 0 and arg[3] == 0:
                         self._is_nsis225 = self._is_var_str(arg[1], self.NS_OUTDIR)
         got_park_version = False
@@ -794,7 +855,7 @@ class NSHeader(Struct):
                 cmd = instruction.opcode
                 arg = instruction.arguments
                 alt = arg[3]
-                if cmd < Op.WRITEUNINSTALLER or cmd > Op.WRITEUNINSTALLER + IN:
+                if cmd < Op.WriteUninstaller or cmd > Op.WriteUninstaller + IN:
                     continue
                 if arg[4] != 0 or arg[5] != 0 or arg[0] <= 1 or alt <= 1:
                     continue
@@ -807,7 +868,7 @@ class NSHeader(Struct):
                 if index != self.NS_INSTDIR:
                     continue
                 if self._read_string_raw(alt + additional) == self._read_string_raw(arg[0]):
-                    inserts = cmd - Op.WRITEUNINSTALLER.value
+                    inserts = cmd - Op.WriteUninstaller.value
                     mask |= 1 << inserts
             if mask == 1:
                 got_park_version = True
@@ -824,24 +885,24 @@ class NSHeader(Struct):
                     got_park_version = True
                     self.type = nt
         self._find_bad_cmd()
-        if self._bad_cmd < Op.REGISTERDLL:
+        if self._bad_cmd < Op.RegisterDll:
             return
         if self.strong_park and not got_park_version:
-            if self._bad_cmd < Op.SECTIONSET:
+            if self._bad_cmd < Op.SectionSet:
                 self.type = NSType.Park3
                 self._log_cmd_is_enabled = True
                 self._find_bad_cmd()
-                if self._bad_cmd in range(Op.SECTIONSET):
+                if self._bad_cmd in range(Op.SectionSet):
                     self.type = NSType.Park2
                     self._log_cmd_is_enabled = False
                     self._find_bad_cmd()
-                    if self._bad_cmd in range(Op.SECTIONSET):
+                    if self._bad_cmd in range(Op.SectionSet):
                         self.type = NSType.Park1
                         self._find_bad_cmd()
-        if self._bad_cmd >= Op.SECTIONSET:
+        if self._bad_cmd >= Op.SectionSet:
             self._log_cmd_is_enabled = not self._log_cmd_is_enabled
             self._find_bad_cmd()
-            if self._bad_cmd >= Op.SECTIONSET and self._log_cmd_is_enabled:
+            if self._bad_cmd >= Op.SectionSet and self._log_cmd_is_enabled:
                 self._log_cmd_is_enabled = False
                 self._find_bad_cmd()
 
@@ -867,7 +928,7 @@ class NSHeader(Struct):
 
             if cmd is Op.INVALID_OPCODE:
                 continue
-            elif cmd is Op.CREATEDIR:
+            elif cmd is Op.CreateDirectory:
                 if not arg[1]:
                     continue
                 _path = arg[0]
@@ -880,17 +941,19 @@ class NSHeader(Struct):
                 elif index == self.NS_OUTDIR:
                     path = prefixes[-1] + path
                 prefixes.append(path)
-            elif cmd is Op.ASSIGNVAR:
+            elif cmd is Op.AssignVar:
                 if arg[0] != out_dir_index:
                     continue
                 if self._is_var_str(arg[1], self.NS_OUTDIR) and arg[2] == 0 and arg[3] == 0:
                     out_dir = prefixes[-1]
-            elif cmd is Op.EXTRACTFILE:
+            elif cmd is Op.ExtractFile:
+                def epoch(t: int):
+                    return (t / 10000000 - 11644473600)
                 try:
-                    time = datetime.fromtimestamp((arg[4] << 32) | arg[3])
+                    time = datetime.fromtimestamp(epoch((arg[4] << 32) | arg[3]))
                 except Exception:
                     time = None
-                item = NSItem(arg[2], time)
+                item = NSItem(arg[2], mtime=time)
                 setpath(arg[1])
                 items.append(item)
                 if not self._is_var_str(arg[1], 10):
@@ -898,26 +961,28 @@ class NSHeader(Struct):
                 cmd_back_offset = 28
                 if cmd_index > 1:
                     previous = self.instructions[cmd_index - 1]
-                    if self.opcode(previous) is Op.NOP:
+                    if self.opcode(previous) is Op.Nop:
                         cmd_back_offset -= 2
                 if cmd_index <= cmd_back_offset:
                     continue
                 previous = self.instructions[cmd_index - cmd_back_offset]
-                if self.opcode(previous) is Op.ASSIGNVAR:
+                if self.opcode(previous) is Op.AssignVar:
                     pa = previous.arguments
                     if pa[0] == 14 and pa[2] == 0 and pa[3] == 0:
                         setpath(pa[1])
-            elif cmd is Op.SETFILEATTRIBUTES:
+            elif cmd is Op.SetFileAttributes:
                 if cmd_index > 0:
                     previous = self.instructions[cmd_index - 1]
                     pa = previous.arguments
-                    if self.opcode(previous) is Op.EXTRACTFILE and arg[0] == pa[1]:
+                    if self.opcode(previous) is Op.ExtractFile and arg[0] == pa[1]:
                         item = items[-1]
                         item.attributes = arg[1]
-            elif cmd is Op.WRITEUNINSTALLER:
+            elif cmd is Op.WriteUninstaller:
+                if arg[4] or arg[5] or arg[0] <= 1 or arg[3] <= 1:
+                    continue
                 if not self._is_good_string(arg[0]):
                     continue
-                if self._bad_cmd in range(Op.WRITEUNINSTALLER):
+                if self._bad_cmd in range(Op.WriteUninstaller):
                     continue
                 item = NSItem(arg[1])
                 setpath(arg[0])
@@ -959,10 +1024,12 @@ class NSArchive(Struct):
         B'\xEF\xBE\xAD\xDE' B'nsis' B'inst' B'all\0',  # v1.0
     ]
 
-    class Entry(NamedTuple):
+    @dataclasses.dataclass
+    class Entry:
         offset: int
         data: bytearray
-        compressed_size: int
+        size: int
+        decompression_error: Optional[Exception] = None
 
     def __init__(self, reader: StructReader[bytearray]):
         self.flags = NSHeaderFlags(reader.u32())
@@ -970,49 +1037,48 @@ class NSArchive(Struct):
         errors = min(sum(1 for a, b in zip(self.signature, sig) if a != b) for sig in self.MAGICS)
         if errors > 3:
             raise ValueError(F'Out of {0x10} bytes, there were {errors} errors in the signature.')
-        self.size_of_header = reader.u32()
-        self.size_of_archive = reader.u32()
-        self.offset_archive = reader.tell()
-        xtnsis.log_debug(F'size of headers: {self.size_of_header}')
-        xtnsis.log_debug(F'size of archive: {self.size_of_archive}')
-        self.size_of_body = self.size_of_archive - self.offset_archive
-        if self.size_of_body < 0:
-            raise ValueError('Header indicates that the archive size is less than the header size.')
-        if self.size_of_header < self.offset_archive:
-            raise ValueError(
-                F'Header indicates that the header size is {self.size_of_header}, '
-                F'but at least {self.offset_archive} bytes must be in header.')
-        if reader.remaining_bytes < self.size_of_body:
-            raise ValueError(
-                F'Header indicates archive size 0x{self.size_of_archive:08X}, '
-                F'but only 0x{reader.remaining_bytes:08X} bytes remain.')
-
-        preview_bytes = bytes(reader.peek(4))
-        preview_value = int.from_bytes(preview_bytes, 'little')
-        self.solid = True
-
-        self.lzma_options: Optional[LZMAOptions] = None
-        self.method = NSMethod.Deflate
 
         header_data = None
+        header_size = reader.u32()
+        # not the same, since the header might be compressed:
+        header_data_length = None
+        archive_size = reader.u32()
+        self.archive_offset = reader.tell()
+        body_size = archive_size - self.archive_offset
+
+        xtnsis.log_debug(F'size of headers: {header_size}')
+        xtnsis.log_debug(F'size of archive: {archive_size}')
+
+        if body_size < 0:
+            raise ValueError('Header indicates that the archive size is less than the header size.')
+        if header_size < self.archive_offset:
+            raise ValueError(
+                F'Header indicates that the header size is {header_size}, '
+                F'but at least {self.archive_offset} bytes must be in header.')
+        if reader.remaining_bytes < body_size:
+            raise ValueError(
+                F'Header indicates archive size 0x{archive_size:08X}, '
+                F'but only 0x{reader.remaining_bytes:08X} bytes remain.')
 
         # Header Matching Logic:
         #  X is the header size as given by the first header
         #  T is a value less than 0xE
         #  Y is a value different from 0x80
-        # XX XX XX XX __ __ __ __ __ __ __  non-solid, uncompressed
-        # 5D 00 00 DD DD 00 __ __ __ __ __  solid LZMA
-        # 00 5D 00 00 DD DD 00 __ __ __ __  solid LZMA, empty filter
-        # 01 5D 00 00 DD DD 00 __ __ __ __  solid LZMA, BCJ filter
-        # __ __ __ 80 00 5D 00 00 DD DD 00  non-solid LZMA, empty filter
-        # __ __ __ 80 01 5D 00 00 DD DD 00  non-solid LZMA, BCJ filter
-        # __ __ __ 80 01 0T __ __ __ __ __  non-solid BZip
-        # __ __ __ 80 __ __ __ __ __ __ __  non-solid deflate
-        # 01 0T __ YY __ __ __ __ __ __ __  solid BZip
-        # __ __ __ YY __ __ __ __ __ __ __  solid Deflate
+        # XX XX XX XX __ __ __ __ __ __ __ __  non-solid, uncompressed
+        # 00 00 00 00 00 00 00 00 XX XX XX XX  non-solid, uncompressed, extended
+        # 5D 00 00 DD DD 00 __ __ __ __ __ __  solid LZMA
+        # 00 5D 00 00 DD DD 00 __ __ __ __ __  solid LZMA, empty filter
+        # 01 5D 00 00 DD DD 00 __ __ __ __ __  solid LZMA, BCJ filter
+        # __ __ __ 80 5D 00 00 DD DD 00 __ __  non-solid LZMA
+        # __ __ __ 80 00 5D 00 00 DD DD 00 __  non-solid LZMA, empty filter
+        # __ __ __ 80 01 5D 00 00 DD DD 00 __  non-solid LZMA, BCJ filter
+        # __ __ __ 80 01 0T __ __ __ __ __ __  non-solid BZip
+        # __ __ __ 80 __ __ __ __ __ __ __ __  non-solid deflate
+        # 01 0T __ YY __ __ __ __ __ __ __ __  solid BZip
+        # __ __ __ YY __ __ __ __ __ __ __ __  solid Deflate
 
         def lzmacheck(preview):
-            if B'\x5D\0\0' not in preview:
+            if B'\x5D\0\0' not in preview[:4]:
                 return False
             filter_flag = preview_bytes[0] <= 1
             reader.seekrel(3 + int(filter_flag))
@@ -1022,16 +1088,40 @@ class NSArchive(Struct):
         def bzipcheck(p):
             return p[0] == 0x31 and p[1] < 14
 
-        if preview_value == self.size_of_header:
-            self.solid = False
-            header_data = reader.read_exactly(self.size_of_header)
+        preview_bytes = bytes(reader.peek(16))
+        preview_check = preview_bytes.find(header_size.to_bytes(4, 'little'))
+        self.solid = True
+        self.extended = False
+
+        self.lzma_options: Optional[LZMAOptions] = None
+        self.method = NSMethod.Deflate
+
+        self.entries: Dict[int, bytearray] = {}
+        self.entry_offset_delta = 4
+        self._solid_iter = None
+
+        xtnsis.log_debug('header preview:', lambda: reader.peek(16).hex(' ', 1).upper())
+
+        if preview_check >= 0:
+            header_data_length = header_size
             self.method = NSMethod.Copy
+            self.solid = False
+            if not preview_check:
+                header_prefix_size = 0x04
+            elif preview_check == 8:
+                header_prefix_size = 0x10
+                self.extended = True
+            else:
+                raise ValueError(F'Found header length at unexpected offset {preview_check}; unknown NSIS format.')
+            reader.seekrel(header_prefix_size)
+            self.entry_offset_delta = header_prefix_size
+            header_data = reader.read_exactly(header_data_length)
         elif lzmacheck(preview_bytes):
             self.method = NSMethod.LZMA
         elif preview_bytes[3] == 0x80:
             self.solid = False
             reader.seekrel(4)
-            preview_bytes = reader.peek(4)
+            preview_bytes = bytes(reader.peek(4))
             if lzmacheck(preview_bytes):
                 self.method = NSMethod.LZMA
             elif bzipcheck(preview_bytes):
@@ -1039,37 +1129,39 @@ class NSArchive(Struct):
         elif bzipcheck(preview_bytes):
             self.method = NSMethod.BZip2
 
-        xtnsis.log_debug(F'compression: {self.method.name}')
+        dbg_method = self.method.value
+        if self.method is NSMethod.LZMA and self.lzma_options.filter_flag:
+            dbg_method = F'{dbg_method}/BCJ'
+        xtnsis.log_debug(F'compression: {dbg_method}')
+        xtnsis.log_debug(F'archive is solid: {self.solid}')
 
-        reader.seekset(self.offset_archive)
-
-        self.entries: Dict[int, bytearray] = {}
-        self.entry_offset_delta = 0
-        self._solid_iter = None
+        reader.seekset(self.archive_offset)
 
         if header_data is None:
             it = self._decompress_items(reader)
-            try:
-                header_entry = next(it)
-            except zlib.error as ZLERR:
+            header_entry = next(it)
+            if header_entry.decompression_error:
                 raise NotImplementedError(
-                    'This archive seems to use an NSIS-specific deflate '
-                    'algorithm which has not been implemented yet.'
-                ) from ZLERR
+                    U'This archive seems to use an NSIS-specific deflate algorithm which has not been implemented yet. '
+                    F'Original error: {exception_to_string(header_entry.decompression_error)}')
             if self.solid:
                 self._solid_iter = it
-            self.entry_offset_delta = header_entry.compressed_size
+            self.entry_offset_delta += header_entry.size
             header_data = header_entry.data
         else:
-            self.entry_offset_delta = len(header_data)
+            self.entry_offset_delta += len(header_data)
 
         if not header_data:
             raise ValueError('header data had length zero')
 
         xtnsis.log_debug(F'read header of length {len(header_data)}')
 
-        self.header = NSHeader(header_data, size=self.size_of_header)
+        self.header_data = header_data
+        self.header = NSHeader(header_data, size=header_size, extended=self.extended)
         self.reader = reader
+
+        if self.method is NSMethod.Deflate and self.header.nsis_deflate:
+            self.method = NSMethod.NSGzip
 
     @property
     def script(self):
@@ -1077,98 +1169,123 @@ class NSArchive(Struct):
 
     @property
     def offset_items(self):
-        return self.offset_archive + self.entry_offset_delta
+        return self.archive_offset + self.entry_offset_delta
 
-    def _extract_item_data(self, item: NSItem):
+    def _extract_item(self, item: NSItem) -> Entry:
         if self.solid:
             while True:
                 try:
-                    data = self.entries[item.offset]
+                    entry = self.entries[item.offset]
                 except KeyError:
                     try:
                         entry = next(self._solid_iter)
                     except StopIteration:
                         raise LookupError(F'No data for item {item!s} could not be found.')
-                    self.entries[entry.offset - self.entry_offset_delta] = entry.data
+                    self.entries[entry.offset - self.entry_offset_delta] = entry
                 else:
-                    return data
+                    break
         else:
             self.reader.seek(self.offset_items + item.offset)
             dc = self._decompress_items(self.reader)
-            return next(dc).data
+            entry = next(dc)
+        if entry.decompression_error:
+            err = exception_to_string(entry.decompression_error)
+            msg = F'decompression failed ({err}); lenient mode will extract uncompressed item'
+            raise RefineryPartialResult(msg, entry.data)
+        else:
+            return entry
 
-    class LengthPrefixed(Iterable[Entry]):
-        def __init__(self, src: BinaryIO):
+    class SolidReader(Iterable[Entry]):
+        def __init__(self, src: BinaryIO, prefix_length: int):
             self.src = src
+            self.pos = 0
+            self.prefix_length = prefix_length
 
         def __iter__(self):
             return self
 
         def __next__(self):
-            offset = self.src.tell()
-            size = self.src.read(4)
-            if len(size) != 4:
+            offset = self.pos
+            mask = (1 << ((self.prefix_length * 8) - 1)) - 1
+            size = self.src.read(self.prefix_length)
+            if len(size) != self.prefix_length:
                 raise StopIteration
             size = int.from_bytes(size, 'little')
-            data = self.src.read(size)
-            if len(data) != size:
+            read = size & mask
+            data = self.src.read(read)
+            if len(data) != read:
                 raise EOFError('Unexpected end of stream while decompressing archive entries.')
-            return NSArchive.Entry(offset, data, size + 4)
+            self.pos = offset + read + 4
+            return NSArchive.Entry(offset, data, size)
 
-    class DeflateReader(LengthPrefixed):
+    class PartsReader(SolidReader):
+        def __init__(self, src: BinaryIO, decompressor: Optional[Type[BinaryIO]], prefix_length: int):
+            super().__init__(src, prefix_length)
+            self._dc = decompressor
+
         def __next__(self):
-            offset = self.src.tell()
-            size = self.src.read(4)
-            if len(size) != 4:
-                raise StopIteration
-            size = int.from_bytes(size, 'little')
-            inflated = bool(size & 0x80000000)
-            size &= 0x7FFFFFFF
-            data = self.src.read(size)
-            if inflated:
-                data = zlib.decompress(data, -15)
-            return NSArchive.Entry(offset, data, size + 4)
+            item = super().__next__()
+            is_compressed = bool(item.size & 0x80000000)
+            item.size &= 0x7FFFFFFF
+            if is_compressed:
+                try:
+                    dc = self._dc(MemoryFile(item.data))
+                    item.data = dc.read()
+                except Exception as E:
+                    item.decompression_error = E
+            return item
+
+    class LZMAFix:
+        def __init__(self, src: MemoryFile):
+            self._src = src
+            self._fix = MemoryFile(bytes(self._src.read(5)) + B'\xFF' * 8)
+
+        def __getattr__(self, key):
+            return getattr(self._src, key)
+
+        def read(self, size: int = -1):
+            src = self._src
+            fix = self._fix
+            if not fix.remaining_bytes:
+                return src.read(size)
+            if size < 0:
+                size = fix.remaining_bytes + src.remaining_bytes
+            out = bytearray(size)
+            temp = fix.read(size)
+            m = len(temp)
+            out[:m] = temp
+            out[m:] = src.read(size - m)
+            return out
 
     def _decompress_items(self, reader: StructReader[bytearray]) -> Iterator[NSArchive.Entry]:
-        if self.method is NSMethod.Deflate:
-            return self.DeflateReader(reader)
+        def NSISLZMAFile(d: StructReader[bytearray]):
+            if use_filter := self.lzma_options.filter_flag:
+                use_filter = d.u8()
+            if use_filter > 1:
+                raise ValueError(F'LZMA/BCJ chunk with invalid filter indicator byte 0x{use_filter:X}')
+            if not use_filter:
+                _filter = None
+                _format = None
+                _stream = self.LZMAFix(d)
+            else:
+                _filter = parse_lzma_properties(d.read(5), 1)
+                _filter = [dict(id=lzma.FILTER_X86), _filter]
+                _format = lzma.FORMAT_RAW
+                _stream = d
+            return lzma.LZMAFile(_stream, filters=_filter, format=_format)
+
+        decompressor: Type[BinaryIO] = {
+            NSMethod.Copy    : None,
+            NSMethod.Deflate : DeflateFile,
+            NSMethod.NSGzip  : GZipFile,
+            NSMethod.LZMA    : NSISLZMAFile,
+            NSMethod.BZip2   : BZip2File,
+        }[self.method]
+        prefix_length = 8 if self.extended else 4
+        if self.solid:
+            return self.SolidReader(decompressor(reader), prefix_length)
         else:
-            class LZMAInjectWrapper:
-                def __init__(self, src: MemoryFile):
-                    self._src = src
-                    self._fix = MemoryFile(bytes(src.read(5)) + B'\xFF' * 8)
-
-                def __getattr__(self, key):
-                    return getattr(self._src, key)
-
-                def read(self, size: int = -1):
-                    src = self._src
-                    fix = self._fix
-                    if not fix.remaining_bytes:
-                        return src.read(size)
-                    if size < 0:
-                        size = fix.remaining_bytes + src.remaining_bytes
-                    out = bytearray(size)
-                    temp = fix.read(size)
-                    m = len(temp)
-                    out[:m] = temp
-                    out[m:] = src.read(size - m)
-                    return out
-
-            if self.method is NSMethod.LZMA:
-                dc = lzma.LZMADecompressor()
-                try:
-                    dc.decompress(reader.peek(32))
-                except Exception:
-                    reader = LZMAInjectWrapper(reader)
-
-            wrapper = {
-                NSMethod.LZMA: lzma.LZMAFile,
-                NSMethod.BZip2: bz2.BZ2File
-            }.get(self.method)
-            if wrapper is not None:
-                reader = wrapper(reader)
-            return self.LengthPrefixed(reader)
+            return self.PartsReader(reader, decompressor, prefix_length)
 
 
 class xtnsis(ArchiveUnit):
@@ -1236,7 +1353,7 @@ class xtnsis(ArchiveUnit):
 
         def info():
             yield F'{arc.header.type.name} archive'
-            yield F'{arc.method.name.lower()} compression'
+            yield F'compression type {arc.method.value}'
             yield F'mystery value 0x{arc.header.unknown_value:X}'
             yield 'solid archive' if arc.solid else 'fragmented archive'
             yield '64-bit header' if arc.header.is64bit else '32-bit header'
@@ -1245,7 +1362,9 @@ class xtnsis(ArchiveUnit):
         self.log_info(', '.join(info()))
 
         for item in arc.header.items:
-            yield self._pack(item.path, item.mtime, lambda i=item: arc._extract_item_data(i))
+            yield self._pack(item.path, item.mtime, lambda i=item: arc._extract_item(i).data)
+
+        yield self._pack('setup.bin', None, arc.header_data)
         yield self._pack('setup.nsis', None, arc.script.encode(self.codec))
 
     @classmethod

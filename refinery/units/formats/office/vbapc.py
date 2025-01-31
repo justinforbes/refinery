@@ -5,6 +5,7 @@ import re
 
 from refinery import Unit
 from refinery.lib.vfs import VirtualFileSystem
+from refinery.lib.tools import NoLogging
 
 
 class vbapc(Unit):
@@ -17,10 +18,11 @@ class vbapc(Unit):
     def __init__(self, raw: Unit.Arg.Switch('-r', help='Return disassembled p-code, do not try to decompile.') = False):
         super().__init__(raw=raw)
 
-    @Unit.Requires('oletools')
+    @Unit.Requires('oletools', 'formats', 'office', 'extended')
     def _pcodedmp():
-        import pcodedmp.pcodedmp
-        return pcodedmp.pcodedmp
+        with NoLogging():
+            import pcodedmp.pcodedmp
+            return pcodedmp.pcodedmp
 
     def process(self, data):
         class args:

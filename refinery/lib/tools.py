@@ -24,9 +24,9 @@ _T = TypeVar('_T')
 
 def lookahead(iterator: Iterable[_T]) -> Generator[Tuple[bool, _T], None, None]:
     """
-    Implements a new iterator from a given one which returns elements
-    `(last, item)` where each `item` is taken from the original iterator
-    and `last` is a boolean indicating whether this is the last item.
+    Implements a new iterator from a given one which returns elements `(last, item)` where each
+    `item` is taken from the original iterator and `last` is a boolean indicating whether this is
+    the last item.
     """
     last = False
     it = iter(iterator)
@@ -46,9 +46,9 @@ def lookahead(iterator: Iterable[_T]) -> Generator[Tuple[bool, _T], None, None]:
 def get_terminal_size(default=0):
     """
     Returns the size of the currently attached terminal. If the environment variable
-    `REFINERY_TERM_SIZE` is set to an integer value, it takes prescedence. If the width
-    of the terminal cannot be determined of if the width is less than 8 characters,
-    the function returns zero.
+    `REFINERY_TERM_SIZE` is set to an integer value, it takes prescedence. If the width of the
+    terminal cannot be determined or if the width is less than 8 characters, the function
+    returns zero.
     """
     from refinery.lib.environment import environment
     ev_terminal_size = environment.term_size.value
@@ -115,8 +115,8 @@ def terminalfit(text: str, delta: int = 0, width: int = 0, parsep: str = '\n\n',
 
 def documentation(unit):
     """
-    Return the documentation string of a given unit as it should be displayed
-    on the command line. Certain pdoc3-specific reference strings are removed.
+    Return the documentation string of a given unit as it should be displayed on the command line.
+    Certain pdoc3-specific reference strings are removed.
     """
     import re
     docs = inspect.getdoc(unit)
@@ -126,9 +126,8 @@ def documentation(unit):
 
 def begin(iterable: Iterable[_T]) -> Optional[Tuple[_T, Iterable[_T]]]:
     """
-    Iterates the first element of an iterator and returns None of this fails.
-    Otherwise, it returns both the first element and a new iterable which will
-    return the same elements as the input.
+    Iterates the first element of an iterator and returns None if this fails. Otherwise, it returns
+    both the first element and a new iterable which will return the same elements as the input.
     """
     try:
         body = iter(iterable)
@@ -144,8 +143,7 @@ def begin(iterable: Iterable[_T]) -> Optional[Tuple[_T, Iterable[_T]]]:
 
 def skipfirst(iterable: Iterable[_T]) -> Generator[_T, None, None]:
     """
-    Returns an interable where the first element of the input iterable was
-    skipped.
+    Returns an interable where the first element of the input iterable was skipped.
     """
     it = iter(iterable)
     next(it)
@@ -154,10 +152,9 @@ def skipfirst(iterable: Iterable[_T]) -> Generator[_T, None, None]:
 
 def autoinvoke(method: Callable[..., _T], keywords: dict) -> _T:
     """
-    For each parameter that `method` expects, this function looks for an entry
-    in `keywords` which has the same name as that parameter. `autoinvoke` then
-    calls `method` with all matching parameters forwarded in the appropriate
-    manner.
+    For each parameter that `method` expects, this function looks for an entry in `keywords` which
+    has the same name as that parameter. `autoinvoke` then calls `method` with all matching
+    parameters forwarded in the appropriate manner.
     """
 
     kwdargs = {}
@@ -193,12 +190,14 @@ def autoinvoke(method: Callable[..., _T], keywords: dict) -> _T:
 
 
 def entropy_fallback(data: ByteString) -> float:
+    """
+    This method is called by `refinery.lib.tools.entropy` when the `numpy` module is not available.
+    It computes the shannon entropy of the input byte string and is written in pure Python.
+    """
     if isinstance(data, memoryview):
-        def count(b):
-            return sum(1 for _b in data if _b == b)
-    else:
-        count = data.count
-    histogram = {b: count(b) for b in range(0x100)}
+        # this copy is better than re-implementing count in Python for memory views
+        data = bytes(data)
+    histogram = {b: data.count(b) for b in range(0x100)}
     S = [histogram[b] / len(data) for b in histogram]
     return 0.0 + -sum(p * log(p, 2) for p in S if p) / 8.0
 
@@ -207,16 +206,16 @@ def entropy(data: ByteString) -> float:
     """
     Computes the entropy of `data` over the alphabet of all bytes.
     """
-    if not data: return 0.0
-
+    if not data:
+        return 0.0
     try:
         import numpy
     except ImportError:
         return entropy_fallback(data)
-    _, counts = numpy.unique(memoryview(data), return_counts=True)
-    probs = counts / len(data)
+    hist = numpy.unique(memoryview(data), return_counts=True)[1]
+    prob = hist / len(data)
     # 8 bits are the maximum number of bits of information in a byte
-    return 0.0 + -sum(p * log(p, 2) for p in probs) / 8.0
+    return 0.0 - (numpy.log2(prob) * prob).sum() / 8.0
 
 
 def index_of_coincidence(data: bytearray) -> float:
@@ -241,13 +240,16 @@ def index_of_coincidence(data: bytearray) -> float:
 
 
 def isstream(obj) -> bool:
+    """
+    Tests whether `obj` is a stream. This is currently done by simply testing whether the object
+    has an attribute called `read`.
+    """
     return hasattr(obj, 'read')
 
 
 def isbuffer(obj) -> bool:
     """
-    Test whether `obj` is an object that supports the buffer API, like a bytes
-    or bytearray object.
+    Test whether `obj` is an object that supports the buffer API, like a bytes or bytearray object.
     """
     try:
         with memoryview(obj):
@@ -256,16 +258,31 @@ def isbuffer(obj) -> bool:
         return False
 
 
-def splitchunks(data: ByteString, size: int, truncate=False) -> Iterable[ByteString]:
+def splitchunks(
+    data: ByteString,
+    size: int,
+    step: Optional[int] = None,
+    truncate: bool = False
+) -> Iterable[ByteString]:
+    """
+    Split `data` into chunks of size `size`. The cursor advances by `step` bytes after extracting a
+    block, the default value for `step` is equal to `size`. The boolean parameter `truncate`
+    specifies whether any chunks of size smaller than `size` are generated or whether to abort as
+    soon as the last complete chunk of the given size is extracted.
+    """
+    if step is None:
+        step = size
     if len(data) <= size:
         if not truncate or len(data) == size:
             yield data
         return
-    total = len(data)
-    if truncate:
-        total -= len(data) % size
-    for k in range(0, total, size):
-        yield data[k:k + size]
+    for k in range(0, len(data), step):
+        chunk = data[k:k + size]
+        if not chunk:
+            break
+        if len(chunk) < size and truncate:
+            break
+        yield chunk
 
 
 def make_buffer_mutable(data: ByteString):
@@ -300,12 +317,26 @@ except AttributeError:
 
 
 class NoLogging:
+    """
+    A context manager to prevent various unwanted kinds of logging messages to appear.
+    The class is initialized with a given mode that encodes the logging channels to be
+    suppressed. After the context is exited, the original logging behavior is restored.
+    """
+
     class Mode(IntFlag):
+        """
+        A set of flags for different logging mechanisms to be suppressed.
+        """
         STD_OUT = 0b0001
+        """Silence the standard output channel."""
         STD_ERR = 0b0010
+        """Silence the standard error channel."""
         WARNING = 0b0100
+        """Silence the Python warning module."""
         LOGGING = 0b1000
+        """Silence the Python logging module."""
         ALL     = 0b1111 # noqa
+        """Silence all known logging mechanisms."""
 
     def __init__(self, mode: Mode = Mode.WARNING | Mode.LOGGING):
         self.mode = mode
@@ -338,21 +369,41 @@ class NoLogging:
             sys.stdout = self._stdout
 
 
+class NotOne(LookupError):
+    """
+    A custom exception raised by `refinery.lib.tools.one` if the input iterator does not yield
+    exactly one element. The property `empty` indicates whether the iterator was empty; if it is
+    false, then the exception was raised because the iterator contained more than one element.
+    """
+    def __init__(self, empty: bool):
+        how = 'none' if empty else 'more'
+        super().__init__(F'Expected a single item, but the iterator was {how}')
+        self.empty = empty
+
+
 def one(iterable: Iterable[_T]) -> _T:
+    """
+    The function expects the input `iterable` to be an iterable that yields exactly one element
+    and returns that element. Raises `refinery.lib.tools.NotOne` for invalid inputs.
+    """
     it = iter(iterable)
     try:
         top = next(it)
     except StopIteration:
-        raise LookupError
+        raise NotOne(True)
     try:
         next(it)
     except StopIteration:
         return top
     else:
-        raise LookupError
+        raise NotOne(False)
 
 
 def isodate(iso: str) -> Optional[datetime.datetime]:
+    """
+    Convert an input date string in ISO format to a `datetime` object. Contains fallbacks for early
+    Python versions.
+    """
     if len(iso) not in range(16, 25):
         return None
     iso = iso[:19].replace(' ', 'T', 1)
@@ -363,6 +414,17 @@ def isodate(iso: str) -> Optional[datetime.datetime]:
             return datetime.datetime.strptime(iso, "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         return None
+
+
+def date_from_timestamp(ts: int):
+    """
+    Convert a UTC timestamp to a datetime object.
+    """
+    if sys.version_info >= (3, 12):
+        dt = datetime.datetime.fromtimestamp(ts, datetime.UTC)
+    else:
+        dt = datetime.datetime.utcfromtimestamp(ts)
+    return dt.replace(tzinfo=None)
 
 
 def integers_of_slice(s: slice) -> Iterable[int]:
@@ -378,7 +440,7 @@ def integers_of_slice(s: slice) -> Iterable[int]:
 def normalize_word_separators(words: str, unified_separator: str, strip: bool = True):
     """
     For a sequence of words separated by whitespace, punctuation, slashes, dashes or underscores,
-    normalize all occurrences of one or more of these seprators to one given symbol. Leading and
+    normalize all occurrences of one or more of these separators to one given symbol. Leading and
     trailing occurrences of separators are removed.
     """
     normalized = re.sub('[-\\s_.,;:/\\\\]+', unified_separator, words)
@@ -414,3 +476,25 @@ def typename(thing):
         return thing.__name__
     except AttributeError:
         return repr(thing)
+
+
+def exception_to_string(exception: BaseException, default=None) -> str:
+    """
+    Attempts to convert a given exception to a good description that can be exposed to the user.
+    """
+    if not exception.args:
+        return exception.__class__.__name__
+    it = (a for a in exception.args if isinstance(a, str))
+    if default is None:
+        default = str(exception)
+    return max(it, key=len, default=default).strip()
+
+
+def nopdoc(obj: object):
+    """
+    This decorator can be applied to any object to exclude it from the automatically generated
+    documentation.
+    """
+    pdoc: dict = sys.modules[obj.__module__].__dict__.setdefault('__pdoc__', {})
+    pdoc[obj.__qualname__] = False
+    return obj

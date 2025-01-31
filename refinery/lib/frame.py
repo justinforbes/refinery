@@ -116,15 +116,13 @@ above example would not be separated by a dash.
 """
 from __future__ import annotations
 
-import json
-import base64
 import itertools
 import zlib
+import uuid
 
-from typing import Generator, Iterable, BinaryIO, Callable, Optional, List, Dict, ByteString, Any
+from typing import Generator, Iterable, BinaryIO, Callable, Optional, List, Tuple, Dict, ByteString, Any
 from typing import TYPE_CHECKING
 from refinery.lib.structures import MemoryFile
-from refinery.lib.tools import isbuffer
 from refinery.lib.meta import LazyMetaOracle
 
 if TYPE_CHECKING:
@@ -138,43 +136,70 @@ except ModuleNotFoundError:
 __all__ = [
     'Chunk',
     'Framed',
-    'FrameUnpacker'
+    'FrameUnpacker',
+    'MAGIC',
+    'MSIZE',
+    'generate_frame_header'
 ]
 
 
-class BytesEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isbuffer(obj):
-            return {'_bin': base64.b85encode(obj).decode('ascii')}
-        return super().default(obj)
-
-
-class BytesDecoder(json.JSONDecoder):
-    def __init__(self, *args, **kwargs):
-        json.JSONDecoder.__init__(self, object_hook=self.object_hook, *args, **kwargs)
-
-    def object_hook(self, obj):
-        if isinstance(obj, dict) and len(obj) == 1 and '_bin' in obj:
-            return base64.b85decode(obj['_bin'])
-        return obj
-
-
 MAGIC = bytes.fromhex('FEED1985C0CAC01AC0DE')
+"""
+This is the magic signature that is used by refinery to prefix serialized frame data. If a unit
+reads data from STDIN that is prefixed with these bytes, it assumes that serialized frame data
+follows. Otherwise, the input is treated as a single unframed chunk.
+"""
+MSIZE = len(MAGIC) + 1
+"""
+This is the length of the data returned by `refinery.lib.frame.generate_frame_header`.
+"""
 
 
 def generate_frame_header(scope: int):
-    if scope > 0xFE:
+    """
+    This function generates a frame header for a frame tree of depth equal to `scope`. The depth
+    is encoded as a single byte following `refinery.lib.frame.MAGIC`. This implies a depth limit
+    of 255 for frame trees in refinery, and I dearly hope that noone is insane enough to build a
+    refinery pipeline that would be affected.
+    """
+    if scope > 0xFF:
         raise ValueError('Maximum frame depth exceeded.')
     return B'%s%c' % (MAGIC, scope)
 
 
 class Chunk(bytearray):
     """
-    Represents the individual chunks in a frame. The `refinery.units.Unit.filter` method
-    receives an iterable of `refinery.lib.frame.Chunk`s.
+    Represents the individual chunks in a frame. The `refinery.units.Unit.filter` method receives
+    an iterable of `refinery.lib.frame.Chunk`s.
     """
-    temp: Any = None
-    meta: LazyMetaOracle
+    temp: Any
+    """
+    Units can use this field to transport temporary data between different callbacks. For example,
+    a unit might want to transport information from `refinery.units.Unit.filter` to:
+
+    - `refinery.units.Unit.reverse`
+    - `refinery.units.Unit.process`
+
+    These methods, in turn, might want to transport information to `refinery.units.Unit.finish`.
+    """
+    uuid: uuid.UUID
+    """
+    Each chunk object carries a unique identifier. The `refinery.units.DelayedArgumentProxy` uses
+    this property to check whether `refinery.units.Unit` command-line arguments were previously
+    evaluated against this chunk. Otherwise `refinery.lib.argformats.DelayedArgument`s that alter
+    the input data could produce unexpected results when the argument proxy is mapped against the
+    same chunk twice.
+    """
+
+    __slots__ = (
+        '_meta',
+        '_view',
+        '_path',
+        '_fill_scope',
+        '_fill_batch',
+        'temp',
+        'uuid',
+    )
 
     def __init__(
         self,
@@ -184,12 +209,16 @@ class Chunk(bytearray):
         meta: Optional[Dict[str, Any]] = None,
         seed: Optional[Dict[str, list]] = None,
         fill_scope: Optional[bool] = None,
-        fill_batch: Optional[int] = None
+        fill_batch: Optional[int] = None,
+        ignore_chunk_properties: bool = False,
     ):
         if data is None:
             bytearray.__init__(self)
         else:
             bytearray.__init__(self, data)
+
+        self.uuid = uuid.uuid4()
+        self.temp = None
 
         if path is None:
             path = []
@@ -198,9 +227,9 @@ class Chunk(bytearray):
         elif len(view) != len(path):
             raise ValueError('view must have the same length as path')
 
-        if isinstance(data, Chunk):
-            path = path or data.path
-            view = view or data.view
+        if not ignore_chunk_properties and isinstance(data, Chunk):
+            path = path or list(data.path)
+            view = view or list(data.view)
             meta = meta or data.meta
             fill_scope = fill_scope or data._fill_scope
             fill_batch = fill_batch or data._fill_batch
@@ -220,18 +249,46 @@ class Chunk(bytearray):
             return data
         return cls(data)
 
-    @property
-    def guid(self) -> int:
-        return hash((id(self), *(id(v) for v in self.meta.values())))
-
     def set_next_scope(self, visible: bool) -> None:
         self._fill_scope = visible
 
     def set_next_batch(self, batch: int) -> None:
+        """
+        This function allows units to emit trees of depth one rather than lists. When a unit emits
+        a chunk at index `a`, sets the next batch to `b`, and when a double frame opens after this
+        unit's invocation, then said chunk will have `a/b` added to its path. By default, `b` would
+        always be `0`. For example, the `refinery.rex` unit uses this feature. As a result:
+
+            $ emit #1yellow-#3red-#2orange | rex #(.)([a-z]+) {1} {2} [[| pop x:e ]| rep v:x ]]
+            yellow
+            red
+            red
+            red
+            orange
+            orange
+
+        The double frame after `refinery.rex` looks like this:
+
+            [[1,yellow],[2,red],[3,orange]]
+
+        By default, the frame would simply look like this:
+
+            [[1,yellow,2,red,3,orange]]
+
+        This feature is useful for `refinery.units.Unit`s that produce multiple outputs for each of
+        a number of intermediate results - in the case of `refinery.rex`, that intermediate result
+        is a regular expression match, and `refinery.rex` allows to produce different outputs for
+        each of those.
+        """
         self._fill_batch = batch
 
     @property
     def scope(self) -> int:
+        """
+        This value is the length of `refinery.lib.frame.Chunk.path` and therefore corresponds to
+        the depth of the frame tree. It is called "scope" because it is equally the scope at which
+        new metadata variables for this chunk will be created.
+        """
         return len(self._path)
 
     @property
@@ -256,7 +313,8 @@ class Chunk(bytearray):
     @property
     def meta(self) -> LazyMetaOracle:
         """
-        Every chunk can contain a dictionary of arbitrary metadata.
+        Every chunk can contain a dictionary of arbitrary metadata. Further details about this data
+        are available in the module-level documetnation of `refinery.lib.meta`.
         """
         if self._meta.chunk is not self:
             raise RuntimeError('meta dictionary carries invalid parent reference')
@@ -289,15 +347,6 @@ class Chunk(bytearray):
         else:
             view[~0] = value
 
-    def inherit(self, parent: Chunk):
-        """
-        This method can be used to take over properties of a parent `refinery.lib.frame.Chunk`.
-        """
-        self._path = parent._path
-        self._view = self._view or parent._view
-        self._meta.inherit(parent.meta)
-        return self
-
     @classmethod
     def unpack(cls, stream):
         """
@@ -307,42 +356,61 @@ class Chunk(bytearray):
         path, view, meta, fs, data = item
         return cls(data, path=path, view=view, seed=meta, fill_scope=fs)
 
-    def pack(self, nest: int = 0, position: int = 0):
+    def pack(self, nest: int = 0, position: int = 0, serialize: bool = True):
         """
-        Return the serialized representation of this chunk.
+        This function is equivalent to `refinery.lib.frame.Chunk.pack` if `serialize` is `True`.
+        Otherwise, the function creates a copy of the chunk whose location in the frame tree has
+        been adjusted based on the given nesting and position. With the default arguments, the
+        value of all the following expressions is the same:
+
+        - `chunk.pack(nesting, position)`
+        - `chunk.gift(nesting, position, True)`
+        - `chunk.gift(nesting, position).pack()`
+
+        The difference, however, is that the first two options require one less copy operation
+        than the latter.
         """
-        view = self._view
-        path = self._path
+        scope = self.scope + nest
         fs = self._fill_scope
         fb = self._fill_batch
-        scope = self.scope + nest
-
         if nest > 0:
-            view = list(view)
-            path = list(path)
-            if fs is not None:
-                view.extend(itertools.repeat(self.visible, nest - 1))
-                view.append(fs)
-                fs = None
-            else:
-                view.extend(itertools.repeat(self.visible, nest))
-            if fb is not None and nest > 1:
-                path.append(position)
-                path.append(fb)
-                path.extend(itertools.repeat(0, nest - 2))
-            else:
-                path.append(position)
-                path.extend(itertools.repeat(0, nest - 1))
-        if nest < 0:
-            view = view[:nest]
-            path = path[:nest]
+            view = list(self._view)
+            path = list(self._path)
+            if nest > 0:
+                if fs is not None:
+                    view.extend(itertools.repeat(self.visible, nest - 1))
+                    view.append(fs)
+                    fs = None
+                else:
+                    view.extend(itertools.repeat(self.visible, nest))
+                if fb is not None and nest > 1:
+                    path.append(position)
+                    path.append(fb)
+                    path.extend(itertools.repeat(0, nest - 2))
+                else:
+                    path.append(position)
+                    path.extend(itertools.repeat(0, nest - 1))
+        elif nest < 0:
+            view = self._view[:nest]
+            path = self._path[:nest]
+        else:
+            view = self._view
+            path = self._path
+            if not serialize:
+                view = list(view)
+                path = list(path)
 
         assert len(path) == scope
         assert len(view) == scope
 
-        meta = self._meta.serialize(scope)
-        item = (path, view, meta, fs, self)
-        return msgpack.packb(item)
+        meta = self._meta.serialize(self.scope + nest)
+
+        if serialize:
+            item = (path, view, meta, fs, self)
+            return msgpack.packb(item)
+        else:
+            return Chunk(self, path, view, None, meta, fs, fb,
+                ignore_chunk_properties=True)
 
     def __repr__(self) -> str:
         layer = '/'.join(str(p) if s else F'!{p}' for p, s in zip(self._path, self._view))
@@ -350,6 +418,10 @@ class Chunk(bytearray):
         return F'<chunk{layer}:{bytes(self)!r}>'
 
     def intersect(self, other: Chunk):
+        """
+        Removes all meta variables from this chunk whose value differs from those of the `other`
+        inut chunk.
+        """
         other_meta = other._meta
         meta = self._meta
         for key, value in list(meta.items()):
@@ -377,7 +449,21 @@ class Chunk(bytearray):
         else:
             bytearray.__setitem__(self, bounds, value)
 
+    def truncate(self, scope: int = 0):
+        """
+        Truncate the `refinery.lib.frame.Chunk.path` and `refinery.lib.frame.Chunk.view` lists
+        to the given length, setting the `refinery.lib.frame.Chunk.scope` to the given value.
+        """
+        del self._path[scope:]
+        del self._view[scope:]
+        return self
+
     def copy(self, meta=True, data=True) -> Chunk:
+        """
+        Produce a copy of this chunk. The metadata is copied if the `meta` argument is `True`,
+        otherwise the copy has no metadata. The body of the chunk is copied only if the `data`
+        argument is `True`.
+        """
         data = data and self or None
         copy = Chunk(
             data,
@@ -385,6 +471,7 @@ class Chunk(bytearray):
             view=list(self._view),
             fill_scope=self._fill_scope,
             fill_batch=self._fill_batch,
+            ignore_chunk_properties=True,
         )
         if meta:
             copy.meta.update(self.meta)
@@ -414,7 +501,8 @@ class FrameUnpacker(Iterable[Chunk]):
     """
     next_chunk: Optional[Chunk]
     depth: int
-    trunk: List[int]
+    trunk: Tuple[int, ...]
+    check: Tuple[int, ...]
     stream: Optional[BinaryIO]
     finished: bool
     framed: bool
@@ -423,6 +511,7 @@ class FrameUnpacker(Iterable[Chunk]):
     def __init__(self, stream: Optional[BinaryIO]):
         self.finished = False
         self.trunk = ()
+        self.check = ()
         self.stream = None
         self.depth = 0
         self.next_chunk = None
@@ -446,6 +535,7 @@ class FrameUnpacker(Iterable[Chunk]):
         while not self.finished:
             try:
                 self.next_chunk = chunk = Chunk.unpack(self.unpacker)
+                self.check = tuple(chunk.path)
                 if chunk.scope != self.depth:
                     raise RuntimeError(F'Frame of depth {self.depth} contained chunk of scope {chunk.scope}.')
                 return True
@@ -454,7 +544,7 @@ class FrameUnpacker(Iterable[Chunk]):
             try:
                 recv = self.stream.read1()
             except TypeError:
-                recv = None
+                raise
             recv = recv or self.stream.read()
             if not recv:
                 break
@@ -471,12 +561,15 @@ class FrameUnpacker(Iterable[Chunk]):
         """
         if self.finished:
             return False
-        self.trunk = self.next_chunk.path
+        self.trunk = self.check
         return True
 
     def abort(self):
+        """
+        Abort unpacking chunks from the frame.
+        """
         if self.depth > 1:
-            while not self.finished and self.trunk == self.next_chunk.path:
+            while not self.finished and self.trunk == self.check:
                 self._advance()
         else:
             self.unpacker = None
@@ -484,14 +577,17 @@ class FrameUnpacker(Iterable[Chunk]):
 
     @property
     def eol(self) -> bool:
+        """
+        Specifies whether the current frame was fully consumed.
+        """
         return self.trunk != self.peek
 
     @property
-    def peek(self) -> List[int]:
+    def peek(self) -> Tuple[int, ...]:
         """
         Contains the identifier of the next frame.
         """
-        return self.next_chunk.path
+        return self.check
 
     def __iter__(self) -> Generator[Chunk, None, None]:
         if self.finished:
@@ -500,7 +596,7 @@ class FrameUnpacker(Iterable[Chunk]):
             yield self.next_chunk
             self.finished = True
             return
-        while not self.finished and self.trunk == self.next_chunk.path:
+        while not self.finished and self.trunk == self.check:
             yield self.next_chunk
             self._advance()
 
@@ -525,11 +621,13 @@ class Framed:
         squeeze: bool = False,
         filter : Optional[Callable[[Iterable[Chunk]], Iterable[Chunk]]] = None,
         finish : Optional[Callable[[], Iterable[Chunk]]] = None,
+        serialized: bool = True,
     ):
         self.unpack = FrameUnpacker(stream)
         self.action = action
         self.filter = filter
         self.finish = finish
+        self.serialized = serialized
         self.nesting = nesting
         self.squeeze = squeeze
 
@@ -576,24 +674,37 @@ class Framed:
         return self.nesting + self.unpack.depth < 0
 
     def _generate_chunks(self, parent: Chunk):
+        path = list(parent.path)
+        view = list(parent.view)
+        meta = parent.meta
+        scope = parent.scope
+
+        def inherit(chunk: Chunk):
+            if chunk is parent:
+                return chunk
+            if path:
+                chunk._path[:] = path
+            if view and not chunk._view:
+                chunk._view[:] = view
+            chunk._meta.inherit(meta)
+            return chunk.truncate(scope)
+
         if not self.squeeze:
             for chunk in self.action(parent):
-                if chunk is not parent:
-                    chunk.inherit(parent)
-                yield chunk
-            return
-        it = self.action(parent)
-        for header in it:
-            header.inherit(parent)
-            buffer = MemoryFile(header)
-            buffer.seek(len(header))
-            break
+                yield inherit(chunk)
         else:
-            return
-        for item in it:
-            header.intersect(item)
-            buffer.write(item)
-        yield header
+            it = self.action(parent)
+            for header in it:
+                buffer = MemoryFile(header)
+                buffer.seek(len(header))
+                break
+            else:
+                return
+            for item in it:
+                header.intersect(item)
+                buffer.write(item)
+            inherit(header)
+            yield header
 
     def _generate_bytes(self, data: ByteString):
         if not self.squeeze:
@@ -606,6 +717,7 @@ class Framed:
 
     def __iter__(self):
         nesting = self.nesting
+        serialized = self.serialized
         scope = max(self.unpack.depth + nesting, 0)
         if self.unpack.finished:
             if scope:
@@ -617,10 +729,10 @@ class Framed:
             while self.unpack.nextframe():
                 for k, chunk in enumerate(self._apply_filter()):
                     if not chunk.visible:
-                        yield chunk.pack(nesting, k)
+                        yield chunk.pack(nesting, k, serialized)
                         continue
                     for result in self._generate_chunks(chunk):
-                        yield result.pack(nesting, k)
+                        yield result.pack(nesting, k, serialized)
         elif not self.unpack.framed:
             for chunk in self._apply_filter():
                 yield from self._generate_bytes(chunk)
@@ -630,10 +742,10 @@ class Framed:
             while self.unpack.nextframe():
                 for chunk in self._apply_filter():
                     if not chunk.visible:
-                        yield chunk.pack()
+                        yield chunk.pack(0, 0, serialized)
                         continue
                     for result in self._generate_chunks(chunk):
-                        yield result.pack()
+                        yield result.pack(0, 0, serialized)
         else:
             trunk = None
             check = scope + 1
@@ -643,7 +755,8 @@ class Framed:
                 for chunk in self._apply_filter():
                     results = self._generate_chunks(chunk) if chunk.visible else (chunk,)
                     if not scope:
-                        yield from results
+                        for chunk in results:
+                            yield chunk.truncate()
                         continue
                     for result in results:
                         if trunk is None:
@@ -652,9 +765,9 @@ class Framed:
                             trunk.intersect(result)
                             trunk.extend(result)
                         else:
-                            yield trunk.pack(nesting)
+                            yield trunk.pack(nesting, 0, serialized)
                             trunk = result
                 if not scope or trunk is None:
                     continue
             if trunk is not None:
-                yield trunk.pack(nesting)
+                yield trunk.pack(nesting, 0, serialized)

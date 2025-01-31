@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Certain libraries insist to read data from a file on disk which has to be specified by passing
+Certain libraries insist on reading data from a file on disk which has to be specified by passing
 a file path, and sometimes they will not accept a stream object or any other way to input data to
 them. This module implements a **virtual file system** which allows us to pass in-memory data to
 these libraries without having to actually write anything to disk. It works by hooking the
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import builtins
 import os
+import os.path
 import io
 import stat
 import uuid
@@ -19,7 +20,7 @@ import mmap
 
 from typing import Dict, Optional
 from refinery.lib.types import ByteStr
-from refinery.lib.structures import MemoryFile
+from refinery.lib.structures import MemoryFile, MemoryFileMethods
 
 
 class VirtualFile:
@@ -44,6 +45,9 @@ class VirtualFile:
         self.data = data
         fs.install(self)
 
+    def __repr__(self):
+        return F'<VirtualFile/{self.name}>'
+
     @property
     def node(self) -> int:
         return self.uuid.fields[1]
@@ -53,10 +57,18 @@ class VirtualFile:
         Emulate the result of an `mmap` call to the virtual file.
         """
         view = memoryview(self.data)
+        node = self.node
         if length:
             view = view[offset:offset + length]
-        fd = MemoryFile(view, read_as_bytes=True, fileno=self.node)
-        return fd
+
+        class _MappedView(bytearray, MemoryFileMethods):
+            def __init__(self):
+                MemoryFileMethods.__init__(self, self, True, node)
+
+        mapped = _MappedView()
+        mapped[:] = view
+
+        return mapped
 
     def open(self, mode: str) -> MemoryFile:
         """
@@ -147,6 +159,15 @@ class VirtualFileSystem:
     def acquire(self):
         self._VFS_LOCK.acquire()
 
+        def hook_isfile(path):
+            try:
+                with self._lock:
+                    self._by_name[os.path.basename(path)]
+            except BaseException:
+                return self._isfile(path)
+            else:
+                return True
+
         def hook_open(file, *args, **kwargs):
             try:
                 with self._lock:
@@ -174,17 +195,30 @@ class VirtualFileSystem:
             else:
                 return vf.mmap(length, kwargs.get('offset', 0))
 
+        def hook_exists(path):
+            try:
+                with self._lock:
+                    return os.path.basename(path) in self._by_name
+            except BaseException:
+                return self._exists(path)
+
         self._builtins_open = builtins.open
         self._os_stat = os.stat
         self._mmap_mmap = mmap.mmap
         self._io_open = io.open
+        self._isfile = os.path.isfile
+        self._exists = os.path.exists
         builtins.open = hook_open
         io.open = hook_open
         os.stat = hook_stat
         mmap.mmap = hook_mmap
+        os.path.isfile = hook_isfile
+        os.path.exists = hook_exists
         return self
 
     def release(self):
+        os.path.isfile = self._isfile
+        os.path.exists = self._exists
         builtins.open = self._builtins_open
         os.stat = self._os_stat
         mmap.mmap = self._mmap_mmap

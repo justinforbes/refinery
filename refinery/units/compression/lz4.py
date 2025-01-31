@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import io
 
-from refinery.lib.structures import StructReader, StreamDetour, EOF
+from refinery.lib.structures import StructReader, StreamDetour
 from refinery.units.crypto.hash.xxhash import xxhash
 from refinery.units import Unit, RefineryPartialResult
 
@@ -23,7 +23,7 @@ class lz4(Unit):
     LZ4 block decompression. See also:
     https://github.com/lz4/lz4/blob/master/doc/lz4_Block_format.md#compressed-block-format
     """
-    def _read_block(self, reader, output, ubound=None):
+    def _read_block(self, reader: StructReader, output: io.BytesIO, ubound=None):
         entry = reader.tell()
         lastend = 0
 
@@ -32,7 +32,7 @@ class lz4(Unit):
                 return False
             consumed = reader.tell() - entry
             if consumed > ubound:
-                raise ValueError(F'upper bound {ubound} exceeded by {consumed-ubound} in LZ4 block')
+                raise ValueError(F'upper bound {ubound} exceeded by {consumed - ubound} in LZ4 block')
             return consumed == ubound
 
         while not reader.eof:
@@ -41,9 +41,12 @@ class lz4(Unit):
             litlen = reader.read_size(litlen)
             literal = reader.read(litlen)
             output.write(literal)
-            if ubound_check(): break
-            try: refpos = reader.u16()
-            except EOF: break
+            if ubound_check():
+                break
+            try:
+                refpos = reader.u16()
+            except EOFError:
+                break
             if refpos - 1 not in range(output.tell()):
                 with StreamDetour(output, lastend):
                     if output.read(len(literal)) == literal:
@@ -73,7 +76,7 @@ class lz4(Unit):
         reader = LZ4Reader(memoryview(data))
         try:
             magic = reader.u32() == 0x184D2204
-        except EOF:
+        except EOFError:
             magic = False
         if not magic:
             reader.seek(0)
@@ -142,5 +145,5 @@ class lz4(Unit):
                 self.log_warn(F'the given checksum {chk:08X} did not match the computed checksum {xxh:08X}')
         if not reader.eof:
             pos = reader.tell()
-            self.log_warn(F'found {len(data)-pos} additional bytes starting at position 0x{pos:X} after compressed data')
+            self.log_warn(F'found {len(data) - pos} additional bytes starting at position 0x{pos:X} after compressed data')
         return output.getbuffer()

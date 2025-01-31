@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-from typing import List, Type
+from typing import List, Optional, Type
 
-from refinery.units.formats.archive import ArchiveUnit
+from refinery.units.formats.archive import ArchiveUnit, MultipleArchives
 from refinery.units import RefineryException
 
 
@@ -12,7 +12,26 @@ class xt(ArchiveUnit):
     Extract files from archives. The unit tries to identify the archive format and use the
     correct extractor.
     """
-    def _handlers(self):
+    @classmethod
+    def handles(cls, data: bytearray) -> Optional[bool]:
+        out = False
+        for engine in cls.handlers():
+            engine_verdict = engine.handles(data)
+            if engine_verdict is True:
+                return True
+            if engine_verdict is None:
+                out = None
+        return out
+
+    @staticmethod
+    def handlers():
+        """
+        Returns all archive handlers supported by the unit.
+        """
+        from refinery.units.formats.archive.xtinno import xtinno
+        yield xtinno
+        from refinery.units.formats.winreg import winreg
+        yield winreg
         from refinery.units.formats.office.xtone import xtone
         yield xtone
         from refinery.units.formats.archive.xtgz import xtgz
@@ -25,6 +44,8 @@ class xt(ArchiveUnit):
         yield xtasar
         from refinery.units.formats.office.xtrtf import xtrtf
         yield xtrtf
+        from refinery.units.formats.archive.xtzpaq import xtzpaq
+        yield xtzpaq
         from refinery.units.formats.pe.dotnet.dnsfx import dnsfx
         yield dnsfx
         from refinery.units.formats.archive.xtnsis import xtnsis
@@ -51,6 +72,8 @@ class xt(ArchiveUnit):
         yield xt7z
         from refinery.units.formats.msi import xtmsi
         yield xtmsi
+        from refinery.units.formats.archive.xtmacho import xtmacho
+        yield xtmacho
         from refinery.units.formats.archive.xtnuitka import xtnuitka
         yield xtnuitka
         from refinery.units.formats.office.xtdoc import xtdoc
@@ -97,26 +120,32 @@ class xt(ArchiveUnit):
                         self.unit.log_info(F'accepted: {handler.name}')
                     try:
                         unit = handler(*pos_args, **key_args)
+                        unit.args.lenient = self.unit.args.lenient
+                        unit.args.quiet = self.unit.args.quiet
                     except TypeError as error:
                         self.unit.log_debug('handler construction failed:', error)
                         return
                     try:
+                        test_unpack = not self.unit.args.list
                         for item in unit.unpack(data):
-                            item.get_data()
+                            if test_unpack:
+                                item.get_data()
+                                test_unpack = False
                             yield item
                     except Exception as error:
                         if not self.fallback:
                             errors[handler.name] = error
-                        self.unit.log_debug('handler unpacking failed:', error)
-                        return
+                        if isinstance(error, MultipleArchives):
+                            self.unit.log_warn(error)
+                        else:
+                            self.unit.log_debug('handler unpacking failed:', error)
                     else:
                         self.success = True
-                        return
                 elif verdict is None:
                     fallback.append(handler)
 
-        for handler in self._handlers():
-            self._custom_path_separator = handler._custom_path_separator
+        for handler in self.handlers():
+            self.CustomPathSeparator = handler.CustomPathSeparator
             it = unpacker(handler, fallback=False)
             yield from it
             if it.success:

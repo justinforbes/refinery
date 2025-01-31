@@ -13,7 +13,7 @@ class lnk(Unit):
     unit is a thin wrapper around the LnkParse3 library.
     """
 
-    @Unit.Requires('LnkParse3', optional=False)
+    @Unit.Requires('LnkParse3>=1.4.0', 'formats', 'default', 'extended')
     def _LnkParse3():
         import LnkParse3
         return LnkParse3
@@ -22,7 +22,7 @@ class lnk(Unit):
         super().__init__(tabular=tabular)
 
     def process(self, data):
-        with NoLogging(NoLogging.Mode.ALL):
+        with NoLogging():
             parsed = self._LnkParse3.lnk_file(MemoryFile(data)).get_json()
         with JSONEncoderEx as encoder:
             pp = ppjson(tabular=self.args.tabular)

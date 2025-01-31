@@ -85,3 +85,21 @@ class TestEscaping(TestUnitBase):
         wish = bytes((1, 2, 3, 4))
         unit = self.load()
         self.assertEqual(bytes(data | unit), wish)
+
+    def test_obfuscated_unicode_strings(self):
+        data = r'࡙ࠣࡨࡰࡨࡵ\u086dࡦ\u082eࠣࡴࡱ\u086bࡡࡴࡧࠣࡩࡳࡺࡥࡳࠢࡼࡳࡺࡸࠠ\u086fࡣࡰࡩ\u083fࠨࠄ'.encode('utf8')
+        unit = self.load(unicode=True)[
+            self.load_pipeline('u16 -R | put b le:x:~1: | alu -B2 B-0x800-((K+b)%7) | u16 | esc -q ]')]
+        self.assertEqual(data | unit | str, 'Welcome, please enter your name:')
+
+    def test_autoquotes_01(self):
+        self.assertEqual(B'BINARY REFINERY!', B'"BINARY\\x20REFINERY!"' | self.load() | bytes)
+        self.assertEqual(B"BINARY REFINERY!", B"'BINARY\\x20REFINERY!'" | self.load() | bytes)
+
+    def test_autoquotes_02(self):
+        self.assertEqual(B'"BINARY REFINERY!"', B'"BINARY\\x20REFINERY!"' | self.load(unquoted=True) | bytes)
+        self.assertEqual(B"'BINARY REFINERY!'", B"'BINARY\\x20REFINERY!'" | self.load(unquoted=True) | bytes)
+
+    def test_autoquotes_03(self):
+        self.assertEqual(B'BINARY REFINERY!"', B'BINARY\\x20REFINERY!"' | self.load() | bytes)
+        self.assertEqual(B"'BINARY REFINERY!", B"'BINARY\\x20REFINERY!" | self.load() | bytes)

@@ -17,25 +17,45 @@
 The Binary Refinery&trade; is a collection of Python scripts that implement transformations of binary data such as compression and encryption.
 We will often refer to it simply by _refinery_, which is also the name of the corresponding package.
 The scripts are designed to exclusively read input from stdin and write output to stdout.
-This way, the individual units can be chained with the piping operator `|` on the commandline to perform more complex tasks.
-The project was born to aid with malware triage, and is an attempt to implement something like [CyberChef](https://github.com/gchq/CyberChef) on the commandline.
+The main philosophy is that every script should be a unit in the sense that it does _one_ job,
+and individual units can be combined into _pipelines_ with the piping operator `|` on the commandline to perform more complex tasks.
+The project's main focus is malware triage,
+and is an attempt to implement something like [CyberChef](https://github.com/gchq/CyberChef) on the commandline.
 
-The main philosophy of the refinery is that every script should be a unit in the sense that it does _one_ job.
-It is always a case by case decision, but it is generally desirable to reduce the number of possible arguments of each script to a minimum and prefer strong capsulation if some functionality could be provided by a separate unit. 
+## Short Version
+
+Make a Python virtual environment. You need Python 3.8 or later. Install refinery like this:
+```
+pip install binary-refinery[extended]
+```
+Run units with `-h` to learn how they work, grep through the [docs][] or use the command `binref` to find them.
+Watch [the latest video][VOD3] if you want to see it in action.
+But also, read the rest of this readme.
+
 
 ## Documentation
 
-The main documentation is [generated automatically from the source code][docs];
-it serves primarily as a reference but also contains the specification for the three fundamental concepts of the toolkit:
-[framing][frame], [multibin arguments][argformats], and [meta variables][meta]. 
+The help text that is displayed when executing a unit with the `-h` or `--help` switch is its main documentation.
+The [automatically generated documentation][docs] contains a compilation of that output for each unit at the top level,
+but also contains the specification for the three fundamental concepts of the toolkit:
+[framing][frame], [multibin arguments][argformats], and [meta variables][meta].
+Full-text search of the description and help text for every unit is also available on the command line,
+via the provided `binref` command. In recognition of the fact that reference documentation can be somewhat dry,
+there is an ongoing effort to produce a series of [tutorials](tutorials); I very much recommend to check them out.
+On top of that, I collect additional resources (including some produced by third parties) below.
 
-In recognition of the fact that reference documentation can be somewhat dry,
-there is an ongoing effort to produce a series of [tutorials](tutorials) and there are a few additional resources:
+> [!NOTE]  
+> Refinery is still in alpha and the interface can sometimes change,
+> i.e. units and parameters can be removed or renamed.
+> Hence, it can happen that specific command lines from older videos and blog posts don't work any more.
 
-- [OALabs](https://www.youtube.com/c/OALabs) was kind enough to let me [demo the toolkit in a feature video](https://www.youtube.com/watch?v=4gTaGfFyMK4).
-- [Johannes Bader](https://bin.re/) wrote an amazing [blog post about how to analyze TA551 malspam with binary refinery](https://bin.re/blog/analysing-ta551-malspam-with-binary-refinery/). It should really be turned into a tutorial at some point.
-
-Full-text search of the description and help text for every unit is also available on the command line, via the provided `binref` command.
+- [`2021/08`] [OALabs][OA] was kind enough to let me [demo the toolkit in a feature video][VOD1].
+  In the video, I essentially work through the contents of 
+  [the first tutorial](tutorials/tbr-files.v0x01.netwalker.dropper.ipynb).
+- [`2021/11`] [Johannes Bader][JB] wrote an amazing [blog post][BLOG] about analyzing malspam with binary refinery.
+- [`2024/03`] [Malware Analysis For Hedgehogs][MH] made [a video about unpacking an XWorm sample][VOD2] using refinery.
+- [`2024/11`] [the CyberYeti][CY] had me [on stream presenting refinery][VOD3].
+  Showcases again include samples from the example section below and the [tutorials](tutorials).
 
 ## License
 
@@ -45,9 +65,10 @@ If you want to do something with it that's not covered by this license, please f
 
 ## Warnings & Advice
 
-The refinery requires at least **Python 3.7**.
+The refinery requires at least **Python 3.8**.
 It is recommended to install it into its own [virtual environment][venv]:
-The package has a **lot** of dependencies, and installing it into your global Python is somewhat prone to dependency conflicts.
+The package can pull in a **lot** of dependencies,
+and installing it into your global Python is somewhat prone to version conflicts.
 Also, since the toolkit introduces a large number of new commands,
 there is a good chance that some of these will clash on some systems,
 and keeping them in their own separate virtual environment is one way to prevent that.
@@ -66,7 +87,7 @@ The most straightforward way to install and update refinery is via pip:
 ```
 pip install -U binary-refinery
 ```
-If you want to choose a prefix for the installed commands, you have to specify it via the environment variable `REFINERY_PREFIX`.
+If you want to choose a prefix for all units, you can specify it via the environment variable `REFINERY_PREFIX`.
 For example, the following command will install refinery into the current Python environment with prefix `r.` on Linux:
 ```bash
 REFINERY_PREFIX=r. pip install -U binary-refinery
@@ -83,18 +104,19 @@ For example, the following will install the very latest refinery commit:
 ```
 pip install -U git+git://github.com/binref/refinery.git
 ```
+Finally, if you are using [REMnux][remnux-main], you can use their [refinery docker container][remnux].
 
 ## Shell Support
 
 The following is a summary of how well various shell environments are currently supported:
 
-| State           | Shell        | Comment                                                                                |
-|:----------------|--------------|----------------------------------------------------------------------------------------|
-| 🔵 Good         | `cmd`        |                                                                                        |
-| 🔵 Good         | `bash`       |                                                                                        |
-| 🔵 Good         | `sh`         |                                                                                        |
-| 🟡 Minor Issues | `zsh`        | [discussion](https://github.com/binref/refinery/discussions/18) / [script](shells/zsh) |
-| 🔴 Terrible     | `powershell` | [discussion](https://github.com/binref/refinery/issues/5)                              |
+| Shell      | Platform | State           | Comment                                                          |
+|:-----------|:---------|:----------------|:-----------------------------------------------------------------|
+| Bash       | Posix    | 🔵 Good         | Used occasionally by the author.                                 |
+| CMD        | Windows  | 🔵 Good         | Used extensively by the author.                                  |
+| PowerShell | Windows  | 🟡 Reasonable   | It [just works if the PowerShell version is at least 7.4.][psh1] |
+| Zsh        | Posix    | 🟠 Minor Issues | Following a [discussion][zsh1], there is a [fix][zsh2].          |
+| Fish       | Posix    | 🟠 Minor Issues | See issue [#55][fsh1] and discussion [#22][fsh2].                |
 
 If you are using a different shell and have some feedback to share, please [let me know](https://github.com/binref/refinery/discussions)!
 
@@ -105,8 +127,8 @@ For example, [pcap][] is the only unit that requires a packet capture file parsi
 These libraries are not installed by default to keep the installation time for refinery at a reasonable level for first-time users.
 The corresponding units will tell you what to do when their dependency is missing:
 ```
-$ emit data.pcap | pcap [| peek ]
-(13:37:00) failure in pcap: dependencies missing; install 'pypcapkit[scapy]'
+$ emit archive.7z | xt7z -l
+(13:37:00) failure in xt7z: dependency py7zr is missing; run pip install py7zr
 ```
 You can then install these missing dependencies manually.
 If you do not want to be bothered by missing dependencies and don't mind a long refinery installation, you can install the package as follows:
@@ -114,6 +136,20 @@ If you do not want to be bothered by missing dependencies and don't mind a long 
 pip install -U binary-refinery[all]
 ```
 which will install _all_ dependencies on top of the required ones.
+More precisely, there are the following extra categories available:
+
+|       Name | Included Dependencies                                             |
+|-----------:|:------------------------------------------------------------------|
+|      `all` | all dependencies for all refinery units                           |
+|      `arc` | all archiving-related dependencies (i.e. 7zip support)            |
+|  `default` | recommended selection of reasonable dependencies, author's choice |
+|  `display` | the packages `colorama` and `jsbeautifier`                        |
+| `extended` | an extended selection, excluding only the most heavyweight ones   |
+|  `formats` | all dependencies related to parsing of various file formats       |
+|   `office` | subset of `formats`; all office-related parsing dependencies      |
+|   `python` | packages related to Python decompilation                          |
+
+You can specify any combination of these to the installation to have some control over trading dependencies for capabilities.
 
 ## Bleeding Edge
 
@@ -133,7 +169,7 @@ To run it, you have to specify the path of a virtual environment as the first co
 which will cause the script to run itself again using the interpreter of that environment.
 If you are certain that you want to run [run-pdoc3.py](run-pdoc3.py),
 there is a command line switch to force the script to run with the current default Python interpreter.
-The script installs the [pdoc3 package][pdoc3] and uses it to generate a HTML documentation for the `refinery` package.
+The script installs the [pdoc3 package][pdoc3] and uses it to generate an HTML documentation for the `refinery` package.
 The documentation can then be found in the subdirectory `html` directly next to this readme file.
 
 The [tutorials](tutorials) are Jupyter notebooks which you can simply run and execute if your virtual environment has [Jupyter installed][jupyter].
@@ -203,7 +239,7 @@ emit 0xC0A80C2A | pack -EB4 | pack -R [| sep . ]
 ```
 Perform a single byte XOR brute force and attempt to extract a PE file payload in every iteration:
 ```
-emit file.bin | rep 0x100 [|cm| xor var:index | carve-pe -R | peek | dump {name} ]
+emit file.bin | rep 0x100 [| xor v:index | carve-pe -R | peek | dump {name} ]
 ```
 
 ### Malware Config Examples
@@ -252,15 +288,30 @@ Extract payload from a shellcode loader and carve its c2:
 emit 58ba30052d249805caae0107a0e2a5a3cb85f3000ba5479fafb7767e2a5a78f3 \
   | rex yara:50607080.* [| struct LL{s:L}{} | xor -B2 accu[s]:@msvc | xtp url ]
 ```
-Extract the malicious downloader payload from a malicious document's text body:
+Get the malicious VBA macros from a forgotten time when this was how it was done:
+```
+emit ee103f8d64cd8fa884ff6a041db2f7aa403c502f54e26337c606044c2f205394 \
+  | xtvba
+```
+And then extract the malicious downloader payload:
 ```
 emit ee103f8d64cd8fa884ff6a041db2f7aa403c502f54e26337c606044c2f205394 \
   | doctxt | repl drp:c: | carve -s b64 | rev | b64 | rev | ppjscript
 ```
+Extract payload URLs from a malicious PDF document:
+```
+emit 066aec7b106f669e587b10b3e3c6745f11f1c116f7728002f30c072bd42d6253 \
+  | xt JS | csd string | csd string | url | xtp url [| urlfix ]]
+```
+Extract the payload URL from an equation editor exploit document:
+```
+emit e850f3849ea82980cf23844ad3caadf73856b2d5b0c4179847d82ce4016e80ee \
+  | officecrypt | xt oleObject | xt native | rex Y:E9[] | vstack -a=x32 -w=200 | xtp
+```
 
 ### AES Encryption
 
-Assume that `data` is a file which was encrypted with 256 bit AES in CBC mode.
+Assume that `data` is a file which was encrypted with 256-bit AES in CBC mode.
 The key was derived from the secret passphrase `swordfish` using the PBKDF2 key derivation routine using the salt `s4lty`.
 The IV is prefixed to the buffer as the first 16 bytes.
 It can be decrypted with the following pipeline:
@@ -279,7 +330,18 @@ emit "Once upon a time, at the foot of a great mountain ..." ^
     | aes pbkdf2[32,s4lty]:swordfish --iv cut:0:16 
 ```
 
+[OA]: https://www.youtube.com/c/OALabs
+[JB]: https://bin.re/
+[MH]: https://www.youtube.com/@MalwareAnalysisForHedgehogs
+[CY]: https://www.youtube.com/@jstrosch
 
+[BLOG]: https://bin.re/blog/analysing-ta551-malspam-with-binary-refinery/
+[VOD1]: https://www.youtube.com/watch?v=4gTaGfFyMK4
+[VOD2]: https://www.youtube.com/watch?v=5ZtmYNmVMKo
+[VOD3]: https://www.youtube.com/live/-B072w0qjNk
+
+[remnux]: https://hub.docker.com/r/remnux/binary-refinery
+[remnux-main]: https://remnux.org/
 [pdoc3]: https://pdoc3.github.io/pdoc/
 [docs]: https://binref.github.io/
 [argformats]: https://binref.github.io/lib/argformats.html
@@ -290,6 +352,12 @@ emit "Once upon a time, at the foot of a great mountain ..." ^
 [codecov]: https://codecov.io/gh/binref/refinery/?branch=master
 [pypi]: https://pypi.org/project/binary-refinery/
 [venv]: https://docs.python.org/3/library/venv.html
+
+[zsh1]: https://github.com/binref/refinery/discussions/18
+[zsh2]: shells/zsh
+[psh1]: https://github.com/binref/refinery/issues/5
+[fsh1]: https://github.com/binref/refinery/discussions/55
+[fsh2]: https://github.com/binref/refinery/issues/22
 
 [dump]: https://binref.github.io/#refinery.dump
 [emit]: https://binref.github.io/#refinery.emit

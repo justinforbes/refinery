@@ -10,7 +10,7 @@ import sys
 import toml
 
 __prefix__ = os.getenv('REFINERY_PREFIX') or ''
-__minver__ = '3.7'
+__minver__ = '3.8'
 __github__ = 'https://github.com/binref/refinery/'
 __gitraw__ = 'https://raw.githubusercontent.com/binref/refinery/'
 __author__ = 'Jesko Huettenhain'
@@ -70,21 +70,26 @@ def get_config():
     sys.path.insert(0, str(pathlib.Path(__file__).parent.absolute()))
 
     import refinery
-    refinery._cache.reload()
+
+    with refinery.__unit_loader__:
+        refinery.__unit_loader__.reload()
 
     def get_setup_extras(requirements: Optional[List] = None):
         all_optional: Set[str] = set()
         all_required: Set[str] = set()
-        extras: Dict[str, List[str]] = {'all': all_optional}
-        for executable in refinery._cache.cache.values():
-            if executable.optional_dependencies:
-                all_optional.update(executable.optional_dependencies)
-                extras[executable.name] = list(executable.optional_dependencies)
-            if executable.required_dependencies:
-                all_required.update(executable.required_dependencies)
-        if requirements:
+        extras: Dict[str, Set[str]] = {'all': all_optional}
+        with refinery.__unit_loader__:
+            for executable in refinery.__unit_loader__.cache.values():
+                if executable.optional_dependencies:
+                    for key, deps in executable.optional_dependencies.items():
+                        bucket = extras.setdefault(key, set())
+                        bucket.update(deps)
+                        all_optional.update(deps)
+                if executable.required_dependencies:
+                    all_required.update(executable.required_dependencies)
+        if requirements is not None:
             requirements.extend(all_required)
-        return extras
+        return {k: list(v) for k, v in extras.items()}
 
     def get_setup_readme(filename: Optional[str] = None):
         if filename is None:
@@ -117,10 +122,11 @@ def get_config():
     if __prefix__ == '!':
         console_scripts = []
     else:
-        console_scripts = [
-            F'{__prefix__}{normalize_name(name)}={path}:{name}.run'
-            for name, path in refinery._cache.units.items()
-        ]
+        with refinery.__unit_loader__:
+            console_scripts = [
+                F'{__prefix__}{normalize_name(name)}={path}:{name}.run'
+                for name, path in refinery.__unit_loader__.units.items()
+            ]
     console_scripts.append('binref=refinery.explore:explorer')
     settings = get_setup_common()
     settings['classifiers'] += [

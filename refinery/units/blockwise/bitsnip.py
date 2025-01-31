@@ -16,9 +16,12 @@ class bitsnip(BlockTransformationBase):
     given byte ordering.
     """
     def __init__(
-        self,
-        slices: Arg(help='Specify start:stop:step in Python slice syntax. Default ist 0:1.') = [slice(0, 1)],
-        bigendian=False, blocksize=1
+        self, slices: Arg(help=(
+            'Specify start:stop:size, where size can be used to pad or truncate the extracted '
+            'bits. If size is omitted, it defaults to (stop-start). If no slice is specified, '
+            'it defaults to 0, which corresponds to 0:1:1, i.e. extracting the lowest bit.')
+        ) = [slice(0, 1)],
+        bigendian=False, blocksize=None
     ):
         super().__init__(slices=slices, bigendian=bigendian, blocksize=blocksize)
 
@@ -26,15 +29,11 @@ class bitsnip(BlockTransformationBase):
         bitsnip_data = 0
         bitsnip_size = 0
         slices: List[Tuple[int, int, int]] = []
-        maxbits = 8 * self.args.blocksize
+        maxbits = 8 * self.blocksize
         args: Iterable[slice] = iter(self.args.slices)
-        indices = list(range(0, maxbits))
         bigendian: bool = self.args.bigendian
 
         for s in args:
-            if s.step is not None:
-                slices.extend((i, 1, 1) for i in indices[s])
-                continue
             start = s.start
             stop = s.stop
             if start is None:
@@ -42,12 +41,13 @@ class bitsnip(BlockTransformationBase):
             if stop is None:
                 stop = maxbits
             elif stop > maxbits:
-                raise ValueError(F'the selection {start}:{stop} is out of bounds for the block size {self.args.blocksize}')
+                raise ValueError(F'the selection {start}:{stop} is out of bounds for the block size {self.blocksize}')
             if start >= stop:
                 continue
             size = stop - start
-            mask = (1 << (stop - start)) - 1
-            slices.append((start, mask, stop - start))
+            mask = (1 << size) - 1
+            size = s.step or size
+            slices.append((start, mask, size))
 
         for item in self.chunk(data):
             for shift, mask, size in slices:
@@ -62,7 +62,7 @@ class bitsnip(BlockTransformationBase):
         length, remainder = divmod(bitsnip_size, 8)
 
         if remainder != 0:
-            self.log_info(F'discarding {bitsnip_size%8} bits')
+            self.log_info(F'discarding {bitsnip_size % 8} bits')
             if bigendian:
                 bitsnip_data >>= remainder
             else:

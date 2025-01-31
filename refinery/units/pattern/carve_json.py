@@ -10,7 +10,6 @@ from refinery.units import Arg, Unit
 _JSON_DELIMITER = re.compile(BR'[\[\]\{\}"]')
 
 _JSON_TOKEN_TO_TERMINATOR = {
-    B'"'[0]: B'"'[0],
     B'['[0]: B']'[0],
     B'{'[0]: B'}'[0],
 }
@@ -58,6 +57,7 @@ class JSONCarver:
         token = data[start]
         scope = bytearray()
         cursor = start
+        view = memoryview(data)
         scope.append(_JSON_TOKEN_TO_TERMINATOR[token])
         printable = cls._PRINTABLE_BYTES
 
@@ -69,6 +69,16 @@ class JSONCarver:
                 return None
             cursor = delim.start()
             token = data[cursor]
+            if token == 0x22:
+                while True:
+                    m = re.search(B'\\"', view[cursor + 1:])
+                    if m is not None:
+                        cursor += m.start() + 1
+                    else:
+                        return None
+                    if data[cursor - 1] != 0x5C:
+                        break
+                continue
             if token not in printable:
                 return None
             if scope[~0] == token:

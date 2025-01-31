@@ -3,7 +3,7 @@
 from ... import TestUnitBase
 
 
-class TestPEStrip(TestUnitBase):
+class TestPEDebloat(TestUnitBase):
 
     def test_section_bloat(self):
         data = self.download_sample('31c353e37946bf459b2a724fbbf2308caf82c96ae48ffcfa798ce5b117f5a8ba')
@@ -18,7 +18,7 @@ class TestPEStrip(TestUnitBase):
         data = self.download_sample('a50a4c0a38520a9f02cf59aa70c930b0491d4d67fe338a317b272d7802b6ecfb')
         bloated = data | self.ldu('xt') | bytearray
         self.assertGreaterEqual(len(bloated), 100_000_000)
-        stripped = bloated | self.ldu('pestrip') | self.load(aggressive=True, trim_text=True, trim_rsrc=True) | bytearray
+        stripped = bloated | self.ldu('pestrip') | self.load(aggressive=True, trim_code=True, trim_rsrc=True) | bytearray
         self.assertLessEqual(len(stripped), 5_000_000)
 
         stripped = bloated | self.ldu('pestrip') | self.load(resources=True) | bytearray
@@ -28,7 +28,7 @@ class TestPEStrip(TestUnitBase):
         data = self.download_sample('49fce89423749a4b0883430a077dd71d52fca0e25acf201588d0c5d186a1d33a')
         bloated = data | self.ldu('xt') | bytearray
         self.assertGreaterEqual(len(bloated), 100_000_000)
-        stripped = bloated | self.ldu('pestrip') | self.load(aggressive=True, trim_text=True, trim_rsrc=True) | bytearray
+        stripped = bloated | self.ldu('pestrip') | self.load(aggressive=True, trim_code=True, trim_rsrc=True) | bytearray
         self.assertLessEqual(len(stripped), 10_000_000)
 
         stripped = bloated | self.ldu('pestrip') | self.load(resources=True) | bytearray

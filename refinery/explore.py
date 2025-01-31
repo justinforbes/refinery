@@ -4,12 +4,14 @@
 A commandline script to search for binary refinery units based on keywords.
 """
 import re
+import argparse
 
 from refinery.lib.tools import documentation, terminalfit, get_terminal_size
 from refinery.units import ArgparseError
-from refinery.lib.argparser import RefineryArgumentParser
+from refinery.lib.argparser import RawDescriptionHelpFormatter
 
 import refinery
+import refinery.units
 
 
 def highlight(text, expression, color):
@@ -30,7 +32,7 @@ def highlight_word(text, word, color):
     return highlight(text, re.compile('(?i)' + re.escape(word)), color)
 
 
-def get_help_string(unit, brief=False, width=None):
+def get_help_string(unit, brief=False, width=None, remove_generic=False):
     """
     Retrieves the help string from a given refinery unit.
     """
@@ -49,7 +51,9 @@ def get_help_string(unit, brief=False, width=None):
             buffer = StringIO('w')
             argp.print_help(buffer)
             info = buffer.getvalue()
-            return info
+            if remove_generic:
+                info, _, _ = info.partition('\ngeneric options:\n')
+            return info.strip()
         finally:
             environment.term_size.value = _ts
 
@@ -75,11 +79,9 @@ def explorer(keyword_color='91', unit_color='93'):
         R'   binary refinery \/ full text search  ' '\n'
     )
 
-    headline = highlight_word(headline, 'keyword', keyword_color)
-    headline = highlight_word(headline, 'unit', unit_color)
-    print(headline)
+    argp = argparse.ArgumentParser(
+        formatter_class=RawDescriptionHelpFormatter, description=headline)
 
-    argp = RefineryArgumentParser()
     argp.add_argument(
         'keywords',
         metavar='keyword',
@@ -89,26 +91,17 @@ def explorer(keyword_color='91', unit_color='93'):
              'a unit, it will be listed.'
     )
     argp.add_argument(
-        '-T', '--columns',
-        dest='terminal_width',
-        metavar='N',
-        type=int,
-        default=80,
-        help='Set the terminal width to N characters, the default is 80 characters. '
-             'Setting the width to zero (-T0) will use the full terminal width.'
-    )
-    argp.add_argument(
-        '-I', '--conjunctive',
+        '-o', '--or',
         dest='quantifier',
         action='store_const',
-        const=all,
-        default=any,
-        help='All keywords must match rather than any of them.'
+        const=any,
+        default=all,
+        help='Any keywords may match rather than requiring all of them to match.'
     )
     argp.add_argument(
-        '-b', '--brief',
+        '-a', '--all',
         action='store_true',
-        help='Only search and display unit descriptions, not the full help output'
+        help='Search full help output (not just unit descriptions).'
     )
     argp.add_argument(
         '-c', '--case-sensitive',
@@ -132,7 +125,7 @@ def explorer(keyword_color='91', unit_color='93'):
         help='Do not allow wildcards in search string'
     )
     args = argp.parse_args()
-    width = args.terminal_width or get_terminal_size()
+    width = get_terminal_size()
     separator = '-' * width
     result = False
 
@@ -152,7 +145,7 @@ def explorer(keyword_color='91', unit_color='93'):
     args.keywords = [pattern(k) for k in args.keywords]
 
     for name in refinery.__all__:
-        unit = getattr(refinery, name)
+        unit = getattr(refinery, name, None)
 
         try:
             if not issubclass(unit, refinery.units.Entry) or unit is refinery.units.Entry:
@@ -160,7 +153,7 @@ def explorer(keyword_color='91', unit_color='93'):
         except TypeError:
             continue
 
-        info = get_help_string(unit, args.brief, width)
+        info = get_help_string(unit, not args.all, width, remove_generic=True)
 
         if not args.quantifier(k.search(name) or k.search(info) for k in args.keywords):
             continue
@@ -170,7 +163,7 @@ def explorer(keyword_color='91', unit_color='93'):
         for kw in args.keywords:
             info = highlight(info, kw, keyword_color)
 
-        if args.brief:
+        if not args.all:
             header = '{e:-<4}[{}]{e:-<{w}}'.format(name, w=width - len(name) - 6, e='')
             header = highlight_word(header, name, unit_color)
         else:

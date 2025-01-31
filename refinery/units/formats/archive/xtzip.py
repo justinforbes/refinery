@@ -15,56 +15,57 @@ class xtzip(ArchiveUnit):
     """
     Extract files from a Zip archive.
     """
-    @ArchiveUnit.Requires('chardet', optional=True)
+    @ArchiveUnit.Requires('chardet', 'default', 'extended')
     def _chardet():
         import chardet
         return chardet
 
-    @ArchiveUnit.Requires('pyzipper', optional=True)
+    @ArchiveUnit.Requires('pyzipper', 'arc', 'default', 'extended')
     def _pyzipper():
         import pyzipper
         return pyzipper
 
-    def unpack(self, data: bytearray):
-        if not data.startswith(B'PK'):
-            self.log_info('input file is not a zip file, attempting to carve one')
-            data = next(data | carve_zip)
-            offset = data['offset']
-            self.log_debug(F'carved a zip file from 0x{offset:X}')
+    @classmethod
+    def _carver(cls):
+        return carve_zip
 
-        from zipfile import ZipFile, ZipInfo
+    def unpack(self, data: bytearray):
+        from zipfile import ZipInfo, ZipFile
+
+        def password_invalid(password: Optional[bytes]):
+            nonlocal archive, fallback
+            if password:
+                archive.setpassword(password)
+            try:
+                archive.testzip()
+            except NotImplementedError:
+                if fallback:
+                    raise
+                self.log_debug('compression method unsupported, switching to pyzipper')
+                archive = self._pyzipper.AESZipFile(MemoryFile(data))
+                fallback = True
+                return password_invalid(password)
+            except RuntimeError as E:
+                if 'password' not in str(E):
+                    raise
+                return True
+            else:
+                if password:
+                    self.log_debug('using password:', password)
+                return False
 
         password = bytes(self.args.pwd)
+        fallback = False
         archive = ZipFile(MemoryFile(data))
+        passwords = [password]
 
-        if password:
-            archive.setpassword(password)
+        if not password:
+            passwords.extend(p.encode(self.codec) for p in self._COMMON_PASSWORDS)
+        for p in passwords:
+            if not password_invalid(p):
+                break
         else:
-            def password_invalid(pwd: Optional[str], pyzipper=False):
-                nonlocal archive
-                if pwd is not None:
-                    archive.setpassword(pwd.encode(self.codec))
-                try:
-                    archive.testzip()
-                except NotImplementedError:
-                    if pyzipper:
-                        raise
-                    self.log_debug('compression method unsupported, switching to pyzipper')
-                    archive = self._pyzipper.AESZipFile(MemoryFile(data))
-                    return password_invalid(pwd, True)
-                except RuntimeError as E:
-                    if 'password' not in str(E):
-                        raise
-                    return True
-                else:
-                    if pwd:
-                        self.log_debug('using password:', pwd)
-                    return False
-            for pwd in [None, *self._COMMON_PASSWORDS]:
-                if not password_invalid(pwd):
-                    break
-            else:
-                raise RuntimeError('Archive is password-protected.')
+            raise RuntimeError('Archive is password-protected.')
 
         for info in archive.infolist():
             def xt(archive: ZipFile = archive, info: ZipInfo = info):

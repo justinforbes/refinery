@@ -6,7 +6,7 @@ import re
 
 from contextlib import suppress
 from importlib import resources
-from datetime import datetime, timezone
+from datetime import timedelta
 from dataclasses import dataclass
 from enum import Enum
 
@@ -23,6 +23,8 @@ from refinery.lib.dotnet.header import DotNetHeader
 from refinery.units import Arg, Unit
 from refinery.units.sinks.ppjson import ppjson
 from refinery.units.formats.pe import get_pe_size
+from refinery.lib.tools import date_from_timestamp
+from refinery.lib.lcid import LCID
 
 from refinery import data
 
@@ -146,26 +148,28 @@ class pemeta(Unit):
     extracted.
     """
     def __init__(
-        self, all : Arg('-c', '--custom',
-            help='Unless enabled, all default categories will be extracted.') = True,
-        debug      : Arg('-D', help='Parse the PDB path from the debug directory.') = False,
-        dotnet     : Arg('-N', help='Parse the .NET header.') = False,
-        signatures : Arg('-S', help='Parse digital signatures.') = False,
-        timestamps : Arg('-T', help='Extract time stamps.') = False,
-        version    : Arg('-V', help='Parse the VERSION resource.') = False,
-        header     : Arg('-H', help='Parse data from the PE header.') = False,
-        exports    : Arg('-E', help='List all exported functions.') = False,
-        imports    : Arg('-I', help='List all imported functions.') = False,
-        tabular    : Arg('-t', help='Print information in a table rather than as JSON') = False,
-        timeraw    : Arg('-r', help='Extract time stamps as numbers instead of human-readable format.') = False,
+        self, custom : Arg('-c', '--custom',
+            help='Unless enabled, all default categories will be extracted.') = False,
+        debug      : Arg.Switch('-D', help='Parse the PDB path from the debug directory.') = False,
+        dotnet     : Arg.Switch('-N', help='Parse the .NET header.') = False,
+        signatures : Arg.Switch('-S', help='Parse digital signatures.') = False,
+        timestamps : Arg.Counts('-T', help='Extract time stamps. Specify twice for more detail.') = 0,
+        version    : Arg.Switch('-V', help='Parse the VERSION resource.') = False,
+        header     : Arg.Switch('-H', help='Parse base data from the PE header.') = False,
+        exports    : Arg.Counts('-E', help='List all exported functions. Specify twice to include addresses.') = 0,
+        imports    : Arg.Counts('-I', help='List all imported functions. Specify twice to include addresses.') = 0,
+        tabular    : Arg.Switch('-t', help='Print information in a table rather than as JSON') = False,
+        timeraw    : Arg.Switch('-r', help='Extract time stamps as numbers instead of human-readable format.') = False,
     ):
+        if not custom and not any((debug, dotnet, signatures, timestamps, version, header)):
+            debug = dotnet = signatures = timestamps = version = header = True
         super().__init__(
-            debug=all or debug,
-            dotnet=all or dotnet,
-            signatures=all or signatures,
-            timestamps=all or timestamps,
-            version=all or version,
-            header=all or header,
+            debug=debug,
+            dotnet=dotnet,
+            signatures=signatures,
+            timestamps=timestamps,
+            version=version,
+            header=header,
             imports=imports,
             exports=exports,
             timeraw=timeraw,
@@ -188,7 +192,7 @@ class pemeta(Unit):
     @classmethod
     def parse_signature(cls, data: bytearray) -> dict:
         """
-        Extracts a JSON-serializable and human readable dictionary with information about
+        Extracts a JSON-serializable and human-readable dictionary with information about
         time stamp and code signing certificates that are attached to the input PE file.
         """
         from refinery.units.formats.pkcs7 import pkcs7
@@ -282,9 +286,32 @@ class pemeta(Unit):
             return info
         return info
 
+    def _pe_characteristics(self, pe: PE):
+        return {name for name, mask in image_characteristics
+            if pe.FILE_HEADER.Characteristics & mask}
+
+    def _pe_address_width(self, pe: PE, default=16) -> int:
+        if 'IMAGE_FILE_16BIT_MACHINE' in self._pe_characteristics(pe):
+            return 4
+        elif MACHINE_TYPE[pe.FILE_HEADER.Machine] in ['IMAGE_FILE_MACHINE_I386']:
+            return 8
+        elif MACHINE_TYPE[pe.FILE_HEADER.Machine] in [
+            'IMAGE_FILE_MACHINE_AMD64',
+            'IMAGE_FILE_MACHINE_IA64',
+        ]:
+            return 16
+        else:
+            return default
+
+    def _vint(self, pe: PE, value: int):
+        if not self.args.tabular:
+            return value
+        aw = self._pe_address_width(pe)
+        return F'0x{value:0{aw}X}'
+
     def parse_version(self, pe: PE, data=None) -> dict:
         """
-        Extracts a JSON-serializable and human readable dictionary with information about
+        Extracts a JSON-serializable and human-readable dictionary with information about
         the version resource of an input PE file, if available.
         """
         pe.parse_data_directories(directories=[DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_RESOURCE']])
@@ -299,7 +326,7 @@ class pemeta(Unit):
                             LangID = int(LangID, 0x10) if not isinstance(LangID, int) else LangID
                             LangHi = LangID >> 0x10
                             LangLo = LangID & 0xFFFF
-                            Language = self._LCID.get(LangHi, 'Language Neutral')
+                            Language = LCID.get(LangHi, 'Language Neutral')
                             Charset = self._CHARSET.get(LangLo, 'Unknown Charset')
                             StringTableEntryParsed.update(
                                 LangID=F'{LangID:08X}',
@@ -320,35 +347,50 @@ class pemeta(Unit):
         else:
             return string_table_entries
 
-    def parse_exports(self, pe: PE, data=None) -> list:
+    def parse_exports(self, pe: PE, data=None, include_addresses=False) -> list:
         pe.parse_data_directories(directories=[DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT']])
+        base = pe.OPTIONAL_HEADER.ImageBase
         info = []
         for k, exp in enumerate(pe.DIRECTORY_ENTRY_EXPORT.symbols):
             if not exp.name:
-                info.append(F'@{k}')
+                name = F'@{k}'
             else:
-                info.append(exp.name.decode('ascii'))
+                name = exp.name.decode('ascii')
+            item = {'Name': name, 'Address': self._vint(pe, exp.address + base)} if include_addresses else name
+            info.append(item)
         return info
 
-    def parse_imports(self, pe: PE, data=None) -> list:
+    def parse_imports(self, pe: PE, data=None, include_addresses=False) -> list:
         info = {}
         dirs = []
         for name in [
             'DIRECTORY_ENTRY_IMPORT',
             'DIRECTORY_ENTRY_DELAY_IMPORT',
-            'DIRECTORY_ENTRY_BOUND_IMPORT',
         ]:
             pe.parse_data_directories(directories=[DIRECTORY_ENTRY[F'IMAGE_{name}']])
             with suppress(AttributeError):
                 dirs.append(getattr(pe, name))
+        self.log_warn(dirs)
         for idd in itertools.chain(*dirs):
-            dll = idd.dll.decode('ascii')
+            dll: bytes = idd.dll
+            dll = dll.decode('ascii')
             if dll.lower().endswith('.dll'):
-                dll = dll[:-4]
-            imports = info.setdefault(dll, [])
-            for imp in idd.imports:
-                name = imp.name and imp.name.decode('ascii') or F'@{imp.ordinal}'
-                imports.append(name)
+                dll = dll[:~3]
+            imports: list[str] = info.setdefault(dll, [])
+            with suppress(AttributeError):
+                symbols = idd.imports
+            with suppress(AttributeError):
+                symbols = idd.entries
+            try:
+                for imp in symbols:
+                    name: bytes = imp.name
+                    name = name and name.decode('ascii') or F'@{imp.ordinal}'
+                    if not include_addresses:
+                        imports.append(name)
+                    else:
+                        imports.append(dict(Name=name, Address=self._vint(pe, imp.address)))
+            except Exception as e:
+                self.log_warn(F'error parsing {name}: {e!s}')
         return info
 
     def parse_header(self, pe: PE, data=None) -> dict:
@@ -390,6 +432,7 @@ class pemeta(Unit):
 
         rich_header = pe.parse_rich_header()
         rich = []
+
         if rich_header:
             it = rich_header.get('values', [])
             if self.args.tabular:
@@ -411,10 +454,7 @@ class pemeta(Unit):
                     })
             header_information['RICH'] = rich
 
-        characteristics = [
-            name for name, mask in image_characteristics
-            if pe.FILE_HEADER.Characteristics & mask
-        ]
+        characteristics = self._pe_characteristics(pe)
         for typespec, flag in {
             'EXE': 'IMAGE_FILE_EXECUTABLE_IMAGE',
             'DLL': 'IMAGE_FILE_DLL',
@@ -422,25 +462,15 @@ class pemeta(Unit):
         }.items():
             if flag in characteristics:
                 header_information['Type'] = typespec
-        address_width = None
-        if 'IMAGE_FILE_16BIT_MACHINE' in characteristics:
-            address_width = 4
-        elif MACHINE_TYPE[pe.FILE_HEADER.Machine] in ['IMAGE_FILE_MACHINE_I386']:
-            address_width = 8
-        elif MACHINE_TYPE[pe.FILE_HEADER.Machine] in [
-            'IMAGE_FILE_MACHINE_AMD64',
-            'IMAGE_FILE_MACHINE_IA64',
-        ]:
-            address_width = 16
-        if address_width:
-            header_information['Bits'] = 4 * address_width
-        else:
-            address_width = 16
-        header_information['ImageBase'] = F'0x{pe.OPTIONAL_HEADER.ImageBase:0{address_width}X}'
+
+        base = pe.OPTIONAL_HEADER.ImageBase
+        header_information['ImageBase'] = self._vint(pe, base)
         header_information['ImageSize'] = get_pe_size(pe)
+        header_information['Bits'] = 4 * self._pe_address_width(pe, 16)
+        header_information['EntryPoint'] = self._vint(pe, pe.OPTIONAL_HEADER.AddressOfEntryPoint + base)
         return header_information
 
-    def parse_time_stamps(self, pe: PE, raw_time_stamps: bool) -> dict:
+    def parse_time_stamps(self, pe: PE, raw_time_stamps: bool, more_detail: bool) -> dict:
         """
         Extracts time stamps from the PE header (link time), as well as from the imports,
         exports, debug, and resource directory. The resource time stamp is also parsed as
@@ -449,16 +479,13 @@ class pemeta(Unit):
         if raw_time_stamps:
             def dt(ts): return ts
         else:
-            def dt(ts):
-                # parse as UTC but then forget time zone information
-                return datetime.fromtimestamp(
-                    ts,
-                    tz=timezone.utc
-                ).replace(tzinfo=None)
+            dt = date_from_timestamp
 
         pe.parse_data_directories(directories=[
             DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_IMPORT'],
             DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_EXPORT'],
+            DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT'],
+            DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT'],
             DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_DEBUG'],
             DIRECTORY_ENTRY['IMAGE_DIRECTORY_ENTRY_RESOURCE']
         ])
@@ -468,13 +495,35 @@ class pemeta(Unit):
         with suppress(AttributeError):
             info.update(Linker=dt(pe.FILE_HEADER.TimeDateStamp))
 
-        with suppress(AttributeError):
-            for entry in pe.DIRECTORY_ENTRY_IMPORT:
-                info.update(Import=dt(entry.TimeDateStamp()))
-
-        with suppress(AttributeError):
-            for entry in pe.DIRECTORY_ENTRY_DEBUG:
-                info.update(DbgDir=dt(entry.struct.TimeDateStamp))
+        for dir_name, _dll, info_key in [
+            ('DIRECTORY_ENTRY_IMPORT',       'dll',  'Import'), # noqa
+            ('DIRECTORY_ENTRY_DELAY_IMPORT', 'dll',  'Symbol'), # noqa
+            ('DIRECTORY_ENTRY_BOUND_IMPORT', 'name', 'Module'), # noqa
+        ]:
+            impts = {}
+            for entry in getattr(pe, dir_name, []):
+                ts = 0
+                with suppress(AttributeError):
+                    ts = entry.struct.dwTimeDateStamp
+                with suppress(AttributeError):
+                    ts = entry.struct.TimeDateStamp
+                if ts == 0 or ts == 0xFFFFFFFF:
+                    continue
+                name = getattr(entry, _dll, B'').decode()
+                if name.lower().endswith('.dll'):
+                    name = name[:-4]
+                impts[name] = dt(ts)
+            if not impts:
+                continue
+            if not more_detail:
+                dmin = min(impts.values())
+                dmax = max(impts.values())
+                small_delta = 2 * 60 * 60
+                if not raw_time_stamps:
+                    small_delta = timedelta(seconds=small_delta)
+                if dmax - dmin < small_delta:
+                    impts = dmin
+            info[info_key] = impts
 
         with suppress(AttributeError):
             Export = pe.DIRECTORY_ENTRY_EXPORT.struct.TimeDateStamp
@@ -490,6 +539,10 @@ class pemeta(Unit):
                     info.update(RsrcTS=dt(res_timestamp))
 
         def norm(value):
+            if isinstance(value, list):
+                return [norm(v) for v in value]
+            if isinstance(value, dict):
+                return {k: norm(v) for k, v in value.items()}
             if isinstance(value, int):
                 return value
             return str(value)
@@ -498,7 +551,7 @@ class pemeta(Unit):
 
     def parse_dotnet(self, pe: PE, data):
         """
-        Extracts a JSON-serializable and human readable dictionary with information about
+        Extracts a JSON-serializable and human-readable dictionary with information about
         the .NET metadata of an input PE file.
         """
         header = DotNetHeader(data, pe=pe)
@@ -524,8 +577,8 @@ class pemeta(Unit):
             )
 
         try:
-            entry = header.head.EntryPointToken + pe.OPTIONAL_HEADER.ImageBase
-            info.update(EntryPoint=F'0x{entry:08X}')
+            entry = self._vint(pe, header.head.EntryPointToken + pe.OPTIONAL_HEADER.ImageBase)
+            info.update(EntryPoint=entry)
         except AttributeError:
             pass
 
@@ -567,8 +620,11 @@ class pemeta(Unit):
             if not switch:
                 continue
             self.log_debug(F'parsing: {name}')
+            args = pe, data
+            if switch > 1:
+                args = *args, True
             try:
-                info = resolver(pe, data)
+                info = resolver(*args)
             except Exception as E:
                 self.log_info(F'failed to obtain {name}: {E!s}')
                 continue
@@ -583,7 +639,7 @@ class pemeta(Unit):
                 signature = self.parse_signature(next(data | pesig))
 
         if self.args.timestamps:
-            ts = self.parse_time_stamps(pe, self.args.timeraw)
+            ts = self.parse_time_stamps(pe, self.args.timeraw, self.args.timestamps > 1)
             with suppress(KeyError):
                 ts.update(Signed=signature['Timestamp'])
             result.update(TimeStamp=ts)
@@ -593,240 +649,6 @@ class pemeta(Unit):
 
         if result:
             yield from ppjson(tabular=self.args.tabular)._pretty_output(result, indent=4, ensure_ascii=False)
-
-    _LCID = {
-        0x0C00: 'Default Custom Locale Language',
-        0x1400: 'Default Custom MUI Locale Language',
-        0x007F: 'Invariant Locale Language',
-        0x0000: 'Neutral Locale Language',
-        0x0800: 'System Default Locale Language',
-        0x1000: 'Unspecified Custom Locale Language',
-        0x0400: 'User Default Locale Language',
-        0x0436: 'Afrikaans-South Africa',
-        0x041c: 'Albanian-Albania',
-        0x045e: 'Amharic-Ethiopia',
-        0x0401: 'Arabic (Saudi Arabia)',
-        0x1401: 'Arabic (Algeria)',
-        0x3c01: 'Arabic (Bahrain)',
-        0x0c01: 'Arabic (Egypt)',
-        0x0801: 'Arabic (Iraq)',
-        0x2c01: 'Arabic (Jordan)',
-        0x3401: 'Arabic (Kuwait)',
-        0x3001: 'Arabic (Lebanon)',
-        0x1001: 'Arabic (Libya)',
-        0x1801: 'Arabic (Morocco)',
-        0x2001: 'Arabic (Oman)',
-        0x4001: 'Arabic (Qatar)',
-        0x2801: 'Arabic (Syria)',
-        0x1c01: 'Arabic (Tunisia)',
-        0x3801: 'Arabic (U.A.E.)',
-        0x2401: 'Arabic (Yemen)',
-        0x042b: 'Armenian-Armenia',
-        0x044d: 'Assamese',
-        0x082c: 'Azeri (Cyrillic)',
-        0x042c: 'Azeri (Latin)',
-        0x042d: 'Basque',
-        0x0423: 'Belarusian',
-        0x0445: 'Bengali (India)',
-        0x0845: 'Bengali (Bangladesh)',
-        0x141A: 'Bosnian (Bosnia/Herzegovina)',
-        0x0402: 'Bulgarian',
-        0x0455: 'Burmese',
-        0x0403: 'Catalan',
-        0x045c: 'Cherokee-United States',
-        0x0804: 'Chinese (People\'s Republic of China)',
-        0x1004: 'Chinese (Singapore)',
-        0x0404: 'Chinese (Taiwan)',
-        0x0c04: 'Chinese (Hong Kong SAR)',
-        0x1404: 'Chinese (Macao SAR)',
-        0x041a: 'Croatian',
-        0x101a: 'Croatian (Bosnia/Herzegovina)',
-        0x0405: 'Czech',
-        0x0406: 'Danish',
-        0x0465: 'Divehi',
-        0x0413: 'Dutch-Netherlands',
-        0x0813: 'Dutch-Belgium',
-        0x0466: 'Edo',
-        0x0409: 'English (United States)',
-        0x0809: 'English (United Kingdom)',
-        0x0c09: 'English (Australia)',
-        0x2809: 'English (Belize)',
-        0x1009: 'English (Canada)',
-        0x2409: 'English (Caribbean)',
-        0x3c09: 'English (Hong Kong SAR)',
-        0x4009: 'English (India)',
-        0x3809: 'English (Indonesia)',
-        0x1809: 'English (Ireland)',
-        0x2009: 'English (Jamaica)',
-        0x4409: 'English (Malaysia)',
-        0x1409: 'English (New Zealand)',
-        0x3409: 'English (Philippines)',
-        0x4809: 'English (Singapore)',
-        0x1c09: 'English (South Africa)',
-        0x2c09: 'English (Trinidad)',
-        0x3009: 'English (Zimbabwe)',
-        0x0425: 'Estonian',
-        0x0438: 'Faroese',
-        0x0429: 'Farsi',
-        0x0464: 'Filipino',
-        0x040b: 'Finnish',
-        0x040c: 'French (France)',
-        0x080c: 'French (Belgium)',
-        0x2c0c: 'French (Cameroon)',
-        0x0c0c: 'French (Canada)',
-        0x240c: 'French (Democratic Rep. of Congo)',
-        0x300c: 'French (Cote d\'Ivoire)',
-        0x3c0c: 'French (Haiti)',
-        0x140c: 'French (Luxembourg)',
-        0x340c: 'French (Mali)',
-        0x180c: 'French (Monaco)',
-        0x380c: 'French (Morocco)',
-        0xe40c: 'French (North Africa)',
-        0x200c: 'French (Reunion)',
-        0x280c: 'French (Senegal)',
-        0x100c: 'French (Switzerland)',
-        0x1c0c: 'French (West Indies)',
-        0x0462: 'Frisian-Netherlands',
-        0x0467: 'Fulfulde-Nigeria',
-        0x042f: 'FYRO Macedonian',
-        0x083c: 'Gaelic (Ireland)',
-        0x043c: 'Gaelic (Scotland)',
-        0x0456: 'Galician',
-        0x0437: 'Georgian',
-        0x0407: 'German (Germany)',
-        0x0c07: 'German (Austria)',
-        0x1407: 'German (Liechtenstein)',
-        0x1007: 'German (Luxembourg)',
-        0x0807: 'German (Switzerland)',
-        0x0408: 'Greek',
-        0x0474: 'Guarani-Paraguay',
-        0x0447: 'Gujarati',
-        0x0468: 'Hausa-Nigeria',
-        0x0475: 'Hawaiian (United States)',
-        0x040d: 'Hebrew',
-        0x0439: 'Hindi',
-        0x040e: 'Hungarian',
-        0x0469: 'Ibibio-Nigeria',
-        0x040f: 'Icelandic',
-        0x0470: 'Igbo-Nigeria',
-        0x0421: 'Indonesian',
-        0x045d: 'Inuktitut',
-        0x0410: 'Italian (Italy)',
-        0x0810: 'Italian (Switzerland)',
-        0x0411: 'Japanese',
-        0x044b: 'Kannada',
-        0x0471: 'Kanuri-Nigeria',
-        0x0860: 'Kashmiri',
-        0x0460: 'Kashmiri (Arabic)',
-        0x043f: 'Kazakh',
-        0x0453: 'Khmer',
-        0x0457: 'Konkani',
-        0x0412: 'Korean',
-        0x0440: 'Kyrgyz (Cyrillic)',
-        0x0454: 'Lao',
-        0x0476: 'Latin',
-        0x0426: 'Latvian',
-        0x0427: 'Lithuanian',
-        0x043e: 'Malay-Malaysia',
-        0x083e: 'Malay-Brunei Darussalam',
-        0x044c: 'Malayalam',
-        0x043a: 'Maltese',
-        0x0458: 'Manipuri',
-        0x0481: 'Maori-New Zealand',
-        0x044e: 'Marathi',
-        0x0450: 'Mongolian (Cyrillic)',
-        0x0850: 'Mongolian (Mongolian)',
-        0x0461: 'Nepali',
-        0x0861: 'Nepali-India',
-        0x0414: 'Norwegian (Bokmål)',
-        0x0814: 'Norwegian (Nynorsk)',
-        0x0448: 'Oriya',
-        0x0472: 'Oromo',
-        0x0479: 'Papiamentu',
-        0x0463: 'Pashto',
-        0x0415: 'Polish',
-        0x0416: 'Portuguese-Brazil',
-        0x0816: 'Portuguese-Portugal',
-        0x0446: 'Punjabi',
-        0x0846: 'Punjabi (Pakistan)',
-        0x046B: 'Quecha (Bolivia)',
-        0x086B: 'Quecha (Ecuador)',
-        0x0C6B: 'Quecha (Peru)',
-        0x0417: 'Rhaeto-Romanic',
-        0x0418: 'Romanian',
-        0x0818: 'Romanian (Moldava)',
-        0x0419: 'Russian',
-        0x0819: 'Russian (Moldava)',
-        0x043b: 'Sami (Lappish)',
-        0x044f: 'Sanskrit',
-        0x046c: 'Sepedi',
-        0x0c1a: 'Serbian (Cyrillic)',
-        0x081a: 'Serbian (Latin)',
-        0x0459: 'Sindhi (India)',
-        0x0859: 'Sindhi (Pakistan)',
-        0x045b: 'Sinhalese-Sri Lanka',
-        0x041b: 'Slovak',
-        0x0424: 'Slovenian',
-        0x0477: 'Somali',
-        0x042e: 'Sorbian',
-        0x0c0a: 'Spanish (Modern Sort)',
-        0x040a: 'Spanish (Traditional Sort)',
-        0x2c0a: 'Spanish (Argentina)',
-        0x400a: 'Spanish (Bolivia)',
-        0x340a: 'Spanish (Chile)',
-        0x240a: 'Spanish (Colombia)',
-        0x140a: 'Spanish (Costa Rica)',
-        0x1c0a: 'Spanish (Dominican Republic)',
-        0x300a: 'Spanish (Ecuador)',
-        0x440a: 'Spanish (El Salvador)',
-        0x100a: 'Spanish (Guatemala)',
-        0x480a: 'Spanish (Honduras)',
-        0x580a: 'Spanish (Latin America)',
-        0x080a: 'Spanish (Mexico)',
-        0x4c0a: 'Spanish (Nicaragua)',
-        0x180a: 'Spanish (Panama)',
-        0x3c0a: 'Spanish (Paraguay)',
-        0x280a: 'Spanish (Peru)',
-        0x500a: 'Spanish (Puerto Rico)',
-        0x540a: 'Spanish (United States)',
-        0x380a: 'Spanish (Uruguay)',
-        0x200a: 'Spanish (Venezuela)',
-        0x0430: 'Sutu',
-        0x0441: 'Swahili',
-        0x041d: 'Swedish',
-        0x081d: 'Swedish-Finland',
-        0x045a: 'Syriac',
-        0x0428: 'Tajik',
-        0x045f: 'Tamazight (Arabic)',
-        0x085f: 'Tamazight (Latin)',
-        0x0449: 'Tamil',
-        0x0444: 'Tatar',
-        0x044a: 'Telugu',
-        0x041e: 'Thai',
-        0x0851: 'Tibetan (Bhutan)',
-        0x0451: 'Tibetan (People\'s Republic of China)',
-        0x0873: 'Tigrigna (Eritrea)',
-        0x0473: 'Tigrigna (Ethiopia)',
-        0x0431: 'Tsonga',
-        0x0432: 'Tswana',
-        0x041f: 'Turkish',
-        0x0442: 'Turkmen',
-        0x0480: 'Uighur-China',
-        0x0422: 'Ukrainian',
-        0x0420: 'Urdu',
-        0x0820: 'Urdu-India',
-        0x0843: 'Uzbek (Cyrillic)',
-        0x0443: 'Uzbek (Latin)',
-        0x0433: 'Venda',
-        0x042a: 'Vietnamese',
-        0x0452: 'Welsh',
-        0x0434: 'Xhosa',
-        0x0478: 'Yi',
-        0x043d: 'Yiddish',
-        0x046a: 'Yoruba',
-        0x0435: 'Zulu',
-        0x04ff: 'HID (Human Interface DeVITe)'
-    }
 
     _CHARSET = {
         0x0000: '7-bit ASCII',
