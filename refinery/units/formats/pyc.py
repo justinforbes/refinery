@@ -15,9 +15,7 @@ class pyc(ArchiveUnit):
     def unpack(self, data):
         input_path = metavars(data).get(self.args.path.decode(self.codec))
         for k, code in enumerate(extract_code_from_buffer(bytes(data), input_path)):
-            if (co := code.container) is None:
-                raise ValueError('could not find code in buffer')
-            path = co.co_filename or F'__unknown_name_{k:02d}.py'
+            path = code.container.co_filename or F'__unknown_name_{k:02d}.py'
             date = datetime.fromtimestamp(code.timestamp)
             data = decompile_buffer(code)
             yield self._pack(path, date, data)

@@ -75,6 +75,8 @@ def extract_code_from_buffer(buffer: ByteStr, file_name: Optional[str] = None) -
     load = xdis.load.load_module_from_file_object
     with NoLogging(NoLogging.Mode.STD_ERR):
         version, timestamp, magic_int, codes, is_pypy, _, _ = load(MemoryFile(buffer), file_name, code_objects)
+    if codes is None:
+        raise ValueError('unable to extract code from buffer')
     if not isinstance(codes, list):
         codes = [codes]
     for code in codes:
