@@ -9,6 +9,9 @@ literal, and removes the dead definitions.
 """
 from __future__ import annotations
 
+import base64
+import enum
+
 from refinery.lib.scripts import (
     Node,
     Transformer,
@@ -30,9 +33,11 @@ from refinery.lib.scripts.js.model import (
     JsFunctionDeclaration,
     JsFunctionExpression,
     JsIdentifier,
+    JsIfStatement,
     JsNumericLiteral,
     JsParenthesizedExpression,
     JsScript,
+    JsStringLiteral,
     JsUnaryExpression,
     JsVariableDeclaration,
     JsVariableDeclarator,
@@ -40,6 +45,12 @@ from refinery.lib.scripts.js.model import (
 )
 
 from typing import NamedTuple, Sequence
+
+
+class Encoding(enum.Enum):
+    NONE = 'none'
+    B64 = 'base64'
+    RC4 = 'rc4'
 
 
 class ArrayFunction(NamedTuple):
@@ -266,28 +277,65 @@ def _extract_checksum_expression(
     return ChecksumInfo(checksum_node, local_accessor)
 
 
+def _extract_rc4_key(call: JsCallExpression, encoding: Encoding) -> str | None:
+    """
+    Extract the RC4 decryption key from the second argument of an accessor call, if present.
+    Returns None for non-RC4 encodings or when no key argument is available.
+    """
+    if (
+        encoding == Encoding.RC4
+        and len(call.arguments) >= 2
+        and isinstance(call.arguments[1], JsStringLiteral)
+    ):
+        return call.arguments[1].value
+    return None
+
+
+def _decode_string(raw: str, encoding: Encoding, key: str | None = None) -> str:
+    """
+    Decode a raw string from the array according to the encoding mode. For RC4, a key must be
+    supplied. Raises _EvalError when decoding is not possible.
+    """
+    if encoding == Encoding.NONE:
+        return raw
+    try:
+        if encoding == Encoding.B64:
+            return _decode_base64(raw)
+        if encoding == Encoding.RC4:
+            if key is None:
+                raise _EvalError
+            return _decrypt_rc4(raw, key)
+    except _EvalError:
+        raise
+    except (UnicodeDecodeError, ValueError):
+        raise _EvalError
+    raise _EvalError
+
+
 def _eval_checksum(
     node: Node,
     local_accessor: str,
     strings: list[str],
     base_offset: int,
+    encoding: Encoding = Encoding.NONE,
 ) -> float:
     """
     Evaluate a checksum expression against the current array state. Handles the arithmetic
     operators (+, -, *, /), unary negation, parentheses, parseInt calls on accessor lookups,
     and numeric literals. Raises _EvalError on any unrecognized pattern.
     """
+    recurse = lambda n: _eval_checksum(n, local_accessor, strings, base_offset, encoding)
     if isinstance(node, JsNumericLiteral):
         return float(node.value)
     if isinstance(node, JsParenthesizedExpression) and node.expression:
-        return _eval_checksum(node.expression, local_accessor, strings, base_offset)
+        return recurse(node.expression)
     if isinstance(node, JsUnaryExpression) and node.operator == '-' and node.operand:
-        return -_eval_checksum(node.operand, local_accessor, strings, base_offset)
+        return -recurse(node.operand)
     if isinstance(node, JsUnaryExpression) and node.operator == '+' and node.operand:
-        return _eval_checksum(node.operand, local_accessor, strings, base_offset)
+        return recurse(node.operand)
     if isinstance(node, JsBinaryExpression) and node.left and node.right:
-        left = _eval_checksum(node.left, local_accessor, strings, base_offset)
-        right = _eval_checksum(node.right, local_accessor, strings, base_offset)
+        left = recurse(node.left)
+        right = recurse(node.right)
         fn = BINARY_OPS.get(node.operator)
         if fn is not None:
             if node.operator == '/' and right == 0:
@@ -303,7 +351,10 @@ def _eval_checksum(
                     if isinstance(arg, JsNumericLiteral):
                         idx = int(arg.value) - base_offset
                         if 0 <= idx < len(strings):
-                            result = js_parse_int(strings[idx])
+                            raw = strings[idx]
+                            key = _extract_rc4_key(inner, encoding)
+                            decoded = _decode_string(raw, encoding, key)
+                            result = js_parse_int(decoded)
                             if result is None:
                                 raise _EvalError
                             return float(result)
@@ -317,22 +368,24 @@ def _simulate_rotation(
     checksum_node: Node,
     local_accessor: str,
     target: int,
+    encoding: Encoding = Encoding.NONE,
 ) -> list[str] | None:
     """
     Simulate the array rotation loop. For each rotation position, evaluate the checksum
     expression against the current array state. Stop when the checksum matches the target,
     or bail after len(strings) attempts.
     """
-    arr = list(strings)
-    n = len(arr)
+    array = list(strings)
+    n = len(array)
     for _ in range(n):
         try:
-            checksum = _eval_checksum(checksum_node, local_accessor, arr, base_offset)
-            if int(checksum) == target:
-                return arr
+            if int(_eval_checksum(
+                checksum_node, local_accessor, array, base_offset, encoding,
+            )) == target:
+                return array
         except _EvalError:
             pass
-        arr.append(arr.pop(0))
+        array.append(array.pop(0))
     return None
 
 
@@ -355,9 +408,87 @@ def _collect_accessor_aliases(body: Sequence[Node], accessor_name: str) -> set[s
     return aliases
 
 
-def _replace_accessor_calls(root: Node, aliases: set[str], lookup: dict[int, str]):
+_B64_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/='
+_B64_STANDARD = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/='
+_B64_TRANSLATE = str.maketrans(_B64_ALPHABET, _B64_STANDARD)
+
+
+def _detect_encoding(accessor_node: JsFunctionDeclaration) -> Encoding:
     """
-    Walk the entire AST and replace accessor calls with resolved string literals.
+    Detect the string encoding mode by inspecting the accessor function body. The base64 and RC4
+    variants inject an ``if (NAME['...'] === undefined)`` init guard that contains the base64
+    alphabet string and one (base64) or two (RC4) inner function definitions.
+    """
+    if accessor_node.body is None:
+        return Encoding.NONE
+    for stmt in accessor_node.body.body:
+        if not isinstance(stmt, JsIfStatement):
+            continue
+        inner_functions = 0
+        has_alphabet = False
+        for child in stmt.walk():
+            if isinstance(child, JsStringLiteral) and child.value == _B64_ALPHABET:
+                has_alphabet = True
+            if (
+                isinstance(child, JsVariableDeclarator)
+                and isinstance(child.init, JsFunctionExpression)
+            ):
+                inner_functions += 1
+        if has_alphabet:
+            return Encoding.RC4 if inner_functions >= 2 else Encoding.B64
+    return Encoding.NONE
+
+
+def _custom_b64decode(s: str) -> bytes:
+    """
+    Decode a string using the obfuscator's custom base64 alphabet (lowercase letters first)
+    and tolerate missing padding.
+    """
+    translated = s.translate(_B64_TRANSLATE)
+    pad = len(translated) % 4
+    if pad:
+        translated += '=' * (4 - pad)
+    return base64.b64decode(translated)
+
+
+def _decode_base64(s: str) -> str:
+    """
+    Decode a base64-encoded string as produced by the obfuscator.
+    """
+    return _custom_b64decode(s).decode('utf-8')
+
+
+def _decrypt_rc4(s: str, key: str) -> str:
+    """
+    Base64-decode, UTF-8-decode, then RC4-decrypt a string using the given key. The obfuscator's
+    RC4 operates on Unicode character codes (after UTF-8 decode), not raw bytes, because its
+    inline atob uses ``decodeURIComponent`` which interprets the base64 output as UTF-8.
+    """
+    data = _decode_base64(s)
+    sbox = list(range(256))
+    j = 0
+    for i in range(256):
+        j = (j + sbox[i] + ord(key[i % len(key)])) % 256
+        sbox[i], sbox[j] = sbox[j], sbox[i]
+    i = j = 0
+    out: list[str] = []
+    for ch in data:
+        i = (i + 1) % 256
+        j = (j + sbox[i]) % 256
+        sbox[i], sbox[j] = sbox[j], sbox[i]
+        out.append(chr(ord(ch) ^ sbox[(sbox[i] + sbox[j]) % 256]))
+    return ''.join(out)
+
+
+def _replace_accessor_calls(
+    root: Node,
+    aliases: set[str],
+    raw_lookup: dict[int, str],
+    encoding: Encoding,
+):
+    """
+    Walk the entire AST and replace accessor calls with decoded string literals. For RC4, the
+    decryption key is taken from the second argument at each call site.
     """
     for node in list(root.walk()):
         if not isinstance(node, JsCallExpression):
@@ -372,11 +503,15 @@ def _replace_accessor_calls(root: Node, aliases: set[str], lookup: dict[int, str
         if not isinstance(arg, JsNumericLiteral):
             continue
         idx = int(arg.value)
-        value = lookup.get(idx)
-        if value is None:
+        raw = raw_lookup.get(idx)
+        if raw is None:
             continue
-        replacement = make_string_literal(value)
-        _replace_in_parent(node, replacement)
+        key = _extract_rc4_key(node, encoding)
+        try:
+            value = _decode_string(raw, encoding, key)
+        except _EvalError:
+            continue
+        _replace_in_parent(node, make_string_literal(value))
 
 
 class JsStringArrayResolver(Transformer):
@@ -395,19 +530,21 @@ class JsStringArrayResolver(Transformer):
         checksum = _extract_checksum_expression(rotation.body, accessor.name)
         if checksum is None:
             return None
+        encoding = _detect_encoding(accessor.node)
         resolved = _simulate_rotation(
             array.strings,
             accessor.base_offset,
             checksum.node,
             checksum.local_accessor,
             rotation.target,
+            encoding,
         )
         if resolved is None:
             return None
         aliases = _collect_accessor_aliases(body, accessor.name)
         aliases.add(accessor.name)
-        lookup = {i + accessor.base_offset: s for i, s in enumerate(resolved)}
-        _replace_accessor_calls(node, aliases, lookup)
+        raw_lookup = {i + accessor.base_offset: s for i, s in enumerate(resolved)}
+        _replace_accessor_calls(node, aliases, raw_lookup, encoding)
         _remove_from_parent(array.node)
         _remove_from_parent(accessor.node)
         _remove_from_parent(rotation.node)
