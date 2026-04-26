@@ -6,7 +6,11 @@ from __future__ import annotations
 from refinery.lib.scripts import Transformer
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     BINARY_OPS,
+    RELATIONAL_OPS,
     is_literal,
+    is_nullish,
+    is_statically_evaluable,
+    is_truthy,
     is_valid_identifier,
     make_numeric_literal,
     make_string_literal,
@@ -18,8 +22,11 @@ from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsBinaryExpression,
     JsBooleanLiteral,
+    JsConditionalExpression,
     JsIdentifier,
+    JsLogicalExpression,
     JsMemberExpression,
+    JsNullLiteral,
     JsNumericLiteral,
     JsParenthesizedExpression,
     JsSequenceExpression,
@@ -61,7 +68,39 @@ class JsSimplifications(Transformer):
                 except (ValueError, OverflowError):
                     return None
                 return make_numeric_literal(result)
+        if op in ('===', '!==', '==', '!='):
+            equal: bool | None = None
+            if left_str is not None and right_str is not None:
+                equal = left_str == right_str
+            elif left_num is not None and right_num is not None:
+                equal = left_num == right_num
+            elif (
+                isinstance(node.left, JsBooleanLiteral)
+                and isinstance(node.right, JsBooleanLiteral)
+            ):
+                equal = node.left.value == node.right.value
+            elif (
+                isinstance(node.left, JsNullLiteral)
+                and isinstance(node.right, JsNullLiteral)
+            ):
+                equal = True
+            if equal is not None:
+                return JsBooleanLiteral(value=equal if op in ('===', '==') else not equal)
+        if op in RELATIONAL_OPS:
+            if left_num is not None and right_num is not None:
+                return JsBooleanLiteral(value=RELATIONAL_OPS[op](left_num, right_num))
+            if left_str is not None and right_str is not None:
+                return JsBooleanLiteral(value=RELATIONAL_OPS[op](left_str, right_str))
         return None
+
+    def visit_JsConditionalExpression(self, node: JsConditionalExpression):
+        self.generic_visit(node)
+        if node.test is None or not is_statically_evaluable(node.test):
+            return None
+        truthy = is_truthy(node.test)
+        if truthy is None:
+            return None
+        return node.consequent if truthy else node.alternate
 
     def visit_JsParenthesizedExpression(self, node: JsParenthesizedExpression):
         self.generic_visit(node)
@@ -102,15 +141,23 @@ class JsSimplifications(Transformer):
         if node.operand is None:
             return None
         op = node.operator
-        if op == '!' and isinstance(node.operand, JsNumericLiteral):
-            if node.operand.value == 0:
-                return JsBooleanLiteral(value=True)
-            if node.operand.value == 1:
-                return JsBooleanLiteral(value=False)
+        if op == '!' and is_statically_evaluable(node.operand):
+            truthy = is_truthy(node.operand)
+            if truthy is not None:
+                return JsBooleanLiteral(value=not truthy)
         if op == '-' and isinstance(node.operand, JsNumericLiteral):
             return make_numeric_literal(-node.operand.value)
         if op == '+' and isinstance(node.operand, JsNumericLiteral):
             return node.operand
+        if op == '~' and isinstance(node.operand, JsNumericLiteral):
+            try:
+                v = int(node.operand.value) & 0xFFFFFFFF
+                v = ~v & 0xFFFFFFFF
+                if v >= 0x80000000:
+                    v -= 0x100000000
+                return make_numeric_literal(v)
+            except (ValueError, OverflowError):
+                pass
         if op == 'typeof' and is_literal(node.operand):
             if isinstance(node.operand, JsNumericLiteral):
                 return make_string_literal('number')
@@ -128,4 +175,24 @@ class JsSimplifications(Transformer):
         if result is not None:
             node.raw = result
             self.mark_changed()
+        return None
+
+    def visit_JsLogicalExpression(self, node: JsLogicalExpression):
+        self.generic_visit(node)
+        if node.left is None or node.right is None:
+            return None
+        if not is_statically_evaluable(node.left):
+            return None
+        op = node.operator
+        if op == '??':
+            if is_nullish(node.left):
+                return node.right
+            return node.left
+        truthy = is_truthy(node.left)
+        if truthy is None:
+            return None
+        if op == '&&':
+            return node.right if truthy else node.left
+        if op == '||':
+            return node.left if truthy else node.right
         return None

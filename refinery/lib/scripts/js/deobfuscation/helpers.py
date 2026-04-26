@@ -6,7 +6,7 @@ from __future__ import annotations
 import operator
 import re
 
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 from refinery.lib.scripts import Expression, Node
 from refinery.lib.scripts.js.model import (
@@ -17,6 +17,9 @@ from refinery.lib.scripts.js.model import (
     JsStringLiteral,
 )
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
+
+if  TYPE_CHECKING:
+    from typing import TypeGuard
 
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_$][a-zA-Z_$0-9]*$')
 
@@ -34,6 +37,13 @@ BINARY_OPS: dict[str, Callable] = {
     '^'  : operator.xor,
     '<<' : operator.lshift,
     '>>' : operator.rshift,
+}
+
+RELATIONAL_OPS: dict[str, Callable] = {
+    '<' : operator.lt,
+    '>' : operator.gt,
+    '<=': operator.le,
+    '>=': operator.ge,
 }
 
 
@@ -77,7 +87,7 @@ def make_numeric_literal(value: int | float) -> JsNumericLiteral:
     return JsNumericLiteral(value=value, raw=raw)
 
 
-def is_literal(node: Node) -> bool:
+def is_literal(node: Node) -> TypeGuard[JsStringLiteral | JsNumericLiteral | JsBooleanLiteral | JsNullLiteral]:
     return isinstance(node, (
         JsStringLiteral, JsNumericLiteral, JsBooleanLiteral, JsNullLiteral,
     ))
@@ -92,6 +102,44 @@ def is_simple_expression(node: Node) -> bool:
     Check whether a node is a side-effect-free leaf expression: a literal value or an identifier.
     """
     return is_literal(node) or isinstance(node, JsIdentifier)
+
+
+def is_truthy(node: Node) -> bool | None:
+    """
+    Return the JavaScript truthiness of a literal node, or ``None`` when the value cannot be
+    determined statically.
+    """
+    if isinstance(node, JsBooleanLiteral):
+        return node.value
+    if isinstance(node, JsNumericLiteral):
+        # return correct value for NaN
+        return (v := node.value) != 0 and v == v
+    if isinstance(node, JsStringLiteral):
+        return bool(node.value)
+    if isinstance(node, JsNullLiteral):
+        return False
+    if isinstance(node, JsIdentifier) and node.name == 'undefined':
+        return False
+    return None
+
+
+def is_statically_evaluable(node: Node) -> bool:
+    """
+    Return whether the node can be evaluated to a known truthiness at transform time. This
+    includes all literal types and the ``undefined`` identifier.
+    """
+    return is_literal(node) or (isinstance(node, JsIdentifier) and node.name == 'undefined')
+
+
+def is_nullish(node: Node) -> bool:
+    """
+    Return whether the node is statically known to be ``null`` or ``undefined``.
+    """
+    if isinstance(node, JsNullLiteral):
+        return True
+    if isinstance(node, JsIdentifier) and node.name == 'undefined':
+        return True
+    return False
 
 
 _HEX_ESCAPE = re.compile(r'\\x([0-9A-Fa-f]{2})|\\u00([0-9A-Fa-f]{2})')

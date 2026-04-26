@@ -82,7 +82,9 @@ class JsBooleanLiteral(Expression):
 
 @dataclass(repr=False, eq=False)
 class JsNullLiteral(Expression):
-    pass
+    @property
+    def value(self):
+        return None
 
 
 @dataclass(repr=False, eq=False)

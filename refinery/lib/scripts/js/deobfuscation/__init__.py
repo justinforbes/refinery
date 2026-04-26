@@ -3,6 +3,7 @@ JavaScript AST deobfuscation transforms.
 """
 from __future__ import annotations
 
+from refinery.lib.scripts.js.deobfuscation.deadcode import JsDeadCodeElimination
 from refinery.lib.scripts.js.deobfuscation.simplify import JsSimplifications
 from refinery.lib.scripts.js.deobfuscation.stringarray import JsStringArrayResolver
 from refinery.lib.scripts.js.deobfuscation.wrappers import JsCallWrapperInliner
@@ -13,7 +14,7 @@ _pipeline = DeobfuscationPipeline(
     groups=[
         TransformerGroup('wrappers', JsCallWrapperInliner),
         TransformerGroup('stringarray', JsStringArrayResolver),
-        TransformerGroup('simplify', JsSimplifications),
+        TransformerGroup('simplify', JsSimplifications, JsDeadCodeElimination),
     ],
     dependencies={
         'stringarray': {'wrappers'},

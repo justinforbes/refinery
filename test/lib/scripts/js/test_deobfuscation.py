@@ -3,7 +3,9 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts.js.deobfuscation import deobfuscate
+from refinery.lib.scripts.js.deobfuscation.deadcode import JsDeadCodeElimination
 from refinery.lib.scripts.js.deobfuscation.helpers import make_string_literal
+from refinery.lib.scripts.js.deobfuscation.simplify import JsSimplifications
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
@@ -380,3 +382,264 @@ class TestCallWrapperInliner(TestJsDeobfuscator):
         self.assertNotIn('outer', result)
         self.assertNotIn('inner', result)
         self.assertIn('target(18)', result)
+
+
+class TestDeadCodeElimination(TestJsDeobfuscator):
+
+    def test_if_true_keeps_consequent(self):
+        result = self._deobfuscate('if (true) { x(); } else { y(); }')
+        self.assertIn('x()', result)
+        self.assertNotIn('y()', result)
+        self.assertNotIn('if', result)
+
+    def test_if_false_keeps_alternate(self):
+        result = self._deobfuscate('if (false) { x(); } else { y(); }')
+        self.assertIn('y()', result)
+        self.assertNotIn('x()', result)
+        self.assertNotIn('if', result)
+
+    def test_if_false_no_else_removed(self):
+        result = self._deobfuscate('if (false) { x(); }')
+        self.assertNotIn('x()', result)
+        self.assertNotIn('if', result)
+
+    def test_if_true_splices_block(self):
+        result = self._deobfuscate(
+            'var a = 1; if (true) { var b = 2; var c = 3; } var d = 4;'
+        )
+        self.assertIn('var a = 1', result)
+        self.assertIn('var b = 2', result)
+        self.assertIn('var c = 3', result)
+        self.assertIn('var d = 4', result)
+        self.assertNotIn('if', result)
+
+    def test_ternary_true(self):
+        result = self._deobfuscate("var x = true ? 'a' : 'b';")
+        self.assertIn("'a'", result)
+        self.assertNotIn("'b'", result)
+
+    def test_ternary_false(self):
+        result = self._deobfuscate("var x = false ? 'a' : 'b';")
+        self.assertIn("'b'", result)
+        self.assertNotIn("'a'", result)
+
+    def test_dead_code_string_comparison(self):
+        result = self._deobfuscate(
+            "if ('hello' === 'world') { dead(); } else { live(); }"
+        )
+        self.assertIn('live()', result)
+        self.assertNotIn('dead()', result)
+        self.assertNotIn('if', result)
+
+
+class TestExtendedOperatorFolding(TestJsDeobfuscator):
+
+    def test_strict_equality_true(self):
+        result = self._deobfuscate("'abc' === 'abc';")
+        self.assertIn('true', result)
+
+    def test_strict_equality_false(self):
+        result = self._deobfuscate("'abc' === 'xyz';")
+        self.assertIn('false', result)
+
+    def test_strict_inequality(self):
+        result = self._deobfuscate("'abc' !== 'xyz';")
+        self.assertIn('true', result)
+
+    def test_number_strict_equality(self):
+        result = self._deobfuscate('42 === 42;')
+        self.assertIn('true', result)
+
+    def test_less_than_numbers(self):
+        result = self._deobfuscate('3 < 5;')
+        self.assertIn('true', result)
+
+    def test_greater_equal_numbers(self):
+        result = self._deobfuscate('5 >= 5;')
+        self.assertIn('true', result)
+
+    def test_less_than_strings(self):
+        result = self._deobfuscate("'abc' < 'abd';")
+        self.assertIn('true', result)
+
+    def test_greater_than_numbers_false(self):
+        result = self._deobfuscate('3 > 5;')
+        self.assertIn('false', result)
+
+    def test_less_equal_numbers(self):
+        result = self._deobfuscate('7 <= 3;')
+        self.assertIn('false', result)
+
+    def test_loose_equality_same_type(self):
+        result = self._deobfuscate('42 == 42;')
+        self.assertIn('true', result)
+
+    def test_loose_inequality_same_type(self):
+        result = self._deobfuscate("'a' != 'b';")
+        self.assertIn('true', result)
+
+    def test_null_equality(self):
+        result = self._deobfuscate('null == null;')
+        self.assertIn('true', result)
+
+    def test_logical_and_truthy_left(self):
+        result = self._deobfuscate("'hello' && 'world';")
+        self.assertIn("'world'", result)
+        self.assertNotIn("'hello'", result)
+
+    def test_logical_and_falsy_left(self):
+        result = self._deobfuscate("0 && 'world';")
+        self.assertIn('0', result)
+        self.assertNotIn("'world'", result)
+
+    def test_logical_or_truthy_left(self):
+        result = self._deobfuscate("'hello' || 'world';")
+        self.assertIn("'hello'", result)
+        self.assertNotIn("'world'", result)
+
+    def test_logical_or_falsy_left(self):
+        result = self._deobfuscate("'' || 'fallback';")
+        self.assertIn("'fallback'", result)
+
+    def test_nullish_coalescing_null(self):
+        result = self._deobfuscate("null ?? 'default';")
+        self.assertIn("'default'", result)
+
+    def test_nullish_coalescing_value(self):
+        result = self._deobfuscate("42 ?? 'default';")
+        self.assertIn('42', result)
+        self.assertNotIn("'default'", result)
+
+    def test_bitwise_not_zero(self):
+        result = self._deobfuscate('~0;')
+        self.assertIn('-1', result)
+        self.assertNotIn('~', result)
+
+    def test_bitwise_not_negative_one(self):
+        result = self._deobfuscate('~(-1);')
+        self.assertIn('0', result)
+        self.assertNotIn('~', result)
+
+    def test_logical_not_true(self):
+        result = self._deobfuscate('!true;')
+        self.assertIn('false', result)
+
+    def test_logical_not_false(self):
+        result = self._deobfuscate('!false;')
+        self.assertIn('true', result)
+
+    def test_logical_not_null(self):
+        result = self._deobfuscate('!null;')
+        self.assertIn('true', result)
+
+    def test_logical_not_empty_string(self):
+        result = self._deobfuscate("!'';")
+        self.assertIn('true', result)
+
+    def test_logical_not_nonempty_string(self):
+        result = self._deobfuscate("!'hello';")
+        self.assertIn('false', result)
+
+    def test_logical_not_undefined(self):
+        result = self._deobfuscate('!undefined;')
+        self.assertIn('true', result)
+
+    def test_nullish_coalescing_undefined(self):
+        result = self._deobfuscate("undefined ?? 'default';")
+        self.assertIn("'default'", result)
+        self.assertNotIn('undefined', result)
+
+    def test_logical_and_undefined(self):
+        result = self._deobfuscate("undefined && 'world';")
+        self.assertIn('undefined', result)
+        self.assertNotIn("'world'", result)
+
+    def test_logical_or_undefined(self):
+        result = self._deobfuscate("undefined || 'fallback';")
+        self.assertIn("'fallback'", result)
+
+
+class TestDeadCodeLiteralConditions(TestJsDeobfuscator):
+
+    def test_if_zero_eliminates_consequent(self):
+        result = self._deobfuscate('if (0) { dead(); } else { live(); }')
+        self.assertIn('live()', result)
+        self.assertNotIn('dead()', result)
+        self.assertNotIn('if', result)
+
+    def test_if_empty_string_eliminates_consequent(self):
+        result = self._deobfuscate('if ("") { dead(); } else { live(); }')
+        self.assertIn('live()', result)
+        self.assertNotIn('dead()', result)
+        self.assertNotIn('if', result)
+
+    def test_if_null_eliminates_consequent(self):
+        result = self._deobfuscate('if (null) { dead(); } else { live(); }')
+        self.assertIn('live()', result)
+        self.assertNotIn('dead()', result)
+        self.assertNotIn('if', result)
+
+    def test_if_nonzero_keeps_consequent(self):
+        result = self._deobfuscate('if (1) { live(); } else { dead(); }')
+        self.assertIn('live()', result)
+        self.assertNotIn('dead()', result)
+        self.assertNotIn('if', result)
+
+    def test_if_nonempty_string_keeps_consequent(self):
+        result = self._deobfuscate("if ('x') { live(); } else { dead(); }")
+        self.assertIn('live()', result)
+        self.assertNotIn('dead()', result)
+        self.assertNotIn('if', result)
+
+    def test_ternary_zero(self):
+        result = self._deobfuscate("var x = 0 ? 'a' : 'b';")
+        self.assertIn("'b'", result)
+        self.assertNotIn("'a'", result)
+
+    def test_ternary_nonempty_string(self):
+        result = self._deobfuscate("var x = 'yes' ? 'a' : 'b';")
+        self.assertIn("'a'", result)
+        self.assertNotIn("'b'", result)
+
+    def test_if_zero_no_else_removed(self):
+        result = self._deobfuscate('if (0) { dead(); }')
+        self.assertNotIn('dead()', result)
+        self.assertNotIn('if', result)
+
+    def test_if_undefined_eliminates_consequent(self):
+        result = self._deobfuscate('if (undefined) { dead(); } else { live(); }')
+        self.assertIn('live()', result)
+        self.assertNotIn('dead()', result)
+        self.assertNotIn('if', result)
+
+    def test_ternary_undefined(self):
+        result = self._deobfuscate("var x = undefined ? 'a' : 'b';")
+        self.assertIn("'b'", result)
+        self.assertNotIn("'a'", result)
+
+
+class TestRegressions(TestBase):
+
+    def test_dead_code_spliced_parent_pointers(self):
+        """
+        After dead code elimination splices statements out of a block, the surviving statements
+        must have their parent pointer set to the containing script node, not the removed block.
+        """
+        ast = JsParser('if (true) { var a = 1; var b = 2; }').parse()
+        t = JsDeadCodeElimination()
+        t.visit(ast)
+        self.assertTrue(t.changed)
+        for stmt in ast.body:
+            self.assertIs(stmt.parent, ast)
+
+    def test_ternary_resolved_by_simplifications_alone(self):
+        """
+        Ternary constant folding must work via JsSimplifications without requiring
+        JsDeadCodeElimination.
+        """
+        ast = JsParser("var x = true ? 'a' : 'b';").parse()
+        t = JsSimplifications()
+        t.visit(ast)
+        result = JsSynthesizer().convert(ast)
+        self.assertIn("'a'", result)
+        self.assertNotIn("'b'", result)
