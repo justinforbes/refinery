@@ -8,9 +8,10 @@ import re
 
 from typing import Callable
 
-from refinery.lib.scripts import Expression
+from refinery.lib.scripts import Expression, Node
 from refinery.lib.scripts.js.model import (
     JsBooleanLiteral,
+    JsIdentifier,
     JsNullLiteral,
     JsNumericLiteral,
     JsStringLiteral,
@@ -76,7 +77,7 @@ def make_numeric_literal(value: int | float) -> JsNumericLiteral:
     return JsNumericLiteral(value=value, raw=raw)
 
 
-def is_literal(node: Expression) -> bool:
+def is_literal(node: Node) -> bool:
     return isinstance(node, (
         JsStringLiteral, JsNumericLiteral, JsBooleanLiteral, JsNullLiteral,
     ))
@@ -84,6 +85,13 @@ def is_literal(node: Expression) -> bool:
 
 def is_valid_identifier(name: str) -> bool:
     return bool(SIMPLE_IDENTIFIER.match(name)) and name not in JS_RESERVED
+
+
+def is_simple_expression(node: Node) -> bool:
+    """
+    Check whether a node is a side-effect-free leaf expression: a literal value or an identifier.
+    """
+    return is_literal(node) or isinstance(node, JsIdentifier)
 
 
 _HEX_ESCAPE = re.compile(r'\\x([0-9A-Fa-f]{2})|\\u00([0-9A-Fa-f]{2})')

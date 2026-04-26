@@ -18,11 +18,6 @@ class TestJsDeobfuscator(TestBase):
 
 class TestBasicSimplifications(TestJsDeobfuscator):
 
-    def _deobfuscate(self, source: str) -> str:
-        ast = JsParser(source).parse()
-        deobfuscate(ast)
-        return JsSynthesizer().convert(ast)
-
     def test_string_concat_simple(self):
         result = self._deobfuscate("'a' + 'b';")
         self.assertIn("'ab'", result)
@@ -351,3 +346,37 @@ class TestStringArray(TestJsDeobfuscator):
         self.assertIn("'test string'", result)
         self.assertIn('console.log', result)
         self.assertNotIn('_0x138c', result)
+
+
+class TestCallWrapperInliner(TestJsDeobfuscator):
+
+    def test_simple_wrapper_inlining(self):
+        source = (
+            "function target(a, b) { return a + b; }"
+            "function wrapper(x, y, z, w) { return target(w - -10, y); }"
+            "var result = wrapper(1, 2, 3, 4);"
+        )
+        result = self._deobfuscate(source)
+        self.assertNotIn('wrapper', result)
+        self.assertIn('target(14, 2)', result)
+
+    def test_wrapper_preserves_non_wrapper_functions(self):
+        source = (
+            "function real(x) { console.log(x); return x * 2; }"
+            "real(5);"
+        )
+        result = self._deobfuscate(source)
+        self.assertIn('function real', result)
+        self.assertIn('real(5)', result)
+
+    def test_chained_wrappers(self):
+        source = (
+            "function target(a) { return a; }"
+            "function inner(x, y) { return target(y - -5); }"
+            "function outer(a, b, c) { return inner(a, c - -10); }"
+            "var r = outer(1, 2, 3);"
+        )
+        result = self._deobfuscate(source)
+        self.assertNotIn('outer', result)
+        self.assertNotIn('inner', result)
+        self.assertIn('target(18)', result)
