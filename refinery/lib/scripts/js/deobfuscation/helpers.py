@@ -75,6 +75,30 @@ def is_valid_identifier(name: str) -> bool:
     return bool(SIMPLE_IDENTIFIER.match(name)) and name not in JS_RESERVED
 
 
+_HEX_ESCAPE = re.compile(r'\\x([0-9A-Fa-f]{2})|\\u00([0-9A-Fa-f]{2})')
+
+
+def unescape_string_raw(raw: str) -> str | None:
+    """
+    Replace printable ``\\xHH`` and ``\\u00HH`` escapes in a raw string literal with their
+    literal characters. Returns the rewritten raw string, or ``None`` if nothing changed.
+    The quote character and backslash are never unescaped.
+    """
+    if len(raw) < 2:
+        return None
+    quote = raw[0]
+
+    def _replace(m: re.Match) -> str:
+        code = int(m.group(1) or m.group(2), 16)
+        ch = chr(code)
+        if 0x20 <= code <= 0x7E and ch != quote and ch != '\\':
+            return ch
+        return m.group(0)
+
+    result = raw[0] + _HEX_ESCAPE.sub(_replace, raw[1:-1]) + raw[-1]
+    return result if result != raw else None
+
+
 _LEADING_DIGITS = re.compile(r'^[+-]?\d+')
 
 

@@ -152,3 +152,25 @@ class TestJsDeobfuscator(TestBase):
         result = self._deobfuscate('var x = "hel" + "lo"; var y = [1, 2, 3][0];')
         self.assertIn("'hello'", result)
         self.assertIn('1', result)
+
+    def test_unescape_hex_space(self):
+        result = self._deobfuscate("'hello\\x20world';")
+        self.assertIn("'hello world'", result)
+
+    def test_unescape_hex_mixed(self):
+        result = self._deobfuscate("'A\\x42\\x0a\\x43';")
+        self.assertIn('AB', result)
+        self.assertIn('C', result)
+        self.assertIn('\\x0a', result)
+
+    def test_unescape_unicode_short(self):
+        result = self._deobfuscate("'\\u0048\\u0069';")
+        self.assertIn("'Hi'", result)
+
+    def test_unescape_preserves_quote(self):
+        result = self._deobfuscate("'don\\x27t';")
+        self.assertIn('\\x27', result)
+
+    def test_unescape_preserves_backslash(self):
+        result = self._deobfuscate("'back\\x5cslash';")
+        self.assertIn('\\x5c', result)

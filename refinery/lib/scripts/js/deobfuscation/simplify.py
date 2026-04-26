@@ -12,6 +12,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     make_string_literal,
     numeric_value,
     string_value,
+    unescape_string_raw,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -120,4 +121,11 @@ class JsSimplifications(Transformer):
         if op == 'void' and isinstance(node.operand, JsNumericLiteral):
             if node.operand.value == 0:
                 return JsIdentifier(name='undefined')
+        return None
+
+    def visit_JsStringLiteral(self, node: JsStringLiteral):
+        result = unescape_string_raw(node.raw)
+        if result is not None:
+            node.raw = result
+            self.mark_changed()
         return None
