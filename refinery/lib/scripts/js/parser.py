@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from refinery.lib.scripts.js.lexer import _ESCAPE_MAP, JsLexer
+from contextlib import contextmanager
+
+from refinery.lib.scripts.js.lexer import JsLexer, decode_js_string_body
 from refinery.lib.scripts.js.model import (
     Expression,
     JsArrayExpression,
@@ -45,6 +47,7 @@ from refinery.lib.scripts.js.model import (
     JsLogicalExpression,
     JsMemberExpression,
     JsMethodDefinition,
+    JsMethodKind,
     JsNewExpression,
     JsNullLiteral,
     JsNumericLiteral,
@@ -53,6 +56,7 @@ from refinery.lib.scripts.js.model import (
     JsParenthesizedExpression,
     JsProperty,
     JsPropertyDefinition,
+    JsPropertyKind,
     JsRegExpLiteral,
     JsRestElement,
     JsReturnStatement,
@@ -72,6 +76,7 @@ from refinery.lib.scripts.js.model import (
     JsUpdateExpression,
     JsVariableDeclaration,
     JsVariableDeclarator,
+    JsVarKind,
     JsWhileStatement,
     JsWithStatement,
     JsYieldExpression,
@@ -79,8 +84,59 @@ from refinery.lib.scripts.js.model import (
 )
 from refinery.lib.scripts.js.token import JsToken, JsTokenKind
 
+_PREC_EXPONENTIATION = 15
+
+_BINARY_PREC: dict[JsTokenKind, tuple[int, bool]] = {
+    JsTokenKind.QQ:         ( 4, True),   # noqa
+    JsTokenKind.OR:         ( 5, True),   # noqa
+    JsTokenKind.AND:        ( 6, True),   # noqa
+    JsTokenKind.PIPE:       ( 7, False),  # noqa
+    JsTokenKind.CARET:      ( 8, False),  # noqa
+    JsTokenKind.AMP:        ( 9, False),  # noqa
+    JsTokenKind.EQ2:        (10, False),  # noqa
+    JsTokenKind.BANG_EQ:    (10, False),  # noqa
+    JsTokenKind.EQ3:        (10, False),  # noqa
+    JsTokenKind.BANG_EQ2:   (10, False),  # noqa
+    JsTokenKind.LT:         (11, False),  # noqa
+    JsTokenKind.GT:         (11, False),  # noqa
+    JsTokenKind.LT_EQ:      (11, False),  # noqa
+    JsTokenKind.GT_EQ:      (11, False),  # noqa
+    JsTokenKind.INSTANCEOF: (11, False),  # noqa
+    JsTokenKind.IN:         (11, False),  # noqa
+    JsTokenKind.LT2:        (12, False),  # noqa
+    JsTokenKind.GT2:        (12, False),  # noqa
+    JsTokenKind.GT3:        (12, False),  # noqa
+    JsTokenKind.PLUS:       (13, False),  # noqa
+    JsTokenKind.MINUS:      (13, False),  # noqa
+    JsTokenKind.STAR:       (14, False),  # noqa
+    JsTokenKind.SLASH:      (14, False),  # noqa
+    JsTokenKind.PERCENT:    (14, False),  # noqa
+    JsTokenKind.STAR2:      (_PREC_EXPONENTIATION, False), # noqa
+}
+
+_VAR_KIND_MAP: dict[JsTokenKind, JsVarKind] = {
+    JsTokenKind.VAR:   JsVarKind.VAR,    # noqa
+    JsTokenKind.LET:   JsVarKind.LET,    # noqa
+    JsTokenKind.CONST: JsVarKind.CONST,  # noqa
+}
+
+_PROP_KIND_MAP: dict[str, JsPropertyKind] = {
+    'get': JsPropertyKind.GET,
+    'set': JsPropertyKind.SET,
+}
+
 
 class JsParser:
+
+    @staticmethod
+    def _parse_int_text(text: str) -> int:
+        if text.startswith(('0x', '0X')):
+            return int(text, 16)
+        if text.startswith(('0o', '0O')):
+            return int(text, 8)
+        if text.startswith(('0b', '0B')):
+            return int(text, 2)
+        return int(text)
 
     def __init__(self, source: str):
         self._lexer = JsLexer(source)
@@ -140,13 +196,21 @@ class JsParser:
             return True
         return False
 
+    @contextmanager
+    def _with_no_in(self, value: bool):
+        saved = self._no_in
+        self._no_in = value
+        try:
+            yield
+        finally:
+            self._no_in = saved
+
     def parse(self) -> JsScript:
         return self._parse_program()
 
-    def _parse_program(self) -> JsScript:
-        offset = self._current.offset
+    def _parse_statement_list(self, *stop: JsTokenKind) -> list[Statement]:
         body: list[Statement] = []
-        while not self._at(JsTokenKind.EOF):
+        while not self._at(*stop):
             mark = self._current.offset
             comments = list(self._pending_comments)
             self._pending_comments.clear()
@@ -165,6 +229,11 @@ class JsParser:
                 )
                 error.leading_comments.extend(comments)
                 body.append(error)
+        return body
+
+    def _parse_program(self) -> JsScript:
+        offset = self._current.offset
+        body = self._parse_statement_list(JsTokenKind.EOF)
         return JsScript(body=body, offset=offset)
 
     def _parse_statement(self) -> Statement | None:
@@ -230,33 +299,14 @@ class JsParser:
     def _parse_block_statement(self) -> JsBlockStatement:
         offset = self._current.offset
         self._expect(JsTokenKind.LBRACE)
-        body: list[Statement] = []
-        while not self._at(JsTokenKind.RBRACE, JsTokenKind.EOF):
-            mark = self._current.offset
-            comments = list(self._pending_comments)
-            self._pending_comments.clear()
-            try:
-                stmt = self._parse_statement()
-            except Exception:
-                stmt = None
-            if stmt is not None:
-                stmt.leading_comments.extend(comments)
-                body.append(stmt)
-            elif self._current.offset == mark:
-                tok = self._advance()
-                error = JsExpressionStatement(
-                    offset=tok.offset,
-                    expression=JsErrorNode(offset=tok.offset, text=tok.value),
-                )
-                error.leading_comments.extend(comments)
-                body.append(error)
+        body = self._parse_statement_list(JsTokenKind.RBRACE, JsTokenKind.EOF)
         self._expect(JsTokenKind.RBRACE)
         return JsBlockStatement(body=body, offset=offset)
 
     def _parse_variable_declaration(self) -> JsVariableDeclaration:
         offset = self._current.offset
         kind_tok = self._advance()
-        kind = kind_tok.value
+        kind = _VAR_KIND_MAP[kind_tok.kind]
         declarations: list[JsVariableDeclarator] = []
         declarations.append(self._parse_variable_declarator())
         while self._eat(JsTokenKind.COMMA):
@@ -406,51 +456,45 @@ class JsParser:
         if self._at(JsTokenKind.VAR, JsTokenKind.LET, JsTokenKind.CONST):
             decl_offset = self._current.offset
             kind_tok = self._advance()
-            kind = kind_tok.value
+            kind = _VAR_KIND_MAP[kind_tok.kind]
             declarator = self._parse_variable_declarator()
             decl = JsVariableDeclaration(
                 declarations=[declarator], kind=kind, offset=decl_offset)
-            if self._eat(JsTokenKind.IN):
-                right = self._parse_expression()
-                self._expect(JsTokenKind.RPAREN)
-                body = self._parse_statement()
-                return JsForInStatement(
-                    left=decl, right=right, body=body, offset=offset)
-            if self._at(JsTokenKind.OF) or (
-                self._at(JsTokenKind.IDENTIFIER) and self._current.value == 'of'
-            ):
-                self._advance()
-                right = self._parse_assignment_expression()
-                self._expect(JsTokenKind.RPAREN)
-                body = self._parse_statement()
-                return JsForOfStatement(
-                    left=decl, right=right, body=body, is_await=is_await, offset=offset)
+            result = self._parse_for_in_or_of(decl, is_await, offset)
+            if result is not None:
+                return result
             while self._eat(JsTokenKind.COMMA):
                 decl.declarations.append(self._parse_variable_declarator())
             self._expect(JsTokenKind.SEMICOLON)
             return self._parse_for_rest(decl, offset)
 
-        saved_no_in = self._no_in
-        self._no_in = True
-        init_expr = self._parse_expression()
-        self._no_in = saved_no_in
+        with self._with_no_in(True):
+            init_expr = self._parse_expression()
+        result = self._parse_for_in_or_of(init_expr, is_await, offset)
+        if result is not None:
+            return result
+        self._expect(JsTokenKind.SEMICOLON)
+        return self._parse_for_rest(init_expr, offset)
+
+    def _parse_for_in_or_of(
+        self,
+        left: Expression | Statement,
+        is_await: bool,
+        offset: int,
+    ) -> JsForInStatement | JsForOfStatement | None:
         if self._eat(JsTokenKind.IN):
             right = self._parse_expression()
             self._expect(JsTokenKind.RPAREN)
             body = self._parse_statement()
-            return JsForInStatement(
-                left=init_expr, right=right, body=body, offset=offset)
-        if self._at(JsTokenKind.OF) or (
-            self._at(JsTokenKind.IDENTIFIER) and self._current.value == 'of'
-        ):
+            return JsForInStatement(left=left, right=right, body=body, offset=offset)
+        if self._at(JsTokenKind.OF):
             self._advance()
             right = self._parse_assignment_expression()
             self._expect(JsTokenKind.RPAREN)
             body = self._parse_statement()
             return JsForOfStatement(
-                left=init_expr, right=right, body=body, is_await=is_await, offset=offset)
-        self._expect(JsTokenKind.SEMICOLON)
-        return self._parse_for_rest(init_expr, offset)
+                left=left, right=right, body=body, is_await=is_await, offset=offset)
+        return None
 
     def _parse_for_rest(
         self,
@@ -573,10 +617,12 @@ class JsParser:
         self._eat_semicolon()
         return JsContinueStatement(label=label, offset=offset)
 
-    def _parse_function_declaration(
+    def _parse_function_impl(
         self,
+        *,
+        as_expression: bool,
         is_async: bool = False,
-    ) -> JsFunctionDeclaration:
+    ) -> JsFunctionDeclaration | JsFunctionExpression:
         offset = self._current.offset
         self._expect(JsTokenKind.FUNCTION)
         generator = bool(self._eat(JsTokenKind.STAR))
@@ -586,14 +632,19 @@ class JsParser:
             id_node = JsIdentifier(name=tok.value, offset=tok.offset)
         params = self._parse_formal_parameters()
         body = self._parse_block_statement()
+        if as_expression:
+            return JsFunctionExpression(
+                id=id_node, params=params, body=body,
+                generator=generator, is_async=is_async, offset=offset)
         return JsFunctionDeclaration(
-            id=id_node,
-            params=params,
-            body=body,
-            generator=generator,
-            is_async=is_async,
-            offset=offset,
-        )
+            id=id_node, params=params, body=body,
+            generator=generator, is_async=is_async, offset=offset)
+
+    def _parse_function_declaration(
+        self,
+        is_async: bool = False,
+    ) -> JsFunctionDeclaration:
+        return self._parse_function_impl(as_expression=False, is_async=is_async)
 
     def _parse_formal_parameters(self) -> list[Expression]:
         self._expect(JsTokenKind.LPAREN)
@@ -613,7 +664,11 @@ class JsParser:
         self._expect(JsTokenKind.RPAREN)
         return params
 
-    def _parse_class_declaration(self) -> JsClassDeclaration:
+    def _parse_class_impl(
+        self,
+        *,
+        as_expression: bool,
+    ) -> JsClassDeclaration | JsClassExpression:
         offset = self._current.offset
         self._expect(JsTokenKind.CLASS)
         id_node = None
@@ -624,8 +679,14 @@ class JsParser:
         if self._eat(JsTokenKind.EXTENDS):
             super_class = self._parse_assignment_expression()
         body = self._parse_class_body()
+        if as_expression:
+            return JsClassExpression(
+                id=id_node, super_class=super_class, body=body, offset=offset)
         return JsClassDeclaration(
             id=id_node, super_class=super_class, body=body, offset=offset)
+
+    def _parse_class_declaration(self) -> JsClassDeclaration:
+        return self._parse_class_impl(as_expression=False)
 
     def _parse_class_body(self) -> JsClassBody:
         offset = self._current.offset
@@ -654,7 +715,7 @@ class JsParser:
                 return self._finish_class_member(key, False, False, offset)
             is_static = True
 
-        kind = 'method'
+        kind = JsMethodKind.METHOD
         is_generator = False
 
         if self._eat(JsTokenKind.STAR):
@@ -666,14 +727,14 @@ class JsParser:
             if self._at(JsTokenKind.LPAREN):
                 key = JsIdentifier(name='get', offset=saved.offset)
                 return self._finish_class_member(key, is_static, is_generator, offset)
-            kind = 'get'
+            kind = JsMethodKind.GET
         elif self._at(JsTokenKind.IDENTIFIER) and self._current.value == 'set':
             saved = self._current
             self._advance()
             if self._at(JsTokenKind.LPAREN):
                 key = JsIdentifier(name='set', offset=saved.offset)
                 return self._finish_class_member(key, is_static, is_generator, offset)
-            kind = 'set'
+            kind = JsMethodKind.SET
         elif self._at(JsTokenKind.ASYNC):
             saved = self._current
             self._advance()
@@ -690,7 +751,7 @@ class JsParser:
         else:
             key = self._parse_property_name()
 
-        if kind == 'method' and not is_generator and not self._at(JsTokenKind.LPAREN):
+        if kind == JsMethodKind.METHOD and not is_generator and not self._at(JsTokenKind.LPAREN):
             value = None
             if self._eat(JsTokenKind.EQUALS):
                 value = self._parse_assignment_expression()
@@ -711,7 +772,7 @@ class JsParser:
         is_static: bool,
         is_generator: bool,
         offset: int,
-        kind: str = 'method',
+        kind: JsMethodKind = JsMethodKind.METHOD,
         computed: bool = False,
     ) -> JsMethodDefinition:
         func_offset = self._current.offset
@@ -723,8 +784,8 @@ class JsParser:
             generator=is_generator,
             offset=func_offset,
         )
-        if isinstance(key, JsIdentifier) and key.name == 'constructor' and kind == 'method':
-            kind = 'constructor'
+        if isinstance(key, JsIdentifier) and key.name == 'constructor' and kind == JsMethodKind.METHOD:
+            kind = JsMethodKind.CONSTRUCTOR
         return JsMethodDefinition(
             key=key,
             value=value,
@@ -789,9 +850,7 @@ class JsParser:
             tok = self._advance()
             imported = JsIdentifier(name=tok.value, offset=tok.offset)
             local = imported
-            if self._at(JsTokenKind.AS) or (
-                self._at(JsTokenKind.IDENTIFIER) and self._current.value == 'as'
-            ):
+            if self._at(JsTokenKind.AS):
                 self._advance()
                 ltok = self._expect(JsTokenKind.IDENTIFIER)
                 local = JsIdentifier(name=ltok.value, offset=ltok.offset)
@@ -823,9 +882,7 @@ class JsParser:
         if self._at(JsTokenKind.STAR):
             self._advance()
             exported = None
-            if self._at(JsTokenKind.AS) or (
-                self._at(JsTokenKind.IDENTIFIER) and self._current.value == 'as'
-            ):
+            if self._at(JsTokenKind.AS):
                 self._advance()
                 tok = self._expect(JsTokenKind.IDENTIFIER)
                 exported = JsIdentifier(name=tok.value, offset=tok.offset)
@@ -862,9 +919,7 @@ class JsParser:
             tok = self._advance()
             local = JsIdentifier(name=tok.value, offset=tok.offset)
             exported = local
-            if self._at(JsTokenKind.AS) or (
-                self._at(JsTokenKind.IDENTIFIER) and self._current.value == 'as'
-            ):
+            if self._at(JsTokenKind.AS):
                 self._advance()
                 etok = self._advance()
                 exported = JsIdentifier(name=etok.value, offset=etok.offset)
@@ -874,9 +929,7 @@ class JsParser:
                 self._expect(JsTokenKind.COMMA)
         self._expect(JsTokenKind.RBRACE)
         source = None
-        if self._at(JsTokenKind.FROM) or (
-            self._at(JsTokenKind.IDENTIFIER) and self._current.value == 'from'
-        ):
+        if self._at(JsTokenKind.FROM):
             self._advance()
             source = self._parse_string_literal()
         self._eat_semicolon()
@@ -918,13 +971,13 @@ class JsParser:
         if self._current.kind.is_assignment:
             op = self._advance().value
             right = self._parse_assignment_expression()
-            left = self._to_pattern(left) if op == '=' else left
+            left = self._to_param(left) if op == '=' else left
             return JsAssignmentExpression(
                 left=left, operator=op, right=right, offset=left.offset)
         return left
 
     def _parse_conditional_expression(self) -> Expression:
-        expr = self._parse_nullish_coalescing_expression()
+        expr = self._parse_binary_expression()
         if self._eat(JsTokenKind.QUESTION):
             consequent = self._parse_assignment_expression()
             self._expect(JsTokenKind.COLON)
@@ -937,119 +990,24 @@ class JsParser:
             )
         return expr
 
-    def _parse_nullish_coalescing_expression(self) -> Expression:
-        left = self._parse_logical_or_expression()
-        while self._eat(JsTokenKind.QQ):
-            right = self._parse_logical_or_expression()
-            left = JsLogicalExpression(
-                left=left, operator='??', right=right, offset=left.offset)
-        return left
-
-    def _parse_logical_or_expression(self) -> Expression:
-        left = self._parse_logical_and_expression()
-        while self._eat(JsTokenKind.OR):
-            right = self._parse_logical_and_expression()
-            left = JsLogicalExpression(
-                left=left, operator='||', right=right, offset=left.offset)
-        return left
-
-    def _parse_logical_and_expression(self) -> Expression:
-        left = self._parse_bitwise_or_expression()
-        while self._eat(JsTokenKind.AND):
-            right = self._parse_bitwise_or_expression()
-            left = JsLogicalExpression(
-                left=left, operator='&&', right=right, offset=left.offset)
-        return left
-
-    def _parse_bitwise_or_expression(self) -> Expression:
-        left = self._parse_bitwise_xor_expression()
-        while self._eat(JsTokenKind.PIPE):
-            right = self._parse_bitwise_xor_expression()
-            left = JsBinaryExpression(
-                left=left, operator='|', right=right, offset=left.offset)
-        return left
-
-    def _parse_bitwise_xor_expression(self) -> Expression:
-        left = self._parse_bitwise_and_expression()
-        while self._eat(JsTokenKind.CARET):
-            right = self._parse_bitwise_and_expression()
-            left = JsBinaryExpression(
-                left=left, operator='^', right=right, offset=left.offset)
-        return left
-
-    def _parse_bitwise_and_expression(self) -> Expression:
-        left = self._parse_equality_expression()
-        while self._eat(JsTokenKind.AMP):
-            right = self._parse_equality_expression()
-            left = JsBinaryExpression(
-                left=left, operator='&', right=right, offset=left.offset)
-        return left
-
-    def _parse_equality_expression(self) -> Expression:
-        left = self._parse_relational_expression()
-        while self._at(
-            JsTokenKind.EQ2, JsTokenKind.BANG_EQ, JsTokenKind.EQ3, JsTokenKind.BANG_EQ2,
-        ):
-            op = self._advance().value
-            right = self._parse_relational_expression()
-            left = JsBinaryExpression(
-                left=left, operator=op, right=right, offset=left.offset)
-        return left
-
-    def _parse_relational_expression(self) -> Expression:
-        left = self._parse_shift_expression()
-        while self._at(
-            JsTokenKind.LT,
-            JsTokenKind.GT,
-            JsTokenKind.LT_EQ,
-            JsTokenKind.GT_EQ,
-            JsTokenKind.INSTANCEOF,
-            JsTokenKind.IN,
-        ):
+    def _parse_binary_expression(self, min_prec: int = 0) -> Expression:
+        left = self._parse_unary_expression()
+        while True:
+            entry = _BINARY_PREC.get(self._current.kind)
+            if entry is None:
+                break
+            prec, logical = entry
+            if prec < min_prec:
+                break
             if self._no_in and self._at(JsTokenKind.IN):
                 break
             op = self._advance().value
-            right = self._parse_shift_expression()
-            left = JsBinaryExpression(
+            next_prec = prec if prec == _PREC_EXPONENTIATION else prec + 1
+            right = self._parse_binary_expression(next_prec)
+            node_type = JsLogicalExpression if logical else JsBinaryExpression
+            left = node_type(
                 left=left, operator=op, right=right, offset=left.offset)
         return left
-
-    def _parse_shift_expression(self) -> Expression:
-        left = self._parse_additive_expression()
-        while self._at(
-            JsTokenKind.LT2, JsTokenKind.GT2, JsTokenKind.GT3,
-        ):
-            op = self._advance().value
-            right = self._parse_additive_expression()
-            left = JsBinaryExpression(
-                left=left, operator=op, right=right, offset=left.offset)
-        return left
-
-    def _parse_additive_expression(self) -> Expression:
-        left = self._parse_multiplicative_expression()
-        while self._at(JsTokenKind.PLUS, JsTokenKind.MINUS):
-            op = self._advance().value
-            right = self._parse_multiplicative_expression()
-            left = JsBinaryExpression(
-                left=left, operator=op, right=right, offset=left.offset)
-        return left
-
-    def _parse_multiplicative_expression(self) -> Expression:
-        left = self._parse_exponentiation_expression()
-        while self._at(JsTokenKind.STAR, JsTokenKind.SLASH, JsTokenKind.PERCENT):
-            op = self._advance().value
-            right = self._parse_exponentiation_expression()
-            left = JsBinaryExpression(
-                left=left, operator=op, right=right, offset=left.offset)
-        return left
-
-    def _parse_exponentiation_expression(self) -> Expression:
-        expr = self._parse_unary_expression()
-        if self._eat(JsTokenKind.STAR2):
-            right = self._parse_exponentiation_expression()
-            return JsBinaryExpression(
-                left=expr, operator='**', right=right, offset=expr.offset)
-        return expr
 
     def _parse_unary_expression(self) -> Expression:
         if self._at(
@@ -1134,14 +1092,7 @@ class JsParser:
                 break
         return expr
 
-    def _parse_call_arguments(
-        self,
-        callee: Expression,
-        optional: bool,
-    ) -> JsCallExpression:
-        saved_no_in = self._no_in
-        self._no_in = False
-        self._expect(JsTokenKind.LPAREN)
+    def _parse_argument_list(self) -> list[Expression]:
         args: list[Expression] = []
         while not self._at(JsTokenKind.RPAREN, JsTokenKind.EOF):
             if self._at(JsTokenKind.ELLIPSIS):
@@ -1154,7 +1105,16 @@ class JsParser:
             if not self._at(JsTokenKind.RPAREN):
                 self._expect(JsTokenKind.COMMA)
         self._expect(JsTokenKind.RPAREN)
-        self._no_in = saved_no_in
+        return args
+
+    def _parse_call_arguments(
+        self,
+        callee: Expression,
+        optional: bool,
+    ) -> JsCallExpression:
+        with self._with_no_in(False):
+            self._expect(JsTokenKind.LPAREN)
+            args = self._parse_argument_list()
         return JsCallExpression(
             callee=callee, arguments=args, optional=optional, offset=callee.offset)
 
@@ -1175,17 +1135,7 @@ class JsParser:
             args: list[Expression] = []
             if self._at(JsTokenKind.LPAREN):
                 self._advance()
-                while not self._at(JsTokenKind.RPAREN, JsTokenKind.EOF):
-                    if self._at(JsTokenKind.ELLIPSIS):
-                        so = self._current.offset
-                        self._advance()
-                        arg = self._parse_assignment_expression()
-                        args.append(JsSpreadElement(argument=arg, offset=so))
-                    else:
-                        args.append(self._parse_assignment_expression())
-                    if not self._at(JsTokenKind.RPAREN):
-                        self._expect(JsTokenKind.COMMA)
-                self._expect(JsTokenKind.RPAREN)
+                args = self._parse_argument_list()
             return JsNewExpression(callee=callee, arguments=args, offset=offset)
         return self._parse_primary_expression()
 
@@ -1206,15 +1156,7 @@ class JsParser:
         if self._at(JsTokenKind.INTEGER):
             self._advance()
             raw = tok.value
-            text = raw.replace('_', '')
-            if text.startswith(('0x', '0X')):
-                value = int(text, 16)
-            elif text.startswith(('0o', '0O')):
-                value = int(text, 8)
-            elif text.startswith(('0b', '0B')):
-                value = int(text, 2)
-            else:
-                value = int(text)
+            value = self._parse_int_text(raw.replace('_', ''))
             return JsNumericLiteral(value=value, raw=raw, offset=offset)
 
         if self._at(JsTokenKind.FLOAT):
@@ -1226,15 +1168,7 @@ class JsParser:
         if self._at(JsTokenKind.BIGINT):
             self._advance()
             raw = tok.value
-            text = raw.replace('_', '').rstrip('n')
-            if text.startswith(('0x', '0X')):
-                value = int(text, 16)
-            elif text.startswith(('0o', '0O')):
-                value = int(text, 8)
-            elif text.startswith(('0b', '0B')):
-                value = int(text, 2)
-            else:
-                value = int(text)
+            value = self._parse_int_text(raw.replace('_', '').rstrip('n'))
             return JsBigIntLiteral(value=value, raw=raw, offset=offset)
 
         if self._at(JsTokenKind.STRING_SINGLE, JsTokenKind.STRING_DOUBLE):
@@ -1294,69 +1228,10 @@ class JsParser:
         tok = self._advance()
         raw = tok.value
         if len(raw) >= 2:
-            value = self._decode_string_value(raw[1:-1])
+            value = decode_js_string_body(raw[1:-1])
         else:
             value = raw
         return JsStringLiteral(value=value, raw=raw, offset=tok.offset)
-
-    @staticmethod
-    def _decode_string_value(text: str) -> str:
-        parts: list[str] = []
-        i = 0
-        length = len(text)
-        while i < length:
-            c = text[i]
-            if c != '\\' or i + 1 >= length:
-                parts.append(c)
-                i += 1
-                continue
-            i += 1
-            c = text[i]
-            i += 1
-            mapped = _ESCAPE_MAP.get(c)
-            if mapped is not None:
-                parts.append(mapped)
-                continue
-            if c == 'x' and i + 1 < length:
-                hexstr = text[i:i + 2]
-                if len(hexstr) == 2 and all(
-                    h in '0123456789abcdefABCDEF' for h in hexstr
-                ):
-                    parts.append(chr(int(hexstr, 16)))
-                    i += 2
-                    continue
-                parts.append('x')
-                continue
-            if c == 'u':
-                if i < length and text[i] == '{':
-                    end = text.find('}', i + 1)
-                    if end != -1:
-                        hexstr = text[i + 1:end]
-                        if hexstr and all(
-                            h in '0123456789abcdefABCDEF' for h in hexstr
-                        ):
-                            parts.append(chr(int(hexstr, 16)))
-                            i = end + 1
-                            continue
-                        i = end + 1
-                        parts.append('u')
-                        continue
-                elif i + 3 < length:
-                    hexstr = text[i:i + 4]
-                    if len(hexstr) == 4 and all(
-                        h in '0123456789abcdefABCDEF' for h in hexstr
-                    ):
-                        parts.append(chr(int(hexstr, 16)))
-                        i += 4
-                        continue
-                parts.append('u')
-                continue
-            if c in '\r\n':
-                if c == '\r' and i < length and text[i] == '\n':
-                    i += 1
-                continue
-            parts.append(c)
-        return ''.join(parts)
 
     def _parse_template_literal(self) -> JsTemplateLiteral:
         offset = self._current.offset
@@ -1403,47 +1278,43 @@ class JsParser:
             quasis=quasis, expressions=expressions, offset=offset)
 
     def _parse_array_literal(self) -> JsArrayExpression:
-        saved_no_in = self._no_in
-        self._no_in = False
-        offset = self._current.offset
-        self._expect(JsTokenKind.LBRACKET)
-        elements: list[Expression | None] = []
-        while not self._at(JsTokenKind.RBRACKET, JsTokenKind.EOF):
-            if self._at(JsTokenKind.COMMA):
-                elements.append(None)
-                self._advance()
-                continue
-            if self._at(JsTokenKind.ELLIPSIS):
-                so = self._current.offset
-                self._advance()
-                arg = self._parse_assignment_expression()
-                elements.append(JsSpreadElement(argument=arg, offset=so))
-            else:
-                elements.append(self._parse_assignment_expression())
-            if not self._at(JsTokenKind.RBRACKET):
-                self._eat(JsTokenKind.COMMA)
-        self._expect(JsTokenKind.RBRACKET)
-        self._no_in = saved_no_in
+        with self._with_no_in(False):
+            offset = self._current.offset
+            self._expect(JsTokenKind.LBRACKET)
+            elements: list[Expression | None] = []
+            while not self._at(JsTokenKind.RBRACKET, JsTokenKind.EOF):
+                if self._at(JsTokenKind.COMMA):
+                    elements.append(None)
+                    self._advance()
+                    continue
+                if self._at(JsTokenKind.ELLIPSIS):
+                    so = self._current.offset
+                    self._advance()
+                    arg = self._parse_assignment_expression()
+                    elements.append(JsSpreadElement(argument=arg, offset=so))
+                else:
+                    elements.append(self._parse_assignment_expression())
+                if not self._at(JsTokenKind.RBRACKET):
+                    self._eat(JsTokenKind.COMMA)
+            self._expect(JsTokenKind.RBRACKET)
         return JsArrayExpression(elements=elements, offset=offset)
 
     def _parse_object_literal(self) -> JsObjectExpression:
-        saved_no_in = self._no_in
-        self._no_in = False
-        offset = self._current.offset
-        self._expect(JsTokenKind.LBRACE)
-        properties: list[JsProperty | JsSpreadElement] = []
-        while not self._at(JsTokenKind.RBRACE, JsTokenKind.EOF):
-            if self._at(JsTokenKind.ELLIPSIS):
-                so = self._current.offset
-                self._advance()
-                arg = self._parse_assignment_expression()
-                properties.append(JsSpreadElement(argument=arg, offset=so))
-            else:
-                properties.append(self._parse_object_property())
-            if not self._at(JsTokenKind.RBRACE):
-                self._eat(JsTokenKind.COMMA)
-        self._expect(JsTokenKind.RBRACE)
-        self._no_in = saved_no_in
+        with self._with_no_in(False):
+            offset = self._current.offset
+            self._expect(JsTokenKind.LBRACE)
+            properties: list[JsProperty | JsSpreadElement] = []
+            while not self._at(JsTokenKind.RBRACE, JsTokenKind.EOF):
+                if self._at(JsTokenKind.ELLIPSIS):
+                    so = self._current.offset
+                    self._advance()
+                    arg = self._parse_assignment_expression()
+                    properties.append(JsSpreadElement(argument=arg, offset=so))
+                else:
+                    properties.append(self._parse_object_property())
+                if not self._at(JsTokenKind.RBRACE):
+                    self._eat(JsTokenKind.COMMA)
+            self._expect(JsTokenKind.RBRACE)
         return JsObjectExpression(properties=properties, offset=offset)
 
     def _parse_object_property(self) -> JsProperty:
@@ -1451,7 +1322,7 @@ class JsParser:
         is_generator = bool(self._eat(JsTokenKind.STAR))
 
         if self._at(JsTokenKind.IDENTIFIER) and self._current.value in ('get', 'set'):
-            kind_val = self._current.value
+            kind_val = _PROP_KIND_MAP[self._current.value]
             saved = self._current
             self._advance()
             if self._at(
@@ -1461,9 +1332,9 @@ class JsParser:
                 JsTokenKind.RBRACE,
                 JsTokenKind.EQUALS,
             ):
-                key = JsIdentifier(name=kind_val, offset=saved.offset)
-                return self._finish_property_value(key, False, False, offset)
-            key = self._parse_property_name_from_current()
+                key = JsIdentifier(name=saved.value, offset=saved.offset)
+                return self._finish_property_value(key, False, offset)
+            key = self._parse_property_name()
             return self._make_method_property(key, kind_val, False, offset)
 
         if self._at(JsTokenKind.ASYNC) and not is_generator:
@@ -1478,12 +1349,12 @@ class JsParser:
             ):
                 if self._at(JsTokenKind.LPAREN):
                     key = JsIdentifier(name='async', offset=saved.offset)
-                    return self._make_method_property(key, 'init', False, offset)
+                    return self._make_method_property(key, JsPropertyKind.INIT, False, offset)
                 key = JsIdentifier(name='async', offset=saved.offset)
-                return self._finish_property_value(key, False, False, offset)
+                return self._finish_property_value(key, False, offset)
             gen = bool(self._eat(JsTokenKind.STAR))
-            key = self._parse_property_name_from_current()
-            return self._make_method_property(key, 'init', gen, offset, is_async=True)
+            key = self._parse_property_name()
+            return self._make_method_property(key, JsPropertyKind.INIT, gen, offset, is_async=True)
 
         computed = False
         if self._at(JsTokenKind.LBRACKET):
@@ -1495,15 +1366,14 @@ class JsParser:
             key = self._parse_property_name()
 
         if is_generator or self._at(JsTokenKind.LPAREN):
-            return self._make_method_property(key, 'init', is_generator, offset, computed=computed)
+            return self._make_method_property(key, JsPropertyKind.INIT, is_generator, offset, computed=computed)
 
-        return self._finish_property_value(key, computed, False, offset)
+        return self._finish_property_value(key, computed, offset)
 
     def _finish_property_value(
         self,
         key: Expression,
         computed: bool,
-        is_generator: bool,
         offset: int,
     ) -> JsProperty:
         if self._eat(JsTokenKind.COLON):
@@ -1518,7 +1388,7 @@ class JsParser:
     def _make_method_property(
         self,
         key: Expression,
-        kind: str,
+        kind: JsPropertyKind,
         is_generator: bool,
         offset: int,
         computed: bool = False,
@@ -1541,7 +1411,7 @@ class JsParser:
             raw = tok.value
             text = raw.replace('_', '')
             return JsNumericLiteral(
-                value=float(text) if tok.kind == JsTokenKind.FLOAT else int(text),
+                value=float(text) if tok.kind == JsTokenKind.FLOAT else self._parse_int_text(text),
                 raw=raw,
                 offset=tok.offset,
             )
@@ -1550,13 +1420,8 @@ class JsParser:
         self._advance()
         return JsIdentifier(name=tok.value, offset=tok.offset)
 
-    def _parse_property_name_from_current(self) -> Expression:
-        return self._parse_property_name()
-
     def _parse_paren_or_arrow(self) -> Expression:
-        saved_no_in = self._no_in
-        self._no_in = False
-        try:
+        with self._with_no_in(False):
             offset = self._current.offset
             self._expect(JsTokenKind.LPAREN)
 
@@ -1587,8 +1452,6 @@ class JsParser:
 
             self._expect(JsTokenKind.RPAREN)
             return JsParenthesizedExpression(expression=expr, offset=offset)
-        finally:
-            self._no_in = saved_no_in
 
     def _parse_arrow_params_rest(self) -> list[Expression]:
         params: list[Expression] = []
@@ -1636,51 +1499,11 @@ class JsParser:
             return JsObjectPattern(properties=props, offset=expr.offset)
         return expr
 
-    def _to_pattern(self, expr: Expression) -> Expression:
-        if isinstance(expr, JsArrayExpression):
-            elements = [
-                self._to_pattern(e) if e is not None else None
-                for e in expr.elements
-            ]
-            return JsArrayPattern(elements=elements, offset=expr.offset)
-        if isinstance(expr, JsObjectExpression):
-            props: list[JsProperty | JsRestElement] = []
-            for p in expr.properties:
-                if isinstance(p, JsSpreadElement):
-                    props.append(JsRestElement(
-                        argument=self._to_pattern(p.argument), offset=p.offset))
-                else:
-                    props.append(p)
-            return JsObjectPattern(properties=props, offset=expr.offset)
-        return expr
-
     def _parse_function_expression(self) -> JsFunctionExpression:
-        offset = self._current.offset
-        self._expect(JsTokenKind.FUNCTION)
-        generator = bool(self._eat(JsTokenKind.STAR))
-        id_node = None
-        if self._at(JsTokenKind.IDENTIFIER):
-            tok = self._advance()
-            id_node = JsIdentifier(name=tok.value, offset=tok.offset)
-        params = self._parse_formal_parameters()
-        body = self._parse_block_statement()
-        return JsFunctionExpression(
-            id=id_node, params=params, body=body,
-            generator=generator, offset=offset)
+        return self._parse_function_impl(as_expression=True)
 
     def _parse_class_expression(self) -> JsClassExpression:
-        offset = self._current.offset
-        self._expect(JsTokenKind.CLASS)
-        id_node = None
-        if self._at(JsTokenKind.IDENTIFIER):
-            tok = self._advance()
-            id_node = JsIdentifier(name=tok.value, offset=tok.offset)
-        super_class = None
-        if self._eat(JsTokenKind.EXTENDS):
-            super_class = self._parse_assignment_expression()
-        body = self._parse_class_body()
-        return JsClassExpression(
-            id=id_node, super_class=super_class, body=body, offset=offset)
+        return self._parse_class_impl(as_expression=True)
 
     def _parse_async_expression(self) -> Expression:
         offset = self._current.offset
@@ -1689,17 +1512,7 @@ class JsParser:
 
     def _parse_expression_starting_with_async(self, offset: int) -> Expression:
         if self._at(JsTokenKind.FUNCTION) and not self._preceded_by_newline:
-            self._advance()
-            generator = bool(self._eat(JsTokenKind.STAR))
-            id_node = None
-            if self._at(JsTokenKind.IDENTIFIER):
-                tok = self._advance()
-                id_node = JsIdentifier(name=tok.value, offset=tok.offset)
-            params = self._parse_formal_parameters()
-            body = self._parse_block_statement()
-            return JsFunctionExpression(
-                id=id_node, params=params, body=body,
-                generator=generator, is_async=True, offset=offset)
+            return self._parse_function_impl(as_expression=True, is_async=True)
 
         if self._at(JsTokenKind.IDENTIFIER) and not self._preceded_by_newline:
             tok = self._advance()

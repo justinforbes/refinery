@@ -36,6 +36,17 @@ BINARY_OPS: dict[str, Callable] = {
 }
 
 
+def escape_js_string(value: str, quote: str = "'") -> str:
+    """
+    Escape a string for use in a JavaScript string literal. Returns the escaped body without
+    surrounding quotes. Backslash is escaped first to avoid double-escaping.
+    """
+    escaped = value.replace('\\', '\\\\').replace(quote, F'\\{quote}')
+    escaped = escaped.replace('\n', '\\n').replace('\r', '\\r')
+    escaped = escaped.replace('\t', '\\t').replace('\0', '\\0')
+    return escaped
+
+
 def string_value(node: Expression | None) -> str | None:
     if isinstance(node, JsStringLiteral):
         return node.value
@@ -43,7 +54,7 @@ def string_value(node: Expression | None) -> str | None:
 
 
 def make_string_literal(value: str) -> JsStringLiteral:
-    escaped = value.replace('\\', '\\\\').replace("'", "\\'")
+    escaped = escape_js_string(value)
     raw = F"'{escaped}'"
     return JsStringLiteral(value=value, raw=raw)
 

@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Synthesizer
+from refinery.lib.scripts.js.deobfuscation.helpers import escape_js_string
 from refinery.lib.scripts.js.model import (
-    JsArrayExpression,
-    JsArrayPattern,
     JsArrowFunctionExpression,
-    JsAssignmentExpression,
     JsAssignmentPattern,
     JsAwaitExpression,
     JsBigIntLiteral,
-    JsBinaryExpression,
     JsBlockStatement,
     JsBooleanLiteral,
     JsBreakStatement,
@@ -41,9 +38,9 @@ from refinery.lib.scripts.js.model import (
     JsImportNamespaceSpecifier,
     JsImportSpecifier,
     JsLabeledStatement,
-    JsLogicalExpression,
     JsMemberExpression,
     JsMethodDefinition,
+    JsMethodKind,
     JsNewExpression,
     JsNullLiteral,
     JsNumericLiteral,
@@ -52,12 +49,11 @@ from refinery.lib.scripts.js.model import (
     JsParenthesizedExpression,
     JsProperty,
     JsPropertyDefinition,
+    JsPropertyKind,
     JsRegExpLiteral,
-    JsRestElement,
     JsReturnStatement,
     JsScript,
     JsSequenceExpression,
-    JsSpreadElement,
     JsStringLiteral,
     JsSwitchCase,
     JsSwitchStatement,
@@ -131,6 +127,15 @@ class JsSynthesizer(Synthesizer):
         if generator:
             self._write('*')
 
+    def _emit_key(self, key: Node | None, computed: bool):
+        if computed:
+            self._write('[')
+            if key:
+                self.visit(key)
+            self._write(']')
+        elif key:
+            self.visit(key)
+
     def visit_JsNumericLiteral(self, node: JsNumericLiteral):
         self._write(node.raw)
 
@@ -146,10 +151,7 @@ class JsSynthesizer(Synthesizer):
     @staticmethod
     def _encode_string(value: str, raw: str) -> str:
         quote = raw[0] if raw and raw[0] in ('"', "'") else "'"
-        escaped = value.replace('\\', '\\\\').replace(quote, F'\\{quote}')
-        escaped = escaped.replace('\n', '\\n').replace('\r', '\\r')
-        escaped = escaped.replace('\t', '\\t').replace('\0', '\\0')
-        return F'{quote}{escaped}{quote}'
+        return F'{quote}{escape_js_string(value, quote)}{quote}'
 
     def visit_JsRegExpLiteral(self, node: JsRegExpLiteral):
         self._write(node.raw)
@@ -185,7 +187,7 @@ class JsSynthesizer(Synthesizer):
     def visit_JsTemplateElement(self, node: JsTemplateElement):
         self._write(node.value)
 
-    def visit_JsArrayExpression(self, node: JsArrayExpression):
+    def _emit_array_like(self, node):
         self._write('[')
         for i, elem in enumerate(node.elements):
             if i > 0:
@@ -194,6 +196,9 @@ class JsSynthesizer(Synthesizer):
                 continue
             self.visit(elem)
         self._write(']')
+
+    visit_JsArrayExpression = _emit_array_like
+    visit_JsArrayPattern = _emit_array_like
 
     def visit_JsObjectExpression(self, node: JsObjectExpression):
         if not node.properties:
@@ -208,15 +213,9 @@ class JsSynthesizer(Synthesizer):
         self._write(' }')
 
     def visit_JsProperty(self, node: JsProperty):
-        if node.kind in ('get', 'set'):
-            self._write(F'{node.kind} ')
-        if node.computed:
-            self._write('[')
-            if node.key:
-                self.visit(node.key)
-            self._write(']')
-        elif node.key:
-            self.visit(node.key)
+        if node.kind in (JsPropertyKind.GET, JsPropertyKind.SET):
+            self._write(F'{node.kind.value} ')
+        self._emit_key(node.key, node.computed)
         if node.method:
             if node.value and isinstance(node.value, JsFunctionExpression):
                 if node.value.generator:
@@ -232,10 +231,13 @@ class JsSynthesizer(Synthesizer):
         if node.value:
             self.visit(node.value)
 
-    def visit_JsSpreadElement(self, node: JsSpreadElement):
+    def _emit_spread_like(self, node):
         self._write('...')
         if node.argument:
             self.visit(node.argument)
+
+    visit_JsSpreadElement = _emit_spread_like
+    visit_JsRestElement = _emit_spread_like
 
     def visit_JsUnaryExpression(self, node: JsUnaryExpression):
         if node.prefix:
@@ -259,26 +261,16 @@ class JsSynthesizer(Synthesizer):
                 self.visit(node.argument)
             self._write(node.operator)
 
-    def visit_JsBinaryExpression(self, node: JsBinaryExpression):
+    def _emit_binary_like(self, node):
         if node.left:
             self.visit(node.left)
         self._write(F' {node.operator} ')
         if node.right:
             self.visit(node.right)
 
-    def visit_JsLogicalExpression(self, node: JsLogicalExpression):
-        if node.left:
-            self.visit(node.left)
-        self._write(F' {node.operator} ')
-        if node.right:
-            self.visit(node.right)
-
-    def visit_JsAssignmentExpression(self, node: JsAssignmentExpression):
-        if node.left:
-            self.visit(node.left)
-        self._write(F' {node.operator} ')
-        if node.right:
-            self.visit(node.right)
+    visit_JsBinaryExpression = _emit_binary_like
+    visit_JsLogicalExpression = _emit_binary_like
+    visit_JsAssignmentExpression = _emit_binary_like
 
     def visit_JsConditionalExpression(self, node: JsConditionalExpression):
         if node.test:
@@ -354,7 +346,7 @@ class JsSynthesizer(Synthesizer):
             self.visit(node.expression)
         self._write(')')
 
-    def visit_JsFunctionExpression(self, node: JsFunctionExpression):
+    def _emit_function(self, node):
         self._emit_function_prefix(node.is_async, node.generator)
         if node.id:
             self._write(' ')
@@ -363,6 +355,8 @@ class JsSynthesizer(Synthesizer):
         self._write(' ')
         if node.body:
             self._emit_block(node.body.body)
+
+    visit_JsFunctionExpression = _emit_function
 
     def visit_JsArrowFunctionExpression(self, node: JsArrowFunctionExpression):
         if node.is_async:
@@ -393,16 +387,6 @@ class JsSynthesizer(Synthesizer):
     def visit_JsClassExpression(self, node: JsClassExpression):
         self._emit_class(node)
 
-    def visit_JsArrayPattern(self, node: JsArrayPattern):
-        self._write('[')
-        for i, elem in enumerate(node.elements):
-            if i > 0:
-                self._write(', ')
-            if elem is None:
-                continue
-            self.visit(elem)
-        self._write(']')
-
     def visit_JsObjectPattern(self, node: JsObjectPattern):
         self._write('{')
         for i, prop in enumerate(node.properties):
@@ -422,11 +406,6 @@ class JsSynthesizer(Synthesizer):
         if node.right:
             self.visit(node.right)
 
-    def visit_JsRestElement(self, node: JsRestElement):
-        self._write('...')
-        if node.argument:
-            self.visit(node.argument)
-
     def visit_JsClassBody(self, node: JsClassBody):
         self._write('{')
         self._depth += 1
@@ -441,15 +420,9 @@ class JsSynthesizer(Synthesizer):
     def visit_JsMethodDefinition(self, node: JsMethodDefinition):
         if node.is_static:
             self._write('static ')
-        if node.kind in ('get', 'set'):
-            self._write(F'{node.kind} ')
-        if node.computed:
-            self._write('[')
-            if node.key:
-                self.visit(node.key)
-            self._write(']')
-        elif node.key:
-            self.visit(node.key)
+        if node.kind in (JsMethodKind.GET, JsMethodKind.SET):
+            self._write(F'{node.kind.value} ')
+        self._emit_key(node.key, node.computed)
         if node.value and isinstance(node.value, JsFunctionExpression):
             if node.value.generator:
                 self._write('*')
@@ -461,13 +434,7 @@ class JsSynthesizer(Synthesizer):
     def visit_JsPropertyDefinition(self, node: JsPropertyDefinition):
         if node.is_static:
             self._write('static ')
-        if node.computed:
-            self._write('[')
-            if node.key:
-                self.visit(node.key)
-            self._write(']')
-        elif node.key:
-            self.visit(node.key)
+        self._emit_key(node.key, node.computed)
         if node.value:
             self._write(' = ')
             self.visit(node.value)
@@ -485,7 +452,7 @@ class JsSynthesizer(Synthesizer):
         self._write(';')
 
     def visit_JsVariableDeclaration(self, node: JsVariableDeclaration):
-        self._write(F'{node.kind} ')
+        self._write(F'{node.kind.value} ')
         for i, decl in enumerate(node.declarations):
             if i > 0:
                 self._write(', ')
@@ -533,17 +500,20 @@ class JsSynthesizer(Synthesizer):
             self.visit(node.test)
         self._write(');')
 
+    def _emit_for_binding(self, node: Statement | Node):
+        if isinstance(node, JsVariableDeclaration):
+            self._write(F'{node.kind.value} ')
+            for i, decl in enumerate(node.declarations):
+                if i > 0:
+                    self._write(', ')
+                self.visit(decl)
+        else:
+            self.visit(node)
+
     def visit_JsForStatement(self, node: JsForStatement):
         self._write('for (')
         if node.init:
-            if isinstance(node.init, JsVariableDeclaration):
-                self._write(F'{node.init.kind} ')
-                for i, decl in enumerate(node.init.declarations):
-                    if i > 0:
-                        self._write(', ')
-                    self.visit(decl)
-            else:
-                self.visit(node.init)
+            self._emit_for_binding(node.init)
         self._write('; ')
         if node.test:
             self.visit(node.test)
@@ -557,14 +527,7 @@ class JsSynthesizer(Synthesizer):
     def visit_JsForInStatement(self, node: JsForInStatement):
         self._write('for (')
         if node.left:
-            if isinstance(node.left, JsVariableDeclaration):
-                self._write(F'{node.left.kind} ')
-                for i, decl in enumerate(node.left.declarations):
-                    if i > 0:
-                        self._write(', ')
-                    self.visit(decl)
-            else:
-                self.visit(node.left)
+            self._emit_for_binding(node.left)
         self._write(' in ')
         if node.right:
             self.visit(node.right)
@@ -578,14 +541,7 @@ class JsSynthesizer(Synthesizer):
             self._write('await ')
         self._write('(')
         if node.left:
-            if isinstance(node.left, JsVariableDeclaration):
-                self._write(F'{node.left.kind} ')
-                for i, decl in enumerate(node.left.declarations):
-                    if i > 0:
-                        self._write(', ')
-                    self.visit(decl)
-            else:
-                self.visit(node.left)
+            self._emit_for_binding(node.left)
         self._write(' of ')
         if node.right:
             self.visit(node.right)
@@ -686,15 +642,7 @@ class JsSynthesizer(Synthesizer):
     def visit_JsDebuggerStatement(self, node: JsDebuggerStatement):
         self._write('debugger;')
 
-    def visit_JsFunctionDeclaration(self, node: JsFunctionDeclaration):
-        self._emit_function_prefix(node.is_async, node.generator)
-        if node.id:
-            self._write(' ')
-            self.visit(node.id)
-        self._emit_params(node.params)
-        self._write(' ')
-        if node.body:
-            self._emit_block(node.body.body)
+    visit_JsFunctionDeclaration = _emit_function
 
     def visit_JsClassDeclaration(self, node: JsClassDeclaration):
         self._emit_class(node)

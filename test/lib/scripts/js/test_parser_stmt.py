@@ -27,6 +27,7 @@ from refinery.lib.scripts.js.model import (
     JsImportNamespaceSpecifier,
     JsLabeledStatement,
     JsMethodDefinition,
+    JsMethodKind,
     JsReturnStatement,
     JsScript,
     JsSwitchStatement,
@@ -34,6 +35,7 @@ from refinery.lib.scripts.js.model import (
     JsTryStatement,
     JsVariableDeclaration,
     JsVariableDeclarator,
+    JsVarKind,
     JsWhileStatement,
     JsWithStatement,
 )
@@ -55,18 +57,18 @@ class TestJsParserStatements(TestBase):
     def test_var_declaration(self):
         stmt = self._parse_stmt('var x = 1;')
         self.assertIsInstance(stmt, JsVariableDeclaration)
-        self.assertEqual(stmt.kind, 'var')
+        self.assertEqual(stmt.kind, JsVarKind.VAR)
         self.assertEqual(len(stmt.declarations), 1)
 
     def test_let_declaration(self):
         stmt = self._parse_stmt('let x = 1;')
         self.assertIsInstance(stmt, JsVariableDeclaration)
-        self.assertEqual(stmt.kind, 'let')
+        self.assertEqual(stmt.kind, JsVarKind.LET)
 
     def test_const_declaration(self):
         stmt = self._parse_stmt('const x = 1;')
         self.assertIsInstance(stmt, JsVariableDeclaration)
-        self.assertEqual(stmt.kind, 'const')
+        self.assertEqual(stmt.kind, JsVarKind.CONST)
 
     def test_var_multiple(self):
         stmt = self._parse_stmt('var x = 1, y = 2;')
@@ -234,9 +236,9 @@ class TestJsParserStatements(TestBase):
         self.assertIsInstance(body, JsClassBody)
         self.assertEqual(len(body.body), 4)
         self.assertIsInstance(body.body[0], JsMethodDefinition)
-        self.assertEqual(body.body[0].kind, 'constructor')
-        self.assertEqual(body.body[1].kind, 'get')
-        self.assertEqual(body.body[2].kind, 'set')
+        self.assertEqual(body.body[0].kind, JsMethodKind.CONSTRUCTOR)
+        self.assertEqual(body.body[1].kind, JsMethodKind.GET)
+        self.assertEqual(body.body[2].kind, JsMethodKind.SET)
         self.assertTrue(body.body[3].is_static)
 
     def test_import_default(self):

@@ -19,6 +19,41 @@ _ESCAPE_MAP: dict[str, str] = {
     '`'  : '`',
 }
 
+_HEX = frozenset('0123456789abcdefABCDEF')
+
+
+def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int]:
+    if pos >= length:
+        return '', pos
+    c = src[pos]
+    pos += 1
+    mapped = _ESCAPE_MAP.get(c)
+    if mapped is not None:
+        return mapped, pos
+    if c == 'x' and pos + 1 < length:
+        hexstr = src[pos:pos + 2]
+        if len(hexstr) == 2 and _HEX.issuperset(hexstr):
+            return chr(int(hexstr, 16)), pos + 2
+        return 'x', pos
+    if c == 'u':
+        if pos < length and src[pos] == '{':
+            end = src.find('}', pos + 1)
+            if end != -1:
+                hexstr = src[pos + 1:end]
+                if hexstr and _HEX.issuperset(hexstr):
+                    return chr(int(hexstr, 16)), end + 1
+                return 'u', end + 1
+        elif pos + 3 < length:
+            hexstr = src[pos:pos + 4]
+            if len(hexstr) == 4 and _HEX.issuperset(hexstr):
+                return chr(int(hexstr, 16)), pos + 4
+        return 'u', pos
+    if c in '\r\n':
+        if c == '\r' and pos < length and src[pos] == '\n':
+            pos += 1
+        return '', pos
+    return c, pos
+
 _FOUR_CHAR_OPS: dict[str, JsTokenKind] = {
     '>>>=' : JsTokenKind.GT3_ASSIGN,
 }
@@ -156,126 +191,67 @@ class JsLexer:
         return src[start:self.pos], has_newline
 
     def _read_string_escape(self) -> str:
+        self.pos += 1
+        result, self.pos = _decode_one_escape(
+            self.source, self.pos, len(self.source))
+        return result
+
+    def _read_string(self, quote: str) -> str:
+        start = self.pos
         src = self.source
         length = len(src)
         self.pos += 1
-        if self.pos >= length:
-            return ''
-        c = src[self.pos]
-        self.pos += 1
-        mapped = _ESCAPE_MAP.get(c)
-        if mapped is not None:
-            return mapped
-        if c == 'x' and self.pos + 1 < length:
-            hexstr = src[self.pos:self.pos + 2]
-            if len(hexstr) == 2 and all(
-                h in '0123456789abcdefABCDEF' for h in hexstr
-            ):
-                self.pos += 2
-                return chr(int(hexstr, 16))
-            return 'x'
-        if c == 'u':
-            if self.pos < length and src[self.pos] == '{':
-                end = src.find('}', self.pos + 1)
-                if end != -1:
-                    hexstr = src[self.pos + 1:end]
-                    if hexstr and all(
-                        h in '0123456789abcdefABCDEF' for h in hexstr
-                    ):
-                        self.pos = end + 1
-                        return chr(int(hexstr, 16))
-                    self.pos = end + 1
-                    return 'u'
-            elif self.pos + 3 < length:
-                hexstr = src[self.pos:self.pos + 4]
-                if len(hexstr) == 4 and all(
-                    h in '0123456789abcdefABCDEF' for h in hexstr
-                ):
-                    self.pos += 4
-                    return chr(int(hexstr, 16))
-            return 'u'
-        if c in '\r\n':
-            if c == '\r' and self.pos < length and src[self.pos] == '\n':
+        while self.pos < length:
+            c = src[self.pos]
+            if c == '\\':
+                self._read_string_escape()
+                continue
+            self.pos += 1
+            if c == quote:
+                return src[start:self.pos]
+            if c in '\r\n':
+                return src[start:self.pos]
+        return src[start:self.pos]
+
+    def _scan_template_content(
+        self,
+        start: int,
+        close_kind: JsTokenKind,
+        interp_kind: JsTokenKind,
+        depth_delta: int,
+    ) -> JsToken:
+        src = self.source
+        length = len(src)
+        while self.pos < length:
+            c = src[self.pos]
+            if c == '\\':
+                self._read_string_escape()
+                continue
+            if c == '`':
                 self.pos += 1
-            return ''
-        return c
-
-    def _read_single_string(self) -> str:
-        start = self.pos
-        src = self.source
-        length = len(src)
-        self.pos += 1
-        while self.pos < length:
-            c = src[self.pos]
-            if c == '\\':
-                self._read_string_escape()
-                continue
+                self._template_depth += depth_delta
+                return JsToken(close_kind, src[start:self.pos], start)
+            if c == '$' and self.pos + 1 < length and src[self.pos + 1] == '{':
+                self.pos += 2
+                if depth_delta == 0:
+                    self._template_depth += 1
+                self._brace_stack.append(0)
+                return JsToken(interp_kind, src[start:self.pos], start)
             self.pos += 1
-            if c == "'":
-                return src[start:self.pos]
-            if c in '\r\n':
-                return src[start:self.pos]
-        return src[start:self.pos]
-
-    def _read_double_string(self) -> str:
-        start = self.pos
-        src = self.source
-        length = len(src)
-        self.pos += 1
-        while self.pos < length:
-            c = src[self.pos]
-            if c == '\\':
-                self._read_string_escape()
-                continue
-            self.pos += 1
-            if c == '"':
-                return src[start:self.pos]
-            if c in '\r\n':
-                return src[start:self.pos]
-        return src[start:self.pos]
+        self._template_depth += depth_delta
+        return JsToken(close_kind, src[start:self.pos], start)
 
     def _read_template(self) -> JsToken:
         start = self.pos
-        src = self.source
-        length = len(src)
         self.pos += 1
-        while self.pos < length:
-            c = src[self.pos]
-            if c == '\\':
-                self._read_string_escape()
-                continue
-            if c == '`':
-                self.pos += 1
-                return JsToken(JsTokenKind.TEMPLATE_FULL, src[start:self.pos], start)
-            if c == '$' and self.pos + 1 < length and src[self.pos + 1] == '{':
-                self.pos += 2
-                self._template_depth += 1
-                self._brace_stack.append(0)
-                return JsToken(JsTokenKind.TEMPLATE_HEAD, src[start:self.pos], start)
-            self.pos += 1
-        return JsToken(JsTokenKind.TEMPLATE_FULL, src[start:self.pos], start)
+        return self._scan_template_content(
+            start, JsTokenKind.TEMPLATE_FULL, JsTokenKind.TEMPLATE_HEAD, 0)
 
     def _resume_template(self) -> JsToken:
         start = self.pos
-        src = self.source
-        length = len(src)
         self.pos += 1
-        while self.pos < length:
-            c = src[self.pos]
-            if c == '\\':
-                self._read_string_escape()
-                continue
-            if c == '`':
-                self.pos += 1
-                self._template_depth -= 1
-                return JsToken(JsTokenKind.TEMPLATE_TAIL, src[start:self.pos], start)
-            if c == '$' and self.pos + 1 < length and src[self.pos + 1] == '{':
-                self.pos += 2
-                self._brace_stack.append(0)
-                return JsToken(JsTokenKind.TEMPLATE_MIDDLE, src[start:self.pos], start)
-            self.pos += 1
-        self._template_depth -= 1
-        return JsToken(JsTokenKind.TEMPLATE_TAIL, src[start:self.pos], start)
+        return self._scan_template_content(
+            start, JsTokenKind.TEMPLATE_TAIL, JsTokenKind.TEMPLATE_MIDDLE, -1)
 
     def _read_regexp(self) -> str:
         start = self.pos
@@ -306,6 +282,16 @@ class JsLexer:
             self.pos += 1
         return src[start:self.pos]
 
+    def _read_prefixed_int(self, start: int, valid_digits: str) -> JsToken:
+        src = self.source
+        length = len(src)
+        while self.pos < length and src[self.pos] in valid_digits:
+            self.pos += 1
+        if self.pos < length and src[self.pos] == 'n':
+            self.pos += 1
+            return JsToken(JsTokenKind.BIGINT, src[start:self.pos], start)
+        return JsToken(JsTokenKind.INTEGER, src[start:self.pos], start)
+
     def _read_number(self) -> JsToken:
         start = self.pos
         src = self.source
@@ -315,32 +301,13 @@ class JsLexer:
             nc = src[self.pos + 1]
             if nc in 'xX':
                 self.pos += 2
-                while self.pos < length and (
-                    src[self.pos] in '0123456789abcdefABCDEF_'
-                ):
-                    self.pos += 1
-                if self.pos < length and src[self.pos] == 'n':
-                    self.pos += 1
-                    return JsToken(JsTokenKind.BIGINT, src[start:self.pos], start)
-                return JsToken(JsTokenKind.INTEGER, src[start:self.pos], start)
+                return self._read_prefixed_int(start, '0123456789abcdefABCDEF_')
             if nc in 'oO':
                 self.pos += 2
-                while self.pos < length and (
-                    src[self.pos] in '01234567_'
-                ):
-                    self.pos += 1
-                if self.pos < length and src[self.pos] == 'n':
-                    self.pos += 1
-                    return JsToken(JsTokenKind.BIGINT, src[start:self.pos], start)
-                return JsToken(JsTokenKind.INTEGER, src[start:self.pos], start)
+                return self._read_prefixed_int(start, '01234567_')
             if nc in 'bB':
                 self.pos += 2
-                while self.pos < length and src[self.pos] in '01_':
-                    self.pos += 1
-                if self.pos < length and src[self.pos] == 'n':
-                    self.pos += 1
-                    return JsToken(JsTokenKind.BIGINT, src[start:self.pos], start)
-                return JsToken(JsTokenKind.INTEGER, src[start:self.pos], start)
+                return self._read_prefixed_int(start, '01_')
 
         while self.pos < length and (src[self.pos].isdigit() or src[self.pos] == '_'):
             self.pos += 1
@@ -427,12 +394,12 @@ class JsLexer:
                 continue
 
             if c == "'":
-                text = self._read_single_string()
+                text = self._read_string("'")
                 prev_allows_regex = False
                 yield JsToken(JsTokenKind.STRING_SINGLE, text, start)
                 continue
             if c == '"':
-                text = self._read_double_string()
+                text = self._read_string('"')
                 prev_allows_regex = False
                 yield JsToken(JsTokenKind.STRING_DOUBLE, text, start)
                 continue
@@ -529,3 +496,21 @@ class JsLexer:
             self.pos += 1
             prev_allows_regex = True
             yield JsToken(JsTokenKind.ERROR, c, start)
+
+
+def decode_js_string_body(text: str) -> str:
+    if '\\' not in text:
+        return text
+    parts: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        c = text[i]
+        if c != '\\' or i + 1 >= length:
+            parts.append(c)
+            i += 1
+            continue
+        decoded, i = _decode_one_escape(text, i + 1, length)
+        if decoded:
+            parts.append(decoded)
+    return ''.join(parts)

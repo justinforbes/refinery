@@ -3,6 +3,7 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts.js.deobfuscation import deobfuscate
+from refinery.lib.scripts.js.deobfuscation.helpers import make_string_literal
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
@@ -160,6 +161,16 @@ class TestBasicSimplifications(TestJsDeobfuscator):
         result = self._deobfuscate('var x = "hel" + "lo"; var y = [1, 2, 3][0];')
         self.assertIn("'hello'", result)
         self.assertIn('1', result)
+
+    def test_make_string_literal_escapes_control_chars(self):
+        node = make_string_literal('a\nb')
+        self.assertEqual(node.raw, "'a\\nb'")
+        node = make_string_literal('x\ry')
+        self.assertEqual(node.raw, "'x\\ry'")
+        node = make_string_literal('p\tq')
+        self.assertEqual(node.raw, "'p\\tq'")
+        node = make_string_literal('m\0n')
+        self.assertEqual(node.raw, "'m\\0n'")
 
     def test_unescape_hex_space(self):
         result = self._deobfuscate("'hello\\x20world';")
