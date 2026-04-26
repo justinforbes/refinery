@@ -36,7 +36,7 @@ BINARY_OPS: dict[str, Callable] = {
 }
 
 
-def string_value(node: Expression) -> str | None:
+def string_value(node: Expression | None) -> str | None:
     if isinstance(node, JsStringLiteral):
         return node.value
     return None
@@ -73,3 +73,18 @@ def is_literal(node: Expression) -> bool:
 
 def is_valid_identifier(name: str) -> bool:
     return bool(SIMPLE_IDENTIFIER.match(name)) and name not in JS_RESERVED
+
+
+_LEADING_DIGITS = re.compile(r'^[+-]?\d+')
+
+
+def js_parse_int(s: str) -> int | None:
+    """
+    Replicate the semantics of JavaScript's parseInt(s, 10) for the subset used by the
+    obfuscator's checksum: extract leading decimal digits, ignore trailing non-digit
+    characters. Returns None when no leading digits are found (JS would return NaN).
+    """
+    m = _LEADING_DIGITS.match(s.strip())
+    if m is None:
+        return None
+    return int(m.group())
