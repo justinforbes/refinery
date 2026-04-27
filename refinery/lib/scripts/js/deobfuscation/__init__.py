@@ -3,7 +3,10 @@ JavaScript AST deobfuscation transforms.
 """
 from __future__ import annotations
 
+from refinery.lib.scripts.js.deobfuscation.cff import JsControlFlowUnflattening
+from refinery.lib.scripts.js.deobfuscation.constants import JsConstantInlining
 from refinery.lib.scripts.js.deobfuscation.deadcode import JsDeadCodeElimination
+from refinery.lib.scripts.js.deobfuscation.objectfold import JsObjectFold
 from refinery.lib.scripts.js.deobfuscation.simplify import JsSimplifications
 from refinery.lib.scripts.js.deobfuscation.stringarray import JsStringArrayResolver
 from refinery.lib.scripts.js.deobfuscation.wrappers import JsCallWrapperInliner
@@ -15,10 +18,16 @@ _pipeline = DeobfuscationPipeline(
         TransformerGroup('wrappers', JsCallWrapperInliner),
         TransformerGroup('stringarray', JsStringArrayResolver),
         TransformerGroup('simplify', JsSimplifications, JsDeadCodeElimination),
+        TransformerGroup('objectfold', JsObjectFold),
+        TransformerGroup('cff', JsControlFlowUnflattening),
+        TransformerGroup('constants', JsConstantInlining),
     ],
     dependencies={
         'stringarray': {'wrappers'},
         'simplify': {'stringarray'},
+        'objectfold': {'simplify'},
+        'cff': {'objectfold'},
+        'constants': {'cff'},
     },
 )
 

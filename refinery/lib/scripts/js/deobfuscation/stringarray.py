@@ -85,7 +85,7 @@ class ChecksumInfo(NamedTuple):
     Result of extracting the checksum expression from the rotation IIFE.
     """
     node: Node
-    local_accessor: str
+    local_accessors: frozenset[str]
 
 
 def _find_array_function(body: Sequence[Node]) -> ArrayFunction | None:
@@ -246,10 +246,10 @@ def _extract_checksum_expression(
     accessor_name: str,
 ) -> ChecksumInfo | None:
     """
-    Extract the checksum expression AST node and the local accessor alias from the rotation
-    IIFE body statements. Returns (checksum_expression_node, local_accessor_name) or None.
+    Extract the checksum expression AST node and the local accessor aliases from the rotation
+    IIFE body statements. Returns (checksum_expression_node, local_accessor_names) or None.
     """
-    local_accessor = accessor_name
+    local_accessors: set[str] = {accessor_name}
     for s in iife_body:
         if isinstance(s, JsVariableDeclaration):
             for decl in s.declarations:
@@ -259,7 +259,7 @@ def _extract_checksum_expression(
                     and isinstance(decl.init, JsIdentifier)
                     and decl.init.name == accessor_name
                 ):
-                    local_accessor = decl.id.name
+                    local_accessors.add(decl.id.name)
     checksum_node: Node | None = None
     for s in iife_body:
         if isinstance(s, JsWhileStatement) and s.body is not None:
@@ -274,7 +274,7 @@ def _extract_checksum_expression(
             break
     if checksum_node is None:
         return None
-    return ChecksumInfo(checksum_node, local_accessor)
+    return ChecksumInfo(checksum_node, frozenset(local_accessors))
 
 
 def _extract_rc4_key(call: JsCallExpression, encoding: Encoding) -> str | None:
@@ -312,9 +312,35 @@ def _decode_string(raw: str, encoding: Encoding, key: str | None = None) -> str:
     raise _EvalError
 
 
+def _eval_arithmetic(node: Node) -> float:
+    """
+    Evaluate a pure arithmetic expression AST to a float. Handles numeric literals, unary `+`/`-`,
+    binary operators, and parenthesized expressions. Raises `_EvalError` on any node that is not
+    statically computable.
+    """
+    if isinstance(node, JsNumericLiteral):
+        return float(node.value)
+    if isinstance(node, JsParenthesizedExpression) and node.expression:
+        return _eval_arithmetic(node.expression)
+    if isinstance(node, JsUnaryExpression) and node.operand:
+        if node.operator == '-':
+            return -_eval_arithmetic(node.operand)
+        if node.operator == '+':
+            return _eval_arithmetic(node.operand)
+    if isinstance(node, JsBinaryExpression) and node.left and node.right:
+        left = _eval_arithmetic(node.left)
+        right = _eval_arithmetic(node.right)
+        fn = BINARY_OPS.get(node.operator)
+        if fn is not None:
+            if node.operator == '/' and right == 0:
+                raise _EvalError
+            return fn(left, right)
+    raise _EvalError
+
+
 def _eval_checksum(
     node: Node,
-    local_accessor: str,
+    local_accessors: frozenset[str],
     strings: list[str],
     base_offset: int,
     encoding: Encoding = Encoding.NONE,
@@ -324,15 +350,16 @@ def _eval_checksum(
     operators (+, -, *, /), unary negation, parentheses, parseInt calls on accessor lookups,
     and numeric literals. Raises _EvalError on any unrecognized pattern.
     """
-    recurse = lambda n: _eval_checksum(n, local_accessor, strings, base_offset, encoding)
+    recurse = lambda n: _eval_checksum(n, local_accessors, strings, base_offset, encoding)
     if isinstance(node, JsNumericLiteral):
         return float(node.value)
     if isinstance(node, JsParenthesizedExpression) and node.expression:
         return recurse(node.expression)
-    if isinstance(node, JsUnaryExpression) and node.operator == '-' and node.operand:
-        return -recurse(node.operand)
-    if isinstance(node, JsUnaryExpression) and node.operator == '+' and node.operand:
-        return recurse(node.operand)
+    if isinstance(node, JsUnaryExpression) and node.operand:
+        if node.operator == '-':
+            return -recurse(node.operand)
+        if node.operator == '+':
+            return recurse(node.operand)
     if isinstance(node, JsBinaryExpression) and node.left and node.right:
         left = recurse(node.left)
         right = recurse(node.right)
@@ -341,23 +368,25 @@ def _eval_checksum(
             if node.operator == '/' and right == 0:
                 raise _EvalError
             return fn(left, right)
-        raise _EvalError
     if isinstance(node, JsCallExpression) and isinstance(node.callee, JsIdentifier):
         if node.callee.name == 'parseInt' and len(node.arguments) >= 1:
             inner = node.arguments[0]
+            if isinstance(inner, JsStringLiteral):
+                result = js_parse_int(inner.value)
+                if result is None:
+                    raise _EvalError
+                return float(result)
             if isinstance(inner, JsCallExpression) and isinstance(inner.callee, JsIdentifier):
-                if inner.callee.name == local_accessor and len(inner.arguments) >= 1:
-                    arg = inner.arguments[0]
-                    if isinstance(arg, JsNumericLiteral):
-                        idx = int(arg.value) - base_offset
-                        if 0 <= idx < len(strings):
-                            raw = strings[idx]
-                            key = _extract_rc4_key(inner, encoding)
-                            decoded = _decode_string(raw, encoding, key)
-                            result = js_parse_int(decoded)
-                            if result is None:
-                                raise _EvalError
-                            return float(result)
+                if inner.callee.name in local_accessors and len(inner.arguments) >= 1:
+                    idx = int(recurse(inner.arguments[0])) - base_offset
+                    if 0 <= idx < len(strings):
+                        raw = strings[idx]
+                        key = _extract_rc4_key(inner, encoding)
+                        decoded = _decode_string(raw, encoding, key)
+                        result = js_parse_int(decoded)
+                        if result is None:
+                            raise _EvalError
+                        return float(result)
             raise _EvalError
     raise _EvalError
 
@@ -366,7 +395,7 @@ def _simulate_rotation(
     strings: list[str],
     base_offset: int,
     checksum_node: Node,
-    local_accessor: str,
+    local_accessors: frozenset[str],
     target: int,
     encoding: Encoding = Encoding.NONE,
 ) -> list[str] | None:
@@ -380,7 +409,7 @@ def _simulate_rotation(
     for _ in range(n):
         try:
             if int(_eval_checksum(
-                checksum_node, local_accessor, array, base_offset, encoding,
+                checksum_node, local_accessors, array, base_offset, encoding,
             )) == target:
                 return array
         except _EvalError:
@@ -485,11 +514,14 @@ def _replace_accessor_calls(
     aliases: set[str],
     raw_lookup: dict[int, str],
     encoding: Encoding,
-):
+) -> int:
     """
-    Walk the entire AST and replace accessor calls with decoded string literals. For RC4, the
-    decryption key is taken from the second argument at each call site.
+    Walk the entire AST and replace accessor calls with decoded string literals. The first argument
+    is evaluated as an arithmetic expression so that post-inlining residuals like `100 - -466` are
+    handled alongside plain numeric literals. For RC4, the decryption key is taken from the second
+    argument at each call site. Returns the number of replaced calls.
     """
+    count = 0
     for node in list(root.walk()):
         if not isinstance(node, JsCallExpression):
             continue
@@ -499,10 +531,10 @@ def _replace_accessor_calls(
             continue
         if len(node.arguments) < 1:
             continue
-        arg = node.arguments[0]
-        if not isinstance(arg, JsNumericLiteral):
+        try:
+            idx = int(_eval_arithmetic(node.arguments[0]))
+        except _EvalError:
             continue
-        idx = int(arg.value)
         raw = raw_lookup.get(idx)
         if raw is None:
             continue
@@ -512,6 +544,8 @@ def _replace_accessor_calls(
         except _EvalError:
             continue
         _replace_in_parent(node, make_string_literal(value))
+        count += 1
+    return count
 
 
 class JsStringArrayResolver(Transformer):
@@ -535,7 +569,7 @@ class JsStringArrayResolver(Transformer):
             array.strings,
             accessor.base_offset,
             checksum.node,
-            checksum.local_accessor,
+            checksum.local_accessors,
             rotation.target,
             encoding,
         )
@@ -544,10 +578,19 @@ class JsStringArrayResolver(Transformer):
         aliases = _collect_accessor_aliases(body, accessor.name)
         aliases.add(accessor.name)
         raw_lookup = {i + accessor.base_offset: s for i, s in enumerate(resolved)}
-        _replace_accessor_calls(node, aliases, raw_lookup, encoding)
-        _remove_from_parent(array.node)
-        _remove_from_parent(accessor.node)
-        _remove_from_parent(rotation.node)
+        replaced = _replace_accessor_calls(node, aliases, raw_lookup, encoding)
+        if replaced == 0:
+            return None
+        has_remaining = any(
+            isinstance(n, JsCallExpression)
+            and isinstance(n.callee, JsIdentifier)
+            and n.callee.name in aliases
+            for n in node.walk()
+        )
+        if not has_remaining:
+            _remove_from_parent(array.node)
+            _remove_from_parent(accessor.node)
+            _remove_from_parent(rotation.node)
         self.mark_changed()
         return None
 

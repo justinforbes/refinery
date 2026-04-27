@@ -3,8 +3,10 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts.js.deobfuscation import deobfuscate
+from refinery.lib.scripts.js.deobfuscation.constants import JsConstantInlining
 from refinery.lib.scripts.js.deobfuscation.deadcode import JsDeadCodeElimination
 from refinery.lib.scripts.js.deobfuscation.helpers import make_string_literal
+from refinery.lib.scripts.js.deobfuscation.objectfold import JsObjectFold
 from refinery.lib.scripts.js.deobfuscation.simplify import JsSimplifications
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
@@ -191,6 +193,25 @@ class TestBasicSimplifications(TestJsDeobfuscator):
         result = self._deobfuscate("'back\\x5cslash';")
         self.assertIn('\\x5c', result)
 
+    def test_split_pipe_to_array(self):
+        result = self._deobfuscate("'a|b|c'['split']('|');")
+        self.assertNotIn('split', result)
+        self.assertIn("'a'", result)
+        self.assertIn("'b'", result)
+        self.assertIn("'c'", result)
+
+    def test_split_dash_separator(self):
+        result = self._deobfuscate("'x-y'['split']('-');")
+        self.assertNotIn('split', result)
+        self.assertIn("'x'", result)
+        self.assertIn("'y'", result)
+
+    def test_split_dot_notation(self):
+        result = self._deobfuscate("'a|b'.split('|');")
+        self.assertNotIn('split', result)
+        self.assertIn("'a'", result)
+        self.assertIn("'b'", result)
+
 
 class TestStringArray(TestJsDeobfuscator):
 
@@ -212,67 +233,12 @@ class TestStringArray(TestJsDeobfuscator):
         self.assertIn('console.log', result)
         self.assertNotIn('_0x2fc0', result)
 
-    def test_string_array_base64_encoding(self):
-        source = (
-            r"var _0x5dcc90=_0xf1a4;function _0xf1a4(_0x5939ce,_0x48b8f0){_0x5939ce=_0x5939ce-0x117;var _0x5943fc="
-            r"_0x35ba();var _0x26baba=_0x5943fc[_0x5939ce];if(_0xf1a4['lvNcRA']===undefined){var _0x57faca=functio"
-            r"n(_0x1e0002){var _0x35ba5c='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=';var _"
-            r"0xf1a4db='',_0x147cac='',_0x1149e8=_0xf1a4db+_0x57faca,_0x574713=(''+function(){return 0x0;})['index"
-            r"Of']('\x0a')!==-0x1;for(var _0x200f8a=0x0,_0x5b41ff,_0xeaa25,_0x4de86c=0x0;_0xeaa25=_0x1e0002['charA"
-            r"t'](_0x4de86c++);~_0xeaa25&&(_0x5b41ff=_0x200f8a%0x4?_0x5b41ff*0x40+_0xeaa25:_0xeaa25,_0x200f8a++%0x"
-            r"4)?_0xf1a4db+=_0x574713||_0x1149e8['charCodeAt'](_0x4de86c+0xa)-0xa!==0x0?String['fromCharCode'](0xf"
-            r"f&_0x5b41ff>>(-0x2*_0x200f8a&0x6)):_0x200f8a:0x0){_0xeaa25=_0x35ba5c['indexOf'](_0xeaa25);}for(var _"
-            r"0x2db414=0x0,_0x3d121a=_0xf1a4db['length'];_0x2db414<_0x3d121a;_0x2db414++){_0x147cac+='%'+('00'+_0x"
-            r"f1a4db['charCodeAt'](_0x2db414)['toString'](0x10))['slice'](-0x2);}return decodeURIComponent(_0x147c"
-            r"ac);};_0xf1a4['xXLpNw']=_0x57faca,_0xf1a4['odAnNy']={},_0xf1a4['lvNcRA']=!![];}var _0x543a02=_0x5943"
-            r"fc[0x0],_0x588b78=_0x5939ce+_0x543a02,_0x69e6c5=_0xf1a4['odAnNy'][_0x588b78];if(!_0x69e6c5){var _0x3"
-            r"8a721=function(_0x3e510d){this['KUwhtg']=_0x3e510d,this['lXYGTl']=[0x1,0x0,0x0],this['cSqHjm']=funct"
-            r"ion(){return'newState';},this['clIxhe']='\x5cw+\x20*\x5c(\x5c)\x20*{\x5cw+\x20*',this['RNuSRa']='[\x"
-            r"27|\x22].+[\x27|\x22];?\x20*}';};_0x38a721['prototype']['nyXfSO']=function(){var _0x11dd31=new RegEx"
-            r"p(this['clIxhe']+this['RNuSRa']),_0x195f18=_0x11dd31['test'](this['cSqHjm']['toString']())?--this['l"
-            r"XYGTl'][0x1]:--this['lXYGTl'][0x0];return this['LKokYd'](_0x195f18);},_0x38a721['prototype']['LKokYd"
-            r"']=function(_0xf1d68b){if(!Boolean(~_0xf1d68b))return _0xf1d68b;return this['ARYADA'](this['KUwhtg']"
-            r");},_0x38a721['prototype']['ARYADA']=function(_0x465b39){for(var _0x8dc7c8=0x0,_0x580cfb=this['lXYGT"
-            r"l']['length'];_0x8dc7c8<_0x580cfb;_0x8dc7c8++){this['lXYGTl']['push'](Math['round'](Math['random']()"
-            r")),_0x580cfb=this['lXYGTl']['length'];}return _0x465b39(this['lXYGTl'][0x0]);},(''+function(){return"
-            r" 0x0;})['indexOf']('\x0a')===-0x1&&new _0x38a721(_0xf1a4)['nyXfSO'](),_0x26baba=_0xf1a4['xXLpNw'](_0"
-            r"x26baba),_0xf1a4['odAnNy'][_0x588b78]=_0x26baba;}else _0x26baba=_0x69e6c5;return _0x26baba;}(functio"
-            r"n(_0x521ca4,_0x3f2b97){var _0x201ef6=_0xf1a4,_0x139eba=_0x521ca4();while(!![]){try{var _0x51150c=-pa"
-            r"rseInt(_0x201ef6(0x11a))/0x1*(parseInt(_0x201ef6(0x133))/0x2)+-parseInt(_0x201ef6(0x118))/0x3+parseI"
-            r"nt(_0x201ef6(0x12d))/0x4+-parseInt(_0x201ef6(0x11f))/0x5*(-parseInt(_0x201ef6(0x12c))/0x6)+-parseInt"
-            r"(_0x201ef6(0x117))/0x7*(parseInt(_0x201ef6(0x127))/0x8)+parseInt(_0x201ef6(0x119))/0x9*(parseInt(_0x"
-            r"201ef6(0x128))/0xa)+parseInt(_0x201ef6(0x122))/0xb*(parseInt(_0x201ef6(0x12b))/0xc);if(_0x51150c===_"
-            r"0x3f2b97)break;else _0x139eba['push'](_0x139eba['shift']());}catch(_0x250985){_0x139eba['push'](_0x1"
-            r"39eba['shift']());}}}(_0x35ba,0x35dec));var _0x1e0002=(function(){var _0x4de86c=!![];return function"
-            r"(_0x2db414,_0x3d121a){var _0x38a721=_0x4de86c?function(){if(_0x3d121a){var _0x3e510d=_0x3d121a['appl"
-            r"y'](_0x2db414,arguments);return _0x3d121a=null,_0x3e510d;}}:function(){};return _0x4de86c=![],_0x38a"
-            r"721;};}()),_0x69e6c5=_0x1e0002(this,function(){var _0x67f34f=_0xf1a4;return _0x69e6c5[_0x67f34f(0x11"
-            r"c)]()['search'](_0x67f34f(0x11b))['toString']()[_0x67f34f(0x129)](_0x69e6c5)[_0x67f34f(0x11d)](_0x67"
-            r"f34f(0x11b));});_0x69e6c5();var _0x57faca=(function(){var _0x11dd31=!![];return function(_0x195f18,_"
-            r"0xf1d68b){var _0x465b39=_0x11dd31?function(){if(_0xf1d68b){var _0x8dc7c8=_0xf1d68b['apply'](_0x195f1"
-            r"8,arguments);return _0xf1d68b=null,_0x8dc7c8;}}:function(){};return _0x11dd31=![],_0x465b39;};}()),_"
-            r"0x26baba=_0x57faca(this,function(){var _0x7452c2=_0xf1a4,_0x580cfb=function(){var _0x4494ae=_0xf1a4,"
-            r"_0xc3a305;try{_0xc3a305=Function(_0x4494ae(0x125)+_0x4494ae(0x123)+');')();}catch(_0x4bae61){_0xc3a3"
-            r"05=window;}return _0xc3a305;},_0x18b0aa=_0x580cfb(),_0x29e29f=_0x18b0aa[_0x7452c2(0x12e)]=_0x18b0aa["
-            r"_0x7452c2(0x12e)]||{},_0x2fdfc1=[_0x7452c2(0x11e),_0x7452c2(0x12a),'info',_0x7452c2(0x126),_0x7452c2"
-            r"(0x132),_0x7452c2(0x12f),_0x7452c2(0x131)];for(var _0x331e55=0x0;_0x331e55<_0x2fdfc1[_0x7452c2(0x130"
-            r")];_0x331e55++){var _0x3139c7=_0x57faca[_0x7452c2(0x129)][_0x7452c2(0x120)]['bind'](_0x57faca),_0x51"
-            r"c297=_0x2fdfc1[_0x331e55],_0x49f6d5=_0x29e29f[_0x51c297]||_0x3139c7;_0x3139c7['__proto__']=_0x57faca"
-            r"[_0x7452c2(0x124)](_0x57faca),_0x3139c7['toString']=_0x49f6d5[_0x7452c2(0x11c)]['bind'](_0x49f6d5),_"
-            r"0x29e29f[_0x51c297]=_0x3139c7;}});_0x26baba();var msg=_0x5dcc90(0x121);function _0x35ba(){var _0x1da"
-            r"a50=['Bg9N','mZvxufbrtwS','ChjVDg90ExbL','DgvZDcbZDhjPBMC','mte4nZeZmxDHz2HzEa','E30Uy29UC3rYDwn0B3i"
-            r"OiNjLDhvYBIb0AgLZiIKOicK','yMLUza','CMv0DxjUicHMDw5JDgLVBIGPia','zxjYB3i','mJKZnNvdtKTLAa','mJy4ntu5"
-            r"me5MzNzKyq','y29UC3rYDwn0B3i','D2fYBG','mtjzsfDvveO','mta3nJi4yMTssfvW','mtuXmdC3nKLPufvltG','y29UC2"
-            r"9Szq','DgfIBgu','BgvUz3rO','DhjHy2u','zxHJzxb0Aw9U','mta1mtK4D1Ddq3nh','ndC0nM1lthvswq','mta3mJK4oxH"
-            r"0BLbisW','owTJBujcwG','mwvNt0XVtW','kcGOlISPkYKRksSK','Dg9tDhjPBMC','C2vHCMnO'];_0x35ba=function(){r"
-            r"eturn _0x1daa50;};return _0x35ba();}console['log'](msg);"
-        )
-        result = self._deobfuscate(source)
-        self.assertIn("'test string'", result)
-        self.assertIn('console.log', result)
-        self.assertNotIn('_0x35ba', result)
-
     def test_string_array_rc4_encoding(self):
+        """
+        RC4-encoded string array: the accessor function contains an RC4 cipher that decrypts
+        array entries using a per-call key (the second argument). This is a trimmed version
+        of the full output with self-defending and console-override boilerplate removed.
+        """
         source = (
             r"var _0x28eff0=_0x85f7;function _0x138c(){var _0x3144dc=['W4CnWRpcQKn3W7mbW4OU','W67dOZ3dU0hdS8ktzmom"
             r"','w24prCo1WPFdJCosWQ1zWQy','W7FdSCo6W5NdJa','W63dPZZcRrtcV8o+umo2g8krW6BcTW','WRxdHSooB8oIaspcNelcV"
@@ -324,30 +290,108 @@ class TestStringArray(TestJsDeobfuscator):
             r"6+parseInt(_0x1fe482(0x174,'q1WL'))/0x7+-parseInt(_0x1fe482(0x161,'Dja*'))/0x8*(-parseInt(_0x1fe482("
             r"0x15e,'DYhn'))/0x9)+parseInt(_0x1fe482(0x14d,'zupi'))/0xa*(parseInt(_0x1fe482(0x16d,'Ot85'))/0xb);if"
             r"(_0xafcaf6===_0x397185)break;else _0x50fe64['push'](_0x50fe64['shift']());}catch(_0x1fe138){_0x50fe6"
-            r"4['push'](_0x50fe64['shift']());}}}(_0x138c,0x697ae));var _0x42cc8d=(function(){var _0x1a6a9b=!![];r"
-            r"eturn function(_0x1b65be,_0x21a7b2){var _0x2450dc=_0x1a6a9b?function(){var _0x570a5c=_0x85f7;if(_0x2"
-            r"1a7b2){var _0x525d21=_0x21a7b2[_0x570a5c(0x160,'DYhn')](_0x1b65be,arguments);return _0x21a7b2=null,_"
-            r"0x525d21;}}:function(){};return _0x1a6a9b=![],_0x2450dc;};}()),_0x7c3c=_0x42cc8d(this,function(){var"
-            r" _0x36d5f=_0x85f7;return _0x7c3c['toString']()['search'](_0x36d5f(0x16e,'vHRQ'))[_0x36d5f(0x168,'43H"
-            r"A')]()[_0x36d5f(0x155,'^WN@')](_0x7c3c)[_0x36d5f(0x15d,'dChY')](_0x36d5f(0x176,'1NBB'));});_0x7c3c()"
-            r";var _0x5083fb=(function(){var _0xb4ae49=!![];return function(_0x5812fb,_0x42d0ca){var _0x72b3ac=_0x"
-            r"b4ae49?function(){var _0x5001a2=_0x85f7;if(_0x42d0ca){var _0x7cffbe=_0x42d0ca[_0x5001a2(0x153,'vHRQ'"
-            r")](_0x5812fb,arguments);return _0x42d0ca=null,_0x7cffbe;}}:function(){};return _0xb4ae49=![],_0x72b3"
-            r"ac;};}()),_0x5eebe1=_0x5083fb(this,function(){var _0x4dc929=_0x85f7,_0x347b99;try{var _0x55c939=Func"
-            r"tion(_0x4dc929(0x15c,']!wI')+_0x4dc929(0x156,'BqaA')+');');_0x347b99=_0x55c939();}catch(_0x404b8a){_"
-            r"0x347b99=window;}var _0x1c604c=_0x347b99[_0x4dc929(0x15f,'FdCr')]=_0x347b99[_0x4dc929(0x14c,'RT!O')]"
-            r"||{},_0x39dfaa=[_0x4dc929(0x157,'PGZ!'),_0x4dc929(0x14f,'ttcu'),_0x4dc929(0x16c,'4lCo'),_0x4dc929(0x"
-            r"16f,']!wI'),_0x4dc929(0x16b,'5)wT'),_0x4dc929(0x166,'KtWU'),_0x4dc929(0x171,'CTYV')];for(var _0x24be"
-            r"40=0x0;_0x24be40<_0x39dfaa[_0x4dc929(0x170,'cq*e')];_0x24be40++){var _0x508196=_0x5083fb[_0x4dc929(0"
-            r"x167,'zupi')]['prototype']['bind'](_0x5083fb),_0x3cea1d=_0x39dfaa[_0x24be40],_0x5a4a1f=_0x1c604c[_0x"
-            r"3cea1d]||_0x508196;_0x508196[_0x4dc929(0x172,'NehO')]=_0x5083fb[_0x4dc929(0x164,'KUmh')](_0x5083fb),"
-            r"_0x508196['toString']=_0x5a4a1f[_0x4dc929(0x177,'KtWU')]['bind'](_0x5a4a1f),_0x1c604c[_0x3cea1d]=_0x"
-            r"508196;}});_0x5eebe1();var msg=_0x28eff0(0x152,'#Y8%');console[_0x28eff0(0x158,'q1WL')](msg);"
+            r"4['push'](_0x50fe64['shift']());}}}(_0x138c,0x697ae));var msg=_0x28eff0(0x152,'#Y8%');console[_0x28e"
+            r"ff0(0x158,'q1WL')](msg);"
         )
         result = self._deobfuscate(source)
         self.assertIn("'test string'", result)
         self.assertIn('console.log', result)
         self.assertNotIn('_0x138c', result)
+
+    def test_string_array_medium_preset(self):
+        """
+        The medium preset enables numbersToExpressions (turning integer literals into
+        arithmetic) and declares multiple accessor aliases in the rotation IIFE. The resolver
+        must handle both to successfully rotate and decode the base64-encoded string array.
+        This is a trimmed version of the full medium preset output with boilerplate removed.
+        """
+        source = (
+            r"(function(_0x34f09b,_0x2ba2c7){var _0x1511b7=_0x1dce,_0x325c2c=_0x1dce,_0x4ab4b0=_0x34f09b();while(!"
+            r"![]){try{var _0x593aa2=-parseInt(_0x1511b7(0x14a))/(-0x996*-0x1+0xdf*0x16+-0x1cbf)*(parseInt(_0x325c"
+            r"2c(0x134))/(0x1*-0x192d+0x2*-0x59f+0x246d))+parseInt(_0x325c2c(0x13c))/(0x51*-0x18+-0x5b1+0xd4c)+par"
+            r"seInt(_0x325c2c(0x130))/(-0x1*0xb0f+0x166f+-0x2d7*0x4)+-parseInt(_0x325c2c(0x154))/(0x911*0x1+0x195*"
+            r"-0x3+-0x44d)+-parseInt(_0x325c2c(0x15b))/(-0xa0a+-0x105+0x1*0xb15)+-parseInt(_0x325c2c(0x12c))/(0x1*"
+            r"0x2057+0x14a*0xb+0x16*-0x21d)+-parseInt(_0x1511b7(0x12b))/(-0x5b5+-0x187e+0x1e3b)*(-parseInt(_0x1511"
+            r"b7(0x132))/(-0x3*-0x6a3+0x1f3d+-0x331d));if(_0x593aa2===_0x2ba2c7)break;else _0x4ab4b0['push'](_0x4a"
+            r"b4b0['shift']());}catch(_0x48377f){_0x4ab4b0['push'](_0x4ab4b0['shift']());}}}(_0x287a,-0x97be7+-0x8"
+            r"8066+0x184e33));function _0x1dce(_0x2813b9,_0x23aedc){_0x2813b9=_0x2813b9-(-0x1*0xd49+0x1*-0x335+-0x"
+            r"11a1*-0x1);var _0x294c48=_0x287a();var _0x2c6771=_0x294c48[_0x2813b9];if(_0x1dce['mgzOcZ']===undefin"
+            r"ed){var _0x1d90f4=function(_0x4924e2){var _0x296904='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTU"
+            r"VWXYZ0123456789+/=';var _0x5cd014='',_0x353c7b='',_0x5ab9b1=_0x5cd014+_0x1d90f4,_0x7ce0f3=(''+functi"
+            r"on(){return-0xfe5+-0x5e8+0x15cd;})['indexOf']('\x0a')!==-(0x10db+-0x26b7+0x15dd);for(var _0x2f3647=-"
+            r"0xc8d+-0x3*-0x8e+0xae3,_0x3e3c71,_0x59c6e0,_0x229262=0x6ad*0x3+0x2264+-0x366b;_0x59c6e0=_0x4924e2['c"
+            r"harAt'](_0x229262++);~_0x59c6e0&&(_0x3e3c71=_0x2f3647%(0x1de7*-0x1+0x16e2+0x709*0x1)?_0x3e3c71*(0x6e"
+            r"5+0x19ec+-0x7*0x4a7)+_0x59c6e0:_0x59c6e0,_0x2f3647++%(-0x1d*-0x4d+-0xd1c*-0x2+-0x22ed))?_0x5cd014+=_"
+            r"0x7ce0f3||_0x5ab9b1['charCodeAt'](_0x229262+(-0x2a6*-0x9+-0x23d7+0xc0b))-(0x2*-0x53+-0x1b6b+-0x1c1b*"
+            r"-0x1)!==-0x2*-0xce3+0x379+0x1d3f*-0x1?String['fromCharCode'](-0xe7c+-0xbf*0x19+0x2222&_0x3e3c71>>(-("
+            r"-0x1ce5+-0x6b*0x8+0x203f)*_0x2f3647&-0x503+-0x1fa1+0x24aa)):_0x2f3647:-0x862+0x8cb*0x2+-0x934){_0x59"
+            r"c6e0=_0x296904['indexOf'](_0x59c6e0);}for(var _0x31be37=0x241a+0x423+-0x283d,_0x489aa0=_0x5cd014['le"
+            r"ngth'];_0x31be37<_0x489aa0;_0x31be37++){_0x353c7b+='%'+('00'+_0x5cd014['charCodeAt'](_0x31be37)['toS"
+            r"tring'](-0x18c3+-0x2422+0x1*0x3cf5))['slice'](-(0x11f8+-0x2579+0xb9*0x1b));}return decodeURIComponen"
+            r"t(_0x353c7b);};_0x1dce['YgTpuI']=_0x1d90f4,_0x1dce['BVHmSK']={},_0x1dce['mgzOcZ']=!![];}var _0x4ffdb"
+            r"5=_0x294c48[-0xe41+0x474+0x1*0x9cd],_0x2a4583=_0x2813b9+_0x4ffdb5,_0x2f31e4=_0x1dce['BVHmSK'][_0x2a4"
+            r"583];if(!_0x2f31e4){var _0x2edc24=function(_0xeb37e){this['deBJNF']=_0xeb37e,this['wasqbd']=[0x1*-0x"
+            r"deb+-0xaf2+0x425*0x6,-0x1115*0x1+0x1*0x295+-0x3a0*-0x4,0x228b+0x1946+-0x3bd1*0x1],this['pBqtjK']=fun"
+            r"ction(){return'newState';},this['QgsebD']='\x5cw+\x20*\x5c(\x5c)\x20*{\x5cw+\x20*',this['RVCFCM']='["
+            r"\x27|\x22].+[\x27|\x22];?\x20*}';};_0x2edc24['prototype']['qXndiN']=function(){var _0x1cd02a=new Reg"
+            r"Exp(this['QgsebD']+this['RVCFCM']),_0x3bf747=_0x1cd02a['test'](this['pBqtjK']['toString']())?--this["
+            r"'wasqbd'][-0x15*-0x10a+0x1*0x1ad7+-0x30a8]:--this['wasqbd'][0x890+0x263+0xaf3*-0x1];return this['KDq"
+            r"Swv'](_0x3bf747);},_0x2edc24['prototype']['KDqSwv']=function(_0x23a01b){if(!Boolean(~_0x23a01b))retu"
+            r"rn _0x23a01b;return this['lltWwG'](this['deBJNF']);},_0x2edc24['prototype']['lltWwG']=function(_0x4d"
+            r"1c63){for(var _0x8bc27c=-0x488+0x26e3+-0x225b,_0x2c26e7=this['wasqbd']['length'];_0x8bc27c<_0x2c26e7"
+            r";_0x8bc27c++){this['wasqbd']['push'](Math['round'](Math['random']())),_0x2c26e7=this['wasqbd']['leng"
+            r"th'];}return _0x4d1c63(this['wasqbd'][0xb3*0xd+0x2*-0x40a+0x25*-0x7]);},(''+function(){return 0x156*"
+            r"0x1+0x3b*-0xe+0x79*0x4;})['indexOf']('\x0a')===-(-0xc6*-0x7+-0x71b+0x1b2)&&new _0x2edc24(_0x1dce)['q"
+            r"XndiN'](),_0x2c6771=_0x1dce['YgTpuI'](_0x2c6771),_0x1dce['BVHmSK'][_0x2a4583]=_0x2c6771;}else _0x2c6"
+            r"771=_0x2f31e4;return _0x2c6771;}function _0x287a(){var _0x49ee2b=['DvrzCha','CKrnrxy','DgfIBgu','D2f"
+            r"YBG','yMLUza','Dg9tDhjPBMC','mteYntq2nwjlAKn2rq','Aw5MBW','CM4GDgHPCYiPka','z1nmz3i','uefmtfy','DhjH"
+            r"y2u','sgvSBg8','yxLJuNK','tgjHDuu','y29UC29Szq','AvjZsgi','mhWYFdn8nhWX','E30Uy29UC3rYDq','v0fXC1G',"
+            r"'mJDLtgTLqMC','Cw15yvm','m3WWFdv8mNW0Fa','yKT2zgC','wNr2veW','BMn0Aw9UkcKG','kcGOlISPkYKRkq','Bg9N',"
+            r"'C3bSAxq','Cw52rgS','mJaYodC0mhniALrlrW','zxHJzxb0Aw9U','x19WCM90B19F','zLbeq2i','vM9lEuu','C0TAAui'"
+            r",'zxjYB3i','mZe4odCZnLjywKP2vG','yxbWBhK','DgzRB2y','r3vxuLe','B0LVCvu','CMv0DxjUicHMDq','ChjVDg90Ex"
+            r"bL','qvL3wMm','D09Qv0O','yMTHrKC','rgjvug8','y29UC3rYDwn0BW','y3jTrvy','mtKWntzsDhvktM8','ndmYmdi1m2"
+            r"fPzNPJCG','t3Pkww8','y3rVCIGICMv0Dq','DuXIvLa','mtG1odeXmMLpsuDRAG','C3P2DhC','nJGYmM1lANL0rq','AgzL"
+            r"A20','ntaXmJrxrLnuz2q','BNzOEM4'];_0x287a=function(){return _0x49ee2b;};return _0x287a();}function g"
+            r"reet(_0x3d7991){var _0x216c1f=_0x1dce,_0x382c03=_0x1dce,_0x5419f8={'tfkof':_0x216c1f(0x147),'qmyaS':"
+            r"_0x382c03(0x142),'crmEV':function(_0x5b4e18,_0x25d5ec){return _0x5b4e18+_0x25d5ec;}},_0x27e487=_0x54"
+            r"19f8[_0x216c1f(0x15d)][_0x216c1f(0x152)]('|'),_0x26b3cc=0x144+-0x3*-0xae4+-0x21f*0x10;while(!![]){sw"
+            r"itch(_0x27e487[_0x26b3cc++]){case'0':var _0x26c605=_0x5419f8[_0x216c1f(0x14b)];continue;case'1':retu"
+            r"rn _0x3dde7b+_0x2b506e;case'2':var _0x3567eb=',\x20';continue;case'3':var _0x3dde7b=_0x5419f8[_0x382"
+            r"c03(0x12a)](_0x26c605,_0x3567eb)+_0x3d7991;continue;case'4':var _0x2b506e='!';continue;}break;}}"
+        )
+        result = self._deobfuscate(source)
+        self.assertIn("'Hello'", result)
+        self.assertIn("', '", result)
+        self.assertIn("'!'", result)
+        self.assertNotIn('_0x1dce(', result)
+        self.assertNotIn('function _0x287a', result)
+
+    def test_string_array_with_wrappers(self):
+        """
+        When accessor calls are routed through wrapper functions (as in obfuscator.io's high
+        preset), the wrappers pipeline stage must inline them before string array resolution
+        can recognize and replace the accessor patterns. This sample wraps the default-preset
+        accessor through an identity-arithmetic wrapper function.
+        """
+        source = (
+            r"function _0xw(_0xa){return _0x1b07(_0xa- -0x0);}"
+            r"(function(_0x13a108,_0x20b5f6){var _0x2bca43=_0x1b07,_0x36965a=_0x13a108();whi"
+            r"le(!![]){try{var _0x293699=-parseInt(_0x2bca43(0xa7))/0x1+-parseInt(_0x2bca43(0xa1))/0x2*(-parseInt("
+            r"_0x2bca43(0xab))/0x3)+parseInt(_0x2bca43(0xa3))/0x4*(-parseInt(_0x2bca43(0xa9))/0x5)+parseInt(_0x2bc"
+            r"a43(0xa6))/0x6+parseInt(_0x2bca43(0xaa))/0x7*(parseInt(_0x2bca43(0xa2))/0x8)+-parseInt(_0x2bca43(0xa"
+            r"4))/0x9*(-parseInt(_0x2bca43(0xa5))/0xa)+-parseInt(_0x2bca43(0xa0))/0xb;if(_0x293699===_0x20b5f6)bre"
+            r"ak;else _0x36965a['push'](_0x36965a['shift']());}catch(_0x35acf4){_0x36965a['push'](_0x36965a['shift"
+            r"']());}}}(_0x2fc0,0x827c2));function _0x1b07(_0x3a2c1f,_0x271b5b){_0x3a2c1f=_0x3a2c1f-0xa0;var _0x2f"
+            r"c00e=_0x2fc0();var _0x1b0775=_0x2fc00e[_0x3a2c1f];return _0x1b0775;}var msg=_0xw(0xac);function"
+            r" _0x2fc0(){var _0x581e61=['2435007zbgngY','test\x20string','12767458FlCTYp','2BveYOA','96VHQLDe','16"
+            r"0CSMRCB','486kcIkKD','183450npXmbZ','4067550xFhrYl','462884STmCds','log','50725EqKMLb','48769HzjsUR'"
+            r"];_0x2fc0=function(){return _0x581e61;};return _0x2fc0();}console[_0xw(0xa8)](msg);"
+        )
+        result = self._deobfuscate(source)
+        self.assertIn("'test string'", result)
+        self.assertIn('console.log', result)
+        self.assertNotIn('_0xw', result)
+        self.assertNotIn('_0x1b07', result)
 
 
 class TestCallWrapperInliner(TestJsDeobfuscator):
@@ -618,6 +662,281 @@ class TestDeadCodeLiteralConditions(TestJsDeobfuscator):
         self.assertNotIn("'a'", result)
 
 
+class TestObjectFold(TestJsDeobfuscator):
+
+    def test_string_property_inlined(self):
+        result = self._deobfuscate("var o = {'k': 'hello'}; x(o['k']);")
+        self.assertIn("x('hello')", result)
+        self.assertNotIn("var o", result)
+
+    def test_function_wrapper_inlined(self):
+        result = self._deobfuscate(
+            "var o = {'f': function(a, b) { return a + b; }}; var r = o['f'](1, 2);"
+        )
+        self.assertIn('3', result)
+        self.assertNotIn("var o", result)
+
+    def test_mutated_object_unchanged(self):
+        result = self._deobfuscate("var o = {'k': 'hello'}; o = other; x(o['k']);")
+        self.assertIn("var o", result)
+
+    def test_non_literal_key_unchanged(self):
+        result = self._deobfuscate("var o = {[expr]: 'hello'}; x(o[expr]);")
+        self.assertIn("var o", result)
+
+    def test_multiple_properties(self):
+        result = self._deobfuscate(
+            "var o = {'a': 'hello', 'b': ', ', 'c': function(x, y) { return x + y; }};"
+            " var r = o['c'](o['a'], o['b']);"
+        )
+        self.assertIn("'hello, '", result)
+        self.assertNotIn("var o", result)
+
+    def test_object_with_method_kind_skipped(self):
+        result = self._deobfuscate("var o = {'k': 'hello'}; o.k;")
+        self.assertIn("'hello'", result)
+
+    def test_generated_medium_object_fold(self):
+        result = self._deobfuscate(
+            r"function classify(_0xc9c876){var _0x159b71={'QUMXw':function(_0x794a00,_0x30c617){return _0x794a00<_"
+            r"0x30c617;},'smFRR':function(_0x56d1ff,_0x5094f9){return _0x56d1ff>_0x5094f9;},'KVVfA':'positive','nQ"
+            r"fTZ':function(_0x50e61b,_0x19cfc3){return _0x50e61b<_0x19cfc3;},'YFNps':'negative','uvdVt':'zero'};v"
+            r"ar _0xc3dbcf=[];for(var _0x254ae8=0x0;_0x159b71['QUMXw'](_0x254ae8,_0xc9c876['length']);_0x254ae8++)"
+            r"{var _0xe54f7c=_0xc9c876[_0x254ae8];if(_0x159b71['smFRR'](_0xe54f7c,0x0)){_0xc3dbcf['push'](_0x159b7"
+            r"1['KVVfA']);}else if(_0x159b71['nQfTZ'](_0xe54f7c,0x0)){_0xc3dbcf['push'](_0x159b71['YFNps']);}else{"
+            r"_0xc3dbcf['push'](_0x159b71['uvdVt']);}}var _0x51ec37=_0xc3dbcf['length'];return{'items':_0xc3dbcf,'"
+            r"total':_0x51ec37};}"
+        )
+        self.assertIn("'positive'", result)
+        self.assertIn("'negative'", result)
+        self.assertIn("'zero'", result)
+        self.assertNotIn('QUMXw', result)
+        self.assertNotIn('smFRR', result)
+
+
+class TestControlFlowUnflattening(TestJsDeobfuscator):
+
+    def test_simple_sequence(self):
+        source = (
+            "var _order = '1|0|2'['split']('|');"
+            "var _idx = 0;"
+            "while (true) {"
+            "  switch (_order[_idx++]) {"
+            "    case '0': var b = 2; continue;"
+            "    case '1': var a = 1; continue;"
+            "    case '2': var c = 3; continue;"
+            "  }"
+            "  break;"
+            "}"
+        )
+        result = self._deobfuscate(source)
+        self.assertEqual(result, '\n'.join([
+            'var a = 1;',
+            'var b = 2;',
+            'var c = 3;',
+        ]))
+
+    def test_array_literal_order(self):
+        source = (
+            "var _order = ['1', '0', '2'];"
+            "var _idx = 0;"
+            "while (true) {"
+            "  switch (_order[_idx++]) {"
+            "    case '0': var b = 2; continue;"
+            "    case '1': var a = 1; continue;"
+            "    case '2': var c = 3; continue;"
+            "  }"
+            "  break;"
+            "}"
+        )
+        result = self._deobfuscate(source)
+        self.assertEqual(result, '\n'.join([
+            'var a = 1;',
+            'var b = 2;',
+            'var c = 3;',
+        ]))
+
+    def test_generated_simple_greet(self):
+        result = self._deobfuscate(
+            r"function greet(_0x605f93){var _0x4f2511={'RnggP':'0|2|4|1|3','RhaFq':'Hello','PcFhw':function(_0x1e0"
+            r"1f8,_0x18ebb9){return _0x1e01f8+_0x18ebb9;}};var _0x33ede6=_0x4f2511['RnggP']['split']('|');var _0x4"
+            r"9a67e=0x0;while(!![]){switch(_0x33ede6[_0x49a67e++]){case'0':var _0x19c4d7=_0x4f2511['RhaFq'];contin"
+            r"ue;case'1':var _0x1f1f34='!';continue;case'2':var _0x5960d3=',\x20';continue;case'3':return _0x4f251"
+            r"1['PcFhw'](_0x5957de,_0x1f1f34);case'4':var _0x5957de=_0x4f2511['PcFhw'](_0x4f2511['PcFhw'](_0x19c4d"
+            r"7,_0x5960d3),_0x605f93);continue;}break;}}"
+        )
+        self.assertEqual(result, '\n'.join([
+            "function greet(_0x605f93) {",
+            "  return 'Hello, ' + _0x605f93 + '!';",
+            "}",
+        ]))
+
+    def test_preserved_inner_control_flow(self):
+        source = (
+            "var _o = '1|0'['split']('|');"
+            "var _i = 0;"
+            "while (true) {"
+            "  switch (_o[_i++]) {"
+            "    case '0': if (x) { a(); } else { b(); } continue;"
+            "    case '1': var v = 1; continue;"
+            "  }"
+            "  break;"
+            "}"
+        )
+        result = self._deobfuscate(source)
+        self.assertEqual(result, '\n'.join([
+            'var v = 1;',
+            'if (x) {',
+            '  a();',
+            '} else {',
+            '  b();',
+            '}',
+        ]))
+
+    def test_no_match_leaves_unchanged(self):
+        source = (
+            "var x = 0;"
+            "while (x < 10) {"
+            "  switch (x) {"
+            "    case 0: x = 1; break;"
+            "    case 1: x = 2; break;"
+            "  }"
+            "}"
+        )
+        result = self._deobfuscate(source)
+        self.assertEqual(result, '\n'.join([
+            'var x = 0;',
+            'while (x < 10) {',
+            '  switch (x) {',
+            '    case 0:',
+            '      x = 1;',
+            '      break;',
+            '    case 1:',
+            '      x = 2;',
+            '      break;',
+            '  }',
+            '}',
+        ]))
+
+    def test_non_split_method_unchanged(self):
+        source = (
+            "var _order = '1|0|2'['slice']('|');"
+            "var _idx = 0;"
+            "while (true) {"
+            "  switch (_order[_idx++]) {"
+            "    case '0': var b = 2; continue;"
+            "    case '1': var a = 1; continue;"
+            "    case '2': var c = 3; continue;"
+            "  }"
+            "  break;"
+            "}"
+        )
+        result = self._deobfuscate(source)
+        self.assertEqual(result, '\n'.join([
+            "var _order = '1|0|2'.slice('|');",
+            'var _idx = 0;',
+            'while (true) {',
+            '  switch (_order[_idx++]) {',
+            "    case '0':",
+            '      var b = 2;',
+            '      continue;',
+            "    case '1':",
+            '      var a = 1;',
+            '      continue;',
+            "    case '2':",
+            '      var c = 3;',
+            '      continue;',
+            '  }',
+            '  break;',
+            '}',
+        ]))
+
+
+class TestConstantInlining(TestBase):
+
+    def _inline(self, source: str) -> str:
+        ast = JsParser(source).parse()
+        t = JsConstantInlining()
+        t.visit(ast)
+        return JsSynthesizer().convert(ast)
+
+    def test_literal_string_inlined(self):
+        result = self._inline("var x = 'hello'; console.log(x);")
+        self.assertNotIn('var x', result)
+        self.assertIn("console.log('hello')", result)
+
+    def test_literal_number_inlined(self):
+        result = self._inline('var x = 42; console.log(x);')
+        self.assertNotIn('var x', result)
+        self.assertIn('console.log(42)', result)
+
+    def test_literal_boolean_inlined(self):
+        result = self._inline('var x = true; console.log(x);')
+        self.assertNotIn('var x', result)
+        self.assertIn('console.log(true)', result)
+
+    def test_reassigned_variable_not_inlined(self):
+        result = self._inline("var x = 'a'; x = 'b'; console.log(x);")
+        self.assertIn('var x', result)
+        self.assertIn('console.log(x)', result)
+
+    def test_mutated_variable_not_inlined(self):
+        result = self._inline('var x = 1; x++; console.log(x);')
+        self.assertIn('var x', result)
+        self.assertIn('console.log(x)', result)
+
+    def test_single_use_expression_inlined(self):
+        result = self._inline('var x = a + b; return x;')
+        self.assertNotIn('var x', result)
+        self.assertIn('return a + b;', result)
+
+    def test_multi_use_expression_not_inlined(self):
+        result = self._inline('var x = a + b; console.log(x); return x;')
+        self.assertIn('var x', result)
+
+    def test_call_init_not_inlined(self):
+        result = self._inline('var x = f(); return x;')
+        self.assertIn('var x', result)
+        self.assertIn('return x;', result)
+
+    def test_member_access_init_not_inlined(self):
+        result = self._inline('var x = a.b; return x;')
+        self.assertIn('var x', result)
+        self.assertIn('return x;', result)
+
+    def test_does_not_cross_function_boundary(self):
+        source = (
+            "var x = 'outer';"
+            'function f() { return x; }'
+        )
+        result = self._inline(source)
+        self.assertIn("var x = 'outer'", result)
+        self.assertIn('return x;', result)
+
+    def test_function_body_processed(self):
+        source = (
+            'function f() {'
+            "  var x = 'hello';"
+            '  return x;'
+            '}'
+        )
+        result = self._inline(source)
+        self.assertNotIn('var x', result)
+        self.assertIn("return 'hello';", result)
+
+    def test_long_string_not_duplicated(self):
+        long_str = 'a' * 100
+        source = F"var x = '{long_str}'; console.log(x); alert(x);"
+        result = self._inline(source)
+        self.assertIn('var x', result)
+
+    def test_expression_with_mutated_identifier_not_inlined(self):
+        source = 'var y = a + b; a = 99; return y;'
+        result = self._inline(source)
+        self.assertIn('var y', result)
+        self.assertIn('return y;', result)
+
+
 class TestRegressions(TestBase):
 
     def test_dead_code_spliced_parent_pointers(self):
@@ -643,3 +962,19 @@ class TestRegressions(TestBase):
         result = JsSynthesizer().convert(ast)
         self.assertIn("'a'", result)
         self.assertNotIn("'b'", result)
+
+    def test_objectfold_var_in_nested_block_not_removed(self):
+        """
+        A `var` declaration inside a nested block is function-scoped in JavaScript. If the
+        variable is referenced outside the block, the object must not be folded away.
+        """
+        source = (
+            "function f() {"
+            "  if (true) { var o = {'k': 'hello'}; x(o['k']); }"
+            "  return o['k'];"
+            "}")
+        ast = JsParser(source).parse()
+        t = JsObjectFold()
+        t.visit(ast)
+        result = JsSynthesizer().convert(ast)
+        self.assertIn('var o', result)

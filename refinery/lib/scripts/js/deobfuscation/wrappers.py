@@ -11,11 +11,15 @@ from __future__ import annotations
 from refinery.lib.scripts import (
     Node,
     Transformer,
-    _clone_node,
     _remove_from_parent,
     _replace_in_parent,
 )
-from refinery.lib.scripts.js.deobfuscation.helpers import is_simple_expression
+from refinery.lib.scripts.js.deobfuscation.helpers import (
+    extract_identifier_params,
+    is_closed_expression,
+    is_simple_expression,
+    substitute_params,
+)
 from refinery.lib.scripts.js.model import (
     JsCallExpression,
     JsFunctionDeclaration,
@@ -24,7 +28,7 @@ from refinery.lib.scripts.js.model import (
     JsScript,
 )
 
-from typing import NamedTuple, Sequence
+from typing import NamedTuple
 
 
 class _WrapperInfo(NamedTuple):
@@ -35,20 +39,6 @@ class _WrapperInfo(NamedTuple):
     name: str
     param_names: list[str]
     return_expression: Node
-
-
-def _is_leaf_safe(node: Node, param_names: set[str]) -> bool:
-    """
-    Check whether every leaf in the expression tree is either a literal or a reference to one of
-    the wrapper's parameters. This ensures the return expression has no free variables that would
-    make inlining unsafe.
-    """
-    children = list(node.children())
-    if not children:
-        if isinstance(node, JsIdentifier):
-            return node.name in param_names
-        return is_simple_expression(node)
-    return all(_is_leaf_safe(child, param_names) for child in children)
 
 
 def _detect_wrapper(node: JsFunctionDeclaration) -> _WrapperInfo | None:
@@ -62,11 +52,9 @@ def _detect_wrapper(node: JsFunctionDeclaration) -> _WrapperInfo | None:
         return None
     if not node.params:
         return None
-    param_names: list[str] = []
-    for p in node.params:
-        if not isinstance(p, JsIdentifier):
-            return None
-        param_names.append(p.name)
+    param_names = extract_identifier_params(node.params)
+    if param_names is None:
+        return None
     body = node.body.body
     if len(body) != 1:
         return None
@@ -81,7 +69,7 @@ def _detect_wrapper(node: JsFunctionDeclaration) -> _WrapperInfo | None:
     allowed_names = set(param_names)
     allowed_names.add(call.callee.name)
     for arg in call.arguments:
-        if not _is_leaf_safe(arg, allowed_names):
+        if not is_closed_expression(arg, allowed_names):
             return None
     return _WrapperInfo(node, node.id.name, param_names, call)
 
@@ -97,23 +85,6 @@ def _collect_wrappers(root: Node) -> dict[str, _WrapperInfo]:
             if info is not None:
                 wrappers[info.name] = info
     return wrappers
-
-
-def _substitute_params(
-    expression: Node,
-    param_names: list[str],
-    arguments: Sequence[Node],
-) -> Node:
-    """
-    Deep-clone the wrapper's return expression and replace every parameter identifier with the
-    corresponding call-site argument (also cloned to allow multiple substitutions).
-    """
-    cloned = _clone_node(expression)
-    mapping = {name: arg for name, arg in zip(param_names, arguments)}
-    for node in list(cloned.walk()):
-        if isinstance(node, JsIdentifier) and node.name in mapping:
-            _replace_in_parent(node, _clone_node(mapping[node.name]))
-    return cloned
 
 
 class JsCallWrapperInliner(Transformer):
@@ -138,7 +109,7 @@ class JsCallWrapperInliner(Transformer):
                 continue
             if not all(is_simple_expression(a) for a in ast_node.arguments):
                 continue
-            replacement = _substitute_params(
+            replacement = substitute_params(
                 info.return_expression,
                 info.param_names,
                 ast_node.arguments,

@@ -6,19 +6,32 @@ from __future__ import annotations
 import operator
 import re
 
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, Sequence, TYPE_CHECKING
 
-from refinery.lib.scripts import Expression, Node
+from refinery.lib.scripts import (
+    Expression,
+    Node,
+    Statement,
+    Transformer,
+    _clone_node,
+    _replace_in_parent,
+)
 from refinery.lib.scripts.js.model import (
+    JsArrowFunctionExpression,
+    JsBlockStatement,
     JsBooleanLiteral,
+    JsFunctionDeclaration,
+    JsFunctionExpression,
     JsIdentifier,
     JsNullLiteral,
     JsNumericLiteral,
+    JsScript,
     JsStringLiteral,
+    JsUnaryExpression,
 )
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
 
-if  TYPE_CHECKING:
+if TYPE_CHECKING:
     from typing import TypeGuard
 
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_$][a-zA-Z_$0-9]*$')
@@ -99,9 +112,14 @@ def is_valid_identifier(name: str) -> bool:
 
 def is_simple_expression(node: Node) -> bool:
     """
-    Check whether a node is a side-effect-free leaf expression: a literal value or an identifier.
+    Check whether a node is a side-effect-free leaf expression: a literal value, an identifier, or
+    a unary operator applied to a literal (e.g. `-42`).
     """
-    return is_literal(node) or isinstance(node, JsIdentifier)
+    if is_literal(node) or isinstance(node, JsIdentifier):
+        return True
+    if isinstance(node, JsUnaryExpression) and node.operand is not None:
+        return is_literal(node.operand)
+    return False
 
 
 def is_truthy(node: Node) -> bool | None:
@@ -179,3 +197,117 @@ def js_parse_int(s: str) -> int | None:
     if m is None:
         return None
     return int(m.group())
+
+
+def extract_identifier_params(params: list) -> list[str] | None:
+    """
+    Extract plain identifier names from a function's parameter list. Returns `None` if any parameter
+    is not a simple `JsIdentifier` (e.g. destructuring or rest patterns).
+    """
+    names: list[str] = []
+    for p in params:
+        if not isinstance(p, JsIdentifier):
+            return None
+        names.append(p.name)
+    return names
+
+
+def is_closed_expression(node: Node, allowed_names: set[str]) -> bool:
+    """
+    Check whether every leaf in the expression tree is either a literal or an identifier whose
+    name is in *allowed_names*. This ensures the expression has no free variables.
+    """
+    children = list(node.children())
+    if not children:
+        if isinstance(node, JsIdentifier):
+            return node.name in allowed_names
+        return is_simple_expression(node)
+    return all(is_closed_expression(child, allowed_names) for child in children)
+
+
+def substitute_params(
+    expression: Node,
+    param_names: Sequence[str],
+    arguments: Sequence[Node],
+) -> Node:
+    """
+    Deep-clone *expression* and replace every `JsIdentifier` whose name appears in *param_names*
+    with a clone of the positionally corresponding node from *arguments*.
+    """
+    cloned = _clone_node(expression)
+    mapping = dict(zip(param_names, arguments))
+    for node in list(cloned.walk()):
+        if isinstance(node, JsIdentifier) and node.name in mapping:
+            _replace_in_parent(node, _clone_node(mapping[node.name]))
+    return cloned
+
+
+class BodyProcessingTransformer(Transformer):
+    """
+    Intermediate base for JS deobfuscation transformers that process the statement list (body) of
+    `JsScript` and `JsBlockStatement` nodes after visiting children. Subclasses override
+    `_process_body`.
+    """
+
+    def visit_JsScript(self, node: JsScript):
+        self.generic_visit(node)
+        self._process_body(node, node.body)
+        return None
+
+    def visit_JsBlockStatement(self, node: JsBlockStatement):
+        self.generic_visit(node)
+        self._process_body(node, node.body)
+        return None
+
+    def _process_body(self, parent: Node, body: list[Statement]) -> None:
+        raise NotImplementedError
+
+    def _replace_body(
+        self,
+        parent: Node,
+        body: list[Statement],
+        replacement: list[Statement],
+    ) -> None:
+        """
+        Replace the contents of *body* with *replacement*, fix parent pointers, and mark the
+        transformer as changed.
+        """
+        body.clear()
+        body.extend(replacement)
+        for stmt in body:
+            stmt.parent = parent
+        self.mark_changed()
+
+
+class ScopeProcessingTransformer(Transformer):
+    """
+    Base for transforms that process at function-scope boundaries. Visits `JsScript` and each
+    function body (`JsFunctionDeclaration`, `JsFunctionExpression`, `JsArrowFunctionExpression`).
+    Subclasses override `_process_scope`.
+    """
+
+    def visit_JsScript(self, node: JsScript):
+        self.generic_visit(node)
+        self._process_scope(node)
+        return None
+
+    def visit_JsFunctionDeclaration(self, node: JsFunctionDeclaration):
+        self.generic_visit(node)
+        if isinstance(node.body, JsBlockStatement):
+            self._process_scope(node.body)
+        return None
+
+    def visit_JsFunctionExpression(self, node: JsFunctionExpression):
+        self.generic_visit(node)
+        if isinstance(node.body, JsBlockStatement):
+            self._process_scope(node.body)
+        return None
+
+    def visit_JsArrowFunctionExpression(self, node: JsArrowFunctionExpression):
+        self.generic_visit(node)
+        if isinstance(node.body, JsBlockStatement):
+            self._process_scope(node.body)
+        return None
+
+    def _process_scope(self, scope: Node) -> None:
+        raise NotImplementedError

@@ -6,31 +6,24 @@ literal whose truthiness can be determined statically.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Node, Statement, Transformer
-from refinery.lib.scripts.js.deobfuscation.helpers import is_statically_evaluable, is_truthy
+from refinery.lib.scripts import Node, Statement
+from refinery.lib.scripts.js.deobfuscation.helpers import (
+    BodyProcessingTransformer,
+    is_statically_evaluable,
+    is_truthy,
+)
 from refinery.lib.scripts.js.model import (
     JsBlockStatement,
     JsIfStatement,
-    JsScript,
 )
 
 
-class JsDeadCodeElimination(Transformer):
+class JsDeadCodeElimination(BodyProcessingTransformer):
     """
     Remove unreachable code guarded by constant conditions.
     """
 
-    def visit_JsScript(self, node: JsScript):
-        self.generic_visit(node)
-        self._prune_body(node, node.body)
-        return None
-
-    def visit_JsBlockStatement(self, node: JsBlockStatement):
-        self.generic_visit(node)
-        self._prune_body(node, node.body)
-        return None
-
-    def _prune_body(self, parent: Node, body: list[Statement]):
+    def _process_body(self, parent: Node, body: list[Statement]):
         result: list[Statement] = []
         changed = False
         for stmt in body:
@@ -41,11 +34,7 @@ class JsDeadCodeElimination(Transformer):
             else:
                 result.append(stmt)
         if changed:
-            body.clear()
-            body.extend(result)
-            for stmt in result:
-                stmt.parent = parent
-            self.mark_changed()
+            self._replace_body(parent, body, result)
 
     @staticmethod
     def _try_prune(stmt: Statement) -> list[Statement] | None:

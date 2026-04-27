@@ -22,6 +22,7 @@ from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsBinaryExpression,
     JsBooleanLiteral,
+    JsCallExpression,
     JsConditionalExpression,
     JsIdentifier,
     JsLogicalExpression,
@@ -92,6 +93,32 @@ class JsSimplifications(Transformer):
             if left_str is not None and right_str is not None:
                 return JsBooleanLiteral(value=RELATIONAL_OPS[op](left_str, right_str))
         return None
+
+    def visit_JsCallExpression(self, node: JsCallExpression):
+        self.generic_visit(node)
+        if len(node.arguments) != 1:
+            return None
+        callee = node.callee
+        if not isinstance(callee, JsMemberExpression):
+            return None
+        obj_str = string_value(callee.object)
+        if obj_str is None:
+            return None
+        method = callee.property
+        if isinstance(method, JsStringLiteral):
+            method_name = method.value
+        elif isinstance(method, JsIdentifier) and not callee.computed:
+            method_name = method.name
+        else:
+            return None
+        if method_name != 'split':
+            return None
+        sep = string_value(node.arguments[0])
+        if sep is None:
+            return None
+        return JsArrayExpression(
+            elements=[make_string_literal(p) for p in obj_str.split(sep)],
+        )
 
     def visit_JsConditionalExpression(self, node: JsConditionalExpression):
         self.generic_visit(node)
