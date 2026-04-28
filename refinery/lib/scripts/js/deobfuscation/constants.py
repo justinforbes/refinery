@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from refinery.lib.scripts import Node, _clone_node, _remove_from_parent, _replace_in_parent
-from refinery.lib.scripts.js.deobfuscation.helpers import ScopeProcessingTransformer, is_literal
+from refinery.lib.scripts import Node, _clone_node, _replace_in_parent
+from refinery.lib.scripts.js.deobfuscation.helpers import ScopeProcessingTransformer, is_literal, remove_declarator
 from refinery.lib.scripts.js.model import (
     JsArrowFunctionExpression,
     JsArrayExpression,
@@ -33,7 +33,6 @@ _FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionE
 
 class _Candidate(NamedTuple):
     declarator: JsVariableDeclarator
-    statement: JsVariableDeclaration
     init: Node
 
 
@@ -134,7 +133,7 @@ class JsConstantInlining(ScopeProcessingTransformer):
                     if name in candidates:
                         mutated.add(name)
                     else:
-                        candidates[name] = _Candidate(decl, node, decl.init)
+                        candidates[name] = _Candidate(decl, decl.init)
             if isinstance(node, JsAssignmentExpression) and isinstance(node.left, JsIdentifier):
                 mutated.add(node.left.name)
             if isinstance(node, JsUpdateExpression) and isinstance(node.argument, JsIdentifier):
@@ -238,13 +237,5 @@ class JsConstantInlining(ScopeProcessingTransformer):
             remaining = ref_counts[name] - inlined.get(name, 0)
             if remaining > 0:
                 continue
-            stmt = candidate.statement
-            if len(stmt.declarations) == 1:
-                _remove_from_parent(stmt)
-            else:
-                decl = candidate.declarator
-                try:
-                    stmt.declarations.remove(decl)
-                except ValueError:
-                    continue
+            remove_declarator(candidate.declarator)
             self.mark_changed()

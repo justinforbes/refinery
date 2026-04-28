@@ -11,13 +11,13 @@ from __future__ import annotations
 from refinery.lib.scripts import (
     Node,
     _clone_node,
-    _remove_from_parent,
     _replace_in_parent,
 )
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
     extract_identifier_params,
     is_closed_expression,
+    remove_declarator,
     string_value,
     substitute_params,
 )
@@ -123,47 +123,42 @@ class JsObjectFold(ScopeProcessingTransformer):
         else:
             return
         for candidate in list(self._find_candidates(body)):
-            obj_name, decl, prop_map = candidate
-            if not self._is_safe_to_fold(scope, obj_name, decl):
+            obj_name, declarator, prop_map = candidate
+            if not self._is_safe_to_fold(scope, obj_name, declarator):
                 continue
             if self._inline_references(scope, obj_name, prop_map):
-                _remove_from_parent(decl)
+                remove_declarator(declarator)
                 self.mark_changed()
 
     @staticmethod
     def _find_candidates(body: list):
         """
-        Yield tuples of
-
-            (name, declaration_node, property_map)
-
-        for each variable declaration in *body* that initializes a single variable to an object
-        literal with all statically-keyed properties.
+        Yield tuples of (name, declarator_node, property_map) for each variable declarator in
+        *body* that initializes a variable to an object literal with all statically-keyed
+        properties.
         """
         for stmt in body:
             if not isinstance(stmt, JsVariableDeclaration):
                 continue
-            if len(stmt.declarations) != 1:
-                continue
-            decl = stmt.declarations[0]
-            if not isinstance(decl, JsVariableDeclarator):
-                continue
-            if not isinstance(decl.id, JsIdentifier):
-                continue
-            if not isinstance(decl.init, JsObjectExpression):
-                continue
-            prop_map = _build_property_map(decl.init)
-            if prop_map is None:
-                continue
-            yield decl.id.name, stmt, prop_map
+            for decl in stmt.declarations:
+                if not isinstance(decl, JsVariableDeclarator):
+                    continue
+                if not isinstance(decl.id, JsIdentifier):
+                    continue
+                if not isinstance(decl.init, JsObjectExpression):
+                    continue
+                prop_map = _build_property_map(decl.init)
+                if prop_map is None:
+                    continue
+                yield decl.id.name, decl, prop_map
 
     @staticmethod
-    def _is_safe_to_fold(root: Node, name: str, decl: JsVariableDeclaration) -> bool:
+    def _is_safe_to_fold(root: Node, name: str, declarator: JsVariableDeclarator) -> bool:
         """
         Verify that the variable is never reassigned, passed as an argument, or used in any
         context other than `obj['key']` or `obj.key` member access.
         """
-        decl_name_node = decl.declarations[0].id
+        decl_name_node = declarator.id
         for node in root.walk():
             if node is decl_name_node:
                 continue

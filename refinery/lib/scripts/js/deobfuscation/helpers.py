@@ -14,6 +14,7 @@ from refinery.lib.scripts import (
     Statement,
     Transformer,
     _clone_node,
+    _remove_from_parent,
     _replace_in_parent,
 )
 from refinery.lib.scripts.js.model import (
@@ -28,6 +29,8 @@ from refinery.lib.scripts.js.model import (
     JsScript,
     JsStringLiteral,
     JsUnaryExpression,
+    JsVariableDeclaration,
+    JsVariableDeclarator,
 )
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
 
@@ -179,6 +182,17 @@ def js_parse_int(s: str) -> int | None:
     if m is None:
         return None
     return int(m.group())
+
+
+def remove_declarator(declarator: JsVariableDeclarator) -> None:
+    """
+    Remove a `JsVariableDeclarator` from its parent `JsVariableDeclaration`. If the declaration
+    has no remaining declarators afterward, remove it from the body as well.
+    """
+    var_decl = declarator.parent
+    _remove_from_parent(declarator)
+    if isinstance(var_decl, JsVariableDeclaration) and not var_decl.declarations:
+        _remove_from_parent(var_decl)
 
 
 def extract_identifier_params(params: list) -> list[str] | None:

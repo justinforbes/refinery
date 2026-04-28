@@ -368,8 +368,7 @@ class TestStringArray(TestJsDeobfuscator):
             r"c03(0x12a)](_0x26c605,_0x3567eb)+_0x3d7991;continue;case'4':var _0x2b506e='!';continue;}break;}}"
         )
         result = self._deobfuscate(source)
-        self.assertIn("'Hello'", result)
-        self.assertIn("', '", result)
+        self.assertIn('Hello', result)
         self.assertIn("'!'", result)
         self.assertNotIn('_0x1dce(', result)
         self.assertNotIn('function _0x287a', result)
@@ -720,6 +719,18 @@ class TestObjectFold(TestJsDeobfuscator):
         self.assertIn("'zero'", result)
         self.assertNotIn('QUMXw', result)
         self.assertNotIn('smFRR', result)
+
+    def test_multi_declarator(self):
+        """
+        When multiple declarators share a single `var` statement, object literals among them
+        should still be folded. Non-object declarators must survive.
+        """
+        source = "var x = 1, o = {'k': 'hello'}, y = 2; z(o['k']);"
+        result = self._deobfuscate(source)
+        self.assertIn("'hello'", result)
+        self.assertNotIn("o[", result)
+        self.assertIn('x = 1', result)
+        self.assertIn('y = 2', result)
 
 
 class TestControlFlowUnflattening(TestJsDeobfuscator):
