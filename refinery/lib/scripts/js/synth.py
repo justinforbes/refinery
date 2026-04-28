@@ -481,7 +481,7 @@ class JsSynthesizer(Synthesizer):
         if isinstance(stmt, JsBlockStatement):
             self._emit_block(stmt.body)
         else:
-            self.visit(stmt)
+            self._emit_block([stmt])
 
     def visit_JsWhileStatement(self, node: JsWhileStatement):
         self._write('while (')
