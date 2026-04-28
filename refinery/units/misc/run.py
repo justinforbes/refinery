@@ -53,10 +53,6 @@ class run(Unit):
             commandline=commandline, errors=errors, noinput=noinput, stream=stream, timeout=timeout)
 
     def process(self, data):
-        def shlexjoin():
-            import shlex
-            return shlex.join(commandline)
-
         meta = metavars(data)
         used = set()
         commandline = [
@@ -68,15 +64,18 @@ class run(Unit):
             self.log_info('sending no input to process stdin')
             data = None
 
-        if not self.log_debug(commandline):
-            self.log_info(shlexjoin)
-
         stream: bool = self.args.stream
         merge: bool = self.args.errors
         timeout: int = self.args.timeout
 
-        posix = 'posix' in sys.builtin_module_names
-        process = Popen(shlex.join(commandline) if posix else commandline, shell=True,
+        if posix := 'posix' in sys.builtin_module_names:
+            args = shlex.join(commandline)
+        else:
+            args = ' '.join(F'"{a}"' for a in commandline)
+
+        self.log_info(args)
+
+        process = Popen(args, shell=True,
             stdin=PIPE, stdout=PIPE, stderr=STDOUT if merge else PIPE, close_fds=posix)
 
         if not stream and not timeout and not merge:

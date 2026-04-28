@@ -19,3 +19,8 @@ class TestRun(TestUnitBase):
         pl = self.load_pipeline(F'emit Binary Refinery [| run -t=1 {command} ]')
         with self.assertRaises(Exception):
             _ = 0 | pl | 0
+
+    def test_shell_metacharacters_in_arguments(self):
+        command = 'python -c "import sys; sys.stdout.buffer.write(sys.argv[1].encode())"'
+        pl = self.load_pipeline(F'emit . [| run -x {command} intent=<- ]')
+        self.assertEqual(pl | str, 'intent=<-')
