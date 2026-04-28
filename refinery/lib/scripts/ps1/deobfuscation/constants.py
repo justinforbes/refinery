@@ -123,6 +123,12 @@ _PS1_AUTOMATIC_VARIABLES = frozenset({
     'true',
 })
 
+_PS1_SKIP_VARIABLES = (
+    _PS1_AUTOMATIC_VARIABLES
+    | frozenset(PS1_KNOWN_VARIABLES)
+    | frozenset(_PS1_DEFAULT_VARIABLES)
+)
+
 
 def _assignment_target_variable(target) -> Ps1Variable | None:
     """

@@ -5,15 +5,11 @@ from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer, _remove_from_parent, _replace_in_parent
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
-    _PS1_AUTOMATIC_VARIABLES,
-    _PS1_DEFAULT_VARIABLES,
+    _PS1_SKIP_VARIABLES,
     _assignment_target_variable,
     _candidate_key,
     _find_removable_statement,
     _walk_outer_scope,
-)
-from refinery.lib.scripts.ps1.deobfuscation.data import (
-    PS1_KNOWN_VARIABLES,
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     get_body,
@@ -51,8 +47,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1UnaryExpression,
     Ps1Variable,
 )
-
-_SKIP_VARIABLES = _PS1_AUTOMATIC_VARIABLES | frozenset(PS1_KNOWN_VARIABLES) | frozenset(_PS1_DEFAULT_VARIABLES)
 
 _PURE_STATIC_TYPES = frozenset({
     'array',
@@ -276,7 +270,7 @@ class Ps1UnusedVariableRemoval(Transformer):
                 has_free_read.add(key)
         dead: set[str] = set()
         for key in write_nodes:
-            if key in has_free_read or key in _SKIP_VARIABLES:
+            if key in has_free_read or key in _PS1_SKIP_VARIABLES:
                 continue
             if key not in read_in_assign:
                 dead.add(key)
@@ -284,7 +278,7 @@ class Ps1UnusedVariableRemoval(Transformer):
         while changed:
             changed = False
             for key, assignees in read_in_assign.items():
-                if key in dead or key in has_free_read or key in _SKIP_VARIABLES:
+                if key in dead or key in has_free_read or key in _PS1_SKIP_VARIABLES:
                     continue
                 if key not in write_nodes:
                     continue

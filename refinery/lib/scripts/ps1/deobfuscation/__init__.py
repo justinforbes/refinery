@@ -14,6 +14,7 @@ from refinery.lib.scripts.ps1.deobfuscation.emulator import Ps1ForEachPipeline, 
 from refinery.lib.scripts.ps1.deobfuscation.expandable import Ps1ExpandableStringHoist
 from refinery.lib.scripts.ps1.deobfuscation.folding import Ps1ConstantFolding
 from refinery.lib.scripts.ps1.deobfuscation.iexinline import Ps1IexInlining
+from refinery.lib.scripts.ps1.deobfuscation.rename import Ps1VariableRenaming
 from refinery.lib.scripts.ps1.deobfuscation.securestring import Ps1SecureStringDecryptor
 from refinery.lib.scripts.ps1.deobfuscation.simplify import Ps1Simplifications
 from refinery.lib.scripts.ps1.deobfuscation.typecast import Ps1TypeCasts
@@ -64,10 +65,15 @@ _finalize = TransformerGroup(
     Ps1IexInlining,
 )
 
+_cosmetic = TransformerGroup(
+    'cosmetic',
+    Ps1VariableRenaming,
+)
+
 _DEPENDENCIES = {
-    'fold'      : {'normalize'},
-    'emulate'   : {'fold'},
-    'finalize'  : {'emulate'},
+    'fold'     : {'normalize'},
+    'emulate'  : {'fold'},
+    'finalize' : {'emulate'},
 }
 
 _INVALIDATORS = {
@@ -81,8 +87,8 @@ _phase1 = DeobfuscationPipeline(
 )
 
 _phase2 = DeobfuscationPipeline(
-    [_normalize, _fold_full, _emulate, _finalize],
-    dependencies=_DEPENDENCIES,
+    [_normalize, _fold_full, _emulate, _finalize, _cosmetic],
+    dependencies={**_DEPENDENCIES, 'cosmetic': {'finalize'}},
     invalidators=_INVALIDATORS,
 )
 

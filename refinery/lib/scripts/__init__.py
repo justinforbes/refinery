@@ -109,6 +109,19 @@ class Node:
             for child in node.children():
                 stack.append(child)
 
+    def walk_in_order(self) -> Generator[Node, None, None]:
+        """
+        Pre-order left-to-right traversal that preserves source order:
+        The regular `refinery.lib.scripts.Node.walk` method uses a LIFO stack which reverses child
+        order; this variant pushes children in reverse so that the first child is popped first.
+        """
+        stack: list[Node] = [self]
+        while stack:
+            node = stack.pop()
+            yield node
+            children = list(node.children())
+            stack.extend(reversed(children))
+
     def _adopt(self, *nodes: Node | None):
         for node in nodes:
             if node is not None:
