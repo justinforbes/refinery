@@ -7,6 +7,7 @@ from refinery.lib.scripts import Transformer
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     BINARY_OPS,
     RELATIONAL_OPS,
+    escape_js_string,
     is_literal,
     is_nullish,
     is_statically_evaluable,
@@ -16,7 +17,6 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     make_string_literal,
     numeric_value,
     string_value,
-    unescape_string_raw,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -198,9 +198,10 @@ class JsSimplifications(Transformer):
         return None
 
     def visit_JsStringLiteral(self, node: JsStringLiteral):
-        result = unescape_string_raw(node.raw)
-        if result is not None:
-            node.raw = result
+        quote = node.raw[0] if node.raw else "'"
+        rebuilt = quote + escape_js_string(node.value, quote) + quote
+        if rebuilt != node.raw:
+            node.raw = rebuilt
             self.mark_changed()
         return None
 

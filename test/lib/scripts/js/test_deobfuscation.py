@@ -179,19 +179,27 @@ class TestBasicSimplifications(TestJsDeobfuscator):
         result = self._deobfuscate("'A\\x42\\x0a\\x43';")
         self.assertIn('AB', result)
         self.assertIn('C', result)
-        self.assertIn('\\x0a', result)
+        self.assertIn('\\n', result)
 
     def test_unescape_unicode_short(self):
         result = self._deobfuscate("'\\u0048\\u0069';")
         self.assertIn("'Hi'", result)
 
+    def test_unescape_unicode_full(self):
+        result = self._deobfuscate("'\\u0048\\u0065\\u006c\\u006c\\u006f';")
+        self.assertIn("'Hello'", result)
+
+    def test_unescape_unicode_non_ascii(self):
+        result = self._deobfuscate("'\\u4f60\\u597d';")
+        self.assertNotIn('\\u', result)
+
     def test_unescape_preserves_quote(self):
         result = self._deobfuscate("'don\\x27t';")
-        self.assertIn('\\x27', result)
+        self.assertIn("\\'", result)
 
     def test_unescape_preserves_backslash(self):
         result = self._deobfuscate("'back\\x5cslash';")
-        self.assertIn('\\x5c', result)
+        self.assertIn('\\\\', result)
 
     def test_split_pipe_to_array(self):
         result = self._deobfuscate("'a|b|c'['split']('|');")

@@ -63,12 +63,18 @@ RELATIONAL_OPS: dict[str, Callable] = {
 def escape_js_string(value: str, quote: str = "'") -> str:
     """
     Escape a string for use in a JavaScript string literal. Returns the escaped body without
-    surrounding quotes. Backslash is escaped first to avoid double-escaping.
+    surrounding quotes. Backslash is escaped first to avoid double-escaping. Control characters
+    not covered by named escapes are emitted as `\\xHH`.
     """
-    escaped = value.replace('\\', '\\\\').replace(quote, F'\\{quote}')
-    escaped = escaped.replace('\n', '\\n').replace('\r', '\\r')
-    escaped = escaped.replace('\t', '\\t').replace('\0', '\\0')
-    return escaped
+    def _residue(m: re.Match[str]):
+        return F'\\x{ord(m.group()):02x}'
+    value = value.replace('\\', r'\\')
+    value = value.replace('\n', r'\n')
+    value = value.replace('\r', r'\r')
+    value = value.replace('\t', r'\t')
+    value = value.replace('\0', r'\0')
+    value = value.replace(quote, F'\\{quote}')
+    return re.sub(r'[\x01-\x1f]', _residue, value)
 
 
 def string_value(node: Expression | None) -> str | None:
@@ -158,30 +164,6 @@ def is_nullish(node: Node) -> bool:
     if isinstance(node, JsIdentifier) and node.name == 'undefined':
         return True
     return False
-
-
-_HEX_ESCAPE = re.compile(r'\\x([0-9A-Fa-f]{2})|\\u00([0-9A-Fa-f]{2})')
-
-
-def unescape_string_raw(raw: str) -> str | None:
-    """
-    Replace printable ``\\xHH`` and ``\\u00HH`` escapes in a raw string literal with their
-    literal characters. Returns the rewritten raw string, or ``None`` if nothing changed.
-    The quote character and backslash are never unescaped.
-    """
-    if len(raw) < 2:
-        return None
-    quote = raw[0]
-
-    def _replace(m: re.Match) -> str:
-        code = int(m.group(1) or m.group(2), 16)
-        ch = chr(code)
-        if 0x20 <= code <= 0x7E and ch != quote and ch != '\\':
-            return ch
-        return m.group(0)
-
-    result = raw[0] + _HEX_ESCAPE.sub(_replace, raw[1:-1]) + raw[-1]
-    return result if result != raw else None
 
 
 _LEADING_DIGITS = re.compile(r'^[+-]?\d+')
