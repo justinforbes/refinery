@@ -3,6 +3,7 @@ JavaScript AST deobfuscation transforms.
 """
 from __future__ import annotations
 
+from refinery.lib.scripts.js.deobfuscation.antidbg import JsRemoveReDoS
 from refinery.lib.scripts.js.deobfuscation.cff import JsControlFlowUnflattening
 from refinery.lib.scripts.js.deobfuscation.constants import JsConstantInlining
 from refinery.lib.scripts.js.deobfuscation.deadcode import JsDeadCodeElimination
@@ -13,21 +14,40 @@ from refinery.lib.scripts.js.deobfuscation.wrappers import JsCallWrapperInliner
 from refinery.lib.scripts.js.model import JsScript
 from refinery.lib.scripts.pipeline import DeobfuscationPipeline, TransformerGroup
 
+
 _pipeline = DeobfuscationPipeline(
     groups=[
-        TransformerGroup('wrappers', JsCallWrapperInliner),
-        TransformerGroup('stringarray', JsStringArrayResolver),
-        TransformerGroup('simplify', JsSimplifications, JsDeadCodeElimination),
-        TransformerGroup('objectfold', JsObjectFold),
-        TransformerGroup('cff', JsControlFlowUnflattening),
-        TransformerGroup('constants', JsConstantInlining),
+        TransformerGroup(
+            'normalize',
+            JsSimplifications,
+            JsDeadCodeElimination,
+        ),
+        TransformerGroup(
+            'fold',
+            JsCallWrapperInliner,
+            JsObjectFold,
+            JsControlFlowUnflattening,
+            JsConstantInlining,
+        ),
+        TransformerGroup(
+            'resolve',
+            JsStringArrayResolver,
+        ),
+        TransformerGroup(
+            'cleanup',
+            JsRemoveReDoS,
+        ),
     ],
     dependencies={
-        'stringarray': {'wrappers'},
-        'simplify': {'stringarray'},
-        'objectfold': {'simplify'},
-        'cff': {'objectfold'},
-        'constants': {'cff'},
+        'fold': {'normalize'},
+        'resolve': {'fold'},
+        'cleanup': {'fold'},
+    },
+    invalidators={
+        'normalize': {'fold', 'resolve'},
+        'fold': {'normalize', 'resolve'},
+        'resolve': {'normalize', 'fold'},
+        'cleanup': set(),
     },
 )
 

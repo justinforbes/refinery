@@ -400,6 +400,40 @@ class TestStringArray(TestJsDeobfuscator):
         self.assertNotIn('_0xw', result)
         self.assertNotIn('_0x1b07', result)
 
+    def test_string_array_cache_survives_checksum_corruption(self):
+        """
+        After a successful string array resolution, the resolved array is cached on the AST node.
+        If the checksum expression in the rotation IIFE is corrupted (e.g. by the simplifier
+        collapsing arithmetic), subsequent passes must still produce correct results from the cache
+        rather than re-simulating the rotation and getting garbled strings.
+        """
+        from refinery.lib.scripts.js.deobfuscation.stringarray import (
+            JsStringArrayResolver,
+            _CACHE_ATTR,
+        )
+        source = (
+            r"var _0xe6abe5=_0x1b07;(function(_0x13a108,_0x20b5f6){var _0x2bca43=_0x1b07,_0x36965a=_0x13a108();whi"
+            r"le(!![]){try{var _0x293699=-parseInt(_0x2bca43(0xa7))/0x1+-parseInt(_0x2bca43(0xa1))/0x2*(-parseInt("
+            r"_0x2bca43(0xab))/0x3)+parseInt(_0x2bca43(0xa3))/0x4*(-parseInt(_0x2bca43(0xa9))/0x5)+parseInt(_0x2bc"
+            r"a43(0xa6))/0x6+parseInt(_0x2bca43(0xaa))/0x7*(parseInt(_0x2bca43(0xa2))/0x8)+-parseInt(_0x2bca43(0xa"
+            r"4))/0x9*(-parseInt(_0x2bca43(0xa5))/0xa)+-parseInt(_0x2bca43(0xa0))/0xb;if(_0x293699===_0x20b5f6)bre"
+            r"ak;else _0x36965a['push'](_0x36965a['shift']());}catch(_0x35acf4){_0x36965a['push'](_0x36965a['shift"
+            r"']());}}}(_0x2fc0,0x827c2));function _0x1b07(_0x3a2c1f,_0x271b5b){_0x3a2c1f=_0x3a2c1f-0xa0;var _0x2f"
+            r"c00e=_0x2fc0();var _0x1b0775=_0x2fc00e[_0x3a2c1f];return _0x1b0775;}var msg=_0xe6abe5(0xac);function"
+            r" _0x2fc0(){var _0x581e61=['2435007zbgngY','test\x20string','12767458FlCTYp','2BveYOA','96VHQLDe','16"
+            r"0CSMRCB','486kcIkKD','183450npXmbZ','4067550xFhrYl','462884STmCds','log','50725EqKMLb','48769HzjsUR'"
+            r"];_0x2fc0=function(){return _0x581e61;};return _0x2fc0();}console[_0xe6abe5(0xa8)](msg);"
+        )
+        ast = JsParser(source).parse()
+        resolver = JsStringArrayResolver()
+        resolver.visit(ast)
+        self.assertTrue(resolver.changed)
+        cache = getattr(ast, _CACHE_ATTR, None)
+        self.assertIsNotNone(cache)
+        result = JsSynthesizer().convert(ast)
+        self.assertIn("'test string'", result)
+        self.assertIn("'log'", result)
+
 
 class TestCallWrapperInliner(TestJsDeobfuscator):
 
@@ -595,6 +629,51 @@ class TestExtendedOperatorFolding(TestJsDeobfuscator):
         result = self._deobfuscate('!undefined;')
         self.assertIn('true', result)
 
+    def test_logical_not_empty_array(self):
+        result = self._deobfuscate('![];')
+        self.assertIn('false', result)
+
+    def test_double_bang_array(self):
+        result = self._deobfuscate('!![];')
+        self.assertIn('true', result)
+
+    def test_parseint_fold(self):
+        result = self._deobfuscate("parseInt('3379kkQfix');")
+        self.assertIn('3379', result)
+        self.assertNotIn('parseInt', result)
+
+    def test_parseint_no_leading_digits(self):
+        result = self._deobfuscate("parseInt('abc');")
+        self.assertIn('parseInt', result)
+
+    def test_parseint_hex_radix_folded(self):
+        result = self._deobfuscate("parseInt('0xFF', 16);")
+        self.assertIn('255', result)
+        self.assertNotIn('parseInt', result)
+
+    def test_parseint_binary_radix(self):
+        result = self._deobfuscate("parseInt('10', 2);")
+        self.assertIn('2', result)
+        self.assertNotIn('parseInt', result)
+
+    def test_parseint_unknown_radix_preserved(self):
+        result = self._deobfuscate("parseInt('ff', radix);")
+        self.assertIn('parseInt', result)
+
+    def test_iife_inline_comparison(self):
+        result = self._deobfuscate("(function(a, b) { return a === b; })('x', 'y');")
+        self.assertIn('false', result)
+        self.assertNotIn('function', result)
+
+    def test_iife_inline_nested(self):
+        source = (
+            "if ((function(a, b) { return a !== b; })('VpDUG', 'ULVFR'))"
+            " { live(); } else { dead(); }"
+        )
+        result = self._deobfuscate(source)
+        self.assertIn('live()', result)
+        self.assertNotIn('dead()', result)
+
     def test_nullish_coalescing_undefined(self):
         result = self._deobfuscate("undefined ?? 'default';")
         self.assertIn("'default'", result)
@@ -731,6 +810,28 @@ class TestObjectFold(TestJsDeobfuscator):
         self.assertNotIn("o[", result)
         self.assertIn('x = 1', result)
         self.assertIn('y = 2', result)
+
+    def test_partial_key_coverage(self):
+        """
+        When code accesses a key not in the object literal, the access provably evaluates to
+        `undefined`. The known-key access should be inlined and the unknown-key access replaced.
+        """
+        source = "var o = {'a': 'hello', 'b': 'world'}; x(o['a']); y(o['missing']);"
+        result = self._deobfuscate(source)
+        self.assertIn("x('hello')", result)
+        self.assertIn('y(undefined)', result)
+        self.assertNotIn('var o', result)
+
+    def test_dynamic_key_preserves_object(self):
+        """
+        When an object is accessed with both static and dynamic keys, the static accesses should
+        be inlined but the object must be preserved because the dynamic access cannot be resolved.
+        """
+        source = "var o = {'a': 'hello', 'b': 'world'}; x(o['a']); y(o[z]);"
+        result = self._deobfuscate(source)
+        self.assertIn("x('hello')", result)
+        self.assertIn('o[z]', result)
+        self.assertIn('var o', result)
 
 
 class TestControlFlowUnflattening(TestJsDeobfuscator):
@@ -869,6 +970,67 @@ class TestControlFlowUnflattening(TestJsDeobfuscator):
             '  break;',
             '}',
         ]))
+
+
+class TestAntiDebug(TestJsDeobfuscator):
+
+    def test_remove_self_defending_redos(self):
+        """
+        The self-defending pattern with the ReDoS regex should be removed entirely, leaving only
+        the original program logic.
+        """
+        source = (
+            "var a = (function() {"
+            "  var b = true;"
+            "  return function(c, d) {"
+            "    var e = b ? function() {"
+            "      if (d) { var f = d.apply(c, arguments); return d = null, f; }"
+            "    } : function() {};"
+            "    return b = false, e;"
+            "  };"
+            "}()), g = a(this, function() {"
+            "  return g.toString().search('(((.+)+)+)+$')"
+            "    .toString().constructor(g).search('(((.+)+)+)+$');"
+            "});"
+            "g();"
+            "console.log('hello');"
+        )
+        result = self._deobfuscate(source)
+        self.assertNotIn('(((.+)+)+)+$', result)
+        self.assertNotIn('toString', result)
+        self.assertIn("console.log('hello')", result)
+
+    def test_preserves_code_without_redos(self):
+        source = "var x = 1; console.log(x);"
+        result = self._deobfuscate(source)
+        self.assertIn('console.log', result)
+
+    def test_redos_factory_preserved_when_referenced(self):
+        """
+        When the factory function that creates the guard is also used elsewhere, the guard call
+        and declarator should be removed but the factory function must be preserved.
+        """
+        source = (
+            "var a = (function() {"
+            "  var b = true;"
+            "  return function(c, d) {"
+            "    var e = b ? function() {"
+            "      if (d) { var f = d.apply(c, arguments); return d = null, f; }"
+            "    } : function() {};"
+            "    return b = false, e;"
+            "  };"
+            "}()), g = a(this, function() {"
+            "  return g.toString().search('(((.+)+)+)+$')"
+            "    .toString().constructor(g).search('(((.+)+)+)+$');"
+            "});"
+            "g();"
+            "var other = a(this, function() { return 42; });"
+            "console.log(other);"
+        )
+        result = self._deobfuscate(source)
+        self.assertNotIn('(((.+)+)+)+$', result)
+        self.assertIn('var a', result)
+        self.assertIn('console.log', result)
 
 
 class TestConstantInlining(TestBase):

@@ -18,6 +18,7 @@ from refinery.lib.scripts import (
     _replace_in_parent,
 )
 from refinery.lib.scripts.js.model import (
+    JsArrayExpression,
     JsArrowFunctionExpression,
     JsBlockStatement,
     JsBooleanLiteral,
@@ -26,6 +27,8 @@ from refinery.lib.scripts.js.model import (
     JsIdentifier,
     JsNullLiteral,
     JsNumericLiteral,
+    JsProperty,
+    JsReturnStatement,
     JsScript,
     JsStringLiteral,
     JsUnaryExpression,
@@ -83,6 +86,21 @@ def escape_js_string(value: str, quote: str = "'") -> str:
 def string_value(node: Expression | None) -> str | None:
     if isinstance(node, JsStringLiteral):
         return node.value
+    return None
+
+
+def property_key(prop: JsProperty) -> str | None:
+    """
+    Extract the string key from a property node. Handles both string-literal keys
+    (``{'key': ...}``) and plain identifier keys (``{key: ...}``). Returns ``None`` for computed
+    keys.
+    """
+    if prop.computed:
+        return None
+    if isinstance(prop.key, JsStringLiteral):
+        return prop.key.value
+    if isinstance(prop.key, JsIdentifier):
+        return prop.key.name
     return None
 
 
@@ -147,6 +165,8 @@ def is_truthy(node: Node) -> bool | None:
         return False
     if isinstance(node, JsIdentifier) and node.name == 'undefined':
         return False
+    if isinstance(node, JsArrayExpression):
+        return True
     return None
 
 
@@ -155,7 +175,11 @@ def is_statically_evaluable(node: Node) -> bool:
     Return whether the node can be evaluated to a known truthiness at transform time. This
     includes all literal types and the ``undefined`` identifier.
     """
-    return is_literal(node) or (isinstance(node, JsIdentifier) and node.name == 'undefined')
+    return (
+        is_literal(node)
+        or (isinstance(node, JsIdentifier) and node.name == 'undefined')
+        or isinstance(node, JsArrayExpression)
+    )
 
 
 def is_nullish(node: Node) -> bool:
@@ -169,19 +193,42 @@ def is_nullish(node: Node) -> bool:
     return False
 
 
-_LEADING_DIGITS = re.compile(r'^[+-]?\d+')
-
-
-def js_parse_int(s: str) -> int | None:
+def js_parse_int(s: str, radix: int = 10) -> int | None:
     """
-    Replicate the semantics of JavaScript's parseInt(s, 10) for the subset used by the
-    obfuscator's checksum: extract leading decimal digits, ignore trailing non-digit
-    characters. Returns None when no leading digits are found (JS would return NaN).
+    Replicate the semantics of JavaScript's ``parseInt(string, radix)``. Strips leading whitespace,
+    handles an optional ``+``/``-`` sign, and for radix 16 skips a leading ``0x``/``0X`` prefix.
+    Parses leading characters valid for the given radix (2-36) and stops at the first invalid one.
+    Returns ``None`` when no valid digits are found (JS would return ``NaN``).
     """
-    m = _LEADING_DIGITS.match(s.strip())
-    if m is None:
+    if radix == 0:
+        radix = 10
+    if not (2 <= radix <= 36):
         return None
-    return int(m.group())
+    s = s.strip()
+    if not s:
+        return None
+    sign = 1
+    if s[0] in '+-':
+        if s[0] == '-':
+            sign = -1
+        s = s[1:]
+    if radix == 16 and len(s) >= 2 and s[0] == '0' and s[1] in 'xX':
+        s = s[2:]
+    digits: list[str] = []
+    for ch in s:
+        if '0' <= ch <= '9':
+            if ord(ch) - ord('0') >= radix:
+                break
+            digits.append(ch)
+        elif 'a' <= ch <= 'z' or 'A' <= ch <= 'Z':
+            if ord(ch.lower()) - ord('a') + 10 >= radix:
+                break
+            digits.append(ch)
+        else:
+            break
+    if not digits:
+        return None
+    return sign * int(''.join(digits), radix)
 
 
 def remove_declarator(declarator: JsVariableDeclarator) -> None:
@@ -236,6 +283,34 @@ def substitute_params(
         if isinstance(node, JsIdentifier) and node.name in mapping:
             _replace_in_parent(node, _clone_node(mapping[node.name]))
     return cloned
+
+
+def try_inline_trivial_function(
+    func: JsFunctionExpression,
+    call_args: list,
+) -> Node | None:
+    """
+    If *func* is a trivial wrapper (single return whose expression uses only the function's
+    parameters), substitute call-site arguments into a clone of the return expression. Returns the
+    inlined expression or ``None`` if the function is not a simple wrapper.
+    """
+    if func.body is None or not isinstance(func.body, JsBlockStatement):
+        return None
+    body = func.body.body
+    if len(body) != 1:
+        return None
+    stmt = body[0]
+    if not isinstance(stmt, JsReturnStatement) or stmt.argument is None:
+        return None
+    param_names = extract_identifier_params(func.params)
+    if param_names is None:
+        return None
+    if len(call_args) != len(param_names):
+        return None
+    expr = stmt.argument
+    if not is_closed_expression(expr, set(param_names)):
+        return None
+    return substitute_params(expr, param_names, call_args)
 
 
 class BodyProcessingTransformer(Transformer):

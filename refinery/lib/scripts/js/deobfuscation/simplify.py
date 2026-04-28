@@ -3,20 +3,23 @@ JavaScript syntax normalization transforms.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Transformer
+from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     BINARY_OPS,
     RELATIONAL_OPS,
     escape_js_string,
     is_literal,
     is_nullish,
+    is_simple_expression,
     is_statically_evaluable,
     is_truthy,
     is_valid_identifier,
+    js_parse_int,
     make_numeric_literal,
     make_string_literal,
     numeric_value,
     string_value,
+    try_inline_trivial_function,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -24,6 +27,7 @@ from refinery.lib.scripts.js.model import (
     JsBooleanLiteral,
     JsCallExpression,
     JsConditionalExpression,
+    JsFunctionExpression,
     JsIdentifier,
     JsLogicalExpression,
     JsMemberExpression,
@@ -96,6 +100,41 @@ class JsSimplifications(Transformer):
 
     def visit_JsCallExpression(self, node: JsCallExpression):
         self.generic_visit(node)
+        callee = node.callee
+        if isinstance(callee, JsIdentifier) and callee.name == 'parseInt':
+            return self._fold_parseint(node)
+        fn = callee
+        if isinstance(fn, JsParenthesizedExpression):
+            fn = fn.expression
+        if isinstance(fn, JsFunctionExpression):
+            return self._try_inline_iife(node, fn)
+        return self._try_fold_split(node)
+
+    @staticmethod
+    def _fold_parseint(node: JsCallExpression) -> JsNumericLiteral | None:
+        if len(node.arguments) < 1:
+            return None
+        radix = 10
+        if len(node.arguments) >= 2:
+            radix_value = numeric_value(node.arguments[1])
+            if radix_value is None:
+                return None
+            radix = int(radix_value)
+        sv = string_value(node.arguments[0])
+        if sv is not None:
+            result = js_parse_int(sv, radix)
+            if result is not None:
+                return make_numeric_literal(result)
+        return None
+
+    @staticmethod
+    def _try_inline_iife(node: JsCallExpression, fn: JsFunctionExpression) -> Node | None:
+        if not all(is_simple_expression(a) for a in node.arguments):
+            return None
+        return try_inline_trivial_function(fn, node.arguments)
+
+    @staticmethod
+    def _try_fold_split(node: JsCallExpression) -> JsArrayExpression | None:
         if len(node.arguments) != 1:
             return None
         callee = node.callee

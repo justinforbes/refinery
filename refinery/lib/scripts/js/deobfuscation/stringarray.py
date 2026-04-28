@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import enum
+import functools
 
 from refinery.lib.scripts import (
     Node,
@@ -22,6 +23,8 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     BINARY_OPS,
     js_parse_int,
     make_string_literal,
+    property_key,
+    remove_declarator,
     string_value,
 )
 from refinery.lib.scripts.js.model import (
@@ -34,8 +37,12 @@ from refinery.lib.scripts.js.model import (
     JsFunctionExpression,
     JsIdentifier,
     JsIfStatement,
+    JsMemberExpression,
     JsNumericLiteral,
+    JsObjectExpression,
     JsParenthesizedExpression,
+    JsProperty,
+    JsReturnStatement,
     JsScript,
     JsStringLiteral,
     JsUnaryExpression,
@@ -86,6 +93,8 @@ class ChecksumInfo(NamedTuple):
     """
     node: Node
     local_accessors: frozenset[str]
+    wrappers: dict[str, 'AccessorWrapperInfo']
+    prop_maps: dict[str, dict[str, int | str]]
 
 
 def _find_array_function(body: Sequence[Node]) -> ArrayFunction | None:
@@ -178,9 +187,12 @@ def _find_accessor_function(
                     and assign.right.operator == '-'
                     and isinstance(assign.right.left, JsIdentifier)
                     and assign.right.left.name == param_name
-                    and isinstance(assign.right.right, JsNumericLiteral)
+                    and assign.right.right is not None
                 ):
-                    base_offset = int(assign.right.right.value)
+                    try:
+                        base_offset = int(_eval_arithmetic(assign.right.right))
+                    except _EvalError:
+                        pass
             elif isinstance(s, JsVariableDeclaration):
                 for decl in s.declarations:
                     if isinstance(decl, JsVariableDeclarator) and isinstance(decl.init, JsCallExpression):
@@ -222,7 +234,9 @@ def _find_rotation_iife(
         second_arg = call.arguments[1]
         if not (isinstance(first_arg, JsIdentifier) and first_arg.name == array_fn_name):
             continue
-        if not isinstance(second_arg, JsNumericLiteral):
+        try:
+            target = int(_eval_arithmetic(second_arg))
+        except _EvalError:
             continue
         fn_body = call.callee.body
         if fn_body is None:
@@ -233,7 +247,7 @@ def _find_rotation_iife(
                 has_while = True
                 break
         if has_while:
-            return RotationIIFE(stmt, int(second_arg.value), fn_body.body)
+            return RotationIIFE(stmt, target, fn_body.body)
     return None
 
 
@@ -241,13 +255,252 @@ class _EvalError(Exception):
     pass
 
 
+class AccessorWrapperInfo(NamedTuple):
+    """
+    Describes an inner wrapper function inside the rotation IIFE that forwards to the main
+    accessor with reordered arguments and an additional offset subtraction.
+    """
+    target: str
+    offset: int
+    idx_param_pos: int
+    key_param_pos: int
+
+
+def _resolve_member_access(
+    node: JsMemberExpression,
+    prop_maps: dict[str, dict[str, int | str]],
+) -> int | str | None:
+    """
+    Resolve a member expression `OBJ.KEY` against a set of known property maps collected from
+    object literals in the IIFE body. Returns the resolved value or None.
+    """
+    if not isinstance(node.object, JsIdentifier):
+        return None
+    obj_name = node.object.name
+    if obj_name not in prop_maps:
+        return None
+    prop = node.property
+    if isinstance(prop, JsIdentifier):
+        key = prop.name
+    elif isinstance(prop, JsStringLiteral):
+        key = prop.value
+    else:
+        return None
+    return prop_maps[obj_name].get(key)
+
+
+def _resolve_constant(
+    node: Node,
+    prop_maps: dict[str, dict[str, int | str]],
+) -> int | None:
+    """
+    Resolve a node to an integer constant, handling numeric literals, member accesses against known
+    property maps, unary negation, and parenthesized expressions. Returns None on failure.
+    """
+    if isinstance(node, JsNumericLiteral):
+        return int(node.value)
+    if isinstance(node, JsParenthesizedExpression) and node.expression:
+        return _resolve_constant(node.expression, prop_maps)
+    if isinstance(node, JsMemberExpression):
+        resolved = _resolve_member_access(node, prop_maps)
+        return resolved if isinstance(resolved, int) else None
+    if isinstance(node, JsUnaryExpression) and node.operator == '-' and node.operand:
+        inner = _resolve_constant(node.operand, prop_maps)
+        return -inner if inner is not None else None
+    try:
+        return int(_eval_arithmetic(node))
+    except _EvalError:
+        return None
+
+
+def _extract_wrapper_offset(
+    idx_arg: Node,
+    prop_maps: dict[str, dict[str, int | str]],
+) -> tuple[str, int] | None:
+    """
+    Analyze the index argument of a wrapper's forwarding call and extract `(param_name, offset)`
+    where offset is the constant subtracted from the call-site argument. The effective accessor
+    index is `call_arg - offset`. Handles these patterns:
+
+        param             => (param, 0)
+        param -   CONST   => (param, CONST)
+        param -  -CONST   => (param, -CONST)
+        param - (-CONST)  => (param, -CONST)
+        param +   CONST   => (param, -CONST)
+    """
+    if isinstance(idx_arg, JsIdentifier):
+        return idx_arg.name, 0
+    if isinstance(idx_arg, JsBinaryExpression) and isinstance(idx_arg.left, JsIdentifier):
+        right_val = _resolve_constant(idx_arg.right, prop_maps)
+        if right_val is None:
+            return None
+        if idx_arg.operator == '-':
+            return idx_arg.left.name, right_val
+        if idx_arg.operator == '+':
+            return idx_arg.left.name, -right_val
+    return None
+
+
+def _parse_object_props(
+    obj: JsObjectExpression,
+    allow_strings: bool = False,
+) -> dict[str, int | str]:
+    """
+    Extract `{key: value}` pairs from an object expression. Keys are identifier names or string
+    literal values. Values are integers (via `_eval_arithmetic`) and optionally strings (via
+    `string_value`) when `allow_strings` is True.
+    """
+    props: dict[str, int | str] = {}
+    for prop in obj.properties:
+        if not isinstance(prop, JsProperty) or prop.value is None:
+            continue
+        key = property_key(prop)
+        if key is None:
+            continue
+        if allow_strings:
+            sv = string_value(prop.value)
+            if sv is not None:
+                props[key] = sv
+                continue
+        try:
+            props[key] = int(_eval_arithmetic(prop.value))
+        except _EvalError:
+            pass
+    return props
+
+
+def _collect_local_prop_maps(
+    body: Sequence[Node],
+) -> dict[str, dict[str, int | str]]:
+    """
+    Scan the leading variable declarations in a function body for object literals and return a
+    mapping from variable name to its `{key: int}` property map. Stops at the first non-variable
+    declaration statement.
+    """
+    local_props: dict[str, dict[str, int | str]] = {}
+    for s in body:
+        if not isinstance(s, JsVariableDeclaration):
+            break
+        for decl in s.declarations:
+            if (
+                isinstance(decl, JsVariableDeclarator)
+                and isinstance(decl.id, JsIdentifier)
+                and isinstance(decl.init, JsObjectExpression)
+                and (lp := _parse_object_props(decl.init))
+            ):
+                local_props[decl.id.name] = lp
+    return local_props
+
+
+def _match_wrapper(
+    fn: JsFunctionDeclaration,
+    accessor_name: str,
+    prop_maps: dict[str, dict[str, int | str]],
+) -> AccessorWrapperInfo | None:
+    """
+    Check whether a function declaration is a wrapper that forwards to *accessor_name* with
+    reordered arguments and a constant offset. Returns a `AccessorWrapperInfo` on match, else None.
+    """
+    if fn.id is None or fn.body is None:
+        return None
+    if len(fn.body.body) < 1 or len(fn.params) < 2:
+        return None
+    ret = fn.body.body[-1]
+    if not isinstance(ret, JsReturnStatement) or ret.argument is None:
+        return None
+    call = ret.argument
+    if not isinstance(call, JsCallExpression) or not isinstance(call.callee, JsIdentifier):
+        return None
+    if call.callee.name != accessor_name:
+        return None
+    if len(call.arguments) != 2:
+        return None
+    local_props = dict(prop_maps)
+    local_props.update(_collect_local_prop_maps(fn.body.body[:-1]))
+    idx_arg = call.arguments[0]
+    key_arg = call.arguments[1]
+    if not isinstance(key_arg, JsIdentifier):
+        return None
+    offset = _extract_wrapper_offset(idx_arg, local_props)
+    if offset is None:
+        return None
+    idx_param_name, offset_value = offset
+    param_names = [p.name for p in fn.params if isinstance(p, JsIdentifier)]
+    if idx_param_name not in param_names or key_arg.name not in param_names:
+        return None
+    return AccessorWrapperInfo(
+        target=accessor_name,
+        offset=offset_value,
+        idx_param_pos=param_names.index(idx_param_name),
+        key_param_pos=param_names.index(key_arg.name),
+    )
+
+
+def _collect_iife_wrappers(
+    iife_body: Sequence[Node],
+    accessor_name: str,
+) -> tuple[dict[str, AccessorWrapperInfo], dict[str, dict[str, int | str]]]:
+    """
+    Scan the rotation IIFE body for inner wrapper functions and their associated offset objects.
+    Returns `(wrappers, prop_maps)` where `wrappers` maps wrapper function names to their
+    `refinery.lib.scripts.js.deobfuscation.AccessorWrapperInfo` and `prop_maps` maps object
+    variable names to their `{key: value}` dicts.
+
+    Inner wrappers follow the pattern::
+
+        var a = { p: 0x4 };
+        function f(x, y) {
+          return g(y - a.p, x);
+        }
+
+    The wrapper swaps argument order and subtracts a constant offset from the index parameter.
+    """
+    prop_maps: dict[str, dict[str, int | str]] = {}
+    wrappers: dict[str, AccessorWrapperInfo] = {}
+    for s in iife_body:
+        if isinstance(s, JsVariableDeclaration):
+            for decl in s.declarations:
+                if (
+                    isinstance(decl, JsVariableDeclarator)
+                    and isinstance(decl.id, JsIdentifier)
+                    and isinstance(decl.init, JsObjectExpression)
+                ):
+                    props = _parse_object_props(decl.init, allow_strings=True)
+                    if props:
+                        prop_maps[decl.id.name] = props
+        if isinstance(s, JsFunctionDeclaration):
+            info = _match_wrapper(s, accessor_name, prop_maps)
+            if info is not None and s.id is not None:
+                wrappers[s.id.name] = info
+    return wrappers, prop_maps
+
+
+def _collect_all_wrappers(
+    root: Node,
+    accessor_name: str,
+) -> dict[str, AccessorWrapperInfo]:
+    """
+    Walk the entire AST to find all function declarations that forward to the accessor with a
+    constant offset. Unlike `_collect_iife_wrappers`, this finds wrappers at any nesting level
+    and handles local offset objects declared inside the wrapper body.
+    """
+    wrappers: dict[str, AccessorWrapperInfo] = {}
+    for s in root.walk():
+        if isinstance(s, JsFunctionDeclaration):
+            info = _match_wrapper(s, accessor_name, {})
+            if info is not None and s.id is not None:
+                wrappers[s.id.name] = info
+    return wrappers
+
+
 def _extract_checksum_expression(
     iife_body: Sequence[Node],
     accessor_name: str,
 ) -> ChecksumInfo | None:
     """
-    Extract the checksum expression AST node and the local accessor aliases from the rotation
-    IIFE body statements. Returns (checksum_expression_node, local_accessor_names) or None.
+    Extract the checksum expression AST node, local accessor aliases, and inner wrapper resolution
+    data from the rotation IIFE body. The wrapper and property-map data allows `_eval_checksum` to
+    evaluate wrapper calls on the fly without mutating the AST.
     """
     local_accessors: set[str] = {accessor_name}
     for s in iife_body:
@@ -274,21 +527,13 @@ def _extract_checksum_expression(
             break
     if checksum_node is None:
         return None
-    return ChecksumInfo(checksum_node, frozenset(local_accessors))
-
-
-def _extract_rc4_key(call: JsCallExpression, encoding: Encoding) -> str | None:
-    """
-    Extract the RC4 decryption key from the second argument of an accessor call, if present.
-    Returns None for non-RC4 encodings or when no key argument is available.
-    """
-    if (
-        encoding == Encoding.RC4
-        and len(call.arguments) >= 2
-        and isinstance(call.arguments[1], JsStringLiteral)
-    ):
-        return call.arguments[1].value
-    return None
+    wrappers, prop_maps = _collect_iife_wrappers(iife_body, accessor_name)
+    return ChecksumInfo(
+        checksum_node,
+        frozenset(local_accessors),
+        wrappers,
+        prop_maps,
+    )
 
 
 def _decode_string(raw: str, encoding: Encoding, key: str | None = None) -> str:
@@ -344,13 +589,27 @@ def _eval_checksum(
     strings: list[str],
     base_offset: int,
     encoding: Encoding = Encoding.NONE,
+    wrappers: dict[str, AccessorWrapperInfo] | None = None,
+    prop_maps: dict[str, dict[str, int | str]] | None = None,
 ) -> float:
     """
     Evaluate a checksum expression against the current array state. Handles the arithmetic
-    operators (+, -, *, /), unary negation, parentheses, parseInt calls on accessor lookups,
-    and numeric literals. Raises _EvalError on any unrecognized pattern.
+    operators (`+`, `-`, `*`, `/`), unary negation, parentheses, `parseInt` calls on accessor
+    lookups, and numeric literals. When inner wrapper functions are present, wrapper calls are
+    resolved to direct accessor calls on the fly without modifying the AST.
+
+    Raises `refinery.lib.scripts.js.deobfuscation.stringarray._EvalError` on any unrecognized
+    pattern.
     """
-    recurse = lambda n: _eval_checksum(n, local_accessors, strings, base_offset, encoding)
+    recurse = functools.partial(
+        _eval_checksum,
+        local_accessors=local_accessors,
+        strings=strings,
+        base_offset=base_offset,
+        encoding=encoding,
+        wrappers=wrappers,
+        prop_maps=prop_maps,
+    )
     if isinstance(node, JsNumericLiteral):
         return float(node.value)
     if isinstance(node, JsParenthesizedExpression) and node.expression:
@@ -361,13 +620,13 @@ def _eval_checksum(
         if node.operator == '+':
             return recurse(node.operand)
     if isinstance(node, JsBinaryExpression) and node.left and node.right:
-        left = recurse(node.left)
-        right = recurse(node.right)
+        lhs = recurse(node.left)
+        rhs = recurse(node.right)
         fn = BINARY_OPS.get(node.operator)
         if fn is not None:
-            if node.operator == '/' and right == 0:
+            if node.operator == '/' and rhs == 0:
                 raise _EvalError
-            return fn(left, right)
+            return fn(lhs, rhs)
     if isinstance(node, JsCallExpression) and isinstance(node.callee, JsIdentifier):
         if node.callee.name == 'parseInt' and len(node.arguments) >= 1:
             inner = node.arguments[0]
@@ -377,18 +636,69 @@ def _eval_checksum(
                     raise _EvalError
                 return float(result)
             if isinstance(inner, JsCallExpression) and isinstance(inner.callee, JsIdentifier):
-                if inner.callee.name in local_accessors and len(inner.arguments) >= 1:
-                    idx = int(recurse(inner.arguments[0])) - base_offset
-                    if 0 <= idx < len(strings):
-                        raw = strings[idx]
-                        key = _extract_rc4_key(inner, encoding)
-                        decoded = _decode_string(raw, encoding, key)
-                        result = js_parse_int(decoded)
-                        if result is None:
-                            raise _EvalError
-                        return float(result)
+                idx, key = _resolve_accessor_call(
+                    inner, local_accessors, wrappers, prop_maps,
+                )
+                if 0 <= (i := idx - base_offset) < len(strings):
+                    raw = strings[i]
+                    decoded = _decode_string(raw, encoding, key)
+                    if (result := js_parse_int(decoded)) is None:
+                        raise _EvalError
+                    return float(result)
             raise _EvalError
     raise _EvalError
+
+
+def _resolve_accessor_call(
+    call: JsCallExpression,
+    local_accessors: frozenset[str],
+    wrappers: dict[str, AccessorWrapperInfo] | None,
+    prop_maps: dict[str, dict[str, int | str]] | None,
+) -> tuple[int, str | None]:
+    """
+    Resolve an accessor or wrapper call to `(index, rc4_key)`. Handles both direct accessor calls
+    (`accessor(idx, key)`) and inner wrapper calls (`wrapper(obj.key, obj.idx)`). Raises
+    `refinery.lib.scripts.js.deobfuscation.stringarray._EvalError` when the call cannot be resolved.
+    """
+    callee_name = call.callee.name if isinstance(call.callee, JsIdentifier) else None
+    if callee_name is not None and callee_name in local_accessors and len(call.arguments) >= 1:
+        idx = int(_eval_arithmetic(call.arguments[0]))
+        key: str | None = None
+        if len(call.arguments) >= 2 and isinstance(call.arguments[1], JsStringLiteral):
+            key = call.arguments[1].value
+        return idx, key
+    if wrappers and callee_name is not None:
+        wrapper = wrappers.get(callee_name)
+        if wrapper is not None:
+            n_args = max(wrapper.idx_param_pos, wrapper.key_param_pos) + 1
+            if len(call.arguments) >= n_args:
+                raw_idx = call.arguments[wrapper.idx_param_pos]
+                raw_key = call.arguments[wrapper.key_param_pos]
+                pm = prop_maps or {}
+                idx_value = _resolve_constant(raw_idx, pm)
+                if idx_value is None:
+                    raise _EvalError
+                idx_value -= wrapper.offset
+                key_value = _resolve_string_arg(raw_key, pm)
+                return idx_value, key_value
+    raise _EvalError
+
+
+def _resolve_string_arg(
+    node: Node,
+    prop_maps: dict[str, dict[str, int | str]],
+) -> str | None:
+    """
+    Resolve an argument node to a string, handling member access against known property maps.
+    Returns None when the argument is not a string (non-RC4 case).
+    """
+    if isinstance(node, JsStringLiteral):
+        return node.value
+    if isinstance(node, JsMemberExpression):
+        resolved = _resolve_member_access(node, prop_maps)
+        if isinstance(resolved, str):
+            return resolved
+    return None
 
 
 def _simulate_rotation(
@@ -398,6 +708,8 @@ def _simulate_rotation(
     local_accessors: frozenset[str],
     target: int,
     encoding: Encoding = Encoding.NONE,
+    wrappers: dict[str, AccessorWrapperInfo] | None = None,
+    prop_maps: dict[str, dict[str, int | str]] | None = None,
 ) -> list[str] | None:
     """
     Simulate the array rotation loop. For each rotation position, evaluate the checksum
@@ -409,7 +721,7 @@ def _simulate_rotation(
     for _ in range(n):
         try:
             if int(_eval_checksum(
-                checksum_node, local_accessors, array, base_offset, encoding,
+                checksum_node, local_accessors, array, base_offset, encoding, wrappers, prop_maps,
             )) == target:
                 return array
         except _EvalError:
@@ -445,7 +757,7 @@ _B64_TRANSLATE = str.maketrans(_B64_ALPHABET, _B64_STANDARD)
 def _detect_encoding(accessor_node: JsFunctionDeclaration) -> Encoding:
     """
     Detect the string encoding mode by inspecting the accessor function body. The base64 and RC4
-    variants inject an ``if (NAME['...'] === undefined)`` init guard that contains the base64
+    variants inject an `if (NAME['...'] === undefined)` init guard that contains the base64
     alphabet string and one (base64) or two (RC4) inner function definitions.
     """
     if accessor_node.body is None:
@@ -491,7 +803,7 @@ def _decrypt_rc4(s: str, key: str) -> str:
     """
     Base64-decode, UTF-8-decode, then RC4-decrypt a string using the given key. The obfuscator's
     RC4 operates on Unicode character codes (after UTF-8 decode), not raw bytes, because its
-    inline atob uses ``decodeURIComponent`` which interprets the base64 output as UTF-8.
+    inline atob uses `decodeURIComponent` which interprets the base64 output as UTF-8.
     """
     data = _decode_base64(s)
     sbox = list(range(256))
@@ -514,31 +826,33 @@ def _replace_accessor_calls(
     aliases: set[str],
     raw_lookup: dict[int, str],
     encoding: Encoding,
+    wrappers: dict[str, AccessorWrapperInfo] | None = None,
+    prop_maps: dict[str, dict[str, int | str]] | None = None,
 ) -> int:
     """
-    Walk the entire AST and replace accessor calls with decoded string literals. The first argument
-    is evaluated as an arithmetic expression so that post-inlining residuals like `100 - -466` are
-    handled alongside plain numeric literals. For RC4, the decryption key is taken from the second
-    argument at each call site. Returns the number of replaced calls.
+    Walk the entire AST and replace accessor calls with decoded string literals. Handles direct
+    accessor calls where the first argument is a pure arithmetic expression, and also wrapper calls
+    that forward to the accessor with reordered arguments and an offset subtraction. For RC4, the
+    decryption key is taken from the second argument (or resolved from the wrapper's key parameter).
+    Returns the number of replaced calls.
     """
     count = 0
+    local_accessors = frozenset(aliases)
+    wrapper_names = set(wrappers) if wrappers else set()
     for node in list(root.walk()):
         if not isinstance(node, JsCallExpression):
             continue
         if not isinstance(node.callee, JsIdentifier):
             continue
-        if node.callee.name not in aliases:
-            continue
-        if len(node.arguments) < 1:
+        if node.callee.name not in aliases and node.callee.name not in wrapper_names:
             continue
         try:
-            idx = int(_eval_arithmetic(node.arguments[0]))
+            idx, key = _resolve_accessor_call(node, local_accessors, wrappers, prop_maps)
         except _EvalError:
             continue
         raw = raw_lookup.get(idx)
         if raw is None:
             continue
-        key = _extract_rc4_key(node, encoding)
         try:
             value = _decode_string(raw, encoding, key)
         except _EvalError:
@@ -546,6 +860,79 @@ def _replace_accessor_calls(
         _replace_in_parent(node, make_string_literal(value))
         count += 1
     return count
+
+
+def _find_remaining_calls(
+    root: JsScript,
+    aliases: set[str],
+    wrapper_names: set[str],
+) -> tuple[bool, set[int]]:
+    """
+    Determine whether unresolved accessor or wrapper calls remain in the AST, excluding calls that
+    are inside dead wrapper function bodies (which will be removed). Returns `(has_remaining,
+    dead_node_ids)` so the dead-node set can be reused during cleanup.
+    """
+    dead_nodes: set[int] = set()
+    for n in root.walk():
+        if isinstance(n, JsFunctionDeclaration) and n.id is not None and n.id.name in wrapper_names:
+            dead_nodes.add(id(n))
+        elif (
+            isinstance(n, JsCallExpression)
+            and isinstance(n.callee, JsIdentifier)
+            and (n.callee.name in aliases or n.callee.name in wrapper_names)
+        ):
+            p = n.parent
+            while p is not None:
+                if id(p) in dead_nodes:
+                    break
+                p = p.parent
+            else:
+                return True, dead_nodes
+    return False, dead_nodes
+
+
+def _cleanup_infrastructure(
+    root: JsScript,
+    body: Sequence[Node],
+    array: ArrayFunction,
+    accessor: AccessorFunction,
+    dead_nodes: set[int],
+    aliases: set[str],
+) -> None:
+    """
+    Remove the string-array infrastructure (array function, accessor function, rotation IIFE, dead
+    wrapper declarations, and accessor alias declarators) once all calls have been resolved.
+    """
+    _remove_from_parent(array.node)
+    _remove_from_parent(accessor.node)
+    rotation = _find_rotation_iife(body, array.name)
+    if rotation is not None:
+        _remove_from_parent(rotation.node)
+    for n in list(root.walk()):
+        if id(n) in dead_nodes:
+            _remove_from_parent(n)
+        elif (
+            isinstance(n, JsVariableDeclarator)
+            and isinstance(n.id, JsIdentifier)
+            and n.id.name in aliases
+            and isinstance(n.init, JsIdentifier)
+            and n.init.name in aliases
+        ):
+            remove_declarator(n)
+
+
+class _CachedResolution(NamedTuple):
+    """
+    Cached result of a successful array rotation simulation, stored on the JsScript node to survive
+    across pipeline iterations. This prevents re-simulation failures when the simplifier modifies the
+    checksum expression in the rotation IIFE between string array passes.
+    """
+    resolved: list[str]
+    base_offset: int
+    encoding: Encoding
+
+
+_CACHE_ATTR = '_stringarray_cache'
 
 
 class JsStringArrayResolver(Transformer):
@@ -558,39 +945,46 @@ class JsStringArrayResolver(Transformer):
         accessor = _find_accessor_function(body, array.name)
         if accessor is None:
             return None
-        rotation = _find_rotation_iife(body, array.name)
-        if rotation is None:
-            return None
-        checksum = _extract_checksum_expression(rotation.body, accessor.name)
-        if checksum is None:
-            return None
         encoding = _detect_encoding(accessor.node)
-        resolved = _simulate_rotation(
-            array.strings,
-            accessor.base_offset,
-            checksum.node,
-            checksum.local_accessors,
-            rotation.target,
-            encoding,
-        )
-        if resolved is None:
-            return None
+        cache: _CachedResolution | None = getattr(node, _CACHE_ATTR, None)
+        if (
+            cache is not None
+            and cache.base_offset == accessor.base_offset
+            and cache.encoding == encoding
+        ):
+            resolved = cache.resolved
+        else:
+            rotation = _find_rotation_iife(body, array.name)
+            if rotation is None:
+                return None
+            checksum = _extract_checksum_expression(rotation.body, accessor.name)
+            if checksum is None:
+                return None
+            resolved = _simulate_rotation(
+                array.strings,
+                accessor.base_offset,
+                checksum.node,
+                checksum.local_accessors,
+                rotation.target,
+                encoding,
+                checksum.wrappers or None,
+                checksum.prop_maps or None,
+            )
+            if resolved is None:
+                return None
+            setattr(node, _CACHE_ATTR, _CachedResolution(resolved, accessor.base_offset, encoding))
         aliases = _collect_accessor_aliases(body, accessor.name)
         aliases.add(accessor.name)
         raw_lookup = {i + accessor.base_offset: s for i, s in enumerate(resolved)}
-        replaced = _replace_accessor_calls(node, aliases, raw_lookup, encoding)
-        if replaced == 0:
+        all_wrappers = _collect_all_wrappers(node, accessor.name)
+        if _replace_accessor_calls(
+            node, aliases, raw_lookup, encoding, all_wrappers,
+        ) == 0:
             return None
-        has_remaining = any(
-            isinstance(n, JsCallExpression)
-            and isinstance(n.callee, JsIdentifier)
-            and n.callee.name in aliases
-            for n in node.walk()
-        )
+        wrapper_names = set(all_wrappers)
+        has_remaining, dead_nodes = _find_remaining_calls(node, aliases, wrapper_names)
         if not has_remaining:
-            _remove_from_parent(array.node)
-            _remove_from_parent(accessor.node)
-            _remove_from_parent(rotation.node)
+            _cleanup_infrastructure(node, body, array, accessor, dead_nodes, aliases)
         self.mark_changed()
         return None
 

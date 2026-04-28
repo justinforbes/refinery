@@ -15,11 +15,10 @@ from refinery.lib.scripts import (
 )
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
-    extract_identifier_params,
-    is_closed_expression,
+    property_key,
     remove_declarator,
     string_value,
-    substitute_params,
+    try_inline_trivial_function,
 )
 from refinery.lib.scripts.js.model import (
     JsBlockStatement,
@@ -29,26 +28,10 @@ from refinery.lib.scripts.js.model import (
     JsMemberExpression,
     JsObjectExpression,
     JsProperty,
-    JsReturnStatement,
     JsScript,
-    JsStringLiteral,
     JsVariableDeclaration,
     JsVariableDeclarator,
 )
-
-
-def _property_key(prop: JsProperty) -> str | None:
-    """
-    Extract the string key from a property node. Handles both string-literal keys
-    (`{'key': ...}`) and plain identifier keys (`{key: ...}`).
-    """
-    if prop.computed:
-        return None
-    if isinstance(prop.key, JsStringLiteral):
-        return prop.key.value
-    if isinstance(prop.key, JsIdentifier):
-        return prop.key.name
-    return None
 
 
 def _build_property_map(
@@ -62,7 +45,7 @@ def _build_property_map(
     for prop in obj.properties:
         if not isinstance(prop, JsProperty):
             return None
-        key = _property_key(prop)
+        key = property_key(prop)
         if key is None or prop.value is None:
             return None
         result[key] = prop.value
@@ -79,34 +62,6 @@ def _access_key(node: JsMemberExpression) -> str | None:
     if isinstance(node.property, JsIdentifier):
         return node.property.name
     return None
-
-
-def _try_inline_call(
-    func: JsFunctionExpression,
-    call_args: list,
-) -> Node | None:
-    """
-    If *func* is a trivial wrapper (single return whose expression uses only the function's
-    parameters), substitute call-site arguments into a clone of the return expression. Returns the
-    inlined expression or `None` if the function is not a simple wrapper.
-    """
-    if func.body is None or not isinstance(func.body, JsBlockStatement):
-        return None
-    body = func.body.body
-    if len(body) != 1:
-        return None
-    stmt = body[0]
-    if not isinstance(stmt, JsReturnStatement) or stmt.argument is None:
-        return None
-    param_names = extract_identifier_params(func.params)
-    if param_names is None:
-        return None
-    if len(call_args) != len(param_names):
-        return None
-    expr = stmt.argument
-    if not is_closed_expression(expr, set(param_names)):
-        return None
-    return substitute_params(expr, param_names, call_args)
 
 
 class JsObjectFold(ScopeProcessingTransformer):
@@ -126,8 +81,10 @@ class JsObjectFold(ScopeProcessingTransformer):
             obj_name, declarator, prop_map = candidate
             if not self._is_safe_to_fold(scope, obj_name, declarator):
                 continue
-            if self._inline_references(scope, obj_name, prop_map):
-                remove_declarator(declarator)
+            changed, can_remove = self._inline_references(scope, obj_name, prop_map)
+            if changed:
+                if can_remove:
+                    remove_declarator(declarator)
                 self.mark_changed()
 
     @staticmethod
@@ -175,20 +132,29 @@ class JsObjectFold(ScopeProcessingTransformer):
         root: Node,
         name: str,
         prop_map: dict[str, Node],
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """
         Replace all `obj['key']` accesses with the corresponding property value. For function-valued
-        properties called as `obj['key'](args)`, inline the call. Returns whether any replacement
-        was made.
+        properties called as `obj['key'](args)`, inline the call. When a key is statically known
+        but absent from the property map, the access provably evaluates to `undefined` and is
+        replaced accordingly. Returns a pair ``(changed, can_remove)`` where *changed* is True when
+        any replacement was made and *can_remove* is True when no unresolvable member accesses
+        remain on the object (i.e. every access had a statically extractable key).
         """
         changed = False
+        can_remove = True
         for node in list(root.walk()):
             if not isinstance(node, JsMemberExpression):
                 continue
             if not isinstance(node.object, JsIdentifier) or node.object.name != name:
                 continue
             key = _access_key(node)
-            if key is None or key not in prop_map:
+            if key is None:
+                can_remove = False
+                continue
+            if key not in prop_map:
+                _replace_in_parent(node, JsIdentifier(name='undefined'))
+                changed = True
                 continue
             value = prop_map[key]
             parent = node.parent
@@ -197,11 +163,11 @@ class JsObjectFold(ScopeProcessingTransformer):
                 and parent.callee is node
                 and isinstance(value, JsFunctionExpression)
             ):
-                replacement = _try_inline_call(value, parent.arguments)
+                replacement = try_inline_trivial_function(value, parent.arguments)
                 if replacement is not None:
                     _replace_in_parent(parent, replacement)
                     changed = True
                     continue
             _replace_in_parent(node, _clone_node(value))
             changed = True
-        return changed
+        return changed, can_remove
