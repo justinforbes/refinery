@@ -40,6 +40,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
     extract_identifier_params,
     is_literal,
+    references_receiver_this,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -55,7 +56,6 @@ from refinery.lib.scripts.js.model import (
     JsProperty,
     JsReturnStatement,
     JsScript,
-    JsThisExpression,
     JsUpdateExpression,
     JsVariableDeclaration,
     JsVariableDeclarator,
@@ -168,9 +168,9 @@ def _is_safe_to_promote(
     inner_name: str | None = None
     if isinstance(inner, JsFunctionExpression) and isinstance(inner.id, JsIdentifier):
         inner_name = inner.id.name
+    if references_receiver_this(body):
+        return False
     for node in body.walk():
-        if isinstance(node, JsThisExpression):
-            return False
         if isinstance(node, JsIdentifier) and node.name == 'arguments':
             return False
         if inner_name is not None and isinstance(node, JsIdentifier) and node.name == inner_name:

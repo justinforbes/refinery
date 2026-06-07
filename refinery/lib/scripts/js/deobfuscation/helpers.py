@@ -48,6 +48,7 @@ from refinery.lib.scripts.js.model import (
     JsScript,
     JsSequenceExpression,
     JsStringLiteral,
+    JsThisExpression,
     JsUnaryExpression,
     JsVariableDeclaration,
     JsVariableDeclarator,
@@ -866,6 +867,24 @@ def _is_shadowed(node: Node, name: str) -> bool:
                 if _body_declares_var(body.body, name):
                     return True
         parent = parent.parent
+    return False
+
+
+def references_receiver_this(root: Node) -> bool:
+    """
+    Return whether relocating *root* would change the meaning of a `this` reference bound to its
+    current receiver. Arrow functions inherit `this` lexically, so they are traversed; regular and
+    generator functions nested below *root* rebind `this` and are not descended into. *root* itself
+    is always traversed, so a method whose body reads `this` (directly or through an arrow) counts.
+    """
+    stack: list[Node] = [root]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, JsThisExpression):
+            return True
+        if isinstance(node, (JsFunctionExpression, JsFunctionDeclaration)) and node is not root:
+            continue
+        stack.extend(node.children())
     return False
 
 

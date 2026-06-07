@@ -1244,6 +1244,10 @@ class TestObjectFold(TestJsDeobfuscator):
         untouched = JsSynthesizer().convert(JsParser(source).parse())
         self.assertEqual(self._objectfold(source), untouched)
 
+    def test_arrow_value_folded_into_callee_is_parenthesized(self):
+        source = "var o = {'f': () => g()}; var r = o['f']();"
+        self.assertEqual(self._objectfold(source), 'var r = (() => g())();')
+
     def test_mutated_object_unchanged(self):
         self.assertEqual(
             inspect.cleandoc(
@@ -2910,9 +2914,9 @@ class TestRegressionBugs(TestJsDeobfuscator):
         self.assertEqual(
             inspect.cleandoc(
                 """
-                function(a) {
+                (function(a) {
                   return a + a;
-                }(g());
+                }(g()));
                 """
             ),
             self._objectfold(source),
@@ -4763,6 +4767,11 @@ class TestFunctionEvaluator(TestJsDeobfuscator):
         from refinery.lib.scripts.js.deobfuscation.evaluator import JsFunctionEvaluator
         return self._run_transformer(source, JsFunctionEvaluator)
 
+    def test_iife_with_nested_arrow_this_not_evaluated(self):
+        source = 'var r = (function(n) { return (() => this.x)(); })(1);'
+        untouched = JsSynthesizer().convert(JsParser(source).parse())
+        self.assertEqual(self._evaluate(source), untouched)
+
     def test_simple_arithmetic(self):
         source = inspect.cleandoc(
             """
@@ -5268,6 +5277,57 @@ class TestParenthesisPreservation(TestJsDeobfuscator):
 
     def test_paren_dropped_for_member_chain_new_callee(self):
         self.assertEqual('var x = new a.b.c();', self._simplify('var x = new (a.b.c)();'))
+
+    def test_paren_preserved_for_operator_tag_of_tagged_template(self):
+        self.assertEqual('var r = (a + b)`x`;', self._simplify('var r = (a + b)`x`;'))
+
+    def test_paren_dropped_for_member_tag_of_tagged_template(self):
+        self.assertEqual('var r = a.b`x`;', self._simplify('var r = (a.b)`x`;'))
+
+    def test_paren_preserved_for_operator_class_super(self):
+        self.assertEqual(
+            'var C = class extends (a + b) {};',
+            self._simplify('var C = class extends (a + b) {};'),
+        )
+
+    def test_paren_dropped_for_member_class_super(self):
+        self.assertEqual(
+            'var C = class extends a.b {};',
+            self._simplify('var C = class extends (a.b) {};'),
+        )
+
+    def test_paren_preserved_for_nullish_under_logical_or(self):
+        self.assertEqual('var x = (a ?? b) || c;', self._simplify('var x = (a ?? b) || c;'))
+
+    def test_paren_preserved_for_logical_or_under_nullish(self):
+        self.assertEqual('var x = (a || b) ?? c;', self._simplify('var x = (a || b) ?? c;'))
+
+    def test_paren_preserved_for_logical_and_under_nullish(self):
+        self.assertEqual('var x = a ?? (b && c);', self._simplify('var x = a ?? (b && c);'))
+
+    def test_paren_dropped_for_nullish_chain(self):
+        self.assertEqual('var x = a ?? b ?? c;', self._simplify('var x = (a ?? b) ?? c;'))
+
+    def test_paren_preserved_for_optional_chain_member_object(self):
+        self.assertEqual('var x = (a?.b).c;', self._simplify('var x = (a?.b).c;'))
+
+    def test_paren_preserved_for_optional_chain_call_callee(self):
+        self.assertEqual('var x = (a?.b)();', self._simplify('var x = (a?.b)();'))
+
+    def test_paren_preserved_for_optional_chain_new_callee(self):
+        self.assertEqual('new (a?.b)();', self._simplify('new (a?.b)();'))
+
+    def test_paren_dropped_for_plain_member_chain(self):
+        self.assertEqual('var x = a.b.c;', self._simplify('var x = (a.b).c;'))
+
+    def test_paren_preserved_for_prefix_update_as_exponent_left_operand(self):
+        self.assertEqual('var x = (++a) ** 2;', self._simplify('var x = (++a) ** 2;'))
+
+    def test_paren_preserved_for_await_as_exponent_left_operand(self):
+        self.assertEqual('var x = (await a) ** 2;', self._simplify('var x = (await a) ** 2;'))
+
+    def test_paren_preserved_for_destructuring_assignment_statement(self):
+        self.assertEqual('({ a } = obj);', self._simplify('({ a } = obj);'))
 
 
 class TestScrambleStringDecoder(TestJsDeobfuscator):
