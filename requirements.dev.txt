@@ -1,0 +1,7 @@
+isort
+pdoc3
+pycodestyle
+pyflakes
+pytest-cov
+pytest-xdist
+requests

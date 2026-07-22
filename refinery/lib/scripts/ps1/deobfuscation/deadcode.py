@@ -466,14 +466,14 @@ class Ps1DeadCodeElimination(Transformer):
     @staticmethod
     def _prune_if(node: Ps1IfStatement) -> list[Statement] | None:
         kept_clauses: list[tuple] = []
-        for condition, block in node.clauses:
+        for index, (condition, block) in enumerate(node.clauses):
             truth = is_truthy(condition)
             if truth is True:
                 return list(block.body)
             if truth is False:
                 continue
             kept_clauses.append((condition, block))
-            kept_clauses.extend(node.clauses[node.clauses.index((condition, block)) + 1:])
+            kept_clauses.extend(node.clauses[index + 1:])
             break
         else:
             if node.else_block is not None:

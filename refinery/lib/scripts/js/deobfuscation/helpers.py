@@ -23,6 +23,7 @@ from refinery.lib.scripts import (
     _compute_children,
     _remove_from_parent,
     _replace_in_parent,
+    set_body,
 )
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import side_effect_free
@@ -1137,20 +1138,13 @@ class BodyProcessingTransformer(Transformer):
     def _process_body(self, parent: Node, body: list[Statement]) -> None:
         raise NotImplementedError
 
-    def _replace_body(
-        self,
-        parent: Node,
-        body: list[Statement],
-        replacement: list[Statement],
-    ) -> None:
+    def _replace_body(self, parent: Node, replacement: list[Statement]) -> None:
         """
-        Replace the contents of *body* with *replacement*, fix parent pointers, and mark the
-        transformer as changed.
+        Replace the body of *parent* with *replacement* through `refinery.lib.scripts.set_body`, so
+        the adoption of the new statements and the advance of the tree's mutation counter happen the
+        one way every splice performs them, and mark the transformer as changed.
         """
-        body.clear()
-        body.extend(replacement)
-        for stmt in body:
-            stmt.parent = parent
+        set_body(parent, list(replacement))
         self.mark_changed()
 
 

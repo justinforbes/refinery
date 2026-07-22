@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from refinery.lib.scripts import Node, _replace_in_parent
+from refinery.lib.scripts import Node, _replace_in_parent, set_body
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.model import SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
@@ -350,9 +350,8 @@ class JsRestArrayUnpacking(ScriptLevelTransformer):
             for n in locals_
         ]
         decl = JsVariableDeclaration(declarations=declarators, kind=JsVarKind.VAR)
-        decl.parent = body
         for d in declarators:
             d.parent = decl
             if d.id is not None:
                 d.id.parent = d
-        body.body.insert(0, decl)
+        set_body(body, [decl, *body.body])

@@ -69,7 +69,7 @@ class JsDeadCodeElimination(BodyProcessingTransformer):
             else:
                 result.append(stmt)
         if changed:
-            self._replace_body(parent, body, result)
+            self._replace_body(parent, result)
 
     def _try_prune(self, stmt: Statement) -> list[Statement] | None:
         if not isinstance(stmt, JsIfStatement):

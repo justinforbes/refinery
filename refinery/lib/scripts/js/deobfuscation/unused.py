@@ -25,7 +25,7 @@ This transformer performs four phases:
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Node, _remove_from_parent
+from refinery.lib.scripts import Node, _remove_from_parent, set_body
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel, object_member_access_runs_accessor
 from refinery.lib.scripts.js.analysis.liveness import LivenessModel
@@ -418,8 +418,7 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
                 kind=JsVarKind.VAR,
                 declarations=[JsVariableDeclarator(id=JsIdentifier(name=name)) for name in names],
             )
-            declaration.parent = body
-            body.body.insert(0, declaration)
+            set_body(body, [declaration, *body.body])
         self.mark_changed()
 
     @staticmethod

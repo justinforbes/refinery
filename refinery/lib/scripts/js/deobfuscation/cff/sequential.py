@@ -277,5 +277,5 @@ class JsControlFlowUnflattening(BodyProcessingTransformer):
             for label in order_info.order_sequence:
                 recovered.extend(match.case_map[label])
             replacement = body[:order_info.first_init_idx] + recovered + body[i + 1:]
-            self._replace_body(parent, body, replacement)
+            self._replace_body(parent, replacement)
             i = order_info.first_init_idx + len(recovered)

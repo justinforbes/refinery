@@ -29,24 +29,22 @@ class ModelCache(ModelCacheBase):
     `refinery.lib.scripts.js.analysis.liveness.LivenessModel` and
     `refinery.lib.scripts.js.analysis.dominance.DominanceModel`, and the
     `refinery.lib.scripts.js.analysis.reaching.ReachingModel` layered on them, for one root script.
-    The memoized models are dropped whenever this root's AST-mutation counter advances past the value
-    they were built at, so a transform that reads the cache after an earlier mutation in the same pass
-    — even one not yet announced through `refinery.lib.scripts.Transformer.changed` — observes models
-    consistent with the current tree. The derived models are always built on the current semantic
-    model, so dropping them together keeps them consistent.
+    The memoized models are dropped whenever this root's AST-mutation counter advances past the
+    value they were built at, so a transform that reads the cache after an earlier mutation in the
+    same pass — even one not yet announced through `refinery.lib.scripts.Transformer.changed` —
+    observes models consistent with the current tree. The derived models are always built on the
+    current semantic model, so dropping them together keeps them consistent.
     """
 
     _SLOTS = ('_model', '_control_flow', '_effects', '_liveness', '_dominance', '_reaching')
 
+    root: JsScript
     _model: SemanticModel | None
     _control_flow: ControlFlowModel | None
     _effects: EffectModel | None
     _liveness: LivenessModel | None
     _dominance: DominanceModel | None
     _reaching: ReachingModel | None
-
-    def __init__(self, root: JsScript):
-        super().__init__(root)
 
     @property
     def model(self) -> SemanticModel:
@@ -75,8 +73,8 @@ class ModelCache(ModelCacheBase):
 
 def model_cache(transformer: Transformer, root: JsScript) -> ModelCache:
     """
-    The pipeline's shared `ModelCache` for *root* when one is attached to *transformer* and built over
-    that same root, otherwise a fresh cache stashed back onto *transformer* for reuse within its
-    single-pass lifetime. See `refinery.lib.scripts.modelcache.ModelCacheBase.for_transformer`.
+    The pipeline's shared `ModelCache` for *root* when one is attached to *transformer* and built
+    over that same root, otherwise a fresh cache stashed back onto *transformer* for reuse within
+    its single-pass lifetime. See `refinery.lib.scripts.modelcache.ModelCacheBase.for_transformer`.
     """
     return ModelCache.for_transformer(transformer, root)

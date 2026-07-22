@@ -3078,7 +3078,7 @@ class JsGeneratorCFFUnflattening(BodyProcessingTransformer):
             start = match.gen_decl_index
             end = match.scaffolding_end
             replacement = body[:start] + recovered + body[end + 1:]
-            self._replace_body(parent, body, replacement)
+            self._replace_body(parent, replacement)
             i = start + len(recovered)
 
     @staticmethod

@@ -50,16 +50,16 @@ from refinery.lib.scripts.ps1.model import (
 class Ps1UnusedVariableRemoval(Transformer):
     """
     Remove assignments to variables that are never read anywhere in the outer scope. Liveness comes
-    from the shared `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`, so a read that reaches
-    the assignment through a nested function, a captured scriptblock, or a scope qualifier keeps it
-    alive. When the right-hand side of a removable assignment has side effects, the assignment wrapper
-    is stripped but the expression is preserved as a standalone statement.
+    from the shared `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`, so a read that
+    reaches the assignment through a nested function, a captured scriptblock, or a scope qualifier
+    keeps it alive. When the right-hand side of a removable assignment has side effects, the
+    assignment wrapper is stripped but the expression is preserved as a standalone statement.
     """
 
     def visit(self, node: Node):
         model = model_cache(self, node).model
         candidates: dict[Binding, list[Node]] = {}
-        for binding in model.bindings_in(model.script_scope):
+        for binding in model.script_scope.bindings.values():
             if binding.dynamic_or_qualified or binding.name in _PS1_SKIP_VARIABLES:
                 continue
             mutations = self._removable_mutations(binding)
@@ -93,10 +93,10 @@ class Ps1UnusedVariableRemoval(Transformer):
     @staticmethod
     def _removable_mutations(binding: Binding) -> list[Node]:
         """
-        The removable mutation nodes that write `binding`: a bare (unqualified) or `$env:` assignment
-        or a `++`/`--` update. A parameter or `foreach` loop variable writes the binding but is not a
-        removable mutation, and a scope-qualified write (`$script:x = ...`) is never removed, so both
-        are excluded.
+        The removable mutation nodes that write `binding`: a bare (unqualified) or `$env:`
+        assignment or a `++`/`--` update. A parameter or `foreach` loop variable writes the binding
+        but is not a removable mutation, and a scope-qualified write (`$script:x = ...`) is never
+        removed, so both are excluded.
         """
         mutations: list[Node] = []
         seen: set[int] = set()
@@ -125,10 +125,10 @@ class Ps1UnusedVariableRemoval(Transformer):
         From candidate bindings mapped to their removable mutations, return those that are dead. A
         binding is live if it has a read not contained in the right-hand side of any candidate
         assignment — a use in live code, in a live function, or a captured scriptblock. Liveness
-        propagates back along right-hand sides: if a live binding's assignment reads another candidate,
-        that candidate is live too. The rest, whose every read sits inside the right-hand side of an
-        assignment that is itself dead, are dead — removing those assignments removes the reads, so
-        nothing observes the value.
+        propagates back along right-hand sides: if a live binding's assignment reads another
+        candidate, that candidate is live too. The rest, whose every read sits inside the right-hand
+        side of an assignment that is itself dead, are dead — removing those assignments removes the
+        reads, so nothing observes the value.
         """
         bindings = list(candidates)
         rhs_owner: dict[int, Binding] = {}
@@ -159,8 +159,9 @@ class Ps1UnusedVariableRemoval(Transformer):
     @staticmethod
     def _covering_owner(node: Node, rhs_owner: dict[int, Binding]) -> Binding | None:
         """
-        The candidate binding whose assignment right-hand side encloses *node*, taken at the outermost
-        such right-hand side, or `None` when *node* lies outside every candidate right-hand side.
+        The candidate binding whose assignment right-hand side encloses *node*, taken at the
+        outermost such right-hand side, or `None` when *node* lies outside every candidate
+        right-hand side.
         """
         owner: Binding | None = None
         cursor: Node | None = node
@@ -195,10 +196,11 @@ class Ps1UnusedVariableRemoval(Transformer):
         assign: Ps1AssignmentExpression, model: Ps1SemanticModel, dead: set[Binding],
     ) -> bool:
         """
-        Whether every variable written by `assign` is dead. A multi-assignment such as `$a, $b = 1, 2`
-        is only removable when all of its targets are dead; removing it while a co-target is still live
-        would destroy that live write. A target that contains a non-variable slot (e.g. `$arr[0], $b`)
-        writes to memory beyond the named variables and is never considered fully dead.
+        Whether every variable written by `assign` is dead. A multi-assignment such as
+        `$a, $b = 1, 2` is only removable when all of its targets are dead; removing it while a
+        co-target is still live would destroy that live write. A target that contains a non-variable
+        slot (e.g. `$arr[0], $b`) writes to memory beyond the named variables and is never
+        considered fully dead.
         """
         if not assignment_target_is_all_variables(assign.target):
             return False
@@ -451,12 +453,16 @@ class Ps1DeadStoreElimination(Transformer):
 
     def __init__(self):
         super().__init__()
-        self._model: Ps1SemanticModel | None = None
+        self._root: Node | None = None
 
     def visit(self, node: Node):
-        if self._model is None:
-            self._model = model_cache(self, node).model
-        model = self._model
+        # The root is remembered rather than the model: `visit` recurses into every nested body,
+        # and a cache built over a nested node would both rebuild the model per body and detach
+        # this transform from the run's shared cache. Reading the model back through the cache on
+        # every visit keeps it consistent with the tree after this pass removes a statement.
+        if self._root is None:
+            self._root = node
+        model = model_cache(self, self._root).model
         body = get_body(node)
         scope = model.scope_of(node)
         if body is None or scope is None:

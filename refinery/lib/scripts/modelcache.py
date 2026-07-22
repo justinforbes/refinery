@@ -26,21 +26,24 @@ _C = TypeVar('_C', bound='ModelCacheBase')
 class ModelCacheBase:
     """
     The version-tracking, invalidation, and reuse mechanism shared by every language's model cache.
-    A subclass lists its lazily-built model attributes in `_SLOTS` and reads each through `_lazy`;
-    the base nulls them on construction, drops them together whenever this root's AST-mutation counter
-    (`refinery.lib.scripts.tree_version`) advances past the value they were built at, and rebuilds on
-    next access. Dropping the models together keeps a derived model consistent with the base model it
-    was layered on. Because the base owns the whole mechanism, `invalidate` — the one method the
-    `refinery.lib.scripts.AnalysisCache` protocol requires — is defined once, not per language.
+    A subclass lists its lazily-built model attributes in `_SLOTS`, reads each through `_lazy`, and
+    re-declares `root` at the node type it builds its models from. The base nulls the slots on
+    construction, drops them together whenever this root's AST-mutation counter
+    (`refinery.lib.scripts.tree_version`) advances past the value they were built at, and rebuilds
+    on next access. Dropping the models together keeps a derived model consistent with the base
+    model it was layered on. Because the base owns the whole mechanism, `invalidate` — the one
+    method the `refinery.lib.scripts.AnalysisCache` protocol requires — is defined once, not per
+    language.
     """
 
     _SLOTS: tuple[str, ...] = ()
 
+    root: Node
+
     def __init__(self, root: Node):
         self.root = root
         self._version = tree_version(root)
-        for slot in self._SLOTS:
-            setattr(self, slot, None)
+        self.invalidate()
 
     def invalidate(self) -> None:
         for slot in self._SLOTS:
@@ -54,9 +57,10 @@ class ModelCacheBase:
 
     def _lazy(self, slot: str, build: Callable[[], _T]) -> _T:
         """
-        The value memoized in *slot*, built through *build* on first access after construction or an
-        invalidation. Every model property routes through here so freshness is checked and the slot is
-        filled by the one accessor primitive rather than a hand-copied check-build-store per model.
+        The value memoized in *slot*, built through *build* on first access after construction or
+        an invalidation. Every model property routes through here so freshness is checked and the
+        slot is filled by the one accessor primitive rather than a hand-copied check-build-store
+        per model.
         """
         self._ensure_fresh()
         value = getattr(self, slot)
@@ -70,10 +74,10 @@ class ModelCacheBase:
         """
         The pipeline's shared cache for *root* when one of this exact class is attached to
         *transformer* and built over that same root, otherwise a fresh cache — stashed back onto
-        *transformer* so later lookups within its single-pass lifetime reuse it instead of rebuilding
-        the models per call. A transform still runs standalone (in tests, or outside the pipeline);
-        freshness stays governed by the tree version, and a standalone mutation invalidates the
-        stashed cache exactly as it would the shared one.
+        *transformer* so later lookups within its single-pass lifetime reuse it instead of
+        rebuilding the models per call. A transform still runs standalone (in tests, or outside the
+        pipeline); freshness stays governed by the tree version, and a standalone mutation
+        invalidates the stashed cache exactly as it would the shared one.
         """
         cache = transformer.models
         if isinstance(cache, cls) and cache.root is root:

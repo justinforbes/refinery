@@ -19,6 +19,7 @@ from refinery.lib.scripts.ps1.analysis.model import (
     build_semantic_model,
     is_assignment_write_target,
     is_write_occurrence,
+    replaces_value,
     unwrap_assignment_target,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     'is_assignment_write_target',
     'is_write_occurrence',
     'model_cache',
+    'replaces_value',
     'unwrap_assignment_target',
 ]

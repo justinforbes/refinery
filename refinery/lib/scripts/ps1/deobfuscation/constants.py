@@ -143,8 +143,8 @@ def _assignment_target_variable(target) -> Ps1Variable | None:
     Extract the single variable written by an assignment target, unwrapping any type constraint
     casts and parentheses. Handles both `$x = expr` and `[Type]$x = expr`. Returns `None` for a
     multi-assignment target (`$a, $b = 1, 2`), which writes more than one variable; use
-    `refinery.lib.scripts.ps1.deobfuscation.helpers.assignment_target_variables` when every written
-    variable is needed.
+    `refinery.lib.scripts.ps1.analysis.model.assignment_target_variables` when every written variable
+    is needed.
     """
     variables = assignment_target_variables(target)
     return variables[0] if len(variables) == 1 else None

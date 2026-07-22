@@ -197,7 +197,7 @@ class AnalysisCache(Protocol):
     """
     The minimal surface the transformer base needs from a per-run analysis cache: a hook to drop its
     memoized analyses when the tree changes. A concrete cache adds the model accessors its consumers
-    use; see `refinery.lib.scripts.js.analysis.cache.ModelCache`.
+    use; see `refinery.lib.scripts.modelcache.ModelCacheBase` and its per-language subclasses.
     """
     def invalidate(self) -> None:
         ...
@@ -296,13 +296,14 @@ _tree_versions: WeakKeyDictionary[Node, int] = WeakKeyDictionary()
 def tree_version(root: Node) -> int:
     """
     The AST-mutation counter for the tree rooted at *root*. Every structural mutation made through
-    `_replace_in_parent` or `_remove_from_parent` advances the counter of the one tree it mutates,
-    found by walking from the mutation site up to its topmost ancestor, and leaves every other tree
-    untouched. `ModelCache` records the value its own root stood at when its models were built and
-    rebuilds once that root's counter moves, so a transform observes models consistent with the
-    current tree even when an earlier mutation in the same pass has not yet been announced through
-    `Transformer.changed`. Mutations to unrelated trees — parsed snippets or clones probed during
-    analysis — never advance this root's counter and so never force a needless rebuild.
+    `_replace_in_parent`, `_remove_from_parent`, or `set_child_list` advances the counter of the one
+    tree it mutates, found by walking from the mutation site up to its topmost ancestor, and leaves
+    every other tree untouched. `refinery.lib.scripts.modelcache.ModelCacheBase` records the value
+    its own root stood at when its models were built and rebuilds once that root's counter moves,
+    so a transform observes models consistent with the current tree even when an earlier mutation
+    in the same pass has not yet been announced through `Transformer.changed`. Mutations to
+    unrelated trees — parsed snippets or clones probed during analysis — never advance this root's
+    counter and so never force a needless rebuild.
     """
     return _tree_versions.get(root, 0)
 
@@ -370,15 +371,20 @@ def _remove_from_parent(node: Node) -> bool:
 
 def set_child_list(parent: Node, attr: str, items: list) -> None:
     """
-    Replace the child list at `parent.<attr>` with `items`, adopt every `Node` among them (including
-    nodes nested one level inside tuple items, as in an `refinery.lib.scripts.ps1.model.Ps1IfStatement`
-    `(condition, block)` clause), and advance the mutation counter of the tree `parent` belongs to.
+    Replace the contents of the child list at `parent.<attr>` with `items`, adopt every `Node` among
+    them (including nodes nested one level inside tuple items, as in a
+    `refinery.lib.scripts.ps1.model.Ps1IfStatement` `(condition, block)` clause), and advance the
+    mutation counter of the tree `parent` belongs to.
 
-    This is the in-place body/clause counterpart to `_replace_in_parent` and `_remove_from_parent`: a
-    transform that rewrites a whole statement list assigns it through here rather than mutating the
-    list object directly, so an `AnalysisCache` over the tree rebuilds on next access instead of
+    This is the in-place body/clause counterpart to `_replace_in_parent` and `_remove_from_parent`:
+    a transform that rewrites a whole statement list splices it through here rather than mutating
+    the list object directly, so an `AnalysisCache` over the tree rebuilds on next access instead of
     serving a model built before the edit. A raw `body[:] = ...` or `body.clear(); body.extend(...)`
     leaves the counter untouched and silently opts the tree out of that consistency check.
+
+    The existing list object is spliced rather than replaced, so a caller iterating the list it was
+    handed — as `refinery.lib.scripts.js.deobfuscation.helpers.BodyProcessingTransformer` hands one
+    to `_process_body` — keeps observing the node's current children.
     """
     for item in items:
         if isinstance(item, Node):
@@ -387,7 +393,11 @@ def set_child_list(parent: Node, attr: str, items: list) -> None:
             for elem in item:
                 if isinstance(elem, Node):
                     elem.parent = parent
-    setattr(parent, attr, items)
+    existing = getattr(parent, attr, None)
+    if isinstance(existing, list):
+        existing[:] = items
+    else:
+        setattr(parent, attr, items)
     _bump_tree_version(parent)
 
 

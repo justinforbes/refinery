@@ -419,5 +419,21 @@ class TestPs1DeadStoreElimination(TestPs1):
             Write-Host $x
             """
         ), Ps1DeadStoreElimination)
-        self.assertIn('$x = 1', result)
-        self.assertIn('Write-Host $x', result)
+        self.assertEqual(
+            result, '$x = 1\n$arr = @({\n  Write-Host $x\n})\n$x = 2\nWrite-Host $x')
+
+    def test_dead_store_read_by_compound_assignment_is_kept(self):
+        # Regression: the target of `$x += 1` reads the variable before writing it, so the store it
+        # observes is live. Excluding every assignment target from the read set — rather than only
+        # the target of a plain `=`, which replaces the value unread — deleted `$x = 1`.
+        result = self._apply(cleandoc(
+            """
+            $x = 5
+            $a = ($x += 1)
+            $x = 7
+            Write-Host $x
+            Write-Host $a
+            """
+        ), Ps1DeadStoreElimination)
+        self.assertEqual(
+            result, '$x = 5\n$a = ($x += 1)\n$x = 7\nWrite-Host $x\nWrite-Host $a')

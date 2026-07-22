@@ -57,8 +57,8 @@ class TestPs1SemanticModel(TestBase):
         self.assertFalse(binding.is_dead)
 
     def test_read_inside_function_keeps_outer_binding_live(self):
-        # PowerShell dynamic scoping: a bare read inside a function references the caller's variable,
-        # so the outer store the function might observe stays live.
+        # PowerShell dynamic scoping: a bare read inside a function references the caller's
+        # variable, so the outer store the function might observe stays live.
         _, binding = self._script_binding(
             "$x = 'payload'\nfunction Run { iex $x }\nRun", 'x')
         assert binding is not None
@@ -71,9 +71,22 @@ class TestPs1SemanticModel(TestBase):
         assert binding is not None
         self.assertFalse(binding.is_dead)
 
+    def test_local_qualified_read_resolves_in_the_scope_of_the_reference(self):
+        # $local: names the scope of the reference itself — the same scope a $local: write
+        # binds in — so the read must keep the function-local binding live, not the script one.
+        model = self._model('function f { $y = 1; Write-Host $local:y }')
+        binding = model.script_scope.children[0].bindings['y']
+        self.assertFalse(binding.is_dead)
+
+    def test_class_property_declaration_is_not_a_read(self):
+        # A class property declares a member, a namespace distinct from the script's variables,
+        # so it must not keep a script variable of the same name alive.
+        model = self._model('$x = 1\nclass C { [int]$x }')
+        self.assertTrue(model.script_scope.bindings['x'].is_dead)
+
     def test_scriptblock_assignment_is_write_local(self):
-        # A bare assignment inside a scriptblock creates a scriptblock-local binding, distinct from the
-        # enclosing $inner; it does not add a write to the outer binding.
+        # A bare assignment inside a scriptblock creates a scriptblock-local binding, distinct
+        # from the enclosing $inner; it does not add a write to the outer binding.
         model = self._model("$inner = 1\n$cb = { $inner = 99 }\nWrite-Host $inner")
         outer = model.script_scope.bindings['inner']
         block_scope = model.script_scope.children[0]
@@ -82,11 +95,19 @@ class TestPs1SemanticModel(TestBase):
         self.assertEqual(len(outer.writes), 1)
 
     def test_reads_in_scope_sees_read_nested_in_scriptblock(self):
-        # The reconciliation: a read of a script variable nested inside a captured scriptblock is seen
-        # by the read set the dead-store sweep flushes against, so the store is not deleted.
+        # The reconciliation: a read of a script variable nested inside a captured scriptblock
+        # is seen by the read set the dead-store sweep flushes against, so the store survives.
         ast = Ps1Parser("$x = 1\n$arr = @( { Write-Host $x } )").parse()
         model = build_semantic_model(ast)
         value = self._assignment_value(ast, 'arr')
+        self.assertIn('x', model.reads_in_scope(value, model.script_scope))
+
+    def test_reads_in_scope_sees_compound_assignment_target(self):
+        # A `+=` target observes the variable before writing it, unlike a plain `=` target, which
+        # replaces the value unread.
+        ast = Ps1Parser("$x = 1\n$a = ($x += 1)").parse()
+        model = build_semantic_model(ast)
+        value = self._assignment_value(ast, 'a')
         self.assertIn('x', model.reads_in_scope(value, model.script_scope))
 
     def test_reads_in_scope_ignores_write_only_scriptblock(self):
@@ -97,8 +118,8 @@ class TestPs1SemanticModel(TestBase):
         self.assertNotIn('inner', model.reads_in_scope(value, model.script_scope))
 
     def test_environment_variable_is_a_distinct_binding(self):
-        # $env:X and $X are different namespaces: an unread env write is dead, an unread script write
-        # keyed the same name is independently tracked.
+        # $env:X and $X are different namespaces: an unread env write is dead, an unread script
+        # write keyed the same name is independently tracked.
         model = self._model("$env:X = 'v'\n$X = 1\nWrite-Host $X")
         self.assertIn('env:x', model.script_scope.bindings)
         self.assertIn('x', model.script_scope.bindings)
