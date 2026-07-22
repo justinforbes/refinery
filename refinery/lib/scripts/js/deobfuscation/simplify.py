@@ -9,7 +9,6 @@ from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.js.analysis.cache import ModelCache, model_cache
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import GLOBAL_OBJECT, EffectModel
-from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.analysis.model import (
     FUNCTION_NODES,
     GUARANTEED_GLOBALS,
@@ -18,6 +17,7 @@ from refinery.lib.scripts.js.analysis.model import (
     SemanticModel,
     is_invocation_target,
 )
+from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     OBJECT_PROTOTYPE_MEMBERS,
     RELATIONAL_OPS,

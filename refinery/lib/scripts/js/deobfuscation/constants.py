@@ -9,10 +9,9 @@ from refinery.lib.scripts import Node, _clone_node, _remove_from_parent, _replac
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import EffectModel
-from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.analysis.model import (
-    Binding,
     FUNCTION_NODES,
+    Binding,
     Role,
     SemanticModel,
     enclosing_function,
@@ -21,6 +20,7 @@ from refinery.lib.scripts.js.analysis.model import (
     pattern_identifiers,
     reference_role,
 )
+from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
     collect_identifier_names,
@@ -52,10 +52,10 @@ from refinery.lib.scripts.js.model import (
     JsTaggedTemplateExpression,
     JsUpdateExpression,
     JsVariableDeclaration,
-    strip_parens,
     JsVariableDeclarator,
     JsVarKind,
     JsYieldExpression,
+    strip_parens,
 )
 
 

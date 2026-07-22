@@ -30,6 +30,18 @@ the complete runtime divergence taxonomy for code that parses in both modes:
 from __future__ import annotations
 
 from refinery.lib.scripts import Node
+from refinery.lib.scripts.js.analysis.effects import object_member_access_runs_accessor
+from refinery.lib.scripts.js.analysis.model import (
+    FUNCTION_NODES,
+    BindingKind,
+    Role,
+    SemanticModel,
+    is_direct_eval_call,
+    is_member_write_target,
+    is_use_position,
+    reference_role,
+)
+from refinery.lib.scripts.js.deobfuscation.helpers import walk_receiver_scope
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsBlockStatement,
@@ -44,19 +56,7 @@ from refinery.lib.scripts.js.model import (
     JsThisExpression,
     strip_parens,
 )
-from refinery.lib.scripts.js.analysis.model import (
-    FUNCTION_NODES,
-    BindingKind,
-    Role,
-    SemanticModel,
-    is_direct_eval_call,
-    is_member_write_target,
-    is_use_position,
-    reference_role,
-)
-from refinery.lib.scripts.js.analysis.effects import object_member_access_runs_accessor
 from refinery.lib.scripts.js.strict import collect_strict_violations
-from refinery.lib.scripts.js.deobfuscation.helpers import walk_receiver_scope
 
 _POISON_PILL_PROPERTIES = frozenset({'caller', 'callee', 'arguments'})
 

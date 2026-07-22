@@ -16,11 +16,11 @@ from refinery.lib.scripts import Expression, Node, _clone_node, _replace_in_pare
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import side_effect_free
 from refinery.lib.scripts.js.analysis.model import (
+    FUNCTION_NODES,
     REFLECTIVE_INTRINSICS,
     SYNC_EVAL_NAMES,
     TIMER_NAMES,
     BindingKind,
-    FUNCTION_NODES,
     Scope,
     SemanticModel,
     build_semantic_model,

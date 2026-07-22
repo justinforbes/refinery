@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import datetime
 
+from refinery.lib.types import Param
+from refinery.lib.vhd import VirtualDisk, is_vhd, is_vhdx
 from refinery.lib.vhd.disk import Partition, VolumeView, partitions
 from refinery.lib.vhd.fat import FatFile, FatVolume, is_fat
 from refinery.lib.vhd.ntfs import NtfsFile, NtfsVolume, is_ntfs
-from refinery.lib.vhd import VirtualDisk, is_vhd, is_vhdx
-from refinery.lib.types import Param
 from refinery.units import Arg, Chunk
 from refinery.units.formats.archive import ArchiveUnit
 

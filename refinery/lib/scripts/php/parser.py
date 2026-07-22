@@ -62,8 +62,9 @@ from refinery.lib.scripts.php.model import (
     PhpInclude,
     PhpInlineHTML,
     PhpInstanceof,
-    PhpIntLiteral,
     PhpInterpolatedString,
+    PhpIntersectionType,
+    PhpIntLiteral,
     PhpIsset,
     PhpLabel,
     PhpList,
@@ -102,7 +103,6 @@ from refinery.lib.scripts.php.model import (
     PhpTry,
     PhpUnaryExpression,
     PhpUnionType,
-    PhpIntersectionType,
     PhpUnset,
     PhpUpdateExpression,
     PhpUse,
@@ -116,7 +116,8 @@ from refinery.lib.scripts.php.model import (
     PhpYieldFrom,
     Statement,
 )
-from refinery.lib.scripts.php.token import PhpToken, PhpTokenKind as K
+from refinery.lib.scripts.php.token import PhpToken
+from refinery.lib.scripts.php.token import PhpTokenKind as K
 
 # Tuple: (precedence, right_associative, non_associative).
 # PHP declares ==, !=, ===, !==, <=>, <, <=, >, >= as %nonassoc in its grammar.

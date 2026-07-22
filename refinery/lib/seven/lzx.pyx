@@ -14,7 +14,7 @@ from libc.string cimport memcpy
 
 import array as _array_mod
 
-from refinery.lib.seven.huffman import OutOfBounds, HuffmanStartOutOfBounds
+from refinery.lib.seven.huffman import HuffmanStartOutOfBounds, OutOfBounds
 
 
 cdef int _BLOCK_TYPE_NUM_BITS = 3

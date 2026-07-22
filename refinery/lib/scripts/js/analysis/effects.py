@@ -38,11 +38,11 @@ from typing import Callable, Iterator, Sequence
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.model import (
+    FUNCTION_NODES,
+    GLOBAL_OBJECT_ALIASES,
     Binding,
     BindingKind,
     ContainerRole,
-    FUNCTION_NODES,
-    GLOBAL_OBJECT_ALIASES,
     Role,
     SemanticModel,
     container_reference_role,

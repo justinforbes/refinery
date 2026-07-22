@@ -26,9 +26,9 @@ from refinery.lib.scripts import Node, _replace_in_parent
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel
 from refinery.lib.scripts.js.analysis.model import (
-    Binding,
     FUNCTION_NODES,
     GLOBAL_OBJECT_ALIASES,
+    Binding,
     SemanticModel,
 )
 from refinery.lib.scripts.js.deobfuscation.helpers import (

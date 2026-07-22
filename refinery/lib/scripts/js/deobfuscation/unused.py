@@ -29,19 +29,19 @@ from refinery.lib.scripts import Node, _remove_from_parent, set_body
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel, object_member_access_runs_accessor
 from refinery.lib.scripts.js.analysis.liveness import LivenessModel
-from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.analysis.model import (
+    FUNCTION_NODES,
     Binding,
     BindingKind,
-    FUNCTION_NODES,
     Scope,
     ScopeKind,
     SemanticModel,
     is_simple_assignment_target,
 )
+from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
-    BodyProcessingTransformer,
     GLOBAL_OBJECT_ALIASES,
+    BodyProcessingTransformer,
     collect_identifier_names,
     is_binding_site,
     remove_declarator,

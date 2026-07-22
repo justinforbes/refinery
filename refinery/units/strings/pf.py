@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from refinery.lib.meta import metavars, STRING_FORMAT_HELP
+from refinery.lib.meta import STRING_FORMAT_HELP, metavars
 from refinery.lib.types import Param, buf
 from refinery.units import Arg, Unit
 

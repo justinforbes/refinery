@@ -43,9 +43,9 @@ from refinery.lib.scripts.js.analysis.cfg import (
     build_control_flow_model,
 )
 from refinery.lib.scripts.js.analysis.model import (
+    FUNCTION_NODES,
     Binding,
     BindingKind,
-    FUNCTION_NODES,
     Role,
     Scope,
     ScopeKind,

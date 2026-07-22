@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from refinery.lib.argformats import DelayedArgument, multibin, number
-from refinery.lib.emulator import CC, Emulator, EmulationTimeout, Hook
+from refinery.lib.emulator import CC, EmulationTimeout, Emulator, Hook
 from refinery.lib.structures import StructReader
-from refinery.lib.types import buf, Param
+from refinery.lib.types import Param, buf
 from refinery.units import Arg, Chunk
 from refinery.units.formats.exe import Arch, EmulatingUnit, Engine
 

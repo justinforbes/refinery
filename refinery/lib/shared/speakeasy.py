@@ -12,8 +12,8 @@ _SUPPORTED_SPEAKEASY = '2.0.0b3'
 def speakeasy():
     import speakeasy
     import speakeasy.profiler
-    import speakeasy.winenv.defs.registry.reg
     import speakeasy.windows.objman
+    import speakeasy.winenv.defs.registry.reg
     try:
         installed = version('speakeasy-emulator')
     except PackageNotFoundError:
