@@ -3,22 +3,26 @@ Remove unused variable assignments and junk expression statements.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Node, Transformer, _compute_children, _remove_from_parent, _replace_in_parent
+from refinery.lib.scripts import Node, Transformer, _remove_from_parent, _replace_in_parent
+from refinery.lib.scripts.ps1.analysis import (
+    Binding,
+    Ps1SemanticModel,
+    Scope,
+    assignment_of,
+    assignment_target_is_all_variables,
+    assignment_target_variables,
+    model_cache,
+)
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _PS1_SKIP_VARIABLES,
-    _assignment_target_variable,
-    _candidate_key,
     _find_removable_statement,
     _walk_outer_scope,
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     BodyRole,
-    assignment_target_is_all_variables,
-    assignment_target_variables,
     classify_body,
     get_body,
     get_command_name,
-    is_assignment_write_target,
 )
 from refinery.lib.scripts.ps1.deobfuscation.purity import (
     StatementEffect,
@@ -28,14 +32,10 @@ from refinery.lib.scripts.ps1.deobfuscation.purity import (
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AssignmentExpression,
-    Ps1ClassDefinition,
     Ps1CommandInvocation,
-    Ps1EnumDefinition,
     Ps1ExpressionStatement,
-    Ps1ForEachLoop,
     Ps1ForLoop,
     Ps1FunctionDefinition,
-    Ps1ParameterDeclaration,
     Ps1Pipeline,
     Ps1PipelineElement,
     Ps1ScopeModifier,
@@ -47,105 +47,32 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 
-def _inside_definition(node: Node) -> bool:
-    """
-    Return `True` when `node` is nested inside a function, class, or enum definition body.
-    """
-    cursor = node.parent
-    while cursor is not None:
-        if isinstance(cursor, (Ps1FunctionDefinition, Ps1ClassDefinition, Ps1EnumDefinition)):
-            return True
-        cursor = cursor.parent
-    return False
-
-
 class Ps1UnusedVariableRemoval(Transformer):
     """
-    Remove assignments to variables that are never read anywhere in the outer scope. When the
-    right-hand side of an assignment has side effects, the assignment wrapper is stripped but the
-    expression is preserved as a standalone statement.
+    Remove assignments to variables that are never read anywhere in the outer scope. Liveness comes
+    from the shared `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`, so a read that reaches
+    the assignment through a nested function, a captured scriptblock, or a scope qualifier keeps it
+    alive. When the right-hand side of a removable assignment has side effects, the assignment wrapper
+    is stripped but the expression is preserved as a standalone statement.
     """
 
     def visit(self, node: Node):
-        write_nodes: dict[str, list[Node]] = {}
-        write_targets: set[Ps1Variable] = set()
-        read_in_assign: dict[str, set[str]] = {}
-        has_free_read: set[str] = set()
-        for n in _walk_outer_scope(node):
-            if isinstance(n, Ps1AssignmentExpression):
-                for var in assignment_target_variables(n.target):
-                    write_targets.add(var)
-                    key = _candidate_key(var)
-                    if key is not None:
-                        write_nodes.setdefault(key, []).append(n)
-            elif isinstance(n, Ps1ForEachLoop):
-                if isinstance(n.variable, Ps1Variable):
-                    write_targets.add(n.variable)
-            elif isinstance(n, Ps1UnaryExpression) and n.operator in ('++', '--'):
-                if isinstance(n.operand, Ps1Variable):
-                    write_targets.add(n.operand)
-                    key = _candidate_key(n.operand)
-                    if key is not None:
-                        write_nodes.setdefault(key, []).append(n)
-            elif isinstance(n, Ps1ParameterDeclaration):
-                if isinstance(n.variable, Ps1Variable):
-                    write_targets.add(n.variable)
-        for n in _walk_outer_scope(node):
-            if not isinstance(n, Ps1Variable) or n in write_targets:
+        model = model_cache(self, node).model
+        candidates: dict[Binding, list[Node]] = {}
+        for binding in model.bindings_in(model.script_scope):
+            if binding.dynamic_or_qualified or binding.name in _PS1_SKIP_VARIABLES:
                 continue
-            key = _candidate_key(n)
-            if key is None:
-                continue
-            enclosing = self._enclosing_assignment_target(n)
-            if enclosing is not None:
-                read_in_assign.setdefault(key, set()).add(enclosing)
-            else:
-                has_free_read.add(key)
-        # An outer-scope assignment can still be read through PowerShell's dynamic scoping (from
-        # inside a function body) or through a scope qualifier (`$script:x`, `$global:x`). The
-        # outer-scope walk above misses both, so collect those reads from the full tree by bare name
-        # and treat them as free reads — keeping the assignment alive rather than deleting live code.
-        for n in node.walk():
-            if not isinstance(n, Ps1Variable) or n in write_targets:
-                continue
-            scoped = n.scope not in (Ps1ScopeModifier.NONE, Ps1ScopeModifier.ENV)
-            if not scoped and not _inside_definition(n):
-                continue
-            has_free_read.add(n.name.lower())
-            if n.scope == Ps1ScopeModifier.ENV:
-                has_free_read.add(F'env:{n.name.lower()}')
-        dead: set[str] = set()
-        for key in write_nodes:
-            if key in has_free_read or key in _PS1_SKIP_VARIABLES:
-                continue
-            if key not in read_in_assign:
-                dead.add(key)
-        changed = True
-        while changed:
-            changed = False
-            for key, assignees in read_in_assign.items():
-                if key in dead or key in has_free_read or key in _PS1_SKIP_VARIABLES:
-                    continue
-                if key not in write_nodes:
-                    continue
-                if assignees.issubset(dead):
-                    dead.add(key)
-                    changed = True
+            mutations = self._removable_mutations(binding)
+            if mutations:
+                candidates[binding] = mutations
+        if not candidates:
+            return None
+        dead = self._dead_bindings(candidates)
         if not dead:
             return None
-        removable: list[Node] = []
-        seen: set[Node] = set()
-        for key in dead:
-            for mutation in write_nodes[key]:
-                if mutation in seen:
-                    continue
-                if (
-                    isinstance(mutation, Ps1AssignmentExpression)
-                    and not self._all_targets_dead(mutation, dead)
-                ):
-                    continue
-                seen.add(mutation)
-                removable.append(mutation)
+        removable = self._removable_statements(candidates, dead, model)
+        if not removable:
+            return None
         body = get_body(node)
         if body is not None:
             dead_stmts: set[Node] = set()
@@ -164,38 +91,125 @@ class Ps1UnusedVariableRemoval(Transformer):
             self._remove_mutation(mutation)
 
     @staticmethod
-    def _all_targets_dead(assign: Ps1AssignmentExpression, dead: set[str]) -> bool:
+    def _removable_mutations(binding: Binding) -> list[Node]:
         """
-        Return `True` when every variable written by `assign` is dead. A multi-assignment such as
-        `$a, $b = 1, 2` is only removable when all of its targets are dead; removing it while a
-        co-target is still live would destroy that live write. A target that contains a non-variable
-        slot (e.g. `$arr[0], $b = 1, 2`) writes to memory beyond the named variables and is never
-        considered fully dead.
+        The removable mutation nodes that write `binding`: a bare (unqualified) or `$env:` assignment
+        or a `++`/`--` update. A parameter or `foreach` loop variable writes the binding but is not a
+        removable mutation, and a scope-qualified write (`$script:x = ...`) is never removed, so both
+        are excluded.
+        """
+        mutations: list[Node] = []
+        seen: set[int] = set()
+        for var in binding.writes:
+            if var.scope not in (Ps1ScopeModifier.NONE, Ps1ScopeModifier.ENV):
+                continue
+            mutation = Ps1UnusedVariableRemoval._mutation_of(var)
+            if mutation is not None and id(mutation) not in seen:
+                seen.add(id(mutation))
+                mutations.append(mutation)
+        return mutations
+
+    @staticmethod
+    def _mutation_of(var: Ps1Variable) -> Node | None:
+        assignment = assignment_of(var)
+        if assignment is not None:
+            return assignment
+        parent = var.parent
+        if isinstance(parent, Ps1UnaryExpression) and parent.operator in ('++', '--'):
+            if parent.operand is var:
+                return parent
+        return None
+
+    def _dead_bindings(self, candidates: dict[Binding, list[Node]]) -> list[Binding]:
+        """
+        From candidate bindings mapped to their removable mutations, return those that are dead. A
+        binding is live if it has a read not contained in the right-hand side of any candidate
+        assignment — a use in live code, in a live function, or a captured scriptblock. Liveness
+        propagates back along right-hand sides: if a live binding's assignment reads another candidate,
+        that candidate is live too. The rest, whose every read sits inside the right-hand side of an
+        assignment that is itself dead, are dead — removing those assignments removes the reads, so
+        nothing observes the value.
+        """
+        bindings = list(candidates)
+        rhs_owner: dict[int, Binding] = {}
+        for binding, mutations in candidates.items():
+            for mutation in mutations:
+                if not isinstance(mutation, Ps1AssignmentExpression) or mutation.value is None:
+                    continue
+                if len(assignment_target_variables(mutation.target)) == 1:
+                    rhs_owner[id(mutation.value)] = binding
+        readers: dict[Binding, set[Binding]] = {binding: set() for binding in bindings}
+        live: set[Binding] = set()
+        for binding in bindings:
+            for read in binding.reads:
+                owner = self._covering_owner(read, rhs_owner)
+                if owner is None or owner is binding:
+                    live.add(binding)
+                else:
+                    readers[binding].add(owner)
+        changed = True
+        while changed:
+            changed = False
+            for binding in bindings:
+                if binding not in live and readers[binding] & live:
+                    live.add(binding)
+                    changed = True
+        return [binding for binding in bindings if binding not in live]
+
+    @staticmethod
+    def _covering_owner(node: Node, rhs_owner: dict[int, Binding]) -> Binding | None:
+        """
+        The candidate binding whose assignment right-hand side encloses *node*, taken at the outermost
+        such right-hand side, or `None` when *node* lies outside every candidate right-hand side.
+        """
+        owner: Binding | None = None
+        cursor: Node | None = node
+        while cursor is not None:
+            found = rhs_owner.get(id(cursor))
+            if found is not None:
+                owner = found
+            cursor = cursor.parent
+        return owner
+
+    def _removable_statements(
+        self, candidates: dict[Binding, list[Node]], dead: list[Binding], model: Ps1SemanticModel,
+    ) -> list[Node]:
+        dead_set = set(dead)
+        removable: list[Node] = []
+        seen: set[int] = set()
+        for binding in dead:
+            for mutation in candidates[binding]:
+                if id(mutation) in seen:
+                    continue
+                if (
+                    isinstance(mutation, Ps1AssignmentExpression)
+                    and not self._all_targets_dead(mutation, model, dead_set)
+                ):
+                    continue
+                seen.add(id(mutation))
+                removable.append(mutation)
+        return removable
+
+    @staticmethod
+    def _all_targets_dead(
+        assign: Ps1AssignmentExpression, model: Ps1SemanticModel, dead: set[Binding],
+    ) -> bool:
+        """
+        Whether every variable written by `assign` is dead. A multi-assignment such as `$a, $b = 1, 2`
+        is only removable when all of its targets are dead; removing it while a co-target is still live
+        would destroy that live write. A target that contains a non-variable slot (e.g. `$arr[0], $b`)
+        writes to memory beyond the named variables and is never considered fully dead.
         """
         if not assignment_target_is_all_variables(assign.target):
             return False
-        keys = [_candidate_key(var) for var in assignment_target_variables(assign.target)]
-        if not keys:
+        variables = assignment_target_variables(assign.target)
+        if not variables:
             return False
-        return all(key is not None and key in dead for key in keys)
-
-    @staticmethod
-    def _enclosing_assignment_target(var: Ps1Variable) -> str | None:
-        """
-        If `var` is read inside an assignment's RHS, return the assignment target's variable key.
-        """
-        if is_assignment_write_target(var):
-            return None
-        cursor: Node = var
-        while cursor.parent is not None:
-            parent = cursor.parent
-            if isinstance(parent, Ps1AssignmentExpression) and cursor is not parent.target:
-                target = _assignment_target_variable(parent.target)
-                if target is not None:
-                    return _candidate_key(target)
-                return None
-            cursor = parent
-        return None
+        for var in variables:
+            binding = model.binding_of(var)
+            if binding is None or binding not in dead:
+                return False
+        return True
 
     def _remove_mutation(self, mutation: Node):
         if isinstance(mutation, Ps1AssignmentExpression):
@@ -430,19 +444,29 @@ class Ps1DeadStoreElimination(Transformer):
     """
     Remove assignments to a variable that are provably overwritten before their next read within the
     same linear scope. This targets the pattern left behind by tier-2 empty-for rewriting: dozens of
-    `$i = N` statements followed by a for-loop whose initializer `$i = 0` overwrites them all.
+    `$i = N` statements followed by a for-loop whose initializer `$i = 0` overwrites them all. Reads
+    come from the shared `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`, so a store read
+    only through a nested scriptblock is correctly seen as live rather than skipped.
     """
 
+    def __init__(self):
+        super().__init__()
+        self._model: Ps1SemanticModel | None = None
+
     def visit(self, node: Node):
+        if self._model is None:
+            self._model = model_cache(self, node).model
+        model = self._model
         body = get_body(node)
-        if body is None:
+        scope = model.scope_of(node)
+        if body is None or scope is None:
             self.generic_visit(node)
             return None
         pending: dict[str, list[Ps1ExpressionStatement]] = {}
         dead: list[Ps1ExpressionStatement] = []
         has_read: set[str] = set()
         for stmt in body:
-            reads, kills, writes = self._classify_statement(stmt)
+            reads, kills, writes = self._classify_statement(stmt, scope, model)
             for var in kills:
                 if var in pending:
                     dead.extend(pending.pop(var))
@@ -476,7 +500,7 @@ class Ps1DeadStoreElimination(Transformer):
         self.generic_visit(node)
 
     def _classify_statement(
-        self, stmt,
+        self, stmt, scope: Scope, model: Ps1SemanticModel,
     ) -> tuple[set[str], set[str], list[tuple[str, Ps1ExpressionStatement]]]:
         """
         Return `(reads, kills, writes)` for a top-level statement:
@@ -502,7 +526,8 @@ class Ps1DeadStoreElimination(Transformer):
             ):
                 key = assign.target.name.lower()
                 if key not in _PS1_SKIP_VARIABLES:
-                    self._collect_reads(assign.value, reads)
+                    if assign.value is not None:
+                        reads |= model.reads_in_scope(assign.value, scope)
                     writes.append((key, stmt))
                     return reads, kills, writes
         if isinstance(stmt, Ps1ForLoop):
@@ -515,37 +540,11 @@ class Ps1DeadStoreElimination(Transformer):
                 key = stmt.initializer.target.name.lower()
                 if key not in _PS1_SKIP_VARIABLES:
                     init_rhs_reads: set[str] = set()
-                    self._collect_reads(stmt.initializer.value, init_rhs_reads)
+                    if stmt.initializer.value is not None:
+                        init_rhs_reads = model.reads_in_scope(stmt.initializer.value, scope)
                     if key in init_rhs_reads:
                         reads.update(init_rhs_reads)
                     else:
                         kills.add(key)
-        self._collect_all_reads(stmt, reads)
+        reads |= model.variables_in_scope(stmt, scope)
         return reads, kills, writes
-
-    def _collect_reads(self, node, reads: set[str]):
-        """
-        Collect variable reads from an expression without descending into nested scriptblock scopes.
-        Variables referenced only inside a `Ps1ScriptBlock` are locals of that scope and must not
-        be treated as reads in the enclosing body.
-        """
-        if node is None:
-            return
-        stack: list[Node] = [node]
-        while stack:
-            child = stack.pop()
-            if child is not node and isinstance(child, Ps1ScriptBlock):
-                continue
-            if isinstance(child, Ps1Variable) and child.scope is Ps1ScopeModifier.NONE:
-                if not is_assignment_write_target(child):
-                    reads.add(child.name.lower())
-            stack.extend(_compute_children(child))
-
-    def _collect_all_reads(self, stmt, reads: set[str]):
-        """
-        Collect all variable reads from a statement and its descendants (conservative flush).
-        """
-        for child in stmt.walk():
-            if isinstance(child, Ps1Variable) and child.scope is Ps1ScopeModifier.NONE:
-                reads.add(child.name.lower())
-

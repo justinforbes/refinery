@@ -368,6 +368,38 @@ def _remove_from_parent(node: Node) -> bool:
     return False
 
 
+def set_child_list(parent: Node, attr: str, items: list) -> None:
+    """
+    Replace the child list at `parent.<attr>` with `items`, adopt every `Node` among them (including
+    nodes nested one level inside tuple items, as in an `refinery.lib.scripts.ps1.model.Ps1IfStatement`
+    `(condition, block)` clause), and advance the mutation counter of the tree `parent` belongs to.
+
+    This is the in-place body/clause counterpart to `_replace_in_parent` and `_remove_from_parent`: a
+    transform that rewrites a whole statement list assigns it through here rather than mutating the
+    list object directly, so an `AnalysisCache` over the tree rebuilds on next access instead of
+    serving a model built before the edit. A raw `body[:] = ...` or `body.clear(); body.extend(...)`
+    leaves the counter untouched and silently opts the tree out of that consistency check.
+    """
+    for item in items:
+        if isinstance(item, Node):
+            item.parent = parent
+        elif isinstance(item, tuple):
+            for elem in item:
+                if isinstance(elem, Node):
+                    elem.parent = parent
+    setattr(parent, attr, items)
+    _bump_tree_version(parent)
+
+
+def set_body(parent: Node, statements: list) -> None:
+    """
+    Replace `parent.body` with `statements` through `set_child_list` — the common case of splicing a
+    statement body, used by transforms that rebuild a `refinery.lib.scripts.Block` or
+    `refinery.lib.scripts.ps1.model.Ps1Code` body in place.
+    """
+    set_child_list(parent, 'body', statements)
+
+
 _N = TypeVar('_N', bound='Node')
 
 

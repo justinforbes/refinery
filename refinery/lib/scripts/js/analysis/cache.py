@@ -4,11 +4,13 @@ the script being transformed and shares it across every transform in a run, rebu
 only after that script's tree changes — whether a transform announces the change through
 `refinery.lib.scripts.Transformer.changed` or an in-pass mutation advances the script's
 `refinery.lib.scripts.tree_version` counter — instead of each transform rebuilding from scratch on
-every pass.
+every pass. The version tracking, invalidation, and transformer-reuse mechanism live in
+`refinery.lib.scripts.modelcache.ModelCacheBase`; this module only declares the JavaScript model
+slots and their `build_*` wiring.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Transformer, tree_version
+from refinery.lib.scripts import Transformer
 from refinery.lib.scripts.js.analysis.cfg import ControlFlowModel, build_control_flow_model
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel, build_dominance
 from refinery.lib.scripts.js.analysis.effects import EffectModel, build_effects
@@ -16,9 +18,10 @@ from refinery.lib.scripts.js.analysis.liveness import LivenessModel, build_liven
 from refinery.lib.scripts.js.analysis.model import SemanticModel, build_semantic_model
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel, build_reaching
 from refinery.lib.scripts.js.model import JsScript
+from refinery.lib.scripts.modelcache import ModelCacheBase
 
 
-class ModelCache:
+class ModelCache(ModelCacheBase):
     """
     Lazily builds and memoizes the `refinery.lib.scripts.js.analysis.model.SemanticModel`, the
     `refinery.lib.scripts.js.analysis.effects.EffectModel`, the
@@ -26,92 +29,54 @@ class ModelCache:
     `refinery.lib.scripts.js.analysis.liveness.LivenessModel` and
     `refinery.lib.scripts.js.analysis.dominance.DominanceModel`, and the
     `refinery.lib.scripts.js.analysis.reaching.ReachingModel` layered on them, for one root script.
-    The memoized models are dropped whenever this root's AST-mutation counter
-    (`refinery.lib.scripts.tree_version`) advances past the value they were built at, so a transform
-    that reads the cache after an earlier mutation in the same pass — even one not yet announced
-    through `refinery.lib.scripts.Transformer.changed` — observes models consistent with the current
-    tree. `invalidate` forces the same drop explicitly. The derived models are always built on the
-    current semantic model, so dropping them together keeps them consistent.
+    The memoized models are dropped whenever this root's AST-mutation counter advances past the value
+    they were built at, so a transform that reads the cache after an earlier mutation in the same pass
+    — even one not yet announced through `refinery.lib.scripts.Transformer.changed` — observes models
+    consistent with the current tree. The derived models are always built on the current semantic
+    model, so dropping them together keeps them consistent.
     """
 
+    _SLOTS = ('_model', '_control_flow', '_effects', '_liveness', '_dominance', '_reaching')
+
+    _model: SemanticModel | None
+    _control_flow: ControlFlowModel | None
+    _effects: EffectModel | None
+    _liveness: LivenessModel | None
+    _dominance: DominanceModel | None
+    _reaching: ReachingModel | None
+
     def __init__(self, root: JsScript):
-        self.root = root
-        self._version = tree_version(root)
-        self._model: SemanticModel | None = None
-        self._control_flow: ControlFlowModel | None = None
-        self._effects: EffectModel | None = None
-        self._liveness: LivenessModel | None = None
-        self._dominance: DominanceModel | None = None
-        self._reaching: ReachingModel | None = None
-
-    def invalidate(self) -> None:
-        self._model = None
-        self._control_flow = None
-        self._effects = None
-        self._liveness = None
-        self._dominance = None
-        self._reaching = None
-
-    def _ensure_fresh(self) -> None:
-        version = tree_version(self.root)
-        if version != self._version:
-            self._version = version
-            self.invalidate()
+        super().__init__(root)
 
     @property
     def model(self) -> SemanticModel:
-        self._ensure_fresh()
-        if self._model is None:
-            self._model = build_semantic_model(self.root)
-        return self._model
+        return self._lazy('_model', lambda: build_semantic_model(self.root))
 
     @property
     def effects(self) -> EffectModel:
-        self._ensure_fresh()
-        if self._effects is None:
-            self._effects = build_effects(self.model)
-        return self._effects
+        return self._lazy('_effects', lambda: build_effects(self.model))
 
     @property
     def control_flow(self) -> ControlFlowModel:
-        self._ensure_fresh()
-        if self._control_flow is None:
-            self._control_flow = build_control_flow_model(self.root)
-        return self._control_flow
+        return self._lazy('_control_flow', lambda: build_control_flow_model(self.root))
 
     @property
     def liveness(self) -> LivenessModel:
-        self._ensure_fresh()
-        if self._liveness is None:
-            self._liveness = build_liveness(self.model, self.control_flow)
-        return self._liveness
+        return self._lazy('_liveness', lambda: build_liveness(self.model, self.control_flow))
 
     @property
     def dominance(self) -> DominanceModel:
-        self._ensure_fresh()
-        if self._dominance is None:
-            self._dominance = build_dominance(self.model, self.control_flow)
-        return self._dominance
+        return self._lazy('_dominance', lambda: build_dominance(self.model, self.control_flow))
 
     @property
     def reaching(self) -> ReachingModel:
-        self._ensure_fresh()
-        if self._reaching is None:
-            self._reaching = build_reaching(self.dominance, self.effects)
-        return self._reaching
+        return self._lazy('_reaching', lambda: build_reaching(self.dominance, self.effects))
 
 
 def model_cache(transformer: Transformer, root: JsScript) -> ModelCache:
     """
     The pipeline's shared `ModelCache` for *root* when one is attached to *transformer* and built over
-    that same root, otherwise a fresh cache — stashed back onto *transformer* so later lookups within
-    its single-pass lifetime reuse it instead of rebuilding the models per call. A transform still runs
-    standalone (in tests, or outside the pipeline); freshness stays governed by the tree version, and a
-    standalone mutation now invalidates the stashed cache exactly as it would the shared one.
+    that same root, otherwise a fresh cache stashed back onto *transformer* for reuse within its
+    single-pass lifetime. See `refinery.lib.scripts.modelcache.ModelCacheBase.for_transformer`.
     """
-    cache = transformer.models
-    if isinstance(cache, ModelCache) and cache.root is root:
-        return cache
-    cache = ModelCache(root)
-    transformer.models = cache
-    return cache
+    return ModelCache.for_transformer(transformer, root)

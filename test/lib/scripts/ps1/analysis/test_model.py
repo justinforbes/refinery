@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+from test import TestBase
+
+from refinery.lib.scripts.ps1.analysis.model import ScopeKind, build_semantic_model
+from refinery.lib.scripts.ps1.model import Ps1AssignmentExpression, Ps1Variable
+from refinery.lib.scripts.ps1.parser import Ps1Parser
+
+
+class TestPs1SemanticModel(TestBase):
+
+    @staticmethod
+    def _model(source: str):
+        return build_semantic_model(Ps1Parser(source).parse())
+
+    @staticmethod
+    def _assignment_value(ast, target_name: str):
+        for node in ast.walk():
+            if isinstance(node, Ps1AssignmentExpression) and isinstance(node.target, Ps1Variable):
+                if node.target.name.lower() == target_name:
+                    return node.value
+        raise AssertionError(F'no assignment to ${target_name}')
+
+    def _script_binding(self, source: str, name: str):
+        model = self._model(source)
+        return model, model.script_scope.bindings.get(name)
+
+    def test_script_root_is_a_script_scope(self):
+        model = self._model("$a = 1\nWrite-Host $a")
+        self.assertIs(model.script_scope.kind, ScopeKind.SCRIPT)
+
+    def test_if_and_loop_bodies_introduce_no_scope(self):
+        model = self._model("$a = 1\nif ($a) { $b = 2 }\nwhile ($a) { $c = 3 }")
+        self.assertEqual(model.script_scope.children, [])
+        self.assertIn('b', model.script_scope.bindings)
+        self.assertIn('c', model.script_scope.bindings)
+
+    def test_function_body_is_a_function_scope(self):
+        model = self._model("function f { $x = 1 }")
+        self.assertEqual(len(model.script_scope.children), 1)
+        self.assertIs(model.script_scope.children[0].kind, ScopeKind.FUNCTION)
+
+    def test_bare_scriptblock_is_a_scriptblock_scope(self):
+        model = self._model("$cb = { $x = 1 }")
+        self.assertEqual(len(model.script_scope.children), 1)
+        self.assertIs(model.script_scope.children[0].kind, ScopeKind.SCRIPTBLOCK)
+
+    def test_unread_variable_is_dead(self):
+        _, binding = self._script_binding("$x = 'hi'\nWrite-Host done", 'x')
+        self.assertIsNotNone(binding)
+        assert binding is not None
+        self.assertTrue(binding.is_dead)
+
+    def test_read_variable_is_live(self):
+        _, binding = self._script_binding("$x = 'hi'\nWrite-Host $x", 'x')
+        assert binding is not None
+        self.assertFalse(binding.is_dead)
+
+    def test_read_inside_function_keeps_outer_binding_live(self):
+        # PowerShell dynamic scoping: a bare read inside a function references the caller's variable,
+        # so the outer store the function might observe stays live.
+        _, binding = self._script_binding(
+            "$x = 'payload'\nfunction Run { iex $x }\nRun", 'x')
+        assert binding is not None
+        self.assertFalse(binding.is_dead)
+
+    def test_qualified_read_keeps_binding_live(self):
+        # A $script:x read resolves to the script-scope binding and keeps it live.
+        _, binding = self._script_binding(
+            "$x = 'keepme'\nfunction f { Write-Host $script:x }\nf", 'x')
+        assert binding is not None
+        self.assertFalse(binding.is_dead)
+
+    def test_scriptblock_assignment_is_write_local(self):
+        # A bare assignment inside a scriptblock creates a scriptblock-local binding, distinct from the
+        # enclosing $inner; it does not add a write to the outer binding.
+        model = self._model("$inner = 1\n$cb = { $inner = 99 }\nWrite-Host $inner")
+        outer = model.script_scope.bindings['inner']
+        block_scope = model.script_scope.children[0]
+        self.assertIn('inner', block_scope.bindings)
+        self.assertIsNot(outer, block_scope.bindings['inner'])
+        self.assertEqual(len(outer.writes), 1)
+
+    def test_reads_in_scope_sees_read_nested_in_scriptblock(self):
+        # The reconciliation: a read of a script variable nested inside a captured scriptblock is seen
+        # by the read set the dead-store sweep flushes against, so the store is not deleted.
+        ast = Ps1Parser("$x = 1\n$arr = @( { Write-Host $x } )").parse()
+        model = build_semantic_model(ast)
+        value = self._assignment_value(ast, 'arr')
+        self.assertIn('x', model.reads_in_scope(value, model.script_scope))
+
+    def test_reads_in_scope_ignores_write_only_scriptblock(self):
+        # A scriptblock that only assigns (write-local) is not a read of the outer variable.
+        ast = Ps1Parser("$inner = 1\n$cb = { $inner = 99 }").parse()
+        model = build_semantic_model(ast)
+        value = self._assignment_value(ast, 'cb')
+        self.assertNotIn('inner', model.reads_in_scope(value, model.script_scope))
+
+    def test_environment_variable_is_a_distinct_binding(self):
+        # $env:X and $X are different namespaces: an unread env write is dead, an unread script write
+        # keyed the same name is independently tracked.
+        model = self._model("$env:X = 'v'\n$X = 1\nWrite-Host $X")
+        self.assertIn('env:x', model.script_scope.bindings)
+        self.assertIn('x', model.script_scope.bindings)
+        self.assertTrue(model.script_scope.bindings['env:x'].is_dead)
+        self.assertFalse(model.script_scope.bindings['x'].is_dead)
+
+    def test_scope_of_maps_nested_node_to_its_scriptblock(self):
+        model = self._model("function f { $x = 1 }")
+        function_scope = model.script_scope.children[0]
+        inner = next(
+            n for n in model.root.walk()
+            if isinstance(n, Ps1Variable) and n.name.lower() == 'x')
+        self.assertIs(model.scope_of(inner), function_scope)

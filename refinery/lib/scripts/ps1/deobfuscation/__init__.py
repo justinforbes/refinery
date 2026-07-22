@@ -4,6 +4,7 @@ PowerShell AST deobfuscation transforms.
 from __future__ import annotations
 
 from refinery.lib.scripts.pipeline import DeobfuscationPipeline, TransformerGroup
+from refinery.lib.scripts.ps1.analysis import Ps1ModelCache
 from refinery.lib.scripts.ps1.deobfuscation.aliases import Ps1AliasInlining
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
     Ps1ConstantInlining,
@@ -101,10 +102,14 @@ def deobfuscate(ast: Ps1Script, max_steps: int = 0, remove_junk: bool = True) ->
     removes unused variable assignments, uncalled function definitions, and side-effect-free
     expression statements.
     """
-    steps = _phase1.run(ast, max_steps=max_steps)
+    # One analysis cache is built over the script and shared across both phases; the now-honored
+    # `tree_version` counter keeps it consistent even across the two pipeline runs, so a transform in
+    # either phase queries models built on the current tree instead of rebuilding them per pass.
+    cache = Ps1ModelCache(ast)
+    steps = _phase1.run(ast, max_steps=max_steps, models=cache)
     if not remove_junk:
         return steps
     # Carry the phase-1 step count into phase 2 so a single `max_steps` budget is enforced across
     # both phases. Splitting the budget instead lets a phase-1 result of exactly `max_steps` leave a
     # remaining budget of 0, which the pipeline would read as "unlimited" and run phase 2 unbounded.
-    return _phase2.run(ast, max_steps=max_steps, initial_steps=steps)
+    return _phase2.run(ast, max_steps=max_steps, initial_steps=steps, models=cache)

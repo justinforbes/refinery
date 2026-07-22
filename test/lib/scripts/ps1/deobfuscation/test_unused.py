@@ -405,3 +405,19 @@ class TestPs1DeadStoreElimination(TestPs1):
             """
         ), Ps1DeadStoreElimination)
         self.assertEqual(result, '$cb = {\n  $inner = 99\n}\n$inner = 2\nWrite-Host $inner')
+
+    def test_dead_store_read_in_captured_scriptblock_is_kept(self):
+        # Regression: $x = 1 is read only through a captured (stored, never invoked) scriptblock
+        # nested inside an array expression. The block could observe that value when later invoked,
+        # so the store is live and must not be removed. The former per-body walk skipped nested
+        # scriptblocks and deleted it; sourcing reads from the shared model closes that path.
+        result = self._apply(cleandoc(
+            """
+            $x = 1
+            $arr = @( { Write-Host $x } )
+            $x = 2
+            Write-Host $x
+            """
+        ), Ps1DeadStoreElimination)
+        self.assertIn('$x = 1', result)
+        self.assertIn('Write-Host $x', result)

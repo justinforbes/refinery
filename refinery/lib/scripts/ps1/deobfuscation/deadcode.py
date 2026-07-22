@@ -3,7 +3,15 @@ Eliminate dead code from PowerShell scripts after constant folding.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Block, Expression, Node, Statement, Transformer
+from refinery.lib.scripts import (
+    Block,
+    Expression,
+    Node,
+    Statement,
+    Transformer,
+    set_body,
+    set_child_list,
+)
 from refinery.lib.scripts.ps1.deobfuscation.data import COMPARISON_OPS, KNOWN_CMDLETS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     BodyRole,
@@ -326,10 +334,7 @@ class Ps1DeadCodeElimination(Transformer):
             body = get_body(parent)
             new_body = self._prune_body(body, role, isinstance(parent, Ps1Script))
             if new_body is not body:
-                body.clear()
-                body.extend(new_body)
-                for stmt in new_body:
-                    stmt.parent = parent
+                set_body(parent, new_body)
                 self.mark_changed()
 
     def _prune_body(
@@ -476,7 +481,7 @@ class Ps1DeadCodeElimination(Transformer):
             return []
         if len(kept_clauses) == len(node.clauses):
             return None
-        node.clauses[:] = kept_clauses
+        set_child_list(node, 'clauses', kept_clauses)
         return [node]
 
     @staticmethod

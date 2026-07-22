@@ -11,6 +11,10 @@ import re
 from typing import Callable, Generator, NamedTuple, TypeGuard, TypeVar
 
 from refinery.lib.scripts import Block, Node, Transformer
+from refinery.lib.scripts.ps1.analysis import (
+    assignment_target_variables,
+    unwrap_assignment_target,
+)
 from refinery.lib.scripts.ps1.deobfuscation.data import (
     BUILTIN_VARIABLES,
     FOREACH_ALIASES,
@@ -23,7 +27,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
-    Ps1CastExpression,
     Ps1Code,
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
@@ -436,65 +439,6 @@ def detect_encoding_chain(node: Ps1InvokeMember) -> str | None:
     return enc_name
 
 
-def _unwrap_assignment_target(target: Node | None) -> Node | None:
-    """
-    Peel type-constraint casts and parentheses from an assignment target.
-    """
-    while isinstance(target, (Ps1ParenExpression, Ps1CastExpression)):
-        target = target.expression if isinstance(target, Ps1ParenExpression) else target.operand
-    return target
-
-
-def assignment_target_variables(target: Node | None) -> list[Ps1Variable]:
-    """
-    Return the variables written by an assignment target. A plain variable target yields a single
-    entry, a `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral` target (the PowerShell
-    multi-assignment `$a, $b = 1, 2`) yields one entry per element that unwraps to a variable, and
-    any other target (index, member access, literal) yields an empty list.
-    """
-    target = _unwrap_assignment_target(target)
-    if isinstance(target, Ps1Variable):
-        return [target]
-    if isinstance(target, Ps1ArrayLiteral):
-        variables: list[Ps1Variable] = []
-        for element in target.elements:
-            unwrapped = _unwrap_assignment_target(element)
-            if isinstance(unwrapped, Ps1Variable):
-                variables.append(unwrapped)
-        return variables
-    return []
-
-
-def assignment_target_is_all_variables(target: Node | None) -> bool:
-    """
-    Return `True` when every slot of an assignment target unwraps to a plain variable. Returns
-    `False` when any slot is an index or member-access expression (e.g. `$arr[0]`), which means
-    the assignment writes to memory other than a named variable and cannot be removed based solely
-    on variable-liveness information.
-    """
-    target = _unwrap_assignment_target(target)
-    if isinstance(target, Ps1Variable):
-        return True
-    if isinstance(target, Ps1ArrayLiteral):
-        return all(isinstance(_unwrap_assignment_target(e), Ps1Variable) for e in target.elements)
-    return False
-
-
-def is_assignment_write_target(var: Ps1Variable) -> bool:
-    """
-    Return `True` when `var` occupies the target position of an enclosing
-    `refinery.lib.scripts.ps1.model.Ps1AssignmentExpression`, including as an element of a
-    multi-assignment `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral` target. Enclosing casts and
-    parentheses are transparent.
-    """
-    cursor: Node = var
-    parent = cursor.parent
-    while isinstance(parent, (Ps1CastExpression, Ps1ParenExpression, Ps1ArrayLiteral)):
-        cursor = parent
-        parent = cursor.parent
-    return isinstance(parent, Ps1AssignmentExpression) and parent.target is cursor
-
-
 def iter_variable_mutations(
     root: Node,
 ) -> Generator[VariableMutation, None, None]:
@@ -508,7 +452,7 @@ def iter_variable_mutations(
                 for variable in variables:
                     yield VariableMutation(variable, MutationKind.ASSIGN, node)
             else:
-                target = _unwrap_assignment_target(node.target)
+                target = unwrap_assignment_target(node.target)
                 if isinstance(target, (Ps1IndexExpression, Ps1MemberAccess)):
                     if isinstance(target.object, Ps1Variable):
                         yield VariableMutation(target.object, MutationKind.MEMBER_ASSIGN, node)

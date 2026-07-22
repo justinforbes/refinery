@@ -14,12 +14,14 @@ from refinery.lib.scripts import (
     _remove_from_parent,
     _replace_in_parent,
 )
+from refinery.lib.scripts.ps1.analysis import (
+    assignment_target_variables,
+    is_assignment_write_target,
+)
 from refinery.lib.scripts.ps1.deobfuscation.data import PS1_KNOWN_VARIABLES
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    assignment_target_variables,
     get_body,
     is_array_reverse_call,
-    is_assignment_write_target,
     is_builtin_variable,
     iter_variable_mutations,
     make_string_literal,
