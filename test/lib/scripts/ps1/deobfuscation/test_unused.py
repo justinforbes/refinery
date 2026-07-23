@@ -107,6 +107,42 @@ class TestPs1JunkStatementRemoval(TestPs1):
         self.assertIn('Kill', result)
         self.assertIn('done', result)
 
+    def test_a_member_invoking_foreach_is_not_excused_by_a_discarding_block(self):
+        # `-MemberName Kill` runs on every input item whatever the block beside it does with `$_`,
+        # so a visible discard may not vouch for it.
+        for source in (
+            'Get-Process | ForEach-Object { [Void]$_ } -MemberName Kill\nWrite-Host done',
+            'Get-Process | ForEach-Object { [Void]$_ } Kill\nWrite-Host done',
+            'Get-Process | ForEach-Object { $Null = $_ } -MemberName Kill\nWrite-Host done',
+        ):
+            with self.subTest(source):
+                result = self._deobfuscate(source)
+                self.assertIn('Kill', result)
+                self.assertIn('done', result)
+
+    def test_a_foreach_block_held_in_a_variable_is_kept(self):
+        # `-End $sb` runs whatever scriptblock the variable holds; nothing in the source says what,
+        # so the discarding process block proves nothing about the statement as a whole.
+        for source in (
+            'Param($sb)\n1..3 | ForEach-Object -Process { [Void]$_ } -End $sb\nWrite-Host done',
+            '1..3 | ForEach-Object { [Void]$_ } $Global:sb\nWrite-Host done',
+        ):
+            with self.subTest(source):
+                self.assertIn('ForEach-Object', self._deobfuscate(source))
+
+    def test_a_parameter_default_that_runs_a_command_keeps_the_function(self):
+        # The default is evaluated on every call that omits the argument, so neither the definition
+        # nor the call site is a no-op.
+        result = self._deobfuscate(
+            'function f { param($x = (Start-Process notepad)) }\nf\nWrite-Host done')
+        self.assertIn('Start-Process', result)
+        self.assertIn('done', result)
+
+    def test_a_splatted_argument_keeps_the_command(self):
+        # `@options` supplies parameters that are nowhere in the source, `-OutVariable` among them.
+        result = self._deobfuscate('Get-Date @options\nWrite-Host $d')
+        self.assertIn('Get-Date', result)
+
     def test_a_discard_terminator_may_not_hide_a_call_in_its_arguments(self):
         result = self._deobfuscate(
             '1 | Out-Null -InputObject (Start-Process notepad)\nWrite-Host done')

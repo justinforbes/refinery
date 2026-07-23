@@ -25,6 +25,7 @@ from refinery.lib.scripts.ps1.ast import (
     get_body,
     get_command_name,
     get_named_blocks,
+    get_param_block,
     is_builtin_variable,
     normalize_dotnet_type_name,
 )
@@ -162,10 +163,21 @@ _WRITING_PARAMETERS = frozenset({
     'wv',
 })
 
-#: The expression forms that are literally their own value. Used both as the base case of
-#: `is_side_effect_free` and as the proof in `_cannot_be_a_scriptblock` that an argument holds no
-#: code, so the two may not drift apart.
+#: The expression forms that are literally their own value: the base case of `is_side_effect_free`.
 _LITERAL_EXPRESSIONS = (
+    Ps1HereString,
+    Ps1IntegerLiteral,
+    Ps1RealLiteral,
+    Ps1StringLiteral,
+)
+
+#: The expression forms that provably hold no code, read by `_cannot_be_a_scriptblock`. This asks a
+#: different question from `_LITERAL_EXPRESSIONS` and is a table of its own even though the two
+#: coincide today, because their correct extensions differ: an expandable string can never be a
+#: scriptblock and belongs here, while `is_side_effect_free` may not grant one wholesale, since
+#: `"$(Start-Process x)"` runs a command. Sharing one table would turn either extension into a
+#: silent grant on the other question.
+_NON_BLOCK_EXPRESSIONS = (
     Ps1HereString,
     Ps1IntegerLiteral,
     Ps1RealLiteral,
@@ -313,15 +325,22 @@ def _argument_values(cmd: Ps1CommandInvocation) -> Iterator[Expression | None]:
         yield arg.value if isinstance(arg, Ps1CommandArgument) else arg
 
 
+def _scriptblock_arguments(cmd: Ps1CommandInvocation) -> list[Ps1ScriptBlock]:
+    """
+    The literal scriptblocks a command is handed, named or positional.
+    """
+    return [value for value in _argument_values(cmd) if isinstance(value, Ps1ScriptBlock)]
+
+
 def _arguments_are_pure(arguments: Sequence[Expression]) -> bool:
     """
     Whether an argument list is safe to evaluate *and* hands the callee nothing to write back
     through. Both halves have to hold for every call, so they are asked in one place: a `[ref]`
     argument is side-effect free to evaluate and still makes the call an out-parameter API.
     """
-    return (
-        all(is_side_effect_free(a) for a in arguments)
-        and not any(_is_writable_reference(a) for a in arguments)
+    return all(
+        not _is_writable_reference(a) and is_side_effect_free(a)
+        for a in arguments
     )
 
 
@@ -333,7 +352,10 @@ def _command_arguments_are_pure(cmd: Ps1CommandInvocation) -> bool:
     arguments are excluded because binding one does not run it; that is `_command_body_is_pure`.
 
     A parameter that `_is_writing_parameter` names is rejected whatever its argument evaluates to:
-    the argument is a variable *name* the command writes, not a value it reads.
+    the argument is a variable *name* the command writes, not a value it reads. A splatted argument
+    is rejected for the same reason one step removed — `Get-Date @options` supplies parameters that
+    are not in the source at all, so it can carry `-OutVariable` as easily as `-Format` and there is
+    nothing here to judge.
     """
     for arg in cmd.arguments:
         if isinstance(arg, Ps1CommandArgument) and _is_writing_parameter(arg.name):
@@ -341,6 +363,8 @@ def _command_arguments_are_pure(cmd: Ps1CommandInvocation) -> bool:
         value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
         if value is None or isinstance(value, Ps1ScriptBlock):
             continue
+        if isinstance(value, Ps1Variable) and value.splatted:
+            return False
         if _is_writable_reference(value) or not is_side_effect_free(value):
             return False
     return True
@@ -352,7 +376,51 @@ def _cannot_be_a_scriptblock(value) -> bool:
     qualify: a variable, a member access or a call result is whatever it was assigned at runtime,
     and a pipeline cmdlet hands exactly such an argument to the engine to invoke per input item.
     """
-    return isinstance(value, _LITERAL_EXPRESSIONS)
+    return isinstance(value, _NON_BLOCK_EXPRESSIONS)
+
+
+def _invokes_a_member(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether a `ForEach-Object` carries its work as a member to call rather than as a scriptblock.
+    The member is named by a plain string argument — `-MemberName Kill` and the positional
+    `| ForEach-Object Kill` are the same call — and nothing static says what that member does, so no
+    inspection of the blocks beside it proves anything about it.
+
+    The question is therefore asked of the arguments, never of whether a block happened to be seen:
+    `| ForEach-Object { [Void]$_ } -MemberName Delete` has a block *and* invokes a member, and
+    reading the answer off the block is what let a discarding body vouch for the deletion sitting
+    next to it.
+
+    A `ForEach-Object` with no scriptblock at all is the same answer with the argument unread: there
+    is no body to prove anything from.
+    """
+    name = get_command_name(cmd)
+    if name is None or name.lower() != 'foreach-object':
+        return False
+    if not _scriptblock_arguments(cmd):
+        return True
+    return any(isinstance(value, Ps1StringLiteral) for value in _argument_values(cmd))
+
+
+def _runs_only_visible_blocks(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether every piece of work a pipeline cmdlet could run is a literal scriptblock this module can
+    read. These cmdlets take their work through their arguments, so an argument that is neither a
+    literal block nor provably blockless hides code: `| Where-Object $filter` and
+    `| ForEach-Object { [Void]$_ } -End $sb` both run whatever the variable holds, and
+    `_invokes_a_member` covers the member form.
+
+    Every caller that judges such a command by the blocks it can see has to ask this first, or it
+    decides on a body it was never shown.
+    """
+    if _invokes_a_member(cmd):
+        return False
+    return all(
+        value is None
+        or isinstance(value, Ps1ScriptBlock)
+        or _cannot_be_a_scriptblock(value)
+        for value in _argument_values(cmd)
+    )
 
 
 def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
@@ -367,25 +435,17 @@ def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
     that. The mutual recursion between the two terminates because a body is strictly nested inside
     the command it belongs to.
 
-    The blocks have to be there to be read. Every one of these cmdlets also takes its work through a
-    plain argument — `| ForEach-Object -MemberName Kill` invokes a member, and
-    `| Where-Object $filter` runs whatever scriptblock the variable holds — so an argument that is
-    not a literal block and not provably a non-block leaves nothing to prove purity from. A
-    `ForEach-Object` with no block at all is impure for the same reason: the loop below proves a
-    property of the blocks it saw, and with no blocks it proves nothing.
+    The blocks have to be all of the work to be worth reading, which is `_runs_only_visible_blocks`.
+    A command that also hides work behind an argument proves nothing here however pure its visible
+    bodies are.
     """
-    name = get_command_name(cmd)
-    may_invoke_a_member = name is not None and name.lower() == 'foreach-object'
-    seen_block = False
-    for block in _argument_values(cmd):
-        if not isinstance(block, Ps1ScriptBlock):
-            if block is not None and not _cannot_be_a_scriptblock(block):
-                return False
-            continue
-        seen_block = True
-        if any(statement_effect(stmt) is StatementEffect.EFFECT for stmt in block.body):
-            return False
-    return seen_block or not may_invoke_a_member
+    if not _runs_only_visible_blocks(cmd):
+        return False
+    return not any(
+        statement_effect(stmt) is StatementEffect.EFFECT
+        for block in _scriptblock_arguments(cmd)
+        for stmt in block.body
+    )
 
 
 def is_side_effect_free(node) -> bool:
@@ -632,13 +692,6 @@ def _terminal_command(pipeline: Ps1Pipeline, name: str) -> Ps1CommandInvocation 
     return expr
 
 
-def _scriptblock_arguments(cmd: Ps1CommandInvocation) -> list[Ps1ScriptBlock]:
-    """
-    The literal scriptblocks a command is handed, named or positional.
-    """
-    return [value for value in _argument_values(cmd) if isinstance(value, Ps1ScriptBlock)]
-
-
 def _pipeline_sink_discards_its_input(pipeline: Ps1Pipeline) -> bool:
     """
     Whether the pipeline's terminator throws away everything that reaches it, so the statement puts
@@ -709,12 +762,16 @@ def _pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
 
     discards the result of a call that still happens.
 
-    A `ForEach-Object` carrying its work in a plain argument (`| ForEach-Object -MemberName Kill`)
-    has no body to discard anything, so it is not a match — the loop proves a property of the blocks
-    it saw, and with no blocks it proves nothing.
+    A `ForEach-Object` that carries work no block accounts for is not a match, whether that work is
+    a member to invoke (`| ForEach-Object { [Void]$_ } -MemberName Delete`) or a block a variable
+    holds (`| ForEach-Object { [Void]$_ } -End $sb`). That is `_runs_only_visible_blocks`, asked
+    here for the same reason `_command_body_is_pure` asks it: the discards below prove a property of
+    the blocks they saw, and a body that was never shown is not among them.
     """
     foreach = _terminal_command(pipeline, 'foreach-object')
     if foreach is None or not _command_arguments_are_pure(foreach):
+        return False
+    if not _runs_only_visible_blocks(foreach):
         return False
     blocks = _scriptblock_arguments(foreach)
     return bool(blocks) and all(
@@ -921,12 +978,14 @@ def body_is_inert(node) -> bool:
 
     A node that owns a `begin`/`process`/`end` block is never inert: `get_body` reports an empty
     statement list for it, and reading that as "nothing happens here" would delete an advanced
-    function together with every call to it. Anything else `get_body` does not recognize is not a
-    body owner and cannot be shown to be inert either.
+    function together with every call to it. A `param` block is the same hole — `get_body` does not
+    report it either, and `function f { param($x = (Start-Process n)) }` runs a command on every
+    call that omits the argument. Anything else `get_body` does not recognize is not a body owner
+    and cannot be shown to be inert either.
     """
     if node is None:
         return True
     body = get_body(node)
-    if body is None or get_named_blocks(node):
+    if body is None or get_named_blocks(node) or get_param_block(node) is not None:
         return False
     return all(statement_effect(stmt) is StatementEffect.DISCARD for stmt in body)

@@ -24,6 +24,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
+    Ps1ParamBlock,
     Ps1ParenExpression,
     Ps1ScopeModifier,
     Ps1StringLiteral,
@@ -60,6 +61,20 @@ def get_named_blocks(node) -> list[Block]:
         return []
     blocks = (node.begin_block, node.process_block, node.end_block, node.dynamicparam_block)
     return [block for block in blocks if block is not None]
+
+
+def get_param_block(node) -> Ps1ParamBlock | None:
+    """
+    The `param( ... )` block a `refinery.lib.scripts.ps1.model.Ps1Code` node owns, or `None`.
+
+    Like `get_named_blocks` this is code that `get_body` does not report: a parameter default is an
+    expression the engine evaluates on every call that omits the argument, and a validation
+    attribute carries arguments of its own. Any caller that reads "no statements" as "nothing
+    happens here" has to ask this as well.
+    """
+    if not isinstance(node, Ps1Code):
+        return None
+    return node.param_block
 
 
 def get_command_name(cmd: Ps1CommandInvocation) -> str | None:

@@ -309,6 +309,39 @@ class TestPs1StatementEffect(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertIs(statement_effect(self._statement(source)), StatementEffect.DISCARD)
 
+    def test_a_foreach_is_judged_by_all_of_its_work_not_only_its_blocks(self):
+        # `ForEach-Object` takes its work through its arguments, and a discarding block sitting
+        # beside that work says nothing about it: `-MemberName Delete` invokes a member on every
+        # input item and `-End $sb` runs whatever scriptblock the variable holds. Reading the
+        # question off "a block was seen" let the visible discard vouch for both.
+        for source in (
+            'Get-Process | ForEach-Object { [Void]$_ } -MemberName Kill',
+            'Get-Process | ForEach-Object { [Void]$_ } Kill',
+            'Get-ChildItem | ForEach-Object { $Null = $_ } -MemberName Delete',
+            '1..3 | ForEach-Object -Process { [Void]$_ } -End $sb',
+            '1..3 | ForEach-Object { [Void]$_ } $sb',
+        ):
+            with self.subTest(source):
+                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_foreach_whose_work_is_all_visible_is_still_a_discard(self):
+        for source in (
+            '1..3 | ForEach-Object { [Void]$_ }',
+            '1..3 | ForEach-Object -Process { $Null = $_ }',
+            '1..3 | ForEach-Object -Begin { [Void]$_ } -Process { $Null = $_ }',
+            '1..3 | ForEach-Object -InputObject 5 -Process { [Void]$_ }',
+        ):
+            with self.subTest(source):
+                self.assertIs(statement_effect(self._statement(source)), StatementEffect.DISCARD)
+
+    def test_a_splatted_argument_hides_the_parameters_it_supplies(self):
+        # `@options` can carry `-OutVariable` as easily as `-Format`, and none of it is in the
+        # source, so there is nothing to judge the command by.
+        for source in ('Get-Date @options', 'Get-ChildItem @options | Out-Null'):
+            with self.subTest(source):
+                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
+
     def test_a_pure_pipeline_cmdlet_still_yields_a_value_a_caller_may_want(self):
         # Purity and emission answer different questions: `Where-Object` performs no side effect,
         # yet the filtered value it puts on the pipeline is not junk.
@@ -339,11 +372,18 @@ class TestPs1StatementEffect(Ps1EffectsTest):
 
 class TestPs1EffectInvariant(Ps1EffectsTest):
     """
-    The standing agreement between the statement layer and the expression layer: a statement the
-    passes are allowed to delete may not contain work they were never shown. Every data-loss bug
-    found in this area so far is one instance of it — a purity allow-list granted a call wholesale
-    while some member of it wrote — so the property is asserted directly rather than one shape at a
-    time.
+    A regression list of shapes that were each, at some point, deleted along with real work: a
+    statement the passes are allowed to drop must not contain a call the expression layer rejects.
+
+    Read this as a list, not as a property. Sweeping the same check over every PowerShell snippet in
+    the test tree reports nothing at all, including on shapes confirmed to be live data-loss bugs at
+    the time — because it asks `is_side_effect_free` about the sub-expressions of a statement whose
+    classification already consulted it, so the two layers sharing one wrong belief looks like
+    agreement. `ForEach-Object { $Null = $_ } -MemberName Delete` was exactly that: `DISCARD` at the
+    statement layer, pure at the expression layer, silently deleted, and invisible here.
+
+    A check that would have caught it has to ask an oracle this module does not supply — real
+    PowerShell, or a corpus labelled by hand with what each statement actually does.
     """
 
     def _violations(self, source: str):
@@ -556,6 +596,18 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             'function f { begin { Start-Process notepad } }',
             'function f { end { Start-Process notepad } }',
             'function f { param($a) process { Write-Host $a } }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
+
+    def test_a_parameter_block_is_code_the_call_runs(self):
+        # A parameter default is evaluated on every call that omits the argument, and `get_body`
+        # reports none of it. Reading the empty statement list as "nothing happens here" deletes the
+        # function together with the call that runs the command in its default.
+        for source in (
+            'function f { param($x = (Start-Process notepad)) }',
+            'function f { param($x = $(Remove-Item C:\\important)) }',
+            'function f { param([ValidateScript({ Start-Process notepad })]$x) }',
         ):
             with self.subTest(source):
                 self.assertFalse(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
