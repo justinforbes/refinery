@@ -82,6 +82,7 @@ _PURE_STATIC_TYPES = frozenset({
     'collections.generic.hashset',
     'collections.generic.list',
     'collections.hashtable',
+    'hashtable',
     'convert',
     'datetime',
     'decimal',

@@ -849,7 +849,7 @@ class TestPs1RealWorldLarge(TestUnitBase):
         goal = inspect.cleandoc(
             r"""
             $kxYB = ([char[]]($lyA5) | ForEach-Object {
-              [Byte][Char]$_
+              [byte][char]$_
             })
             $af5 = (New-Object byte[] 583)
             for ($i = 0; $i -LT 583; $i++) {
@@ -857,7 +857,7 @@ class TestPs1RealWorldLarge(TestUnitBase):
             }
             Set-Alias Copy-Item 'dI6tW'.Remove(3, 3)
             Invoke-Expression (-Join (($af5) | ForEach-Object {
-              [Char]$_
+              [char]$_
             }))
             """
         )

@@ -11,6 +11,7 @@ from refinery.lib.scripts.ps1.data import (
     MEMBER_LOOKUP,
     OBJ_COMMANDS,
     PROPERTY_TYPES,
+    TYPE_ACCELERATORS,
     TYPE_MEMBERS,
     VARIABLE_TYPES,
     WMI_CLASS_NAMES,
@@ -51,8 +52,12 @@ from refinery.lib.scripts.ps1.model import (
 def canonical_type_name(name: str) -> str | None:
     """
     Return the canonical PascalCase display name for a .NET type, preserving an explicit `System.`
-    prefix if the caller used one. Returns `None` if the type is not in the database.
+    prefix if the caller used one. Returns `None` if the type is not in the database, or if the name
+    is already a type accelerator: `[ref]`, `[int]` and `[string]` are the readable forms and are
+    left untouched, where a verbose `[System.Int32]` still folds to `[Int32]`.
     """
+    if name.lower() in TYPE_ACCELERATORS:
+        return None
     resolved = _resolve_type_name(name)
     lower = resolved if resolved is not None else name.lower()
     display = CANONICAL_TYPE_NAMES.get(lower)

@@ -2,6 +2,10 @@ include requirements.txt
 include README.md
 include LICENSE.md
 include refinery/data/rich.json
-include refinery/data/pwsh.json
+include refinery/data/pwsh-meta.json.gz
+include refinery/data/pwsh-types.json.gz
+include refinery/data/pwsh-commands.json.gz
+include refinery/data/pwsh-variables.json.gz
+include refinery/data/pwsh-wmi.json.gz
 recursive-include refinery/lib/fast *.pyx
 recursive-include refinery/lib/seven *.pyx

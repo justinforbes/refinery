@@ -72,7 +72,7 @@ class TestPs1ParserModeRescan(TestPs1):
             'function f { Param([byte[]]$x, [string]$y) ; $x }'
         )
         self.assertIn('[byte[]]', result)
-        self.assertIn('String', result)
+        self.assertIn('[string]', result)
 
     def test_digit_starting_token_does_not_break_expression(self):
         result = self._deobfuscate('$x = 1 + 2')
