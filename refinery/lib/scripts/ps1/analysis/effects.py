@@ -1,7 +1,17 @@
 """
-Purity analysis for PowerShell expressions: decide whether evaluating a node produces observable
-side effects. Shared by the dead-code, trap-removal, and junk/unused-variable passes so that a
-single conservative allow-list governs every "is it safe to delete this?" decision.
+The effect layer of the PowerShell analysis substrate: whether evaluating a node produces an
+observable side effect, and what a standalone statement contributes to the body it sits in. Every
+pass that decides "is it safe to delete this?" asks here, so that no two of them can disagree.
+
+These are free functions rather than a model class because the facts they compute are syntactic: a
+conservative allow-list over one expression, needing no information from anywhere else in the tree.
+A cached model arrives with the first genuine summary fact — interprocedural purity, which has to be
+computed over the `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`.
+
+**Scope.** `StatementEffect` models emission and side effect, not *fault* behavior: it has no member
+for a statement that may throw. The trap and try/catch passes therefore keep statement predicates of
+their own for reasoning about exceptions, and folding those into `statement_effect` requires
+deciding a fault semantics first — it is not a simplification that can be made silently.
 """
 from __future__ import annotations
 
@@ -82,8 +92,12 @@ _PURE_STATIC_METHODS = frozenset({
 def _pure_type_name(name: str) -> str:
     """
     Normalize a .NET type name for purity lookup: lower-cased, `System.` prefix removed, and any
-    generic-argument suffix (`[byte]` or the arity marker before it) stripped, so `System.Collections.Generic.List`
-    and `List[byte]` reduce to the same `collections.generic.list` key.
+    generic-argument suffix (`[byte]` or the arity marker before it) stripped, so that both
+
+        System.Collections.Generic.List
+        List[byte]
+
+    reduce to the same `collections.generic.list` key.
     """
     name = normalize_dotnet_type_name(name)
     for separator in ('[', '`'):
@@ -274,13 +288,13 @@ class StatementEffect(enum.Enum):
     DISCARD = 'discard'
 
 
-def classify_statement_effect(stmt) -> StatementEffect:
+def statement_effect(stmt) -> StatementEffect:
     """
     Classify the observable effect of a standalone statement as a `StatementEffect`. This is the one
     shared authority the dead-code and junk-removal passes consult so they never disagree about
-    whether a statement carries a body's output: a `DISCARD` emits nothing and can always be dropped,
-    an `OUTPUT` yields a value that emit-safety must protect in a captured body, and an `EFFECT` must
-    always be kept.
+    whether a statement carries a body's output: a `DISCARD` emits nothing and can always be
+    dropped, an `OUTPUT` yields a value that emit-safety must protect in a captured body, and an
+    `EFFECT` must always be kept.
     """
     if not isinstance(stmt, Ps1ExpressionStatement):
         return StatementEffect.EFFECT
@@ -382,26 +396,3 @@ def pipeline_ends_with_cmdlet(pipeline: Ps1Pipeline, names: frozenset) -> bool:
         return False
     name = get_command_name(expr)
     return name is not None and name.lower() in names
-
-
-def statement_performs_side_effect(stmt) -> bool:
-    """
-    Return `True` only when a statement is known to perform a genuine observable side effect
-    beyond yielding a value. This is stricter than `classify_statement_effect` returning `EFFECT`:
-    pipelines ending with a pure pipeline cmdlet (`Where-Object`, `Select-Object`, etc.) are
-    classified as `EFFECT` to prevent their deletion, but they have no side effect of their own —
-    only a value yield. Such statements must NOT count as anchors that permit removing surrounding
-    pure-output statements from a ROOT body.
-
-    Control-flow statements (`if`, `for`, `while`, etc.) are treated as non-anchors even when their
-    bodies contain side effects, because they execute conditionally — they cannot guarantee that the
-    function's output is already covered when their condition is unknown at compile time.
-    """
-    if not isinstance(stmt, Ps1ExpressionStatement):
-        return False
-    expr = stmt.expression
-    if expr is None:
-        return False
-    if isinstance(expr, Ps1Pipeline) and pipeline_ends_with_cmdlet(expr, _PURE_PIPELINE_CMDLETS):
-        return False
-    return classify_statement_effect(stmt) is StatementEffect.EFFECT

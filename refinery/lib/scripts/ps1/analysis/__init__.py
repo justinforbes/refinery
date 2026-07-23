@@ -1,13 +1,21 @@
 """
 Static-analysis substrate for PowerShell deobfuscation. Transforms query a shared, computed model of
-the program here instead of each re-deriving scope, binding, and liveness facts on their own.
+the program here instead of each re-deriving scope, binding, effect, and liveness facts on their
+own.
 
-The foundation is `model`, a semantic model of scopes and resolved variable bindings. Later layers
-(effect summaries, control-flow graphs) attach behind the same representation-agnostic surface.
+The foundation is `model`, a semantic model of scopes and resolved variable bindings. On top of it,
+`effects` decides what evaluating a node does and what a statement contributes to its body's output.
+Later layers (control-flow graphs, interprocedural summaries) attach behind the same
+representation-agnostic surface.
 """
 from __future__ import annotations
 
 from refinery.lib.scripts.ps1.analysis.cache import Ps1ModelCache, model_cache
+from refinery.lib.scripts.ps1.analysis.effects import (
+    StatementEffect,
+    is_side_effect_free,
+    statement_effect,
+)
 from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
     Ps1SemanticModel,
@@ -25,9 +33,12 @@ __all__ = [
     'Ps1SemanticModel',
     'Scope',
     'ScopeKind',
+    'StatementEffect',
     'build_semantic_model',
     'is_assignment_write_target',
+    'is_side_effect_free',
     'is_write_occurrence',
     'model_cache',
     'replaces_value',
+    'statement_effect',
 ]

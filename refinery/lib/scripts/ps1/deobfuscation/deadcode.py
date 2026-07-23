@@ -12,6 +12,7 @@ from refinery.lib.scripts import (
     set_body,
     set_child_list,
 )
+from refinery.lib.scripts.ps1.analysis.effects import is_side_effect_free
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
@@ -21,9 +22,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     switch_matches,
     unwrap_integer,
     unwrap_parens,
-)
-from refinery.lib.scripts.ps1.deobfuscation.purity import (
-    is_side_effect_free,
 )
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,

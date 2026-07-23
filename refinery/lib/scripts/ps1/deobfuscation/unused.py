@@ -5,6 +5,11 @@ from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer, _remove_from_parent, _replace_in_parent
 from refinery.lib.scripts.ps1.analysis import Binding, Ps1SemanticModel, Scope, model_cache
+from refinery.lib.scripts.ps1.analysis.effects import (
+    StatementEffect,
+    is_side_effect_free,
+    statement_effect,
+)
 from refinery.lib.scripts.ps1.ast import (
     assignment_of,
     assignment_target_is_all_variables,
@@ -18,11 +23,6 @@ from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _walk_outer_scope,
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import BodyRole, classify_body
-from refinery.lib.scripts.ps1.deobfuscation.purity import (
-    StatementEffect,
-    classify_statement_effect,
-    is_side_effect_free,
-)
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AssignmentExpression,
@@ -349,7 +349,7 @@ class Ps1JunkStatementRemoval(Transformer):
         if function.body is None:
             return True
         for stmt in function.body.body:
-            if classify_statement_effect(stmt) is not StatementEffect.DISCARD:
+            if statement_effect(stmt) is not StatementEffect.DISCARD:
                 return False
         return True
 
@@ -391,7 +391,7 @@ class Ps1JunkStatementRemoval(Transformer):
                 if is_script_root and stmt.name.lower() not in called:
                     dead_functions.add(stmt)
                 continue
-            effect = classify_statement_effect(stmt)
+            effect = statement_effect(stmt)
             if effect is StatementEffect.DISCARD:
                 discard.add(stmt)
             elif effect is StatementEffect.OUTPUT:
