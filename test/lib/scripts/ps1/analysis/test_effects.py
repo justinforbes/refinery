@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from test import TestBase
 
-from refinery.lib.scripts import _remove_from_parent
+from refinery.lib.scripts import Statement, _remove_from_parent
 from refinery.lib.scripts.ps1.analysis.effects import (
     BodyRole,
     StatementEffect,
@@ -17,12 +17,15 @@ from refinery.lib.scripts.ps1.analysis.effects import (
 )
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
+    Ps1CommandInvocation,
     Ps1DataSection,
     Ps1ExpressionStatement,
     Ps1FunctionDefinition,
     Ps1IfStatement,
+    Ps1InvokeMember,
     Ps1ScriptBlock,
     Ps1SubExpression,
+    Ps1UnaryExpression,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
@@ -187,6 +190,46 @@ class TestPs1Purity(Ps1EffectsTest):
         self.assertTrue(is_side_effect_free(self._expression('[IO.Path]::Combine($a, $b)')))
         self.assertTrue(is_side_effect_free(self._expression('[IO.Path]::GetFileName($p)')))
 
+    def test_a_parameter_that_names_a_variable_the_command_fills(self):
+        # `-OutVariable d` sets `$d`. The parsed parameter name carries its leading dash and
+        # PowerShell binds any unambiguous abbreviation, so matching the documented spelling alone
+        # recognizes none of these and the deobfuscator drops the statement that fills the variable.
+        for source in (
+            'Get-Date -OutVariable d',
+            'Get-Date -outvariable d',
+            'Get-Date -OutVar d',
+            'Get-Date -ov d',
+            'Get-Date -ov:$d',
+            'Get-Process -ErrorVariable e',
+            'Get-ChildItem -PipelineVariable p',
+            'Get-Content x -WarningVariable w',
+            'Get-Random -SetSeed 5',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_command_that_only_reads_stays_pure(self):
+        for source in (
+            'Get-Date -Format o',
+            'Get-ChildItem -Recurse',
+            'Get-Item x -Force',
+            'Get-Random -Maximum 5',
+            '1..3 | Select-Object -First 2',
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_side_effect_free(self._expression(source)))
+
+    def test_a_constructor_is_judged_by_every_argument_it_is_handed(self):
+        # `New-Object` binds two positional parameters. An accessor that reports the first two and
+        # drops the rest leaves the trailing argument unexamined, and a call it runs is deleted.
+        for source in (
+            "New-Object String 'x' (Start-Process notepad)",
+            'New-Object Text.StringBuilder (Start-Process notepad)',
+            'New-Object Text.StringBuilder ([ref]$n)',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
     def test_a_type_grants_purity_to_its_members_one_by_one(self):
         # A type whose static surface mixes readers with process- and environment-level writers
         # cannot be trusted wholesale, so membership is per method.
@@ -294,6 +337,60 @@ class TestPs1StatementEffect(Ps1EffectsTest):
                 self.assertFalse(is_pure_constant(self._expression(source)))
 
 
+class TestPs1EffectInvariant(Ps1EffectsTest):
+    """
+    The standing agreement between the statement layer and the expression layer: a statement the
+    passes are allowed to delete may not contain work they were never shown. Every data-loss bug
+    found in this area so far is one instance of it — a purity allow-list granted a call wholesale
+    while some member of it wrote — so the property is asserted directly rather than one shape at a
+    time.
+    """
+
+    def _violations(self, source: str):
+        script = self._parse(source)
+        found = []
+        for node in script.walk():
+            if not isinstance(node, Statement):
+                continue
+            if statement_effect(node) is StatementEffect.EFFECT:
+                continue
+            for sub in node.walk():
+                if sub is node:
+                    continue
+                if isinstance(sub, (Ps1CommandInvocation, Ps1InvokeMember)):
+                    if not is_side_effect_free(sub):
+                        found.append(sub)
+                elif isinstance(sub, Ps1UnaryExpression) and sub.operator in ('++', '--'):
+                    found.append(sub)
+        return found
+
+    def test_a_removable_statement_never_hides_work(self):
+        for source in (
+            '[Void](Start-Process notepad)',
+            '$Null = Start-Process notepad',
+            '$Null = 5',
+            '[Void]1',
+            '1 | Out-Null -InputObject (Start-Process notepad)',
+            '1..3 | ForEach-Object { [Void](Start-Process notepad) }',
+            '1..3 | ForEach-Object { $_ } | Out-Null',
+            '1..3 | ForEach-Object { $Null = $_ }',
+            'Get-Process | ForEach-Object -MemberName Kill',
+            'Get-Date > C:\\out.txt',
+            'Get-Date -OutVariable d',
+            '[Environment]::Exit(0)',
+            '[Array]::Reverse($buffer)',
+            '[Int]::TryParse($s, [ref]$n)',
+            '[IO.Path]::GetTempFileName()',
+            "New-Object String 'x' (Start-Process notepad)",
+            '[Void]$a[$i++]',
+            '$Null = $x++',
+            "$Null = 'a' + $(Start-Process notepad)",
+            "@(1, 2) | Where-Object { $_ -GT 1 } | ForEach-Object { [Void](Remove-Item $_) }",
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._violations(source), [])
+
+
 class TestPs1BodyRole(Ps1EffectsTest):
 
     def test_the_script_root_is_its_own_role(self):
@@ -370,9 +467,20 @@ class TestPs1EmitSafety(Ps1EffectsTest):
                 self.assertFalse(output_is_covered([definition]))
 
     def test_any_other_survivor_covers_the_output(self):
-        for source in ('Write-Host hi', '42', 'if ($a) { }', '$x = 1'):
+        for source in ('Write-Host hi', '42', 'if ($a) { }', '($x = 1)'):
             with self.subTest(source):
                 self.assertTrue(output_is_covered(list(self._parse(source).body)))
+
+    def test_a_statement_that_only_binds_does_not_cover_the_output(self):
+        # An assignment yields nothing to the pipeline, so it cannot stand in for the value a
+        # `RETURNING` body exists to produce. Same for the named `data` section, which is an
+        # assignment in block clothing — `data d { 42 }` binds `$d` rather than emitting `42`.
+        for source in ('$x = 1', '$x += 1', '$a, $b = 1, 2', 'data d { 42 }'):
+            with self.subTest(source):
+                self.assertFalse(output_is_covered(list(self._parse(source).body)))
+
+    def test_an_unnamed_data_section_does_emit(self):
+        self.assertTrue(output_is_covered(list(self._parse('data { 42 }').body)))
 
     def test_emit_safety_reads_only_the_sequence_it_is_given(self):
         # The contract that used to be broken: a caller holds statements hoisted out of a block it
@@ -435,7 +543,7 @@ class TestPs1EmitSafety(Ps1EffectsTest):
                 self.assertFalse(output_is_covered(list(block.body)))
 
     def test_a_statement_that_acts_still_covers_the_output(self):
-        for source in ('function f { Write-Host hi }', 'function f { $x = 1 }'):
+        for source in ('function f { Write-Host hi }', 'function f { Get-Item x }'):
             with self.subTest(source):
                 block = self._first(source, Ps1ScriptBlock)
                 self.assertTrue(output_is_covered(list(block.body)))

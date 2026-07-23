@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import enum
 
-from typing import Sequence
+from typing import Iterator, Sequence, TypeGuard
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.ast import (
@@ -29,15 +29,18 @@ from refinery.lib.scripts.ps1.ast import (
     normalize_dotnet_type_name,
 )
 from refinery.lib.scripts.ps1.model import (
+    Expression,
     Ps1AccessKind,
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
     Ps1CastExpression,
+    Ps1ClassDefinition,
     Ps1CommandArgument,
     Ps1CommandInvocation,
     Ps1DataSection,
+    Ps1EnumDefinition,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1FunctionDefinition,
@@ -56,6 +59,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SubExpression,
+    Ps1TrapStatement,
     Ps1TypeExpression,
     Ps1UnaryExpression,
     Ps1Variable,
@@ -98,7 +102,6 @@ _PURE_STATIC_TYPES = frozenset({
 _PURE_STATIC_METHODS = frozenset({
     ('diagnostics.process', 'getcurrentprocess'),
     ('threading.tasks.task', 'delay'),
-    ('collections.hashtable', 'synchronized'),
     ('array', 'asreadonly'),
     ('array', 'binarysearch'),
     ('array', 'createinstance'),
@@ -121,6 +124,7 @@ _MUTATING_STATIC_METHODS = frozenset({
     ('array', 'reverse'),
     ('array', 'setvalue'),
     ('array', 'sort'),
+    ('convert', 'tobase64chararray'),
 })
 
 #: Members that do something observable whatever they are handed, on a type whose remaining static
@@ -130,6 +134,56 @@ _MUTATING_STATIC_METHODS = frozenset({
 _IMPURE_STATIC_METHODS = frozenset({
     ('io.path', 'gettempfilename'),
 })
+
+#: Type names that denote a by-reference wrapper. `[Ref]` is the PowerShell shorthand; the framework
+#: name it resolves to spells the same thing and appears in obfuscated scripts.
+_REFERENCE_TYPE_NAMES = frozenset({
+    'management.automation.psreference',
+    'ref',
+})
+
+#: Parameters whose presence makes a command write, however pure the transform it names. The common
+#: out-variable parameters bind their argument as the *name* of a variable the command fills, so
+#: `Get-Date -OutVariable d` sets `$d` and is an out-parameter in cmdlet clothing, no more removable
+#: than `[Int]::TryParse($s, [ref]$n)`; `Get-Random -SetSeed 5` rewrites the session's generator
+#: state. Both the full names and the documented aliases are listed because a script may use either,
+#: and `_is_writing_parameter` matches abbreviations on top of that.
+_WRITING_PARAMETERS = frozenset({
+    'errorvariable',
+    'ev',
+    'informationvariable',
+    'iv',
+    'outvariable',
+    'ov',
+    'pipelinevariable',
+    'pv',
+    'setseed',
+    'warningvariable',
+    'wv',
+})
+
+#: The expression forms that are literally their own value. Used both as the base case of
+#: `is_side_effect_free` and as the proof in `_cannot_be_a_scriptblock` that an argument holds no
+#: code, so the two may not drift apart.
+_LITERAL_EXPRESSIONS = (
+    Ps1HereString,
+    Ps1IntegerLiteral,
+    Ps1RealLiteral,
+    Ps1StringLiteral,
+)
+
+
+def _is_writing_parameter(name: str) -> bool:
+    """
+    Whether a command parameter, as written in the source, names one of `_WRITING_PARAMETERS`.
+
+    The leading dash is part of the parsed name and is stripped here. PowerShell also binds any
+    unambiguous abbreviation of a parameter, so `-OutVar` is `-OutVariable` and has to be recognized
+    as one: the match is a prefix test, not equality. An abbreviation short enough to be ambiguous
+    is a runtime error in PowerShell, so rejecting it here costs nothing.
+    """
+    name = name.lstrip('-').lower()
+    return bool(name) and any(parameter.startswith(name) for parameter in _WRITING_PARAMETERS)
 
 
 def _denotes_shared_storage(node) -> bool:
@@ -163,10 +217,15 @@ def _is_writable_reference(node) -> bool:
     Only the syntactic form is recognized. A reference stashed in a variable first
     (`$r = [ref]$n` and then `[Int]::TryParse($s, $r)`) needs dataflow to see, and treating every
     variable argument as a possible reference would make `[Math]::Max($a, $b)` impure.
+
+    Parentheses are transparent: `([ref]$n)` is how the idiom is most often written, and reading the
+    cast only at the top level made the whole call look pure.
     """
+    while isinstance(node, Ps1ParenExpression):
+        node = node.expression
     return (
         isinstance(node, Ps1CastExpression)
-        and node.type_name.lower() == 'ref'
+        and normalize_dotnet_type_name(node.type_name) in _REFERENCE_TYPE_NAMES
         and _denotes_shared_storage(node.operand)
     )
 
@@ -245,20 +304,55 @@ _PURE_PIPELINE_CMDLETS = frozenset({
 })
 
 
+def _argument_values(cmd: Ps1CommandInvocation) -> Iterator[Expression | None]:
+    """
+    The expression behind every argument of a command, named or positional. A switch parameter
+    carries no value and yields `None`.
+    """
+    for arg in cmd.arguments:
+        yield arg.value if isinstance(arg, Ps1CommandArgument) else arg
+
+
+def _arguments_are_pure(arguments: Sequence[Expression]) -> bool:
+    """
+    Whether an argument list is safe to evaluate *and* hands the callee nothing to write back
+    through. Both halves have to hold for every call, so they are asked in one place: a `[ref]`
+    argument is side-effect free to evaluate and still makes the call an out-parameter API.
+    """
+    return (
+        all(is_side_effect_free(a) for a in arguments)
+        and not any(_is_writable_reference(a) for a in arguments)
+    )
+
+
 def _command_arguments_are_pure(cmd: Ps1CommandInvocation) -> bool:
     """
     Whether every non-scriptblock argument of a command is side-effect free. A cmdlet being a pure
     transform says nothing about what its operands cost to evaluate, so
     `Out-String -InputObject (Start-Process x)` is as impure as the call it is handed. Scriptblock
     arguments are excluded because binding one does not run it; that is `_command_body_is_pure`.
+
+    A parameter that `_is_writing_parameter` names is rejected whatever its argument evaluates to:
+    the argument is a variable *name* the command writes, not a value it reads.
     """
     for arg in cmd.arguments:
+        if isinstance(arg, Ps1CommandArgument) and _is_writing_parameter(arg.name):
+            return False
         value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
         if value is None or isinstance(value, Ps1ScriptBlock):
             continue
         if _is_writable_reference(value) or not is_side_effect_free(value):
             return False
     return True
+
+
+def _cannot_be_a_scriptblock(value) -> bool:
+    """
+    Whether an argument provably does not carry a scriptblock the command could run. Only literals
+    qualify: a variable, a member access or a call result is whatever it was assigned at runtime,
+    and a pipeline cmdlet hands exactly such an argument to the engine to invoke per input item.
+    """
+    return isinstance(value, _LITERAL_EXPRESSIONS)
 
 
 def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
@@ -273,18 +367,20 @@ def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
     that. The mutual recursion between the two terminates because a body is strictly nested inside
     the command it belongs to.
 
-    `ForEach-Object` also has a member-invocation form (`| ForEach-Object -MemberName Kill`,
-    `| ForEach-Object Name`) that carries its work in a plain argument instead of a scriptblock.
-    Nothing static says what that member does, so a `ForEach-Object` with no scriptblock at all is
-    impure rather than vacuously pure — the loop below proves a property of the blocks it saw, and
-    with no blocks it proves nothing.
+    The blocks have to be there to be read. Every one of these cmdlets also takes its work through a
+    plain argument — `| ForEach-Object -MemberName Kill` invokes a member, and
+    `| Where-Object $filter` runs whatever scriptblock the variable holds — so an argument that is
+    not a literal block and not provably a non-block leaves nothing to prove purity from. A
+    `ForEach-Object` with no block at all is impure for the same reason: the loop below proves a
+    property of the blocks it saw, and with no blocks it proves nothing.
     """
     name = get_command_name(cmd)
     may_invoke_a_member = name is not None and name.lower() == 'foreach-object'
     seen_block = False
-    for arg in cmd.arguments:
-        block = arg.value if isinstance(arg, Ps1CommandArgument) else arg
+    for block in _argument_values(cmd):
         if not isinstance(block, Ps1ScriptBlock):
+            if block is not None and not _cannot_be_a_scriptblock(block):
+                return False
             continue
         seen_block = True
         if any(statement_effect(stmt) is StatementEffect.EFFECT for stmt in block.body):
@@ -297,7 +393,7 @@ def is_side_effect_free(node) -> bool:
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
     observable side effects beyond yielding a value.
     """
-    if isinstance(node, (Ps1StringLiteral, Ps1HereString, Ps1IntegerLiteral, Ps1RealLiteral)):
+    if isinstance(node, _LITERAL_EXPRESSIONS):
         return True
     if isinstance(node, Ps1TypeExpression):
         return True
@@ -330,23 +426,25 @@ def is_side_effect_free(node) -> bool:
     if isinstance(node, Ps1MemberAccess):
         return is_side_effect_free(node.object)
     if isinstance(node, Ps1InvokeMember):
-        if not all(is_side_effect_free(a) for a in node.arguments):
-            return False
-        if any(_is_writable_reference(a) for a in node.arguments):
+        if not _arguments_are_pure(node.arguments):
             return False
         if node.access == Ps1AccessKind.STATIC:
             obj = node.object
-            if isinstance(obj, Ps1TypeExpression):
+            member = node.member
+            # A computed or quoted member name (`[IO.Path]::$m()`, `[IO.Path]::'GetTempFileName'()`)
+            # cannot be matched against the carve-outs, so the whole-type grant below must not fire
+            # for it either — that is how an obfuscated call reaches the one writing member of an
+            # otherwise pure type.
+            if isinstance(obj, Ps1TypeExpression) and isinstance(member, str):
                 type_name = _pure_type_name(obj.name)
-                member = node.member
-                key = (type_name, member.lower()) if isinstance(member, str) else None
-                if key is not None and key in _IMPURE_STATIC_METHODS:
+                key = (type_name, member.lower())
+                if key in _IMPURE_STATIC_METHODS:
                     return False
-                if key is not None and key in _MUTATING_STATIC_METHODS:
+                if key in _MUTATING_STATIC_METHODS:
                     return not any(_denotes_shared_storage(a) for a in node.arguments)
                 if type_name in _PURE_STATIC_TYPES:
                     return True
-                if key is not None and key in _PURE_STATIC_METHODS:
+                if key in _PURE_STATIC_METHODS:
                     return True
         elif is_side_effect_free(node.object):
             member = node.member
@@ -360,7 +458,7 @@ def is_side_effect_free(node) -> bool:
         if new_object is not None:
             type_name, ctor_args = new_object
             if _pure_type_name(type_name) in _PURE_STATIC_TYPES:
-                return all(is_side_effect_free(a) for a in ctor_args)
+                return _arguments_are_pure(ctor_args)
             return False
         name = get_command_name(node)
         if name is None:
@@ -434,6 +532,30 @@ class StatementEffect(enum.Enum):
     DISCARD = 'discard'
 
 
+def _is_void_cast(node) -> TypeGuard[Ps1CastExpression]:
+    """
+    Whether a node is a cast to `[Void]`, the discard idiom that throws a value away. The type name
+    is folded through `refinery.lib.scripts.ps1.ast.normalize_dotnet_type_name` so that the
+    `[System.Void]` spelling an obfuscator emits is the same idiom.
+    """
+    return (
+        isinstance(node, Ps1CastExpression)
+        and normalize_dotnet_type_name(node.type_name) == 'void'
+    )
+
+
+def _is_null_discard(node) -> TypeGuard[Ps1AssignmentExpression]:
+    """
+    Whether a node is the `$Null = ...` discard idiom, which evaluates its right-hand side and puts
+    nothing on the output.
+    """
+    return (
+        isinstance(node, Ps1AssignmentExpression)
+        and node.operator == '='
+        and is_builtin_variable(node.target, {'null'})
+    )
+
+
 def statement_effect(stmt) -> StatementEffect:
     """
     Classify the observable effect of a standalone statement as a `StatementEffect`. This is the one
@@ -447,34 +569,30 @@ def statement_effect(stmt) -> StatementEffect:
     expr = stmt.expression
     if expr is None:
         return StatementEffect.DISCARD
-    if isinstance(expr, Ps1CastExpression) and expr.type_name.lower() == 'void':
+    if _is_void_cast(expr):
         if is_side_effect_free(expr.operand):
             return StatementEffect.DISCARD
         return StatementEffect.EFFECT
     if isinstance(expr, Ps1Pipeline):
         # The prefix is walked exactly once and every branch below is derived from that one answer.
-        # Asking `pipeline_prefix_is_pure` per idiom and then falling through to
+        # Asking `_pipeline_prefix_is_pure` per idiom and then falling through to
         # `is_side_effect_free(expr)` re-walks the same elements, and because a pipeline cmdlet
         # body re-enters here through `_command_body_is_pure`, that doubling compounds into 2^depth
         # work on the nested `... | ForEach-Object { ... } | Out-Null` shape.
-        prefix_is_pure = pipeline_prefix_is_pure(expr)
+        prefix_is_pure = _pipeline_prefix_is_pure(expr)
         if prefix_is_pure and (
-            pipeline_ends_with_out_null(expr)
-            or pipeline_ends_with_void_foreach(expr)
+            _pipeline_ends_with_out_null(expr)
+            or _pipeline_ends_with_void_foreach(expr)
         ):
             return StatementEffect.DISCARD
-        if pipeline_ends_with_cmdlet(expr, _PURE_PIPELINE_CMDLETS):
+        if _pipeline_ends_with_cmdlet(expr, _PURE_PIPELINE_CMDLETS):
             # A pure pipeline cmdlet (`... | Where-Object {...}`) yields a filtered value a caller
             # may consume, so it is kept even though it performs no side effect of its own.
             return StatementEffect.EFFECT
-        if prefix_is_pure and pipeline_final_is_pure(expr):
+        if prefix_is_pure and _pipeline_final_is_pure(expr):
             return StatementEffect.OUTPUT
         return StatementEffect.EFFECT
-    if (
-        isinstance(expr, Ps1AssignmentExpression)
-        and expr.operator == '='
-        and is_builtin_variable(expr.target, {'null'})
-    ):
+    if _is_null_discard(expr):
         if expr.value is not None and is_side_effect_free(expr.value):
             return StatementEffect.DISCARD
         return StatementEffect.EFFECT
@@ -483,27 +601,78 @@ def statement_effect(stmt) -> StatementEffect:
     return StatementEffect.EFFECT
 
 
-def pipeline_ends_with_out_null(pipeline: Ps1Pipeline) -> bool:
+def _terminal_invocation(pipeline: Ps1Pipeline) -> Ps1CommandInvocation | None:
     """
-    Whether a pipeline is terminated by an `Out-Null` that throws its input away. The terminator's
-    own arguments are part of the question: `... | Out-Null -InputObject (Start-Process x)` runs the
-    call it is handed, so it discards a value the pipeline never carried and is not a junk sink.
+    The unredirected command invocation that terminates a multi-element pipeline, else `None`. A
+    single-element pipeline has no terminator in this sense: there is no upstream value for it to
+    consume.
     """
     if len(pipeline.elements) < 2:
-        return False
+        return None
     last = pipeline.elements[-1]
     if not isinstance(last, Ps1PipelineElement) or last.redirections:
-        return False
+        return None
     expr = last.expression
-    if isinstance(expr, Ps1CommandInvocation):
-        name = get_command_name(expr)
-        if name is None or name.lower() != 'out-null':
-            return False
-        return not expr.redirections and _command_arguments_are_pure(expr)
-    return False
+    if not isinstance(expr, Ps1CommandInvocation) or expr.redirections:
+        return None
+    return expr
 
 
-def pipeline_prefix_is_pure(pipeline: Ps1Pipeline) -> bool:
+def _terminal_command(pipeline: Ps1Pipeline, name: str) -> Ps1CommandInvocation | None:
+    """
+    The invocation that terminates a pipeline when it is an unredirected call to `name`, else
+    `None`.
+    """
+    expr = _terminal_invocation(pipeline)
+    if expr is None:
+        return None
+    command = get_command_name(expr)
+    if command is None or command.lower() != name:
+        return None
+    return expr
+
+
+def _scriptblock_arguments(cmd: Ps1CommandInvocation) -> list[Ps1ScriptBlock]:
+    """
+    The literal scriptblocks a command is handed, named or positional.
+    """
+    return [value for value in _argument_values(cmd) if isinstance(value, Ps1ScriptBlock)]
+
+
+def _pipeline_sink_discards_its_input(pipeline: Ps1Pipeline) -> bool:
+    """
+    Whether the pipeline's terminator throws away everything that reaches it, so the statement puts
+    nothing on the enclosing body's output.
+
+    This is the shape question alone. What the terminator costs to evaluate is a separate matter and
+    belongs to `statement_effect`: `... | Out-Null -InputObject (Start-Process x)` runs a call and
+    still emits nothing, so it is an `EFFECT` that cannot carry a body's return value. Conflating
+    the two is what let a non-emitting survivor stand in for the value a `RETURNING` body exists to
+    produce.
+    """
+    if _terminal_command(pipeline, 'out-null') is not None:
+        return True
+    foreach = _terminal_command(pipeline, 'foreach-object')
+    if foreach is None:
+        return False
+    blocks = _scriptblock_arguments(foreach)
+    return bool(blocks) and all(
+        not statement_can_emit(stmt) for block in blocks for stmt in block.body
+    )
+
+
+def _pipeline_ends_with_out_null(pipeline: Ps1Pipeline) -> bool:
+    """
+    Whether a pipeline is terminated by an `Out-Null` that throws its input away *and* costs nothing
+    to reach. The terminator's own arguments are part of the question:
+    `... | Out-Null -InputObject (Start-Process x)` runs the call it is handed, so it discards a
+    value the pipeline never carried and is not a junk sink.
+    """
+    out_null = _terminal_command(pipeline, 'out-null')
+    return out_null is not None and _command_arguments_are_pure(out_null)
+
+
+def _pipeline_prefix_is_pure(pipeline: Ps1Pipeline) -> bool:
     for el in pipeline.elements[:-1]:
         if not isinstance(el, Ps1PipelineElement) or el.redirections:
             return False
@@ -512,11 +681,11 @@ def pipeline_prefix_is_pure(pipeline: Ps1Pipeline) -> bool:
     return True
 
 
-def pipeline_final_is_pure(pipeline: Ps1Pipeline) -> bool:
+def _pipeline_final_is_pure(pipeline: Ps1Pipeline) -> bool:
     """
     Whether the last element of a pipeline is side-effect free. Together with
-    `pipeline_prefix_is_pure` this is the purity of the whole pipeline, split so that a caller which
-    already knows about the prefix does not walk it a second time.
+    `_pipeline_prefix_is_pure` this is the purity of the whole pipeline, split so that a caller
+    which already knows about the prefix does not walk it a second time.
     """
     if not pipeline.elements:
         return True
@@ -528,7 +697,7 @@ def pipeline_final_is_pure(pipeline: Ps1Pipeline) -> bool:
     )
 
 
-def pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
+def _pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
     """
     Detect junk pipelines like `... | ForEach-Object { [Void]$_ }` or
     `... | ForEach-Object { $Null = $_ }` where the ForEach body explicitly discards all output.
@@ -544,39 +713,20 @@ def pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
     has no body to discard anything, so it is not a match — the loop proves a property of the blocks
     it saw, and with no blocks it proves nothing.
     """
-    if len(pipeline.elements) < 2:
+    foreach = _terminal_command(pipeline, 'foreach-object')
+    if foreach is None or not _command_arguments_are_pure(foreach):
         return False
-    last = pipeline.elements[-1]
-    if not isinstance(last, Ps1PipelineElement) or last.redirections:
-        return False
-    expr = last.expression
-    if not isinstance(expr, Ps1CommandInvocation):
-        return False
-    name = get_command_name(expr)
-    if name is None or name.lower() != 'foreach-object':
-        return False
-    if expr.redirections or not _command_arguments_are_pure(expr):
-        return False
-    seen_block = False
-    for arg in expr.arguments:
-        block = arg.value if isinstance(arg, Ps1CommandArgument) else arg
-        if not isinstance(block, Ps1ScriptBlock):
-            continue
-        seen_block = True
-        for stmt in block.body:
-            if statement_effect(stmt) is not StatementEffect.DISCARD:
-                return False
-    return seen_block
+    blocks = _scriptblock_arguments(foreach)
+    return bool(blocks) and all(
+        statement_effect(stmt) is StatementEffect.DISCARD
+        for block in blocks
+        for stmt in block.body
+    )
 
 
-def pipeline_ends_with_cmdlet(pipeline: Ps1Pipeline, names: frozenset) -> bool:
-    if len(pipeline.elements) < 2:
-        return False
-    last = pipeline.elements[-1]
-    if not isinstance(last, Ps1PipelineElement):
-        return False
-    expr = last.expression
-    if not isinstance(expr, Ps1CommandInvocation):
+def _pipeline_ends_with_cmdlet(pipeline: Ps1Pipeline, names: frozenset[str]) -> bool:
+    expr = _terminal_invocation(pipeline)
+    if expr is None:
         return False
     name = get_command_name(expr)
     return name is not None and name.lower() in names
@@ -696,30 +846,35 @@ def output_observed(role: BodyRole) -> bool:
 
 def statement_can_emit(stmt) -> bool:
     """
-    Whether a statement can put a value on the enclosing body's output at all. A discard idiom emits
-    nothing no matter what producing its value costs, so `[Void](Start-Process x)` cannot carry a
-    body's return value even though `statement_effect` calls it an `EFFECT` for the call it wraps.
-    Recognizing the wrapper and judging its operand are separate questions and only the first one is
-    asked here.
+    Whether a statement can put a value on the enclosing body's output at all. This is the emission
+    question alone, deliberately divorced from what the statement costs to run:
+    `[Void](Start-Process x)` cannot carry a body's return value even though `statement_effect`
+    calls it an `EFFECT` for the call it wraps, and neither can `... | Out-Null -InputObject (...)`.
+
+    A declaration emits nothing, and neither does an assignment — `$x = 1` binds a value rather than
+    yielding one, whatever sits on its right-hand side. Only the parenthesized form `($x = 1)` puts
+    the assigned value on the pipeline, and that is a `Ps1ParenExpression` rather than an assignment
+    statement. A named `data d { ... }` section is an assignment too: it binds its block's value to
+    `$d`. Only the unnamed `data { ... }` puts that value on the output.
     """
+    if isinstance(stmt, (
+        Ps1ClassDefinition,
+        Ps1EnumDefinition,
+        Ps1FunctionDefinition,
+        Ps1TrapStatement,
+    )):
+        return False
+    if isinstance(stmt, Ps1DataSection):
+        return not stmt.name
     if not isinstance(stmt, Ps1ExpressionStatement):
         return True
     expr = stmt.expression
     if expr is None:
         return False
-    if isinstance(expr, Ps1CastExpression) and expr.type_name.lower() == 'void':
-        return False
-    if (
-        isinstance(expr, Ps1AssignmentExpression)
-        and expr.operator == '='
-        and is_builtin_variable(expr.target, {'null'})
-    ):
+    if _is_void_cast(expr) or isinstance(expr, Ps1AssignmentExpression):
         return False
     if isinstance(expr, Ps1Pipeline):
-        return not (
-            pipeline_ends_with_out_null(expr)
-            or pipeline_ends_with_void_foreach(expr)
-        )
+        return not _pipeline_sink_discards_its_input(expr)
     return True
 
 
@@ -736,14 +891,10 @@ def output_is_covered(survivors: Sequence[Node]) -> bool:
     The check is coarse: every survivor that can emit at all counts as covering, including a
     conditional that may not execute. It therefore over-counts, permitting a prune that a precise
     analysis would refuse. What it may not do is count a statement that provably emits nothing —
-    a function definition or a discard idiom — because such a survivor would silence the body while
-    appearing to cover it. Tightening the rest needs reachability.
+    a definition, an assignment, a discard idiom — because such a survivor would silence the body
+    while appearing to cover it. Tightening the rest needs reachability.
     """
-    return any(
-        statement_can_emit(stmt)
-        for stmt in survivors
-        if not isinstance(stmt, Ps1FunctionDefinition)
-    )
+    return any(statement_can_emit(stmt) for stmt in survivors)
 
 
 def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:

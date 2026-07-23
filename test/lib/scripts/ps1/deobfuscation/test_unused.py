@@ -133,6 +133,32 @@ class TestPs1JunkStatementRemoval(TestPs1):
         self.assertIn('Reverse', result)
         self.assertIn('done', result)
 
+    def test_a_command_that_fills_a_variable_is_kept(self):
+        # `-OutVariable d` is what sets `$d`. The parsed parameter name keeps its leading dash and
+        # PowerShell binds abbreviations, so a name table consulted by exact match matches nothing.
+        for source, marker in (
+            ('Get-Date -OutVariable d\nWrite-Host $d', 'OutVariable'),
+            ('Get-Date -OutVar d\nWrite-Host $d', 'OutVar'),
+            ('Get-Date -ov d\nWrite-Host $d', '-ov'),
+            ('Get-ChildItem -ErrorVariable e\nWrite-Host $e', 'ErrorVariable'),
+            ('Get-Date | Out-Null -ErrorVariable e\nWrite-Host $e', 'ErrorVariable'),
+            ('Get-Random -SetSeed 5\nWrite-Host done', 'SetSeed'),
+        ):
+            with self.subTest(source):
+                self.assertIn(marker, self._deobfuscate(source))
+
+    def test_a_constructor_argument_that_runs_a_command_is_kept(self):
+        result = self._deobfuscate(
+            "New-Object String 'x' (Start-Process notepad)\nWrite-Host done")
+        self.assertIn('Start-Process', result)
+        self.assertIn('done', result)
+
+    def test_a_data_section_does_not_stand_in_for_a_return_value(self):
+        # `data d { 42 }` binds `$d` and emits nothing, so it cannot be the survivor that makes
+        # dropping the function's real output safe.
+        result = self._deobfuscate("function f { data d { 42 }; 'payload' }\nf")
+        self.assertIn('payload', result)
+
     def test_out_null_pipeline_removed(self):
         result = self._deobfuscate('[Math]::Pow(2, 8) | Out-Null; Write-Host done')
         self.assertNotIn('Pow', result)

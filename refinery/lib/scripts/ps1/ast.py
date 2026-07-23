@@ -76,6 +76,11 @@ def extract_new_object(cmd: Ps1CommandInvocation) -> tuple[str, list[Expression]
     """
     Extract the type name and constructor arguments from a `New-Object` invocation. Returns
     `(type_name, [arg_expressions])`, or `None` when `cmd` is not a resolvable `New-Object` call.
+
+    `New-Object` binds only two positional parameters, the type name and the argument list, so a
+    third positional argument does not resolve. Reporting the first two and dropping the rest would
+    hand every caller a shape that leaves part of the call unexamined — that is how a purity check
+    came to clear a `New-Object` whose trailing argument runs a command.
     """
     if not isinstance(cmd.name, Ps1StringLiteral):
         return None
@@ -91,14 +96,14 @@ def extract_new_object(cmd: Ps1CommandInvocation) -> tuple[str, list[Expression]
             positional.append(arg)
         else:
             return None
-    if not positional:
+    if not positional or len(positional) > 2:
         return None
     type_name_expr = positional[0]
     if not isinstance(type_name_expr, Ps1StringLiteral):
         return None
     type_name = type_name_expr.value
     ctor_args: list[Expression] = []
-    if len(positional) >= 2:
+    if len(positional) == 2:
         second = positional[1]
         if isinstance(second, Ps1ParenExpression) and second.expression is not None:
             inner = second.expression
