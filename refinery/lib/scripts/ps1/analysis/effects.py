@@ -24,6 +24,7 @@ from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
     get_command_name,
+    get_named_blocks,
     is_builtin_variable,
     normalize_dotnet_type_name,
 )
@@ -36,6 +37,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CastExpression,
     Ps1CommandArgument,
     Ps1CommandInvocation,
+    Ps1DataSection,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1FunctionDefinition,
@@ -60,7 +62,6 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 _PURE_STATIC_TYPES = frozenset({
-    'array',
     'bitconverter',
     'char',
     'collections.arraylist',
@@ -72,7 +73,6 @@ _PURE_STATIC_TYPES = frozenset({
     'datetime',
     'decimal',
     'double',
-    'environment',
     'guid',
     'int',
     'int32',
@@ -93,7 +93,49 @@ _PURE_STATIC_METHODS = frozenset({
     ('diagnostics.process', 'getcurrentprocess'),
     ('threading.tasks.task', 'delay'),
     ('collections.hashtable', 'synchronized'),
+    ('array', 'asreadonly'),
+    ('array', 'binarysearch'),
+    ('array', 'createinstance'),
+    ('array', 'empty'),
+    ('array', 'indexof'),
+    ('array', 'lastindexof'),
+    ('environment', 'expandenvironmentvariables'),
+    ('environment', 'getcommandlineargs'),
+    ('environment', 'getenvironmentvariable'),
+    ('environment', 'getenvironmentvariables'),
+    ('environment', 'getfolderpath'),
+    ('environment', 'getlogicaldrives'),
 })
+
+_MUTATING_STATIC_METHODS = frozenset({
+    ('array', 'clear'),
+    ('array', 'constrainedcopy'),
+    ('array', 'copy'),
+    ('array', 'fill'),
+    ('array', 'reverse'),
+    ('array', 'setvalue'),
+    ('array', 'sort'),
+})
+
+
+def _denotes_shared_storage(node) -> bool:
+    """
+    Whether an expression denotes storage that something outside it can already reach: a variable, a
+    property, or an array slot. A literal, a constructed array and a call result are temporaries —
+    the expression that produced them is the only holder — so mutating one of those is unobservable
+    while mutating shared storage is a side effect.
+
+    This is what separates `[Array]::Reverse('ab'.ToCharArray())`, a junk statement whose result
+    nothing can read, from `[Array]::Reverse($buffer)`, which rewrites a live variable.
+    """
+    while True:
+        if isinstance(node, Ps1ParenExpression):
+            node = node.expression
+        elif isinstance(node, Ps1CastExpression):
+            node = node.operand
+        else:
+            break
+    return isinstance(node, (Ps1Variable, Ps1MemberAccess, Ps1IndexExpression))
 
 
 def _pure_type_name(name: str) -> str:
@@ -170,6 +212,22 @@ _PURE_PIPELINE_CMDLETS = frozenset({
 })
 
 
+def _command_arguments_are_pure(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether every non-scriptblock argument of a command is side-effect free. A cmdlet being a pure
+    transform says nothing about what its operands cost to evaluate, so
+    `Out-String -InputObject (Start-Process x)` is as impure as the call it is handed. Scriptblock
+    arguments are excluded because binding one does not run it; that is `_command_body_is_pure`.
+    """
+    for arg in cmd.arguments:
+        value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
+        if value is None or isinstance(value, Ps1ScriptBlock):
+            continue
+        if not is_side_effect_free(value):
+            return False
+    return True
+
+
 def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
     """
     Check whether all script block arguments of a pipeline cmdlet (ForEach-Object, Where-Object,
@@ -181,14 +239,24 @@ def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
     discards is as harmless as one of bare pure expressions, and only the statement layer knows
     that. The mutual recursion between the two terminates because a body is strictly nested inside
     the command it belongs to.
+
+    `ForEach-Object` also has a member-invocation form (`| ForEach-Object -MemberName Kill`,
+    `| ForEach-Object Name`) that carries its work in a plain argument instead of a scriptblock.
+    Nothing static says what that member does, so a `ForEach-Object` with no scriptblock at all is
+    impure rather than vacuously pure — the loop below proves a property of the blocks it saw, and
+    with no blocks it proves nothing.
     """
+    name = get_command_name(cmd)
+    may_invoke_a_member = name is not None and name.lower() == 'foreach-object'
+    seen_block = False
     for arg in cmd.arguments:
         block = arg.value if isinstance(arg, Ps1CommandArgument) else arg
         if not isinstance(block, Ps1ScriptBlock):
             continue
+        seen_block = True
         if any(statement_effect(stmt) is StatementEffect.EFFECT for stmt in block.body):
             return False
-    return True
+    return seen_block or not may_invoke_a_member
 
 
 def is_side_effect_free(node) -> bool:
@@ -235,13 +303,13 @@ def is_side_effect_free(node) -> bool:
             obj = node.object
             if isinstance(obj, Ps1TypeExpression):
                 type_name = _pure_type_name(obj.name)
+                member = node.member
+                key = (type_name, member.lower()) if isinstance(member, str) else None
+                if key is not None and key in _MUTATING_STATIC_METHODS:
+                    return not any(_denotes_shared_storage(a) for a in node.arguments)
                 if type_name in _PURE_STATIC_TYPES:
                     return True
-                member = node.member
-                if (
-                    isinstance(member, str)
-                    and (type_name, member.lower()) in _PURE_STATIC_METHODS
-                ):
+                if key is not None and key in _PURE_STATIC_METHODS:
                     return True
         elif is_side_effect_free(node.object):
             member = node.member
@@ -249,6 +317,8 @@ def is_side_effect_free(node) -> bool:
                 return True
         return False
     if isinstance(node, Ps1CommandInvocation):
+        if node.redirections:
+            return False
         new_object = extract_new_object(node)
         if new_object is not None:
             type_name, ctor_args = new_object
@@ -258,14 +328,22 @@ def is_side_effect_free(node) -> bool:
         name = get_command_name(node)
         if name is None:
             return False
-        if name.lower() in _PURE_CMDLETS:
-            return True
-        if name.lower() in _PURE_PIPELINE_CMDLETS:
+        name = name.lower()
+        # The pipeline set is checked through the same gate rather than after the plain one: three
+        # of its four members are in both, so testing the plain set first would make the body check
+        # below unreachable for `Where-Object`, `Select-Object` and `Sort-Object`.
+        if name not in _PURE_CMDLETS and name not in _PURE_PIPELINE_CMDLETS:
+            return False
+        if not _command_arguments_are_pure(node):
+            return False
+        if name in _PURE_PIPELINE_CMDLETS:
             return _command_body_is_pure(node)
-        return False
+        return True
     if isinstance(node, Ps1Pipeline):
         return all(
-            isinstance(el, Ps1PipelineElement) and is_side_effect_free(el.expression)
+            isinstance(el, Ps1PipelineElement)
+            and not el.redirections
+            and is_side_effect_free(el.expression)
             for el in node.elements
         )
     if isinstance(node, Ps1ExpandableString):
@@ -337,14 +415,24 @@ def statement_effect(stmt) -> StatementEffect:
             return StatementEffect.DISCARD
         return StatementEffect.EFFECT
     if isinstance(expr, Ps1Pipeline):
-        if pipeline_ends_with_out_null(expr) and pipeline_prefix_is_pure(expr):
-            return StatementEffect.DISCARD
-        if pipeline_ends_with_void_foreach(expr) and pipeline_prefix_is_pure(expr):
+        # The prefix is walked exactly once and every branch below is derived from that one answer.
+        # Asking `pipeline_prefix_is_pure` per idiom and then falling through to
+        # `is_side_effect_free(expr)` re-walks the same elements, and because a pipeline cmdlet
+        # body re-enters here through `_command_body_is_pure`, that doubling compounds into 2^depth
+        # work on the nested `... | ForEach-Object { ... } | Out-Null` shape.
+        prefix_is_pure = pipeline_prefix_is_pure(expr)
+        if prefix_is_pure and (
+            pipeline_ends_with_out_null(expr)
+            or pipeline_ends_with_void_foreach(expr)
+        ):
             return StatementEffect.DISCARD
         if pipeline_ends_with_cmdlet(expr, _PURE_PIPELINE_CMDLETS):
             # A pure pipeline cmdlet (`... | Where-Object {...}`) yields a filtered value a caller
             # may consume, so it is kept even though it performs no side effect of its own.
             return StatementEffect.EFFECT
+        if prefix_is_pure and pipeline_final_is_pure(expr):
+            return StatementEffect.OUTPUT
+        return StatementEffect.EFFECT
     if (
         isinstance(expr, Ps1AssignmentExpression)
         and expr.operator == '='
@@ -359,39 +447,70 @@ def statement_effect(stmt) -> StatementEffect:
 
 
 def pipeline_ends_with_out_null(pipeline: Ps1Pipeline) -> bool:
+    """
+    Whether a pipeline is terminated by an `Out-Null` that throws its input away. The terminator's
+    own arguments are part of the question: `... | Out-Null -InputObject (Start-Process x)` runs the
+    call it is handed, so it discards a value the pipeline never carried and is not a junk sink.
+    """
     if len(pipeline.elements) < 2:
         return False
     last = pipeline.elements[-1]
-    if not isinstance(last, Ps1PipelineElement):
+    if not isinstance(last, Ps1PipelineElement) or last.redirections:
         return False
     expr = last.expression
     if isinstance(expr, Ps1CommandInvocation):
         name = get_command_name(expr)
-        return name is not None and name.lower() == 'out-null'
+        if name is None or name.lower() != 'out-null':
+            return False
+        return not expr.redirections and _command_arguments_are_pure(expr)
     return False
 
 
 def pipeline_prefix_is_pure(pipeline: Ps1Pipeline) -> bool:
     for el in pipeline.elements[:-1]:
-        if not isinstance(el, Ps1PipelineElement):
+        if not isinstance(el, Ps1PipelineElement) or el.redirections:
             return False
         if not is_side_effect_free(el.expression):
             return False
     return True
 
 
+def pipeline_final_is_pure(pipeline: Ps1Pipeline) -> bool:
+    """
+    Whether the last element of a pipeline is side-effect free. Together with
+    `pipeline_prefix_is_pure` this is the purity of the whole pipeline, split so that a caller which
+    already knows about the prefix does not walk it a second time.
+    """
+    if not pipeline.elements:
+        return True
+    last = pipeline.elements[-1]
+    return (
+        isinstance(last, Ps1PipelineElement)
+        and not last.redirections
+        and is_side_effect_free(last.expression)
+    )
+
+
 def pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
     """
     Detect junk pipelines like `... | ForEach-Object { [Void]$_ }` or
     `... | ForEach-Object { $Null = $_ }` where the ForEach body explicitly discards all output.
-    These are anti-analysis noise injected into malware scripts. Only a discard of a value that is
-    itself side-effect free counts: `ForEach-Object { [Void](Start-Process x) }` discards the result
-    of a call that still happens.
+    These are anti-analysis noise injected into malware scripts. Whether a body statement discards
+    is `statement_effect`'s answer rather than a second copy of the idiom table, so a discard of a
+    value that is not itself side-effect free does not count — the body
+
+        ForEach-Object { [Void](Start-Process x) }
+
+    discards the result of a call that still happens.
+
+    A `ForEach-Object` carrying its work in a plain argument (`| ForEach-Object -MemberName Kill`)
+    has no body to discard anything, so it is not a match — the loop proves a property of the blocks
+    it saw, and with no blocks it proves nothing.
     """
     if len(pipeline.elements) < 2:
         return False
     last = pipeline.elements[-1]
-    if not isinstance(last, Ps1PipelineElement):
+    if not isinstance(last, Ps1PipelineElement) or last.redirections:
         return False
     expr = last.expression
     if not isinstance(expr, Ps1CommandInvocation):
@@ -399,29 +518,18 @@ def pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
     name = get_command_name(expr)
     if name is None or name.lower() != 'foreach-object':
         return False
+    if expr.redirections or not _command_arguments_are_pure(expr):
+        return False
+    seen_block = False
     for arg in expr.arguments:
         block = arg.value if isinstance(arg, Ps1CommandArgument) else arg
         if not isinstance(block, Ps1ScriptBlock):
             continue
+        seen_block = True
         for stmt in block.body:
-            if not isinstance(stmt, Ps1ExpressionStatement) or stmt.expression is None:
+            if statement_effect(stmt) is not StatementEffect.DISCARD:
                 return False
-            ex = stmt.expression
-            if (
-                isinstance(ex, Ps1CastExpression)
-                and ex.type_name.lower() == 'void'
-                and is_side_effect_free(ex.operand)
-            ):
-                continue
-            if (
-                isinstance(ex, Ps1AssignmentExpression)
-                and ex.operator == '='
-                and is_builtin_variable(ex.target, {'null'})
-                and (ex.value is None or is_side_effect_free(ex.value))
-            ):
-                continue
-            return False
-    return True
+    return seen_block
 
 
 def pipeline_ends_with_cmdlet(pipeline: Ps1Pipeline, names: frozenset) -> bool:
@@ -523,7 +631,7 @@ def body_role(node) -> BodyRole | None:
     prev = node
     cursor = node.parent
     while cursor is not None:
-        if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression)):
+        if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression, Ps1DataSection)):
             return BodyRole.OPAQUE
         if isinstance(cursor, Ps1AssignmentExpression) and cursor.value is prev:
             return BodyRole.OPAQUE
@@ -549,6 +657,35 @@ def output_observed(role: BodyRole) -> bool:
     return role is BodyRole.RETURNING
 
 
+def statement_can_emit(stmt) -> bool:
+    """
+    Whether a statement can put a value on the enclosing body's output at all. A discard idiom emits
+    nothing no matter what producing its value costs, so `[Void](Start-Process x)` cannot carry a
+    body's return value even though `statement_effect` calls it an `EFFECT` for the call it wraps.
+    Recognizing the wrapper and judging its operand are separate questions and only the first one is
+    asked here.
+    """
+    if not isinstance(stmt, Ps1ExpressionStatement):
+        return True
+    expr = stmt.expression
+    if expr is None:
+        return False
+    if isinstance(expr, Ps1CastExpression) and expr.type_name.lower() == 'void':
+        return False
+    if (
+        isinstance(expr, Ps1AssignmentExpression)
+        and expr.operator == '='
+        and is_builtin_variable(expr.target, {'null'})
+    ):
+        return False
+    if isinstance(expr, Ps1Pipeline):
+        return not (
+            pipeline_ends_with_out_null(expr)
+            or pipeline_ends_with_void_foreach(expr)
+        )
+    return True
+
+
 def output_is_covered(survivors: Sequence[Node]) -> bool:
     """
     Whether some statement in `survivors` still carries the body's output, so that removing the
@@ -559,12 +696,17 @@ def output_is_covered(survivors: Sequence[Node]) -> bool:
     hoisted out of a pruned block still point at the block they came from; answering this question
     by walking `parent` is what used to delete live return values.
 
-    The check is coarse: every survivor that is not a function definition counts as covering,
-    including a conditional that may not execute and a statement that emits nothing at all. It
-    therefore over-counts, permitting a prune that a precise analysis would refuse. This is the
-    semantics the junk pass has shipped with; tightening it needs reachability.
+    The check is coarse: every survivor that can emit at all counts as covering, including a
+    conditional that may not execute. It therefore over-counts, permitting a prune that a precise
+    analysis would refuse. What it may not do is count a statement that provably emits nothing —
+    a function definition or a discard idiom — because such a survivor would silence the body while
+    appearing to cover it. Tightening the rest needs reachability.
     """
-    return any(not isinstance(stmt, Ps1FunctionDefinition) for stmt in survivors)
+    return any(
+        statement_can_emit(stmt)
+        for stmt in survivors
+        if not isinstance(stmt, Ps1FunctionDefinition)
+    )
 
 
 def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:
@@ -584,12 +726,19 @@ def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:
 
 def body_is_inert(node) -> bool:
     """
-    Whether the body that `node` owns neither emits a value nor performs a side effect: `node` owns
-    no body at all, the body is empty, or every statement in it is a `StatementEffect.DISCARD`. An
-    inert function body makes the function itself unobservable, so its definition and its bare call
-    sites can be dropped together.
+    Whether the body that `node` owns neither emits a value nor performs a side effect: `node` is
+    `None`, the body is empty, or every statement in it is a `StatementEffect.DISCARD`. An inert
+    function body makes the function itself unobservable, so its definition and its bare call sites
+    can be dropped together.
+
+    A node that owns a `begin`/`process`/`end` block is never inert: `get_body` reports an empty
+    statement list for it, and reading that as "nothing happens here" would delete an advanced
+    function together with every call to it. Anything else `get_body` does not recognize is not a
+    body owner and cannot be shown to be inert either.
     """
-    body = get_body(node)
-    if body is None:
+    if node is None:
         return True
+    body = get_body(node)
+    if body is None or get_named_blocks(node):
+        return False
     return all(statement_effect(stmt) is StatementEffect.DISCARD for stmt in body)

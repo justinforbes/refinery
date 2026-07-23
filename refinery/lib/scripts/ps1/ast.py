@@ -45,6 +45,23 @@ def get_body(node) -> list | None:
     return None
 
 
+def get_named_blocks(node) -> list[Block]:
+    """
+    The `begin`, `process`, `end` and `dynamicparam` blocks a
+    `refinery.lib.scripts.ps1.model.Ps1Code` node owns.
+
+    The parser fills either these or `body`, never both, so `get_body` reports an empty list for an
+    advanced function whose whole implementation sits in a named block. `get_body` deliberately does
+    not merge them — they are not the single statement list a pass can rebuild with
+    `refinery.lib.scripts.set_body` — so any caller that reads "no statements" as "nothing happens
+    here" has to ask this as well.
+    """
+    if not isinstance(node, Ps1Code):
+        return []
+    blocks = (node.begin_block, node.process_block, node.end_block, node.dynamicparam_block)
+    return [block for block in blocks if block is not None]
+
+
 def get_command_name(cmd: Ps1CommandInvocation) -> str | None:
     """
     The literal name a command is invoked under, or `None` when the name is computed (`& $cmd`, an

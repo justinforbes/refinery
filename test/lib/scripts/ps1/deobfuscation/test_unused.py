@@ -84,6 +84,45 @@ class TestPs1JunkStatementRemoval(TestPs1):
             'function f { Write-Host hi; [Void](Remove-Item C:\\important) }\nf')
         self.assertIn('Remove-Item', result)
 
+    def test_a_void_cast_does_not_stand_in_for_the_value_it_replaced(self):
+        # Keeping the wrapped call must not cost the body its return value: a discard emits nothing,
+        # so it cannot be the survivor that makes dropping the real output safe.
+        result = self._deobfuscate(
+            "function f { [Void](Remove-Item C:\\important); 'payload' }\nf")
+        self.assertIn('Remove-Item', result)
+        self.assertIn('payload', result)
+
+    def test_an_advanced_function_is_not_junk(self):
+        # A `process` block is a body like any other; reading the empty unnamed body as an inert
+        # function deleted the definition and every call to it.
+        result = self._deobfuscate(
+            'function f { process { Start-Process notepad } }\nf\nWrite-Host done')
+        self.assertIn('Start-Process', result)
+        self.assertIn('function f', result)
+        self.assertIn('done', result)
+
+    def test_a_member_invoking_foreach_is_not_a_discard(self):
+        result = self._deobfuscate(
+            'Get-Process | ForEach-Object -MemberName Kill\nWrite-Host done')
+        self.assertIn('Kill', result)
+        self.assertIn('done', result)
+
+    def test_a_discard_terminator_may_not_hide_a_call_in_its_arguments(self):
+        result = self._deobfuscate(
+            '1 | Out-Null -InputObject (Start-Process notepad)\nWrite-Host done')
+        self.assertIn('Start-Process', result)
+        self.assertIn('done', result)
+
+    def test_a_redirected_command_is_kept(self):
+        result = self._deobfuscate('Get-Date > C:\\out.txt\nWrite-Host done')
+        self.assertIn('out.txt', result)
+        self.assertIn('done', result)
+
+    def test_an_array_mutation_on_a_live_variable_is_kept(self):
+        result = self._deobfuscate('[Array]::Reverse($buffer)\nWrite-Host done')
+        self.assertIn('Reverse', result)
+        self.assertIn('done', result)
+
     def test_out_null_pipeline_removed(self):
         result = self._deobfuscate('[Math]::Pow(2, 8) | Out-Null; Write-Host done')
         self.assertNotIn('Pow', result)

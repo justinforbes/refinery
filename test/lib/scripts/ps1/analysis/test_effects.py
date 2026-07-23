@@ -17,6 +17,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
 )
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
+    Ps1DataSection,
     Ps1ExpressionStatement,
     Ps1FunctionDefinition,
     Ps1IfStatement,
@@ -94,6 +95,77 @@ class TestPs1Purity(Ps1EffectsTest):
         ):
             with self.subTest(source):
                 self.assertIs(is_side_effect_free(self._expression(source)), pure)
+
+    def test_a_pipeline_cmdlet_body_is_read_for_every_such_cmdlet(self):
+        # Three of the four pipeline cmdlets also name a plain pure cmdlet, so an allow-list that
+        # answers on the name alone never reaches the body and calls every one of these pure.
+        for source in (
+            'Where-Object { Start-Process notepad }',
+            'Select-Object { Start-Process notepad }',
+            'Sort-Object { Start-Process notepad }',
+            '1..3 | ForEach-Object { Start-Process notepad }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_cmdlet_is_no_purer_than_the_arguments_it_evaluates(self):
+        # Being a pure transform says nothing about what the operands cost to produce: the cmdlet
+        # runs whatever it is handed before it transforms anything.
+        for source in (
+            'Out-String -InputObject (Start-Process notepad)',
+            'Measure-Object -InputObject (Start-Process notepad)',
+            'Get-Item (Remove-Item C:\\important)',
+            'Where-Object -InputObject (Start-Process notepad) { $_ }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_member_invoking_foreach_has_no_body_to_vouch_for_it(self):
+        # `ForEach-Object -MemberName Delete` calls that member on every input item. A body check
+        # that proves a property of the scriptblocks it saw proves nothing when there are none.
+        for source in (
+            'Get-ChildItem | ForEach-Object -MemberName Delete',
+            'Get-Process | ForEach-Object Kill',
+            'Get-Process | ForEach-Object $handler',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_an_in_place_mutator_is_pure_only_on_a_temporary(self):
+        # `[Array]::Reverse` rewrites what it is given. Reversing a value nothing else can reach is
+        # unobservable; reversing a variable is the mutation the rest of the script reads back.
+        for source, pure in (
+            ("[Array]::Reverse('ab'.ToCharArray())", True),
+            ('[Array]::Reverse((1, 2, 3))', True),
+            ('[Array]::Reverse($buffer)', False),
+            ('[Array]::Sort($buffer)', False),
+            ('[Array]::Clear($buffer, 0, 2)', False),
+            ('[Array]::Reverse($this.Items)', False),
+            ('[Array]::Reverse($pair[0])', False),
+        ):
+            with self.subTest(source):
+                self.assertIs(is_side_effect_free(self._expression(source)), pure)
+
+    def test_a_type_grants_purity_to_its_members_one_by_one(self):
+        # A type whose static surface mixes readers with process- and environment-level writers
+        # cannot be trusted wholesale, so membership is per method.
+        for source, pure in (
+            ("[Environment]::GetFolderPath('Desktop')", True),
+            ("[Environment]::GetEnvironmentVariable('PATH')", True),
+            ('[Environment]::Exit(0)', False),
+            ("[Environment]::SetEnvironmentVariable('k', 'v')", False),
+        ):
+            with self.subTest(source):
+                self.assertIs(is_side_effect_free(self._expression(source)), pure)
+
+    def test_a_redirection_writes_a_file_however_pure_the_command_is(self):
+        for source in (
+            'Get-Date > C:\\out.txt',
+            'Get-Content a.txt >> b.txt',
+            'Get-Process 2> C:\\err.txt',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
 
     def test_no_combining_form_launders_an_effect(self):
         # Purity is compositional: an impure operand must poison every expression built over it,
@@ -307,6 +379,43 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             BodyRole.SCRIPT, [s for s in script.body if s not in constants]))
         self.assertTrue(pruning_erases_body(
             BodyRole.SCRIPT, [s for s in script.body if s not in junk]))
+
+    def test_a_discard_never_covers_a_bodys_output(self):
+        # A discard idiom emits nothing whatever its operand costs, so it cannot stand in for the
+        # value a `RETURNING` body exists to produce — counting it silences the body.
+        for source in (
+            'function f { [Void](Start-Process notepad) }',
+            'function f { [Void]$sb.Append(1) }',
+            'function f { $Null = Start-Process notepad }',
+            'function f { Get-Item x | Out-Null }',
+        ):
+            with self.subTest(source):
+                block = self._first(source, Ps1ScriptBlock)
+                self.assertFalse(output_is_covered(list(block.body)))
+
+    def test_a_statement_that_acts_still_covers_the_output(self):
+        for source in ('function f { Write-Host hi }', 'function f { $x = 1 }'):
+            with self.subTest(source):
+                block = self._first(source, Ps1ScriptBlock)
+                self.assertTrue(output_is_covered(list(block.body)))
+
+    def test_a_named_block_body_is_never_inert(self):
+        # The parser fills either `body` or the named blocks, so an advanced function reports an
+        # empty statement list. Reading that as "nothing happens here" deletes the function.
+        for source in (
+            'function f { process { Start-Process notepad } }',
+            'function f { begin { Start-Process notepad } }',
+            'function f { end { Start-Process notepad } }',
+            'function f { param($a) process { Write-Host $a } }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
+
+    def test_a_data_section_captures_the_block_it_binds(self):
+        # `data d { 42 }` binds the block's value to `$d`, so pruning into it is as destructive as
+        # pruning into `$(...)`.
+        block = self._first('data d { 42 }', Ps1DataSection).body
+        self.assertIs(body_role(block), BodyRole.OPAQUE)
 
     def test_a_body_of_pure_discards_is_inert(self):
         for source in ('function j { $Null = 915 }', 'function j { }', 'function j { [Void]1 }'):

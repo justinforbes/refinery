@@ -519,10 +519,13 @@ class Ps1DeadCodeElimination(Transformer):
         Remove a `trap` handler whose body produces no observable output. A trap only runs when the
         code it guards throws a terminating error; injected-noise traps (`trap { continue }`, an
         empty `trap {}`, `trap { break }`) merely swallow or re-raise without emitting anything, so
-        deleting them is invisible unless an error actually propagates. A body that emits output (a
-        real logging handler such as `trap { Write-Host 'err' }`) is not side-effect-free and keeps
-        the trap intact. This is the one removal not provable under strict semantics — it relies on
-        the guarded code never throwing — and is deliberately gated on a strict no-output body.
+        deleting them is invisible unless an error actually propagates. A body that performs a side
+        effect — a real logging handler such as `trap { Write-Host 'err' }` — keeps the trap intact.
+
+        The gate is purity, not emission: this removal is not provable under strict semantics at all
+        (it relies on the guarded code never throwing), and under that premise a body that merely
+        emits never runs either, so `trap { 5 }` and `trap { Get-Date }` are dropped alike. Only a
+        body whose statements would do something observable is worth keeping the trap for.
         """
         body = node.body.body if node.body is not None else []
         for stmt in body:
