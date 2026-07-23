@@ -80,6 +80,21 @@ class TestPs1Purity(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertFalse(is_side_effect_free(self._expression(source)))
 
+    def test_a_pipeline_cmdlet_is_as_pure_as_the_body_it_runs(self):
+        # A scriptblock body is a sequence of statements, so purity of the cmdlet has to be decided
+        # at the statement layer: a body of discards is as harmless as one of bare pure expressions.
+        for source, pure in (
+            ('1..3 | ForEach-Object { $_ }', True),
+            ('1..3 | ForEach-Object { $Null = $_ }', True),
+            ('1..3 | ForEach-Object { [Void]$_ }', True),
+            ('1..3 | Where-Object { $Null = $_ }', True),
+            ('1..3 | ForEach-Object { $x = $_ }', False),
+            ('1..3 | ForEach-Object { Write-Host $_ }', False),
+            ('1..3 | ForEach-Object { [Void](Start-Process notepad) }', False),
+        ):
+            with self.subTest(source):
+                self.assertIs(is_side_effect_free(self._expression(source)), pure)
+
     def test_no_combining_form_launders_an_effect(self):
         # Purity is compositional: an impure operand must poison every expression built over it,
         # otherwise a pass could delete the effect by wrapping it.

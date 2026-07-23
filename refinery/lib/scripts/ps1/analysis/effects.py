@@ -174,23 +174,20 @@ def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
     """
     Check whether all script block arguments of a pipeline cmdlet (ForEach-Object, Where-Object,
     etc.) have side-effect-free bodies. These cmdlets are pure transforms: they evaluate a script
-    block per input item without mutating state themselves. Note: the `$Null = <pure>` discard
-    idiom is NOT currently recognized here because `is_side_effect_free` has no case for
-    `Ps1AssignmentExpression`; such bodies are caught at statement level by
-    `pipeline_ends_with_void_foreach` instead.
+    block per input item without mutating state themselves.
+
+    A scriptblock body is a sequence of statements, so it is `statement_effect` that decides, not
+    the expression-level `is_side_effect_free`: a body of `$Null = <pure>` or `[Void]<pure>`
+    discards is as harmless as one of bare pure expressions, and only the statement layer knows
+    that. The mutual recursion between the two terminates because a body is strictly nested inside
+    the command it belongs to.
     """
-    # TODO: teach `is_side_effect_free` to recognize `$Null = <pure>` assignments as pure so that
-    # this function correctly handles ForEach bodies containing the discard idiom without relying
-    # on the separate `pipeline_ends_with_void_foreach` path.
     for arg in cmd.arguments:
         block = arg.value if isinstance(arg, Ps1CommandArgument) else arg
         if not isinstance(block, Ps1ScriptBlock):
             continue
-        for stmt in block.body:
-            if not isinstance(stmt, Ps1ExpressionStatement):
-                return False
-            if stmt.expression is not None and not is_side_effect_free(stmt.expression):
-                return False
+        if any(statement_effect(stmt) is StatementEffect.EFFECT for stmt in block.body):
+            return False
     return True
 
 
