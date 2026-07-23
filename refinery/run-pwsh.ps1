@@ -251,6 +251,50 @@ function Get-SignatureKey {
     return ('{0:0000}|{1}' -f $list.Count, ($types -join ','))
 }
 
+function Add-MethodMember {
+    param(
+        [System.Collections.Specialized.OrderedDictionary] $Members,
+        [System.Reflection.MethodInfo] $Method
+    )
+    $parameters = @()
+    foreach ($parameter in $Method.GetParameters()) {
+        $parameters += ConvertTo-ParameterRecord $parameter
+    }
+    $overload = [ordered]@{
+        static     = [bool]$Method.IsStatic
+        returns    = Get-TypeText $Method.ReturnType
+        parameters = @($parameters)
+    }
+    if ($Members.PSBase.Contains($Method.Name)) {
+        if ($Members[$Method.Name].kind -eq 'method') {
+            $Members[$Method.Name].overloads += $overload
+        }
+    } else {
+        $Members[$Method.Name] = [ordered]@{
+            kind      = 'method'
+            source    = 'reflection'
+            overloads = @($overload)
+        }
+    }
+}
+
+function Add-PropertyMember {
+    param(
+        [System.Collections.Specialized.OrderedDictionary] $Members,
+        [System.Reflection.PropertyInfo] $Property
+    )
+    if ($Members.PSBase.Contains($Property.Name)) { return }
+    $accessor = @($Property.GetAccessors($false)) | Select-Object -First 1
+    $Members[$Property.Name] = [ordered]@{
+        kind     = 'property'
+        source   = 'reflection'
+        type     = Get-TypeText $Property.PropertyType
+        static   = [bool]($null -ne $accessor -and $accessor.IsStatic)
+        readable = [bool]$Property.CanRead
+        writable = [bool]$Property.CanWrite
+    }
+}
+
 function ConvertTo-TypeRecord {
     param(
         [Parameter(Mandatory)] [Type] $Type,
@@ -260,36 +304,24 @@ function ConvertTo-TypeRecord {
     $members = [ordered]@{}
 
     foreach ($method in (Get-PublicMethods $Type)) {
-        $parameters = @()
-        foreach ($parameter in $method.GetParameters()) {
-            $parameters += ConvertTo-ParameterRecord $parameter
-        }
-        $overload = [ordered]@{
-            static     = [bool]$method.IsStatic
-            returns    = Get-TypeText $method.ReturnType
-            parameters = @($parameters)
-        }
-        if ($members.PSBase.Contains($method.Name)) {
-            $members[$method.Name].overloads += $overload
-        } else {
-            $members[$method.Name] = [ordered]@{
-                kind      = 'method'
-                source    = 'reflection'
-                overloads = @($overload)
-            }
-        }
+        Add-MethodMember $members $method
     }
 
     foreach ($property in (Get-PublicProperties $Type)) {
-        if ($members.PSBase.Contains($property.Name)) { continue }
-        $accessor = @($property.GetAccessors($false)) | Select-Object -First 1
-        $members[$property.Name] = [ordered]@{
-            kind     = 'property'
-            source   = 'reflection'
-            type     = Get-TypeText $property.PropertyType
-            static   = [bool]($null -ne $accessor -and $accessor.IsStatic)
-            readable = [bool]$property.CanRead
-            writable = [bool]$property.CanWrite
+        Add-PropertyMember $members $property
+    }
+
+    # Explicitly-implemented interface members — System.Array's Count from ICollection is the
+    # canonical case — are not returned by GetProperties/GetMethods on the type itself, only by
+    # reflecting the interfaces it implements. A member the type already declares wins; the
+    # interface only fills what is otherwise invisible.
+    foreach ($interface in $Type.GetInterfaces()) {
+        foreach ($method in (Get-PublicMethods $interface)) {
+            if ($members.PSBase.Contains($method.Name)) { continue }
+            Add-MethodMember $members $method
+        }
+        foreach ($property in (Get-PublicProperties $interface)) {
+            Add-PropertyMember $members $property
         }
     }
 
@@ -305,8 +337,16 @@ function ConvertTo-TypeRecord {
         }
     }
 
+    # The Extended Type System fills only what reflection cannot see. A member reflection already
+    # reported keeps its reflection kind and — the load-bearing part — its return type: Get-Member
+    # presents System.Array's Count as an alias property, but ICollection.Count is a real Int32
+    # property, and dropping that type would break every consumer that resolves what `.Count` yields.
+    # The members that exist only in the ETS, like Process.Path and Process.CPU, are the ones this
+    # captures, and they are exactly the ScriptProperties a later purity gate must not mistake for
+    # inert reads.
     foreach ($member in @($EtsMembers)) {
         if ($null -eq $member) { continue }
+        if ($members.PSBase.Contains($member.Name)) { continue }
         $members[$member.Name] = [ordered]@{
             kind   = $member.Kind
             source = 'ets'
