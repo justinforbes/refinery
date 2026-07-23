@@ -794,6 +794,16 @@ Get-Command -CommandType Cmdlet, Function | ForEach-Object {
 
     $aliases = [ordered]@{}
     $aliasRecords = Invoke-Pristine -Label 'Get-Alias' -Script @'
+# Aliases are module-contributed the same way commands are, so the alias table has to be built
+# against the same imported surface Get-Command uses. A bare pristine session lists only the core
+# aliases and drops every module-provided short form, the CimCmdlets ones (gcim, icim, ...) among
+# them. The Continue preference and per-import catch mirror the command query for the same reason.
+$WarningPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Continue'
+foreach ($available in Get-Module -ListAvailable) {
+    try { Import-Module $available.Name -ErrorAction Stop -WarningAction SilentlyContinue }
+    catch { Write-Error ("import {0}: {1}" -f $available.Name, $_.Exception.Message) }
+}
 Get-Alias | Sort-Object Name | ForEach-Object {
     [pscustomobject]@{ Name = $_.Name; Definition = $_.Definition }
 }
