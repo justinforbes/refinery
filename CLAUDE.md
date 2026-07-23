@@ -61,15 +61,10 @@ The following rules contradict common Python conventions. Check them explicitly:
 
 # Development
 
-- Always run your tests using `pytest -n 6`, running the tests in parallel saves a lot of time.
+- Run your tests using `pytest -n auto`.
   Restricting to 6 workers ensures that not too much memory is used.
 - Use the `temp` subdirectory of the project root for creating temporary scripts and files.
-  When generating samples for testing, create a subfolder in `temp` with an appropriate name and place your data in there.
-- When running commands, use only Python.
-  Write a script to disk first, then run `python [path]` where `[path]` is the full path to the script.
-  Do not use `python -c`.
-  Handle everything you need to do inside the script, including directory changes and file I/O.
-- Do not use shell commands, output redirection, pipes, or compound commands (e.g. `cd && ...`).
+  When generating samples for testing, create a subfolder in `temp` with an appropriate name for this.
 - When making commits on the user's behalf, do not include a comment about AI co-authorship.
 - When asked to commit changes to git, only use one-line commit messages.
 
