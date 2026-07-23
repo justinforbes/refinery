@@ -31,6 +31,16 @@ class TestPs1MetadataReader(unittest.TestCase):
         self.assertEqual(data.resolve_type('Net.WebClient'), 'System.Net.WebClient')
         self.assertEqual(data.resolve_type('System.Net.WebClient'), 'System.Net.WebClient')
 
+    def test_a_mixed_case_accelerator_resolves(self):
+        # The accelerator table is keyed in the casing PowerShell reports, which is mixed; resolving
+        # one has to be case-insensitive or every capital-lettered accelerator silently fails.
+        self.assertEqual(
+            data.resolve_type('CimSession'), 'Microsoft.Management.Infrastructure.CimSession')
+        self.assertEqual(
+            data.resolve_type('X509Certificate'),
+            'System.Security.Cryptography.X509Certificates.X509Certificate',
+        )
+
     def test_a_generic_name_resolves_to_its_open_definition(self):
         self.assertEqual(
             data.resolve_type('Collections.Generic.List[int]'),
@@ -82,6 +92,12 @@ class TestPs1MetadataReader(unittest.TestCase):
         self.assertFalse(gci['parameters']['Path']['common'])
         self.assertTrue(gci['parameters']['ErrorAction']['common'])
 
+    def test_a_command_resolves_case_insensitively(self):
+        # PowerShell resolves command names without regard to case, and an obfuscated script may
+        # write any casing; the lookup must not depend on the collected PascalCase key.
+        self.assertIsNotNone(data.command('get-childitem'))
+        self.assertEqual(data.command('GET-CHILDITEM'), data.command('Get-ChildItem'))
+
     def test_an_unknown_command_is_none(self):
         self.assertIsNone(data.command('Definitely-NotACommand'))
 
@@ -114,6 +130,17 @@ class TestPs1MetadataViews(unittest.TestCase):
     def test_property_types_resolve_a_member_result_type(self):
         self.assertEqual(data.PROPERTY_TYPES[('system.array', 'length')], 'system.int32')
         self.assertEqual(data.PROPERTY_TYPES[('system.array', 'count')], 'system.int32')
+
+    def test_module_provided_cim_aliases_are_present(self):
+        # A pristine Get-Alias drops these module short forms; they are supplied so that a sample
+        # using gcim/icim is still de-aliased to its (collected) target cmdlet.
+        self.assertEqual(data.KNOWN_ALIAS['gcim'], 'Get-CimInstance')
+        self.assertEqual(data.KNOWN_ALIAS['icim'], 'Invoke-CimMethod')
+        self.assertIn('get-ciminstance', data.KNOWN_CMDLETS)
+
+    def test_the_scope_only_pscmdlet_variable_type_is_present(self):
+        self.assertEqual(
+            data.VARIABLE_TYPES['pscmdlet'], 'system.management.automation.psscriptcmdlet')
 
 
 if __name__ == '__main__':

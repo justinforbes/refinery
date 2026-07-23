@@ -41,7 +41,9 @@ _COMMANDS = _load('pwsh-commands.json.gz')
 _VARIABLES = _load('pwsh-variables.json.gz')
 _WMI = _load('pwsh-wmi.json.gz')
 
-_ACCELERATORS: dict[str, str] = _TYPES['accelerators']
+_ACCELERATORS: dict[str, str] = {
+    _alias.lower(): _full for _alias, _full in _TYPES['accelerators'].items()
+}
 _TYPE_TABLE: dict[str, dict] = _TYPES['types']
 _COMMAND_TABLE: dict[str, dict] = _COMMANDS['commands']
 
@@ -84,6 +86,10 @@ VARIABLE_TYPES: dict[str, str] = {
     for _name, _info in _VARIABLES['variables'].items()
     if _info['type'] is not None
 }
+#: `$PSCmdlet` exists only inside an advanced function's scope, so the pristine `Get-Variable` the
+#: generator runs never sees it. It is supplied here, as the previous database did, because it
+#: cannot be collected rather than because it is absent.
+VARIABLE_TYPES.setdefault('pscmdlet', 'system.management.automation.psscriptcmdlet')
 
 TYPE_ALIASES: dict[str, str] = {
     _alias.lower(): _full.lower() for _alias, _full in _ACCELERATORS.items()
@@ -162,6 +168,26 @@ KNOWN_ALIAS.setdefault('gerr', 'Get-Error')
 KNOWN_ALIAS.setdefault('item', 'Get-Item')
 KNOWN_ALIAS.setdefault('member', 'Get-Member')
 KNOWN_ALIAS.setdefault('variable', 'Get-Variable')
+
+#: The CimCmdlets short forms are module-provided aliases, and a bare pristine `Get-Alias` does not
+#: list them even though their target cmdlets are collected. `run-pwsh.ps1` now imports the modules
+#: before enumerating aliases, but the shipped data predates that fix, so they are restored here
+#: until the next regeneration; each target is a canonical name already in `KNOWN_CMDLETS`.
+for _cim_alias, _cim_command in {
+    'gcai' : 'Get-CimAssociatedInstance',
+    'gcim' : 'Get-CimInstance',
+    'gcls' : 'Get-CimClass',
+    'gcms' : 'Get-CimSession',
+    'icim' : 'Invoke-CimMethod',
+    'ncim' : 'New-CimInstance',
+    'ncms' : 'New-CimSession',
+    'ncso' : 'New-CimSessionOption',
+    'rcie' : 'Register-CimIndicationEvent',
+    'rcim' : 'Remove-CimInstance',
+    'rcms' : 'Remove-CimSession',
+    'scim' : 'Set-CimInstance',
+}.items():
+    KNOWN_ALIAS.setdefault(_cim_alias, _cim_command)
 
 KNOWN_PS_OPERATORS: dict[str, str] = {name.lower(): name for name in [
     '-As',
@@ -397,10 +423,16 @@ def member_order(name: str) -> list[str] | None:
     return _TYPE_TABLE[key].get('member_order')
 
 
+_COMMAND_LOOKUP: dict[str, dict] = {
+    _name.lower(): _record for _name, _record in _COMMAND_TABLE.items()
+}
+
+
 def command(name: str) -> dict | None:
     """
     The collected record for a command, or `None` when the name is not a known cmdlet or function.
     The record carries the command kind, its module, declared output types with an
     `output_type_declared` flag, and the full parameter table including the common parameters.
+    Command names are matched case-insensitively, as PowerShell resolves them.
     """
-    return _COMMAND_TABLE.get(name)
+    return _COMMAND_LOOKUP.get(name.lower())
