@@ -260,6 +260,23 @@ for _params in CMDLET_PARAMETERS.values():
     for _p in _params:
         ALL_PARAMETER_NAMES.setdefault(_p.lower(), _p)
 
+#: The PowerShell common parameters, keyed by lowercased name and mapped to their lowercased
+#: aliases. These are the parameters every advanced command shares (`-ErrorAction`, `-OutVariable`,
+#: `-Verbose`, ...), which `CMDLET_PARAMETERS` and the views built from it deliberately exclude.
+#: This is the one place they are surfaced, so a consumer reasoning about them — the out-variable
+#: purity check does — reads them from the collected data rather than hardcoding the set. They are
+#: identical on every command, so a single advanced command already determines the whole set; the
+#: union is taken regardless so the first command that happens to lack one does not drop it.
+COMMON_PARAMETERS: dict[str, tuple[str, ...]] = {}
+
+for _record in _COMMAND_TABLE.values():
+    for _param, _info in _record['parameters'].items():
+        if _info['common']:
+            COMMON_PARAMETERS.setdefault(
+                _param.lower(),
+                tuple(_alias.lower() for _alias in _info['aliases']),
+            )
+
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_]\w*$')
 
 OBJ_COMMANDS = frozenset({
@@ -421,6 +438,27 @@ def member_order(name: str) -> list[str] | None:
     if key is None:
         return None
     return _TYPE_TABLE[key].get('member_order')
+
+
+def static_overloads(name: str, member: str) -> list[dict]:
+    """
+    The static overloads of a method on a type, each a record carrying its `returns` and its
+    `parameters`, where every parameter records its `byref`/`out` direction, its `type` and its
+    `position`. Returns an empty list when the type is not collected or carries no static method of
+    that name. The member is matched case-insensitively, as PowerShell resolves it, and instance
+    overloads are excluded: a caller asks this to reason about a `[Type]::Member(...)` call, whose
+    reachable surface is the static one.
+    """
+    members = type_members(name)
+    if members is None:
+        return []
+    for stored, record in members.items():
+        if stored.lower() != member.lower():
+            continue
+        if record.get('kind') != 'method':
+            return []
+        return [overload for overload in record.get('overloads') or () if overload.get('static')]
+    return []
 
 
 _COMMAND_LOOKUP: dict[str, dict] = {

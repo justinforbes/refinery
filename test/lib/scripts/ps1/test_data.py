@@ -101,6 +101,27 @@ class TestPs1MetadataReader(unittest.TestCase):
     def test_an_unknown_command_is_none(self):
         self.assertIsNone(data.command('Definitely-NotACommand'))
 
+    def test_static_overloads_report_the_out_parameter_direction(self):
+        # The two-argument TryParse marks its result parameter as a by-reference out; the purity
+        # layer reads exactly this flag to know a `[Int]::TryParse($s, $r)` writes back through $r.
+        overloads = data.static_overloads('int', 'TryParse')
+        self.assertTrue(overloads)
+        self.assertTrue(all(overload['static'] for overload in overloads))
+        two = [overload for overload in overloads if len(overload['parameters']) == 2]
+        self.assertEqual(len(two), 1)
+        self.assertTrue(two[0]['parameters'][1]['byref'])
+
+    def test_static_overloads_are_case_insensitive_and_static_only(self):
+        self.assertTrue(data.static_overloads('INT', 'tryparse'))
+        # TryGetValue is an instance method; the static view excludes it, since a [Type]::Member
+        # call could never reach it.
+        self.assertEqual(
+            data.static_overloads('Collections.Generic.Dictionary[string, object]', 'TryGetValue'),
+            [],
+        )
+        self.assertEqual(data.static_overloads('NotARealType', 'X'), [])
+        self.assertEqual(data.static_overloads('int', 'NotAMember'), [])
+
 
 class TestPs1MetadataViews(unittest.TestCase):
     """
@@ -141,6 +162,15 @@ class TestPs1MetadataViews(unittest.TestCase):
     def test_the_scope_only_pscmdlet_variable_type_is_present(self):
         self.assertEqual(
             data.VARIABLE_TYPES['pscmdlet'], 'system.management.automation.psscriptcmdlet')
+
+    def test_common_parameters_carry_the_out_variable_aliases(self):
+        # The common parameters are excluded from CMDLET_PARAMETERS; this is the one view that keeps
+        # them, and the out-variable purity check reads their aliases from here rather than
+        # hardcoding the set.
+        self.assertIn('ov', data.COMMON_PARAMETERS['outvariable'])
+        self.assertIn('ev', data.COMMON_PARAMETERS['errorvariable'])
+        self.assertIn('erroraction', data.COMMON_PARAMETERS)
+        self.assertNotIn('path', data.COMMON_PARAMETERS)
 
 
 if __name__ == '__main__':

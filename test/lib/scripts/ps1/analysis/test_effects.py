@@ -212,6 +212,40 @@ class TestPs1Purity(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertTrue(is_side_effect_free(self._expression(source)))
 
+    def test_a_bare_out_argument_is_caught_by_the_signature(self):
+        # `TryParse` binds its second parameter by reference, and PowerShell lets the caller pass
+        # the target without a `[ref]` cast. The syntactic check sees only `[ref]$n`; the collected
+        # signature is what tells the effect layer that a bare `$r` in that position is written, so
+        # a call filling a live variable is not mistaken for a pure transform and dropped. Only a
+        # storage location can be written back through, so a temporary in that slot stays pure.
+        for source, pure in (
+            ('[Int]::TryParse($s, $r)', False),
+            ('[Int32]::TryParse($s, $r)', False),
+            ('[DateTime]::TryParse($s, $d)', False),
+            ('[IPAddress]::TryParse($s, $a)', False),
+            ('[Int]::TryParse($s, $obj.Slot)', False),
+            ('[Int]::TryParse($s, $arr[0])', False),
+            ('[Int]::Parse($s)', True),
+        ):
+            with self.subTest(source):
+                self.assertIs(is_side_effect_free(self._expression(source)), pure)
+
+    def test_a_types_spelling_does_not_change_its_purity(self):
+        # `int`, `Int32` and the qualified name are one type, and a generic is one type however its
+        # argument is spelled; resolving every spelling through the collected data lands them on a
+        # single canonical key, so the verdict cannot depend on which an obfuscated script chose.
+        # This is the property that retired the dual-spelling allow-list entries.
+        for variants in (
+            ('[int]::Parse($s)', '[Int32]::Parse($s)', '[System.Int32]::Parse($s)'),
+            (
+                "New-Object 'Collections.Generic.List[byte]'",
+                "New-Object 'System.Collections.Generic.List[byte]'",
+            ),
+        ):
+            with self.subTest(variants):
+                verdicts = {is_side_effect_free(self._expression(v)) for v in variants}
+                self.assertEqual(verdicts, {True})
+
     def test_a_member_that_writes_whatever_it_is_handed(self):
         # A whole-type grant asserts that no member of the type writes. `[IO.Path]` is pure apart
         # from the one member that creates a file on disk, and that one takes no arguments to be
@@ -463,6 +497,7 @@ class TestPs1EffectInvariant(Ps1EffectsTest):
             '[Environment]::Exit(0)',
             '[Array]::Reverse($buffer)',
             '[Int]::TryParse($s, [ref]$n)',
+            '[Int]::TryParse($s, $n)',
             '[IO.Path]::GetTempFileName()',
             "New-Object String 'x' (Start-Process notepad)",
             '[Void]$a[$i++]',

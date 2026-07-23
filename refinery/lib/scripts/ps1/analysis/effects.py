@@ -20,6 +20,7 @@ import enum
 from typing import Iterator, Sequence, TypeGuard
 
 from refinery.lib.scripts import Node
+from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
@@ -68,34 +69,77 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
 )
 
+
+def _canonical_type_name(name: str) -> str:
+    """
+    Resolve a purity allow-list type spelling to the lowercased canonical .NET `FullName` the effect
+    checks key on, raising when the collected metadata carries no such type. Building the tables
+    through this at import time is the fail-loud floor the metadata rework exists to provide: an
+    entry that names a type the current data cannot resolve stops the module from loading rather
+    than going silently unmatched, which is how a stale allow-list used to fail open. A generic
+    type is named by its arity-marked definition (`collections.generic.list` `` `1 ``), the only
+    spelling `refinery.lib.scripts.ps1.data.resolve_type` resolves without its type arguments.
+    """
+    resolved = data.resolve_type(name)
+    if resolved is None:
+        raise ValueError(
+            F'the PowerShell purity allow-list names {name!r}, which the collected metadata does '
+            F'not resolve to a type; the data and the allow-list are out of step.'
+        )
+    return resolved.lower()
+
+
+def _canonical_type_set(names: set[str]) -> frozenset[str]:
+    """
+    A frozenset of canonical type keys built from readable source spellings through
+    `_canonical_type_name`. Spellings that name the same type collapse to one entry, retiring the
+    dual-spelling entries (`int` beside `int32`) the allow-lists carried before the data could
+    resolve them.
+    """
+    return frozenset(_canonical_type_name(name) for name in names)
+
+
+def _canonical_method_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, str]]:
+    """
+    A frozenset of `(canonical type key, lowercased member)` pairs, the form the static-method
+    checks look up. Only the type half is resolved through the data and floored by it; the member
+    name is matched against a `refinery.lib.scripts.ps1.model.Ps1InvokeMember.member` at its own
+    casing.
+    """
+    return frozenset(
+        (_canonical_type_name(type_name), member.lower())
+        for type_name, member in entries
+    )
+
+
 #: Types whose entire static surface is granted purity at once. Listing a type here asserts that no
-#: static member of it writes anything — a bet that has to be re-checked against the real .NET
-#: surface whenever an entry is added, because a single writing member makes every call on the type
-#: removable. `_IMPURE_STATIC_METHODS` carves out the members where the bet is wrong but the type is
-#: still worth granting wholesale, and out-parameters are handled generically by
-#: `_is_writable_reference` rather than per method.
-_PURE_STATIC_TYPES = frozenset({
+#: static member of it writes anything — a bet re-checked against the real .NET surface whenever an
+#: entry is added, because a single writing member makes every call on the type removable.
+#: `_IMPURE_STATIC_METHODS` and `_MUTATING_STATIC_METHODS` carve out the members where the bet is
+#: wrong but the type is still worth granting wholesale, and out-parameters are handled generically,
+#: from the collected signature in `_writes_through_out_parameter` and syntactically in
+#: `_is_writable_reference`, rather than per method. The readable source spellings are resolved to
+#: canonical `FullName` keys at import, so a spelling variant is one entry and an unresolvable name
+#: fails the load.
+_PURE_STATIC_TYPES = _canonical_type_set({
     'bitconverter',
     'char',
     'collections.arraylist',
-    'collections.generic.dictionary',
-    'collections.generic.hashset',
-    'collections.generic.list',
-    'collections.hashtable',
-    'hashtable',
+    'collections.generic.dictionary`2',
+    'collections.generic.hashset`1',
+    'collections.generic.list`1',
     'convert',
     'datetime',
     'decimal',
     'double',
     'guid',
+    'hashtable',
     'int',
-    'int32',
     'int64',
     'io.path',
     'ipaddress',
     'math',
     'object',
-    'security.securestring',
     'securestring',
     'string',
     'text.stringbuilder',
@@ -103,7 +147,7 @@ _PURE_STATIC_TYPES = frozenset({
     'version',
 })
 
-_PURE_STATIC_METHODS = frozenset({
+_PURE_STATIC_METHODS = _canonical_method_set({
     ('diagnostics.process', 'getcurrentprocess'),
     ('threading.tasks.task', 'delay'),
     ('array', 'asreadonly'),
@@ -120,7 +164,15 @@ _PURE_STATIC_METHODS = frozenset({
     ('environment', 'getlogicaldrives'),
 })
 
-_MUTATING_STATIC_METHODS = frozenset({
+#: Static members that mutate an argument in place — `[Array]::Reverse($buffer)` rewrites the array
+#: it is handed — on a type whose remaining static surface is pure enough to keep granting
+#: wholesale. The mutation is invisible to the signature: the argument is passed by value, and an
+#: array is a reference the call writes through without an `out`/`byref` marker, so these cannot
+#: fold into `_writes_through_out_parameter` and stay a hand-kept table. Deleting the table would
+#: let `[Convert]::ToBase64CharArray(...)`, which writes its output array the same unmarked way,
+#: reach the `convert` whole-type grant and be removed. Each is pure only when handed a temporary
+#: nothing else can read; that is `_denotes_shared_storage`.
+_MUTATING_STATIC_METHODS = _canonical_method_set({
     ('array', 'clear'),
     ('array', 'constrainedcopy'),
     ('array', 'copy'),
@@ -135,7 +187,7 @@ _MUTATING_STATIC_METHODS = frozenset({
 #: surface is pure enough to keep granting wholesale. Unlike `_MUTATING_STATIC_METHODS` these are
 #: not saved by being called on a temporary: `[IO.Path]::GetTempFileName()` takes no arguments and
 #: still creates a file on disk.
-_IMPURE_STATIC_METHODS = frozenset({
+_IMPURE_STATIC_METHODS = _canonical_method_set({
     ('io.path', 'gettempfilename'),
 })
 
@@ -146,25 +198,30 @@ _REFERENCE_TYPE_NAMES = frozenset({
     'ref',
 })
 
-#: Parameters whose presence makes a command write, however pure the transform it names. The common
-#: out-variable parameters bind their argument as the *name* of a variable the command fills, so
-#: `Get-Date -OutVariable d` sets `$d` and is an out-parameter in cmdlet clothing, no more removable
-#: than `[Int]::TryParse($s, [ref]$n)`; `Get-Random -SetSeed 5` rewrites the session's generator
-#: state. Both the full names and the documented aliases are listed because a script may use either,
-#: and `_is_writing_parameter` matches abbreviations on top of that.
-_WRITING_PARAMETERS = frozenset({
-    'errorvariable',
-    'ev',
-    'informationvariable',
-    'iv',
-    'outvariable',
-    'ov',
-    'pipelinevariable',
-    'pv',
-    'setseed',
-    'warningvariable',
-    'wv',
-})
+
+def _writing_parameters() -> frozenset[str]:
+    """
+    The parameter spellings whose presence makes a command write, however pure the transform it
+    names, gathered once at import. The out-variable common parameters — `-OutVariable`,
+    `-ErrorVariable` and the rest — bind their argument as the *name* of a variable the command
+    fills, so `Get-Date -OutVariable d` sets `$d` and is an out-parameter in cmdlet clothing, no
+    more removable than `[Int]::TryParse($s, [ref]$n)`. They are read from the collected
+    common-parameter surface rather than hardcoded, with their aliases (`ov`, `ev`, ...), so the
+    set tracks what PowerShell reports: a common parameter names a variable exactly when its name
+    ends in `Variable`, the convention the engine defines them under, which `-OutBuffer` (a count)
+    is the one common parameter to fail. `-SetSeed` is added on top — not a common parameter but a
+    `Get-Random` switch that rewrites the session's generator state, the same kind of hidden write.
+    The match in `_is_writing_parameter` accepts unambiguous abbreviations of every spelling here.
+    """
+    names = {'setseed'}
+    for common, aliases in data.COMMON_PARAMETERS.items():
+        if common.endswith('variable'):
+            names.add(common)
+            names.update(aliases)
+    return frozenset(names)
+
+
+_WRITING_PARAMETERS = _writing_parameters()
 
 #: The expression forms that are literally their own value: the base case of `is_side_effect_free`.
 _LITERAL_EXPRESSIONS = (
@@ -255,20 +312,33 @@ def _is_writable_reference(node) -> bool:
     )
 
 
-def _pure_type_name(name: str) -> str:
+def _writes_through_out_parameter(
+    type_name: str,
+    member: str,
+    arguments: Sequence[Expression],
+) -> bool:
     """
-    Normalize a .NET type name for purity lookup: lower-cased, `System.` prefix removed, and any
-    generic-argument suffix (`[byte]` or the arity marker before it) stripped, so that both
+    Whether a `[Type]::Member(args)` call hands one of its arguments to a by-reference parameter it
+    can write back through, which makes it an out-parameter API no purer than `[Int]::TryParse($s,
+    $n)` however pure the transform itself is. The collected signature is consulted over the static
+    overloads of that arity: if one marks position *i* as `byref` and `args[i]` denotes shared
+    storage, the call may assign it.
 
-        System.Collections.Generic.List
-        List[byte]
-
-    reduce to the same `collections.generic.list` key.
+    This reads the parameter direction from the data, so it catches a bare `$n` handed to an
+    out-parameter that `_is_writable_reference` — which sees only the syntactic `[ref]$n` cast —
+    misses. Arity is matched exactly: an optional trailing parameter the call omits simply removes
+    that overload from consideration, so the match never over-rejects a shorter call.
     """
-    name = normalize_dotnet_type_name(name)
-    for separator in ('[', '`'):
-        name = name.split(separator, 1)[0]
-    return name
+    for overload in data.static_overloads(type_name, member):
+        parameters = overload.get('parameters') or ()
+        if len(parameters) != len(arguments):
+            continue
+        if any(
+            parameter['byref'] and _denotes_shared_storage(argument)
+            for parameter, argument in zip(parameters, arguments)
+        ):
+            return True
+    return False
 
 
 _PURE_INSTANCE_METHODS = frozenset({
@@ -548,16 +618,23 @@ def is_side_effect_free(node) -> bool:
             # for it either — that is how an obfuscated call reaches the one writing member of an
             # otherwise pure type.
             if isinstance(obj, Ps1TypeExpression) and isinstance(member, str):
-                type_name = _pure_type_name(obj.name)
-                key = (type_name, member.lower())
-                if key in _IMPURE_STATIC_METHODS:
-                    return False
-                if key in _MUTATING_STATIC_METHODS:
-                    return not any(_denotes_shared_storage(a) for a in node.arguments)
-                if type_name in _PURE_STATIC_TYPES:
-                    return True
-                if key in _PURE_STATIC_METHODS:
-                    return True
+                # The type name is resolved through the collected metadata, not truncated, so every
+                # spelling of a type lands on one canonical key, and a type the data does not
+                # describe resolves to nothing and falls through to impure: the fail-closed default.
+                resolved = data.resolve_type(obj.name)
+                if resolved is not None:
+                    type_key = resolved.lower()
+                    key = (type_key, member.lower())
+                    if key in _IMPURE_STATIC_METHODS:
+                        return False
+                    if key in _MUTATING_STATIC_METHODS:
+                        return not any(_denotes_shared_storage(a) for a in node.arguments)
+                    if _writes_through_out_parameter(obj.name, member, node.arguments):
+                        return False
+                    if type_key in _PURE_STATIC_TYPES:
+                        return True
+                    if key in _PURE_STATIC_METHODS:
+                        return True
         elif is_side_effect_free(node.object):
             member = node.member
             if isinstance(member, str) and member.lower() in _PURE_INSTANCE_METHODS:
@@ -569,7 +646,8 @@ def is_side_effect_free(node) -> bool:
         new_object = extract_new_object(node)
         if new_object is not None:
             type_name, ctor_args = new_object
-            if _pure_type_name(type_name) in _PURE_STATIC_TYPES:
+            resolved = data.resolve_type(type_name)
+            if resolved is not None and resolved.lower() in _PURE_STATIC_TYPES:
                 return _arguments_are_pure(ctor_args)
             return False
         name = get_command_name(node)
