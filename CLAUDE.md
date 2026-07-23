@@ -68,6 +68,22 @@ The following rules contradict common Python conventions. Check them explicitly:
 - When making commits on the user's behalf, do not include a comment about AI co-authorship.
 - When asked to commit changes to git, only use one-line commit messages.
 
+# Code Review Context
+
+When asked to provide context for a code review, produce **only** the following, with no preface,
+no commentary, and nothing after it:
+
+1. The commit range on its own first line, as `<base>..<head>`, in backticks.
+2. A blank line, then `Notes from the author:`, then provide context for the reviewer on at least the following:
+   - scope
+   - standing prior
+   - highest-value targets
+   - deliberately open items
+   - most useful non-bug outcome
+
+Be specific and adversarial. The goal is to spend the reviewer's budget on what is not yet known,
+so never pad the notes with what the diff already shows.
+
 # Architecture is P0
 
 - Your highest priority is good architecture, clear separation of concerns, and maintainability.
