@@ -17,8 +17,12 @@ from __future__ import annotations
 
 import enum
 
+from typing import Sequence
+
+from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
+    get_body,
     get_command_name,
     is_builtin_variable,
     normalize_dotnet_type_name,
@@ -34,6 +38,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandInvocation,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
+    Ps1FunctionDefinition,
     Ps1HashLiteral,
     Ps1HereString,
     Ps1IndexExpression,
@@ -45,8 +50,10 @@ from refinery.lib.scripts.ps1.model import (
     Ps1PipelineElement,
     Ps1RangeExpression,
     Ps1RealLiteral,
+    Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
+    Ps1SubExpression,
     Ps1TypeExpression,
     Ps1UnaryExpression,
     Ps1Variable,
@@ -269,6 +276,29 @@ def is_side_effect_free(node) -> bool:
     return False
 
 
+def is_pure_constant(node) -> bool:
+    """
+    Whether an expression is a side-effect-free constant that can be removed as a standalone
+    statement: a numeric literal or one of the built-in constants `$Null`, `$True`, `$False`,
+    through any enclosing parentheses and unary sign. String literals are excluded because they may
+    be intentional pipeline output.
+
+    This is a strict refinement of `StatementEffect.OUTPUT`: an expression statement whose
+    expression is a pure constant always classifies as `OUTPUT`. The two pruning passes therefore
+    have nested candidate sets rather than independently drifting ones — the dead-code pass, which
+    prunes only constants, is provably the more conservative of the two.
+    """
+    if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
+        return True
+    if is_builtin_variable(node):
+        return True
+    if isinstance(node, Ps1ParenExpression):
+        return is_pure_constant(node.expression)
+    if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
+        return is_pure_constant(node.operand)
+    return False
+
+
 class StatementEffect(enum.Enum):
     """
     The observable effect of evaluating a standalone statement, used by every pass that decides
@@ -396,3 +426,161 @@ def pipeline_ends_with_cmdlet(pipeline: Ps1Pipeline, names: frozenset) -> bool:
         return False
     name = get_command_name(expr)
     return name is not None and name.lower() in names
+
+
+class BodyRole(enum.Enum):
+    """
+    How a statement body relates to the code around it — the emission question every pruning pass
+    has to answer before it removes anything. A `refinery.lib.scripts.Block` or
+    `refinery.lib.scripts.ps1.model.Ps1Code` body is one of:
+
+    - `OPAQUE`: the body's value is captured (an assignment right-hand side, `$(...)`, `@(...)`, a
+      stored or argument scriptblock, a piped `&{}`); pruning any statement could destroy an
+      observable value, so the body is left untouched.
+    - `SCRIPT`: the script root. It has no return value — its output goes to the host — but it must
+      never be pruned away entirely, which is what `pruning_erases_body` guards.
+    - `RETURNING`: a body whose value the caller observes — a function or method body, or a bare
+      `&{ ... }` / `.{ ... }` in statement position. Removing the statement that carries the output
+      silences the return value, so pruning goes through `output_observed` and `output_is_covered`.
+    - `NESTED`: a plain nested block that runs for its side effects (a loop or `if` body in
+      statement position); it has no observable value of its own, so statements may be pruned
+      freely.
+    """
+    OPAQUE = 'opaque'
+    SCRIPT = 'script'
+    RETURNING = 'returning'
+    NESTED = 'nested'
+
+
+def _scriptblock_is_captured(block: Ps1ScriptBlock) -> bool:
+    """
+    Return `True` when the value of a `refinery.lib.scripts.ps1.model.Ps1ScriptBlock` is captured
+    rather than run for its observable output. A bare `&{ ... }` / `.{ ... }` in statement position
+    produces output that the pass may prune into; every other scriptblock (a stored closure
+    `$x = { ... }`, an argument block, or an invocation whose result is assigned, passed, or piped)
+    is treated as captured and left opaque.
+    """
+    parent = block.parent
+    if isinstance(parent, Ps1FunctionDefinition):
+        return False
+    if not (isinstance(parent, Ps1CommandInvocation) and parent.name is block):
+        return True
+    invocation_parent = parent.parent
+    if isinstance(invocation_parent, Ps1ExpressionStatement):
+        return False
+    if isinstance(invocation_parent, Ps1PipelineElement):
+        pipeline = invocation_parent.parent
+        if (
+            isinstance(pipeline, Ps1Pipeline)
+            and len(pipeline.elements) == 1
+            and isinstance(pipeline.parent, Ps1ExpressionStatement)
+        ):
+            return False
+    return True
+
+
+def body_role(node) -> BodyRole | None:
+    """
+    Classify the statement body that `node` owns as a `BodyRole`, or return `None` when `node` owns
+    no prunable body — which is also how `@( ... )` stays out of every pruning walk, since
+    `refinery.lib.scripts.ps1.ast.get_body` deliberately does not recognize it. Ambiguous capture
+    always resolves to `OPAQUE`.
+
+    A plain `refinery.lib.scripts.Block` — a loop, `if`, `try`, `catch`, `finally`, or `trap` body —
+    carries no role of its own and derives one by walking outward to the nearest body owner. That
+    walk reports the *owner's* role only for a function body, so the same block classifies three
+    ways depending on where it sits:
+
+        if ($x) { 1 }                    at script level  ->  NESTED
+        function f { if ($x) { 1 } }                      ->  RETURNING
+        &{ if ($x) { 1 } }                                ->  NESTED
+
+    A nested block's value is observed exactly when its owner's is, so the consistent answer would
+    be the owner's role in all three cases, and `NESTED` is the more permissive one at both the
+    script and the `&{}` boundary. The passes have shipped with this behavior and all three traces
+    are pinned by test; resolving it needs the reachability of the flow layer, so it is deliberately
+    left as it stands rather than changed as a side effect of consolidating the authority here.
+    """
+    if get_body(node) is None:
+        return None
+    if isinstance(node, Ps1Script):
+        return BodyRole.SCRIPT
+    if isinstance(node, Ps1SubExpression):
+        return BodyRole.OPAQUE
+    if isinstance(node, Ps1ScriptBlock):
+        if isinstance(node.parent, Ps1FunctionDefinition) and node.parent.body is node:
+            return BodyRole.RETURNING
+        return BodyRole.OPAQUE if _scriptblock_is_captured(node) else BodyRole.RETURNING
+    prev = node
+    cursor = node.parent
+    while cursor is not None:
+        if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression)):
+            return BodyRole.OPAQUE
+        if isinstance(cursor, Ps1AssignmentExpression) and cursor.value is prev:
+            return BodyRole.OPAQUE
+        if isinstance(cursor, Ps1ScriptBlock):
+            if _scriptblock_is_captured(cursor):
+                return BodyRole.OPAQUE
+            if isinstance(cursor.parent, Ps1FunctionDefinition) and cursor.parent.body is cursor:
+                return BodyRole.RETURNING
+            return BodyRole.NESTED
+        if isinstance(cursor, Ps1Script):
+            return BodyRole.NESTED
+        prev = cursor
+        cursor = cursor.parent
+    return BodyRole.NESTED
+
+
+def output_observed(role: BodyRole) -> bool:
+    """
+    Whether a body of this role has a return value that pruning must protect. True only for
+    `BodyRole.RETURNING`: a `NESTED` body has no observable value, the `SCRIPT` root has no return
+    value, and an `OPAQUE` body is never pruned at all.
+    """
+    return role is BodyRole.RETURNING
+
+
+def output_is_covered(survivors: Sequence[Node]) -> bool:
+    """
+    Whether some statement in `survivors` still carries the body's output, so that removing the
+    pure-output statements around it cannot silence a `BodyRole.RETURNING` body's return value.
+
+    `survivors` is the surviving statement set itself and never a node to walk up from. A caller may
+    hold freshly synthesized statements that are not parented into a body yet, and statements
+    hoisted out of a pruned block still point at the block they came from; answering this question
+    by walking `parent` is what used to delete live return values.
+
+    The check is coarse: every survivor that is not a function definition counts as covering,
+    including a conditional that may not execute and a statement that emits nothing at all. It
+    therefore over-counts, permitting a prune that a precise analysis would refuse. This is the
+    semantics the junk pass has shipped with; tightening it needs reachability.
+    """
+    return any(not isinstance(stmt, Ps1FunctionDefinition) for stmt in survivors)
+
+
+def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:
+    """
+    Whether pruning a body of this role down to `survivors` would erase it: nothing would survive,
+    and a body of this role must not become empty. Only the `BodyRole.SCRIPT` root qualifies — a
+    script that is nothing but function definitions is a module whose functions may be dot-sourced,
+    and a script that is nothing but `42` still emits `42` — so emptying it would delete real code.
+    Every other role may legitimately prune to nothing; that is what turns an injected junk function
+    inert.
+
+    Like `output_is_covered`, this takes the surviving statement set itself and never walks up from
+    a node.
+    """
+    return not survivors and role is BodyRole.SCRIPT
+
+
+def body_is_inert(node) -> bool:
+    """
+    Whether the body that `node` owns neither emits a value nor performs a side effect: `node` owns
+    no body at all, the body is empty, or every statement in it is a `StatementEffect.DISCARD`. An
+    inert function body makes the function itself unobservable, so its definition and its bare call
+    sites can be dropped together.
+    """
+    body = get_body(node)
+    if body is None:
+        return True
+    return all(statement_effect(stmt) is StatementEffect.DISCARD for stmt in body)

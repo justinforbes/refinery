@@ -12,12 +12,17 @@ from refinery.lib.scripts import (
     set_body,
     set_child_list,
 )
-from refinery.lib.scripts.ps1.analysis.effects import is_side_effect_free
+from refinery.lib.scripts.ps1.analysis.effects import (
+    BodyRole,
+    body_role,
+    is_pure_constant,
+    is_side_effect_free,
+    output_observed,
+    pruning_erases_body,
+)
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    BodyRole,
-    classify_body,
     is_truthy,
     switch_matches,
     unwrap_integer,
@@ -35,10 +40,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ForLoop,
     Ps1IfStatement,
     Ps1IntegerLiteral,
-    Ps1ParenExpression,
     Ps1RealLiteral,
     Ps1ScopeModifier,
-    Ps1Script,
     Ps1StringLiteral,
     Ps1SwitchStatement,
     Ps1TrapStatement,
@@ -299,24 +302,6 @@ def _switch_clause_body(body: list[Statement]) -> tuple[list[Statement], bool] |
     return stmts, stop
 
 
-def _is_pure_constant(node) -> bool:
-    """
-    Return `True` when an expression is a side-effect-free constant that can be removed as a
-    standalone statement. Only matches numeric literals and the built-in constants `$Null`,
-    `$True`, and `$False` — string literals are excluded because they may represent intentional
-    pipeline output.
-    """
-    if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
-        return True
-    if is_builtin_variable(node):
-        return True
-    if isinstance(node, Ps1ParenExpression):
-        return _is_pure_constant(node.expression)
-    if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
-        return _is_pure_constant(node.operand)
-    return False
-
-
 class Ps1DeadCodeElimination(Transformer):
     """
     Remove unreachable code guarded by constant boolean conditions and resolve switch statements
@@ -325,25 +310,22 @@ class Ps1DeadCodeElimination(Transformer):
 
     def visit(self, node: Node):
         for parent in list(node.walk()):
-            role = classify_body(parent)
+            role = body_role(parent)
             if role is None or role is BodyRole.OPAQUE:
                 continue
             body = get_body(parent)
-            new_body = self._prune_body(body, role, isinstance(parent, Ps1Script))
+            new_body = self._prune_body(body, role)
             if new_body is not body:
                 set_body(parent, new_body)
                 self.mark_changed()
 
     def _prune_body(
-        self, body: list[Statement], role: BodyRole = BodyRole.NESTED,
-        is_script_root: bool = False,
+        self, body: list[Statement], role: BodyRole = BodyRole.NESTED
     ) -> list[Statement]:
-        # First pass: apply control-flow pruning (dead branches, empty loops, try/trap removal).
-        # prune_output must be computed from what actually survives this pass: a branch like
-        # `if ($false) {}` is a non-expression statement that looks like a side effect before
-        # pruning but produces nothing afterwards. Computing prune_output from the original body
-        # would cause the flag to stay True even after the apparent anchor is eliminated,
-        # incorrectly silencing the body's observable return value.
+        # The output decision must be taken over what survives control-flow pruning, never over the
+        # original body: a branch like `if ($false) {}` looks like an anchor before pruning and
+        # produces nothing afterwards, so reading the original body would keep pruning enabled after
+        # its only apparent anchor is gone and silence the body's observable value.
         intermediate: list[Statement] = []
         changed = False
         for stmt in body:
@@ -353,33 +335,19 @@ class Ps1DeadCodeElimination(Transformer):
                 changed = True
             else:
                 intermediate.append(stmt)
-        # Second pass: drop bare pure-constant output statements (integers, booleans, $null) whose
-        # value is not observed. A NESTED body has no observable return value — all constants are
-        # prunable. The script root has no pipeline return value, but a script consisting entirely of
-        # pure constants must be preserved (otherwise `42` becomes empty). So the script root only
-        # prunes when at least one non-constant statement survives the first pass.
-        # A non-script ROOT body (function body, bare `&{}`) may use a bare constant as its
-        # implicit return value, and determining whether some other statement "covers" that return is
-        # subtle (e.g. Write-Host has a side effect but does not produce pipeline output). The
-        # junk-removal pass handles ROOT emit-safety with a proper `_output_survives` check; here we
-        # stay conservative and never prune constants from non-script ROOT bodies.
-        if role is BodyRole.NESTED:
-            prune_output = True
-        elif is_script_root:
-            prune_output = any(
-                not (isinstance(s, Ps1ExpressionStatement) and _is_pure_constant(s.expression))
-                for s in intermediate
-            )
-        else:
-            prune_output = False
-        result: list[Statement] = []
-        for stmt in intermediate:
-            if isinstance(stmt, Ps1ExpressionStatement) and _is_pure_constant(stmt.expression):
-                if prune_output:
-                    changed = True
-                    continue
-            result.append(stmt)
-        return result if changed else body
+        # This pass prunes only pure constants, the narrowest slice of `StatementEffect.OUTPUT`, and
+        # declines outright wherever the value could be observed. Whether another statement covers a
+        # RETURNING body's output is a question it never asks: `output_is_covered` answers it more
+        # permissively than is safe here, so only the junk pass consults it.
+        survivors = [s for s in intermediate if not self._is_constant_output(s)]
+        if not output_observed(role) and not pruning_erases_body(role, survivors):
+            changed = changed or len(survivors) != len(intermediate)
+            intermediate = survivors
+        return intermediate if changed else body
+
+    @staticmethod
+    def _is_constant_output(stmt: Statement) -> bool:
+        return isinstance(stmt, Ps1ExpressionStatement) and is_pure_constant(stmt.expression)
 
     def _try_prune(self, stmt: Statement) -> list[Statement] | None:
         if isinstance(stmt, Ps1WhileLoop):

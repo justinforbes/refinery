@@ -13,7 +13,6 @@ from typing import Callable, Generator, NamedTuple, TypeGuard, TypeVar
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
-    get_body,
     is_builtin_variable,
     normalize_type_expression,
     unwrap_assignment_target,
@@ -39,11 +38,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1MemberAccess,
     Ps1ParameterDeclaration,
     Ps1ParenExpression,
-    Ps1Pipeline,
-    Ps1PipelineElement,
     Ps1RealLiteral,
     Ps1ScopeModifier,
-    Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SubExpression,
@@ -62,25 +58,6 @@ class MutationKind(enum.Enum):
     FOREACH = 'foreach'
     INCRDECR = 'incrdecr'
     PARAM = 'param'
-
-
-class BodyRole(enum.Enum):
-    """
-    How a statement body relates to the code that surrounds it, for the cleanup passes that descend
-    into function and `&{}` bodies. A `refinery.lib.scripts.Block` or `Ps1Code` body is one of:
-
-    - `OPAQUE`: the body's value is captured (an assignment right-hand side, `$(...)`, `@(...)`, a
-      stored or argument scriptblock, a piped `&{}`); pruning any statement could destroy an
-      observable value, so the body is left untouched.
-    - `ROOT`: the body's output is observed but not captured into a value (the script root, a
-      function body, a bare `&{}`/`.{}` in statement position); side-effect-free junk may be pruned,
-      but a body that is nothing but its own output value is preserved.
-    - `NESTED`: a plain nested block that runs for its side effects (a loop or `if` body in
-      statement position); statements may be pruned freely.
-    """
-    OPAQUE = 'opaque'
-    ROOT = 'root'
-    NESTED = 'nested'
 
 
 class VariableMutation(NamedTuple):
@@ -264,74 +241,6 @@ def inside_value_producing_context(node) -> bool:
         prev = cursor
         cursor = cursor.parent
     return False
-
-
-def _scriptblock_is_captured(block: Ps1ScriptBlock) -> bool:
-    """
-    Return `True` when the value of a `refinery.lib.scripts.ps1.model.Ps1ScriptBlock` is captured
-    rather than run for its observable output. A bare `&{ ... }` / `.{ ... }` in statement position
-    produces output that the pass may prune into; every other scriptblock (a stored closure
-    `$x = { ... }`, an argument block, or an invocation whose result is assigned, passed, or piped)
-    is treated as captured and left opaque.
-    """
-    parent = block.parent
-    if isinstance(parent, Ps1FunctionDefinition):
-        return False
-    if not (isinstance(parent, Ps1CommandInvocation) and parent.name is block):
-        return True
-    invocation_parent = parent.parent
-    if isinstance(invocation_parent, Ps1ExpressionStatement):
-        return False
-    if isinstance(invocation_parent, Ps1PipelineElement):
-        pipeline = invocation_parent.parent
-        if (
-            isinstance(pipeline, Ps1Pipeline)
-            and len(pipeline.elements) == 1
-            and isinstance(pipeline.parent, Ps1ExpressionStatement)
-        ):
-            return False
-    return True
-
-
-def classify_body(node) -> BodyRole | None:
-    """
-    Classify the statement body owned by `node` as a
-    `refinery.lib.scripts.ps1.deobfuscation.helpers.BodyRole`, or return `None` when `node` owns no
-    prunable body (`get_body` is `None`). Used by the dead-code and junk passes to decide whether a
-    body may be pruned and how aggressively; ambiguous capture always resolves to `OPAQUE`.
-    """
-    if get_body(node) is None:
-        return None
-    if isinstance(node, Ps1Script):
-        return BodyRole.ROOT
-    if isinstance(node, Ps1SubExpression):
-        return BodyRole.OPAQUE
-    if isinstance(node, Ps1ScriptBlock):
-        if isinstance(node.parent, Ps1FunctionDefinition) and node.parent.body is node:
-            return BodyRole.ROOT
-        return BodyRole.OPAQUE if _scriptblock_is_captured(node) else BodyRole.ROOT
-    # A plain `Block` (loop/if/try/catch/finally/trap body): walk to the nearest enclosing body
-    # owner. Crossing a value-capturing boundary (`$(...)`, `@(...)`, a captured scriptblock, or the
-    # right-hand side of an assignment such as `$x = if (...) {...}`) makes this block opaque; a
-    # function/script/bare-`&{}` boundary resets capture, leaving it nested.
-    prev = node
-    cursor = node.parent
-    while cursor is not None:
-        if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression)):
-            return BodyRole.OPAQUE
-        if isinstance(cursor, Ps1AssignmentExpression) and cursor.value is prev:
-            return BodyRole.OPAQUE
-        if isinstance(cursor, Ps1ScriptBlock):
-            if _scriptblock_is_captured(cursor):
-                return BodyRole.OPAQUE
-            if isinstance(cursor.parent, Ps1FunctionDefinition) and cursor.parent.body is cursor:
-                return BodyRole.ROOT
-            return BodyRole.NESTED
-        if isinstance(cursor, Ps1Script):
-            return BodyRole.NESTED
-        prev = cursor
-        cursor = cursor.parent
-    return BodyRole.NESTED
 
 
 def unwrap_parens(node: Node) -> Node:

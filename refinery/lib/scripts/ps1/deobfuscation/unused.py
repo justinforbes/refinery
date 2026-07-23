@@ -4,12 +4,19 @@ Remove unused variable assignments and junk expression statements.
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer, _remove_from_parent, _replace_in_parent
-from refinery.lib.scripts.ps1.analysis import Binding, Ps1SemanticModel, Scope, model_cache
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import (
+    BodyRole,
     StatementEffect,
+    body_is_inert,
+    body_role,
     is_side_effect_free,
+    output_is_covered,
+    output_observed,
+    pruning_erases_body,
     statement_effect,
 )
+from refinery.lib.scripts.ps1.analysis.model import Binding, Ps1SemanticModel, Scope
 from refinery.lib.scripts.ps1.ast import (
     assignment_of,
     assignment_target_is_all_variables,
@@ -22,7 +29,6 @@ from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _find_removable_statement,
     _walk_outer_scope,
 )
-from refinery.lib.scripts.ps1.deobfuscation.helpers import BodyRole, classify_body
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AssignmentExpression,
@@ -236,11 +242,10 @@ class Ps1JunkStatementRemoval(Transformer):
     def visit(self, node: Node):
         called = self._reachable_functions(node)
         for parent in list(node.walk()):
-            role = classify_body(parent)
+            role = body_role(parent)
             if role is None or role is BodyRole.OPAQUE:
                 continue
-            body = get_body(parent)
-            self._prune_body(body, role, isinstance(parent, Ps1Script), called)
+            self._prune_body(get_body(parent), role, called)
         self._remove_inert_functions(node)
 
     @staticmethod
@@ -310,7 +315,7 @@ class Ps1JunkStatementRemoval(Transformer):
             return
         inert: dict[str, Ps1FunctionDefinition] = {}
         for stmt in node.body:
-            if isinstance(stmt, Ps1FunctionDefinition) and self._body_is_inert(stmt):
+            if isinstance(stmt, Ps1FunctionDefinition) and body_is_inert(stmt.body):
                 inert[stmt.name.lower()] = stmt
         if not inert:
             return
@@ -340,20 +345,6 @@ class Ps1JunkStatementRemoval(Transformer):
                 self.mark_changed()
 
     @staticmethod
-    def _body_is_inert(function: Ps1FunctionDefinition) -> bool:
-        """
-        Return `True` when a function body neither emits output nor performs a side effect: it is
-        empty, or every statement is a no-output discard (`$Null = <pure>`, `[Void]`, `Out-Null`).
-        A statement that yields a value or has any effect makes the function observable and non-inert.
-        """
-        if function.body is None:
-            return True
-        for stmt in function.body.body:
-            if statement_effect(stmt) is not StatementEffect.DISCARD:
-                return False
-        return True
-
-    @staticmethod
     def _bare_call_statement(cmd: Ps1CommandInvocation) -> Node | None:
         """
         Return the enclosing statement when `cmd` is invoked as a whole expression statement (`f`
@@ -381,14 +372,13 @@ class Ps1JunkStatementRemoval(Transformer):
                     return True
         return False
 
-    def _prune_body(self, body: list, role: BodyRole, is_script_root: bool, called: set[str]):
-        is_root = role is BodyRole.ROOT
+    def _prune_body(self, body: list, role: BodyRole, called: set[str]):
         discard: set[Node] = set()
         output: set[Node] = set()
         dead_functions: set[Node] = set()
         for stmt in body:
             if isinstance(stmt, Ps1FunctionDefinition):
-                if is_script_root and stmt.name.lower() not in called:
+                if role is BodyRole.SCRIPT and stmt.name.lower() not in called:
                     dead_functions.add(stmt)
                 continue
             effect = statement_effect(stmt)
@@ -396,44 +386,26 @@ class Ps1JunkStatementRemoval(Transformer):
                 discard.add(stmt)
             elif effect is StatementEffect.OUTPUT:
                 output.add(stmt)
-        # Emit-safety for a captured `ROOT` body (a function body or bare `&{}`): a side-effect-free
-        # value may be the body's whole point (its return value), so a pure output statement is only
-        # pruned when a non-removable statement survives to carry the body's output. A `DISCARD`
-        # emits nothing and is always safe to drop, even when it empties the body — that is what
-        # turns a junk function inert. The true script root has no return value, so this guard does
-        # not apply there. A `NESTED` body likewise has no observable value: prune freely.
-        if is_root and not is_script_root and output:
-            if not self._output_survives(body, discard, output, dead_functions):
+        # A body whose value is observed may exist only to produce it, so a pure output statement
+        # is given up only when another survivor still carries the output. A `DISCARD` emits nothing
+        # and is always safe to drop, even when it empties the body — that is what turns a junk
+        # function inert.
+        if output and output_observed(role):
+            if not output_is_covered(self._survivors(body, discard | output | dead_functions)):
                 output.clear()
         removable = discard | output | dead_functions
         if not removable:
             return
-        # Never strip the script root down to nothing: a script that is only function definitions is
-        # a module whose functions may be dot-sourced, so leaving it empty would erase real code.
-        if is_script_root:
-            surviving = [s for s in body if s not in removable]
-            if not surviving:
-                return
+        if pruning_erases_body(role, self._survivors(body, removable)):
+            return
         for stmt in list(body):
             if stmt in removable:
                 if _remove_from_parent(stmt):
                     self.mark_changed()
 
     @staticmethod
-    def _output_survives(
-        body: list, discard: set[Node], output: set[Node], dead_functions: set[Node],
-    ) -> bool:
-        """
-        Return `True` when a statement that carries observable output would remain after pruning, so
-        that removing the pure-output statements does not silence a captured body's return value.
-        """
-        for stmt in body:
-            if stmt in discard or stmt in output or stmt in dead_functions:
-                continue
-            if isinstance(stmt, Ps1FunctionDefinition):
-                continue
-            return True
-        return False
+    def _survivors(body: list, removable: set[Node]) -> list[Node]:
+        return [stmt for stmt in body if stmt not in removable]
 
 
 class Ps1DeadStoreElimination(Transformer):
