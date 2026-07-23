@@ -17,6 +17,7 @@
     "System.Management",
     "System.Net.Http",
     "System.Security",
+    "System.ServiceProcess",
     "System.Windows.Forms"
   ],
   "types": {
