@@ -118,6 +118,16 @@ class TestPs1JunkStatementRemoval(TestPs1):
         self.assertIn('out.txt', result)
         self.assertIn('done', result)
 
+    def test_an_out_parameter_call_is_kept(self):
+        # The statement is what fills `$n`; deleting it leaves the read below with nothing.
+        result = self._deobfuscate('[Int]::TryParse($s, [ref]$n)\nWrite-Host $n')
+        self.assertIn('TryParse', result)
+
+    def test_a_temporary_file_creation_is_kept(self):
+        result = self._deobfuscate('[IO.Path]::GetTempFileName()\nWrite-Host done')
+        self.assertIn('GetTempFileName', result)
+        self.assertIn('done', result)
+
     def test_an_array_mutation_on_a_live_variable_is_kept(self):
         result = self._deobfuscate('[Array]::Reverse($buffer)\nWrite-Host done')
         self.assertIn('Reverse', result)

@@ -61,6 +61,12 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
 )
 
+#: Types whose entire static surface is granted purity at once. Listing a type here asserts that no
+#: static member of it writes anything — a bet that has to be re-checked against the real .NET
+#: surface whenever an entry is added, because a single writing member makes every call on the type
+#: removable. `_IMPURE_STATIC_METHODS` carves out the members where the bet is wrong but the type is
+#: still worth granting wholesale, and out-parameters are handled generically by
+#: `_is_writable_reference` rather than per method.
 _PURE_STATIC_TYPES = frozenset({
     'bitconverter',
     'char',
@@ -117,6 +123,14 @@ _MUTATING_STATIC_METHODS = frozenset({
     ('array', 'sort'),
 })
 
+#: Members that do something observable whatever they are handed, on a type whose remaining static
+#: surface is pure enough to keep granting wholesale. Unlike `_MUTATING_STATIC_METHODS` these are
+#: not saved by being called on a temporary: `[IO.Path]::GetTempFileName()` takes no arguments and
+#: still creates a file on disk.
+_IMPURE_STATIC_METHODS = frozenset({
+    ('io.path', 'gettempfilename'),
+})
+
 
 def _denotes_shared_storage(node) -> bool:
     """
@@ -136,6 +150,25 @@ def _denotes_shared_storage(node) -> bool:
         else:
             break
     return isinstance(node, (Ps1Variable, Ps1MemberAccess, Ps1IndexExpression))
+
+
+def _is_writable_reference(node) -> bool:
+    """
+    Whether an argument hands the callee a `[ref]` to storage it can write back through. A method
+    taking one is an out-parameter API — `[Int]::TryParse($s, [ref]$n)` assigns `$n` — so it mutates
+    the caller's state no matter how pure the transformation itself is. Every `TryParse` on the
+    numeric, date and network types takes one, which is why this is a rule about the argument rather
+    than an entry per method.
+
+    Only the syntactic form is recognized. A reference stashed in a variable first
+    (`$r = [ref]$n` and then `[Int]::TryParse($s, $r)`) needs dataflow to see, and treating every
+    variable argument as a possible reference would make `[Math]::Max($a, $b)` impure.
+    """
+    return (
+        isinstance(node, Ps1CastExpression)
+        and node.type_name.lower() == 'ref'
+        and _denotes_shared_storage(node.operand)
+    )
 
 
 def _pure_type_name(name: str) -> str:
@@ -223,7 +256,7 @@ def _command_arguments_are_pure(cmd: Ps1CommandInvocation) -> bool:
         value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
         if value is None or isinstance(value, Ps1ScriptBlock):
             continue
-        if not is_side_effect_free(value):
+        if _is_writable_reference(value) or not is_side_effect_free(value):
             return False
     return True
 
@@ -299,12 +332,16 @@ def is_side_effect_free(node) -> bool:
     if isinstance(node, Ps1InvokeMember):
         if not all(is_side_effect_free(a) for a in node.arguments):
             return False
+        if any(_is_writable_reference(a) for a in node.arguments):
+            return False
         if node.access == Ps1AccessKind.STATIC:
             obj = node.object
             if isinstance(obj, Ps1TypeExpression):
                 type_name = _pure_type_name(obj.name)
                 member = node.member
                 key = (type_name, member.lower()) if isinstance(member, str) else None
+                if key is not None and key in _IMPURE_STATIC_METHODS:
+                    return False
                 if key is not None and key in _MUTATING_STATIC_METHODS:
                     return not any(_denotes_shared_storage(a) for a in node.arguments)
                 if type_name in _PURE_STATIC_TYPES:

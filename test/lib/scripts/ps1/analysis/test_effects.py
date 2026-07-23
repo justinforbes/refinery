@@ -146,6 +146,47 @@ class TestPs1Purity(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertIs(is_side_effect_free(self._expression(source)), pure)
 
+    def test_an_out_parameter_writes_the_callers_storage(self):
+        # `[ref]$x` hands the callee somewhere to put its result. Every `TryParse` on the numeric,
+        # date and network types takes one, so a whole-type grant on its own calls them all pure and
+        # the deobfuscator drops the statement that produced the value the script goes on to read.
+        for source in (
+            '[Int]::TryParse($s, [ref]$n)',
+            '[Int32]::TryParse($s, [ref]$n)',
+            '[Int64]::TryParse($s, [ref]$n)',
+            '[Double]::TryParse($s, [ref]$n)',
+            '[Decimal]::TryParse($s, [ref]$n)',
+            '[DateTime]::TryParse($s, [ref]$d)',
+            '[TimeSpan]::TryParse($s, [ref]$t)',
+            '[IPAddress]::TryParse($s, [ref]$a)',
+            '[Guid]::TryParse($s, [ref]$g)',
+            '[Version]::TryParse($s, [ref]$v)',
+            '[Char]::TryParse($s, [ref]$c)',
+            '[Int]::TryParse($s, [ref]$obj.Slot)',
+            '$dict.TryGetValue($k, [ref]$v)',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_call_that_only_returns_its_result_stays_pure(self):
+        # The rule is about being handed writable storage, not about the call having arguments.
+        for source in (
+            '[Int]::Parse($s)',
+            '[Math]::Max($a, $b)',
+            "[String]::Join(',', $parts)",
+            '[Convert]::ToBase64String($b)',
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_side_effect_free(self._expression(source)))
+
+    def test_a_member_that_writes_whatever_it_is_handed(self):
+        # A whole-type grant asserts that no member of the type writes. `[IO.Path]` is pure apart
+        # from the one member that creates a file on disk, and that one takes no arguments to be
+        # judged by.
+        self.assertFalse(is_side_effect_free(self._expression('[IO.Path]::GetTempFileName()')))
+        self.assertTrue(is_side_effect_free(self._expression('[IO.Path]::Combine($a, $b)')))
+        self.assertTrue(is_side_effect_free(self._expression('[IO.Path]::GetFileName($p)')))
+
     def test_a_type_grants_purity_to_its_members_one_by_one(self):
         # A type whose static surface mixes readers with process- and environment-level writers
         # cannot be trusted wholesale, so membership is per method.
