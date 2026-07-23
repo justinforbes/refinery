@@ -111,6 +111,36 @@ class TestPs1Purity(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertFalse(is_side_effect_free(self._expression(source)))
 
+    def test_a_scriptblock_argument_is_read_through_every_block_it_owns(self):
+        # The parser fills either `body` or the named blocks, so a block that carries its work in
+        # `begin`/`process`/`end` or in a parameter default reports an empty statement list. Judging
+        # the cmdlet by that list calls a command that runs on every input item pure.
+        for source in (
+            'Get-Process | Where-Object { begin { Start-Process notepad } process { $_ } }',
+            '1..3 | ForEach-Object { end { Start-Process notepad } }',
+            '1..3 | ForEach-Object { param($p = (Start-Process notepad)) [Void]$_ }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_computed_member_name_is_an_expression_the_read_evaluates(self):
+        # `$x.$(...)` runs the subexpression to decide which member to read, before any read.
+        for source in (
+            '$x.$(Start-Process notepad)',
+            '[IO.Path]::$(Start-Process notepad)',
+            '$x.$(Remove-Item C:\\important).Length',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_hash_literal_evaluates_its_keys_as_well_as_its_values(self):
+        for source in (
+            '@{ $(Start-Process notepad) = 1 }',
+            '@{ 1 = $(Start-Process notepad) }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
     def test_a_cmdlet_is_no_purer_than_the_arguments_it_evaluates(self):
         # Being a pure transform says nothing about what the operands cost to produce: the cmdlet
         # runs whatever it is handed before it transforms anything.
@@ -320,10 +350,23 @@ class TestPs1StatementEffect(Ps1EffectsTest):
             'Get-ChildItem | ForEach-Object { $Null = $_ } -MemberName Delete',
             '1..3 | ForEach-Object -Process { [Void]$_ } -End $sb',
             '1..3 | ForEach-Object { [Void]$_ } $sb',
+            "Get-Process | ForEach-Object { [Void]$_ } -MemberName @'\nKill\n'@",
+            "Get-ChildItem | ForEach-Object { $Null = $_ } @'\nDelete\n'@",
         ):
             with self.subTest(source):
                 self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
                 self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_foreach_body_is_read_through_every_block_it_owns(self):
+        # A discarding `body` says nothing about work the same block carries in a named or `param`
+        # block, and the parser fills only one of the two.
+        for source in (
+            '1..3 | ForEach-Object { end { Remove-Item C:\\important } }',
+            '1..3 | ForEach-Object { begin { Start-Process notepad } process { [Void]$_ } }',
+            '1..3 | ForEach-Object { param($p = (Start-Process notepad)) [Void]$_ }',
+        ):
+            with self.subTest(source):
+                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
 
     def test_a_foreach_whose_work_is_all_visible_is_still_a_discard(self):
         for source in (
@@ -608,9 +651,22 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             'function f { param($x = (Start-Process notepad)) }',
             'function f { param($x = $(Remove-Item C:\\important)) }',
             'function f { param([ValidateScript({ Start-Process notepad })]$x) }',
+            'function f { param([Parameter(Mandatory)]$x) }',
         ):
             with self.subTest(source):
                 self.assertFalse(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
+
+    def test_a_parameter_block_that_only_declares_names_runs_nothing(self):
+        # Declaring a parameter binds storage and evaluates nothing, so a junk function keeps being
+        # removable once its body is pruned away. Only a default value or an attribute is code.
+        for source in (
+            'function f($a) { }',
+            'function j($x) { $Null = 915 }',
+            'function f { param($x, $y = 1) }',
+            'function f { param([String]$x) }',
+        ):
+            with self.subTest(source):
+                self.assertTrue(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
 
     def test_a_data_section_captures_the_block_it_binds(self):
         # `data d { 42 }` binds the block's value to `$d`, so pruning into it is as destructive as

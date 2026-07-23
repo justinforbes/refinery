@@ -35,6 +35,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
+    Ps1Attribute,
     Ps1BinaryExpression,
     Ps1CastExpression,
     Ps1ClassDefinition,
@@ -51,6 +52,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1MemberAccess,
+    Ps1ParamBlock,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1PipelineElement,
@@ -182,6 +184,16 @@ _NON_BLOCK_EXPRESSIONS = (
     Ps1IntegerLiteral,
     Ps1RealLiteral,
     Ps1StringLiteral,
+)
+
+#: The expression forms that can never be read as the name of a member, used by `_invokes_a_member`.
+#: The polarity is deliberately the opposite of the two tables above: a form that is *absent* here
+#: is treated as a member name, so extending an allow-list elsewhere can never quietly turn a member
+#: invocation into a proof of purity. Only numbers qualify — every string form spells a member name
+#: however it is quoted, and a here-string named one that `Ps1StringLiteral` alone did not catch.
+_NON_MEMBER_EXPRESSIONS = (
+    Ps1IntegerLiteral,
+    Ps1RealLiteral,
 )
 
 
@@ -379,10 +391,33 @@ def _cannot_be_a_scriptblock(value) -> bool:
     return isinstance(value, _NON_BLOCK_EXPRESSIONS)
 
 
+def _may_name_a_member(value) -> bool:
+    """
+    Whether an argument could be the string that names the member a `ForEach-Object` invokes. Read
+    through `_NON_MEMBER_EXPRESSIONS`, so an unrecognized form counts as a member name rather than
+    as proof there is none.
+    """
+    if value is None or isinstance(value, Ps1ScriptBlock):
+        return False
+    return not isinstance(value, _NON_MEMBER_EXPRESSIONS)
+
+
+def _block_runs_only_its_body(block: Ps1ScriptBlock) -> bool:
+    """
+    Whether every statement a scriptblock runs is one that `refinery.lib.scripts.ps1.ast.get_body`
+    reports. A `begin`/`process`/`end` block and a `param` block are code that it does not report —
+    the parser fills either those or `body`, never both — so a caller that judges a block by `body`
+    alone judges an empty list and proves nothing about `| ForEach-Object { end { Remove-Item $p }}`
+    or `| ForEach-Object { param($p = (Start-Process x)) [Void]$_ }`. This is the hole that
+    `body_is_inert` guards for a function body, asked of a block handed to a command.
+    """
+    return not get_named_blocks(block) and get_param_block(block) is None
+
+
 def _invokes_a_member(cmd: Ps1CommandInvocation) -> bool:
     """
     Whether a `ForEach-Object` carries its work as a member to call rather than as a scriptblock.
-    The member is named by a plain string argument — `-MemberName Kill` and the positional
+    The member is named by a string argument — `-MemberName Kill` and the positional
     `| ForEach-Object Kill` are the same call — and nothing static says what that member does, so no
     inspection of the blocks beside it proves anything about it.
 
@@ -393,22 +428,29 @@ def _invokes_a_member(cmd: Ps1CommandInvocation) -> bool:
 
     A `ForEach-Object` with no scriptblock at all is the same answer with the argument unread: there
     is no body to prove anything from.
+
+    The parser reports `-Name value` as a switch followed by a positional argument and binds no
+    values to parameter names, so the argument a member name sits in is not knowable here. Every
+    non-numeric argument therefore counts, and `| ForEach-Object { [Void]$_ } -ErrorAction Stop`
+    is rejected along with the member forms. That over-rejection keeps junk; distinguishing the two
+    needs the parameter positions and types that `refinery.lib.scripts.ps1.data` does not carry.
     """
     name = get_command_name(cmd)
     if name is None or name.lower() != 'foreach-object':
         return False
-    if not _scriptblock_arguments(cmd):
+    if not any(isinstance(value, Ps1ScriptBlock) for value in _argument_values(cmd)):
         return True
-    return any(isinstance(value, Ps1StringLiteral) for value in _argument_values(cmd))
+    return any(_may_name_a_member(value) for value in _argument_values(cmd))
 
 
 def _runs_only_visible_blocks(cmd: Ps1CommandInvocation) -> bool:
     """
     Whether every piece of work a pipeline cmdlet could run is a literal scriptblock this module can
     read. These cmdlets take their work through their arguments, so an argument that is neither a
-    literal block nor provably blockless hides code: `| Where-Object $filter` and
-    `| ForEach-Object { [Void]$_ } -End $sb` both run whatever the variable holds, and
-    `_invokes_a_member` covers the member form.
+    readable block nor provably blockless hides code: `| Where-Object $filter` and
+    `| ForEach-Object { [Void]$_ } -End $sb` both run whatever the variable holds,
+    `_invokes_a_member` covers the member form, and a block whose statements sit in a named or
+    `param` block is one `_block_runs_only_its_body` refuses to call readable.
 
     Every caller that judges such a command by the blocks it can see has to ask this first, or it
     decides on a body it was never shown.
@@ -417,8 +459,8 @@ def _runs_only_visible_blocks(cmd: Ps1CommandInvocation) -> bool:
         return False
     return all(
         value is None
-        or isinstance(value, Ps1ScriptBlock)
         or _cannot_be_a_scriptblock(value)
+        or (isinstance(value, Ps1ScriptBlock) and _block_runs_only_its_body(value))
         for value in _argument_values(cmd)
     )
 
@@ -474,7 +516,10 @@ def is_side_effect_free(node) -> bool:
     if isinstance(node, Ps1ArrayLiteral):
         return all(is_side_effect_free(e) for e in node.elements)
     if isinstance(node, Ps1HashLiteral):
-        return all(is_side_effect_free(value) for _key, value in node.pairs)
+        return all(
+            is_side_effect_free(key) and is_side_effect_free(value)
+            for key, value in node.pairs
+        )
     if isinstance(node, Ps1ArrayExpression):
         if len(node.body) == 1:
             stmt = node.body[0]
@@ -484,6 +529,12 @@ def is_side_effect_free(node) -> bool:
     if isinstance(node, Ps1IndexExpression):
         return is_side_effect_free(node.object) and is_side_effect_free(node.index)
     if isinstance(node, Ps1MemberAccess):
+        # The member may itself be an expression that selects the property at runtime, and
+        # `$x.$(Start-Process n)` runs a command to compute the name before anything is read. Only a
+        # literal name is a plain string; the computed form is checked like any other operand, as
+        # `Ps1IndexExpression` above already checks its index.
+        if not isinstance(node.member, str) and not is_side_effect_free(node.member):
+            return False
         return is_side_effect_free(node.object)
     if isinstance(node, Ps1InvokeMember):
         if not _arguments_are_pure(node.arguments):
@@ -969,6 +1020,28 @@ def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:
     return not survivors and role is BodyRole.SCRIPT
 
 
+def _param_block_is_inert(block: Ps1ParamBlock | None) -> bool:
+    """
+    Whether a `param( ... )` block runs nothing when the function is called. Declaring a name binds
+    storage and evaluates nothing, but a default value is an expression the engine runs on every
+    call that omits the argument, and an attribute is work of its own — a `[ValidateScript({...})]`
+    body runs on every call that supplies one, and a `[Parameter(Mandatory)]` makes the call prompt.
+
+    Attributes are rejected wholesale rather than matched against a table: which of them do
+    something observable is not a question this module can answer, and a type constraint is the one
+    form that provably does not, so it is the only one let through.
+    """
+    if block is None:
+        return True
+    if block.attributes:
+        return False
+    return all(
+        not any(isinstance(a, Ps1Attribute) for a in parameter.attributes)
+        and (parameter.default_value is None or is_side_effect_free(parameter.default_value))
+        for parameter in block.parameters
+    )
+
+
 def body_is_inert(node) -> bool:
     """
     Whether the body that `node` owns neither emits a value nor performs a side effect: `node` is
@@ -980,12 +1053,15 @@ def body_is_inert(node) -> bool:
     statement list for it, and reading that as "nothing happens here" would delete an advanced
     function together with every call to it. A `param` block is the same hole — `get_body` does not
     report it either, and `function f { param($x = (Start-Process n)) }` runs a command on every
-    call that omits the argument. Anything else `get_body` does not recognize is not a body owner
-    and cannot be shown to be inert either.
+    call that omits the argument — but unlike a named block it is not code by its mere presence, so
+    it is judged by `_param_block_is_inert` rather than counted. Anything else `get_body` does not
+    recognize is not a body owner and cannot be shown to be inert either.
     """
     if node is None:
         return True
     body = get_body(node)
-    if body is None or get_named_blocks(node) or get_param_block(node) is not None:
+    if body is None or get_named_blocks(node):
+        return False
+    if not _param_block_is_inert(get_param_block(node)):
         return False
     return all(statement_effect(stmt) is StatementEffect.DISCARD for stmt in body)

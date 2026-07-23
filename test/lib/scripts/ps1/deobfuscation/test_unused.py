@@ -120,6 +120,43 @@ class TestPs1JunkStatementRemoval(TestPs1):
                 self.assertIn('Kill', result)
                 self.assertIn('done', result)
 
+    def test_a_member_named_by_a_here_string_is_still_a_member(self):
+        # The member name is a string whichever way it is quoted, and a table of literal forms that
+        # names only the single-quoted one hands the here-string spelling back to the junk pass.
+        for source in (
+            "Get-ChildItem C:\\ | ForEach-Object { $Null = $_ } -MemberName @'\nDelete\n'@",
+            "Get-Process | ForEach-Object { [Void]$_ } @'\nKill\n'@",
+        ):
+            with self.subTest(source):
+                self.assertIn('ForEach-Object', self._deobfuscate(F'{source}\nWrite-Host done'))
+
+    def test_a_foreach_body_hidden_in_a_named_or_param_block_is_kept(self):
+        # The parser fills either `body` or the named blocks, so a block that carries its work in
+        # `end { ... }` or in a parameter default reports an empty statement list. Reading that as
+        # "this body discards everything" deleted the recursive removal along with the statement.
+        for source in (
+            'Get-ChildItem C:\\ | ForEach-Object { end { Remove-Item C:\\important -Recurse } }',
+            '1..3 | ForEach-Object { begin { Start-Process notepad } process { [Void]$_ } }',
+            '1..3 | ForEach-Object -Process { param($p = (Start-Process notepad)) [Void]$_ }',
+        ):
+            with self.subTest(source):
+                self.assertIn('ForEach-Object', self._deobfuscate(F'{source}\nWrite-Host done'))
+
+    def test_a_computed_member_name_keeps_the_statement_that_computes_it(self):
+        result = self._deobfuscate('if ($true) { $x.$(Start-Process notepad) }\nWrite-Host done')
+        self.assertIn('Start-Process', result)
+        self.assertIn('done', result)
+
+    def test_a_hash_literal_key_that_runs_a_command_is_kept(self):
+        result = self._deobfuscate('if ($true) { @{ $(Start-Process notepad) = 1 } }\nWrite-Host x')
+        self.assertIn('Start-Process', result)
+
+    def test_a_junk_function_stays_removable_when_it_declares_parameters(self):
+        # A bare parameter declaration evaluates nothing, so the pruned body is still inert.
+        result = self._deobfuscate('function j($x) { $Null = 915 }\nj\nWrite-Host done')
+        self.assertNotIn('function', result)
+        self.assertIn('done', result)
+
     def test_a_foreach_block_held_in_a_variable_is_kept(self):
         # `-End $sb` runs whatever scriptblock the variable holds; nothing in the source says what,
         # so the discarding process block proves nothing about the statement as a whole.
