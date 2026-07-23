@@ -199,6 +199,20 @@ _REFERENCE_TYPE_NAMES = frozenset({
 })
 
 
+#: The out-variable common parameters PowerShell defines on every advanced command. Naming them here
+#: floors the derivation below the way `_canonical_type_name` floors the type allow-list: each is a
+#: fixed engine contract whose loss silences a real write, so a collected surface that no longer
+#: carries one fails the load rather than letting `_WRITING_PARAMETERS` shrink to `{setseed}` and
+#: quietly stop treating `-OutVariable` as an out-parameter.
+_REQUIRED_OUT_VARIABLE_PARAMETERS = frozenset({
+    'errorvariable',
+    'informationvariable',
+    'outvariable',
+    'pipelinevariable',
+    'warningvariable',
+})
+
+
 def _writing_parameters() -> frozenset[str]:
     """
     The parameter spellings whose presence makes a command write, however pure the transform it
@@ -212,12 +226,21 @@ def _writing_parameters() -> frozenset[str]:
     is the one common parameter to fail. `-SetSeed` is added on top — not a common parameter but a
     `Get-Random` switch that rewrites the session's generator state, the same kind of hidden write.
     The match in `_is_writing_parameter` accepts unambiguous abbreviations of every spelling here.
+    The derivation is floored by `_REQUIRED_OUT_VARIABLE_PARAMETERS`, so a collected surface that
+    drops one of those parameters fails the load rather than shrinking the set silently.
     """
     names = {'setseed'}
     for common, aliases in data.COMMON_PARAMETERS.items():
         if common.endswith('variable'):
             names.add(common)
             names.update(aliases)
+    missing = _REQUIRED_OUT_VARIABLE_PARAMETERS - names
+    if missing:
+        raise ValueError(
+            F'the collected common parameters no longer surface the out-variable parameters '
+            F'{sorted(missing)!r}; the write-parameter set would silently stop treating them as '
+            F'writes, so the data and this module are out of step.'
+        )
     return frozenset(names)
 
 

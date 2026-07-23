@@ -447,7 +447,8 @@ def static_overloads(name: str, member: str) -> list[dict]:
     `position`. Returns an empty list when the type is not collected or carries no static method of
     that name. The member is matched case-insensitively, as PowerShell resolves it, and instance
     overloads are excluded: a caller asks this to reason about a `[Type]::Member(...)` call, whose
-    reachable surface is the static one.
+    reachable surface is the static one. A non-method member that case-collides with the method name
+    is skipped, not taken as the answer, so a real static method behind it is still found.
     """
     members = type_members(name)
     if members is None:
@@ -456,7 +457,7 @@ def static_overloads(name: str, member: str) -> list[dict]:
         if stored.lower() != member.lower():
             continue
         if record.get('kind') != 'method':
-            return []
+            continue
         return [overload for overload in record.get('overloads') or () if overload.get('static')]
     return []
 
