@@ -1,6 +1,7 @@
 """
-Contains .NET type and PowerShell command database for deobfuscation. Generated via run-pwsh.ps1
-from PowerShell 5.1 reflection data.
+The .NET type and PowerShell command database: cmdlet, alias, and parameter tables, type aliases
+and members, and the small lookup tables that the PowerShell analysis and deobfuscation subsystems
+share. Generated via run-pwsh.ps1 from PowerShell 5.1 reflection data.
 """
 from __future__ import annotations
 

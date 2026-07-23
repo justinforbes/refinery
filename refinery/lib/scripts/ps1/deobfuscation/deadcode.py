@@ -12,12 +12,11 @@ from refinery.lib.scripts import (
     set_body,
     set_child_list,
 )
-from refinery.lib.scripts.ps1.deobfuscation.data import COMPARISON_OPS, KNOWN_CMDLETS
+from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable
+from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     BodyRole,
     classify_body,
-    get_body,
-    is_builtin_variable,
     is_truthy,
     switch_matches,
     unwrap_integer,

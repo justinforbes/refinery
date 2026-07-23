@@ -14,7 +14,8 @@ import re
 from fnmatch import translate as fnmatch_translate
 from typing import Iterable
 
-from refinery.lib.scripts.ps1.deobfuscation.data import (
+from refinery.lib.scripts.ps1.ast import get_command_name
+from refinery.lib.scripts.ps1.data import (
     GET_COMMAND_ALIASES,
     GET_MEMBER_ALIASES,
     KNOWN_CMDLETS,
@@ -24,7 +25,6 @@ from refinery.lib.scripts.ps1.deobfuscation.data import (
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     extract_first_positional_string,
     extract_positional_values,
-    get_command_name,
     get_member_name,
     make_string_literal,
     string_value,

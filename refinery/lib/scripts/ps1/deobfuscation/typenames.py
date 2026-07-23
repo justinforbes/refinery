@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer
-from refinery.lib.scripts.ps1.deobfuscation.data import (
+from refinery.lib.scripts.ps1.ast import get_command_name
+from refinery.lib.scripts.ps1.data import (
     CANONICAL_TYPE_NAMES,
     GET_MEMBER_ALIASES,
     MEMBER_LOOKUP,
@@ -19,7 +20,6 @@ from refinery.lib.scripts.ps1.deobfuscation.data import (
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     MutationKind,
     extract_first_positional_string,
-    get_command_name,
     get_member_name,
     iter_variable_mutations,
     make_string_literal,

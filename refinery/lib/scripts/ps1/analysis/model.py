@@ -36,14 +36,11 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 from refinery.lib.scripts import Node
+from refinery.lib.scripts.ps1.ast import assignment_of
 from refinery.lib.scripts.ps1.model import (
-    Ps1ArrayLiteral,
-    Ps1AssignmentExpression,
-    Ps1CastExpression,
     Ps1ForEachLoop,
     Ps1FunctionDefinition,
     Ps1ParameterDeclaration,
-    Ps1ParenExpression,
     Ps1PropertyMember,
     Ps1ScopeModifier,
     Ps1Script,
@@ -51,67 +48,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1UnaryExpression,
     Ps1Variable,
 )
-
-
-def unwrap_assignment_target(target: Node | None) -> Node | None:
-    """
-    Peel type-constraint casts and parentheses from an assignment target, so `[Type]$x` and `($x)`
-    both resolve to the variable `$x` the assignment writes.
-    """
-    while isinstance(target, (Ps1ParenExpression, Ps1CastExpression)):
-        target = target.expression if isinstance(target, Ps1ParenExpression) else target.operand
-    return target
-
-
-def assignment_target_variables(target: Node | None) -> list[Ps1Variable]:
-    """
-    The variables written by an assignment target. A plain variable target yields a single entry, a
-    `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral` target (the PowerShell multi-assignment
-    `$a, $b = 1, 2`) yields one entry per element that unwraps to a variable, and any other target
-    (index, member access, literal) yields an empty list.
-    """
-    target = unwrap_assignment_target(target)
-    if isinstance(target, Ps1Variable):
-        return [target]
-    if isinstance(target, Ps1ArrayLiteral):
-        variables: list[Ps1Variable] = []
-        for element in target.elements:
-            unwrapped = unwrap_assignment_target(element)
-            if isinstance(unwrapped, Ps1Variable):
-                variables.append(unwrapped)
-        return variables
-    return []
-
-
-def assignment_target_is_all_variables(target: Node | None) -> bool:
-    """
-    Whether every slot of an assignment target unwraps to a plain variable. `False` when any slot is
-    an index or member-access expression (e.g. `$arr[0]`), which means the assignment writes to
-    memory other than a named variable and cannot be removed on variable-liveness information alone.
-    """
-    target = unwrap_assignment_target(target)
-    if isinstance(target, Ps1Variable):
-        return True
-    if isinstance(target, Ps1ArrayLiteral):
-        return all(isinstance(unwrap_assignment_target(e), Ps1Variable) for e in target.elements)
-    return False
-
-
-def assignment_of(var: Ps1Variable) -> Ps1AssignmentExpression | None:
-    """
-    The `refinery.lib.scripts.ps1.model.Ps1AssignmentExpression` that writes `var` when `var`
-    occupies its target position — directly, or as an element of a multi-assignment
-    `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral` target — else `None`. Enclosing
-    type-constraint casts and parentheses are transparent.
-    """
-    cursor: Node = var
-    parent = cursor.parent
-    while isinstance(parent, (Ps1CastExpression, Ps1ParenExpression, Ps1ArrayLiteral)):
-        cursor = parent
-        parent = cursor.parent
-    if isinstance(parent, Ps1AssignmentExpression) and parent.target is cursor:
-        return parent
-    return None
 
 
 def is_assignment_write_target(var: Ps1Variable) -> bool:

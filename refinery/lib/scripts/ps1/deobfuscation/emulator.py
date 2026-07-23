@@ -16,7 +16,12 @@ if TYPE_CHECKING:
     _Value: TypeAlias = str | int | float | bool | list | None
 
 from refinery.lib.scripts import Block, Transformer
-from refinery.lib.scripts.ps1.deobfuscation.data import (
+from refinery.lib.scripts.ps1.ast import (
+    get_command_name,
+    normalize_dotnet_type_name,
+    normalize_type_expression,
+)
+from refinery.lib.scripts.ps1.data import (
     COMPARISON_OPS,
     ENCODING_MAP,
     is_type,
@@ -28,11 +33,8 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
-    get_command_name,
     get_member_name,
     make_string_literal,
-    normalize_dotnet_type_name,
-    normalize_type_expression,
     ps_divide,
     ps_modulo,
     ps_shift_left,

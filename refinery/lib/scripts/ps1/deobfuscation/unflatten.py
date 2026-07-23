@@ -13,12 +13,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Generator, NamedTuple
 
 from refinery.lib.scripts import Block, Node, Statement, Transformer
-from refinery.lib.scripts.ps1.deobfuscation.data import COMPARISON_OPS
+from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable
+from refinery.lib.scripts.ps1.data import COMPARISON_OPS
 from refinery.lib.scripts.ps1.deobfuscation.emulator import evaluate_truthy
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    get_body,
     inside_value_producing_context,
-    is_builtin_variable,
     unwrap_parens,
 )
 from refinery.lib.scripts.ps1.model import (

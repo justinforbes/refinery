@@ -9,11 +9,12 @@ import re
 
 from typing import Iterator
 
-from refinery.lib.scripts.ps1.deobfuscation.constants import PS1_ENV_CONSTANTS
-from refinery.lib.scripts.ps1.deobfuscation.data import (
+from refinery.lib.scripts.ps1.ast import get_body
+from refinery.lib.scripts.ps1.data import (
     COMPARISON_OPS,
     ENCODING_MAP,
 )
+from refinery.lib.scripts.ps1.deobfuscation.constants import PS1_ENV_CONSTANTS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     LocalFunctionAwareTransformer,
     StringMethodError,
@@ -26,7 +27,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
-    get_body,
     get_member_name,
     is_array_reverse_call,
     is_pipeline_item,

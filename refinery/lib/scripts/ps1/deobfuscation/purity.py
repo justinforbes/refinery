@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import enum
 
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
+from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_command_name,
     is_builtin_variable,

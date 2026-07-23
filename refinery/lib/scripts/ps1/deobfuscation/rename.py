@@ -4,9 +4,7 @@ Rename obfuscated variable names to short sequential identifiers.
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer
-from refinery.lib.scripts.ps1.analysis import (
-    assignment_target_variables,
-)
+from refinery.lib.scripts.ps1.ast import assignment_target_variables
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _PS1_SKIP_VARIABLES,
 )

@@ -4,26 +4,20 @@ Remove unused variable assignments and junk expression statements.
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer, _remove_from_parent, _replace_in_parent
-from refinery.lib.scripts.ps1.analysis import (
-    Binding,
-    Ps1SemanticModel,
-    Scope,
+from refinery.lib.scripts.ps1.analysis import Binding, Ps1SemanticModel, Scope, model_cache
+from refinery.lib.scripts.ps1.ast import (
     assignment_of,
     assignment_target_is_all_variables,
     assignment_target_variables,
-    model_cache,
+    get_body,
+    get_command_name,
 )
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _PS1_SKIP_VARIABLES,
     _find_removable_statement,
     _walk_outer_scope,
 )
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    BodyRole,
-    classify_body,
-    get_body,
-    get_command_name,
-)
+from refinery.lib.scripts.ps1.deobfuscation.helpers import BodyRole, classify_body
 from refinery.lib.scripts.ps1.deobfuscation.purity import (
     StatementEffect,
     classify_statement_effect,

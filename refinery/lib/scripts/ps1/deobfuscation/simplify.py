@@ -3,7 +3,8 @@ PowerShell syntax normalization transforms.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts.ps1.deobfuscation.data import (
+from refinery.lib.scripts.ps1.ast import get_command_name
+from refinery.lib.scripts.ps1.data import (
     ALL_PARAMETER_NAMES,
     KNOWN_ALIAS,
     KNOWN_CMDLETS,
@@ -15,7 +16,6 @@ from refinery.lib.scripts.ps1.deobfuscation.data import (
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     LocalFunctionAwareTransformer,
-    get_command_name,
     is_bare_command_name,
     make_string_literal,
     string_value,

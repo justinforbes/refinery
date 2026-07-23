@@ -14,15 +14,11 @@ from refinery.lib.scripts import (
     _remove_from_parent,
     _replace_in_parent,
 )
-from refinery.lib.scripts.ps1.analysis import (
-    assignment_target_variables,
-    is_assignment_write_target,
-)
-from refinery.lib.scripts.ps1.deobfuscation.data import PS1_KNOWN_VARIABLES
+from refinery.lib.scripts.ps1.analysis import is_assignment_write_target
+from refinery.lib.scripts.ps1.ast import assignment_target_variables, get_body, is_builtin_variable
+from refinery.lib.scripts.ps1.data import PS1_KNOWN_VARIABLES
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    get_body,
     is_array_reverse_call,
-    is_builtin_variable,
     iter_variable_mutations,
     make_string_literal,
     unwrap_parens,
@@ -143,8 +139,8 @@ def _assignment_target_variable(target) -> Ps1Variable | None:
     Extract the single variable written by an assignment target, unwrapping any type constraint
     casts and parentheses. Handles both `$x = expr` and `[Type]$x = expr`. Returns `None` for a
     multi-assignment target (`$a, $b = 1, 2`), which writes more than one variable; use
-    `refinery.lib.scripts.ps1.analysis.model.assignment_target_variables` when every written variable
-    is needed.
+    `refinery.lib.scripts.ps1.ast.assignment_target_variables` when every written variable is
+    needed.
     """
     variables = assignment_target_variables(target)
     return variables[0] if len(variables) == 1 else None

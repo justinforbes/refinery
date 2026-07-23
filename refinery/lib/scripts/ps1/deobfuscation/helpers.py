@@ -10,24 +10,21 @@ import re
 
 from typing import Callable, Generator, NamedTuple, TypeGuard, TypeVar
 
-from refinery.lib.scripts import Block, Node, Transformer
-from refinery.lib.scripts.ps1.analysis import (
+from refinery.lib.scripts import Node, Transformer
+from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
+    get_body,
+    is_builtin_variable,
+    normalize_type_expression,
     unwrap_assignment_target,
 )
-from refinery.lib.scripts.ps1.deobfuscation.data import (
-    BUILTIN_VARIABLES,
-    FOREACH_ALIASES,
-    FORMAT_PATTERN,
-    is_type,
-)
+from refinery.lib.scripts.ps1.data import FOREACH_ALIASES, FORMAT_PATTERN, is_type
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
-    Ps1Code,
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
@@ -223,12 +220,6 @@ def unwrap_single_paren(node: Expression) -> Expression:
     return node
 
 
-def get_command_name(cmd: Ps1CommandInvocation) -> str | None:
-    if isinstance(cmd.name, Ps1StringLiteral):
-        return cmd.name.value
-    return None
-
-
 def extract_positional_values(
     cmd: Ps1CommandInvocation,
 ) -> list[Expression]:
@@ -251,12 +242,6 @@ def extract_first_positional_string(
     values = extract_positional_values(cmd)
     if values:
         return string_value(values[0])
-    return None
-
-
-def get_body(node) -> list | None:
-    if isinstance(node, (Ps1Code, Block, Ps1SubExpression)):
-        return node.body
     return None
 
 
@@ -486,21 +471,6 @@ def extract_foreach_scriptblock(expr: Expression) -> Ps1ScriptBlock | None:
     return None
 
 
-def is_builtin_variable(
-    node: Node | None,
-    names: set[str] | frozenset[str] = BUILTIN_VARIABLES,
-) -> TypeGuard[Ps1Variable]:
-    """
-    Return `True` when `node` is an unscoped `refinery.lib.scripts.ps1.model.Ps1Variable` whose
-    lowered name is in `names` (defaults to `$Null`, `$True`, `$False`).
-    """
-    return (
-        isinstance(node, Ps1Variable)
-        and node.scope == Ps1ScopeModifier.NONE
-        and node.name.lower() in names
-    )
-
-
 def is_pipeline_item(node: Node | None) -> TypeGuard[Ps1Variable]:
     """
     Return `True` when `node` is the current pipeline item variable, written either as `$_` or its
@@ -557,45 +527,6 @@ def is_array_reverse_call(node: Ps1ExpressionStatement) -> Ps1Variable | None:
     if isinstance(arg, Ps1Variable):
         return arg
     return None
-
-
-def extract_new_object(cmd: Ps1CommandInvocation) -> tuple[str, list[Expression]] | None:
-    """
-    Extract the type name and constructor arguments from a `New-Object` invocation. Returns
-    `(type_name, [arg_expressions])`, or `None` when `cmd` is not a resolvable `New-Object` call.
-    """
-    if not isinstance(cmd.name, Ps1StringLiteral):
-        return None
-    if cmd.name.value.lower() != 'new-object':
-        return None
-    positional: list[Expression] = []
-    for arg in cmd.arguments:
-        if isinstance(arg, Ps1CommandArgument):
-            if arg.kind != Ps1CommandArgumentKind.POSITIONAL or arg.value is None:
-                return None
-            positional.append(arg.value)
-        elif isinstance(arg, Expression):
-            positional.append(arg)
-        else:
-            return None
-    if not positional:
-        return None
-    type_name_expr = positional[0]
-    if not isinstance(type_name_expr, Ps1StringLiteral):
-        return None
-    type_name = type_name_expr.value
-    ctor_args: list[Expression] = []
-    if len(positional) >= 2:
-        second = positional[1]
-        if isinstance(second, Ps1ParenExpression) and second.expression is not None:
-            inner = second.expression
-            if isinstance(inner, Ps1ArrayLiteral):
-                ctor_args = list(inner.elements)
-            else:
-                ctor_args = [inner]
-        else:
-            ctor_args = [second]
-    return type_name, ctor_args
 
 
 def ps_divide(a: int | float, b: int | float) -> int | float:
@@ -924,17 +855,6 @@ def _apply_dotnet_format(value: str | int, spec: str) -> str | None:
         decimal_places = width if width else 2
         return format(value, F',.{decimal_places}f')
     return None
-
-
-def normalize_type_expression(name: str) -> str:
-    return name.lower().replace(' ', '')
-
-
-def normalize_dotnet_type_name(name: str) -> str:
-    result = normalize_type_expression(name)
-    if result.startswith('system.'):
-        result = result[7:]
-    return result
 
 
 def apply_format_string(fmt: str, args: list[str | int]) -> str | None:
