@@ -72,6 +72,18 @@ class TestPs1JunkStatementRemoval(TestPs1):
         self.assertNotIn('Sqrt', result)
         self.assertIn('done', result)
 
+    def test_void_cast_around_a_call_preserved(self):
+        # A `[Void]` wrapper discards the value of the call, not the call. Treating the cast alone
+        # as a discard deleted the payload out of a script whose whole point is to reveal it.
+        result = self._deobfuscate('[Void](Start-Process notepad); Write-Host done')
+        self.assertIn('Start-Process', result)
+        self.assertIn('done', result)
+
+    def test_void_cast_around_a_call_preserved_inside_a_function(self):
+        result = self._deobfuscate(
+            'function f { Write-Host hi; [Void](Remove-Item C:\\important) }\nf')
+        self.assertIn('Remove-Item', result)
+
     def test_out_null_pipeline_removed(self):
         result = self._deobfuscate('[Math]::Pow(2, 8) | Out-Null; Write-Host done')
         self.assertNotIn('Pow', result)

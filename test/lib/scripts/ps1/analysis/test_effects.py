@@ -120,9 +120,23 @@ class TestPs1StatementEffect(Ps1EffectsTest):
                 self.assertIs(statement_effect(self._statement(source)), StatementEffect.DISCARD)
 
     def test_a_discard_idiom_wrapped_around_an_effect_is_still_an_effect(self):
-        # `$Null =` discards the value, not the work that produced it.
-        statement = self._statement('$Null = Start-Process notepad')
-        self.assertIs(statement_effect(statement), StatementEffect.EFFECT)
+        # A discard idiom throws away a value, never the work that produced it. Obfuscated scripts
+        # wrap real calls in exactly these idioms, so a discard that skips the operand check makes
+        # the deobfuscator delete the payload it is supposed to surface.
+        for source in (
+            '$Null = Start-Process notepad',
+            '[Void](Start-Process notepad)',
+            '[Void]$(Remove-Item C:\\important)',
+            '1..3 | ForEach-Object { [Void](Start-Process notepad) }',
+            '1..3 | ForEach-Object { $Null = Start-Process notepad }',
+        ):
+            with self.subTest(source):
+                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
+
+    def test_a_discard_of_a_harmless_value_stays_a_discard(self):
+        for source in ('$Null = 5', '[Void]1', '[Void]$x', "[Void]('a' + 'b')"):
+            with self.subTest(source):
+                self.assertIs(statement_effect(self._statement(source)), StatementEffect.DISCARD)
 
     def test_a_pure_pipeline_cmdlet_still_yields_a_value_a_caller_may_want(self):
         # Purity and emission answer different questions: `Where-Object` performs no side effect,

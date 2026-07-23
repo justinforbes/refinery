@@ -310,8 +310,12 @@ class StatementEffect(enum.Enum):
       bare constant, a pure expression); it is junk at a discarding position, but in a captured body
       it may be the return value, so removing it needs an emit-safety check.
     - `DISCARD`: the statement is a syntactic no-op that yields nothing and does nothing observable
-      (an empty statement, the `$Null = <pure>` discard idiom, a `[Void]` cast, a `... | Out-Null`
+      (an empty statement, the `$Null = <pure>` and `[Void]<pure>` discard idioms, an `Out-Null`
       pipeline, a discarding `ForEach`); it is always safe to remove, even when it empties the body.
+
+    A discard idiom throws away a *value*, never the work that produced it: every one of them is
+    recognized only over an operand that `is_side_effect_free` accepts, so `[Void](Start-Process x)`
+    is an `EFFECT` like any other call.
     """
     EFFECT = 'effect'
     OUTPUT = 'output'
@@ -332,7 +336,9 @@ def statement_effect(stmt) -> StatementEffect:
     if expr is None:
         return StatementEffect.DISCARD
     if isinstance(expr, Ps1CastExpression) and expr.type_name.lower() == 'void':
-        return StatementEffect.DISCARD
+        if is_side_effect_free(expr.operand):
+            return StatementEffect.DISCARD
+        return StatementEffect.EFFECT
     if isinstance(expr, Ps1Pipeline):
         if pipeline_ends_with_out_null(expr) and pipeline_prefix_is_pure(expr):
             return StatementEffect.DISCARD
@@ -381,7 +387,9 @@ def pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
     """
     Detect junk pipelines like `... | ForEach-Object { [Void]$_ }` or
     `... | ForEach-Object { $Null = $_ }` where the ForEach body explicitly discards all output.
-    These are anti-analysis noise injected into malware scripts.
+    These are anti-analysis noise injected into malware scripts. Only a discard of a value that is
+    itself side-effect free counts: `ForEach-Object { [Void](Start-Process x) }` discards the result
+    of a call that still happens.
     """
     if len(pipeline.elements) < 2:
         return False
@@ -402,7 +410,11 @@ def pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
             if not isinstance(stmt, Ps1ExpressionStatement) or stmt.expression is None:
                 return False
             ex = stmt.expression
-            if isinstance(ex, Ps1CastExpression) and ex.type_name.lower() == 'void':
+            if (
+                isinstance(ex, Ps1CastExpression)
+                and ex.type_name.lower() == 'void'
+                and is_side_effect_free(ex.operand)
+            ):
                 continue
             if (
                 isinstance(ex, Ps1AssignmentExpression)
