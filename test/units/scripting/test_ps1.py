@@ -848,6 +848,7 @@ class TestPs1RealWorldLarge(TestUnitBase):
         test = data | self.load() | str
         goal = inspect.cleandoc(
             r"""
+            (Get-Command ???t?).Name
             $kxYB = ([char[]]($lyA5) | ForEach-Object {
               [byte][char]$_
             })

@@ -133,6 +133,43 @@ class TestPs1Purity(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertFalse(is_side_effect_free(self._expression(source)))
 
+    def test_a_provable_pure_member_read_is_removable(self):
+        # The object is pure to evaluate and the member read runs no code: a curated reflection
+        # property (`Process.ProcessName`, resolved through the static call's return type), any read
+        # on a sealed value type (`DateTime.Ticks`), or a reflection field, which is a bare memory
+        # slot with no getter (`Math.PI`, `Int32.MaxValue`). The chained read resolves the receiver
+        # of `.ManagedThreadId` through `CurrentThread`, itself a curated pure read.
+        for source in (
+            '[Diagnostics.Process]::GetCurrentProcess().ProcessName',
+            '(Get-Date).Ticks',
+            '[Environment]::UserName',
+            '[Threading.Thread]::CurrentThread.ManagedThreadId',
+            '[Math]::PI',
+            '[Int]::MaxValue',
+            '[String]::Empty',
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_side_effect_free(self._expression(source)))
+
+    def test_a_member_read_is_kept_unless_the_getter_is_proven_inert(self):
+        # The soundness core: a property getter may run code or throw, and a read is removed only when
+        # it is proven not to. Returning the object's own purity — which this gate replaces — deleted
+        # every one of these. `Process.Path` is an Extended Type System member that shells out;
+        # `Process.ExitCode` throws until the process exits; `IPAddress.Address` throws by address
+        # family, which is why that type is not a whole-surface grant; casting to the supertype
+        # `object` leaves the runtime type free to carry an effectful member the supertype lacks; and
+        # an object whose type is not resolved could be anything at all.
+        for source in (
+            '(Get-Process).Path',
+            '[Diagnostics.Process]::GetCurrentProcess().ExitCode',
+            "([ipaddress]'::1').Address",
+            '([object]$x).Path',
+            '$Host.UI',
+            '$reader.EndOfStream',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
     def test_a_hash_literal_evaluates_its_keys_as_well_as_its_values(self):
         for source in (
             '@{ $(Start-Process notepad) = 1 }',
