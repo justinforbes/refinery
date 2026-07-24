@@ -12,6 +12,7 @@ facts the new format carries — per-overload signatures, member kind, the true 
 """
 from __future__ import annotations
 
+import enum
 import gzip
 import json
 import operator
@@ -440,6 +441,38 @@ def member_order(name: str) -> list[str] | None:
     return _TYPE_TABLE[key].get('member_order')
 
 
+class MemberLookup(enum.Enum):
+    """
+    The two non-record outcomes of `member_record`. A member query has three outcomes a purity gate
+    must keep apart: the type was never collected, so nothing is known about its members; the type is
+    collected but carries no member of that name; or the member is present and its record is returned.
+    Collapsing the first two into a single `None` conflates an unknown surface with a known absence,
+    which a sound gate must treat oppositely — an unknown surface is unsafe, a known-absent read
+    yields `$null`.
+    """
+    UNCOLLECTED = 'uncollected'
+    ABSENT = 'absent'
+
+
+def member_record(name: str, member: str) -> dict | MemberLookup:
+    """
+    The collected record for a single member of a type, or a `MemberLookup` sentinel explaining why
+    there is none. `MemberLookup.UNCOLLECTED` means the type has no member table at all;
+    `MemberLookup.ABSENT` means the type is collected and carries no member of that name. The member
+    is matched case-insensitively, as PowerShell resolves it, and the first match wins. The record
+    carries at least `kind` and `source`, which distinguish a plain reflection property or field from
+    a code-running Extended Type System member.
+    """
+    members = type_members(name)
+    if members is None:
+        return MemberLookup.UNCOLLECTED
+    lower = member.lower()
+    for stored, record in members.items():
+        if stored.lower() == lower:
+            return record
+    return MemberLookup.ABSENT
+
+
 def static_overloads(name: str, member: str) -> list[dict]:
     """
     The static overloads of a method on a type, each a record carrying its `returns` and its
@@ -475,3 +508,18 @@ def command(name: str) -> dict | None:
     Command names are matched case-insensitively, as PowerShell resolves them.
     """
     return _COMMAND_LOOKUP.get(name.lower())
+
+
+def command_output_types(name: str) -> frozenset[str] | None:
+    """
+    The declared output types of a command, lowercased, or `None` when the command declares none. A
+    set is returned only when the command carries an `[OutputType]` attribute — the
+    `output_type_declared` flag — because an `output_types` list without it records what was observed,
+    not what the author promised, and an empty one means the declaration was never made rather than
+    that the command emits nothing. An unknown command is `None` for the same reason. Names are
+    matched case-insensitively.
+    """
+    record = _COMMAND_LOOKUP.get(name.lower())
+    if record is None or not record.get('output_type_declared'):
+        return None
+    return frozenset(_type.lower() for _type in record['output_types'])

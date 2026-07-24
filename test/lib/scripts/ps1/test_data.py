@@ -84,6 +84,29 @@ class TestPs1MetadataReader(unittest.TestCase):
         # SecurityProtocolType has no instance expression, so its Get-Member order was not observed.
         self.assertIsNone(data.member_order('System.Net.SecurityProtocolType'))
 
+    def test_member_record_distinguishes_uncollected_from_absent(self):
+        # The two negative outcomes a purity gate must treat oppositely: nothing is known about an
+        # uncollected type's surface (unsafe to read), whereas a collected type that lacks a member
+        # yields $null (safe). A single None return would conflate them.
+        self.assertIs(data.member_record('NotARealType', 'Anything'), data.MemberLookup.UNCOLLECTED)
+        self.assertIs(data.member_record('System.String', 'NotAMember'), data.MemberLookup.ABSENT)
+        self.assertIsNot(data.MemberLookup.UNCOLLECTED, data.MemberLookup.ABSENT)
+
+    def test_member_record_returns_the_member_and_marks_its_source(self):
+        # Process.Path is a types.ps1xml ScriptProperty that runs code; Process.ProcessName is a
+        # plain reflection property. The record's source is what a gate reads to tell them apart.
+        ets = data.member_record('System.Diagnostics.Process', 'Path')
+        reflected = data.member_record('System.Diagnostics.Process', 'ProcessName')
+        self.assertEqual(ets['source'], 'ets')
+        self.assertEqual(reflected['source'], 'reflection')
+
+    def test_member_record_matches_case_insensitively(self):
+        # PowerShell resolves both type and member names without regard to case, and a type oracle
+        # hands this query a lowercased canonical name; the first case-insensitive match is returned,
+        # and it is the same record the full member table exposes.
+        record = data.member_record('system.diagnostics.process', 'PATH')
+        self.assertIs(record, data.type_members('System.Diagnostics.Process')['Path'])
+
     def test_a_command_carries_its_module_and_common_flag(self):
         gci = data.command('Get-ChildItem')
         self.assertIsNotNone(gci)
@@ -100,6 +123,29 @@ class TestPs1MetadataReader(unittest.TestCase):
 
     def test_an_unknown_command_is_none(self):
         self.assertIsNone(data.command('Definitely-NotACommand'))
+
+    def test_command_output_types_are_declared_and_lowercased(self):
+        # Get-Date carries [OutputType([datetime], [string])]; the query lowercases the declared
+        # full names. Get-Command declares PSObject among its outputs, which is why a later gate
+        # cannot prove (Get-Command).Name pure — a PSObject read is a dynamic adapter lookup.
+        self.assertEqual(
+            data.command_output_types('Get-Date'),
+            frozenset({'system.datetime', 'system.string'}),
+        )
+        self.assertIn(
+            'system.management.automation.psobject',
+            data.command_output_types('Get-Command'),
+        )
+        self.assertEqual(
+            data.command_output_types('get-date'), data.command_output_types('Get-Date'))
+
+    def test_command_output_types_are_none_when_undeclared(self):
+        # Out-Null and Write-Host emit (or suppress) without an [OutputType] attribute, so their
+        # output_types list is empty by absence, not by promise; reading that as "emits nothing"
+        # is the fail-open shape the declared flag exists to prevent. An unknown command is None too.
+        self.assertIsNone(data.command_output_types('Out-Null'))
+        self.assertIsNone(data.command_output_types('Write-Host'))
+        self.assertIsNone(data.command_output_types('Definitely-NotACommand'))
 
     def test_static_overloads_report_the_out_parameter_direction(self):
         # The two-argument TryParse marks its result parameter as a by-reference out; the purity
