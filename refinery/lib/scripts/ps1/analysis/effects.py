@@ -21,6 +21,7 @@ from typing import Iterator, Sequence, TypeGuard
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1 import data
+from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
@@ -68,6 +69,12 @@ from refinery.lib.scripts.ps1.model import (
     Ps1UnaryExpression,
     Ps1Variable,
 )
+
+#: The type view threaded through the purity cluster when no caller supplies one. It carries no
+#: model-derived variable or pipeline typing, so it resolves only what the static surface alone
+#: determines. A deobfuscation pass that has built a TypeOracle from a semantic model passes that
+#: instead, and the member gate then sees the richer typing.
+_EMPTY_ORACLE = TypeOracle()
 
 
 def _canonical_type_name(name: str) -> str:
@@ -438,19 +445,25 @@ def _scriptblock_arguments(cmd: Ps1CommandInvocation) -> list[Ps1ScriptBlock]:
     return [value for value in _argument_values(cmd) if isinstance(value, Ps1ScriptBlock)]
 
 
-def _arguments_are_pure(arguments: Sequence[Expression]) -> bool:
+def _arguments_are_pure(
+    arguments: Sequence[Expression],
+    oracle: TypeOracle = _EMPTY_ORACLE,
+) -> bool:
     """
     Whether an argument list is safe to evaluate *and* hands the callee nothing to write back
     through. Both halves have to hold for every call, so they are asked in one place: a `[ref]`
     argument is side-effect free to evaluate and still makes the call an out-parameter API.
     """
     return all(
-        not _is_writable_reference(a) and is_side_effect_free(a)
+        not _is_writable_reference(a) and is_side_effect_free(a, oracle)
         for a in arguments
     )
 
 
-def _command_arguments_are_pure(cmd: Ps1CommandInvocation) -> bool:
+def _command_arguments_are_pure(
+    cmd: Ps1CommandInvocation,
+    oracle: TypeOracle = _EMPTY_ORACLE,
+) -> bool:
     """
     Whether every non-scriptblock argument of a command is side-effect free. A cmdlet being a pure
     transform says nothing about what its operands cost to evaluate, so
@@ -471,7 +484,7 @@ def _command_arguments_are_pure(cmd: Ps1CommandInvocation) -> bool:
             continue
         if isinstance(value, Ps1Variable) and value.splatted:
             return False
-        if _is_writable_reference(value) or not is_side_effect_free(value):
+        if _is_writable_reference(value) or not is_side_effect_free(value, oracle):
             return False
     return True
 
@@ -559,7 +572,10 @@ def _runs_only_visible_blocks(cmd: Ps1CommandInvocation) -> bool:
     )
 
 
-def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
+def _command_body_is_pure(
+    cmd: Ps1CommandInvocation,
+    oracle: TypeOracle = _EMPTY_ORACLE,
+) -> bool:
     """
     Check whether all script block arguments of a pipeline cmdlet (ForEach-Object, Where-Object,
     etc.) have side-effect-free bodies. These cmdlets are pure transforms: they evaluate a script
@@ -578,16 +594,18 @@ def _command_body_is_pure(cmd: Ps1CommandInvocation) -> bool:
     if not _runs_only_visible_blocks(cmd):
         return False
     return not any(
-        statement_effect(stmt) is StatementEffect.EFFECT
+        statement_effect(stmt, oracle) is StatementEffect.EFFECT
         for block in _scriptblock_arguments(cmd)
         for stmt in block.body
     )
 
 
-def is_side_effect_free(node) -> bool:
+def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
     """
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
-    observable side effects beyond yielding a value.
+    observable side effects beyond yielding a value. The `oracle` types the object of a member read
+    so the member gate can decide whether the read runs code; without one it resolves only the
+    static surface, and every member read whose object it cannot type stays impure.
     """
     if isinstance(node, _LITERAL_EXPRESSIONS):
         return True
@@ -596,42 +614,42 @@ def is_side_effect_free(node) -> bool:
     if isinstance(node, Ps1Variable):
         return True
     if isinstance(node, Ps1ParenExpression):
-        return node.expression is None or is_side_effect_free(node.expression)
+        return node.expression is None or is_side_effect_free(node.expression, oracle)
     if isinstance(node, Ps1CastExpression):
-        return is_side_effect_free(node.operand)
+        return is_side_effect_free(node.operand, oracle)
     if isinstance(node, Ps1UnaryExpression):
         if node.operator in ('++', '--'):
             return False
-        return is_side_effect_free(node.operand)
+        return is_side_effect_free(node.operand, oracle)
     if isinstance(node, Ps1BinaryExpression):
-        return is_side_effect_free(node.left) and is_side_effect_free(node.right)
+        return is_side_effect_free(node.left, oracle) and is_side_effect_free(node.right, oracle)
     if isinstance(node, Ps1RangeExpression):
-        return is_side_effect_free(node.start) and is_side_effect_free(node.end)
+        return is_side_effect_free(node.start, oracle) and is_side_effect_free(node.end, oracle)
     if isinstance(node, Ps1ArrayLiteral):
-        return all(is_side_effect_free(e) for e in node.elements)
+        return all(is_side_effect_free(e, oracle) for e in node.elements)
     if isinstance(node, Ps1HashLiteral):
         return all(
-            is_side_effect_free(key) and is_side_effect_free(value)
+            is_side_effect_free(key, oracle) and is_side_effect_free(value, oracle)
             for key, value in node.pairs
         )
     if isinstance(node, Ps1ArrayExpression):
         if len(node.body) == 1:
             stmt = node.body[0]
             if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
-                return is_side_effect_free(stmt.expression)
+                return is_side_effect_free(stmt.expression, oracle)
         return len(node.body) == 0
     if isinstance(node, Ps1IndexExpression):
-        return is_side_effect_free(node.object) and is_side_effect_free(node.index)
+        return is_side_effect_free(node.object, oracle) and is_side_effect_free(node.index, oracle)
     if isinstance(node, Ps1MemberAccess):
         # The member may itself be an expression that selects the property at runtime, and
         # `$x.$(Start-Process n)` runs a command to compute the name before anything is read. Only a
         # literal name is a plain string; the computed form is checked like any other operand, as
         # `Ps1IndexExpression` above already checks its index.
-        if not isinstance(node.member, str) and not is_side_effect_free(node.member):
+        if not isinstance(node.member, str) and not is_side_effect_free(node.member, oracle):
             return False
-        return is_side_effect_free(node.object)
+        return is_side_effect_free(node.object, oracle)
     if isinstance(node, Ps1InvokeMember):
-        if not _arguments_are_pure(node.arguments):
+        if not _arguments_are_pure(node.arguments, oracle):
             return False
         if node.access == Ps1AccessKind.STATIC:
             obj = node.object
@@ -658,7 +676,7 @@ def is_side_effect_free(node) -> bool:
                         return True
                     if key in _PURE_STATIC_METHODS:
                         return True
-        elif is_side_effect_free(node.object):
+        elif is_side_effect_free(node.object, oracle):
             member = node.member
             if isinstance(member, str) and member.lower() in _PURE_INSTANCE_METHODS:
                 return True
@@ -671,7 +689,7 @@ def is_side_effect_free(node) -> bool:
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
             if resolved is not None and resolved.lower() in _PURE_STATIC_TYPES:
-                return _arguments_are_pure(ctor_args)
+                return _arguments_are_pure(ctor_args, oracle)
             return False
         name = get_command_name(node)
         if name is None:
@@ -682,20 +700,20 @@ def is_side_effect_free(node) -> bool:
         # below unreachable for `Where-Object`, `Select-Object` and `Sort-Object`.
         if name not in _PURE_CMDLETS and name not in _PURE_PIPELINE_CMDLETS:
             return False
-        if not _command_arguments_are_pure(node):
+        if not _command_arguments_are_pure(node, oracle):
             return False
         if name in _PURE_PIPELINE_CMDLETS:
-            return _command_body_is_pure(node)
+            return _command_body_is_pure(node, oracle)
         return True
     if isinstance(node, Ps1Pipeline):
         return all(
             isinstance(el, Ps1PipelineElement)
             and not el.redirections
-            and is_side_effect_free(el.expression)
+            and is_side_effect_free(el.expression, oracle)
             for el in node.elements
         )
     if isinstance(node, Ps1ExpandableString):
-        return all(is_side_effect_free(p) for p in node.parts)
+        return all(is_side_effect_free(p, oracle) for p in node.parts)
     return False
 
 
@@ -769,7 +787,7 @@ def _is_null_discard(node) -> TypeGuard[Ps1AssignmentExpression]:
     )
 
 
-def statement_effect(stmt) -> StatementEffect:
+def statement_effect(stmt, oracle: TypeOracle = _EMPTY_ORACLE) -> StatementEffect:
     """
     Classify the observable effect of a standalone statement as a `StatementEffect`. This is the one
     shared authority the dead-code and junk-removal passes consult so they never disagree about
@@ -783,7 +801,7 @@ def statement_effect(stmt) -> StatementEffect:
     if expr is None:
         return StatementEffect.DISCARD
     if _is_void_cast(expr):
-        if is_side_effect_free(expr.operand):
+        if is_side_effect_free(expr.operand, oracle):
             return StatementEffect.DISCARD
         return StatementEffect.EFFECT
     if isinstance(expr, Ps1Pipeline):
@@ -792,24 +810,24 @@ def statement_effect(stmt) -> StatementEffect:
         # `is_side_effect_free(expr)` re-walks the same elements, and because a pipeline cmdlet
         # body re-enters here through `_command_body_is_pure`, that doubling compounds into 2^depth
         # work on the nested `... | ForEach-Object { ... } | Out-Null` shape.
-        prefix_is_pure = _pipeline_prefix_is_pure(expr)
+        prefix_is_pure = _pipeline_prefix_is_pure(expr, oracle)
         if prefix_is_pure and (
-            _pipeline_ends_with_out_null(expr)
-            or _pipeline_ends_with_void_foreach(expr)
+            _pipeline_ends_with_out_null(expr, oracle)
+            or _pipeline_ends_with_void_foreach(expr, oracle)
         ):
             return StatementEffect.DISCARD
         if _pipeline_ends_with_cmdlet(expr, _PURE_PIPELINE_CMDLETS):
             # A pure pipeline cmdlet (`... | Where-Object {...}`) yields a filtered value a caller
             # may consume, so it is kept even though it performs no side effect of its own.
             return StatementEffect.EFFECT
-        if prefix_is_pure and _pipeline_final_is_pure(expr):
+        if prefix_is_pure and _pipeline_final_is_pure(expr, oracle):
             return StatementEffect.OUTPUT
         return StatementEffect.EFFECT
     if _is_null_discard(expr):
-        if expr.value is not None and is_side_effect_free(expr.value):
+        if expr.value is not None and is_side_effect_free(expr.value, oracle):
             return StatementEffect.DISCARD
         return StatementEffect.EFFECT
-    if is_side_effect_free(expr):
+    if is_side_effect_free(expr, oracle):
         return StatementEffect.OUTPUT
     return StatementEffect.EFFECT
 
@@ -867,7 +885,10 @@ def _pipeline_sink_discards_its_input(pipeline: Ps1Pipeline) -> bool:
     )
 
 
-def _pipeline_ends_with_out_null(pipeline: Ps1Pipeline) -> bool:
+def _pipeline_ends_with_out_null(
+    pipeline: Ps1Pipeline,
+    oracle: TypeOracle = _EMPTY_ORACLE,
+) -> bool:
     """
     Whether a pipeline is terminated by an `Out-Null` that throws its input away *and* costs nothing
     to reach. The terminator's own arguments are part of the question:
@@ -875,19 +896,25 @@ def _pipeline_ends_with_out_null(pipeline: Ps1Pipeline) -> bool:
     value the pipeline never carried and is not a junk sink.
     """
     out_null = _terminal_command(pipeline, 'out-null')
-    return out_null is not None and _command_arguments_are_pure(out_null)
+    return out_null is not None and _command_arguments_are_pure(out_null, oracle)
 
 
-def _pipeline_prefix_is_pure(pipeline: Ps1Pipeline) -> bool:
+def _pipeline_prefix_is_pure(
+    pipeline: Ps1Pipeline,
+    oracle: TypeOracle = _EMPTY_ORACLE,
+) -> bool:
     for el in pipeline.elements[:-1]:
         if not isinstance(el, Ps1PipelineElement) or el.redirections:
             return False
-        if not is_side_effect_free(el.expression):
+        if not is_side_effect_free(el.expression, oracle):
             return False
     return True
 
 
-def _pipeline_final_is_pure(pipeline: Ps1Pipeline) -> bool:
+def _pipeline_final_is_pure(
+    pipeline: Ps1Pipeline,
+    oracle: TypeOracle = _EMPTY_ORACLE,
+) -> bool:
     """
     Whether the last element of a pipeline is side-effect free. Together with
     `_pipeline_prefix_is_pure` this is the purity of the whole pipeline, split so that a caller
@@ -899,11 +926,14 @@ def _pipeline_final_is_pure(pipeline: Ps1Pipeline) -> bool:
     return (
         isinstance(last, Ps1PipelineElement)
         and not last.redirections
-        and is_side_effect_free(last.expression)
+        and is_side_effect_free(last.expression, oracle)
     )
 
 
-def _pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
+def _pipeline_ends_with_void_foreach(
+    pipeline: Ps1Pipeline,
+    oracle: TypeOracle = _EMPTY_ORACLE,
+) -> bool:
     """
     Detect junk pipelines like `... | ForEach-Object { [Void]$_ }` or
     `... | ForEach-Object { $Null = $_ }` where the ForEach body explicitly discards all output.
@@ -922,13 +952,13 @@ def _pipeline_ends_with_void_foreach(pipeline: Ps1Pipeline) -> bool:
     the blocks they saw, and a body that was never shown is not among them.
     """
     foreach = _terminal_command(pipeline, 'foreach-object')
-    if foreach is None or not _command_arguments_are_pure(foreach):
+    if foreach is None or not _command_arguments_are_pure(foreach, oracle):
         return False
     if not _runs_only_visible_blocks(foreach):
         return False
     blocks = _scriptblock_arguments(foreach)
     return bool(blocks) and all(
-        statement_effect(stmt) is StatementEffect.DISCARD
+        statement_effect(stmt, oracle) is StatementEffect.DISCARD
         for block in blocks
         for stmt in block.body
     )
