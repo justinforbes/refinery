@@ -136,15 +136,15 @@ def _canonical_read_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, s
     for type_name, member in entries:
         type_key = _canonical_type_name(type_name)
         record = data.member_record(type_key, member)
-        if (
-            not isinstance(record, dict)
-            or record['source'] != 'reflection'
-            or record['kind'] not in ('property', 'field')
-        ):
+        gated = isinstance(record, dict) and record['source'] == 'reflection' and (
+            record['kind'] == 'property'
+            or (record['kind'] == 'field' and record.get('static') is True)
+        )
+        if not gated:
             raise ValueError(
                 F'the PowerShell pure-read allow-list names {type_name}.{member}, which the '
-                F'collected metadata does not carry as a reflection property or field; the data and '
-                F'the allow-list are out of step.'
+                F'collected metadata does not carry as a reflection property or static field; an '
+                F'instance field is pure without listing, so the data and allow-list are out of step.'
             )
         result.add((type_key, member.lower()))
     return frozenset(result)
