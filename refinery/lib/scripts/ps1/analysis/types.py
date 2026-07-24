@@ -111,6 +111,18 @@ def resolve_expression_type(
     return None
 
 
+#: Commands whose declared `[OutputType]` is a trustworthy *superset* of what they emit at runtime,
+#: not merely a lower bound. Most commands under-declare: one that forwards its input emits the
+#: input's type, which it never lists — `Get-Random -InputObject $procs` returns a `Process`,
+#: `Get-Content` on a non-filesystem provider returns whatever that provider yields — so trusting the
+#: declaration lets the member gate prove `(...).Path` pure over an incomplete candidate set and
+#: delete a live effect. Only commands that emit their own output and cannot pass input through
+#: belong here; a read on any other command's result stays unresolved, and therefore kept.
+_CLOSED_OUTPUT_CMDLETS = frozenset({
+    'get-date',
+})
+
+
 class TypeOracle:
     """
     The type view the effect layer consults to decide whether reading a member has a side effect. It
@@ -186,15 +198,22 @@ class TypeOracle:
     def _command_candidates(self, cmd: Ps1CommandInvocation) -> frozenset[str]:
         """
         The types a command's result could have: the constructed or queried type for the `New-Object`
-        and WMI forms the single-type ladder already knows, otherwise the output types the command
-        declares through an `[OutputType]` attribute. A command that declares none contributes
-        nothing — an undeclared output is unknown, not empty.
+        and WMI forms the single-type ladder already knows, otherwise the output types a command
+        declares through `[OutputType]` — but only for a command whose declaration is a trustworthy
+        *superset* of what it emits (`_CLOSED_OUTPUT_CMDLETS`). `[OutputType]` is a lower bound in
+        general: a command that forwards its input emits types it never declares, and trusting the
+        declaration there would let the member gate prove an effectful read pure over an incomplete
+        candidate set. Every other command contributes nothing, so a read on its result stays
+        unresolved and is kept.
         """
         name = get_command_name(cmd)
         if name is None:
             return frozenset()
-        if name.lower() in TYPE_ARG_COMMANDS:
+        lower = name.lower()
+        if lower in TYPE_ARG_COMMANDS:
             single = resolve_expression_type(cmd, self._variable_types)
             return frozenset() if single is None else frozenset({single})
+        if lower not in _CLOSED_OUTPUT_CMDLETS:
+            return frozenset()
         declared = command_output_types(name)
         return declared if declared is not None else frozenset()

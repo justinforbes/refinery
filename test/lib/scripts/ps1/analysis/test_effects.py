@@ -151,6 +151,15 @@ class TestPs1Purity(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertTrue(is_side_effect_free(self._expression(source)))
 
+    def test_a_quoted_member_name_reads_the_same_member_as_a_bare_one(self):
+        # A quoted member name (`.'Ticks'`) is one spelling of a literal member, not a computed one,
+        # so the gate resolves it to the same member and reaches the same verdict as the bare form:
+        # the sealed-value read is removable and the Extended Type System getter is kept. Only a name
+        # the engine computes at runtime (`.$(...)`) leaves the member unknown and stays impure.
+        self.assertTrue(is_side_effect_free(self._expression("(Get-Date).'Ticks'")))
+        self.assertFalse(is_side_effect_free(self._expression("(Get-Process).'Path'")))
+        self.assertFalse(is_side_effect_free(self._expression('(Get-Date).$($x)')))
+
     def test_a_member_read_is_kept_unless_the_getter_is_proven_inert(self):
         # The soundness core: a property getter may run code or throw, and a read is removed only when
         # it is proven not to. Returning the object's own purity — which this gate replaces — deleted
@@ -169,6 +178,29 @@ class TestPs1Purity(Ps1EffectsTest):
         ):
             with self.subTest(source):
                 self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_forwarding_cmdlet_result_read_is_kept(self):
+        # A cmdlet's [OutputType] is only a lower bound: one that forwards its input emits types it
+        # never declares. `Get-Random -InputObject $x` returns an element of $x -- a Process if $x
+        # holds processes -- so proving `.Path` pure over its declared numeric outputs would delete a
+        # live ETS getter. The oracle trusts a declaration only for a curated closed set, so a read on
+        # any forwarding command's result is left unresolved and kept.
+        for source in (
+            '(Get-Random -InputObject $procs).Path',
+            '(Get-Random -InputObject $x).ProcessName',
+            '(Get-Content $p).Length',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+
+    def test_a_static_field_read_is_gated_but_an_instance_field_is_not(self):
+        # Reading a static field runs the declaring type's static constructor on first touch, so it is
+        # not unconditionally pure the way an instance field is; it is removable only when the type or
+        # the read is granted. `Math.PI` and `Int32.MaxValue` are granted; `IO.Path`'s separator
+        # fields are not, and its cctor could do anything, so they are kept.
+        self.assertFalse(is_side_effect_free(self._expression('[IO.Path]::DirectorySeparatorChar')))
+        self.assertTrue(is_side_effect_free(self._expression('[Math]::PI')))
+        self.assertTrue(is_side_effect_free(self._expression('[Int]::MaxValue')))
 
     def test_a_hash_literal_evaluates_its_keys_as_well_as_its_values(self):
         for source in (

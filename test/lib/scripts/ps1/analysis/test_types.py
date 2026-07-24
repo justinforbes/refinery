@@ -35,11 +35,13 @@ class TestPs1TypeOracleCandidates(Ps1TypeOracleTest):
             frozenset({'system.datetime', 'system.string'}),
         )
 
-    def test_get_command_keeps_psobject_among_its_candidates(self):
-        # Get-Command declares PSObject among its outputs; a member read on it can never be proven
-        # pure, and that turns on PSObject being one of the candidates the gate must satisfy.
-        candidates = self.oracle.candidate_types(self._expr('Get-Command'))
-        self.assertIn('system.management.automation.psobject', candidates)
+    def test_an_untrusted_cmdlet_contributes_no_candidates(self):
+        # [OutputType] is only a lower bound: a command that forwards its input emits types it never
+        # declares, so the oracle trusts a declaration only for a curated closed set. Get-Random
+        # forwards -InputObject and Get-Command's declaration is not vouched for, so both are left
+        # untyped — which is what keeps a member read on their result (e.g. (Get-Command X).Name).
+        self.assertEqual(self.oracle.candidate_types(self._expr('Get-Random')), frozenset())
+        self.assertEqual(self.oracle.candidate_types(self._expr('Get-Command')), frozenset())
 
     def test_a_static_call_takes_the_return_its_overloads_agree_on(self):
         # GetCurrentProcess has one overload returning Process; the single-type ladder cannot type a

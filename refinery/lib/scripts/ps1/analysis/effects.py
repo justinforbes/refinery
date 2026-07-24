@@ -26,6 +26,7 @@ from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
     get_command_name,
+    get_member_name,
     get_named_blocks,
     get_param_block,
     is_builtin_variable,
@@ -121,14 +122,15 @@ def _canonical_method_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str,
 
 def _canonical_read_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, str]]:
     """
-    A frozenset of `(canonical type key, lowercased member)` property reads, each floored against the
-    data the way `_canonical_type_name` floors a type: the type must resolve, and the member must be
-    collected as a reflection property. A field needs no entry — reading a bare memory slot is pure
-    on any type — so this table is only for the getters that are pure despite having a getter. An
-    entry that names an Extended Type System member (which runs code) or a member the type no longer
-    carries fails the load rather than silently granting a read the data cannot vouch for. It keys on
-    the same canonical `FullName` as the invoke-side tables, so the per-member effect data a later
-    regeneration adds can replace it without rekeying.
+    A frozenset of `(canonical type key, lowercased member)` reads, each floored against the data the
+    way `_canonical_type_name` floors a type: the type must resolve, and the member must be collected
+    as a reflection property or field. An *instance* field needs no entry — reading a bare memory slot
+    runs no code — so this table is for a property (whose getter may run code) or a *static* field
+    (whose first read runs the declaring type's static constructor). An entry that names an Extended
+    Type System member (which runs code) or a member the type no longer carries fails the load rather
+    than silently granting a read the data cannot vouch for. It keys on the same canonical `FullName`
+    as the invoke-side tables, so the per-member effect data a later regeneration adds can replace it
+    without rekeying.
     """
     result: set[tuple[str, str]] = set()
     for type_name, member in entries:
@@ -137,12 +139,12 @@ def _canonical_read_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, s
         if (
             not isinstance(record, dict)
             or record['source'] != 'reflection'
-            or record['kind'] != 'property'
+            or record['kind'] not in ('property', 'field')
         ):
             raise ValueError(
                 F'the PowerShell pure-read allow-list names {type_name}.{member}, which the '
-                F'collected metadata does not carry as a reflection property; the data and the '
-                F'allow-list are out of step.'
+                F'collected metadata does not carry as a reflection property or field; the data and '
+                F'the allow-list are out of step.'
             )
         result.add((type_key, member.lower()))
     return frozenset(result)
@@ -255,17 +257,20 @@ _PURE_READ_TYPES = _canonical_type_set({
     'version',
 })
 
-#: Individual reflection reads granted purity on a reference type whose surface as a whole is not.
-#: Each `(type, member)` asserts that reading that one property runs no code and cannot throw —
-#: `Process.ProcessName` returns a cached string, where `Process.ExitCode` throws until the process
-#: exits and is deliberately absent. The floor confirms each names a collected reflection property or
+#: Individual reflection reads granted purity where the type's surface as a whole is not. Each
+#: `(type, member)` asserts that reading it runs no observable code and cannot throw — a property
+#: whose getter only returns cached data (`Process.ProcessName`, where `Process.ExitCode` throws
+#: until exit and is deliberately absent), or a static field whose declaring type's static
+#: constructor is inert (`Math.PI`). The floor confirms each names a collected reflection property or
 #: field, so an entry that turns into an Extended Type System member across a regeneration fails the
-#: load rather than vouching for a getter that now runs code.
+#: load rather than vouching for a member that now runs code.
 _PURE_READS = _canonical_read_set({
     ('diagnostics.process', 'processname'),
     ('environment', 'machinename'),
     ('environment', 'systemdirectory'),
     ('environment', 'username'),
+    ('math', 'e'),
+    ('math', 'pi'),
     ('threading.tasks.task', 'status'),
     ('threading.thread', 'currentthread'),
     ('threading.thread', 'managedthreadid'),
@@ -678,9 +683,11 @@ def _reflection_read_is_pure(type_key: str, member: str) -> bool:
     Whether reading `member` off a value of the single .NET type `type_key` runs no code and cannot
     throw. An uncollected type is never pure: nothing is known about its surface, so a getter that
     shells out cannot be ruled out. On a collected type an Extended Type System member runs arbitrary
-    PowerShell and is impure. A field is a bare memory slot with no getter, so reading one is pure
-    whatever the type. A property has a getter that may run code — `Process.Path` shells out — so it
-    is pure only when the whole read surface is granted (`_PURE_READ_TYPES`) or the specific read is
+    PowerShell and is impure. An *instance* field is a bare memory slot with no getter, so reading
+    one is pure whatever the type. A *static* field is not: its first read runs the declaring type's
+    static constructor (`beforefieldinit` relaxes the timing, not the fact), so it is gated like a
+    property — as is a property, whose getter may run code (`Process.Path` shells out). Both are pure
+    only when the whole read surface is granted (`_PURE_READ_TYPES`) or the specific read is
     (`_PURE_READS`). A member the type does not carry reads as `$null` and is pure — but only on a
     sealed value type, because a candidate that is an imprecise supertype would otherwise vouch for a
     read its runtime subtype does carry.
@@ -692,9 +699,9 @@ def _reflection_read_is_pure(type_key: str, member: str) -> bool:
         return type_key in _PURE_READ_TYPES
     if record['source'] == 'ets':
         return False
-    if record['kind'] == 'field':
+    if record['kind'] == 'field' and record.get('static') is False:
         return True
-    if record['kind'] == 'property':
+    if record['kind'] in ('field', 'property'):
         return type_key in _PURE_READ_TYPES or (type_key, member.lower()) in _PURE_READS
     return False
 
@@ -757,14 +764,16 @@ def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
         # A read is side-effect free only when the object is pure to evaluate *and* selecting the
         # member runs no code. Returning the object's own purity was the fail-open shape this gate
         # replaces: it deleted `(Get-Process).Path`, an Extended Type System getter that shells out,
-        # because the pipeline that produced the object was itself pure. A computed member name
-        # (`$x.$(...)`) leaves the selected member unknown, so a read through it can never be proven
-        # pure however pure the name expression is.
+        # because the pipeline that produced the object was itself pure. A literal member name —
+        # bare (`.Path`) or quoted (`.'Path'`) — names one member the gate can check; a computed
+        # member name (`$x.$(...)`) leaves the selected member unknown, so a read through it can
+        # never be proven pure however pure the name expression is.
         if not is_side_effect_free(node.object, oracle):
             return False
-        if not isinstance(node.member, str):
+        member = get_member_name(node.member)
+        if member is None:
             return False
-        return _member_read_is_pure(node.object, node.member, oracle)
+        return _member_read_is_pure(node.object, member, oracle)
     if isinstance(node, Ps1InvokeMember):
         if not _arguments_are_pure(node.arguments, oracle):
             return False
