@@ -57,7 +57,7 @@ if (-not $SeedFile) { $SeedFile = Join-Path $ScriptDir 'pwsh-seeds.json' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $ScriptDir 'data' }
 
 $SchemaVersion = 1
-$GeneratorVersion = 1
+$GeneratorVersion = 2
 $JsonDepth = 64
 
 $Problems = [System.Collections.Generic.List[object]]::new()
@@ -389,6 +389,8 @@ function ConvertTo-TypeRecord {
     return [ordered]@{
         kind         = Get-TypeKind $Type
         base         = Get-TypeText $Type.BaseType
+        sealed       = [bool]$Type.IsSealed
+        abstract     = [bool]$Type.IsAbstract
         interfaces   = @($Type.GetInterfaces() | ForEach-Object { Get-TypeText $_ } | Sort-Object)
         enum_values  = $enumValues
         seeded       = $Seeded

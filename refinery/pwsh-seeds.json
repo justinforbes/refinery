@@ -22,6 +22,9 @@
   ],
   "types": {
     "required": [
+      "Microsoft.PowerShell.Commands.GenericMeasureInfo",
+      "Microsoft.PowerShell.Commands.GenericObjectMeasureInfo",
+      "Microsoft.PowerShell.Commands.TextMeasureInfo",
       "System.Array",
       "System.BitConverter",
       "System.Char",
@@ -53,6 +56,8 @@
       "System.Void"
     ],
     "optional": [
+      "Microsoft.PowerShell.Commands.ByteCollection",
+      "Microsoft.PowerShell.Commands.MemberDefinition",
       "Microsoft.Win32.Registry",
       "Microsoft.Win32.RegistryHive",
       "Microsoft.Win32.RegistryKey",
@@ -78,6 +83,7 @@
       "System.DateTimeOffset",
       "System.DayOfWeek",
       "System.Diagnostics.EventLog",
+      "System.Diagnostics.FileVersionInfo",
       "System.Diagnostics.ProcessStartInfo",
       "System.Diagnostics.ProcessWindowStyle",
       "System.Diagnostics.Stopwatch",
@@ -124,10 +130,13 @@
       "System.Int16",
       "System.IntPtr",
       "System.Management.Automation.AliasInfo",
+      "System.Management.Automation.ApplicationInfo",
       "System.Management.Automation.CmdletInfo",
       "System.Management.Automation.CommandInfo",
       "System.Management.Automation.CommandInvocationIntrinsics",
       "System.Management.Automation.EngineIntrinsics",
+      "System.Management.Automation.ExternalScriptInfo",
+      "System.Management.Automation.FilterInfo",
       "System.Management.Automation.FunctionInfo",
       "System.Management.Automation.Host.PSHost",
       "System.Management.Automation.Language.Parser",
@@ -148,6 +157,7 @@
       "System.Management.Automation.ScriptBlock",
       "System.Management.Automation.SessionState",
       "System.Management.Automation.SwitchParameter",
+      "System.Management.Automation.WorkflowInfo",
       "System.Management.ManagementObject",
       "System.Management.ManagementObjectSearcher",
       "System.Net.CredentialCache",
