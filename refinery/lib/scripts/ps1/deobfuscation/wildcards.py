@@ -14,6 +14,7 @@ import re
 from fnmatch import translate as fnmatch_translate
 from typing import Iterable
 
+from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
 from refinery.lib.scripts.ps1.ast import (
     extract_first_positional_string,
     extract_positional_values,
@@ -30,10 +31,7 @@ from refinery.lib.scripts.ps1.data import (
     TYPE_MEMBERS,
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
-from refinery.lib.scripts.ps1.deobfuscation.typenames import (
-    VariableTypeAwareTransformer,
-    resolve_expression_type,
-)
+from refinery.lib.scripts.ps1.deobfuscation.typenames import VariableTypeAwareTransformer
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AssignmentExpression,
