@@ -4,13 +4,9 @@ Inline command aliases defined via Set-Alias / New-Alias.
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer
-from refinery.lib.scripts.ps1.ast import get_command_name
+from refinery.lib.scripts.ps1.ast import get_command_name, string_value
 from refinery.lib.scripts.ps1.data import KNOWN_CMDLETS
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    make_string_literal,
-    set_command_name,
-    string_value,
-)
+from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal, set_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandArgumentKind,

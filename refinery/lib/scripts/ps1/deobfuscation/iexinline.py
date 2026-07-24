@@ -13,12 +13,16 @@ import gzip
 import zlib
 
 from refinery.lib.scripts import Expression, Transformer, _replace_in_parent
-from refinery.lib.scripts.ps1.ast import extract_new_object, get_body, normalize_dotnet_type_name
+from refinery.lib.scripts.ps1.ast import (
+    extract_new_object,
+    get_body,
+    normalize_dotnet_type_name,
+    string_value,
+)
 from refinery.lib.scripts.ps1.data import ENCODING_MAP
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     collect_byte_array,
     extract_foreach_scriptblock,
-    string_value,
 )
 from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,

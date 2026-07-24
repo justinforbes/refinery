@@ -20,14 +20,9 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     output_observed,
     pruning_erases_body,
 )
-from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable
+from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    is_truthy,
-    switch_matches,
-    unwrap_integer,
-    unwrap_parens,
-)
+from refinery.lib.scripts.ps1.deobfuscation.helpers import is_truthy, switch_matches, unwrap_integer
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1BinaryExpression,

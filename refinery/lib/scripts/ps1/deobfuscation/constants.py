@@ -15,13 +15,17 @@ from refinery.lib.scripts import (
     _replace_in_parent,
 )
 from refinery.lib.scripts.ps1.analysis import is_assignment_write_target
-from refinery.lib.scripts.ps1.ast import assignment_target_variables, get_body, is_builtin_variable
+from refinery.lib.scripts.ps1.ast import (
+    assignment_target_variables,
+    get_body,
+    is_builtin_variable,
+    unwrap_parens,
+)
 from refinery.lib.scripts.ps1.data import PS1_KNOWN_VARIABLES
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     is_array_reverse_call,
     iter_variable_mutations,
     make_string_literal,
-    unwrap_parens,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.model import (

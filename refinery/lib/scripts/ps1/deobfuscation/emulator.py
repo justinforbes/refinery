@@ -18,8 +18,10 @@ if TYPE_CHECKING:
 from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.ast import (
     get_command_name,
+    get_member_name,
     normalize_dotnet_type_name,
     normalize_type_expression,
+    string_value,
 )
 from refinery.lib.scripts.ps1.data import (
     COMPARISON_OPS,
@@ -33,13 +35,11 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
-    get_member_name,
     make_string_literal,
     ps_divide,
     ps_modulo,
     ps_shift_left,
     ps_shift_right,
-    string_value,
     switch_matches,
     unwrap_to_array_literal,
 )

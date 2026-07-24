@@ -9,7 +9,7 @@ import re
 
 from typing import Iterator
 
-from refinery.lib.scripts.ps1.ast import get_body
+from refinery.lib.scripts.ps1.ast import get_body, get_member_name, string_value, unwrap_parens
 from refinery.lib.scripts.ps1.data import (
     COMPARISON_OPS,
     ENCODING_MAP,
@@ -27,7 +27,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
-    get_member_name,
     is_array_reverse_call,
     is_pipeline_item,
     is_static_type_call,
@@ -37,9 +36,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     ps_modulo,
     ps_shift_left,
     ps_shift_right,
-    string_value,
     unwrap_integer,
-    unwrap_parens,
     unwrap_single_paren,
     unwrap_to_array_literal,
 )

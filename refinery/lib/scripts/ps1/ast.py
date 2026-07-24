@@ -11,6 +11,8 @@ layer instead.
 """
 from __future__ import annotations
 
+import io
+
 from typing import TypeGuard
 
 from refinery.lib.scripts import Block, Node
@@ -24,6 +26,9 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
+    Ps1ExpandableString,
+    Ps1ExpressionStatement,
+    Ps1HereString,
     Ps1ParamBlock,
     Ps1ParenExpression,
     Ps1ScopeModifier,
@@ -129,6 +134,81 @@ def extract_new_object(cmd: Ps1CommandInvocation) -> tuple[str, list[Expression]
         else:
             ctor_args = [second]
     return type_name, ctor_args
+
+
+def string_value(node: Node | None) -> str | None:
+    if isinstance(node, Ps1StringLiteral):
+        return node.value
+    if isinstance(node, Ps1HereString):
+        return node.value
+    if isinstance(node, Ps1ExpandableString):
+        out = io.StringIO()
+        for p in node.parts:
+            if not isinstance(p, Ps1StringLiteral):
+                break
+            out.write(p.value)
+        else:
+            return out.getvalue()
+    if isinstance(node, Ps1SubExpression) and len(node.body) == 1:
+        stmt = node.body[0]
+        if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
+            return string_value(stmt.expression)
+    return None
+
+
+def unwrap_parens(node: Node) -> Node:
+    """
+    Unwrap nested `refinery.lib.scripts.ps1.model.Ps1ParenExpression` wrappers and single-statement
+    `refinery.lib.scripts.ps1.model.Ps1SubExpression` wrappers, stopping at an empty wrapper.
+    """
+    while True:
+        if isinstance(node, Ps1ParenExpression) and node.expression is not None:
+            node = node.expression
+            continue
+        if isinstance(node, Ps1SubExpression) and len(node.body) == 1:
+            stmt = node.body[0]
+            if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
+                node = stmt.expression
+                continue
+        break
+    return node
+
+
+def get_member_name(member: str | Expression) -> str | None:
+    """
+    Extract a plain member name string from a member that may be a string
+    or a string literal expression.
+    """
+    if isinstance(member, str):
+        return member
+    if isinstance(member, Ps1StringLiteral):
+        return member.value
+    return None
+
+
+def extract_positional_values(
+    cmd: Ps1CommandInvocation,
+) -> list[Expression]:
+    """
+    Collect all positional argument values from a command invocation.
+    """
+    result: list[Expression] = []
+    for arg in cmd.arguments:
+        if isinstance(arg, Ps1CommandArgument):
+            if arg.kind == Ps1CommandArgumentKind.POSITIONAL and arg.value is not None:
+                result.append(arg.value)
+        elif isinstance(arg, Expression):
+            result.append(arg)
+    return result
+
+
+def extract_first_positional_string(
+    cmd: Ps1CommandInvocation,
+) -> str | None:
+    values = extract_positional_values(cmd)
+    if values:
+        return string_value(values[0])
+    return None
 
 
 def normalize_type_expression(name: str) -> str:

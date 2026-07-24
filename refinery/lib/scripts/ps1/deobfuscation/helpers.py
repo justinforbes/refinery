@@ -4,7 +4,6 @@ Shared utilities for PowerShell deobfuscation transforms.
 from __future__ import annotations
 
 import enum
-import io
 import math
 import re
 
@@ -13,9 +12,12 @@ from typing import Callable, Generator, NamedTuple, TypeGuard, TypeVar
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
+    get_member_name,
     is_builtin_variable,
     normalize_type_expression,
+    string_value,
     unwrap_assignment_target,
+    unwrap_parens,
 )
 from refinery.lib.scripts.ps1.data import FOREACH_ALIASES, FORMAT_PATTERN, is_type
 from refinery.lib.scripts.ps1.model import (
@@ -27,7 +29,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
-    Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1ForEachLoop,
     Ps1FunctionDefinition,
@@ -68,26 +69,6 @@ class VariableMutation(NamedTuple):
 
 BACKTICK_ENCODE = {v: F'`{k}' for k, v in BACKTICK_ESCAPE.items()}
 NONPRINT_CONTROL = frozenset(BACKTICK_ENCODE) - {'\n'}
-
-
-def string_value(node: Node | None) -> str | None:
-    if isinstance(node, Ps1StringLiteral):
-        return node.value
-    if isinstance(node, Ps1HereString):
-        return node.value
-    if isinstance(node, Ps1ExpandableString):
-        out = io.StringIO()
-        for p in node.parts:
-            if not isinstance(p, Ps1StringLiteral):
-                break
-            out.write(p.value)
-        else:
-            return out.getvalue()
-    if isinstance(node, Ps1SubExpression) and len(node.body) == 1:
-        stmt = node.body[0]
-        if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
-            return string_value(stmt.expression)
-    return None
 
 
 def make_string_literal(value: str) -> Ps1StringLiteral | Ps1HereString:
@@ -197,31 +178,6 @@ def unwrap_single_paren(node: Expression) -> Expression:
     return node
 
 
-def extract_positional_values(
-    cmd: Ps1CommandInvocation,
-) -> list[Expression]:
-    """
-    Collect all positional argument values from a command invocation.
-    """
-    result: list[Expression] = []
-    for arg in cmd.arguments:
-        if isinstance(arg, Ps1CommandArgument):
-            if arg.kind == Ps1CommandArgumentKind.POSITIONAL and arg.value is not None:
-                result.append(arg.value)
-        elif isinstance(arg, Expression):
-            result.append(arg)
-    return result
-
-
-def extract_first_positional_string(
-    cmd: Ps1CommandInvocation,
-) -> str | None:
-    values = extract_positional_values(cmd)
-    if values:
-        return string_value(values[0])
-    return None
-
-
 def inside_value_producing_context(node) -> bool:
     """
     Return `True` when `node` is or is nested inside a context whose statement bodies produce
@@ -243,24 +199,6 @@ def inside_value_producing_context(node) -> bool:
     return False
 
 
-def unwrap_parens(node: Node) -> Node:
-    """
-    Unwrap nested `refinery.lib.scripts.ps1.model.Ps1ParenExpression` wrappers and single-statement
-    `refinery.lib.scripts.ps1.model.Ps1SubExpression` wrappers, stopping at an empty wrapper.
-    """
-    while True:
-        if isinstance(node, Ps1ParenExpression) and node.expression is not None:
-            node = node.expression
-            continue
-        if isinstance(node, Ps1SubExpression) and len(node.body) == 1:
-            stmt = node.body[0]
-            if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
-                node = stmt.expression
-                continue
-        break
-    return node
-
-
 def unwrap_to_array_literal(node: Node) -> Ps1ArrayLiteral | None:
     """
     Unwrap parentheses and array expressions to find an inner
@@ -273,18 +211,6 @@ def unwrap_to_array_literal(node: Node) -> Ps1ArrayLiteral | None:
         stmt = node.body[0]
         if isinstance(stmt, Ps1ExpressionStatement) and isinstance(stmt.expression, Ps1ArrayLiteral):
             return stmt.expression
-    return None
-
-
-def get_member_name(member: str | Expression) -> str | None:
-    """
-    Extract a plain member name string from a member that may be a string
-    or a string literal expression.
-    """
-    if isinstance(member, str):
-        return member
-    if isinstance(member, Ps1StringLiteral):
-        return member.value
     return None
 
 

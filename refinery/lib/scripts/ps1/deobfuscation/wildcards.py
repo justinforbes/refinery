@@ -14,7 +14,14 @@ import re
 from fnmatch import translate as fnmatch_translate
 from typing import Iterable
 
-from refinery.lib.scripts.ps1.ast import get_command_name
+from refinery.lib.scripts.ps1.ast import (
+    extract_first_positional_string,
+    extract_positional_values,
+    get_command_name,
+    get_member_name,
+    string_value,
+    unwrap_parens,
+)
 from refinery.lib.scripts.ps1.data import (
     GET_COMMAND_ALIASES,
     GET_MEMBER_ALIASES,
@@ -22,14 +29,7 @@ from refinery.lib.scripts.ps1.data import (
     PS1_KNOWN_VARIABLES,
     TYPE_MEMBERS,
 )
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    extract_first_positional_string,
-    extract_positional_values,
-    get_member_name,
-    make_string_literal,
-    string_value,
-    unwrap_parens,
-)
+from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
 from refinery.lib.scripts.ps1.deobfuscation.typenames import (
     VariableTypeAwareTransformer,
     resolve_expression_type,
