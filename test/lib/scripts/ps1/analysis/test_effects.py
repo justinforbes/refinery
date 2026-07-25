@@ -470,6 +470,36 @@ class TestPs1MemberGateWorld(Ps1EffectsTest):
                 self.assertFalse(self._pure(self._expression(source)))
 
 
+class TestPs1CommandShadowing(Ps1EffectsTest):
+    """
+    A command the script redefines as a function is not the built-in the metadata describes, so —
+    even under a closed type world — the oracle must not type its result and the gate must not grant
+    its purity or read it as a discarding sink. A command the script does not redefine is unaffected.
+    """
+
+    @staticmethod
+    def _shadowing(*names: str) -> TypeOracle:
+        return TypeOracle(world=Ps1TypeWorld(True, frozenset(names)))
+
+    def test_a_shadowed_commands_read_and_call_are_impure(self):
+        oracle = self._shadowing('get-date', 'new-object')
+        for source in ('(Get-Date).Ticks', 'Get-Date', 'New-Object System.Version'):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source), oracle))
+
+    def test_a_shadowed_pipeline_sink_does_not_discard(self):
+        oracle = self._shadowing('out-null', 'foreach-object')
+        for source in ('1 | Out-Null', '1 | ForEach-Object { [Void]$_ }'):
+            with self.subTest(source):
+                self.assertIs(
+                    statement_effect(self._statement(source), oracle), StatementEffect.EFFECT)
+
+    def test_an_unshadowed_command_stays_pure_beside_a_shadowed_one(self):
+        oracle = self._shadowing('get-date')
+        self.assertTrue(is_side_effect_free(self._expression('Get-ChildItem'), oracle))
+        self.assertTrue(is_side_effect_free(self._expression('New-Object System.Version'), oracle))
+
+
 class TestPs1StatementEffect(Ps1EffectsTest):
 
     def test_a_statement_that_only_yields_a_value_is_output(self):

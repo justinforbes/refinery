@@ -12,6 +12,7 @@ from refinery.lib.scripts import (
     set_body,
     set_child_list,
 )
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import (
     BodyRole,
     body_role,
@@ -49,13 +50,16 @@ from refinery.lib.scripts.ps1.model import (
 _PATH_EXTENSIONS = frozenset({'.exe', '.ps1', '.cmd', '.bat', '.com', '.vbs', '.msi'})
 
 
-def _is_unresolvable_command(expr: Expression) -> bool:
+def _is_unresolvable_command(expr: Expression, shadowed: frozenset[str] = frozenset()) -> bool:
     """
     Return `True` when `expr` is a command invocation of an unknown bareword whose arguments are all
     side-effect-free. Such an invocation will throw `CommandNotFoundException` at runtime — no side
     effect precedes the throw, and if it somehow resolved, the discarded result is harmless. This
     predicate is intentionally narrow: only bareword string-literal names that do not match any
     known cmdlet or alias and do not look like a filesystem path.
+
+    A name in `shadowed` — one the script defines as a function/filter — resolves to that definition
+    and runs it, so it does not throw and is not harmless; it is treated as resolvable.
     """
     if not isinstance(expr, Ps1CommandInvocation):
         return False
@@ -63,7 +67,7 @@ def _is_unresolvable_command(expr: Expression) -> bool:
         return False
     name = expr.name.value
     name_lower = name.lower()
-    if name_lower in KNOWN_CMDLETS:
+    if name_lower in KNOWN_CMDLETS or name_lower in shadowed:
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
         return False
@@ -78,11 +82,13 @@ def _is_unresolvable_command(expr: Expression) -> bool:
     return True
 
 
-def _try_body_is_harmless(body: list[Statement]) -> bool:
+def _try_body_is_harmless(body: list[Statement], shadowed: frozenset[str] = frozenset()) -> bool:
     """
     Return `True` when every statement in a try body is guaranteed to produce no observable side
     effects whether it succeeds or throws. This covers pure expressions (value discarded) and
     unresolvable bareword commands (throw `CommandNotFoundException` with no preceding side effect).
+    A bareword the script redefines as a function is not unresolvable, so `shadowed` is threaded to
+    the resolvability check.
     """
     for stmt in body:
         if not isinstance(stmt, Ps1ExpressionStatement):
@@ -91,7 +97,7 @@ def _try_body_is_harmless(body: list[Statement]) -> bool:
             continue
         if is_side_effect_free(stmt.expression):
             continue
-        if _is_unresolvable_command(stmt.expression):
+        if _is_unresolvable_command(stmt.expression, shadowed):
             continue
         return False
     return True
@@ -303,7 +309,12 @@ class Ps1DeadCodeElimination(Transformer):
     on constant values.
     """
 
+    def __init__(self):
+        super().__init__()
+        self._shadowed: frozenset[str] = frozenset()
+
     def visit(self, node: Node):
+        self._shadowed = model_cache(self, node).closed_world.shadowed_commands
         for parent in list(node.walk()):
             role = body_role(parent)
             if role is None or role is BodyRole.OPAQUE:
@@ -480,8 +491,7 @@ class Ps1DeadCodeElimination(Transformer):
             return body[0]
         return []
 
-    @staticmethod
-    def _prune_try(node: Ps1TryCatchFinally) -> list[Statement] | None:
+    def _prune_try(self, node: Ps1TryCatchFinally) -> list[Statement] | None:
         """
         Resolve a `try`/`catch`/`finally` whose `try` body cannot produce observable side effects.
         An empty (or absent) `try` block raises nothing, so every `catch` clause is unreachable and
@@ -496,7 +506,7 @@ class Ps1DeadCodeElimination(Transformer):
         if not try_body:
             finally_body = node.finally_block.body if node.finally_block is not None else []
             return list(finally_body)
-        if not _try_body_is_harmless(try_body):
+        if not _try_body_is_harmless(try_body, self._shadowed):
             return None
         for clause in node.catch_clauses:
             if clause.body is not None and clause.body.body:

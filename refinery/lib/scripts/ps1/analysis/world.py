@@ -43,6 +43,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1CommandArgument,
     Ps1CommandInvocation,
+    Ps1FunctionDefinition,
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1ScopeModifier,
@@ -93,12 +94,16 @@ _IDENTITY_PROVIDERS = ('alias:', 'function:')
 class Ps1TypeWorld:
     """
     The verdict of `build_closed_world`: whether the running script leaves the type system and
-    command table intact. Held in a `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot and
-    consulted through `refinery.lib.scripts.ps1.analysis.types.TypeOracle.world_closed_at`.
+    command table intact. It carries both command-table facts the purity gate needs — the
+    whole-world verdict (`world_closed_at`) and the set of command names the script redefines
+    (`command_shadowed`) — so the two cannot drift apart. Held in a
+    `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot and consulted through
+    `refinery.lib.scripts.ps1.analysis.types.TypeOracle`.
     """
 
-    def __init__(self, closed: bool):
+    def __init__(self, closed: bool, shadowed: frozenset[str] = frozenset()):
         self._closed = closed
+        self._shadowed = shadowed
 
     def world_closed_at(self, node) -> bool:
         """
@@ -109,17 +114,58 @@ class Ps1TypeWorld:
         """
         return self._closed
 
+    def command_shadowed(self, name: str) -> bool:
+        """
+        Whether `name` is a command the script redefines with a script-local `function`/`filter`
+        or a `function:`/`alias:`-scope assignment, so the collected metadata no longer describes
+        what the name runs. The analysis must not trust such a name for typing or purity. The set is
+        whole-script and conservative — an inner-scope redefinition distrusts the name everywhere,
+        which only keeps more — mirroring `world_closed_at`'s whole-script granularity.
+        """
+        return name.lower() in self._shadowed
+
+    @property
+    def shadowed_commands(self) -> frozenset[str]:
+        """
+        The lowercased command names the script redefines, for a consumer that tests membership
+        against a set of its own rather than one name at a time — dead-code elimination, deciding
+        a bareword resolves to a script function rather than throwing `CommandNotFoundException`.
+        """
+        return self._shadowed
+
 
 def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
     """
-    Walk the whole tree once and report whether any node opens the world. A single opener anywhere
-    closes off the verdict, because a type-system mutation is global and retroactive: it changes
-    what a read means regardless of where in the script it sits.
+    Walk the whole tree once, computing both command-table facts: whether any node opens the world
+    (a single opener anywhere is global and retroactive, so it closes off the verdict) and the set
+    of command names the script redefines. The walk cannot short-circuit on the first opener
+    because the shadow set needs every redefinition, wherever it sits.
     """
+    closed = True
+    shadowed: set[str] = set()
     for node in root.walk():
         if _opens_world(node):
-            return Ps1TypeWorld(False)
-    return Ps1TypeWorld(True)
+            closed = False
+        name = _shadowed_command(node)
+        if name is not None:
+            shadowed.add(name)
+    return Ps1TypeWorld(closed, frozenset(shadowed))
+
+
+def _shadowed_command(node) -> str | None:
+    """
+    The lowercased command name `node` redefines, or `None`. A `function`/`filter` definition names
+    the command directly; an assignment into the `function:`/`alias:` variable namespace
+    (`${function:Get-Date} = { ... }`) names it through the same identity scopes the world openers
+    recognize.
+    """
+    if isinstance(node, Ps1FunctionDefinition):
+        return node.name.lower()
+    if isinstance(node, Ps1AssignmentExpression):
+        target = unwrap_assignment_target(node.target)
+        if isinstance(target, Ps1Variable) and target.scope in _IDENTITY_SCOPES:
+            return target.name.lower()
+    return None
 
 
 def _opens_world(node) -> bool:

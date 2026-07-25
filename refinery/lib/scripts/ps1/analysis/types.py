@@ -141,9 +141,11 @@ class TypeOracle:
     return of a static method call and the declared outputs of a cmdlet. A populated oracle only adds
     the reads whose object is a typed variable or a pipeline item.
 
-    It also carries the closed-world verdict the member gate consults through `world_closed_at`:
-    whether the script's type system and command table are unmutated, which a present-member purity
-    grant requires and the empty oracle, carrying no world, denies.
+    It also carries the two command-table facts the gate consults: `world_closed_at`, whether the
+    script's type system is unmutated (a present-member purity grant requires it), and `is_shadowed`,
+    whether the script redefines a command name so the metadata no longer describes it (a name-trust
+    grant must decline it). The empty oracle carries no world and denies the first while trusting the
+    second, matching the pre-existing behaviour on the un-wired call paths.
     """
 
     def __init__(
@@ -164,6 +166,17 @@ class TypeOracle:
         fail-closed default that holds on every un-wired call path.
         """
         return self._world is not None and self._world.world_closed_at(node)
+
+    def is_shadowed(self, name: str) -> bool:
+        """
+        Whether `name` is a command the script redefines with a script-local function/filter or an
+        identity-scope assignment, so the collected metadata no longer describes what it runs. Every
+        site that trusts a command name — for typing or for purity — asks this before acting on the
+        name. Delegates to the `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` a model has
+        supplied; the empty oracle carries none and answers `False`, keeping the pre-existing
+        name-trust behaviour on the un-wired call paths.
+        """
+        return self._world is not None and self._world.command_shadowed(name)
 
     def resolve(self, expr: Expression) -> str | None:
         """
@@ -235,6 +248,8 @@ class TypeOracle:
         if name is None:
             return frozenset()
         lower = name.lower()
+        if self.is_shadowed(lower):
+            return frozenset()
         if lower in TYPE_ARG_COMMANDS:
             single = resolve_expression_type(cmd, self._variable_types)
             return frozenset() if single is None else frozenset({single})

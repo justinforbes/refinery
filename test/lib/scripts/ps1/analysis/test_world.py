@@ -108,3 +108,26 @@ class TestPs1WorldClosed(Ps1TypeWorldTest):
         ):
             with self.subTest(source):
                 self.assertTrue(self._closed(source))
+
+
+class TestPs1ShadowedCommands(Ps1TypeWorldTest):
+    """
+    The shadow set records which command names the script redefines, so the analysis stops trusting
+    the metadata for them. It is separate from the closed/open verdict — defining a function does not
+    open the world (a benign helper would neuter every grant), it only distrusts that one name.
+    """
+
+    def test_a_redefinition_shadows_its_name(self):
+        world = build_closed_world(Ps1Parser(
+            "function Get-Date { 1 }\n"
+            "filter Out-Null { $_ }\n"
+            "${function:New-Object} = { 2 }\n"
+            "$alias:gc = 'Get-Content'\n"
+        ).parse())
+        for name in ('get-date', 'out-null', 'new-object', 'gc'):
+            with self.subTest(name):
+                self.assertTrue(world.command_shadowed(name))
+        self.assertFalse(world.command_shadowed('get-childitem'))
+
+    def test_a_defined_function_does_not_open_the_world(self):
+        self.assertTrue(self._closed('function Get-Date { 1 }\n$x = 2'))

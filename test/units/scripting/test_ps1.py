@@ -222,6 +222,40 @@ class TestPs1ClosedWorld(TestUnitBase):
         self.assertIn('Reverse', self._deob(b"iex $x\n" + anchor))
 
 
+class TestPs1CommandRedefinition(TestUnitBase):
+    """
+    A script-local `function`/`filter` (or a `${function:X}=` assignment) shadows a same-named
+    command, so it no longer runs what the metadata describes. The analysis must not delete a read,
+    discard, or pipeline sink of a shadowed command as if it were the inert built-in — every form
+    below runs a real `Start-Process` through the shadowing definition and must survive.
+    """
+
+    def _deob(self, source: bytes) -> str:
+        return source | self.load() | str
+
+    def test_a_shadowed_commands_effect_survives_every_deletion_form(self):
+        anchor = b"\nWrite-Output 'keep'\n"
+        forms = {
+            'member-read': b"function Get-Date { Start-Process calc }\n$Null = (Get-Date).Ticks",
+            'bare-discard': b"function Get-Date { Start-Process calc }\n$Null = Get-Date",
+            'out-null-sink': b"function Out-Null { Start-Process calc }\n1 | Out-Null",
+            'foreach-void-sink': b"function ForEach-Object { Start-Process calc }\n1 | ForEach-Object { [Void]$_ }",
+            'unresolvable-try': b"function Zzz { Start-Process calc }\ntry { Zzz } catch {}",
+            'function-scope-assign': b"${function:Get-Date} = { Start-Process calc }\n$Null = Get-Date",
+            'new-object': b"function New-Object { Start-Process calc }\n$Null = New-Object Version",
+        }
+        for name, body in forms.items():
+            with self.subTest(name):
+                self.assertIn('Start-Process', self._deob(body + anchor))
+
+    def test_an_unshadowed_pure_read_is_still_deleted(self):
+        # The guard is name-keyed, not blanket: a script that defines an unrelated function still has
+        # its genuinely-pure junk removed.
+        out = self._deob(
+            b"function Helper { 'x' }\n$Null = (Get-Date).Ticks\nWrite-Output 'keep'\n")
+        self.assertNotIn('Get-Date', out)
+
+
 class TestPs1RealWorldLarge(TestUnitBase):
 
     def test_real_world_01(self):

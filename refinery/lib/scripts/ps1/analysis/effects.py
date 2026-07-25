@@ -850,6 +850,8 @@ def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
             return False
         new_object = extract_new_object(node)
         if new_object is not None:
+            if oracle.is_shadowed('new-object'):
+                return False
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
             if resolved is not None and resolved.lower() in _PURE_STATIC_METHOD_TYPES:
@@ -859,6 +861,10 @@ def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
         if name is None:
             return False
         name = name.lower()
+        # A command the script redefines as a function no longer runs what the metadata describes, so
+        # its purity is not the built-in's; the grant is withheld before the name is trusted.
+        if oracle.is_shadowed(name):
+            return False
         # The pipeline set is checked through the same gate rather than after the plain one: three
         # of its four members are in both, so testing the plain set first would make the body check
         # below unreachable for `Where-Object`, `Select-Object` and `Sort-Object`.
@@ -1060,7 +1066,9 @@ def _pipeline_ends_with_out_null(
     value the pipeline never carried and is not a junk sink.
     """
     out_null = _terminal_command(pipeline, 'out-null')
-    return out_null is not None and _command_arguments_are_pure(out_null, oracle)
+    if out_null is None or oracle.is_shadowed('out-null'):
+        return False
+    return _command_arguments_are_pure(out_null, oracle)
 
 
 def _pipeline_prefix_is_pure(
@@ -1116,7 +1124,9 @@ def _pipeline_ends_with_void_foreach(
     the blocks they saw, and a body that was never shown is not among them.
     """
     foreach = _terminal_command(pipeline, 'foreach-object')
-    if foreach is None or not _command_arguments_are_pure(foreach, oracle):
+    if foreach is None or oracle.is_shadowed('foreach-object'):
+        return False
+    if not _command_arguments_are_pure(foreach, oracle):
         return False
     if not _runs_only_visible_blocks(foreach):
         return False
