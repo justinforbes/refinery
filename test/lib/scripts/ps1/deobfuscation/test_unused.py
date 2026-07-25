@@ -428,6 +428,17 @@ class TestPs1InertFunctionRemoval(TestPs1):
             "function j { $Null = 1 }\n$x = j\nWrite-Host 'keep'", Ps1JunkStatementRemoval)
         self.assertEqual(result, "function j {}\n$x = j\nWrite-Host 'keep'")
 
+    def test_a_scope_qualified_definition_is_reached_by_an_unqualified_call(self):
+        # `function global:f` defines what a later bare `f` runs. Keying the definition under the
+        # qualified spelling left the callgraph unable to enter the body, so nothing inside it
+        # counted as reachable and the definition itself read as never called.
+        for definition in ('global:f', 'script:f', 'local:f', 'private:f'):
+            with self.subTest(definition):
+                result = self._apply(
+                    F"function {definition} {{ Start-Process calc }}\nf\nWrite-Host 'keep'",
+                    Ps1JunkStatementRemoval)
+                self.assertIn('Start-Process', result)
+
     def test_param_block_function_module_preserved(self):
         result = self._apply(cleandoc("""
             function Ge {

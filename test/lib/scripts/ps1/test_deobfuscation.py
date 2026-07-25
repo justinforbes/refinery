@@ -370,6 +370,9 @@ class TestPs1CommandRedefinition(TestPs1):
     command, so it no longer runs what the metadata describes. The analysis must not delete a read,
     discard, or pipeline sink of a shadowed command as if it were the inert built-in — every form
     below runs a real `Start-Process` through the shadowing definition and must survive.
+
+    A scope qualifier selects which scope table the definition lands in and is not part of the name,
+    so every qualified spelling has to shadow what the unqualified call resolves to.
     """
 
     def test_a_shadowed_commands_effect_survives_every_deletion_form(self):
@@ -384,10 +387,24 @@ class TestPs1CommandRedefinition(TestPs1):
             'function-scope-assign':
                 "${function:Get-Date} = { Start-Process calc }\n$Null = Get-Date",
             'new-object': "function New-Object { Start-Process calc }\n$Null = New-Object Version",
+            'global-function':
+                "function global:Get-Date { Start-Process calc }\n$Null = (Get-Date).Ticks",
+            'private-filter': "filter private:Out-Null { Start-Process calc }\n1 | Out-Null",
         }
         for name, body in forms.items():
             with self.subTest(name):
                 self.assertIn('Start-Process', self._deobfuscate_iterative(body + anchor))
+
+    def test_a_multi_assignment_redefinition_keeps_the_call_it_shadows(self):
+        # The payload text survives inside the assignment whatever happens, so asserting on it would
+        # prove nothing here. What the shadow set has to save is the *call*, which is what runs it —
+        # and matching one target shape against one variable never saw this form at all.
+        out = self._deobfuscate_iterative(
+            "${function:Get-Date}, $y = { Start-Process calc }, 2\n"
+            "$Null = (Get-Date).Ticks\n"
+            "Write-Output 'keep'\n")
+        self.assertIn('Ticks', out)
+        self.assertIn('Start-Process', out)
 
     def test_an_unshadowed_pure_read_is_still_deleted(self):
         # The guard is name-keyed, not blanket: a script that defines an unrelated function still has
@@ -395,3 +412,14 @@ class TestPs1CommandRedefinition(TestPs1):
         out = self._deobfuscate_iterative(
             "function Helper { 'x' }\n$Null = (Get-Date).Ticks\nWrite-Output 'keep'\n")
         self.assertNotIn('Get-Date', out)
+
+    def test_a_name_is_inert_only_when_every_definition_of_it_is(self):
+        # Call sites are attributed to the name, not to one of its definitions, so dropping them
+        # because one definition is empty silences the other: the calls go first, then the surviving
+        # definition reads as never called and follows on the next round. Which definition a call
+        # actually reaches is order and scope information no pass here has, so both are kept.
+        for second in ('function f { }', 'function global:f { }'):
+            with self.subTest(second):
+                out = self._deobfuscate_iterative(
+                    F"function f {{ Start-Process calc }}\n{second}\nf\nWrite-Host 'keep'")
+                self.assertIn('Start-Process', out)

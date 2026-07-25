@@ -14,9 +14,10 @@ call opens the world, closing the open-ended escape of runtime-constructed code 
 forget.
 **Mutation** is a curated, documented deny-list — a pure allow-list would be vacuous, since the
 collected metadata omits hundreds of host cmdlets and every one would then read as a possible
-mutator. The deny-list is enumerated here rather than left silent; its residual (an exotic aliasing
-spelling, a `using module` statement, a computed provider path) is a recall gap that keeps a read,
-never deletes one.
+mutator. The deny-list is enumerated here rather than left silent, and its residual — an exotic
+aliasing spelling, a `using module` statement, a computed provider path — is a *soundness* gap, not a
+recall gap: a mutator the list misses leaves the world reading closed, which fires the grants and
+deletes the reads that mutator makes effectful. Every name added to it buys correctness, not recall.
 
 This is a leaf model in Phase 5c — a one-shot whole-script verdict — cached in
 `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` and queried through
@@ -27,15 +28,16 @@ leaks that reach it; in this phase the node is not yet consulted.
 from __future__ import annotations
 
 from refinery.lib.scripts.ps1.ast import (
+    assignment_target_variables,
     get_command_name,
     get_member_name,
     is_execution_context_invoke,
     is_opaque_dispatch,
     is_scriptblock_create,
     is_scriptblock_invoke,
+    normalize_command_name,
     normalize_dotnet_type_name,
     string_value,
-    unwrap_assignment_target,
 )
 from refinery.lib.scripts.ps1.data import KNOWN_ALIAS
 from refinery.lib.scripts.ps1.model import (
@@ -50,7 +52,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Script,
     Ps1StringLiteral,
     Ps1TypeExpression,
-    Ps1Variable,
 )
 
 #: Commands that execute arbitrary code supplied as data. `Invoke-Expression` is the canonical one;
@@ -144,31 +145,44 @@ def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
     closed = True
     shadowed: set[str] = set()
     for node in root.walk():
-        if _opens_world(node):
+        redefined = _identity_redefinitions(node)
+        shadowed.update(redefined)
+        if _opens_world(node, redefined):
             closed = False
-        name = _shadowed_command(node)
-        if name is not None:
-            shadowed.add(name)
     return Ps1TypeWorld(closed, frozenset(shadowed))
 
 
-def _shadowed_command(node) -> str | None:
+def _identity_redefinitions(node) -> tuple[str, ...]:
     """
-    The lowercased command name `node` redefines, or `None`. A `function`/`filter` definition names
-    the command directly; an assignment into the `function:`/`alias:` variable namespace
-    (`${function:Get-Date} = { ... }`) names it through the same identity scopes the world openers
-    recognize.
+    The command names `node` redefines, each normalized to the key a call resolves under, or an empty
+    tuple. A `function`/`filter` definition names one command directly; an assignment into the
+    `function:`/`alias:` variable namespace names one per slot it writes, so the multi-assignment
+    `${function:Get-Date}, $y = { ... }, 2` records `get-date` where matching one target shape
+    against one variable would miss it.
+
+    Normalizing is what makes the name usable: `function global:Get-Date` defines exactly what a
+    later unqualified `Get-Date` runs, and a shadow set holding the qualified spelling answers `False`
+    to every consumer that asks about the unqualified one.
     """
     if isinstance(node, Ps1FunctionDefinition):
-        return node.name.lower()
+        return (normalize_command_name(node.name),)
     if isinstance(node, Ps1AssignmentExpression):
-        target = unwrap_assignment_target(node.target)
-        if isinstance(target, Ps1Variable) and target.scope in _IDENTITY_SCOPES:
-            return target.name.lower()
-    return None
+        return tuple(
+            normalize_command_name(variable.name)
+            for variable in assignment_target_variables(node.target)
+            if variable.scope in _IDENTITY_SCOPES
+        )
+    return ()
 
 
-def _opens_world(node) -> bool:
+def _opens_world(node, redefined: tuple[str, ...]) -> bool:
+    """
+    Whether `node` leaves the type system or the command table in a state the collected metadata no
+    longer describes. `redefined` is the identity classification of the same node, so an assignment
+    into the identity namespaces is recognized once instead of by two functions that can drift apart
+    — a function definition is classified there too, but does not open the world, since a benign
+    helper would otherwise neuter every grant in the script.
+    """
     if isinstance(node, Ps1CommandInvocation):
         return _command_opens_world(node)
     if isinstance(node, Ps1InvokeMember):
@@ -180,8 +194,7 @@ def _opens_world(node) -> bool:
             or _is_psobject_member_mutation(node)
         )
     if isinstance(node, Ps1AssignmentExpression):
-        target = unwrap_assignment_target(node.target)
-        return isinstance(target, Ps1Variable) and target.scope in _IDENTITY_SCOPES
+        return bool(redefined)
     return False
 
 

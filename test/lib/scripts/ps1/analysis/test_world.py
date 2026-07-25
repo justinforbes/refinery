@@ -66,6 +66,7 @@ class TestPs1WorldOpeners(Ps1TypeWorldTest):
             "New-Item function:foo -Value { 1 }",
             '${function:Get-Date} = { 1 }',
             '$alias:x = 1',
+            '${function:Get-Date}, $y = { 1 }, 2',
         ):
             with self.subTest(source):
                 self.assertFalse(self._closed(source))
@@ -131,3 +132,33 @@ class TestPs1ShadowedCommands(Ps1TypeWorldTest):
 
     def test_a_defined_function_does_not_open_the_world(self):
         self.assertTrue(self._closed('function Get-Date { 1 }\n$x = 2'))
+
+    def test_a_scope_qualified_redefinition_shadows_the_name_a_call_resolves_to(self):
+        # A qualifier selects which scope table the definition is written to; it is not part of the
+        # name. `function global:Get-Date` is what a later bare `Get-Date` runs, so a shadow set
+        # holding the qualified spelling answers every consumer's question about the wrong name.
+        for source in (
+            'function global:Get-Date { 1 }',
+            'function local:Get-Date { 1 }',
+            'function private:Get-Date { 1 }',
+            'function script:Get-Date { 1 }',
+            'function global:script:Get-Date { 1 }',
+            'filter global:Get-Date { 1 }',
+            '${function:global:Get-Date} = { 1 }',
+        ):
+            with self.subTest(source):
+                world = build_closed_world(Ps1Parser(source).parse())
+                self.assertTrue(world.command_shadowed('get-date'))
+
+    def test_a_multi_assignment_shadows_every_identity_slot_it_writes(self):
+        world = build_closed_world(Ps1Parser(
+            '${function:Get-Date}, $y, $alias:gc = { 1 }, 2, 3').parse())
+        self.assertTrue(world.command_shadowed('get-date'))
+        self.assertTrue(world.command_shadowed('gc'))
+        self.assertFalse(world.command_shadowed('y'))
+
+    def test_a_module_qualified_name_does_not_shadow_the_bare_one(self):
+        # `Module\Get-Date` names one module's export and leaves the bare name alone, so stripping
+        # the qualifier off this spelling would distrust a command nothing redefined.
+        world = build_closed_world(Ps1Parser('function Module\\Get-Date { 1 }').parse())
+        self.assertFalse(world.command_shadowed('get-date'))

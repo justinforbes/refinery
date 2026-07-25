@@ -97,6 +97,37 @@ def get_command_name(cmd: Ps1CommandInvocation) -> str | None:
     return None
 
 
+#: The scope qualifiers a command name may carry. Each selects which scope table the name is written
+#: to or read from, and none of them is part of the name. Spelled through the enum so the set cannot
+#: drift from the scopes the parser produces.
+_COMMAND_SCOPES = frozenset({
+    Ps1ScopeModifier.GLOBAL.value,
+    Ps1ScopeModifier.LOCAL.value,
+    Ps1ScopeModifier.PRIVATE.value,
+    Ps1ScopeModifier.SCRIPT.value,
+})
+
+
+def normalize_command_name(name: str) -> str:
+    """
+    The lowercased command name with every leading scope qualifier stripped: the key under which a
+    definition and the calls that reach it agree. `function global:Get-Date` defines what an
+    unqualified `Get-Date` then resolves to, so both spellings must key as `get-date`. Qualifiers are
+    stripped in a loop because they stack — `global:script:Get-Date` parses as one name.
+
+    Only a caller that keys a *definition* should normalize: a shadow set, a callgraph. A caller
+    deciding whether to *trust* a name against an allow-list must not. An unqualified spelling that
+    fails a lookup is kept, which is the safe answer, whereas normalizing there would turn a
+    scope-qualified spelling into a purity grant.
+    """
+    name = name.lower()
+    while True:
+        scope, colon, rest = name.partition(':')
+        if not colon or scope not in _COMMAND_SCOPES:
+            return name
+        name = rest
+
+
 def extract_new_object(cmd: Ps1CommandInvocation) -> tuple[str, list[Expression]] | None:
     """
     Extract the type name and constructor arguments from a `New-Object` invocation. Returns

@@ -25,6 +25,7 @@ from refinery.lib.scripts.ps1.ast import (
     get_body,
     get_command_name,
     is_opaque_dispatch,
+    normalize_command_name,
 )
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _PS1_SKIP_VARIABLES,
@@ -259,40 +260,44 @@ class Ps1JunkStatementRemoval(Transformer):
         invocation may dispatch dynamically (see `refinery.lib.scripts.ps1.ast.is_opaque_dispatch`),
         every defined function is treated as reachable so a function called only through `& $f` is
         never removed.
+
+        Definitions and calls are keyed through `refinery.lib.scripts.ps1.ast.normalize_command_name`,
+        so `function global:F` is reached by a call to `F`. Every definition sharing a key is walked,
+        not just the last one: a redefinition shadows the earlier body only from the point it runs,
+        which is order and scope information this pass does not have.
         """
         directly_called: set[str] = set()
-        functions: dict[str, Ps1FunctionDefinition] = {}
+        functions: dict[str, list[Ps1FunctionDefinition]] = {}
         dynamic_call = False
         for n in _walk_outer_scope(node):
             if isinstance(n, Ps1CommandInvocation):
                 name = get_command_name(n)
                 if name is not None:
-                    directly_called.add(name.lower())
+                    directly_called.add(normalize_command_name(name))
                 elif is_opaque_dispatch(n):
                     dynamic_call = True
             elif isinstance(n, Ps1FunctionDefinition):
-                functions[n.name.lower()] = n
+                functions.setdefault(normalize_command_name(n.name), []).append(n)
         if dynamic_call:
             return set(functions.keys()) | directly_called
         reachable = set(directly_called)
         frontier = list(reachable & functions.keys())
         while frontier:
-            fname = frontier.pop()
-            fdef = functions[fname]
-            if fdef.body is None:
-                continue
-            for n in fdef.body.walk():
-                if isinstance(n, Ps1CommandInvocation):
-                    name = get_command_name(n)
-                    if name is None:
-                        if is_opaque_dispatch(n):
-                            return set(functions.keys()) | reachable
-                        continue
-                    key = name.lower()
-                    if key not in reachable:
-                        reachable.add(key)
-                        if key in functions:
-                            frontier.append(key)
+            for fdef in functions[frontier.pop()]:
+                if fdef.body is None:
+                    continue
+                for n in fdef.body.walk():
+                    if isinstance(n, Ps1CommandInvocation):
+                        name = get_command_name(n)
+                        if name is None:
+                            if is_opaque_dispatch(n):
+                                return set(functions.keys()) | reachable
+                            continue
+                        key = normalize_command_name(name)
+                        if key not in reachable:
+                            reachable.add(key)
+                            if key in functions:
+                                frontier.append(key)
         return reachable
 
     def _remove_inert_functions(self, node: Node, oracle: TypeOracle):
@@ -304,13 +309,25 @@ class Ps1JunkStatementRemoval(Transformer):
         invocations of the function count as call sites — if the name is referenced any other way, or
         anything in the script dispatches dynamically (`& $f`), the function is kept, because its
         result might then be observed or its identity might not be provable.
+
+        A name is inert only when *every* definition of it is, since the calls are attributed to the
+        name rather than to one of its definitions: removing them because the last definition is
+        empty would silence a payload-bearing earlier one.
         """
         if self._any_dynamic_dispatch(node):
             return
-        inert: dict[str, Ps1FunctionDefinition] = {}
+        inert: dict[str, list[Ps1FunctionDefinition]] = {}
+        acting: set[str] = set()
         for stmt in node.body:
-            if isinstance(stmt, Ps1FunctionDefinition) and body_is_inert(stmt.body, oracle):
-                inert[stmt.name.lower()] = stmt
+            if not isinstance(stmt, Ps1FunctionDefinition):
+                continue
+            key = normalize_command_name(stmt.name)
+            if body_is_inert(stmt.body, oracle):
+                inert.setdefault(key, []).append(stmt)
+            else:
+                acting.add(key)
+        for key in acting:
+            inert.pop(key, None)
         if not inert:
             return
         call_sites: dict[str, list[Node]] = {name: [] for name in inert}
@@ -321,7 +338,7 @@ class Ps1JunkStatementRemoval(Transformer):
             name = get_command_name(ref)
             if name is None:
                 continue
-            key = name.lower()
+            key = normalize_command_name(name)
             if key not in inert:
                 continue
             statement = self._bare_call_statement(ref)
@@ -329,14 +346,15 @@ class Ps1JunkStatementRemoval(Transformer):
                 call_sites[key].append(statement)
             else:
                 other_reference.add(key)
-        for key, definition in inert.items():
+        for key, definitions in inert.items():
             if key in other_reference:
                 continue
             for statement in call_sites[key]:
                 if _remove_from_parent(statement):
                     self.mark_changed()
-            if _remove_from_parent(definition):
-                self.mark_changed()
+            for definition in definitions:
+                if _remove_from_parent(definition):
+                    self.mark_changed()
 
     @staticmethod
     def _bare_call_statement(cmd: Ps1CommandInvocation) -> Node | None:
@@ -372,7 +390,7 @@ class Ps1JunkStatementRemoval(Transformer):
         dead_functions: set[Node] = set()
         for stmt in body:
             if isinstance(stmt, Ps1FunctionDefinition):
-                if role is BodyRole.SCRIPT and stmt.name.lower() not in called:
+                if role is BodyRole.SCRIPT and normalize_command_name(stmt.name) not in called:
                     dead_functions.add(stmt)
                 continue
             effect = statement_effect(stmt, oracle)
