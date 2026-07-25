@@ -64,8 +64,10 @@ class TestPs1WorldOpeners(Ps1TypeWorldTest):
             "New-Alias utd Update-TypeData",
             "Set-Item alias:utd Update-TypeData",
             "New-Item function:foo -Value { 1 }",
-            '${function:Get-Date} = { 1 }',
             '$alias:x = 1',
+            '${function:Get-Date} = $blk',
+            '${function:Get-Date} = (Get-Content f.ps1)',
+            '${function:Get-Date} += { 1 }',
             '${function:Get-Date}, $y = { 1 }, 2',
         ):
             with self.subTest(source):
@@ -132,6 +134,35 @@ class TestPs1ShadowedCommands(Ps1TypeWorldTest):
 
     def test_a_defined_function_does_not_open_the_world(self):
         self.assertTrue(self._closed('function Get-Date { 1 }\n$x = 2'))
+
+    def test_a_redefinition_binding_a_visible_block_does_not_open_the_world(self):
+        # `${function:X} = { ... }` is `function X { ... }` in the other spelling, and the block
+        # stands in the tree either way. Opening on it killed every member grant in the script over
+        # a name the shadow set already distrusts.
+        for source in (
+            '${function:Get-Date} = { 1 }',
+            '${function:Get-Date} = ({ 1 })',
+            '${function:global:Get-Date} = { 1 }',
+        ):
+            with self.subTest(source):
+                self.assertTrue(self._closed(source))
+                self.assertTrue(
+                    build_closed_world(Ps1Parser(source).parse()).command_shadowed('get-date'))
+
+    def test_a_mutation_inside_a_visible_block_still_opens_the_world(self):
+        # The relaxation above rests entirely on the walk reaching into the block, so a mutation
+        # hidden in one has to be caught by presence like any other statement. Every place a block
+        # can carry code is checked, because reaching only the plain body would make the relaxation
+        # a way to smuggle a mutation past the gate.
+        for body in (
+            'Update-TypeData -TypeName System.String -MemberName M -Value { 1 }',
+            'param($p = (Update-TypeData -TypeName System.String -MemberName M -Value { 1 }))',
+            'begin { Import-Module Evil }',
+            'process { iex $x }',
+            'end { Add-Member -InputObject $o -Name N -Value { 1 } }',
+        ):
+            with self.subTest(body):
+                self.assertFalse(self._closed(F'${{function:Get-Date}} = {{ {body} }}'))
 
     def test_a_scope_qualified_redefinition_shadows_the_name_a_call_resolves_to(self):
         # A qualifier selects which scope table the definition is written to; it is not part of the

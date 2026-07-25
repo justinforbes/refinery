@@ -27,6 +27,10 @@ leaks that reach it; in this phase the node is not yet consulted.
 """
 from __future__ import annotations
 
+import enum
+
+from typing import NamedTuple
+
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_command_name,
@@ -38,10 +42,13 @@ from refinery.lib.scripts.ps1.ast import (
     normalize_command_name,
     normalize_dotnet_type_name,
     string_value,
+    unwrap_assignment_target,
+    unwrap_parens,
 )
 from refinery.lib.scripts.ps1.data import KNOWN_ALIAS
 from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
+    Ps1ArrayLiteral,
     Ps1AssignmentExpression,
     Ps1CommandArgument,
     Ps1CommandInvocation,
@@ -50,8 +57,10 @@ from refinery.lib.scripts.ps1.model import (
     Ps1MemberAccess,
     Ps1ScopeModifier,
     Ps1Script,
+    Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1TypeExpression,
+    Ps1Variable,
 )
 
 #: Commands that execute arbitrary code supplied as data. `Invoke-Expression` is the canonical one;
@@ -137,42 +146,96 @@ def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
     shadowed: set[str] = set()
     for node in root.walk():
         redefined = _identity_redefinitions(node)
-        shadowed.update(redefined)
+        shadowed.update(record.name for record in redefined)
         if _opens_world(node, redefined):
             closed = False
     return Ps1TypeWorld(closed, frozenset(shadowed))
 
 
-def _identity_redefinitions(node) -> tuple[str, ...]:
+class _IdentityBody(enum.Enum):
     """
-    The command names `node` redefines, each normalized to the key a call resolves under, or an empty
-    tuple. A `function`/`filter` definition names one command directly; an assignment into the
-    `function:`/`alias:` variable namespace names one per slot it writes, so the multi-assignment
-    `${function:Get-Date}, $y = { ... }, 2` records `get-date` where matching one target shape
-    against one variable would miss it.
+    What a command redefinition binds the name to, which is what decides whether the redefinition
+    also opens the type world. An enum rather than a boolean because the two ways of *not* being a
+    visible block are unrelated — one hides a body inside a value, the other names another command
+    entirely — and collapsing them would make the world rule read as if it had one reason.
+    """
+    #: A scriptblock literal standing in the tree, so the whole-tree walk reads its statements and
+    #: catches a mutation inside it by presence. The only kind that leaves the world closed.
+    VISIBLE_BLOCK = enum.auto()
+    #: A value the walk cannot see through — a variable, a call's result, or a compound assignment
+    #: folding in whatever the name held before.
+    OPAQUE_VALUE = enum.auto()
+    #: Another command, named rather than defined. Its body is not in this script at all.
+    EXTERNAL_COMMAND = enum.auto()
+
+
+class _IdentityRedefinition(NamedTuple):
+    name: str
+    body: _IdentityBody
+
+
+def _identity_redefinitions(node) -> tuple[_IdentityRedefinition, ...]:
+    """
+    The command names `node` redefines, each normalized to the key a call resolves under and paired
+    with what it binds, or an empty tuple. A `function`/`filter` definition names one command
+    directly; an assignment into the `function:`/`alias:` variable namespace names one per slot it
+    writes, so the multi-assignment `${function:Get-Date}, $y = { ... }, 2` records `get-date` where
+    matching one target shape against one variable would miss it.
 
     Normalizing is what makes the name usable: `function global:Get-Date` defines exactly what a
     later unqualified `Get-Date` runs, and a shadow set holding the qualified spelling answers `False`
     to every consumer that asks about the unqualified one.
+
+    Only a plain `=` onto a single target reports `VISIBLE_BLOCK`. A multi-assignment could be
+    paired up with the values on its right, but the target list drops non-variable slots, so the
+    position a variable came from is already lost — and the shape is rare enough that reading
+    every slot of one as opaque costs nothing.
     """
     if isinstance(node, Ps1FunctionDefinition):
-        return (normalize_command_name(node.name),)
-    if isinstance(node, Ps1AssignmentExpression):
-        return tuple(
-            normalize_command_name(variable.name)
-            for variable in assignment_target_variables(node.target)
-            if variable.scope in _IDENTITY_SCOPES
+        return (_IdentityRedefinition(
+            normalize_command_name(node.name), _IdentityBody.VISIBLE_BLOCK),)
+    if not isinstance(node, Ps1AssignmentExpression):
+        return ()
+    targets = assignment_target_variables(node.target)
+    single = len(targets) == 1 and not isinstance(
+        unwrap_assignment_target(node.target), Ps1ArrayLiteral)
+    return tuple(
+        _IdentityRedefinition(
+            normalize_command_name(variable.name),
+            _assigned_identity_body(node, variable, single),
         )
-    return ()
+        for variable in targets
+        if variable.scope in _IDENTITY_SCOPES
+    )
 
 
-def _opens_world(node, redefined: tuple[str, ...]) -> bool:
+def _assigned_identity_body(
+    node: Ps1AssignmentExpression, variable: Ps1Variable, single: bool,
+) -> _IdentityBody:
+    """
+    What an identity-scope assignment binds its name to. The `alias:` namespace always names another
+    command; the `function:` namespace binds a scriptblock, which is readable only when written out
+    as a literal and this assignment plainly rebinds one target.
+    """
+    if variable.scope is Ps1ScopeModifier.ALIAS:
+        return _IdentityBody.EXTERNAL_COMMAND
+    if not single or node.operator != '=' or node.value is None:
+        return _IdentityBody.OPAQUE_VALUE
+    if isinstance(unwrap_parens(node.value), Ps1ScriptBlock):
+        return _IdentityBody.VISIBLE_BLOCK
+    return _IdentityBody.OPAQUE_VALUE
+
+
+def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> bool:
     """
     Whether `node` leaves the type system or the command table in a state the collected metadata no
     longer describes. `redefined` is the identity classification of the same node, so an assignment
-    into the identity namespaces is recognized once instead of by two functions that can drift apart
-    — a function definition is classified there too, but does not open the world, since a benign
-    helper would otherwise neuter every grant in the script.
+    into the identity namespaces is recognized once, not by two functions that can drift apart.
+
+    A redefinition binding a visible scriptblock does *not* open the world. Its body stands in the
+    tree, so a mutation inside it is caught by presence like any other statement, and the same
+    construct spelled `function X { }` has always left the world closed. Opening on it would kill
+    every member grant in the script over a name the shadow set already distrusts.
     """
     if isinstance(node, Ps1CommandInvocation):
         return _command_opens_world(node)
@@ -185,7 +248,7 @@ def _opens_world(node, redefined: tuple[str, ...]) -> bool:
             or _is_psobject_member_mutation(node)
         )
     if isinstance(node, Ps1AssignmentExpression):
-        return bool(redefined)
+        return any(record.body is not _IdentityBody.VISIBLE_BLOCK for record in redefined)
     return False
 
 
