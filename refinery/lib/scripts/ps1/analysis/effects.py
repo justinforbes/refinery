@@ -71,12 +71,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
 )
 
-#: The type view threaded through the purity cluster when no caller supplies one. It carries no
-#: model-derived variable or pipeline typing, so it resolves only what the static surface alone
-#: determines. A deobfuscation pass that has built a TypeOracle from a semantic model passes that
-#: instead, and the member gate then sees the richer typing.
-_EMPTY_ORACLE = TypeOracle()
-
 
 def _canonical_type_name(name: str) -> str:
     """
@@ -548,7 +542,7 @@ def _scriptblock_arguments(cmd: Ps1CommandInvocation) -> list[Ps1ScriptBlock]:
 
 def _arguments_are_pure(
     arguments: Sequence[Expression],
-    oracle: TypeOracle = _EMPTY_ORACLE,
+    oracle: TypeOracle,
 ) -> bool:
     """
     Whether an argument list is safe to evaluate *and* hands the callee nothing to write back
@@ -563,7 +557,7 @@ def _arguments_are_pure(
 
 def _command_arguments_are_pure(
     cmd: Ps1CommandInvocation,
-    oracle: TypeOracle = _EMPTY_ORACLE,
+    oracle: TypeOracle,
 ) -> bool:
     """
     Whether every non-scriptblock argument of a command is side-effect free. A cmdlet being a pure
@@ -675,7 +669,7 @@ def _runs_only_visible_blocks(cmd: Ps1CommandInvocation) -> bool:
 
 def _command_body_is_pure(
     cmd: Ps1CommandInvocation,
-    oracle: TypeOracle = _EMPTY_ORACLE,
+    oracle: TypeOracle,
 ) -> bool:
     """
     Check whether all script block arguments of a pipeline cmdlet (ForEach-Object, Where-Object,
@@ -750,14 +744,14 @@ def _grant(verdict: bool, node, oracle: TypeOracle) -> bool:
     method or constructor resolves to a known-pure .NET operation routes its verdict through here:
     the grant holds only when no code the script runs could have shadowed that member through the
     Extended Type System or remapped its type name through an accelerator, which is
-    `refinery.lib.scripts.ps1.analysis.types.TypeOracle.world_closed_at`. On the empty oracle that
-    is `False`, so an un-wired caller keeps the access — the fail-closed default. An impurity
+    `refinery.lib.scripts.ps1.analysis.types.TypeOracle.world_closed_at`. An oracle built without a
+    world answers `False`, so such a caller keeps the access. An impurity
     *deny* is never routed through here; it holds unconditionally.
     """
     return verdict and oracle.world_closed_at(node)
 
 
-def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
+def is_side_effect_free(node, oracle: TypeOracle) -> bool:
     """
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
     observable side effects beyond yielding a value. The `oracle` types the object of a member read
@@ -957,7 +951,7 @@ def _is_null_discard(node) -> TypeGuard[Ps1AssignmentExpression]:
     )
 
 
-def statement_effect(stmt, oracle: TypeOracle = _EMPTY_ORACLE) -> StatementEffect:
+def statement_effect(stmt, oracle: TypeOracle) -> StatementEffect:
     """
     Classify the observable effect of a standalone statement as a `StatementEffect`. This is the one
     shared authority the dead-code and junk-removal passes consult so they never disagree about
@@ -1057,7 +1051,7 @@ def _pipeline_sink_discards_its_input(pipeline: Ps1Pipeline) -> bool:
 
 def _pipeline_ends_with_out_null(
     pipeline: Ps1Pipeline,
-    oracle: TypeOracle = _EMPTY_ORACLE,
+    oracle: TypeOracle,
 ) -> bool:
     """
     Whether a pipeline is terminated by an `Out-Null` that throws its input away *and* costs nothing
@@ -1073,7 +1067,7 @@ def _pipeline_ends_with_out_null(
 
 def _pipeline_prefix_is_pure(
     pipeline: Ps1Pipeline,
-    oracle: TypeOracle = _EMPTY_ORACLE,
+    oracle: TypeOracle,
 ) -> bool:
     for el in pipeline.elements[:-1]:
         if not isinstance(el, Ps1PipelineElement) or el.redirections:
@@ -1085,7 +1079,7 @@ def _pipeline_prefix_is_pure(
 
 def _pipeline_final_is_pure(
     pipeline: Ps1Pipeline,
-    oracle: TypeOracle = _EMPTY_ORACLE,
+    oracle: TypeOracle,
 ) -> bool:
     """
     Whether the last element of a pipeline is side-effect free. Together with
@@ -1104,7 +1098,7 @@ def _pipeline_final_is_pure(
 
 def _pipeline_ends_with_void_foreach(
     pipeline: Ps1Pipeline,
-    oracle: TypeOracle = _EMPTY_ORACLE,
+    oracle: TypeOracle,
 ) -> bool:
     """
     Detect junk pipelines like `... | ForEach-Object { [Void]$_ }` or
@@ -1328,7 +1322,7 @@ def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:
 
 def _param_block_is_inert(
     block: Ps1ParamBlock | None,
-    oracle: TypeOracle = _EMPTY_ORACLE,
+    oracle: TypeOracle,
 ) -> bool:
     """
     Whether a `param( ... )` block runs nothing when the function is called. Declaring a name binds
@@ -1351,7 +1345,7 @@ def _param_block_is_inert(
     )
 
 
-def body_is_inert(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
+def body_is_inert(node, oracle: TypeOracle) -> bool:
     """
     Whether the body that `node` owns neither emits a value nor performs a side effect: `node` is
     `None`, the body is empty, or every statement in it is a `StatementEffect.DISCARD`. An inert

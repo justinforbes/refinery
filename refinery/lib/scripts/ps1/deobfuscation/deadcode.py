@@ -21,6 +21,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     output_observed,
     pruning_erases_body,
 )
+from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import is_truthy, switch_matches, unwrap_integer
@@ -48,6 +49,12 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 _PATH_EXTENSIONS = frozenset({'.exe', '.ps1', '.cmd', '.bat', '.com', '.vbs', '.msi'})
+
+#: Dead-code elimination asks its purity questions without a type world or a shadow set: its prune
+#: helpers hold no model cache, so every answer here comes from the static surface alone. Spelled
+#: out at the four call sites rather than left to a parameter default, which is how the gap stayed
+#: invisible while `_prune_trap` deleted a body the script had redefined.
+_NO_WORLD = TypeOracle()
 
 
 def _carries_assignment_marker(cmd: Ps1CommandInvocation, name: str) -> bool:
@@ -101,7 +108,7 @@ def _is_injected_noise_bareword(expr: Expression, shadowed: frozenset[str] = fro
         return False
     for arg in expr.arguments:
         value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
-        if value is not None and not is_side_effect_free(value):
+        if value is not None and not is_side_effect_free(value, _NO_WORLD):
             return False
     return True
 
@@ -120,7 +127,7 @@ def _try_body_is_harmless(body: list[Statement], shadowed: frozenset[str] = froz
             return False
         if stmt.expression is None:
             continue
-        if is_side_effect_free(stmt.expression):
+        if is_side_effect_free(stmt.expression, _NO_WORLD):
             continue
         if _is_injected_noise_bareword(stmt.expression, shadowed):
             continue
@@ -543,7 +550,8 @@ class Ps1DeadCodeElimination(Transformer):
         finally_body = node.finally_block.body if node.finally_block is not None else []
         output_stmts = [
             stmt for stmt in try_body
-            if isinstance(stmt, Ps1ExpressionStatement) and is_side_effect_free(stmt.expression)
+            if isinstance(stmt, Ps1ExpressionStatement)
+            and is_side_effect_free(stmt.expression, _NO_WORLD)
         ]
         return output_stmts + list(finally_body)
 
@@ -568,7 +576,7 @@ class Ps1DeadCodeElimination(Transformer):
                     return None
                 continue
             if isinstance(stmt, Ps1ExpressionStatement):
-                if stmt.expression is None or is_side_effect_free(stmt.expression):
+                if stmt.expression is None or is_side_effect_free(stmt.expression, _NO_WORLD):
                     continue
             return None
         return []

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Callable, TypeVar
 
-from refinery.lib.scripts import Node, Transformer, tree_version
+from refinery.lib.scripts import Node, Transformer, tree_root, tree_version
 
 _T = TypeVar('_T')
 _C = TypeVar('_C', bound='ModelCacheBase')
@@ -78,7 +78,13 @@ class ModelCacheBase:
         rebuilding the models per call. A transform still runs standalone (in tests, or outside the
         pipeline); freshness stays governed by the tree version, and a standalone mutation
         invalidates the stashed cache exactly as it would the shared one.
+
+        *root* is normalized to the tree it belongs to, so a transform that visits a nested body and
+        a transform that visits the script agree on which cache they mean. Skipping that leaves a
+        whole-script model derived from a subtree: a leak sitting outside it becomes invisible and
+        the world reads closed, which is the one direction that deletes code.
         """
+        root = tree_root(root)
         cache = transformer.models
         if isinstance(cache, cls) and cache.root is root:
             return cache

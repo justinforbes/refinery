@@ -308,10 +308,21 @@ def tree_version(root: Node) -> int:
     return _tree_versions.get(root, 0)
 
 
+def tree_root(node: Node) -> Node:
+    """
+    The topmost ancestor of *node*, which is the tree it belongs to. Both the mutation counter and
+    the analysis caches are keyed on this rather than on whatever node a caller happens to hold: a
+    model built over a subtree answers questions about that subtree alone, and a whole-script fact
+    derived from it — whether any statement anywhere runs opaque code — would come back wrong in
+    the permissive direction for every node outside it.
+    """
+    while node.parent is not None:
+        node = node.parent
+    return node
+
+
 def _bump_tree_version(site: Node) -> None:
-    root = site
-    while root.parent is not None:
-        root = root.parent
+    root = tree_root(site)
     _tree_versions[root] = _tree_versions.get(root, 0) + 1
 
 

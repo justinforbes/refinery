@@ -102,7 +102,7 @@ class Ps1TypeWorld:
     `refinery.lib.scripts.ps1.analysis.types.TypeOracle`.
     """
 
-    def __init__(self, closed: bool, shadowed: frozenset[str] = frozenset()):
+    def __init__(self, closed: bool, shadowed: frozenset[str]):
         self._closed = closed
         self._shadowed = shadowed
 

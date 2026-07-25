@@ -12,6 +12,7 @@ from __future__ import annotations
 from refinery.lib.scripts import Transformer
 from refinery.lib.scripts.modelcache import ModelCacheBase
 from refinery.lib.scripts.ps1.analysis.model import Ps1SemanticModel, build_semantic_model
+from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld, build_closed_world
 from refinery.lib.scripts.ps1.model import Ps1Script
 
@@ -25,11 +26,12 @@ class Ps1ModelCache(ModelCacheBase):
     slot behind the same shape.
     """
 
-    _SLOTS = ('_model', '_closed_world')
+    _SLOTS = ('_model', '_closed_world', '_oracle')
 
     root: Ps1Script
     _model: Ps1SemanticModel | None
     _closed_world: Ps1TypeWorld | None
+    _oracle: TypeOracle | None
 
     @property
     def model(self) -> Ps1SemanticModel:
@@ -38,6 +40,24 @@ class Ps1ModelCache(ModelCacheBase):
     @property
     def closed_world(self) -> Ps1TypeWorld:
         return self._lazy('_closed_world', lambda: build_closed_world(self.root))
+
+    @property
+    def oracle(self) -> TypeOracle:
+        """
+        The effect layer's context for this script, not a model despite the company it keeps in this
+        class. `refinery.lib.scripts.ps1.analysis.effects` takes a
+        `refinery.lib.scripts.ps1.analysis.types.TypeOracle` as its parameter object, and every
+        purity verdict in a run must be asked through the same one, or two transforms reach opposite
+        conclusions about the same node. Interprocedural purity later adds a real effect model
+        beside this instead of replacing it: that would be a derived fact about the script, where
+        this is the lens such facts are read through.
+
+        This is the *base* oracle. Node-local typing — a pipeline item's type, a variable with one
+        definition — is layered per call site through
+        `refinery.lib.scripts.ps1.analysis.types.TypeOracle.with_variable_types`, so the shared
+        instance never forks.
+        """
+        return self._lazy('_oracle', lambda: TypeOracle(world=self.closed_world))
 
 
 def model_cache(transformer: Transformer, root: Ps1Script) -> Ps1ModelCache:

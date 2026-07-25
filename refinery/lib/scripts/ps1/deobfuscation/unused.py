@@ -60,7 +60,7 @@ class Ps1UnusedVariableRemoval(Transformer):
     def visit(self, node: Node):
         cache = model_cache(self, node)
         model = cache.model
-        oracle = TypeOracle(world=cache.closed_world)
+        oracle = cache.oracle
         candidates: dict[Binding, list[Node]] = {}
         for binding in model.script_scope.bindings.values():
             if binding.dynamic_or_qualified or binding.name in _PS1_SKIP_VARIABLES:
@@ -243,7 +243,7 @@ class Ps1JunkStatementRemoval(Transformer):
     """
 
     def visit(self, node: Node):
-        oracle = TypeOracle(world=model_cache(self, node).closed_world)
+        oracle = model_cache(self, node).oracle
         called = self._reachable_functions(node)
         for parent in list(node.walk()):
             role = body_role(parent)
@@ -429,20 +429,10 @@ class Ps1DeadStoreElimination(Transformer):
     only through a nested scriptblock is correctly seen as live rather than skipped.
     """
 
-    def __init__(self):
-        super().__init__()
-        self._root: Node | None = None
-
     def visit(self, node: Node):
-        # The root is remembered rather than the model: `visit` recurses into every nested body,
-        # and a cache built over a nested node would both rebuild the model per body and detach
-        # this transform from the run's shared cache. Reading the model back through the cache on
-        # every visit keeps it consistent with the tree after this pass removes a statement.
-        if self._root is None:
-            self._root = node
-        cache = model_cache(self, self._root)
+        cache = model_cache(self, node)
         model = cache.model
-        oracle = TypeOracle(world=cache.closed_world)
+        oracle = cache.oracle
         body = get_body(node)
         scope = model.scope_of(node)
         if body is None or scope is None:

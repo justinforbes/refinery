@@ -36,7 +36,13 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: its full type reasoning. `TestPs1Purity` asserts type facts (this member read is a plain .NET
 #: property) against it, because Position A makes a present-member grant conditional on the world
 #: being closed; the open-world behaviour it guards is exercised in `TestPs1ClosedWorld`.
-_CLOSED_WORLD = TypeOracle(world=Ps1TypeWorld(True))
+_CLOSED_WORLD = TypeOracle(world=Ps1TypeWorld(True, frozenset()))
+
+#: An oracle carrying no world at all, which is what a caller holds before any model has been built.
+#: Every present-member grant is withheld, so a read this module proves pure is still kept. Named
+#: rather than defaulted: a test asserting open-world behaviour has to say so, and the effect layer
+#: no longer lets a call site acquire this answer by omission.
+_NO_WORLD = TypeOracle()
 
 
 class Ps1EffectsTest(TestBase):
@@ -44,6 +50,14 @@ class Ps1EffectsTest(TestBase):
     @staticmethod
     def _pure(node) -> bool:
         return is_side_effect_free(node, _CLOSED_WORLD)
+
+    @staticmethod
+    def _effect(stmt) -> StatementEffect:
+        return statement_effect(stmt, _CLOSED_WORLD)
+
+    @staticmethod
+    def _inert(node) -> bool:
+        return body_is_inert(node, _CLOSED_WORLD)
 
     @staticmethod
     def _parse(source: str):
@@ -438,8 +452,8 @@ class TestPs1MemberGateWorld(Ps1EffectsTest):
     constructor — is trusted only under a closed type world. The type reasoning that proves the read
     inert is the same whether the world is open or closed; what the world decides is whether that
     proof may be acted on, because an Extended Type System mutation the script could run would make
-    the read effectful. Each read below is one the type layer proves pure, kept under the empty oracle
-    (no world, the fail-closed default) and granted only under a closed one.
+    the read effectful. Each read below is one the type layer proves pure, withheld under an oracle
+    carrying no world and granted only under a closed one.
     """
 
     def test_each_grant_is_withheld_when_the_world_is_open(self):
@@ -453,7 +467,7 @@ class TestPs1MemberGateWorld(Ps1EffectsTest):
             'New-Object System.Version(1, 2)',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(is_side_effect_free(self._expression(source), _NO_WORLD))
                 self.assertTrue(self._pure(self._expression(source)))
 
     def test_a_denied_read_stays_impure_even_under_a_closed_world(self):
@@ -466,7 +480,7 @@ class TestPs1MemberGateWorld(Ps1EffectsTest):
             '[IO.Path]::GetTempFileName()',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(is_side_effect_free(self._expression(source), _NO_WORLD))
                 self.assertFalse(self._pure(self._expression(source)))
 
 
@@ -505,12 +519,12 @@ class TestPs1StatementEffect(Ps1EffectsTest):
     def test_a_statement_that_only_yields_a_value_is_output(self):
         for source in ('42', "'hi'", '$x', '1 + 1', 'Get-Date'):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.OUTPUT)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.OUTPUT)
 
     def test_a_statement_that_does_something_is_an_effect(self):
         for source in ('Write-Host hi', '$x = 1', '$x++', 'if ($a) { }'):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.EFFECT)
 
     def test_the_discard_idioms_emit_nothing(self):
         for source in (
@@ -521,7 +535,7 @@ class TestPs1StatementEffect(Ps1EffectsTest):
             '1..3 | ForEach-Object { $Null = $_ }',
         ):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.DISCARD)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.DISCARD)
 
     def test_a_discard_idiom_wrapped_around_an_effect_is_still_an_effect(self):
         # A discard idiom throws away a value, never the work that produced it. Obfuscated scripts
@@ -535,12 +549,12 @@ class TestPs1StatementEffect(Ps1EffectsTest):
             '1..3 | ForEach-Object { $Null = Start-Process notepad }',
         ):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.EFFECT)
 
     def test_a_discard_of_a_harmless_value_stays_a_discard(self):
         for source in ('$Null = 5', '[Void]1', '[Void]$x', "[Void]('a' + 'b')"):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.DISCARD)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.DISCARD)
 
     def test_a_foreach_is_judged_by_all_of_its_work_not_only_its_blocks(self):
         # `ForEach-Object` takes its work through its arguments, and a discarding block sitting
@@ -557,7 +571,7 @@ class TestPs1StatementEffect(Ps1EffectsTest):
             "Get-ChildItem | ForEach-Object { $Null = $_ } @'\nDelete\n'@",
         ):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.EFFECT)
                 self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_foreach_body_is_read_through_every_block_it_owns(self):
@@ -569,7 +583,7 @@ class TestPs1StatementEffect(Ps1EffectsTest):
             '1..3 | ForEach-Object { param($p = (Start-Process notepad)) [Void]$_ }',
         ):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.EFFECT)
 
     def test_a_foreach_whose_work_is_all_visible_is_still_a_discard(self):
         for source in (
@@ -579,21 +593,21 @@ class TestPs1StatementEffect(Ps1EffectsTest):
             '1..3 | ForEach-Object -InputObject 5 -Process { [Void]$_ }',
         ):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.DISCARD)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.DISCARD)
 
     def test_a_splatted_argument_hides_the_parameters_it_supplies(self):
         # `@options` can carry `-OutVariable` as easily as `-Format`, and none of it is in the
         # source, so there is nothing to judge the command by.
         for source in ('Get-Date @options', 'Get-ChildItem @options | Out-Null'):
             with self.subTest(source):
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.EFFECT)
 
     def test_a_pure_pipeline_cmdlet_still_yields_a_value_a_caller_may_want(self):
         # Purity and emission answer different questions: `Where-Object` performs no side effect,
         # yet the filtered value it puts on the pipeline is not junk.
         statement = self._statement('1..3 | Where-Object { $_ }')
         self.assertTrue(self._pure(self._expression('1..3 | Where-Object { $_ }')))
-        self.assertIs(statement_effect(statement), StatementEffect.EFFECT)
+        self.assertIs(self._effect(statement), StatementEffect.EFFECT)
 
     def test_pure_constants_are_a_strict_refinement_of_output(self):
         # The dead-code pass prunes only pure constants and the junk pass prunes the whole OUTPUT
@@ -601,7 +615,7 @@ class TestPs1StatementEffect(Ps1EffectsTest):
         for source in ('42', '-3', '(7)', '$Null', '$True', '$False', '+9', '3.5'):
             with self.subTest(source):
                 self.assertTrue(is_pure_constant(self._expression(source)))
-                self.assertIs(statement_effect(self._statement(source)), StatementEffect.OUTPUT)
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.OUTPUT)
 
     def test_a_string_literal_is_not_a_prunable_constant(self):
         # A bare string is very often the point of the script, so it is deliberately left out of the
@@ -638,13 +652,13 @@ class TestPs1EffectInvariant(Ps1EffectsTest):
         for node in script.walk():
             if not isinstance(node, Statement):
                 continue
-            if statement_effect(node) is StatementEffect.EFFECT:
+            if self._effect(node) is StatementEffect.EFFECT:
                 continue
             for sub in node.walk():
                 if sub is node:
                     continue
                 if isinstance(sub, (Ps1CommandInvocation, Ps1InvokeMember)):
-                    if not is_side_effect_free(sub):
+                    if not self._pure(sub):
                         found.append(sub)
                 elif isinstance(sub, Ps1UnaryExpression) and sub.operator in ('++', '--'):
                     found.append(sub)
@@ -807,7 +821,7 @@ class TestPs1EmitSafety(Ps1EffectsTest):
         }
         junk = {
             statement for statement in script.body
-            if statement_effect(statement) is not StatementEffect.EFFECT
+            if self._effect(statement) is not StatementEffect.EFFECT
         }
         self.assertEqual(len(constants), 1)
         self.assertEqual(len(junk), 2)
@@ -845,7 +859,7 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             'function f { param($a) process { Write-Host $a } }',
         ):
             with self.subTest(source):
-                self.assertFalse(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
+                self.assertFalse(self._inert(self._first(source, Ps1FunctionDefinition).body))
 
     def test_a_parameter_block_is_code_the_call_runs(self):
         # A parameter default is evaluated on every call that omits the argument, and `get_body`
@@ -858,7 +872,7 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             'function f { param([Parameter(Mandatory)]$x) }',
         ):
             with self.subTest(source):
-                self.assertFalse(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
+                self.assertFalse(self._inert(self._first(source, Ps1FunctionDefinition).body))
 
     def test_a_parameter_block_that_only_declares_names_runs_nothing(self):
         # Declaring a parameter binds storage and evaluates nothing, so a junk function keeps being
@@ -870,7 +884,7 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             'function f { param([String]$x) }',
         ):
             with self.subTest(source):
-                self.assertTrue(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
+                self.assertTrue(self._inert(self._first(source, Ps1FunctionDefinition).body))
 
     def test_a_data_section_captures_the_block_it_binds(self):
         # `data d { 42 }` binds the block's value to `$d`, so pruning into it is as destructive as
@@ -881,12 +895,12 @@ class TestPs1EmitSafety(Ps1EffectsTest):
     def test_a_body_of_pure_discards_is_inert(self):
         for source in ('function j { $Null = 915 }', 'function j { }', 'function j { [Void]1 }'):
             with self.subTest(source):
-                self.assertTrue(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
+                self.assertTrue(self._inert(self._first(source, Ps1FunctionDefinition).body))
 
     def test_a_body_that_emits_or_acts_is_not_inert(self):
         for source in ('function j { Write-Host hi }', 'function j { 42 }', 'function j { $x++ }'):
             with self.subTest(source):
-                self.assertFalse(body_is_inert(self._first(source, Ps1FunctionDefinition).body))
+                self.assertFalse(self._inert(self._first(source, Ps1FunctionDefinition).body))
 
     def test_a_definition_without_a_body_is_inert(self):
-        self.assertTrue(body_is_inert(None))
+        self.assertTrue(self._inert(None))

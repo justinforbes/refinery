@@ -135,17 +135,16 @@ class TypeOracle:
     views: `candidate_types` yields every possibility, and `resolve` collapses them to a single type
     when that is unambiguous.
 
-    The oracle carries whatever variable and pipeline typing a semantic model has derived; with none —
-    the empty oracle the effect layer threads until a model populates it — it still resolves
-    everything the static surface alone determines: literals, casts, `New-Object`, WMI queries, the
-    return of a static method call and the declared outputs of a cmdlet. A populated oracle only adds
-    the reads whose object is a typed variable or a pipeline item.
+    The oracle carries whatever variable and pipeline typing a semantic model has derived; with none
+    it still resolves everything the static surface alone determines: literals, casts, `New-Object`,
+    WMI queries, the return of a static method call and a cmdlet's declared outputs. A populated
+    oracle only adds the reads whose object is a typed variable or a pipeline item.
 
     It also carries the two command-table facts the gate consults: `world_closed_at`, whether the
     script's type system is unmutated (a present-member purity grant requires it), and `is_shadowed`,
     whether the script redefines a command name so the metadata no longer describes it (a name-trust
-    grant must decline it). The empty oracle carries no world and denies the first while trusting the
-    second, matching the pre-existing behaviour on the un-wired call paths.
+    grant must decline it). An oracle built without a world denies the first and trusts the second:
+    fail-closed on member grants, fail-*open* on name trust. Never assume one from the other.
     """
 
     def __init__(
@@ -156,14 +155,22 @@ class TypeOracle:
         self._variable_types = variable_types
         self._world = world
 
+    def with_variable_types(self, variable_types: dict[str, str] | None) -> TypeOracle:
+        """
+        This oracle with `variable_types` substituted, carrying the same world. The world is a
+        whole-script fact and the typing is not, so a caller holding typing derived for one node
+        layers it here rather than building a second oracle — which would be free to answer the
+        world questions differently, and is how one script comes to have two disagreeing verdicts.
+        """
+        return TypeOracle(variable_types, self._world)
+
     def world_closed_at(self, node) -> bool:
         """
         Whether the .NET type world is closed at `node`: no code the script runs can have shadowed a
         member through the Extended Type System or remapped a type accelerator, so a present-member
         purity grant can be trusted. This delegates to the
-        `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` a model has supplied; the empty
-        oracle carries none and answers `False`, so the member gate keeps every access — the
-        fail-closed default that holds on every un-wired call path.
+        `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` a model has supplied; an oracle
+        built without one answers `False`, so the member gate keeps every access.
         """
         return self._world is not None and self._world.world_closed_at(node)
 
@@ -173,8 +180,8 @@ class TypeOracle:
         identity-scope assignment, so the collected metadata no longer describes what it runs. Every
         site that trusts a command name — for typing or for purity — asks this before acting on the
         name. Delegates to the `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` a model has
-        supplied; the empty oracle carries none and answers `False`, keeping the pre-existing
-        name-trust behaviour on the un-wired call paths.
+        supplied; an oracle built without one answers `False`, which trusts every name — the one
+        place in this class where a missing world grants rather than withholds.
         """
         return self._world is not None and self._world.command_shadowed(name)
 
