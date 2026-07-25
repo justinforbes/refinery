@@ -15,6 +15,8 @@ one of several types, which is why the set is the primitive and the single type 
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from refinery.lib.scripts.ps1.ast import (
     extract_first_positional_string,
     get_command_name,
@@ -48,6 +50,9 @@ from refinery.lib.scripts.ps1.model import (
     Ps1TypeExpression,
     Ps1Variable,
 )
+
+if TYPE_CHECKING:
+    from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 
 
 def resolve_expression_type(
@@ -135,10 +140,30 @@ class TypeOracle:
     everything the static surface alone determines: literals, casts, `New-Object`, WMI queries, the
     return of a static method call and the declared outputs of a cmdlet. A populated oracle only adds
     the reads whose object is a typed variable or a pipeline item.
+
+    It also carries the closed-world verdict the member gate consults through `world_closed_at`:
+    whether the script's type system and command table are unmutated, which a present-member purity
+    grant requires and the empty oracle, carrying no world, denies.
     """
 
-    def __init__(self, variable_types: dict[str, str] | None = None):
+    def __init__(
+        self,
+        variable_types: dict[str, str] | None = None,
+        world: Ps1TypeWorld | None = None,
+    ):
         self._variable_types = variable_types
+        self._world = world
+
+    def world_closed_at(self, node) -> bool:
+        """
+        Whether the .NET type world is closed at `node`: no code the script runs can have shadowed a
+        member through the Extended Type System or remapped a type accelerator, so a present-member
+        purity grant can be trusted. This delegates to the
+        `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` a model has supplied; the empty oracle
+        carries none and answers `False`, so the member gate keeps every access — the fail-closed
+        default that holds on every un-wired call path.
+        """
+        return self._world is not None and self._world.world_closed_at(node)
 
     def resolve(self, expr: Expression) -> str | None:
         """

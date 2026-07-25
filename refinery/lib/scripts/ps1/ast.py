@@ -19,6 +19,7 @@ from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1.data import BUILTIN_VARIABLES
 from refinery.lib.scripts.ps1.model import (
     Expression,
+    Ps1AccessKind,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
     Ps1CastExpression,
@@ -29,11 +30,15 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1HereString,
+    Ps1InvokeMember,
+    Ps1MemberAccess,
     Ps1ParamBlock,
     Ps1ParenExpression,
     Ps1ScopeModifier,
+    Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SubExpression,
+    Ps1TypeExpression,
     Ps1Variable,
 )
 
@@ -228,6 +233,84 @@ def normalize_dotnet_type_name(name: str) -> str:
     if result.startswith('system.'):
         result = result[7:]
     return result
+
+
+def is_opaque_dispatch(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether an invocation may resolve to an arbitrary command at runtime: its name is neither a
+    string literal (a statically known command) nor an inline scriptblock (`&{ ... }`, whose body is
+    visible). `& $f`, `. $f`, and a call through an expandable string or subexpression all dispatch
+    to whatever the expression yields, so nothing static bounds what they run. The inline-scriptblock
+    exclusion is why this is not `get_command_name(cmd) is None`, which would also flag `&{ ... }`.
+    """
+    return not isinstance(cmd.name, (Ps1StringLiteral, Ps1ScriptBlock))
+
+
+_SCRIPTBLOCK_TYPE_NAMES = frozenset({
+    'scriptblock',
+    'management.automation.scriptblock',
+})
+
+
+def is_scriptblock_create(expr: Expression) -> bool:
+    """
+    Whether `expr` is a `[scriptblock]::Create(...)` call, which compiles an arbitrary string into a
+    runnable scriptblock. The argument count is not checked — any such call is recognized — so a
+    caller that needs the single argument checks the arity itself.
+    """
+    return (
+        isinstance(expr, Ps1InvokeMember)
+        and expr.access is Ps1AccessKind.STATIC
+        and isinstance(expr.object, Ps1TypeExpression)
+        and normalize_dotnet_type_name(expr.object.name) in _SCRIPTBLOCK_TYPE_NAMES
+        and isinstance(expr.member, str)
+        and expr.member.lower() == 'create'
+    )
+
+
+_SCRIPTBLOCK_INVOKE_METHODS = frozenset({
+    'invoke',
+    'invokereturnasis',
+    'invokewithcontext',
+    'foreach',
+    'where',
+})
+
+
+def is_scriptblock_invoke(expr: Expression) -> bool:
+    """
+    Whether `expr` runs code a receiver carries rather than a fixed .NET method: `$sb.Invoke(...)`,
+    `.InvokeReturnAsIs`, `.InvokeWithContext`, or the intrinsic `.ForEach`/`.Where`, which each take
+    and run a scriptblock. The receiver is not typed, so any instance call by one of these names
+    counts; a false positive on an unrelated `.Where` only keeps a statement, never deletes one.
+    """
+    return (
+        isinstance(expr, Ps1InvokeMember)
+        and expr.access is Ps1AccessKind.INSTANCE
+        and isinstance(expr.member, str)
+        and expr.member.lower() in _SCRIPTBLOCK_INVOKE_METHODS
+    )
+
+
+def is_execution_context_invoke(expr: Expression) -> bool:
+    """
+    Whether `expr` invokes a member of `$ExecutionContext.InvokeCommand` — `.InvokeScript(...)`,
+    `.NewScriptBlock(...)`, `.ExpandString(...)` — each of which runs or compiles code from a string.
+    Matched on the `$ExecutionContext.InvokeCommand` receiver chain rather than the member name, so
+    the whole command surface is covered.
+    """
+    if not (isinstance(expr, Ps1InvokeMember) and expr.access is Ps1AccessKind.INSTANCE):
+        return False
+    middle = expr.object
+    if not isinstance(middle, Ps1MemberAccess):
+        return False
+    inner = get_member_name(middle.member)
+    return (
+        inner is not None
+        and inner.lower() == 'invokecommand'
+        and isinstance(middle.object, Ps1Variable)
+        and middle.object.name.lower() == 'executioncontext'
+    )
 
 
 def is_builtin_variable(
