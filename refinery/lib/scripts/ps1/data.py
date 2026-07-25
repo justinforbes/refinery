@@ -444,11 +444,11 @@ def member_order(name: str) -> list[str] | None:
 def type_is_sealed(name: str) -> bool:
     """
     Whether the named type is sealed — no subtype of it exists, so a value of the type carries
-    exactly the members reflection reports and nothing a subtype could add. `False` when the type is
-    not collected or is not sealed, so a caller that needs sealedness to justify a grant fails closed
-    on an unknown type rather than assuming it. The flag is read from the collected metadata, which
-    is what retires the hand-asserted sealedness the effect layer's pure-read allow-list used to rest
-    on.
+    exactly the members reflection reports and nothing a subtype could add. `False` when the type
+    is not collected or is not sealed, so a caller that needs sealedness to justify a grant fails
+    closed on an unknown type rather than assuming it. The flag is read from the collected metadata,
+    which is what retires the hand-asserted sealedness the effect layer's pure-read allow-list used
+    to rest on.
     """
     key = resolve_type(name)
     if key is None:

@@ -153,10 +153,10 @@ def _canonical_read_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, s
 def _canonical_sealed_value_type_set(names: set[str]) -> frozenset[str]:
     """
     A frozenset of canonical type keys like `_canonical_type_set`, additionally floored against the
-    shipped `sealed` flag. A type on the pure-read allow-list must be sealed: the whole-surface grant
-    bets that a value of the type carries exactly the members reflection reports, which a subtype
-    could violate. An entry the collected metadata does not mark sealed fails the load, retiring the
-    sealedness the table used to assert by hand.
+    shipped `sealed` flag. A type on the pure-read allow-list must be sealed: the whole-surface
+    grant bets that a value of the type carries exactly the members reflection reports, which a
+    subtype could violate. An entry the collected metadata does not mark sealed fails the load,
+    retiring the sealedness the table used to assert by hand.
     """
     keys = _canonical_type_set(names)
     for key in keys:
@@ -252,14 +252,15 @@ _IMPURE_STATIC_METHODS = _canonical_method_set({
 #: property and field getters only return stored data and whose members never mutate or throw. A
 #: read of any member of one of these — present or absent — has no side effect, which is what lets a
 #: member the type does not carry resolve to `$null` safely. The bet is the type is sealed, so the
-#: runtime value is exactly this type and not a subtype with a member of its own; the shipped `sealed`
-#: flag is checked at import by `_canonical_sealed_value_type_set`, so an entry the data does not mark
-#: sealed fails the load rather than resting on a hand assertion. Absent-safe stays scoped to this set
-#: rather than to any sealed type: a value of one of these carries no member a module's `types.ps1xml`
-#: could have added that our capture missed, which sealedness alone does not guarantee for a reference
-#: type. `IPAddress` is deliberately absent — its `.Address` throws for an IPv6 address and its
-#: `.ScopeId` for an IPv4 one, so its read surface is not uniformly pure. A value type that ever
-#: gained an effectful reflection getter would move to `_PURE_READS`, member by member.
+#: runtime value is exactly this type and not a subtype with a member of its own; the shipped
+#: `sealed` flag is checked at import by `_canonical_sealed_value_type_set`, so an entry the data
+#: does not mark sealed fails the load rather than resting on a hand assertion. Absent-safe stays
+#: scoped to this set rather than to any sealed type: a value of one of these carries no member a
+#: module's `types.ps1xml` could have added that our capture missed, which sealedness alone does
+#: not guarantee for a reference type. `IPAddress` is deliberately absent — its `.Address` throws
+#: for an IPv6 address and its `.ScopeId` for an IPv4 one, so its read surface is not uniformly
+#: pure. A value type that ever gained an effectful reflection getter would move to `_PURE_READS`,
+#: member by member.
 _PURE_READ_TYPES = _canonical_sealed_value_type_set({
     'byte',
     'datetime',
@@ -745,13 +746,13 @@ def _member_read_is_pure(obj, member: str, oracle: TypeOracle) -> bool:
 def _grant(verdict: bool, node, oracle: TypeOracle) -> bool:
     """
     A present-member or present-type purity grant, conditioned on the type world being closed at
-    `node`. Every branch of `is_side_effect_free` that returns `True` because a member, static method
-    or constructor resolves to a known-pure .NET operation routes its verdict through here: the grant
-    holds only when no code the script runs could have shadowed that member through the Extended Type
-    System or remapped its type name through an accelerator, which is
-    `refinery.lib.scripts.ps1.analysis.types.TypeOracle.world_closed_at`. On the empty oracle that is
-    `False`, so an un-wired caller keeps the access — the fail-closed default. An impurity *deny* is
-    never routed through here; it holds unconditionally.
+    `node`. Every branch of `is_side_effect_free` that returns `True` because a member, static
+    method or constructor resolves to a known-pure .NET operation routes its verdict through here:
+    the grant holds only when no code the script runs could have shadowed that member through the
+    Extended Type System or remapped its type name through an accelerator, which is
+    `refinery.lib.scripts.ps1.analysis.types.TypeOracle.world_closed_at`. On the empty oracle that
+    is `False`, so an un-wired caller keeps the access — the fail-closed default. An impurity
+    *deny* is never routed through here; it holds unconditionally.
     """
     return verdict and oracle.world_closed_at(node)
 

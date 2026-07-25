@@ -159,9 +159,9 @@ class TypeOracle:
         Whether the .NET type world is closed at `node`: no code the script runs can have shadowed a
         member through the Extended Type System or remapped a type accelerator, so a present-member
         purity grant can be trusted. This delegates to the
-        `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` a model has supplied; the empty oracle
-        carries none and answers `False`, so the member gate keeps every access — the fail-closed
-        default that holds on every un-wired call path.
+        `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` a model has supplied; the empty
+        oracle carries none and answers `False`, so the member gate keeps every access — the
+        fail-closed default that holds on every un-wired call path.
         """
         return self._world is not None and self._world.world_closed_at(node)
 

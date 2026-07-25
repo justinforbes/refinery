@@ -240,8 +240,9 @@ def is_opaque_dispatch(cmd: Ps1CommandInvocation) -> bool:
     Whether an invocation may resolve to an arbitrary command at runtime: its name is neither a
     string literal (a statically known command) nor an inline scriptblock (`&{ ... }`, whose body is
     visible). `& $f`, `. $f`, and a call through an expandable string or subexpression all dispatch
-    to whatever the expression yields, so nothing static bounds what they run. The inline-scriptblock
-    exclusion is why this is not `get_command_name(cmd) is None`, which would also flag `&{ ... }`.
+    to whatever the expression yields, so nothing static bounds what they run. The
+    inline-scriptblock exclusion is why this is not `get_command_name(cmd) is None`, which would
+    also flag `&{ ... }`.
     """
     return not isinstance(cmd.name, (Ps1StringLiteral, Ps1ScriptBlock))
 
@@ -295,9 +296,9 @@ def is_scriptblock_invoke(expr: Expression) -> bool:
 def is_execution_context_invoke(expr: Expression) -> bool:
     """
     Whether `expr` invokes a member of `$ExecutionContext.InvokeCommand` — `.InvokeScript(...)`,
-    `.NewScriptBlock(...)`, `.ExpandString(...)` — each of which runs or compiles code from a string.
-    Matched on the `$ExecutionContext.InvokeCommand` receiver chain rather than the member name, so
-    the whole command surface is covered.
+    `.NewScriptBlock(...)`, `.ExpandString(...)` — each of which runs or compiles code from a
+    string. Matched on the `$ExecutionContext.InvokeCommand` receiver chain rather than the member
+    name, so the whole command surface is covered.
     """
     if not (isinstance(expr, Ps1InvokeMember) and expr.access is Ps1AccessKind.INSTANCE):
         return False
