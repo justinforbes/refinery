@@ -332,3 +332,66 @@ class TestPs1Integration(TestPs1):
         """)
         result = self._deobfuscate(src)
         self.assertEqual(result, "Write-Host 'payload'")
+
+
+class TestPs1ClosedWorld(TestPs1):
+    """
+    A probe on Windows PowerShell confirmed that `Update-TypeData -Force` can shadow a native member
+    with a code-running ScriptProperty, so a member read after any type-system or command-identity
+    mutation — or after opaque code that could perform one — is not junk and must survive
+    deobfuscation. Each case runs the same read with and without an opener and checks it is deleted
+    only in a closed world.
+    """
+
+    def test_a_pure_read_is_deleted_only_in_a_closed_world(self):
+        anchor = "$Null = [Environment]::UserName\nWrite-Output 'anchor'\n"
+        self.assertNotIn('UserName', self._deobfuscate_iterative(anchor))
+        openers = (
+            'Update-TypeData -TypeName System.String -MemberName M '
+            '-MemberType ScriptProperty -Value { 1 }\n',
+            'Set-Item alias:utd Update-TypeData\n',
+            'iex $x\n',
+        )
+        for opener in openers:
+            with self.subTest(opener):
+                self.assertIn('UserName', self._deobfuscate_iterative(opener + anchor))
+
+    def test_a_temporary_mutator_is_deleted_only_in_a_closed_world(self):
+        # The in-place mutator on a temporary is pure — but the grant is a present-member grant, so it
+        # gates on the world too, the case both critic rounds caught.
+        anchor = "$Null = [Array]::Reverse('ab'.ToCharArray())\nWrite-Output 'anchor'\n"
+        self.assertNotIn('Reverse', self._deobfuscate_iterative(anchor))
+        self.assertIn('Reverse', self._deobfuscate_iterative('iex $x\n' + anchor))
+
+
+class TestPs1CommandRedefinition(TestPs1):
+    """
+    A script-local `function`/`filter` (or a `${function:X}=` assignment) shadows a same-named
+    command, so it no longer runs what the metadata describes. The analysis must not delete a read,
+    discard, or pipeline sink of a shadowed command as if it were the inert built-in — every form
+    below runs a real `Start-Process` through the shadowing definition and must survive.
+    """
+
+    def test_a_shadowed_commands_effect_survives_every_deletion_form(self):
+        anchor = "\nWrite-Output 'keep'\n"
+        forms = {
+            'member-read': "function Get-Date { Start-Process calc }\n$Null = (Get-Date).Ticks",
+            'bare-discard': "function Get-Date { Start-Process calc }\n$Null = Get-Date",
+            'out-null-sink': "function Out-Null { Start-Process calc }\n1 | Out-Null",
+            'foreach-void-sink':
+                "function ForEach-Object { Start-Process calc }\n1 | ForEach-Object { [Void]$_ }",
+            'unresolvable-try': "function Zzz { Start-Process calc }\ntry { Zzz } catch {}",
+            'function-scope-assign':
+                "${function:Get-Date} = { Start-Process calc }\n$Null = Get-Date",
+            'new-object': "function New-Object { Start-Process calc }\n$Null = New-Object Version",
+        }
+        for name, body in forms.items():
+            with self.subTest(name):
+                self.assertIn('Start-Process', self._deobfuscate_iterative(body + anchor))
+
+    def test_an_unshadowed_pure_read_is_still_deleted(self):
+        # The guard is name-keyed, not blanket: a script that defines an unrelated function still has
+        # its genuinely-pure junk removed.
+        out = self._deobfuscate_iterative(
+            "function Helper { 'x' }\n$Null = (Get-Date).Ticks\nWrite-Output 'keep'\n")
+        self.assertNotIn('Get-Date', out)
