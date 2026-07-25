@@ -17,12 +17,14 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     statement_effect,
 )
 from refinery.lib.scripts.ps1.analysis.model import Binding, Ps1SemanticModel, Scope
+from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.ast import (
     assignment_of,
     assignment_target_is_all_variables,
     assignment_target_variables,
     get_body,
     get_command_name,
+    is_opaque_dispatch,
 )
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _PS1_SKIP_VARIABLES,
@@ -40,8 +42,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1PipelineElement,
     Ps1ScopeModifier,
     Ps1Script,
-    Ps1ScriptBlock,
-    Ps1StringLiteral,
     Ps1UnaryExpression,
     Ps1Variable,
 )
@@ -57,7 +57,9 @@ class Ps1UnusedVariableRemoval(Transformer):
     """
 
     def visit(self, node: Node):
-        model = model_cache(self, node).model
+        cache = model_cache(self, node)
+        model = cache.model
+        oracle = TypeOracle(world=cache.closed_world)
         candidates: dict[Binding, list[Node]] = {}
         for binding in model.script_scope.bindings.values():
             if binding.dynamic_or_qualified or binding.name in _PS1_SKIP_VARIABLES:
@@ -88,7 +90,7 @@ class Ps1UnusedVariableRemoval(Transformer):
             if not surviving:
                 return None
         for mutation in removable:
-            self._remove_mutation(mutation)
+            self._remove_mutation(mutation, oracle)
 
     @staticmethod
     def _removable_mutations(binding: Binding) -> list[Node]:
@@ -213,10 +215,10 @@ class Ps1UnusedVariableRemoval(Transformer):
                 return False
         return True
 
-    def _remove_mutation(self, mutation: Node):
+    def _remove_mutation(self, mutation: Node, oracle: TypeOracle):
         if isinstance(mutation, Ps1AssignmentExpression):
             rhs = mutation.value
-            if rhs is not None and not is_side_effect_free(rhs) and isinstance(rhs, Expression):
+            if rhs is not None and not is_side_effect_free(rhs, oracle) and isinstance(rhs, Expression):
                 stmt = _find_removable_statement(mutation)
                 if stmt is None:
                     return
@@ -240,31 +242,23 @@ class Ps1JunkStatementRemoval(Transformer):
     """
 
     def visit(self, node: Node):
+        oracle = TypeOracle(world=model_cache(self, node).closed_world)
         called = self._reachable_functions(node)
         for parent in list(node.walk()):
             role = body_role(parent)
             if role is None or role is BodyRole.OPAQUE:
                 continue
-            self._prune_body(get_body(parent), role, called)
-        self._remove_inert_functions(node)
-
-    @staticmethod
-    def _is_dynamic_dispatch(cmd: Ps1CommandInvocation) -> bool:
-        """
-        Return `True` when an invocation may resolve to an arbitrary function name at runtime. A
-        literal command name resolves statically, and a literal scriptblock body (`&{ ... }`) runs
-        inline; any other command expression (a variable like `& $f`, an expandable string, or a
-        subexpression) could dispatch to any defined function.
-        """
-        return not isinstance(cmd.name, (Ps1StringLiteral, Ps1ScriptBlock))
+            self._prune_body(get_body(parent), role, called, oracle)
+        self._remove_inert_functions(node, oracle)
 
     @staticmethod
     def _reachable_functions(node: Node) -> set[str]:
         """
         Collect all function names transitively reachable from top-level call sites. First gather
         direct calls from the outer scope, then expand through function bodies until stable. When an
-        invocation may dispatch dynamically (see `_is_dynamic_dispatch`), every defined function is
-        treated as reachable so that a function called only through `& $f` is never removed.
+        invocation may dispatch dynamically (see `refinery.lib.scripts.ps1.ast.is_opaque_dispatch`),
+        every defined function is treated as reachable so a function called only through `& $f` is
+        never removed.
         """
         directly_called: set[str] = set()
         functions: dict[str, Ps1FunctionDefinition] = {}
@@ -274,7 +268,7 @@ class Ps1JunkStatementRemoval(Transformer):
                 name = get_command_name(n)
                 if name is not None:
                     directly_called.add(name.lower())
-                elif Ps1JunkStatementRemoval._is_dynamic_dispatch(n):
+                elif is_opaque_dispatch(n):
                     dynamic_call = True
             elif isinstance(n, Ps1FunctionDefinition):
                 functions[n.name.lower()] = n
@@ -291,7 +285,7 @@ class Ps1JunkStatementRemoval(Transformer):
                 if isinstance(n, Ps1CommandInvocation):
                     name = get_command_name(n)
                     if name is None:
-                        if Ps1JunkStatementRemoval._is_dynamic_dispatch(n):
+                        if is_opaque_dispatch(n):
                             return set(functions.keys()) | reachable
                         continue
                     key = name.lower()
@@ -301,7 +295,7 @@ class Ps1JunkStatementRemoval(Transformer):
                             frontier.append(key)
         return reachable
 
-    def _remove_inert_functions(self, node: Node):
+    def _remove_inert_functions(self, node: Node, oracle: TypeOracle):
         """
         Remove top-level functions whose body carries no observable output or side effect together
         with the bare call statements that invoke them. After body pruning, an injected junk function
@@ -315,7 +309,7 @@ class Ps1JunkStatementRemoval(Transformer):
             return
         inert: dict[str, Ps1FunctionDefinition] = {}
         for stmt in node.body:
-            if isinstance(stmt, Ps1FunctionDefinition) and body_is_inert(stmt.body):
+            if isinstance(stmt, Ps1FunctionDefinition) and body_is_inert(stmt.body, oracle):
                 inert[stmt.name.lower()] = stmt
         if not inert:
             return
@@ -368,11 +362,11 @@ class Ps1JunkStatementRemoval(Transformer):
     def _any_dynamic_dispatch(node: Node) -> bool:
         for n in node.walk():
             if isinstance(n, Ps1CommandInvocation):
-                if get_command_name(n) is None and Ps1JunkStatementRemoval._is_dynamic_dispatch(n):
+                if get_command_name(n) is None and is_opaque_dispatch(n):
                     return True
         return False
 
-    def _prune_body(self, body: list, role: BodyRole, called: set[str]):
+    def _prune_body(self, body: list, role: BodyRole, called: set[str], oracle: TypeOracle):
         discard: set[Node] = set()
         output: set[Node] = set()
         dead_functions: set[Node] = set()
@@ -381,7 +375,7 @@ class Ps1JunkStatementRemoval(Transformer):
                 if role is BodyRole.SCRIPT and stmt.name.lower() not in called:
                     dead_functions.add(stmt)
                 continue
-            effect = statement_effect(stmt)
+            effect = statement_effect(stmt, oracle)
             if effect is StatementEffect.DISCARD:
                 discard.add(stmt)
             elif effect is StatementEffect.OUTPUT:
@@ -428,7 +422,9 @@ class Ps1DeadStoreElimination(Transformer):
         # every visit keeps it consistent with the tree after this pass removes a statement.
         if self._root is None:
             self._root = node
-        model = model_cache(self, self._root).model
+        cache = model_cache(self, self._root)
+        model = cache.model
+        oracle = TypeOracle(world=cache.closed_world)
         body = get_body(node)
         scope = model.scope_of(node)
         if body is None or scope is None:
@@ -463,7 +459,7 @@ class Ps1DeadStoreElimination(Transformer):
             rhs = stmt.expression
             if isinstance(rhs, Ps1AssignmentExpression):
                 rhs = rhs.value
-            if rhs is not None and isinstance(rhs, Expression) and not is_side_effect_free(rhs):
+            if rhs is not None and isinstance(rhs, Expression) and not is_side_effect_free(rhs, oracle):
                 replacement = Ps1ExpressionStatement(expression=rhs)
                 _replace_in_parent(stmt, replacement)
             else:

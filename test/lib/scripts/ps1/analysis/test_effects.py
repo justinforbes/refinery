@@ -15,6 +15,8 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     pruning_erases_body,
     statement_effect,
 )
+from refinery.lib.scripts.ps1.analysis.types import TypeOracle
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1CommandInvocation,
@@ -30,7 +32,18 @@ from refinery.lib.scripts.ps1.model import (
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
+#: A type world with no mutation or capability leak, the context in which the member gate performs
+#: its full type reasoning. `TestPs1Purity` asserts type facts (this member read is a plain .NET
+#: property) against it, because Position A makes a present-member grant conditional on the world
+#: being closed; the open-world behaviour it guards is exercised in `TestPs1ClosedWorld`.
+_CLOSED_WORLD = TypeOracle(world=Ps1TypeWorld(True))
+
+
 class Ps1EffectsTest(TestBase):
+
+    @staticmethod
+    def _pure(node) -> bool:
+        return is_side_effect_free(node, _CLOSED_WORLD)
 
     @staticmethod
     def _parse(source: str):
@@ -64,7 +77,7 @@ class TestPs1Purity(Ps1EffectsTest):
             'New-Object System.Text.StringBuilder',
         ):
             with self.subTest(source):
-                self.assertTrue(is_side_effect_free(self._expression(source)))
+                self.assertTrue(self._pure(self._expression(source)))
 
     def test_expressions_that_change_the_world(self):
         for source in (
@@ -75,14 +88,14 @@ class TestPs1Purity(Ps1EffectsTest):
             '$s.Invoke()',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_an_unrecognized_construct_is_assumed_impure(self):
         # The allow-list is the whole safety argument: anything it does not name has to come back
         # impure, however harmless it looks.
         for source in ('New-Object System.Net.WebClient', '& $f', '$obj.Frobnicate()'):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_pipeline_cmdlet_is_as_pure_as_the_body_it_runs(self):
         # A scriptblock body is a sequence of statements, so purity of the cmdlet has to be decided
@@ -97,7 +110,7 @@ class TestPs1Purity(Ps1EffectsTest):
             ('1..3 | ForEach-Object { [Void](Start-Process notepad) }', False),
         ):
             with self.subTest(source):
-                self.assertIs(is_side_effect_free(self._expression(source)), pure)
+                self.assertIs(self._pure(self._expression(source)), pure)
 
     def test_a_pipeline_cmdlet_body_is_read_for_every_such_cmdlet(self):
         # Three of the four pipeline cmdlets also name a plain pure cmdlet, so an allow-list that
@@ -109,7 +122,7 @@ class TestPs1Purity(Ps1EffectsTest):
             '1..3 | ForEach-Object { Start-Process notepad }',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_scriptblock_argument_is_read_through_every_block_it_owns(self):
         # The parser fills either `body` or the named blocks, so a block that carries its work in
@@ -121,7 +134,7 @@ class TestPs1Purity(Ps1EffectsTest):
             '1..3 | ForEach-Object { param($p = (Start-Process notepad)) [Void]$_ }',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_computed_member_name_is_an_expression_the_read_evaluates(self):
         # `$x.$(...)` runs the subexpression to decide which member to read, before any read.
@@ -131,7 +144,7 @@ class TestPs1Purity(Ps1EffectsTest):
             '$x.$(Remove-Item C:\\important).Length',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_provable_pure_member_read_is_removable(self):
         # The object is pure to evaluate and the member read runs no code: a curated reflection
@@ -149,16 +162,16 @@ class TestPs1Purity(Ps1EffectsTest):
             '[String]::Empty',
         ):
             with self.subTest(source):
-                self.assertTrue(is_side_effect_free(self._expression(source)))
+                self.assertTrue(self._pure(self._expression(source)))
 
     def test_a_quoted_member_name_reads_the_same_member_as_a_bare_one(self):
         # A quoted member name (`.'Ticks'`) is one spelling of a literal member, not a computed one,
         # so the gate resolves it to the same member and reaches the same verdict as the bare form:
         # the sealed-value read is removable and the Extended Type System getter is kept. Only a name
         # the engine computes at runtime (`.$(...)`) leaves the member unknown and stays impure.
-        self.assertTrue(is_side_effect_free(self._expression("(Get-Date).'Ticks'")))
-        self.assertFalse(is_side_effect_free(self._expression("(Get-Process).'Path'")))
-        self.assertFalse(is_side_effect_free(self._expression('(Get-Date).$($x)')))
+        self.assertTrue(self._pure(self._expression("(Get-Date).'Ticks'")))
+        self.assertFalse(self._pure(self._expression("(Get-Process).'Path'")))
+        self.assertFalse(self._pure(self._expression('(Get-Date).$($x)')))
 
     def test_a_member_read_is_kept_unless_the_getter_is_proven_inert(self):
         # The soundness core: a property getter may run code or throw, and a read is removed only when
@@ -177,7 +190,7 @@ class TestPs1Purity(Ps1EffectsTest):
             '$reader.EndOfStream',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_forwarding_cmdlet_result_read_is_kept(self):
         # A cmdlet's [OutputType] is only a lower bound: one that forwards its input emits types it
@@ -191,16 +204,16 @@ class TestPs1Purity(Ps1EffectsTest):
             '(Get-Content $p).Length',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_static_field_read_is_gated_but_an_instance_field_is_not(self):
         # Reading a static field runs the declaring type's static constructor on first touch, so it is
         # not unconditionally pure the way an instance field is; it is removable only when the type or
         # the read is granted. `Math.PI` and `Int32.MaxValue` are granted; `IO.Path`'s separator
         # fields are not, and its cctor could do anything, so they are kept.
-        self.assertFalse(is_side_effect_free(self._expression('[IO.Path]::DirectorySeparatorChar')))
-        self.assertTrue(is_side_effect_free(self._expression('[Math]::PI')))
-        self.assertTrue(is_side_effect_free(self._expression('[Int]::MaxValue')))
+        self.assertFalse(self._pure(self._expression('[IO.Path]::DirectorySeparatorChar')))
+        self.assertTrue(self._pure(self._expression('[Math]::PI')))
+        self.assertTrue(self._pure(self._expression('[Int]::MaxValue')))
 
     def test_a_hash_literal_evaluates_its_keys_as_well_as_its_values(self):
         for source in (
@@ -208,7 +221,7 @@ class TestPs1Purity(Ps1EffectsTest):
             '@{ 1 = $(Start-Process notepad) }',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_cmdlet_is_no_purer_than_the_arguments_it_evaluates(self):
         # Being a pure transform says nothing about what the operands cost to produce: the cmdlet
@@ -220,7 +233,7 @@ class TestPs1Purity(Ps1EffectsTest):
             'Where-Object -InputObject (Start-Process notepad) { $_ }',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_member_invoking_foreach_has_no_body_to_vouch_for_it(self):
         # `ForEach-Object -MemberName Delete` calls that member on every input item. A body check
@@ -231,7 +244,7 @@ class TestPs1Purity(Ps1EffectsTest):
             'Get-Process | ForEach-Object $handler',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_an_in_place_mutator_is_pure_only_on_a_temporary(self):
         # `[Array]::Reverse` rewrites what it is given. Reversing a value nothing else can reach is
@@ -246,7 +259,7 @@ class TestPs1Purity(Ps1EffectsTest):
             ('[Array]::Reverse($pair[0])', False),
         ):
             with self.subTest(source):
-                self.assertIs(is_side_effect_free(self._expression(source)), pure)
+                self.assertIs(self._pure(self._expression(source)), pure)
 
     def test_an_out_parameter_writes_the_callers_storage(self):
         # `[ref]$x` hands the callee somewhere to put its result. Every `TryParse` on the numeric,
@@ -268,7 +281,7 @@ class TestPs1Purity(Ps1EffectsTest):
             '$dict.TryGetValue($k, [ref]$v)',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_call_that_only_returns_its_result_stays_pure(self):
         # The rule is about being handed writable storage, not about the call having arguments.
@@ -279,7 +292,7 @@ class TestPs1Purity(Ps1EffectsTest):
             '[Convert]::ToBase64String($b)',
         ):
             with self.subTest(source):
-                self.assertTrue(is_side_effect_free(self._expression(source)))
+                self.assertTrue(self._pure(self._expression(source)))
 
     def test_a_bare_out_argument_is_caught_by_the_signature(self):
         # `TryParse` binds its second parameter by reference, and PowerShell lets the caller pass
@@ -297,7 +310,7 @@ class TestPs1Purity(Ps1EffectsTest):
             ('[Int]::Parse($s)', True),
         ):
             with self.subTest(source):
-                self.assertIs(is_side_effect_free(self._expression(source)), pure)
+                self.assertIs(self._pure(self._expression(source)), pure)
 
     def test_a_types_spelling_does_not_change_its_purity(self):
         # `int`, `Int32` and the qualified name are one type, and a generic is one type however its
@@ -312,16 +325,16 @@ class TestPs1Purity(Ps1EffectsTest):
             ),
         ):
             with self.subTest(variants):
-                verdicts = {is_side_effect_free(self._expression(v)) for v in variants}
+                verdicts = {self._pure(self._expression(v)) for v in variants}
                 self.assertEqual(verdicts, {True})
 
     def test_a_member_that_writes_whatever_it_is_handed(self):
         # A whole-type grant asserts that no member of the type writes. `[IO.Path]` is pure apart
         # from the one member that creates a file on disk, and that one takes no arguments to be
         # judged by.
-        self.assertFalse(is_side_effect_free(self._expression('[IO.Path]::GetTempFileName()')))
-        self.assertTrue(is_side_effect_free(self._expression('[IO.Path]::Combine($a, $b)')))
-        self.assertTrue(is_side_effect_free(self._expression('[IO.Path]::GetFileName($p)')))
+        self.assertFalse(self._pure(self._expression('[IO.Path]::GetTempFileName()')))
+        self.assertTrue(self._pure(self._expression('[IO.Path]::Combine($a, $b)')))
+        self.assertTrue(self._pure(self._expression('[IO.Path]::GetFileName($p)')))
 
     def test_a_parameter_that_names_a_variable_the_command_fills(self):
         # `-OutVariable d` sets `$d`. The parsed parameter name carries its leading dash and
@@ -339,7 +352,7 @@ class TestPs1Purity(Ps1EffectsTest):
             'Get-Random -SetSeed 5',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_the_write_parameter_derivation_fails_loud_when_data_drops_one(self):
         # The out-variable write parameters are derived from the collected common parameters. If a
@@ -369,7 +382,7 @@ class TestPs1Purity(Ps1EffectsTest):
             '1..3 | Select-Object -First 2',
         ):
             with self.subTest(source):
-                self.assertTrue(is_side_effect_free(self._expression(source)))
+                self.assertTrue(self._pure(self._expression(source)))
 
     def test_a_constructor_is_judged_by_every_argument_it_is_handed(self):
         # `New-Object` binds two positional parameters. An accessor that reports the first two and
@@ -380,7 +393,7 @@ class TestPs1Purity(Ps1EffectsTest):
             'New-Object Text.StringBuilder ([ref]$n)',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_type_grants_purity_to_its_members_one_by_one(self):
         # A type whose static surface mixes readers with process- and environment-level writers
@@ -392,7 +405,7 @@ class TestPs1Purity(Ps1EffectsTest):
             ("[Environment]::SetEnvironmentVariable('k', 'v')", False),
         ):
             with self.subTest(source):
-                self.assertIs(is_side_effect_free(self._expression(source)), pure)
+                self.assertIs(self._pure(self._expression(source)), pure)
 
     def test_a_redirection_writes_a_file_however_pure_the_command_is(self):
         for source in (
@@ -401,7 +414,7 @@ class TestPs1Purity(Ps1EffectsTest):
             'Get-Process 2> C:\\err.txt',
         ):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_no_combining_form_launders_an_effect(self):
         # Purity is compositional: an impure operand must poison every expression built over it,
@@ -416,7 +429,45 @@ class TestPs1Purity(Ps1EffectsTest):
             '1..3 | ForEach-Object { Start-Process notepad }',
         ):
             with self.subTest(source):
+                self.assertFalse(self._pure(self._expression(source)))
+
+
+class TestPs1MemberGateWorld(Ps1EffectsTest):
+    """
+    Position A: a present-member purity grant — a property read, a static or instance method call, a
+    constructor — is trusted only under a closed type world. The type reasoning that proves the read
+    inert is the same whether the world is open or closed; what the world decides is whether that
+    proof may be acted on, because an Extended Type System mutation the script could run would make
+    the read effectful. Each read below is one the type layer proves pure, kept under the empty oracle
+    (no world, the fail-closed default) and granted only under a closed one.
+    """
+
+    def test_each_grant_is_withheld_when_the_world_is_open(self):
+        for source in (
+            "'abcdef'.Length",
+            '(Get-Date).Ticks',
+            '[Environment]::UserName',
+            '[Math]::Max(1, 2)',
+            '$s.Trim()',
+            "[Array]::Reverse('ab'.ToCharArray())",
+            'New-Object System.Version(1, 2)',
+        ):
+            with self.subTest(source):
                 self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertTrue(self._pure(self._expression(source)))
+
+    def test_a_denied_read_stays_impure_even_under_a_closed_world(self):
+        # The world gates grants, never denies: a getter that runs code or throws, an in-place mutator
+        # on shared storage, or an out-parameter is kept whether the world is open or closed.
+        for source in (
+            '(Get-Process).Path',
+            '[Diagnostics.Process]::GetCurrentProcess().ExitCode',
+            '[Array]::Reverse($buffer)',
+            '[IO.Path]::GetTempFileName()',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
 
 class TestPs1StatementEffect(Ps1EffectsTest):
@@ -477,7 +528,7 @@ class TestPs1StatementEffect(Ps1EffectsTest):
         ):
             with self.subTest(source):
                 self.assertIs(statement_effect(self._statement(source)), StatementEffect.EFFECT)
-                self.assertFalse(is_side_effect_free(self._expression(source)))
+                self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_foreach_body_is_read_through_every_block_it_owns(self):
         # A discarding `body` says nothing about work the same block carries in a named or `param`
@@ -511,7 +562,7 @@ class TestPs1StatementEffect(Ps1EffectsTest):
         # Purity and emission answer different questions: `Where-Object` performs no side effect,
         # yet the filtered value it puts on the pipeline is not junk.
         statement = self._statement('1..3 | Where-Object { $_ }')
-        self.assertTrue(is_side_effect_free(self._expression('1..3 | Where-Object { $_ }')))
+        self.assertTrue(self._pure(self._expression('1..3 | Where-Object { $_ }')))
         self.assertIs(statement_effect(statement), StatementEffect.EFFECT)
 
     def test_pure_constants_are_a_strict_refinement_of_output(self):
@@ -526,7 +577,7 @@ class TestPs1StatementEffect(Ps1EffectsTest):
         # A bare string is very often the point of the script, so it is deliberately left out of the
         # constant set even though it is side-effect free.
         expression = self._expression("'hi'")
-        self.assertTrue(is_side_effect_free(expression))
+        self.assertTrue(self._pure(expression))
         self.assertFalse(is_pure_constant(expression))
 
     def test_a_computed_expression_is_not_a_constant(self):

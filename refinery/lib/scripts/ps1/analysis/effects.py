@@ -150,6 +150,25 @@ def _canonical_read_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, s
     return frozenset(result)
 
 
+def _canonical_sealed_value_type_set(names: set[str]) -> frozenset[str]:
+    """
+    A frozenset of canonical type keys like `_canonical_type_set`, additionally floored against the
+    shipped `sealed` flag. A type on the pure-read allow-list must be sealed: the whole-surface grant
+    bets that a value of the type carries exactly the members reflection reports, which a subtype
+    could violate. An entry the collected metadata does not mark sealed fails the load, retiring the
+    sealedness the table used to assert by hand.
+    """
+    keys = _canonical_type_set(names)
+    for key in keys:
+        if not data.type_is_sealed(key):
+            raise ValueError(
+                F'the PowerShell pure-read allow-list names {key!r}, which the collected metadata '
+                F'does not mark sealed; a subtype could carry a member the whole-surface grant does '
+                F'not see, so the data and the allow-list are out of step.'
+            )
+    return keys
+
+
 #: Types whose entire static surface is granted purity at once. Listing a type here asserts that no
 #: static member of it writes anything — a bet re-checked against the real .NET surface whenever an
 #: entry is added, because a single writing member makes every call on the type removable.
@@ -233,12 +252,15 @@ _IMPURE_STATIC_METHODS = _canonical_method_set({
 #: property and field getters only return stored data and whose members never mutate or throw. A
 #: read of any member of one of these — present or absent — has no side effect, which is what lets a
 #: member the type does not carry resolve to `$null` safely. The bet is the type is sealed, so the
-#: runtime value is exactly this type and not a subtype with a member of its own; the shipped data
-#: carries no sealed flag yet, so membership here *is* that assertion, re-checked when an entry is
-#: added. `IPAddress` is deliberately absent — its `.Address` throws for an IPv6 address and its
+#: runtime value is exactly this type and not a subtype with a member of its own; the shipped `sealed`
+#: flag is checked at import by `_canonical_sealed_value_type_set`, so an entry the data does not mark
+#: sealed fails the load rather than resting on a hand assertion. Absent-safe stays scoped to this set
+#: rather than to any sealed type: a value of one of these carries no member a module's `types.ps1xml`
+#: could have added that our capture missed, which sealedness alone does not guarantee for a reference
+#: type. `IPAddress` is deliberately absent — its `.Address` throws for an IPv6 address and its
 #: `.ScopeId` for an IPv4 one, so its read surface is not uniformly pure. A value type that ever
 #: gained an effectful reflection getter would move to `_PURE_READS`, member by member.
-_PURE_READ_TYPES = _canonical_type_set({
+_PURE_READ_TYPES = _canonical_sealed_value_type_set({
     'byte',
     'datetime',
     'decimal',
@@ -720,6 +742,20 @@ def _member_read_is_pure(obj, member: str, oracle: TypeOracle) -> bool:
     )
 
 
+def _grant(verdict: bool, node, oracle: TypeOracle) -> bool:
+    """
+    A present-member or present-type purity grant, conditioned on the type world being closed at
+    `node`. Every branch of `is_side_effect_free` that returns `True` because a member, static method
+    or constructor resolves to a known-pure .NET operation routes its verdict through here: the grant
+    holds only when no code the script runs could have shadowed that member through the Extended Type
+    System or remapped its type name through an accelerator, which is
+    `refinery.lib.scripts.ps1.analysis.types.TypeOracle.world_closed_at`. On the empty oracle that is
+    `False`, so an un-wired caller keeps the access — the fail-closed default. An impurity *deny* is
+    never routed through here; it holds unconditionally.
+    """
+    return verdict and oracle.world_closed_at(node)
+
+
 def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
     """
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
@@ -773,7 +809,7 @@ def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
         member = get_member_name(node.member)
         if member is None:
             return False
-        return _member_read_is_pure(node.object, member, oracle)
+        return _grant(_member_read_is_pure(node.object, member, oracle), node, oracle)
     if isinstance(node, Ps1InvokeMember):
         if not _arguments_are_pure(node.arguments, oracle):
             return False
@@ -795,17 +831,18 @@ def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
                     if key in _IMPURE_STATIC_METHODS:
                         return False
                     if key in _MUTATING_STATIC_METHODS:
-                        return not any(_denotes_shared_storage(a) for a in node.arguments)
+                        pure = not any(_denotes_shared_storage(a) for a in node.arguments)
+                        return _grant(pure, node, oracle)
                     if _writes_through_out_parameter(obj.name, member, node.arguments):
                         return False
                     if type_key in _PURE_STATIC_METHOD_TYPES:
-                        return True
+                        return _grant(True, node, oracle)
                     if key in _PURE_STATIC_METHODS:
-                        return True
+                        return _grant(True, node, oracle)
         elif is_side_effect_free(node.object, oracle):
             member = node.member
             if isinstance(member, str) and member.lower() in _PURE_INSTANCE_METHODS:
-                return True
+                return _grant(True, node, oracle)
         return False
     if isinstance(node, Ps1CommandInvocation):
         if node.redirections:
@@ -815,7 +852,7 @@ def is_side_effect_free(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
             if resolved is not None and resolved.lower() in _PURE_STATIC_METHOD_TYPES:
-                return _arguments_are_pure(ctor_args, oracle)
+                return _grant(_arguments_are_pure(ctor_args, oracle), node, oracle)
             return False
         name = get_command_name(node)
         if name is None:
@@ -1278,7 +1315,10 @@ def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:
     return not survivors and role is BodyRole.SCRIPT
 
 
-def _param_block_is_inert(block: Ps1ParamBlock | None) -> bool:
+def _param_block_is_inert(
+    block: Ps1ParamBlock | None,
+    oracle: TypeOracle = _EMPTY_ORACLE,
+) -> bool:
     """
     Whether a `param( ... )` block runs nothing when the function is called. Declaring a name binds
     storage and evaluates nothing, but a default value is an expression the engine runs on every
@@ -1295,12 +1335,12 @@ def _param_block_is_inert(block: Ps1ParamBlock | None) -> bool:
         return False
     return all(
         not any(isinstance(a, Ps1Attribute) for a in parameter.attributes)
-        and (parameter.default_value is None or is_side_effect_free(parameter.default_value))
+        and (parameter.default_value is None or is_side_effect_free(parameter.default_value, oracle))
         for parameter in block.parameters
     )
 
 
-def body_is_inert(node) -> bool:
+def body_is_inert(node, oracle: TypeOracle = _EMPTY_ORACLE) -> bool:
     """
     Whether the body that `node` owns neither emits a value nor performs a side effect: `node` is
     `None`, the body is empty, or every statement in it is a `StatementEffect.DISCARD`. An inert
@@ -1320,6 +1360,6 @@ def body_is_inert(node) -> bool:
     body = get_body(node)
     if body is None or get_named_blocks(node):
         return False
-    if not _param_block_is_inert(get_param_block(node)):
+    if not _param_block_is_inert(get_param_block(node), oracle):
         return False
-    return all(statement_effect(stmt) is StatementEffect.DISCARD for stmt in body)
+    return all(statement_effect(stmt, oracle) is StatementEffect.DISCARD for stmt in body)

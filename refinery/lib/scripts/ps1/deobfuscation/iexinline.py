@@ -16,6 +16,7 @@ from refinery.lib.scripts import Expression, Transformer, _replace_in_parent
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
+    is_scriptblock_create,
     normalize_dotnet_type_name,
     string_value,
 )
@@ -139,26 +140,14 @@ def _extract_iex_value(cmd: Ps1CommandInvocation) -> Expression | None:
     return arg
 
 
-_SCRIPTBLOCK_TYPE_NAMES = frozenset({
-    'scriptblock',
-    'management.automation.scriptblock',
-})
-
-
 def _try_extract_scriptblock_create_arg(expr: Expression) -> Expression | None:
     """
-    If `expr` is `[scriptblock]::Create(arg)`, return the single argument.
+    If `expr` is `[scriptblock]::Create(arg)` with a single argument, return that argument. The
+    recognition is shared with the closed-world predicate through
+    `refinery.lib.scripts.ps1.ast.is_scriptblock_create`; the arity check stays local, because
+    inlining needs the one argument the predicate, which only classifies, does not.
     """
-    if not isinstance(expr, Ps1InvokeMember):
-        return None
-    if expr.access != Ps1AccessKind.STATIC:
-        return None
-    if not isinstance(expr.object, Ps1TypeExpression):
-        return None
-    tn = normalize_dotnet_type_name(expr.object.name)
-    if tn not in _SCRIPTBLOCK_TYPE_NAMES:
-        return None
-    if not isinstance(expr.member, str) or expr.member.lower() != 'create':
+    if not is_scriptblock_create(expr):
         return None
     if len(expr.arguments) != 1:
         return None
