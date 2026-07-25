@@ -125,15 +125,6 @@ class Ps1TypeWorld:
         """
         return name.lower() in self._shadowed
 
-    @property
-    def shadowed_commands(self) -> frozenset[str]:
-        """
-        The lowercased command names the script redefines, for a consumer that tests membership
-        against a set of its own rather than one name at a time — dead-code elimination, deciding
-        a bareword resolves to a script function rather than throwing `CommandNotFoundException`.
-        """
-        return self._shadowed
-
 
 def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
     """
