@@ -413,25 +413,6 @@ class TestPs1CommandRedefinition(TestPs1):
             "function Helper { 'x' }\n$Null = (Get-Date).Ticks\nWrite-Output 'keep'\n")
         self.assertNotIn('Get-Date', out)
 
-    def test_a_payload_in_a_catch_survives_a_throwing_try_body(self):
-        # Moving the real work into a `catch` and making the `try` fail on purpose is a standard
-        # anti-analysis shape. Nothing here can tell that `[Int]'abc'` throws — it emits nothing, so
-        # the cleanup passes removed it, and an emptied `try` body then makes the handler provably
-        # unreachable. The over-deletion is in emptying the body, so that is what is refused.
-        for body in ("$Null = [Int]'abc'", "$x = [Int]'abc'", "[Int]'abc'", "[Guid]'nope'"):
-            with self.subTest(body):
-                out = self._deobfuscate_iterative(
-                    F"try {{ {body} }} catch {{ Start-Process calc }}\nWrite-Host 'keep'")
-                self.assertIn('Start-Process', out)
-
-    def test_an_empty_catch_still_lets_a_junk_try_be_pruned(self):
-        # The guard above is scoped to a handler that does something. `catch {}` swallows the error
-        # and execution continues either way, so removing a throwing statement changes nothing —
-        # and that is the shape obfuscators actually emit, which is why the guard costs so little.
-        out = self._deobfuscate_iterative(
-            "try { foo =5 } catch {}\ntry { [Int]'abc' } catch {}\nWrite-Host 'keep'")
-        self.assertEqual(out, "Write-Host 'keep'")
-
     def test_a_cast_to_a_script_defined_type_keeps_the_constructor_it_runs(self):
         # PowerShell converts a string to a custom type by invoking a one-argument constructor, so
         # the cast is the call. The type is defined in this very script and the constructor body is
@@ -455,6 +436,54 @@ class TestPs1CommandRedefinition(TestPs1):
                 out = self._deobfuscate_iterative(
                     F"function f {{ Start-Process calc }}\n{second}\nf\nWrite-Host 'keep'")
                 self.assertIn('Start-Process', out)
+
+
+class TestPs1ErrorHandlerSurvival(TestPs1):
+    """
+    Moving the real work into a `catch` and making the `try` fail on purpose is a standard
+    anti-analysis shape, and nothing in this pipeline decides whether a statement throws. A `try`
+    body therefore reads as harmless whether it truly is or merely looks it, and once the body is
+    gone the handler beside it is provably unreachable — so the payload goes too, and the deletion
+    is silent.
+
+    The refusal is placed on dropping the handler rather than on emptying the body, because the
+    routes to an empty body are many and each new pass adds another. A body left empty is an
+    artifact of this pipeline: it is evidence about the pass that produced it, never about whether
+    the code as written could raise.
+    """
+
+    def test_a_payload_in_a_catch_survives_a_throwing_try_body(self):
+        # Nothing here can tell that `[Int]'abc'` throws — it emits nothing, so the cleanup passes
+        # removed it, and the emptied body then made the handler unreachable.
+        for body in ("$Null = [Int]'abc'", "$x = [Int]'abc'", "[Int]'abc'", "[Guid]'nope'"):
+            with self.subTest(body):
+                out = self._deobfuscate_iterative(
+                    F"try {{ {body} }} catch {{ Start-Process calc }}\nWrite-Host 'keep'")
+                self.assertIn('Start-Process', out)
+
+    def test_a_payload_in_a_catch_survives_a_try_body_another_pass_emptied(self):
+        # The same over-deletion reached by every other route: an inert function inlined away, a
+        # definition-only body, a constant-false branch, a bare literal, a trap, an empty loop.
+        scripts = (
+            "function f { $Null = [Int]'abc' }\ntry { f } catch { Start-Process calc }",
+            "try { function g { 'z' } } catch { Start-Process calc }\nWrite-Host (g)",
+            "try { if ($false) { 1 } } catch { Start-Process calc }",
+            "try { 42 } catch { Start-Process calc }",
+            "try { trap { continue } } catch { Start-Process calc }",
+            "try { do { } while ($false) } catch { Start-Process calc }",
+        )
+        for script in scripts:
+            with self.subTest(script):
+                out = self._deobfuscate_iterative(F"{script}\nWrite-Host 'keep'")
+                self.assertIn('Start-Process', out)
+
+    def test_an_empty_catch_still_lets_a_junk_try_be_pruned(self):
+        # The guard is scoped to a handler that does something. `catch {}` swallows the error and
+        # execution continues either way, so removing a throwing statement changes nothing — and
+        # that is the shape obfuscators actually emit, which is why the guard costs so little.
+        out = self._deobfuscate_iterative(
+            "try { foo =5 } catch {}\ntry { [Int]'abc' } catch {}\nWrite-Host 'keep'")
+        self.assertEqual(out, "Write-Host 'keep'")
 
 
 class TestPs1NameTrustSurvivesRewriting(TestPs1):

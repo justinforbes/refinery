@@ -537,28 +537,27 @@ class Ps1DeadCodeElimination(Transformer):
     def _prune_try(self, node: Ps1TryCatchFinally, oracle: TypeOracle) -> list[Statement] | None:
         """
         Resolve a `try`/`catch`/`finally` whose `try` body cannot produce observable side effects.
-        An empty (or absent) `try` block raises nothing, so every `catch` clause is unreachable and
-        drops away; the `finally` block always runs, so its statements are hoisted in place of the
-        whole construct. A non-empty body that `_try_body_is_harmless` accepts, combined with
-        all-empty `catch` clauses, is likewise treated as a no-op — the construct is replaced with
-        any pure-constant statements from the try body (preserving integer/boolean literals that may
-        be a function's implicit return value) followed by the `finally` body when present.
+        A body that `_try_body_is_harmless` accepts is treated as a no-op, and so is an empty or
+        absent one: the construct is replaced with any pure-constant statements from the try body
+        (preserving integer/boolean literals that may be a function's implicit return value)
+        followed by the `finally` body, which always runs.
 
-        Dissolving the construct is sound for a body that really is pure: an empty `catch` only
-        swallows a throw the removed statements can no longer raise. The risk sits entirely in the
-        noise guess `_try_body_is_harmless` inherits — what is dropped is the statement, not the
-        error handling around it.
+        Both routes require every `catch` clause to be empty. Dissolving the construct is sound for
+        a body that really is pure, because an empty `catch` only swallows a throw the removed
+        statements can no longer raise — but a handler with a body is live code whose reachability
+        this pass cannot decide. An empty try body is no license to drop one: emptiness here is
+        rarely how the source was written, it is what an earlier pass left behind, so it is evidence
+        about that pass and not about whether the original body could throw.
         """
-        try_body = node.try_block.body if node.try_block is not None else []
-        if not try_body:
-            finally_body = node.finally_block.body if node.finally_block is not None else []
-            return list(finally_body)
-        if not _try_body_is_harmless(try_body, oracle):
-            return None
         for clause in node.catch_clauses:
             if clause.body is not None and clause.body.body:
                 return None
+        try_body = node.try_block.body if node.try_block is not None else []
         finally_body = node.finally_block.body if node.finally_block is not None else []
+        if not try_body:
+            return list(finally_body)
+        if not _try_body_is_harmless(try_body, oracle):
+            return None
         output_stmts = [
             stmt for stmt in try_body
             if isinstance(stmt, Ps1ExpressionStatement)
