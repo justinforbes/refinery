@@ -786,9 +786,59 @@ class TestPs1EmitSafety(Ps1EffectsTest):
                 self.assertFalse(output_is_covered([definition]))
 
     def test_any_other_survivor_covers_the_output(self):
-        for source in ('Write-Host hi', '42', 'if ($a) { }', '($x = 1)'):
+        for source in ('Get-Item x', '42', 'if ($a) { 42 }', '($x = 1)'):
             with self.subTest(source):
                 self.assertTrue(output_is_covered(list(self._parse(source).body)))
+
+    def test_a_statement_holding_only_silent_statements_does_not_cover_the_output(self):
+        # A body-bearing statement emits whatever the statements inside it emit, so it is descended
+        # into rather than granted emission for its shape. Answering `True` for an empty branch is
+        # what let one stand in for the value a `RETURNING` body exists to produce.
+        for source in (
+            'if ($a) { }',
+            'if ($a) { $Null = 1 } else { $x = 2 }',
+            'foreach ($i in $x) { $Null = $i }',
+            'while ($a) { }',
+            'do { } while ($a)',
+            'for ($i = 0; $i -lt 3; $i++) { }',
+            'switch ($a) { 1 { } }',
+            'try { } catch { }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(output_is_covered(list(self._parse(source).body)))
+
+    def test_a_statement_holding_an_emitting_statement_covers_the_output(self):
+        # The counterpart: descent has to find a real emitter, including one below a `catch` clause,
+        # whose block sits a node deeper than every other body.
+        for source in (
+            'if ($a) { 42 }',
+            'if ($a) { $Null = 1 } else { 42 }',
+            'foreach ($i in $x) { $i }',
+            'while ($a) { 42 }',
+            'switch ($a) { 1 { 42 } }',
+            'try { } catch { 42 }',
+            'try { } finally { 42 }',
+            'if ($a) { foreach ($i in $x) { 42 } }',
+        ):
+            with self.subTest(source):
+                self.assertTrue(output_is_covered(list(self._parse(source).body)))
+
+    def test_a_redirection_of_the_output_stream_stops_it_covering(self):
+        # Sending output to a file or merging it into another stream puts it where the enclosing
+        # body cannot see it. Reading the wrong end of a merge inverts the answer, so both
+        # directions are pinned: `1>&2` silences emission and `2>&1` leaves it alone.
+        for source, covers in (
+            (r'Get-Item x > C:\log.txt' , False),  # noqa
+            (r'Get-Item x >> C:\log.txt', False),  # noqa
+            (r'Get-Item x *> C:\log.txt', False),  # noqa
+            (r'Get-Item x 1>&2'         , False),  # noqa
+            (r'Get-Item x 2>&1 > C:\log', False),  # noqa
+            (r'Get-Item x 2>&1'         , True),   # noqa
+            (r'Get-Item x 3>&1'         , True),   # noqa
+            (r'Get-Item x 2> C:\err.txt', True),   # noqa
+        ):
+            with self.subTest(source):
+                self.assertEqual(output_is_covered(list(self._parse(source).body)), covers)
 
     def test_a_statement_that_only_binds_does_not_cover_the_output(self):
         # An assignment yields nothing to the pipeline, so it cannot stand in for the value a

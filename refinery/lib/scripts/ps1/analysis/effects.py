@@ -8,10 +8,17 @@ conservative allow-list over one expression, needing no information from anywher
 A cached model arrives with the first genuine summary fact — interprocedural purity, which has to be
 computed over the `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`.
 
-**Scope.** `StatementEffect` models emission and side effect, not *fault* behavior: it has no member
-for a statement that may throw. The trap and try/catch passes therefore keep statement predicates of
-their own for reasoning about exceptions, and folding those into `statement_effect` requires
-deciding a fault semantics first — it is not a simplification that can be made silently.
+**Scope.** Three questions about a statement are separable, and only two are answered here. Whether
+it performs a side effect is `statement_effect`; whether it can put a value on its body's output is
+`output_is_covered`, which is not the same question — `Write-Host x` acts and emits nothing. Whether
+it may *throw* is the third and has no representation at all: `StatementEffect` has no member for
+it, so the trap and try/catch passes keep statement predicates of their own, and folding those in
+requires deciding a fault semantics first. It is not a simplification that can be made silently.
+
+One site still answers an emission question with a purity verdict: `_command_body_is_pure` reads an
+`EFFECT` statement as disqualifying, where what it means to ask is whether the body emits. It costs
+recall rather than safety — a body that acts is kept — and it is named here so the split above is
+read as incomplete rather than as done.
 """
 from __future__ import annotations
 
@@ -19,7 +26,7 @@ import enum
 
 from typing import Iterator, Sequence, TypeGuard
 
-from refinery.lib.scripts import Node
+from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.ast import (
@@ -41,35 +48,45 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Attribute,
     Ps1BinaryExpression,
     Ps1CastExpression,
+    Ps1CatchClause,
     Ps1ClassDefinition,
     Ps1CommandArgument,
     Ps1CommandInvocation,
     Ps1DataSection,
+    Ps1DoLoop,
     Ps1EnumDefinition,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
+    Ps1FileRedirection,
+    Ps1ForEachLoop,
+    Ps1ForLoop,
     Ps1FunctionDefinition,
     Ps1HashLiteral,
     Ps1HereString,
+    Ps1IfStatement,
     Ps1IndexExpression,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1MemberAccess,
+    Ps1MergingRedirection,
     Ps1ParamBlock,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1PipelineElement,
     Ps1RangeExpression,
     Ps1RealLiteral,
+    Ps1RedirectionStream,
     Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SubExpression,
+    Ps1SwitchStatement,
     Ps1TrapStatement,
     Ps1TryCatchFinally,
     Ps1TypeExpression,
     Ps1UnaryExpression,
     Ps1Variable,
+    Ps1WhileLoop,
 )
 
 
@@ -960,6 +977,12 @@ class StatementEffect(enum.Enum):
     A discard idiom throws away a *value*, never the work that produced it: every one of them is
     recognized only over an operand that `is_side_effect_free` accepts, so `[Void](Start-Process x)`
     is an `EFFECT` like any other call.
+
+    `EFFECT` deliberately says nothing about emission, and splitting it into an emitting and a
+    silent member would not pay: a silent `EFFECT` is still un-removable, so every consumer would
+    grow a branch to reach the verdict it already reaches. Whether a statement emits is a second and
+    orthogonal fact, asked through `output_is_covered` — `Write-Host x` and `Get-Item x` are both
+    `EFFECT` and only the second can carry a body's return value.
     """
     EFFECT = 'effect'
     OUTPUT = 'output'
@@ -1084,7 +1107,7 @@ def _pipeline_sink_discards_its_input(pipeline: Ps1Pipeline) -> bool:
         return False
     blocks = _scriptblock_arguments(foreach)
     return bool(blocks) and all(
-        not statement_can_emit(stmt) for block in blocks for stmt in block.body
+        not _statement_can_emit(stmt) for block in blocks for stmt in block.body
     )
 
 
@@ -1324,7 +1347,72 @@ def fault_is_observed(stmt: Node) -> bool:
     )
 
 
-def statement_can_emit(stmt) -> bool:
+_BODY_BEARING_STATEMENTS = (
+    Ps1DoLoop,
+    Ps1ForEachLoop,
+    Ps1ForLoop,
+    Ps1IfStatement,
+    Ps1SwitchStatement,
+    Ps1TryCatchFinally,
+    Ps1WhileLoop,
+)
+
+
+def _redirection_takes_output_away(
+    redirection: Ps1FileRedirection | Ps1MergingRedirection,
+) -> bool:
+    """
+    Whether a single redirection moves the output stream somewhere the enclosing body cannot see it.
+    A file redirection of `OUTPUT` or of `ALL` (`>`, `>>`, `*>`) writes the values to disk; a merge
+    carries them into whichever stream it names, so it takes them away exactly when it reads *from*
+    output and writes somewhere that is not output.
+
+    The direction is what decides this, and reading the wrong end inverts the answer on the common
+    forms: `2>&1` and `3>&1` merge another stream *into* output and leave emission untouched, while
+    `1>&2` is the one that silences it. `*>&1` names `ALL` as its source, which includes output
+    merged onto itself, so it is not a removal either.
+    """
+    if isinstance(redirection, Ps1FileRedirection):
+        return redirection.stream in (Ps1RedirectionStream.OUTPUT, Ps1RedirectionStream.ALL)
+    return (
+        redirection.from_stream in (Ps1RedirectionStream.OUTPUT, Ps1RedirectionStream.ALL)
+        and redirection.to_stream is not Ps1RedirectionStream.OUTPUT
+    )
+
+
+def _output_is_redirected_away(expr: Expression) -> bool:
+    """
+    Whether the value an expression statement would emit is redirected before the enclosing body can
+    see it. Only the last element of a pipeline is asked: an earlier element's redirection diverts
+    what that element would have handed downstream, which is a different question from what the
+    statement as a whole puts on the body's output.
+
+    A redirection attaches to the invocation, and the parser leaves a lone command unwrapped by any
+    pipeline, so both shapes have to be read. Where a merge and a file redirection are written
+    together (`2>&1 > C:\\log`), the file redirection is still a removal and any one of them is
+    enough to answer yes.
+    """
+    if isinstance(expr, Ps1Pipeline):
+        if not expr.elements:
+            return False
+        last = expr.elements[-1]
+        if not isinstance(last, Ps1PipelineElement):
+            return False
+        redirections = [*last.redirections]
+        if isinstance(last.expression, Ps1CommandInvocation):
+            redirections.extend(last.expression.redirections)
+    elif isinstance(expr, Ps1CommandInvocation):
+        redirections = [*expr.redirections]
+    else:
+        return False
+    return any(_redirection_takes_output_away(r) for r in redirections)
+
+
+def _body_can_emit(block: Block | None) -> bool:
+    return block is not None and any(_statement_can_emit(stmt) for stmt in block.body)
+
+
+def _statement_can_emit(stmt: Node) -> bool:
     """
     Whether a statement can put a value on the enclosing body's output at all. This is the emission
     question alone, deliberately divorced from what the statement costs to run:
@@ -1336,6 +1424,17 @@ def statement_can_emit(stmt) -> bool:
     the assigned value on the pipeline, and that is a `Ps1ParenExpression` rather than an assignment
     statement. A named `data d { ... }` section is an assignment too: it binds its block's value to
     `$d`. Only the unnamed `data { ... }` puts that value on the output.
+
+    A statement that holds other statements emits whatever they do, so the recognized ones are
+    descended into rather than granted emission for their shape: `if ($c) { }` and
+    `foreach ($i in $x) { $Null = $i }` put nothing anywhere, and answering `True` for them lets an
+    empty branch stand in for the value a body exists to produce. An unrecognized statement stays
+    `True`, which is where a `return` and every construct not listed here lands.
+
+    This is private on purpose. Its safe direction is `False` — see `output_is_covered`, whose one
+    production consumer withholds a deletion when nothing covers the output — and that polarity
+    lives in the caller rather than here, so a predicate that reads as "can emit" would be a trap to
+    reuse anywhere a `True` licenses an action.
     """
     if isinstance(stmt, (
         Ps1ClassDefinition,
@@ -1346,6 +1445,8 @@ def statement_can_emit(stmt) -> bool:
         return False
     if isinstance(stmt, Ps1DataSection):
         return not stmt.name
+    if isinstance(stmt, _BODY_BEARING_STATEMENTS):
+        return any(_body_can_emit(block) for block in _nested_blocks(stmt))
     if not isinstance(stmt, Ps1ExpressionStatement):
         return True
     expr = stmt.expression
@@ -1353,9 +1454,23 @@ def statement_can_emit(stmt) -> bool:
         return False
     if _is_void_cast(expr) or isinstance(expr, Ps1AssignmentExpression):
         return False
+    if _output_is_redirected_away(expr):
+        return False
     if isinstance(expr, Ps1Pipeline):
         return not _pipeline_sink_discards_its_input(expr)
     return True
+
+
+def _nested_blocks(stmt: Node) -> Iterator[Block]:
+    """
+    The statement blocks a body-bearing statement runs. A `Ps1CatchClause` is transparent here: it
+    is a wrapper carrying a type filter, and the block below it is the handler that runs.
+    """
+    for child in stmt.children():
+        if isinstance(child, Block):
+            yield child
+        elif isinstance(child, Ps1CatchClause):
+            yield from _nested_blocks(child)
 
 
 def output_is_covered(survivors: Sequence[Node]) -> bool:
@@ -1374,7 +1489,7 @@ def output_is_covered(survivors: Sequence[Node]) -> bool:
     a definition, an assignment, a discard idiom — because such a survivor would silence the body
     while appearing to cover it. Tightening the rest needs reachability.
     """
-    return any(statement_can_emit(stmt) for stmt in survivors)
+    return any(_statement_can_emit(stmt) for stmt in survivors)
 
 
 def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:

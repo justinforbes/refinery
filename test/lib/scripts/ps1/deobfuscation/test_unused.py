@@ -685,6 +685,21 @@ class TestPs1PayloadRetention(TestPs1):
                     'Start-Process calc',
                     self._deobfuscate(F'$x = {value}\n$x = 1\nWrite-Host $x'))
 
+    def test_a_redirected_survivor_does_not_cover_a_functions_return_value(self):
+        # Inside a function a bare value is the return value, so a payload is deleted whenever
+        # something beside it reads as carrying the output. A statement whose output goes to a file
+        # or into another stream carries nothing, and counting it was enough to lose the payload.
+        for junk in (
+            r'Get-Date > C:\log.txt',
+            r'Get-Date >> C:\log.txt',
+            r'Get-Date *> C:\log.txt',
+            r'Get-Date 1>&2',
+            r'Get-Date 2>&1 > C:\log.txt',
+        ):
+            with self.subTest(junk):
+                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
+                self.assertIn('TVqQAAMA', result)
+
     def test_a_scope_qualified_local_function_is_not_alias_inlined(self):
         # Regression: local definitions were keyed by their written spelling, so `function
         # global:gci` did not shield the call `gci`, which was rewritten to `Get-ChildItem` and then
