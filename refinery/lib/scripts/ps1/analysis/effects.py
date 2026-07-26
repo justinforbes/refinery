@@ -66,6 +66,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1TrapStatement,
+    Ps1TryCatchFinally,
     Ps1TypeExpression,
     Ps1UnaryExpression,
     Ps1Variable,
@@ -1288,6 +1289,39 @@ def output_observed(role: BodyRole) -> bool:
     value, and an `OPAQUE` body is never pruned at all.
     """
     return role is BodyRole.RETURNING
+
+
+def fault_is_observed(stmt: Node) -> bool:
+    """
+    Whether removing `stmt` could change whether an enclosing handler runs: it sits directly in the
+    `try` block of a `try`/`catch` with at least one catch clause that does something.
+
+    `StatementEffect` models emission and side effect, not fault — nothing here can answer whether a
+    statement throws. So a statement is removed from a protected body only when it is not protected
+    at all, however pure it looks: `[Int]'abc'` produces no output and raises, and dropping it makes
+    the `try` body empty, after which `Ps1DeadCodeElimination._prune_try` correctly reasons that an
+    empty body cannot throw and drops the handler with the payload inside it. The over-deletion is
+    in this step, not that one.
+
+    An empty `catch { }` is deliberately not a handler that does something: it swallows the error
+    and execution continues either way, so removing a throwing statement changes nothing observable.
+    That is the shape obfuscators emit, which is why this costs the cleanup passes almost nothing.
+
+    The converse under-deletion is left alone: `_prune_try` still requires *every* catch clause to
+    be empty before it dissolves a construct, where a body proven not to throw would let it dissolve
+    one with a live handler and delete that handler as unreachable. Both directions are the same
+    missing axis, and both are the fault axis's to settle.
+    """
+    block = stmt.parent
+    if block is None:
+        return False
+    guard = block.parent
+    if not isinstance(guard, Ps1TryCatchFinally) or guard.try_block is not block:
+        return False
+    return any(
+        clause.body is not None and clause.body.body
+        for clause in guard.catch_clauses
+    )
 
 
 def statement_can_emit(stmt) -> bool:

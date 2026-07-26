@@ -413,6 +413,25 @@ class TestPs1CommandRedefinition(TestPs1):
             "function Helper { 'x' }\n$Null = (Get-Date).Ticks\nWrite-Output 'keep'\n")
         self.assertNotIn('Get-Date', out)
 
+    def test_a_payload_in_a_catch_survives_a_throwing_try_body(self):
+        # Moving the real work into a `catch` and making the `try` fail on purpose is a standard
+        # anti-analysis shape. Nothing here can tell that `[Int]'abc'` throws — it emits nothing, so
+        # the cleanup passes removed it, and an emptied `try` body then makes the handler provably
+        # unreachable. The over-deletion is in emptying the body, so that is what is refused.
+        for body in ("$Null = [Int]'abc'", "$x = [Int]'abc'", "[Int]'abc'", "[Guid]'nope'"):
+            with self.subTest(body):
+                out = self._deobfuscate_iterative(
+                    F"try {{ {body} }} catch {{ Start-Process calc }}\nWrite-Host 'keep'")
+                self.assertIn('Start-Process', out)
+
+    def test_an_empty_catch_still_lets_a_junk_try_be_pruned(self):
+        # The guard above is scoped to a handler that does something. `catch {}` swallows the error
+        # and execution continues either way, so removing a throwing statement changes nothing —
+        # and that is the shape obfuscators actually emit, which is why the guard costs so little.
+        out = self._deobfuscate_iterative(
+            "try { foo =5 } catch {}\ntry { [Int]'abc' } catch {}\nWrite-Host 'keep'")
+        self.assertEqual(out, "Write-Host 'keep'")
+
     def test_a_cast_to_a_script_defined_type_keeps_the_constructor_it_runs(self):
         # PowerShell converts a string to a custom type by invoking a one-argument constructor, so
         # the cast is the call. The type is defined in this very script and the constructor body is

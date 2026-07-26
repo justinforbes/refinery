@@ -10,6 +10,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     StatementEffect,
     body_is_inert,
     body_role,
+    fault_is_observed,
     is_side_effect_free,
     output_is_covered,
     output_observed,
@@ -280,7 +281,7 @@ class Ps1UnusedVariableRemoval(Transformer):
         elif not isinstance(mutation, Ps1UnaryExpression):
             return
         stmt = _find_removable_statement(mutation)
-        if stmt is not None and _remove_from_parent(stmt):
+        if stmt is not None and not fault_is_observed(stmt) and _remove_from_parent(stmt):
             self.mark_changed()
 
     def _drop_store_keep_value(self, mutation: Ps1AssignmentExpression, rhs: Node):
@@ -495,7 +496,7 @@ class Ps1JunkStatementRemoval(Transformer):
         if pruning_erases_body(role, self._survivors(body, removable)):
             return
         for stmt in list(body):
-            if stmt in removable:
+            if stmt in removable and not fault_is_observed(stmt):
                 if _remove_from_parent(stmt):
                     self.mark_changed()
 
@@ -565,8 +566,10 @@ class Ps1DeadStoreElimination(Transformer):
             if rhs is not None and not is_side_effect_free(rhs, oracle):
                 if not _drop_store_keep_value(stmt, rhs):
                     continue
-            else:
+            elif not fault_is_observed(stmt):
                 _remove_from_parent(stmt)
+            else:
+                continue
             self.mark_changed()
         self.generic_visit(node)
 
