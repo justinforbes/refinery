@@ -372,10 +372,26 @@ class TestPs1UnusedExtra(TestPs1):
         self.assertEqual(result, "Write-Host 'keep'")
 
     def test_impure_new_object_store_kept(self):
-        # `New-Object System.Net.WebClient` is not proven pure, so its RHS must be preserved.
+        # `New-Object System.Net.WebClient` is not proven pure, so its RHS must be preserved — as a
+        # discard, not as a bare statement. The construction returns the client, which the dead
+        # store swallowed and a bare expression would write to the output stream instead.
         result = self._apply(
             "$x = New-Object System.Net.WebClient\nWrite-Host 'keep'", Ps1UnusedVariableRemoval)
-        self.assertEqual(result, "New-Object System.Net.WebClient\nWrite-Host 'keep'")
+        self.assertEqual(result, "$Null = New-Object System.Net.WebClient\nWrite-Host 'keep'")
+
+    def test_dropping_a_dead_store_does_not_start_emitting_its_value(self):
+        # A bare expression statement writes its value to the output stream; the assignment being
+        # removed swallowed it. Rewriting the store to the value alone therefore made the
+        # deobfuscated script print what the sample never printed, and inside a function body it
+        # changed the return value — a deobfuscator has to preserve what the script does.
+        for source in (
+            '$unused = [ordered]@{ a = 1 }',
+            '$unused = New-Object System.Net.WebClient',
+        ):
+            with self.subTest(source):
+                result = self._apply(
+                    F"{source}\nWrite-Host 'keep'", Ps1UnusedVariableRemoval)
+                self.assertTrue(result.startswith('$Null = '), result)
 
     def test_null_discard_pure_removed(self):
         # `$null = <pure>` is PowerShell's discard idiom; with a side-effect-free RHS it is junk.

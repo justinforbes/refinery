@@ -73,8 +73,14 @@ def _binds_command_identity(node: Node) -> bool:
 
 def _drop_store_keep_value(stmt: Node, rhs: Node) -> bool:
     """
-    Replace `stmt` — a dead store — with `rhs` alone, so the store goes but whatever evaluating the
-    value does survives. Returns whether the tree changed.
+    Replace `stmt` — a dead store — with a discard of `rhs`, so the store goes but whatever
+    evaluating the value does survives. Returns whether the tree changed.
+
+    The discard wrapper is not decoration. A bare expression statement *emits* its value, where the
+    assignment being removed swallowed it, so rewriting `$unused = [ordered]@{ a = 1 }` to the
+    hashtable alone makes the deobfuscated script print something the original never printed — and
+    inside a function body, return it. `$Null = ...` keeps the work and emits nothing, which is what
+    the dead store did.
 
     A right-hand side that is a *statement* rather than an expression — `$x = if ($c) { ... }`, and
     the `switch`/`foreach`/`while`/`try` forms beside it, all legal assignment sources — has no
@@ -87,7 +93,13 @@ def _drop_store_keep_value(stmt: Node, rhs: Node) -> bool:
     """
     if not isinstance(rhs, Expression):
         return False
-    _replace_in_parent(stmt, Ps1ExpressionStatement(expression=rhs))
+    target = Ps1Variable(name='Null')
+    discard = Ps1AssignmentExpression(target=target, operator='=', value=rhs)
+    target.parent = discard
+    rhs.parent = discard
+    replacement = Ps1ExpressionStatement(expression=discard)
+    discard.parent = replacement
+    _replace_in_parent(stmt, replacement)
     return True
 
 
