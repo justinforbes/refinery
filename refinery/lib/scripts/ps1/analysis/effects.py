@@ -50,13 +50,13 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Attribute,
     Ps1BinaryExpression,
     Ps1CastExpression,
-    Ps1CatchClause,
     Ps1ClassDefinition,
     Ps1CommandArgument,
     Ps1CommandInvocation,
     Ps1DataSection,
     Ps1DoLoop,
     Ps1EnumDefinition,
+    Ps1Exit,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1FileRedirection,
@@ -69,6 +69,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1IndexExpression,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
+    Ps1Jump,
     Ps1MemberAccess,
     Ps1MergingRedirection,
     Ps1ParamBlock,
@@ -78,6 +79,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1RangeExpression,
     Ps1RealLiteral,
     Ps1RedirectionStream,
+    Ps1ReturnStatement,
     Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
@@ -583,8 +585,10 @@ _PURE_PIPELINE_CMDLETS = _canonical_command_set({
 #: the shipped parameter data rather than split by hand — `Out-GridView` has the switch while
 #: `Export-Csv` and `Export-Clixml` do not, which is the opposite of what the names suggest.
 #:
-#: `Out-String`, `Write-Output` and `Tee-Object` are deliberately absent: they emit, and adding one
-#: would be the mistake that costs a payload.
+#: `Out-String`, `Write-Output` and `Tee-Object` are deliberately absent, because they emit. Listing
+#: one costs recall and never a payload — see `_command_emits_nothing` — but it makes this table
+#: claim something false about PowerShell, and the next reader has no way to tell which entries were
+#: checked. The direction that does cost a payload is a name *missing* from here.
 _SILENT_COMMAND_NAMES = {
     'add-content',
     'export-clixml',
@@ -612,9 +616,14 @@ def _split_silent_commands() -> tuple[frozenset[str], frozenset[str]]:
     when `-PassThru` is supplied, reading the switch off the collected parameter data.
 
     A name whose record declares an output type is rejected: a command cannot both be documented as
-    producing values and be listed here as producing none, and that contradiction is the shape a
-    wrong addition takes — `Out-String` declares `System.String` and would fail the load rather than
-    silence a payload.
+    producing values and be listed here as producing none, so `Out-String` declares `System.String`
+    and fails the load. The floor reaches only that far, and it is worth being exact about how far
+    that is — `Write-Output` and `Tee-Object` declare no output type either, so both load cleanly
+    and neither is caught here. What stops them is the behavioral tests, not this check.
+
+    The parameter lookup is case-folded because the collected records are not consistent about it:
+    148 of them spell the switch `Passthru`, and an exact test would file the next such name under
+    the names that never emit while its `-PassThru` form goes on emitting.
     """
     always: set[str] = set()
     gated: set[str] = set()
@@ -625,7 +634,8 @@ def _split_silent_commands() -> tuple[frozenset[str], frozenset[str]]:
                 F'declares output types; a command that emits cannot be listed as one that does '
                 F'not, so the data and the table are out of step.'
             )
-        target = gated if 'PassThru' in data.command(name)['parameters'] else always
+        parameters = {p.lower() for p in data.command(name)['parameters']}
+        target = gated if 'passthru' in parameters else always
         target.add(name)
     return frozenset(always), frozenset(gated)
 
@@ -1421,16 +1431,20 @@ def fault_is_observed(stmt: Node) -> bool:
     `StatementEffect` models emission and side effect, not fault — nothing here can answer whether a
     statement throws. So a statement is removed from a protected body only when it is not protected
     at all, however pure it looks: `[Int]'abc'` produces no output and raises, and dropping it makes
-    the `try` body empty, after which `Ps1DeadCodeElimination._prune_try` correctly reasons that an
-    empty body cannot throw and drops the handler with the payload inside it. The over-deletion is
-    in this step, not that one.
+    the `try` body empty, which is evidence about this pass rather than about the code as written.
+
+    This is the first of two refusals and no longer the only one.
+    `Ps1DeadCodeElimination._prune_try` now declines to dissolve a construct whose handler has a
+    body, whatever emptied the `try` block, because the routes to an empty body are many and each
+    new pass adds another. Neither refusal makes the other redundant: this one keeps the body from
+    being emptied through the pruning path at all, and that one covers every other route.
 
     An empty `catch { }` is deliberately not a handler that does something: it swallows the error
     and execution continues either way, so removing a throwing statement changes nothing observable.
     That is the shape obfuscators emit, which is why this costs the cleanup passes almost nothing.
 
-    The converse under-deletion is left alone: `_prune_try` still requires *every* catch clause to
-    be empty before it dissolves a construct, where a body proven not to throw would let it dissolve
+    The converse under-deletion is left alone: `_prune_try` requires *every* catch clause to be
+    empty before it dissolves a construct, where a body proven not to throw would let it dissolve
     one with a live handler and delete that handler as unreachable. Both directions are the same
     missing axis, and both are the fault axis's to settle.
     """
@@ -1479,32 +1493,17 @@ def _redirection_takes_output_away(
     )
 
 
-def _output_is_redirected_away(expr: Expression) -> bool:
+def _output_is_redirected_away(cmd: Ps1CommandInvocation) -> bool:
     """
-    Whether the value an expression statement would emit is redirected before the enclosing body can
-    see it. Only the last element of a pipeline is asked: an earlier element's redirection diverts
-    what that element would have handed downstream, which is a different question from what the
-    statement as a whole puts on the body's output.
-
-    A redirection attaches to the invocation, and the parser leaves a lone command unwrapped by any
-    pipeline, so both shapes have to be read. Where a merge and a file redirection are written
-    together (`2>&1 > C:\\log`), the file redirection is still a removal and any one of them is
-    enough to answer yes.
+    Whether any redirection written on a call moves its output somewhere the enclosing body cannot
+    see it. The parser hangs every redirection off the invocation and never off the pipeline element
+    around it, so this is the whole of what a statement can carry; only the call whose output would
+    reach the body is asked, because an earlier pipeline element's redirection diverts what that
+    element hands downstream, which is a different question. Where a merge and a file redirection
+    are written together (`2>&1 > C:\\log`), the file redirection is still a removal and any one of
+    them is enough to answer yes.
     """
-    if isinstance(expr, Ps1Pipeline):
-        if not expr.elements:
-            return False
-        last = expr.elements[-1]
-        if not isinstance(last, Ps1PipelineElement):
-            return False
-        redirections = [*last.redirections]
-        if isinstance(last.expression, Ps1CommandInvocation):
-            redirections.extend(last.expression.redirections)
-    elif isinstance(expr, Ps1CommandInvocation):
-        redirections = [*expr.redirections]
-    else:
-        return False
-    return any(_redirection_takes_output_away(r) for r in redirections)
+    return any(_redirection_takes_output_away(r) for r in cmd.redirections)
 
 
 def _passthru_is_requested(cmd: Ps1CommandInvocation) -> bool:
@@ -1531,19 +1530,25 @@ def _command_emits_nothing(cmd: Ps1CommandInvocation) -> bool:
     Whether a command puts nothing on the output of the body its call sits in.
 
     The name is resolved through `refinery.lib.scripts.ps1.ast.resolve_command_name`, so an alias
-    (`sc`, `ogv`, `%`) and a qualified spelling reach the same entry the plain name does. That is
-    safe in the direction this table is read: a hit says "cannot emit", which withholds a deletion,
-    so resolving toward a bare name can only keep more code. A script that redefines `Write-Host` is
-    wrong here for the same reason and in the same harmless direction — the definition is not
-    consulted, the call reads as silent, and the payload beside it survives.
+    (`sc`, `ogv`, `%`) reaches the same entry the plain name does. That is safe in the direction
+    this table is read: a hit says "cannot emit", which withholds a deletion, so resolving toward a
+    bare name can only keep more code. A script that redefines `Write-Host` is wrong here for the
+    same reason and in the same harmless direction — the definition is not consulted, the call reads
+    as silent, and the payload beside it survives.
 
-    **Accepted risk.** A name listed here in error costs recall: junk that would have been deleted
-    is kept. That is the whole exposure, and it is the reason the table is a hand-written list at
-    all — the metadata records that `Out-Null` and `Write-Output` have identical `output_types`,
-    `output_type_declared` and `kind`, so nothing shipped distinguishes the command that swallows
-    its input from the one that forwards it. What must not happen is this predicate being re-keyed
-    to feed a *deletion* decision, `_pipeline_ends_with_void_foreach` being the tempting one, where
-    the same wrong name would delete code instead of keeping it.
+    **The two error directions are not symmetric.** A name listed here in error costs recall: junk
+    that would have been deleted is kept. A name *missing* from here costs a payload, because the
+    call then reads as carrying the body's output and whatever stands beside it is deleted as
+    redundant. The table is far from complete in that sense — `Start-Sleep`, `Remove-Item`,
+    `Stop-Process` and every other command that acts without emitting are absent — so this is a
+    floor on what is known to be silent and never a decision that anything else emits.
+
+    It is a hand-written list because nothing shipped separates the two: the metadata records that
+    `Out-Null` and `Write-Output` have identical `output_types`, `output_type_declared` and `kind`,
+    so the command that swallows its input and the one that forwards it are indistinguishable in the
+    data. What must not happen is this predicate being re-keyed to feed a *deletion* decision,
+    `_pipeline_ends_with_void_foreach` being the tempting one, where a wrong name would delete code
+    instead of keeping it.
     """
     name = resolve_command_name(cmd)
     if name is None:
@@ -1577,6 +1582,38 @@ def _body_can_emit(block: Block | None) -> bool:
     return block is not None and any(_statement_can_emit(stmt) for stmt in block.body)
 
 
+def _expression_can_emit(expr: Expression | None) -> bool:
+    """
+    Whether the value of an expression standing alone as a statement reaches the enclosing body's
+    output. Split out of `_statement_can_emit` because `return $x` asks it of a statement that is
+    not a `Ps1ExpressionStatement`, and `(Write-Host x)` asks it of an operand one level down.
+
+    A grouping construct is transparent: `(...)` and `$(...)` emit whatever stands inside them, and
+    a silent call reads as silent through either. `@(...)` is not one of them — it builds an array
+    even when nothing filled it, so `@(Write-Host x)` puts an empty array on the output and keeps
+    the permissive answer. Neither is `($x = 1)`: parentheses around an assignment are the one form
+    that does put the bound value on the pipeline, so the paren is not unwrapped past one.
+    """
+    if expr is None:
+        return False
+    if isinstance(expr, Ps1ParenExpression):
+        inner = expr.expression
+        if isinstance(inner, Ps1AssignmentExpression):
+            return True
+        return _expression_can_emit(inner)
+    if isinstance(expr, Ps1SubExpression):
+        return any(_statement_can_emit(stmt) for stmt in expr.body)
+    if _is_void_cast(expr) or isinstance(expr, Ps1AssignmentExpression):
+        return False
+    invocation = _emitting_invocation(expr)
+    if invocation is not None:
+        if _output_is_redirected_away(invocation) or _command_emits_nothing(invocation):
+            return False
+    if isinstance(expr, Ps1Pipeline):
+        return not _pipeline_sink_discards_its_input(expr)
+    return True
+
+
 def _statement_can_emit(stmt: Node) -> bool:
     """
     Whether a statement can put a value on the enclosing body's output at all. This is the emission
@@ -1585,16 +1622,26 @@ def _statement_can_emit(stmt: Node) -> bool:
     calls it an `EFFECT` for the call it wraps, and neither can `... | Out-Null -InputObject (...)`.
 
     A declaration emits nothing, and neither does an assignment — `$x = 1` binds a value rather than
-    yielding one, whatever sits on its right-hand side. Only the parenthesized form `($x = 1)` puts
-    the assigned value on the pipeline, and that is a `Ps1ParenExpression` rather than an assignment
-    statement. A named `data d { ... }` section is an assignment too: it binds its block's value to
-    `$d`. Only the unnamed `data { ... }` puts that value on the output.
+    yielding one, whatever sits on its right-hand side. A named `data d { ... }` section is an
+    assignment too: it binds its block's value to `$d`. Only the unnamed `data { ... }` puts that
+    value on the output, and only when its block holds something that emits.
 
-    A statement that holds other statements emits whatever they do, so the recognized ones are
-    descended into rather than granted emission for their shape: `if ($c) { }` and
-    `foreach ($i in $x) { $Null = $i }` put nothing anywhere, and answering `True` for them lets an
-    empty branch stand in for the value a body exists to produce. An unrecognized statement stays
-    `True`, which is where a `return` and every construct not listed here lands.
+    A statement that holds other statements emits whatever they do, so one is descended into rather
+    than granted emission for its shape: `if ($c) { }` and `foreach ($i in $x) { $Null = $i }` put
+    nothing anywhere, and answering `True` for them lets an empty branch stand in for the value a
+    body exists to produce. Owning a block is enough to be descended into, so a construct the parser
+    learns later cannot fall through to the permissive answer by being absent from a list;
+    `_BODY_BEARING_STATEMENTS` names the ones that must be descended into *even when they own no
+    block at all*, which is what `switch ($a) { }` parses to.
+
+    A `catch` handler is *not* descended into. It runs only when the `try` body faults, so what it
+    emits cannot stand in for the value the body produces on the path that does not throw — and
+    since the try/catch pass stopped dissolving a construct whose handler has a body, that handler
+    is now a survivor sitting beside the payload it would otherwise shadow. The `try` and `finally`
+    blocks both run on the normal path and are descended into as usual.
+
+    A jump or an exit leaves the body without putting anything on it; `return $x` is the one that
+    carries a value, and it carries exactly what the expression beside it would.
 
     This is private on purpose. Its safe direction is `False` — see `output_is_covered`, whose one
     production consumer withholds a deletion when nothing covers the output — and that polarity
@@ -1608,37 +1655,31 @@ def _statement_can_emit(stmt: Node) -> bool:
         Ps1TrapStatement,
     )):
         return False
+    if isinstance(stmt, Ps1Jump):
+        return False
+    if isinstance(stmt, Ps1ReturnStatement):
+        return _expression_can_emit(stmt.pipeline)
+    if isinstance(stmt, Ps1Exit):
+        return False
     if isinstance(stmt, Ps1DataSection):
-        return not stmt.name
-    if isinstance(stmt, _BODY_BEARING_STATEMENTS):
-        return any(_body_can_emit(block) for block in _nested_blocks(stmt))
+        return not stmt.name and _body_can_emit(stmt.body)
+    blocks = list(_nested_blocks(stmt))
+    if blocks or isinstance(stmt, _BODY_BEARING_STATEMENTS):
+        return any(_body_can_emit(block) for block in blocks)
     if not isinstance(stmt, Ps1ExpressionStatement):
         return True
-    expr = stmt.expression
-    if expr is None:
-        return False
-    if _is_void_cast(expr) or isinstance(expr, Ps1AssignmentExpression):
-        return False
-    if _output_is_redirected_away(expr):
-        return False
-    invocation = _emitting_invocation(expr)
-    if invocation is not None and _command_emits_nothing(invocation):
-        return False
-    if isinstance(expr, Ps1Pipeline):
-        return not _pipeline_sink_discards_its_input(expr)
-    return True
+    return _expression_can_emit(stmt.expression)
 
 
 def _nested_blocks(stmt: Node) -> Iterator[Block]:
     """
-    The statement blocks a body-bearing statement runs. A `Ps1CatchClause` is transparent here: it
-    is a wrapper carrying a type filter, and the block below it is the handler that runs.
+    The statement blocks that run on the path a body's output travels. A `catch` clause is skipped
+    rather than unwrapped: `Ps1CatchClause` is a wrapper carrying a type filter, and the handler
+    below it runs only on a fault.
     """
     for child in stmt.children():
         if isinstance(child, Block):
             yield child
-        elif isinstance(child, Ps1CatchClause):
-            yield from _nested_blocks(child)
 
 
 def output_is_covered(survivors: Sequence[Node]) -> bool:

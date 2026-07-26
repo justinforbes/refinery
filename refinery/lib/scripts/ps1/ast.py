@@ -132,15 +132,23 @@ def resolve_command_name(cmd: Ps1CommandInvocation) -> str | None:
     """
     The lowercased command name a call resolves to, following one level of known alias
     (`ipmo` → `import-module`), or `None` when the name is not a static literal. A module qualifier
-    is dropped first and a scope qualifier after it:
-    `Microsoft.PowerShell.Utility\\Invoke-Expression` and `global:iex` each run what the bare
-    spelling runs.
+    is dropped first and a scope qualifier after it, so that
+    `& 'Microsoft.PowerShell.Utility\\Invoke-Expression'` and `& 'global:iex'` each run what the
+    bare spelling runs.
 
     This is the *deny-list* reading of a name, and it is the exact opposite of what
     `normalize_command_name` advises for an allow-list. Resolving toward a bare name can only match
     more entries, so on a table whose hits withhold an action — a world opener, a command that emits
     nothing — every extra match is the conservative answer, and a spelling that dodges the table is
     the dangerous one. A table whose hits *grant* something must not read a name this way.
+
+    **The stripping reaches only a quoted name.** Written bare, `Microsoft.PowerShell.Utility\\iex`
+    and `global:iex` never arrive here as one token: the lexer splits at the backslash and at the
+    scope colon, so `get_command_name` answers `'Microsoft.PowerShell.Utility'` and `'global'`, and
+    every table keyed on the bare spelling is dodged. That is a hole in the lexer rather than here,
+    and it is the dangerous direction on every caller — a world opener that reads as closed, a
+    silent command that reads as emitting. Until the lexer joins a qualified name, do not read this
+    function as evidence that a qualified call has been seen.
     """
     name = get_command_name(cmd)
     if name is None:

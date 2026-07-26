@@ -538,10 +538,11 @@ class Ps1DeadCodeElimination(Transformer):
     def _prune_try(self, node: Ps1TryCatchFinally, oracle: TypeOracle) -> list[Statement] | None:
         """
         Resolve a `try`/`catch`/`finally` whose `try` body cannot produce observable side effects.
-        A body that `_try_body_is_harmless` accepts is treated as a no-op, and so is an empty or
-        absent one: the construct is replaced with any pure-constant statements from the try body
-        (preserving integer/boolean literals that may be a function's implicit return value)
-        followed by the `finally` body, which always runs.
+        A body that `_try_body_is_harmless` accepts is treated as a no-op, and an empty or absent
+        one needs no separate case because it satisfies that predicate vacuously: the construct is
+        replaced with any pure-constant statements from the try body (preserving integer/boolean
+        literals that may be a function's implicit return value) followed by the `finally` body,
+        which always runs.
 
         Both routes require every `catch` clause to be empty. Dissolving the construct is sound for
         a body that really is pure, because an empty `catch` only swallows a throw the removed
@@ -554,11 +555,9 @@ class Ps1DeadCodeElimination(Transformer):
             if clause.body is not None and clause.body.body:
                 return None
         try_body = node.try_block.body if node.try_block is not None else []
-        finally_body = node.finally_block.body if node.finally_block is not None else []
-        if not try_body:
-            return list(finally_body)
         if not _try_body_is_harmless(try_body, oracle):
             return None
+        finally_body = node.finally_block.body if node.finally_block is not None else []
         output_stmts = [
             stmt for stmt in try_body
             if isinstance(stmt, Ps1ExpressionStatement)

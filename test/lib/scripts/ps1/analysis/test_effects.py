@@ -802,26 +802,87 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             'do { } while ($a)',
             'for ($i = 0; $i -lt 3; $i++) { }',
             'switch ($a) { 1 { } }',
+            'switch ($a) { }',
             'try { } catch { }',
         ):
             with self.subTest(source):
                 self.assertFalse(output_is_covered(list(self._parse(source).body)))
 
     def test_a_statement_holding_an_emitting_statement_covers_the_output(self):
-        # The counterpart: descent has to find a real emitter, including one below a `catch` clause,
-        # whose block sits a node deeper than every other body.
+        # The counterpart: descent has to find a real emitter. A `finally` block runs on the path
+        # that does not throw, so what it emits is the body's to carry.
         for source in (
             'if ($a) { 42 }',
             'if ($a) { $Null = 1 } else { 42 }',
             'foreach ($i in $x) { $i }',
             'while ($a) { 42 }',
             'switch ($a) { 1 { 42 } }',
-            'try { } catch { 42 }',
+            'try { 42 } catch { }',
             'try { } finally { 42 }',
             'if ($a) { foreach ($i in $x) { 42 } }',
         ):
             with self.subTest(source):
                 self.assertTrue(output_is_covered(list(self._parse(source).body)))
+
+    def test_a_catch_handler_does_not_cover_the_output(self):
+        # A handler runs only when the `try` body faults, so what it emits cannot stand in for the
+        # value the body produces on the path that does not throw. Since the try/catch pass stopped
+        # dissolving a construct whose handler has a body, such a handler is now a survivor sitting
+        # beside the payload — and counting it deleted that payload.
+        for source in (
+            'try { } catch { 42 }',
+            'try { } catch { Start-Process calc }',
+            'try { $Null = 1 } catch { 42 } finally { $x = 2 }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(output_is_covered(list(self._parse(source).body)))
+
+    def test_a_statement_that_leaves_the_body_does_not_cover_the_output(self):
+        # A jump or an exit puts nothing on the output, and neither does a bare `return`. Reading
+        # them as emitting let a guard clause stand in for the value the body exists to produce.
+        for source in (
+            'return',
+            'throw',
+            "throw 'x'",
+            'exit',
+            'exit 1',
+            'if ($a) { return }',
+            'if ($a) { throw "x" }',
+            'foreach ($i in $x) { break }',
+            'while ($a) { continue }',
+            'switch ($a) { 1 { break } }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(output_is_covered(list(self._parse(source).body)))
+
+    def test_a_return_carries_whatever_stands_beside_it(self):
+        # `return $x` is the one exit that emits, and it emits exactly what the expression would.
+        for source, covers in (
+            ('return 42', True),
+            ('return $x', True),
+            ("return (Write-Host 'x')", False),
+            ('return ($Null = 1)', True),
+        ):
+            with self.subTest(source):
+                self.assertEqual(output_is_covered(list(self._parse(source).body)), covers)
+
+    def test_a_grouping_construct_does_not_hide_a_silent_command(self):
+        # `(...)` and `$(...)` emit whatever stands inside them, so a silent call reads as silent
+        # through either; wrapping one was enough to dodge the table entirely. `@(...)` is not a
+        # grouping construct — it builds an array even when nothing filled it — and `($x = 1)` is
+        # the one parenthesized form that does put the bound value on the pipeline.
+        for source, covers in (
+            ("(Write-Host 'x')"      , False),  # noqa
+            ("$(Write-Host 'x')"     , False),  # noqa
+            ("((Write-Host 'x'))"    , False),  # noqa
+            ("$(Set-Content C:\\l x)", False),  # noqa
+            ("@(Write-Host 'x')"     , True),   # noqa
+            ('($x = 1)'              , True),   # noqa
+            ('$($x = 1)'             , False),  # noqa
+            ("(Get-Item x)"          , True),   # noqa
+        ):
+            with self.subTest(source):
+                self.assertEqual(output_is_covered(list(self._parse(source).body)), covers)
 
     def test_a_redirection_of_the_output_stream_stops_it_covering(self):
         # Sending output to a file or merging it into another stream puts it where the enclosing
@@ -848,8 +909,12 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertFalse(output_is_covered(list(self._parse(source).body)))
 
-    def test_an_unnamed_data_section_does_emit(self):
+    def test_an_unnamed_data_section_emits_what_its_block_holds(self):
+        # Being unnamed is what makes the section put its block's value on the output, but there
+        # still has to be a value: `data { }` is an empty branch by another spelling.
         self.assertTrue(output_is_covered(list(self._parse('data { 42 }').body)))
+        self.assertFalse(output_is_covered(list(self._parse('data { }').body)))
+        self.assertFalse(output_is_covered(list(self._parse('data { $x = 1 }').body)))
 
     def test_emit_safety_reads_only_the_sequence_it_is_given(self):
         # The contract that used to be broken: a caller holds statements hoisted out of a block it
@@ -937,8 +1002,13 @@ class TestPs1EmitSafety(Ps1EffectsTest):
         # Six of the silent commands ship aliases, so a table matched on the literal spelling fixes
         # `Set-Content` and leaves `sc` losing the payload beside it. Resolving toward the bare name
         # can only match more entries, and every extra match here withholds a deletion.
-        for source in (r'function f { sc C:\log x }', r'function f { ac C:\log x }',
-                       r'function f { ogv }', r'function f { oh }', r'function f { epcsv }'):
+        for source in (
+            r'function f { sc C:\log x }',
+            r'function f { ac C:\log x }',
+            r'function f { ogv }',
+            r'function f { oh }',
+            r'function f { epcsv }',
+        ):
             with self.subTest(source):
                 block = self._first(source, Ps1ScriptBlock)
                 self.assertFalse(output_is_covered(list(block.body)))

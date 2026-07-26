@@ -465,6 +465,19 @@ class TestPs1InertFunctionRemoval(TestPs1):
                 result = self._apply(script, Ps1JunkStatementRemoval)
                 self.assertIn('function f', result)
 
+    def test_a_script_that_calls_its_own_inert_functions_is_still_emptied(self):
+        # The counterpart, and the reason the guard weighs only the definitions. A script holding a
+        # call site of its own is not the dot-sourced module the guard protects — it uses the
+        # function here — so the whole thing goes. Weighing the call sites too kept every one of
+        # these alive.
+        for script in (
+            'function j { $Null = 1 }\nj',
+            'function f { $Null = 1 }\nfunction g { $Null = 2 }\nf\ng',
+        ):
+            with self.subTest(script):
+                result = self._apply(script, Ps1JunkStatementRemoval)
+                self.assertEqual(result.strip(), '')
+
     def test_param_block_function_module_preserved(self):
         result = self._apply(cleandoc("""
             function Ge {
@@ -714,6 +727,28 @@ class TestPs1PayloadRetention(TestPs1):
                 result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
                 self.assertIn('TVqQAAMA', result)
 
+    def test_a_redirected_multi_element_pipeline_does_not_cover_the_return_value(self):
+        # The redirection check reads the redirections off the pipeline's terminal invocation, and
+        # nothing pinned that: every other redirection case is a bare command, which reaches the
+        # answer without ever looking inside a pipeline.
+        for junk in (
+            r'$p | Out-String > C:\log.txt',
+            r'$p | Out-String 1>&2',
+            r'$p | Out-String *> C:\log.txt',
+        ):
+            with self.subTest(junk):
+                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
+                self.assertIn('TVqQAAMA', result)
+
+    def test_a_shadowed_foreach_sink_does_not_cover_the_return_value(self):
+        # The one shape that needs the emission side to resolve aliases. Everywhere else the alias
+        # pass rewrites `%` to `ForEach-Object` before this question is asked, so only a script that
+        # takes the spelling `foreach` over reaches the sink under a name the literal match misses.
+        result = self._deobfuscate(
+            'function foreach { Start-Process calc }\n'
+            "function f { 1..3 | foreach { $Null = $_ }; 'TVqQAAMA' }\nf")
+        self.assertIn('TVqQAAMA', result)
+
     def test_a_silent_command_nested_in_a_branch_does_not_cover_the_return_value(self):
         # The same loss one nesting level in. A body-bearing statement was granted emission for its
         # shape, so descending into it is what makes the table reach these at all.
@@ -727,7 +762,47 @@ class TestPs1PayloadRetention(TestPs1):
                 result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
                 self.assertIn('TVqQAAMA', result)
 
-    def test_a_void_foreach_sink_stays_removable_under_both_spellings(self):
+    def test_a_live_catch_handler_does_not_cover_the_return_value(self):
+        # Regression: two passes met here. One stopped dissolving a `try` whose handler has a body,
+        # which is right, and the surviving construct was then read as carrying the body's output
+        # because the descent walked into the handler. A handler runs only on a fault, so it carried
+        # nothing — and the payload beside it was deleted as redundant.
+        for junk in (
+            'try { } catch { Start-Process calc }',
+            'try { $Null = 1 } catch { Write-Output 9 }',
+        ):
+            with self.subTest(junk):
+                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
+                self.assertIn('TVqQAAMA', result)
+
+    def test_a_statement_that_leaves_the_body_does_not_cover_the_return_value(self):
+        # A guard clause is the common shape: it emits nothing and reading it as an emitter let it
+        # stand in for the value the function exists to produce.
+        for junk in (
+            'if ($env:X) { return }',
+            "if ($env:X) { throw 'x' }",
+            'if ($env:X) { exit }',
+            'foreach ($i in 1..3) { break }',
+            'switch ($env:X) { 1 { break } }',
+        ):
+            with self.subTest(junk):
+                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
+                self.assertIn('TVqQAAMA', result)
+
+    def test_a_grouped_silent_command_does_not_cover_the_return_value(self):
+        # Wrapping the call in a grouping construct was enough to dodge the silent table, because
+        # the lookup only ever saw a bare invocation or a pipeline's last element.
+        for junk in (
+            "(Write-Host 'x')",
+            "$(Write-Host 'x')",
+            r'$(Set-Content C:\log x)',
+            'data { }',
+        ):
+            with self.subTest(junk):
+                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
+                self.assertIn('TVqQAAMA', result)
+
+    def test_a_void_foreach_sink_survives_under_both_spellings(self):
         # This one carries the invariant the whole emission axis rests on. `_statement_can_emit` is
         # safe only because a `True` from it *withholds* nothing — its answer feeds
         # `output_is_covered`, whose caller keeps code when the answer is no. The sibling question
