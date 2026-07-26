@@ -42,8 +42,19 @@ _COMMANDS = _load('pwsh-commands.json.gz')
 _VARIABLES = _load('pwsh-variables.json.gz')
 _WMI = _load('pwsh-wmi.json.gz')
 
+#: Type names PowerShell's *parser* understands that are not registered type accelerators, so a
+#: collection run on a real host does not report them however authoritative it is — `[ordered]` is
+#: recognized in a cast position and denotes an `OrderedDictionary`, but it is absent from the 94
+#: accelerators our capture reports because it never was one. Kept beside the collected table rather
+#: than injected into it: the data describes a host's .NET surface and this describes the language,
+#: and blurring the two would cost the collected table the provenance that makes it trustworthy.
+_PARSER_TYPE_KEYWORDS: dict[str, str] = {
+    'ordered': 'System.Collections.Specialized.OrderedDictionary',
+}
+
 _ACCELERATORS: dict[str, str] = {
-    _alias.lower(): _full for _alias, _full in _TYPES['accelerators'].items()
+    **_PARSER_TYPE_KEYWORDS,
+    **{_alias.lower(): _full for _alias, _full in _TYPES['accelerators'].items()},
 }
 _TYPE_TABLE: dict[str, dict] = _TYPES['types']
 _COMMAND_TABLE: dict[str, dict] = _COMMANDS['commands']

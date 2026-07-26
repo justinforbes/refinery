@@ -385,7 +385,7 @@ class TestPs1UnusedExtra(TestPs1):
         # deobfuscated script print what the sample never printed, and inside a function body it
         # changed the return value — a deobfuscator has to preserve what the script does.
         for source in (
-            '$unused = [ordered]@{ a = 1 }',
+            "$unused = [Loader]'payload'",
             '$unused = New-Object System.Net.WebClient',
         ):
             with self.subTest(source):

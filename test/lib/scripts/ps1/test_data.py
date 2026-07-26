@@ -27,6 +27,15 @@ class TestPs1MetadataReader(unittest.TestCase):
         for accelerator, full in cases.items():
             self.assertEqual(data.resolve_type(accelerator), full, accelerator)
 
+    def test_a_parser_type_keyword_resolves_although_no_host_reports_it(self):
+        # `[ordered]` is understood in a cast position but was never registered as an accelerator,
+        # so a collection run on real Windows PowerShell does not report it however authoritative
+        # the host is. Leaving it unresolved made the language's most common hashtable idiom
+        # unremovable, since a cast is granted purity only when its target type resolves.
+        self.assertEqual(
+            data.resolve_type('ordered'), 'System.Collections.Specialized.OrderedDictionary')
+        self.assertNotIn('ordered', data._TYPES['accelerators'])
+
     def test_a_qualified_name_resolves_without_the_system_prefix(self):
         self.assertEqual(data.resolve_type('Net.WebClient'), 'System.Net.WebClient')
         self.assertEqual(data.resolve_type('System.Net.WebClient'), 'System.Net.WebClient')

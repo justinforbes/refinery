@@ -190,7 +190,7 @@ class TestPs1Purity(Ps1EffectsTest):
     def test_a_cast_to_a_collected_type_is_still_removable(self):
         # The guard above is a resolution check, not a blanket denial: the ordinary casts an
         # obfuscator emits by the dozen have to keep pruning.
-        for source in ("[Int]'42'", '[Void]1', '[String]42', '[Char[]]$s'):
+        for source in ("[Int]'42'", '[Void]1', '[String]42', '[Char[]]$s', '[ordered]@{ a = 1 }'):
             with self.subTest(source):
                 self.assertTrue(self._pure(self._expression(source)))
 
