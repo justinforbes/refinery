@@ -878,7 +878,7 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
             return False
         new_object = extract_new_object(node)
         if new_object is not None:
-            if oracle.is_shadowed('new-object', node):
+            if not oracle.may_trust_command_name('new-object', node):
                 return False
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
@@ -889,9 +889,9 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
         if name is None:
             return False
         name = name.lower()
-        # A command the script redefines as a function no longer runs what the metadata describes,
-        # so its purity is not the built-in's; the grant is withheld before the name is trusted.
-        if oracle.is_shadowed(name, node):
+        # A command the script redefines no longer runs what the metadata describes, and neither
+        # does any command in a script able to rebind names, so its purity is not the built-in's.
+        if not oracle.may_trust_command_name(name, node):
             return False
         # The pipeline set is checked through the same gate rather than after the plain one: three
         # of its four members are in both, so testing the plain set first would make the body check
@@ -900,9 +900,13 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
             return False
         if not _command_arguments_are_pure(node, oracle):
             return False
+        # Routed through `_grant` like every other grant, though `may_trust_command_name` above
+        # already refuses an open world. The redundancy is the point: this arm would otherwise hold
+        # its world check inside a name-trust question, so narrowing that question back to what its
+        # name suggests would silently reopen a fail-open hole with nothing in the path to catch it.
         if name in _PURE_PIPELINE_CMDLETS:
-            return _command_body_is_pure(node, oracle)
-        return True
+            return _grant(_command_body_is_pure(node, oracle), node, oracle)
+        return _grant(True, node, oracle)
     if isinstance(node, Ps1Pipeline):
         return all(
             isinstance(el, Ps1PipelineElement)
@@ -1094,7 +1098,7 @@ def _pipeline_ends_with_out_null(
     value the pipeline never carried and is not a junk sink.
     """
     out_null = _terminal_command(pipeline, 'out-null')
-    if out_null is None or oracle.is_shadowed('out-null', out_null):
+    if out_null is None or not oracle.may_trust_command_name('out-null', out_null):
         return False
     return _command_arguments_are_pure(out_null, oracle)
 
@@ -1152,7 +1156,7 @@ def _pipeline_ends_with_void_foreach(
     the blocks they saw, and a body that was never shown is not among them.
     """
     foreach = _terminal_command(pipeline, 'foreach-object')
-    if foreach is None or oracle.is_shadowed('foreach-object', foreach):
+    if foreach is None or not oracle.may_trust_command_name('foreach-object', foreach):
         return False
     if not _command_arguments_are_pure(foreach, oracle):
         return False

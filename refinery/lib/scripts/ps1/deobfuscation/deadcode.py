@@ -108,7 +108,7 @@ def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:
     name_lower = name.lower()
     if not _carries_assignment_marker(expr, name):
         return False
-    if name_lower in KNOWN_CMDLETS or oracle.is_shadowed(name_lower, expr):
+    if name_lower in KNOWN_CMDLETS or not oracle.may_trust_command_name(name_lower, expr):
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
         return False

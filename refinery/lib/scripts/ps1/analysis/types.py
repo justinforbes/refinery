@@ -142,7 +142,7 @@ class TypeOracle:
 
     It also carries the two command-table facts the gate consults: `world_closed_at`, whether the
     script's type system is unmutated (a present-member purity grant requires it), and
-    `is_shadowed`, whether the metadata still describes what a command name runs (a name-trust grant
+    `may_trust_command_name`, whether the metadata still describes what a command name runs (a grant
     must decline it when it does not). Both read the same world and both withhold when there is
     none, so a caller can never obtain a grant from one that the other would refuse.
     """
@@ -174,22 +174,26 @@ class TypeOracle:
         """
         return self._world is not None and self._world.world_closed_at(node)
 
-    def is_shadowed(self, name: str, node) -> bool:
+    def may_trust_command_name(self, name: str, node) -> bool:
         """
-        Whether the collected metadata no longer describes what the command `name` runs at `node`,
-        so no site may trust it — for typing or for purity. Two things make it stop describing it,
-        and both are the world's to answer: the script redefines the name where the walk can
-        classify the redefinition, or the world is open at `node`, in which case a dot-sourced file,
-        an imported module, an `iex`, an item cmdlet writing the `function:` provider or an opaque
+        Whether the collected metadata still describes what the command `name` runs at `node`, so a
+        site may act on the name — for typing or for purity. Two things stop it describing it, and
+        both are the world's to answer: the script redefines the name where the walk can classify
+        the redefinition, or the world is open at `node`, in which case a dot-sourced file, an
+        imported module, an `iex`, an item cmdlet writing the `function:` provider or an opaque
         dispatch can bind *any* name to code this tree does not contain. Reading the shadow set
-        alone would trust every name in exactly the scripts able to rebind them, and the shadow set
-        holds only the two spellings the classifier sees. An oracle built without a world distrusts
-        every name, matching `world_closed_at`: both questions withhold when there is nothing to
-        ask.
+        alone would trust every name in exactly the scripts able to rebind them, and that set holds
+        only the two spellings the classifier sees. An oracle built without a world trusts no name,
+        matching `world_closed_at`: both questions withhold when there is nothing to ask.
+
+        Named for the question a caller actually has rather than for the shadow set, because the
+        answer is wider than the set: a reader who takes this for "is it redefined?" and narrows it
+        back to that would reopen a hole that deletes code, and no `_grant` sits in the path to
+        catch it.
         """
         if self._world is None:
-            return True
-        return not self._world.world_closed_at(node) or self._world.command_shadowed(name)
+            return False
+        return self._world.world_closed_at(node) and not self._world.command_shadowed(name)
 
     def resolve(self, expr: Expression) -> str | None:
         """
@@ -261,7 +265,7 @@ class TypeOracle:
         if name is None:
             return frozenset()
         lower = name.lower()
-        if self.is_shadowed(lower, cmd):
+        if not self.may_trust_command_name(lower, cmd):
             return frozenset()
         if lower in TYPE_ARG_COMMANDS:
             single = resolve_expression_type(cmd, self._variable_types)
