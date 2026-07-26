@@ -416,7 +416,13 @@ class Ps1Synthesizer(Synthesizer):
             self.visit(node.target)
 
     def visit_Ps1MergingRedirection(self, node: Ps1MergingRedirection):
-        prefix = self._emit_redirection_stream(node.from_stream)
+        # A file redirection of the output stream is written bare, but a merge names its source
+        # even then: dropping the `1` from `1>&2` produces `>&2`, which is a file redirection to
+        # the target `&2` and does not read back as the statement that was written.
+        if node.from_stream is Ps1RedirectionStream.ALL:
+            prefix = '*'
+        else:
+            prefix = str(node.from_stream.value)
         self._write(F'{prefix}>&{node.to_stream.value}')
 
     def visit_Ps1PipelineElement(self, node: Ps1PipelineElement):
