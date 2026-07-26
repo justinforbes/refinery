@@ -348,6 +348,18 @@ def _writing_parameters() -> frozenset[str]:
 
 _WRITING_PARAMETERS = _writing_parameters()
 
+#: The binary operators whose evaluation writes the automatic `$Matches` variable, so an expression
+#: built on one is a store to engine state rather than a value. Every case-sensitivity and negation
+#: spelling is listed, because the engine populates `$Matches` for all of them.
+_MATCH_OPERATORS = frozenset({
+    '-cmatch',
+    '-cnotmatch',
+    '-imatch',
+    '-inotmatch',
+    '-match',
+    '-notmatch',
+})
+
 #: The expression forms that are literally their own value: the base case of `is_side_effect_free`.
 _LITERAL_EXPRESSIONS = (
     Ps1HereString,
@@ -774,15 +786,24 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
         # PowerShell converts a string to it by running a constructor — so granting on the operand
         # alone deleted the call. Resolving is necessary here, not sufficient: a conversion to a
         # collected type can still run code (`[xml]$s` parses, and follows external DTDs), which
-        # `_PURE_CAST_TYPES` is the eventual answer to.
+        # `_PURE_CAST_TYPES` is the eventual answer to. The world is read before either check
+        # because it is a stored bool that can only veto, while both checks below walk.
+        if not oracle.world_closed_at(node):
+            return False
         if data.resolve_type(node.type_name) is None:
             return False
-        return _grant(is_side_effect_free(node.operand, oracle), node, oracle)
+        return is_side_effect_free(node.operand, oracle)
     if isinstance(node, Ps1UnaryExpression):
         if node.operator in ('++', '--'):
             return False
         return is_side_effect_free(node.operand, oracle)
     if isinstance(node, Ps1BinaryExpression):
+        # The regex operators write the automatic `$Matches`, which the statements after them read;
+        # that is a store to shared engine state, not a value the expression merely yields, so the
+        # operator has to be read and not just the operands. Deleting `$s -match 'p(.*)q'` left the
+        # `$Matches[1]` that carries the payload reading an unset variable.
+        if node.operator.lower() in _MATCH_OPERATORS:
+            return False
         return is_side_effect_free(node.left, oracle) and is_side_effect_free(node.right, oracle)
     if isinstance(node, Ps1RangeExpression):
         return is_side_effect_free(node.start, oracle) and is_side_effect_free(node.end, oracle)

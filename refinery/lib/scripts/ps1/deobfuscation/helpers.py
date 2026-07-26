@@ -10,11 +10,11 @@ import re
 from typing import Callable, Generator, NamedTuple, TypeGuard, TypeVar
 
 from refinery.lib.scripts import Node, Transformer
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_member_name,
     is_builtin_variable,
-    normalize_command_name,
     normalize_type_expression,
     string_value,
     unwrap_assignment_target,
@@ -32,7 +32,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandInvocation,
     Ps1ExpressionStatement,
     Ps1ForEachLoop,
-    Ps1FunctionDefinition,
     Ps1HereString,
     Ps1IndexExpression,
     Ps1IntegerLiteral,
@@ -638,10 +637,19 @@ def apply_string_method(
 
 
 class LocalFunctionAwareTransformer(Transformer):
+    """
+    A transform that must not rewrite a command name the script has taken over. The set of such
+    names is the world's — `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld.shadowed_names` —
+    rather than a private walk, because the ways to take a name over are more than one: a `function`
+    or `filter` definition, and an assignment into the `function:`/`alias:` namespace. A private
+    collector that saw only the first renamed `gci` to `Get-ChildItem` in a script whose very next
+    statement was `${function:gci} = { <payload> }`, and the pass that prunes pure cmdlets then
+    deleted the call.
+    """
 
     def __init__(self):
         super().__init__()
-        self._local_functions: set[str] = set()
+        self._local_functions: frozenset[str] = frozenset()
         self._entry = False
 
     def visit(self, node: Node):
@@ -649,11 +657,7 @@ class LocalFunctionAwareTransformer(Transformer):
             return super().visit(node)
         self._entry = True
         try:
-            self._local_functions = {
-                normalize_command_name(n.name)
-                for n in node.walk()
-                if isinstance(n, Ps1FunctionDefinition) and n.name
-            }
+            self._local_functions = model_cache(self, node).closed_world.shadowed_names
             return super().visit(node)
         finally:
             self._entry = False

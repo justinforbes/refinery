@@ -250,3 +250,55 @@ class TestPs1OffTreeCodeOpensTheWorld(Ps1TypeWorldTest):
         ):
             with self.subTest(source):
                 self.assertFalse(self._closed(source))
+
+
+class TestPs1TypeDefinitionsOpenTheWorld(Ps1TypeWorldTest):
+    """
+    A `class` or `enum` puts a type into the session under a name the collected metadata never
+    described — the same thing `Add-Type` does, and it is on the deny-list. The case that matters is
+    a name the metadata *did* describe, because every purity grant keyed on a resolved type then
+    vouches for a body standing in this very script.
+    """
+
+    def test_a_script_defined_type_opens_the_world(self):
+        for source in (
+            'class Loader { Loader([String]$s) { } }',
+            'class Math { static [int] Abs([int]$x) { return 1 } }',
+            'enum Version { A = 1 }',
+        ):
+            with self.subTest(source):
+                self.assertFalse(self._closed(source))
+
+
+class TestPs1QualifiedOpenerSpellings(Ps1TypeWorldTest):
+    """
+    A qualifier selects which module or scope an opener is taken from; it does not make the command
+    something the deny-list has never heard of. Every qualifier the deny-list does not strip is a
+    spelling that runs the opener while the world reports closed.
+    """
+
+    def test_a_scope_qualifier_does_not_hide_an_opener(self):
+        for source in (
+            "& 'global:iex' $x",
+            "& 'script:Import-Module' Foo",
+            "& 'global:Set-Alias' x Update-TypeData",
+        ):
+            with self.subTest(source):
+                self.assertFalse(self._closed(source))
+
+    def test_a_qualified_provider_path_still_addresses_command_identity(self):
+        # `Microsoft.PowerShell.Core\Function::Get-Date` is what `function:Get-Date` abbreviates, so
+        # a test that only knows the short spelling reads the long one as an ordinary file path.
+        for source in (
+            'Set-Item function:Get-Date -Value { 1 }',
+            "Set-Item 'Function::Get-Date' -Value { 1 }",
+            "Set-Item 'Microsoft.PowerShell.Core\\Function::Get-Date' -Value { 1 }",
+            "New-Item -Path 'Microsoft.PowerShell.Core\\Alias::gd' -Value Get-Date",
+        ):
+            with self.subTest(source):
+                self.assertFalse(self._closed(source))
+
+    def test_an_ordinary_path_argument_is_not_an_identity_write(self):
+        for source in ('Set-Content C:\\tmp\\x.txt -Value 1', 'Get-Content .\\notes.txt'):
+            with self.subTest(source):
+                self.assertTrue(self._closed(source))

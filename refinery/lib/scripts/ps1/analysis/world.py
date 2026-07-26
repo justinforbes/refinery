@@ -50,8 +50,10 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
+    Ps1ClassDefinition,
     Ps1CommandArgument,
     Ps1CommandInvocation,
+    Ps1EnumDefinition,
     Ps1FunctionDefinition,
     Ps1InvokeMember,
     Ps1MemberAccess,
@@ -108,10 +110,10 @@ _IDENTITY_SCOPES = frozenset({
     Ps1ScopeModifier.FUNCTION,
 })
 
-#: The provider path prefixes that address command identity, written as a string argument to an item
-#: cmdlet (`Set-Item alias:x ...`). Matched by prefix rather than by enumerating every aliasing
-#: cmdlet, which is the family the mutation deny-list cannot close by name.
-_IDENTITY_PROVIDERS = ('alias:', 'function:')
+#: The provider names that address command identity, written as a path argument to an item cmdlet
+#: (`Set-Item alias:x ...`). Matched by name rather than by enumerating every aliasing cmdlet, which
+#: is the family the mutation deny-list cannot close by name.
+_IDENTITY_PROVIDERS = ('alias', 'function')
 
 
 class Ps1TypeWorld:
@@ -144,8 +146,21 @@ class Ps1TypeWorld:
         what the name runs. The analysis must not trust such a name for typing or purity. The set is
         whole-script and conservative — an inner-scope redefinition distrusts the name everywhere,
         which only keeps more — mirroring `world_closed_at`'s whole-script granularity.
+
+        The query is normalized the way the set was built, so the spelling a caller happens to hold
+        cannot answer `False` for a name the walk recorded under its canonical key.
         """
-        return name.lower() in self._shadowed
+        return normalize_command_name(name) in self._shadowed
+
+    @property
+    def shadowed_names(self) -> frozenset[str]:
+        """
+        Every command name the script redefines, keyed through
+        `refinery.lib.scripts.ps1.ast.normalize_command_name`. Exposed so a transform that must not
+        rewrite a name the script has taken over reads the one set the whole-tree walk built,
+        instead of keeping a narrower private one that sees only `function` definitions.
+        """
+        return self._shadowed
 
 
 def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
@@ -159,8 +174,7 @@ def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
     shadowed: set[str] = set()
     for node in root.walk():
         redefined = _identity_redefinitions(node)
-        if redefined:
-            shadowed.update(record.name for record in redefined)
+        shadowed.update(record.name for record in redefined)
         if _opens_world(node, redefined):
             closed = False
     return Ps1TypeWorld(closed, frozenset(shadowed))
@@ -250,7 +264,16 @@ def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> bool:
     tree, so a mutation inside it is caught by presence like any other statement, and the same
     construct spelled `function X { }` has always left the world closed. Opening on it would kill
     every member grant in the script over a name the shadow set already distrusts.
+
+    A `class` or `enum` definition does open it, for the reason `Add-Type` does: it puts a type into
+    the session under a name the collected metadata never described, and a name it *did* describe is
+    exactly the interesting case — `class Math { static [int] Abs([int]$x) { <payload> } }` makes
+    `[Math]::Abs(1)` run that body while `resolve_type` still vouches for `System.Math`. The
+    definition standing in the tree does not help, because the grant is keyed on the type name
+    rather than on the presence of a body.
     """
+    if isinstance(node, (Ps1ClassDefinition, Ps1EnumDefinition)):
+        return True
     if isinstance(node, Ps1CommandInvocation):
         return _command_opens_world(node)
     if isinstance(node, Ps1InvokeMember):
@@ -304,15 +327,17 @@ def _resolved_command_name(cmd: Ps1CommandInvocation) -> str | None:
     The lowercased command name a call resolves to, following one level of known alias
     (`ipmo` → `import-module`), or `None` when the name is not a static literal.
 
-    A module qualifier is dropped first: `Microsoft.PowerShell.Utility\\Invoke-Expression` runs what
-    the bare spelling runs, and a deny-list keyed on bare names would otherwise never see it. Erring
+    A module qualifier is dropped first and a scope qualifier after it:
+    `Microsoft.PowerShell.Utility\\Invoke-Expression` and `global:iex` each run what the bare
+    spelling runs, and a deny-list keyed on bare names would otherwise never see either. Erring
     toward the deny-list is the safe direction — a module of one's own that exports a name on it is
-    then read as an opener too, which only keeps more.
+    then read as an opener too, which only keeps more — which is why this is the one name-trust
+    caller that normalizes, against `normalize_command_name`'s general advice.
     """
     name = get_command_name(cmd)
     if name is None:
         return None
-    name = name.rpartition('\\')[2].lower()
+    name = normalize_command_name(name.rpartition('\\')[2])
     return KNOWN_ALIAS.get(name, name).lower()
 
 
@@ -320,13 +345,21 @@ def _touches_identity_provider(cmd: Ps1CommandInvocation) -> bool:
     """
     Whether any argument is a literal path into the `alias:` or `function:` provider, the vector
     that escapes a name-keyed deny-list because `Set-Item alias:x Update-TypeData` mutates identity
-    without `Set-Item` being an aliasing cmdlet. Recognized by the path prefix, not by resolving the
-    aliased target, so an obfuscated or dynamic target cannot slip through.
+    without `Set-Item` being an aliasing cmdlet. Recognized by the provider the path names, not by
+    resolving the aliased target, so an obfuscated or dynamic target cannot slip through.
+
+    The provider is read after the same two decorations `_resolved_command_name` strips from a
+    command name, because a path addresses the identical namespace through either:
+    `Microsoft.PowerShell.Core\\Function::Get-Date` is what `function:Get-Date` is short for, and a
+    prefix test keyed on the short spelling reads the long one as an ordinary file path.
     """
     for arg in cmd.arguments:
         value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
         text = string_value(value)
-        if text is not None and text.lower().startswith(_IDENTITY_PROVIDERS):
+        if text is None:
+            continue
+        provider = text.rpartition('\\')[2].partition(':')[0].lower()
+        if provider in _IDENTITY_PROVIDERS:
             return True
     return False
 

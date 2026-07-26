@@ -19,6 +19,7 @@ from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.ast import (
     get_command_name,
     get_member_name,
+    normalize_command_name,
     normalize_dotnet_type_name,
     normalize_type_expression,
     string_value,
@@ -1170,6 +1171,7 @@ class Ps1FunctionEvaluator(Transformer):
         self._replaced_counts: dict[str, int] = {}
         self._failed_counts: dict[str, int] = {}
         self._callers: dict[str, set[str]] = {}
+        self._ambiguous: set[str] = set()
         self._entry = False
 
     def visit(self, node):
@@ -1182,6 +1184,7 @@ class Ps1FunctionEvaluator(Transformer):
             self._replaced_counts.clear()
             self._failed_counts.clear()
             self._callers.clear()
+            self._ambiguous.clear()
             self._collect_functions(node)
             if not self._functions:
                 return None
@@ -1200,14 +1203,21 @@ class Ps1FunctionEvaluator(Transformer):
                     continue
                 if node.body is None:
                     continue
-                self._functions[node.name.lower()] = node
+                key = normalize_command_name(node.name)
+                # A name with more than one definition is not foldable: which body a call reaches
+                # depends on the order and scope in which the definitions run, which this pass does
+                # not model. Keeping the last one folded `F` where `function global:F` had replaced
+                # it, and the payload definition then read as uncalled and was removed.
+                if key in self._functions:
+                    self._ambiguous.add(key)
+                self._functions[key] = node
         func_names = set(self._functions)
         for caller_key, funcdef in self._functions.items():
             for node in funcdef.walk():
                 if isinstance(node, Ps1CommandInvocation):
                     name = get_command_name(node)
                     if name is not None:
-                        callee = name.lower()
+                        callee = normalize_command_name(name)
                         if callee in func_names and callee != caller_key:
                             self._callers.setdefault(callee, set()).add(caller_key)
 
@@ -1225,9 +1235,9 @@ class Ps1FunctionEvaluator(Transformer):
         name_str = get_command_name(node)
         if name_str is None:
             return None
-        key = name_str.lower()
+        key = normalize_command_name(name_str)
         funcdef = self._functions.get(key)
-        if funcdef is None:
+        if funcdef is None or key in self._ambiguous:
             return None
         self._call_counts[key] = self._call_counts.get(key, 0) + 1
         args = self._extract_constant_args(node)

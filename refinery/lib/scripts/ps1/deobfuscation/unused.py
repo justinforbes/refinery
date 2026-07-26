@@ -47,6 +47,49 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
 )
 
+#: The variable namespaces that name a command rather than a value. Kept in step with
+#: `refinery.lib.scripts.ps1.analysis.world._IDENTITY_SCOPES`, which this pass cannot reuse because
+#: the world reports one verdict for the whole script and this pass needs the individual node.
+_IDENTITY_SCOPES = frozenset({
+    Ps1ScopeModifier.ALIAS,
+    Ps1ScopeModifier.FUNCTION,
+})
+
+
+def _binds_command_identity(node: Node) -> bool:
+    """
+    Whether `node` writes the `function:` or `alias:` namespace, binding a command name to something
+    the definition scan does not read as a definition and the call scan does not read as a call.
+    Both of this module's name-keyed removals have to treat such a node as an unknown: it can bind
+    the name they are about to delete, and it can be the only thing that reaches it.
+    """
+    if not isinstance(node, Ps1AssignmentExpression):
+        return False
+    return any(
+        variable.scope in _IDENTITY_SCOPES
+        for variable in assignment_target_variables(node.target)
+    )
+
+
+def _drop_store_keep_value(stmt: Node, rhs: Node) -> bool:
+    """
+    Replace `stmt` — a dead store — with `rhs` alone, so the store goes but whatever evaluating the
+    value does survives. Returns whether the tree changed.
+
+    A right-hand side that is a *statement* rather than an expression — `$x = if ($c) { ... }`, and
+    the `switch`/`foreach`/`while`/`try` forms beside it, all legal assignment sources — has no
+    expression-statement spelling to be moved into, so the whole assignment stays and this reports
+    no change. Removing it instead would take the branch bodies with it.
+
+    Both passes that drop a dead store share this, rather than each spelling the rule: the two
+    outcomes are keep-the-value and keep-the-statement, and a pass that learned only one of them
+    would delete what the other keeps.
+    """
+    if not isinstance(rhs, Expression):
+        return False
+    _replace_in_parent(stmt, Ps1ExpressionStatement(expression=rhs))
+    return True
+
 
 class Ps1UnusedVariableRemoval(Transformer):
     """
@@ -232,19 +275,10 @@ class Ps1UnusedVariableRemoval(Transformer):
         """
         Replace the statement holding `mutation` with its right-hand side alone: the store is dead
         but evaluating the value is not, so what it does has to survive.
-
-        A right-hand side that is a *statement* rather than an expression — `$x = if ($c) { ... }`,
-        and the `switch`/`foreach`/`while`/`try` forms beside it, all legal assignment sources — has
-        no expression-statement spelling to be moved into, so the whole assignment stays. Removing
-        it instead would take the branch bodies with it.
         """
-        if not isinstance(rhs, Expression):
-            return
         stmt = _find_removable_statement(mutation)
-        if stmt is None:
-            return
-        _replace_in_parent(stmt, Ps1ExpressionStatement(expression=rhs))
-        self.mark_changed()
+        if stmt is not None and _drop_store_keep_value(stmt, rhs):
+            self.mark_changed()
 
 
 class Ps1JunkStatementRemoval(Transformer):
@@ -289,6 +323,11 @@ class Ps1JunkStatementRemoval(Transformer):
                     dynamic_call = True
             elif isinstance(n, Ps1FunctionDefinition):
                 functions.setdefault(normalize_command_name(n.name), []).append(n)
+            elif _binds_command_identity(n):
+                # `${alias:q} = 'j'` reaches `j` without naming it in command position, so a
+                # definition with no call site is not evidence of anything once one of these is in
+                # the tree. Treated like an opaque dispatch, which is the same unknown.
+                dynamic_call = True
         if dynamic_call:
             return set(functions.keys()) | directly_called
         reachable = set(directly_called)
@@ -327,12 +366,23 @@ class Ps1JunkStatementRemoval(Transformer):
         not only at the top level, because a `function` inside an `if` or a loop body is written
         into the enclosing scope just the same — while only a top-level definition is itself
         removable, since a nested one is not this pass's to reason about.
+
+        "Every definition" can only mean every definition standing in this tree, so the tree has to
+        be the whole story: an open world binds names from a file the walk never read, and an
+        identity-namespace assignment binds one by a spelling this scan does not read as a
+        definition. In either case the empty body standing here is not the body the call reaches.
+
+        Both walks run in source order, because removal is by identity scan over the containing
+        list: taking the reverse order `Node.walk` yields would delete from the back and make every
+        scan traverse the whole body.
         """
-        if self._any_dynamic_dispatch(node):
+        if self._any_dynamic_dispatch(node) or not oracle.world_closed_at(node):
             return
         inert: dict[str, list[Ps1FunctionDefinition]] = {}
         acting: set[str] = set()
-        for definition in node.walk():
+        for definition in node.walk_in_order():
+            if _binds_command_identity(definition):
+                return
             if not isinstance(definition, Ps1FunctionDefinition):
                 continue
             key = normalize_command_name(definition.name)
@@ -346,7 +396,7 @@ class Ps1JunkStatementRemoval(Transformer):
             return
         call_sites: dict[str, list[Node]] = {name: [] for name in inert}
         other_reference: set[str] = set()
-        for ref in node.walk():
+        for ref in node.walk_in_order():
             if not isinstance(ref, Ps1CommandInvocation):
                 continue
             name = get_command_name(ref)
@@ -404,7 +454,15 @@ class Ps1JunkStatementRemoval(Transformer):
         dead_functions: set[Node] = set()
         for stmt in body:
             if isinstance(stmt, Ps1FunctionDefinition):
-                if role is BodyRole.SCRIPT and normalize_command_name(stmt.name) not in called:
+                # `called` is every call site standing in this tree, which is only the whole story
+                # while the tree is the whole script. When the world is open, a dot-sourced file, an
+                # imported module or an `iex` holds call sites the walk never read, so a definition
+                # with none here is not unreachable — it is reachable from somewhere unreadable.
+                if (
+                    role is BodyRole.SCRIPT
+                    and oracle.world_closed_at(stmt)
+                    and normalize_command_name(stmt.name) not in called
+                ):
                     dead_functions.add(stmt)
                 continue
             effect = statement_effect(stmt, oracle)
@@ -493,12 +551,8 @@ class Ps1DeadStoreElimination(Transformer):
             if isinstance(rhs, Ps1AssignmentExpression):
                 rhs = rhs.value
             if rhs is not None and not is_side_effect_free(rhs, oracle):
-                # A statement-valued right-hand side (`$x = if ($c) { ... }`) has no expression
-                # statement to be moved into, so the dead store is kept whole rather than dropped
-                # along with what its branches run.
-                if not isinstance(rhs, Expression):
+                if not _drop_store_keep_value(stmt, rhs):
                     continue
-                _replace_in_parent(stmt, Ps1ExpressionStatement(expression=rhs))
             else:
                 _remove_from_parent(stmt)
             self.mark_changed()

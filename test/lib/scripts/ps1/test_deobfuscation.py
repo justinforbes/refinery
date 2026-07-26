@@ -417,10 +417,13 @@ class TestPs1CommandRedefinition(TestPs1):
         # PowerShell converts a string to a custom type by invoking a one-argument constructor, so
         # the cast is the call. The type is defined in this very script and the constructor body is
         # standing in the tree, and the conversion was still deleted.
-        out = self._deobfuscate_iterative(
-            "class Loader { Loader([String]$s) { [IO.File]::WriteAllText('C:\\p.txt', $s) } }\n"
-            "$Null = [Loader]'payload'\n"
-            "Write-Host 'keep'")
+        out = self._deobfuscate_iterative(cleandoc(
+            """
+            class Loader { Loader([String]$s) { [IO.File]::WriteAllText('C:\\p.txt', $s) } }
+            $Null = [Loader]'payload'
+            Write-Host 'keep'
+            """
+        ))
         self.assertIn('[Loader]', out)
 
     def test_a_name_is_inert_only_when_every_definition_of_it_is(self):
@@ -433,3 +436,69 @@ class TestPs1CommandRedefinition(TestPs1):
                 out = self._deobfuscate_iterative(
                     F"function f {{ Start-Process calc }}\n{second}\nf\nWrite-Host 'keep'")
                 self.assertIn('Start-Process', out)
+
+
+class TestPs1NameTrustSurvivesRewriting(TestPs1):
+    """
+    A rename pass and a pruning pass agree on a name only while they read the same facts about it.
+    Every case here is a rewrite that erased the evidence the later pass needed: the name it renamed
+    was one the script had taken over, or the operator it dropped was the world's only signal that
+    off-tree code runs.
+    """
+
+    def test_a_dot_source_of_a_script_keeps_its_operator(self):
+        # Regression: the dot was dropped for any bare-safe name, so `. helper` became `helper` and
+        # the world, rebuilt from the stripped tree, read closed and granted every purity check.
+        out = self._deobfuscate_iterative(cleandoc(
+            """
+            . 'profile-loader'
+            $Null = (Get-Date).Ticks
+            Write-Host 'keep'
+            """
+        ))
+        self.assertIn('. profile-loader', out)
+        self.assertIn('Get-Date', out)
+
+    def test_a_dot_on_a_cmdlet_is_still_dropped(self):
+        # A compiled cmdlet has no body to run in the caller's scope, so the dot carries nothing.
+        out = self._deobfuscate_iterative("$c = . New-Object 'Net.WebClient'\nWrite-Host $c")
+        self.assertNotIn('. New-Object', out)
+
+    def test_a_provider_redefinition_shields_the_name_from_alias_expansion(self):
+        # Regression: only `function` definitions shielded a name, so the call was renamed to
+        # `Get-ChildItem`, which the shadow set no longer matched, and then pruned as a pure cmdlet.
+        out = self._deobfuscate_iterative(cleandoc(
+            """
+            ${function:gci} = { Start-Process calc }
+            gci
+            Write-Host done
+            """
+        ))
+        self.assertNotIn('Get-ChildItem', out)
+        self.assertRegex(out, r'(?m)^gci$')
+
+    def test_a_regex_match_that_populates_matches_is_kept(self):
+        # Regression: `-match` writes the automatic `$Matches`, which is a store to engine state and
+        # not a value the expression merely yields, so deleting the match left the payload read on
+        # the next line looking at an unset variable.
+        out = self._deobfuscate_iterative(cleandoc(
+            """
+            $c = 'aaa<<calc>>bbb'
+            $z = $c -match '<<(.*)>>'
+            Invoke-Expression $Matches[1]
+            """
+        ))
+        self.assertIn('-Match', out)
+
+    def test_a_scope_qualified_redefinition_is_not_constant_folded(self):
+        # Regression: the evaluator keyed definitions by their written spelling and kept the last
+        # one, so `function F` was folded into the call that `function global:F` had replaced, and
+        # the payload definition then read as never called.
+        out = self._deobfuscate_iterative(cleandoc(
+            """
+            function F { 'A' }
+            function global:F { Start-Process calc; 'B' }
+            Write-Host (F)
+            """
+        ))
+        self.assertIn('Start-Process calc', out)

@@ -210,6 +210,27 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
             return canonical
         return name
 
+    def _operator_is_noise(self, operator: str, name: str) -> bool:
+        """
+        Whether dropping `operator` from a call to `name` leaves the same program. `&` always does:
+        it only forces command position. `.` does not — it runs the target in the *caller's* scope,
+        so a script file or a function dot-sourced this way writes its definitions, variables and
+        type-system changes here rather than into a child scope. A compiled cmdlet has no such body
+        and cannot tell the two apart, so only a name the metadata still describes as one may lose
+        the dot.
+
+        The world reads the surviving dot as its evidence that off-tree code runs
+        (`refinery.lib.scripts.ps1.analysis.world._runs_another_script_file`), so dropping it from
+        `. helper` did not merely change scope: the world, rebuilt from the stripped tree, then read
+        closed and every grant in the script fired.
+        """
+        if operator == '&':
+            return True
+        return (
+            name.lower() in KNOWN_CMDLETS
+            and normalize_command_name(name) not in self._local_functions
+        )
+
     def visit_Ps1CommandInvocation(self, node: Ps1CommandInvocation):
         self.generic_visit(node)
         old_name = node.name
@@ -217,6 +238,7 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
             inner = node.name.expression
             if isinstance(inner, Ps1StringLiteral):
                 node.name = inner
+                inner.parent = node
             elif isinstance(inner, Ps1CommandInvocation):
                 c = get_command_name(inner)
                 if c is not None and c.lower() in ('gcm', 'get-command'):
@@ -230,6 +252,7 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
                         # `gcm i*e-e*` must not be substituted verbatim as the command name.
                         if isinstance(arg, Ps1StringLiteral) and not _has_wildcard(arg.value):
                             node.name = arg
+                            arg.parent = node
         if node.name is not old_name:
             self.mark_changed()
         if node.name and isinstance(node.name, Ps1StringLiteral):
@@ -243,7 +266,7 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
                 )
                 self.mark_changed()
             name_lower = node.name.value.lower()
-            if normalize_command_name(node.name.value) not in self._local_functions:
+            if normalize_command_name(name_lower) not in self._local_functions:
                 alias_target = KNOWN_ALIAS.get(name_lower)
                 if alias_target is not None:
                     new_value = alias_target
@@ -264,6 +287,7 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
                     (SIMPLE_IDENTIFIER.match(name_val) or '-' in name_val)
                     and is_bare_command_name(name_val)
                     and not _has_wildcard(name_val)
+                    and self._operator_is_noise(node.invocation_operator, name_val)
                 ):
                     node.name = Ps1StringLiteral(
                         offset=node.name.offset,

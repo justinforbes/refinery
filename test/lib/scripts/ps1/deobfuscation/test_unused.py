@@ -672,3 +672,71 @@ class TestPs1PayloadRetention(TestPs1):
         ))
         self.assertIn('Start-Process calc', result)
         self.assertNotIn('Get-ChildItem', result)
+
+
+class TestPs1NameRemovalNeedsTheWholeStory(TestPs1):
+    """
+    Both name-keyed removals in this module reason from the definitions and calls standing in the
+    tree. That is the whole story only while the tree is: an open world holds definitions and calls
+    in a file the walk never read, and an identity-namespace assignment binds a name by a spelling
+    neither scan recognizes. Each test asserts the payload path survives, never an exact rendering.
+    """
+
+    def test_an_open_world_keeps_the_call_to_an_apparently_inert_function(self):
+        # Regression: the empty `j` standing here is not the `j` the dot-sourced file defines, so
+        # the call reaches code this tree does not contain.
+        for opener in (". '.\\stage2.ps1'", 'Invoke-Expression $code', 'Import-Module .\\m.psm1'):
+            with self.subTest(opener):
+                result = self._deobfuscate(cleandoc(
+                    F"""
+                    function j {{ }}
+                    {opener}
+                    j
+                    Write-Host 'keep'
+                    """
+                ))
+                self.assertRegex(result, r'(?m)^j$')
+
+    def test_an_open_world_keeps_a_function_nothing_in_the_tree_calls(self):
+        # Regression: the `iex` is exactly what calls it, and its call site is not in this tree.
+        result = self._deobfuscate(cleandoc(
+            """
+            function Payload { Start-Process calc }
+            Invoke-Expression $code
+            Write-Host 'keep'
+            """
+        ))
+        self.assertIn('Start-Process calc', result)
+
+    def test_an_identity_assignment_keeps_the_names_it_could_bind(self):
+        # `${function:j} = { ... }` is a definition of `j` the definition scan does not read, and
+        # `${alias:q} = 'j'` is a call to `j` the call scan does not read.
+        rebound = self._deobfuscate(cleandoc(
+            """
+            function j { }
+            ${function:j} = { Start-Process calc }
+            j
+            Write-Host done
+            """
+        ))
+        self.assertIn('Start-Process calc', rebound)
+        self.assertRegex(rebound, r'(?m)^j$')
+        aliased = self._deobfuscate(cleandoc(
+            """
+            function j { Start-Process calc }
+            ${alias:q} = 'j'
+            q
+            Write-Host done
+            """
+        ))
+        self.assertIn('Start-Process calc', aliased)
+
+    def test_a_closed_world_still_prunes_an_inert_function_and_its_calls(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function j { $Null = 915 }
+            j
+            Write-Host 'keep'
+            """
+        ))
+        self.assertEqual(result, "Write-Host 'keep'")
