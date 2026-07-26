@@ -455,6 +455,16 @@ class TestPs1InertFunctionRemoval(TestPs1):
                     Ps1JunkStatementRemoval)
                 self.assertIn('Start-Process', result)
 
+    def test_a_script_of_nothing_but_definitions_is_not_emptied(self):
+        # Dot-sourcing is how a definition-only script is used, so the call sites that would prove
+        # its functions live sit in a caller this walk never reads. Every definition then reads as
+        # both unreachable and inert, which is the same evidence that says "this is a module" —
+        # and one removal site already refuses to act on it while this one did not.
+        for script in ('function f { }', 'function f { }\nfunction g { }'):
+            with self.subTest(script):
+                result = self._apply(script, Ps1JunkStatementRemoval)
+                self.assertIn('function f', result)
+
     def test_param_block_function_module_preserved(self):
         result = self._apply(cleandoc("""
             function Ge {

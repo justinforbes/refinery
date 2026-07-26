@@ -388,6 +388,13 @@ class Ps1JunkStatementRemoval(Transformer):
         Both walks run in source order, because removal is by identity scan over the containing
         list: taking the reverse order `Node.walk` yields would delete from the back and make every
         scan traverse the whole body.
+
+        Removals are collected before any is applied so that `pruning_erases_body` sees the whole
+        set at once. A script of nothing but inert definitions is inert by every measure this pass
+        has and still may not be emptied — it is a module whose functions are dot-sourced from a
+        caller the walk never read, and the call sites that would prove them live are exactly what
+        is out of reach. The same invariant already governs `_prune_body`; enforcing it there and
+        not here left one removal site able to erase what the other refuses to.
         """
         if self._any_dynamic_dispatch(node) or not oracle.world_closed_at(node):
             return
@@ -423,15 +430,22 @@ class Ps1JunkStatementRemoval(Transformer):
                 call_sites[key].append(statement)
             else:
                 other_reference.add(key)
+        removable: list[Node] = []
         for key, definitions in inert.items():
             if key in other_reference:
                 continue
-            for statement in call_sites[key]:
-                if _remove_from_parent(statement):
-                    self.mark_changed()
-            for definition in definitions:
-                if _remove_from_parent(definition):
-                    self.mark_changed()
+            removable.extend(call_sites[key])
+            removable.extend(definitions)
+        if not removable:
+            return
+        role = body_role(node)
+        if role is not None:
+            survivors = self._survivors(get_body(node), set(removable))
+            if pruning_erases_body(role, survivors):
+                return
+        for statement in removable:
+            if _remove_from_parent(statement):
+                self.mark_changed()
 
     @staticmethod
     def _bare_call_statement(cmd: Ps1CommandInvocation) -> Node | None:
