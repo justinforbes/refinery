@@ -700,6 +700,56 @@ class TestPs1PayloadRetention(TestPs1):
                 result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
                 self.assertIn('TVqQAAMA', result)
 
+    def test_a_silent_command_does_not_cover_a_functions_return_value(self):
+        # The reported shapes. A command whose whole job is to write elsewhere was counted as
+        # carrying the body's output, so the payload beside it was deleted as redundant junk.
+        for junk in (
+            "Write-Host 'loading'",
+            r'$p | Out-File C:\log',
+            r'Set-Content C:\log x',
+            r'Write-Error hi',
+            r'sc C:\log x',
+        ):
+            with self.subTest(junk):
+                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
+                self.assertIn('TVqQAAMA', result)
+
+    def test_a_silent_command_nested_in_a_branch_does_not_cover_the_return_value(self):
+        # The same loss one nesting level in. A body-bearing statement was granted emission for its
+        # shape, so descending into it is what makes the table reach these at all.
+        for junk in (
+            "if ($env:X) { Write-Host 'x' }",
+            "foreach ($i in 1..3) { Write-Host $i }",
+            "while ($env:X) { Write-Host 'x' }",
+            "try { Write-Host 'x' } catch { Write-Host 'y' }",
+        ):
+            with self.subTest(junk):
+                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
+                self.assertIn('TVqQAAMA', result)
+
+    def test_a_void_foreach_sink_stays_removable_under_both_spellings(self):
+        # This one carries the invariant the whole emission axis rests on. `_statement_can_emit` is
+        # safe only because a `True` from it *withholds* nothing — its answer feeds
+        # `output_is_covered`, whose caller keeps code when the answer is no. The sibling question
+        # "does this pipeline discard?" reaches `StatementEffect.DISCARD` and deletes
+        # unconditionally, so re-keying that one onto the emission predicate would turn every
+        # conservative entry into a deletion. A table-shaped test cannot see that; this can.
+        for sink in ('ForEach-Object', '%'):
+            with self.subTest(sink):
+                result = self._deobfuscate(
+                    F"1..3 | {sink} {{ Write-Host $_ }}\nWrite-Output 'keep'")
+                self.assertIn('Write-Host', result)
+
+    def test_a_redefined_silent_command_is_wrong_in_the_direction_that_keeps_code(self):
+        # The table is keyed on a name, so a script that takes the name over makes it wrong. The
+        # cost is recall and never a payload: the call reads as silent, nothing covers the output,
+        # and the statements around it are kept.
+        result = self._deobfuscate(
+            "function Write-Host { Start-Process calc }\n"
+            "function f { Write-Host 'x'; 'TVqQAAMA' }\nf")
+        self.assertIn('TVqQAAMA', result)
+        self.assertIn('Start-Process calc', result)
+
     def test_a_scope_qualified_local_function_is_not_alias_inlined(self):
         # Regression: local definitions were keyed by their written spelling, so `function
         # global:gci` did not shield the call `gci`, which was rewritten to `Get-ChildItem` and then

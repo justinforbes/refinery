@@ -28,6 +28,7 @@ from typing import Iterator, Sequence, TypeGuard
 
 from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1 import data
+from refinery.lib.scripts.ps1.analysis.constants import is_truthy
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
@@ -38,6 +39,7 @@ from refinery.lib.scripts.ps1.ast import (
     get_param_block,
     is_builtin_variable,
     normalize_dotnet_type_name,
+    resolve_command_name,
 )
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -159,6 +161,28 @@ def _canonical_read_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, s
                 F'instance field is pure without listing, so the data and allow-list are out of step.'
             )
         result.add((type_key, member.lower()))
+    return frozenset(result)
+
+
+def _canonical_command_set(names: set[str]) -> frozenset[str]:
+    """
+    A frozenset of lowercased command names, each floored against the collected metadata the way
+    `_canonical_type_name` floors a type: a name no capture host reported is a name this module has
+    no evidence about, and a table that keeps it fails open the moment the command is renamed or the
+    module holding it stops shipping. The load fails instead.
+
+    This is for a table keyed on what a command *is*, never for a deny-list of what a script may do:
+    `refinery.lib.scripts.ps1.analysis.world` names `start-threadjob` and `remove-alias`, which the
+    capture host does not carry, and a deny-list has to be allowed to outrun the data.
+    """
+    result: set[str] = set()
+    for name in names:
+        if data.command(name) is None:
+            raise ValueError(
+                F'the PowerShell command table names {name!r}, which the collected metadata does '
+                F'not carry as a command; the data and the table are out of step.'
+            )
+        result.add(name.lower())
     return frozenset(result)
 
 
@@ -528,7 +552,7 @@ _PURE_INSTANCE_METHODS = frozenset({
     'trimstart',
 })
 
-_PURE_CMDLETS = frozenset({
+_PURE_CMDLETS = _canonical_command_set({
     'get-childitem',
     'get-command',
     'get-content',
@@ -546,12 +570,67 @@ _PURE_CMDLETS = frozenset({
     'where-object',
 })
 
-_PURE_PIPELINE_CMDLETS = frozenset({
+_PURE_PIPELINE_CMDLETS = _canonical_command_set({
     'foreach-object',
     'select-object',
     'sort-object',
     'where-object',
 })
+
+#: Commands that put nothing on their caller's output. Every name here is a command whose whole job
+#: is to consume, format, or write elsewhere, so a statement calling one cannot carry the return
+#: value of the body it sits in. Three of them emit under `-PassThru`, and which three is read from
+#: the shipped parameter data rather than split by hand — `Out-GridView` has the switch while
+#: `Export-Csv` and `Export-Clixml` do not, which is the opposite of what the names suggest.
+#:
+#: `Out-String`, `Write-Output` and `Tee-Object` are deliberately absent: they emit, and adding one
+#: would be the mistake that costs a payload.
+_SILENT_COMMAND_NAMES = {
+    'add-content',
+    'export-clixml',
+    'export-csv',
+    'out-default',
+    'out-file',
+    'out-gridview',
+    'out-host',
+    'out-null',
+    'out-printer',
+    'set-content',
+    'write-debug',
+    'write-error',
+    'write-host',
+    'write-information',
+    'write-progress',
+    'write-verbose',
+    'write-warning',
+}
+
+
+def _split_silent_commands() -> tuple[frozenset[str], frozenset[str]]:
+    """
+    Partition the silent-command table into the names that never emit and the names that emit only
+    when `-PassThru` is supplied, reading the switch off the collected parameter data.
+
+    A name whose record declares an output type is rejected: a command cannot both be documented as
+    producing values and be listed here as producing none, and that contradiction is the shape a
+    wrong addition takes — `Out-String` declares `System.String` and would fail the load rather than
+    silence a payload.
+    """
+    always: set[str] = set()
+    gated: set[str] = set()
+    for name in _canonical_command_set(_SILENT_COMMAND_NAMES):
+        if data.command_output_types(name):
+            raise ValueError(
+                F'the PowerShell silent-command table names {name!r}, whose collected record '
+                F'declares output types; a command that emits cannot be listed as one that does '
+                F'not, so the data and the table are out of step.'
+            )
+        target = gated if 'PassThru' in data.command(name)['parameters'] else always
+        target.add(name)
+    return frozenset(always), frozenset(gated)
+
+
+_SILENT_COMMANDS, _SILENT_COMMANDS_UNLESS_PASSTHRU = _split_silent_commands()
 
 
 def _argument_values(cmd: Ps1CommandInvocation) -> Iterator[Expression | None]:
@@ -1077,14 +1156,34 @@ def _terminal_invocation(pipeline: Ps1Pipeline) -> Ps1CommandInvocation | None:
 
 def _terminal_command(pipeline: Ps1Pipeline, name: str) -> Ps1CommandInvocation | None:
     """
-    The invocation that terminates a pipeline when it is an unredirected call to `name`, else
-    `None`.
+    The invocation that terminates a pipeline when it is an unredirected call to `name`, written
+    under exactly that spelling, else `None`.
     """
     expr = _terminal_invocation(pipeline)
     if expr is None:
         return None
     command = get_command_name(expr)
     if command is None or command.lower() != name:
+        return None
+    return expr
+
+
+def _terminal_command_resolved(pipeline: Ps1Pipeline, name: str) -> Ps1CommandInvocation | None:
+    """
+    The invocation that terminates a pipeline when it *resolves* to `name`, so `%` and `foreach`
+    reach `foreach-object` the way the engine does.
+
+    Deliberately a second function rather than a flag on `_terminal_command`, because which of the
+    two a caller may use is decided by what its answer licenses. This one feeds
+    `_statement_can_emit`, where a match withholds a deletion, so following an alias can only keep
+    more code. `_terminal_command`'s callers reach `StatementEffect.DISCARD`, which deletes, and
+    they ask `may_trust_command_name` under the canonical name — a script defining
+    `function foreach` shadows the spelling `foreach`, which a question about `foreach-object`
+    cannot see, so resolving there would grant exactly the deletion the shadow set holds evidence
+    against.
+    """
+    expr = _terminal_invocation(pipeline)
+    if expr is None or resolve_command_name(expr) != name:
         return None
     return expr
 
@@ -1100,9 +1199,9 @@ def _pipeline_sink_discards_its_input(pipeline: Ps1Pipeline) -> bool:
     the two is what let a non-emitting survivor stand in for the value a `RETURNING` body exists to
     produce.
     """
-    if _terminal_command(pipeline, 'out-null') is not None:
+    if _terminal_command_resolved(pipeline, 'out-null') is not None:
         return True
-    foreach = _terminal_command(pipeline, 'foreach-object')
+    foreach = _terminal_command_resolved(pipeline, 'foreach-object')
     if foreach is None:
         return False
     blocks = _scriptblock_arguments(foreach)
@@ -1408,6 +1507,72 @@ def _output_is_redirected_away(expr: Expression) -> bool:
     return any(_redirection_takes_output_away(r) for r in redirections)
 
 
+def _passthru_is_requested(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether a call provably asks for `-PassThru`, the switch that turns a writing command into an
+    emitting one. Anything short of proof is a no: `-PassThru:$false` binds false, and
+    `-PassThru:$env:x` binds something no analysis here can read, so both answer no and the command
+    keeps its silent verdict — which withholds a deletion rather than licensing one.
+
+    The leading dash is part of the parsed name and is stripped, but the rest is matched in full
+    rather than by prefix — the opposite of `_is_writing_parameter`. There the abbreviation
+    PowerShell would accept has to be caught because a match *refuses* a purity grant; here a match
+    asserts emission, so accepting `-Pass` would be the direction that deletes a payload.
+    """
+    for arg in cmd.arguments:
+        if not isinstance(arg, Ps1CommandArgument) or arg.name.lstrip('-').lower() != 'passthru':
+            continue
+        return arg.value is None or is_truthy(arg.value) is True
+    return False
+
+
+def _command_emits_nothing(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether a command puts nothing on the output of the body its call sits in.
+
+    The name is resolved through `refinery.lib.scripts.ps1.ast.resolve_command_name`, so an alias
+    (`sc`, `ogv`, `%`) and a qualified spelling reach the same entry the plain name does. That is
+    safe in the direction this table is read: a hit says "cannot emit", which withholds a deletion,
+    so resolving toward a bare name can only keep more code. A script that redefines `Write-Host` is
+    wrong here for the same reason and in the same harmless direction — the definition is not
+    consulted, the call reads as silent, and the payload beside it survives.
+
+    **Accepted risk.** A name listed here in error costs recall: junk that would have been deleted
+    is kept. That is the whole exposure, and it is the reason the table is a hand-written list at
+    all — the metadata records that `Out-Null` and `Write-Output` have identical `output_types`,
+    `output_type_declared` and `kind`, so nothing shipped distinguishes the command that swallows
+    its input from the one that forwards it. What must not happen is this predicate being re-keyed
+    to feed a *deletion* decision, `_pipeline_ends_with_void_foreach` being the tempting one, where
+    the same wrong name would delete code instead of keeping it.
+    """
+    name = resolve_command_name(cmd)
+    if name is None:
+        return False
+    if name in _SILENT_COMMANDS:
+        return True
+    if name not in _SILENT_COMMANDS_UNLESS_PASSTHRU:
+        return False
+    return not _passthru_is_requested(cmd)
+
+
+def _emitting_invocation(expr: Expression) -> Ps1CommandInvocation | None:
+    """
+    The invocation whose output would reach the enclosing body: the call itself when a statement is
+    one, else the last element of its pipeline. Unlike `_terminal_invocation` this accepts a
+    single-element pipeline and a redirected call, because the question is what the statement emits
+    rather than what a sink consumes.
+    """
+    if isinstance(expr, Ps1CommandInvocation):
+        return expr
+    if isinstance(expr, Ps1Pipeline) and expr.elements:
+        last = expr.elements[-1]
+        if not isinstance(last, Ps1PipelineElement):
+            return None
+        if isinstance(last.expression, Ps1CommandInvocation):
+            return last.expression
+    return None
+
+
 def _body_can_emit(block: Block | None) -> bool:
     return block is not None and any(_statement_can_emit(stmt) for stmt in block.body)
 
@@ -1455,6 +1620,9 @@ def _statement_can_emit(stmt: Node) -> bool:
     if _is_void_cast(expr) or isinstance(expr, Ps1AssignmentExpression):
         return False
     if _output_is_redirected_away(expr):
+        return False
+    invocation = _emitting_invocation(expr)
+    if invocation is not None and _command_emits_nothing(invocation):
         return False
     if isinstance(expr, Ps1Pipeline):
         return not _pipeline_sink_discards_its_input(expr)

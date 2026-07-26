@@ -16,7 +16,7 @@ import io
 from typing import TypeGuard
 
 from refinery.lib.scripts import Block, Node
-from refinery.lib.scripts.ps1.data import BUILTIN_VARIABLES
+from refinery.lib.scripts.ps1.data import BUILTIN_VARIABLES, KNOWN_ALIAS
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
@@ -126,6 +126,27 @@ def normalize_command_name(name: str) -> str:
         if not colon or scope not in _COMMAND_SCOPES:
             return name
         name = rest
+
+
+def resolve_command_name(cmd: Ps1CommandInvocation) -> str | None:
+    """
+    The lowercased command name a call resolves to, following one level of known alias
+    (`ipmo` → `import-module`), or `None` when the name is not a static literal. A module qualifier
+    is dropped first and a scope qualifier after it:
+    `Microsoft.PowerShell.Utility\\Invoke-Expression` and `global:iex` each run what the bare
+    spelling runs.
+
+    This is the *deny-list* reading of a name, and it is the exact opposite of what
+    `normalize_command_name` advises for an allow-list. Resolving toward a bare name can only match
+    more entries, so on a table whose hits withhold an action — a world opener, a command that emits
+    nothing — every extra match is the conservative answer, and a spelling that dodges the table is
+    the dangerous one. A table whose hits *grant* something must not read a name this way.
+    """
+    name = get_command_name(cmd)
+    if name is None:
+        return None
+    name = normalize_command_name(name.rpartition('\\')[2])
+    return KNOWN_ALIAS.get(name, name).lower()
 
 
 def extract_new_object(cmd: Ps1CommandInvocation) -> tuple[str, list[Expression]] | None:

@@ -33,7 +33,6 @@ from typing import NamedTuple
 
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
-    get_command_name,
     get_member_name,
     is_execution_context_invoke,
     is_opaque_dispatch,
@@ -41,11 +40,11 @@ from refinery.lib.scripts.ps1.ast import (
     is_scriptblock_invoke,
     normalize_command_name,
     normalize_dotnet_type_name,
+    resolve_command_name,
     string_value,
     unwrap_assignment_target,
     unwrap_parens,
 )
-from refinery.lib.scripts.ps1.data import KNOWN_ALIAS
 from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
     Ps1ArrayLiteral,
@@ -294,7 +293,7 @@ def _command_opens_world(cmd: Ps1CommandInvocation) -> bool:
         return True
     if _runs_another_script_file(cmd):
         return True
-    name = _resolved_command_name(cmd)
+    name = resolve_command_name(cmd)
     if name is None:
         return False
     if name in _LEAK_CMDLETS or name in _MUTATION_CMDLETS or name in _ALIAS_CMDLETS:
@@ -322,25 +321,6 @@ def _runs_another_script_file(cmd: Ps1CommandInvocation) -> bool:
     )
 
 
-def _resolved_command_name(cmd: Ps1CommandInvocation) -> str | None:
-    """
-    The lowercased command name a call resolves to, following one level of known alias
-    (`ipmo` → `import-module`), or `None` when the name is not a static literal.
-
-    A module qualifier is dropped first and a scope qualifier after it:
-    `Microsoft.PowerShell.Utility\\Invoke-Expression` and `global:iex` each run what the bare
-    spelling runs, and a deny-list keyed on bare names would otherwise never see either. Erring
-    toward the deny-list is the safe direction — a module of one's own that exports a name on it is
-    then read as an opener too, which only keeps more — which is why this is the one name-trust
-    caller that normalizes, against `normalize_command_name`'s general advice.
-    """
-    name = get_command_name(cmd)
-    if name is None:
-        return None
-    name = normalize_command_name(name.rpartition('\\')[2])
-    return KNOWN_ALIAS.get(name, name).lower()
-
-
 def _touches_identity_provider(cmd: Ps1CommandInvocation) -> bool:
     """
     Whether any argument is a literal path into the `alias:` or `function:` provider, the vector
@@ -348,7 +328,7 @@ def _touches_identity_provider(cmd: Ps1CommandInvocation) -> bool:
     without `Set-Item` being an aliasing cmdlet. Recognized by the provider the path names, not by
     resolving the aliased target, so an obfuscated or dynamic target cannot slip through.
 
-    The provider is read after the same two decorations `_resolved_command_name` strips from a
+    The provider is read after the same two decorations `resolve_command_name` strips from a
     command name, because a path addresses the identical namespace through either:
     `Microsoft.PowerShell.Core\\Function::Get-Date` is what `function:Get-Date` is short for, and a
     prefix test keyed on the short spelling reads the long one as an ordinary file path.

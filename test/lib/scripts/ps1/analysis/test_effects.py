@@ -911,11 +911,113 @@ class TestPs1EmitSafety(Ps1EffectsTest):
                 block = self._first(source, Ps1ScriptBlock)
                 self.assertFalse(output_is_covered(list(block.body)))
 
-    def test_a_statement_that_acts_still_covers_the_output(self):
-        for source in ('function f { Write-Host hi }', 'function f { Get-Item x }'):
+    def test_a_statement_that_emits_covers_the_output(self):
+        # Acting and emitting are two questions, and this pair is the point. Both bodies below are
+        # `EFFECT`, so purity cannot tell them apart; only the second puts a value anywhere the
+        # caller can see, and only the second may stand in for a body's return value.
+        for source in ('function f { Get-Item x }', 'function f { Write-Output hi }'):
             with self.subTest(source):
                 block = self._first(source, Ps1ScriptBlock)
                 self.assertTrue(output_is_covered(list(block.body)))
+
+    def test_a_statement_that_acts_without_emitting_does_not_cover_the_output(self):
+        for source in (
+            'function f { Write-Host hi }',
+            'function f { Write-Error hi }',
+            'function f { Write-Verbose hi }',
+            r'function f { $p | Out-File C:\log }',
+            r'function f { Set-Content C:\log x }',
+            r'function f { Export-Csv -Path C:\log }',
+        ):
+            with self.subTest(source):
+                block = self._first(source, Ps1ScriptBlock)
+                self.assertFalse(output_is_covered(list(block.body)))
+
+    def test_a_silent_command_is_matched_through_its_alias(self):
+        # Six of the silent commands ship aliases, so a table matched on the literal spelling fixes
+        # `Set-Content` and leaves `sc` losing the payload beside it. Resolving toward the bare name
+        # can only match more entries, and every extra match here withholds a deletion.
+        for source in (r'function f { sc C:\log x }', r'function f { ac C:\log x }',
+                       r'function f { ogv }', r'function f { oh }', r'function f { epcsv }'):
+            with self.subTest(source):
+                block = self._first(source, Ps1ScriptBlock)
+                self.assertFalse(output_is_covered(list(block.body)))
+
+    def test_a_passthru_switch_turns_a_writing_command_back_into_an_emitter(self):
+        # Three of the seventeen emit under `-PassThru`, and only a provable request counts: a bound
+        # false is not one, and a value nothing here can read is not one either. Both of those keep
+        # the silent verdict, which is the answer that withholds a deletion rather than allowing it.
+        for source, covers in (
+            (r'function f { Set-Content C:\log x -PassThru }'          , True),   # noqa
+            (r'function f { Out-GridView -PassThru }'                  , True),   # noqa
+            (r'function f { Out-GridView -PassThru:$true }'            , True),   # noqa
+            (r'function f { Out-GridView -PassThru:$false }'           , False),  # noqa
+            (r'function f { Out-GridView -PassThru:$env:x }'           , False),  # noqa
+            (r'function f { Out-GridView -PassThru:([bool]0) }'        , False),  # noqa
+            (r'function f { Write-Host hi -PassThru }'                 , False),  # noqa
+        ):
+            with self.subTest(source):
+                block = self._first(source, Ps1ScriptBlock)
+                self.assertEqual(output_is_covered(list(block.body)), covers)
+
+    def test_the_commands_that_do_emit_are_not_in_the_silent_table(self):
+        # The three most plausible wrong additions. Each forwards or produces values, and listing
+        # one would make it stand in for a return value it never carries.
+        for source in (
+            'function f { Get-Date | Out-String }',
+            'function f { Write-Output hi }',
+            r'function f { $p | Tee-Object C:\log }',
+        ):
+            with self.subTest(source):
+                block = self._first(source, Ps1ScriptBlock)
+                self.assertTrue(output_is_covered(list(block.body)))
+
+    def test_a_sink_that_licenses_deletion_does_not_follow_an_alias(self):
+        # The two questions about a `ForEach-Object` sink resolve names differently on purpose, and
+        # the reason is what each answer licenses. The emission side withholds a deletion, so
+        # following `%` to `foreach-object` can only keep more code. The discard side *deletes*, and
+        # it clears the name with `may_trust_command_name('foreach-object')` — a script defining
+        # `function foreach` shadows the spelling `foreach`, which that question cannot see. Letting
+        # the discard side resolve aliases would delete a call reaching the payload below.
+        from refinery.lib.scripts.ps1.analysis import effects
+        from refinery.lib.scripts.ps1.analysis.world import build_closed_world
+
+        source = 'function foreach { Start-Process calc }\n1..3 | foreach { $Null = $_ }'
+        tree = self._parse(source)
+        oracle = TypeOracle(world=build_closed_world(tree))
+        statement = tree.body[-1]
+        self.assertFalse(effects._pipeline_ends_with_void_foreach(statement.expression, oracle))
+        self.assertIsNot(effects.statement_effect(statement, oracle), StatementEffect.DISCARD)
+
+    def test_the_silent_command_table_is_floored_by_the_shipped_metadata(self):
+        # The table is hand-written, so the load has to refuse an entry the data contradicts: a name
+        # no host reported at all, and a name whose record declares it produces output. The second
+        # is the shape a wrong addition actually takes, and `Out-String` is the likeliest one.
+        from unittest.mock import patch
+
+        from refinery.lib.scripts.ps1.analysis import effects
+
+        with self.assertRaises(ValueError):
+            effects._canonical_command_set({'definitely-notacommand'})
+        names = effects._SILENT_COMMAND_NAMES | {'out-string'}
+        with patch.object(effects, '_SILENT_COMMAND_NAMES', names):
+            with self.assertRaises(ValueError):
+                effects._split_silent_commands()
+
+    def test_the_passthru_split_is_derived_and_not_hand_written(self):
+        # Which names carry `-PassThru` is read off the parameter data, and the answer is not what
+        # the names suggest: `Out-GridView` has the switch while the two `Export-*` commands do not.
+        from refinery.lib.scripts.ps1.analysis import effects
+
+        self.assertEqual(
+            effects._SILENT_COMMANDS_UNLESS_PASSTHRU,
+            frozenset({'add-content', 'out-gridview', 'set-content'}),
+        )
+        self.assertFalse(effects._SILENT_COMMANDS & effects._SILENT_COMMANDS_UNLESS_PASSTHRU)
+        self.assertEqual(
+            effects._SILENT_COMMANDS | effects._SILENT_COMMANDS_UNLESS_PASSTHRU,
+            frozenset(effects._SILENT_COMMAND_NAMES),
+        )
 
     def test_a_named_block_body_is_never_inert(self):
         # The parser fills either `body` or the named blocks, so an advanced function reports an
