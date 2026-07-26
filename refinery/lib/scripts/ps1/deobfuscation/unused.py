@@ -395,6 +395,16 @@ class Ps1JunkStatementRemoval(Transformer):
         caller the walk never read, and the call sites that would prove them live are exactly what
         is out of reach. The same invariant already governs `_prune_body`; enforcing it there and
         not here left one removal site able to erase what the other refuses to.
+
+        Only the definitions are weighed against that invariant, because only they are what a
+        dot-sourcing caller would come for. A script holding a call site of its own is not the
+        module the guard protects — it uses the function here — so `function j { $Null = 1 }` beside
+        a bare `j` reduces to nothing, while the same definition standing alone survives.
+
+        `fault_is_observed` is applied for the same reason it is applied in `_prune_body`: emptying
+        a `try` body beside a handler that does something is what makes the handler read as
+        unreachable. Both removal sites have to answer that question the same way, and this one
+        did not.
         """
         if self._any_dynamic_dispatch(node) or not oracle.world_closed_at(node):
             return
@@ -431,19 +441,23 @@ class Ps1JunkStatementRemoval(Transformer):
             else:
                 other_reference.add(key)
         removable: list[Node] = []
+        removable_definitions: list[Node] = []
         for key, definitions in inert.items():
             if key in other_reference:
                 continue
             removable.extend(call_sites[key])
             removable.extend(definitions)
+            removable_definitions.extend(definitions)
         if not removable:
             return
         role = body_role(node)
         if role is not None:
-            survivors = self._survivors(get_body(node), set(removable))
+            survivors = self._survivors(get_body(node), set(removable_definitions))
             if pruning_erases_body(role, survivors):
                 return
         for statement in removable:
+            if fault_is_observed(statement):
+                continue
             if _remove_from_parent(statement):
                 self.mark_changed()
 
