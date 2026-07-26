@@ -41,6 +41,10 @@ class ModelCacheBase:
     root: Node
 
     def __init__(self, root: Node):
+        # Normalized here and not only in `for_transformer`, because the version counter a mutation
+        # advances is the one keyed on the tree: a cache holding a nested node as its root would
+        # read a counter nothing ever bumps and never invalidate.
+        root = tree_root(root)
         self.root = root
         self._version = tree_version(root)
         self.invalidate()
@@ -79,10 +83,11 @@ class ModelCacheBase:
         pipeline); freshness stays governed by the tree version, and a standalone mutation
         invalidates the stashed cache exactly as it would the shared one.
 
-        *root* is normalized to the tree it belongs to, so a transform that visits a nested body and
-        a transform that visits the script agree on which cache they mean. Skipping that leaves a
-        whole-script model derived from a subtree: a leak sitting outside it becomes invisible and
-        the world reads closed, which is the one direction that deletes code.
+        *root* is normalized to the tree it belongs to — by the constructor, so the two entry points
+        cannot disagree — and a transform that visits a nested body therefore means the same cache
+        as one that visits the script. Skipping that leaves a whole-script model derived from a
+        subtree: a leak sitting outside it becomes invisible and the world reads closed, which is
+        the one direction that deletes code.
         """
         root = tree_root(root)
         cache = transformer.models

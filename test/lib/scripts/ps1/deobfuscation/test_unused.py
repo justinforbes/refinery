@@ -608,3 +608,67 @@ class TestPs1DeadStoreElimination(TestPs1):
         ), Ps1DeadStoreElimination)
         self.assertEqual(
             result, '$x = 5\n$a = ($x += 1)\n$x = 7\nWrite-Host $x\nWrite-Host $a')
+
+
+class TestPs1PayloadRetention(TestPs1):
+    """
+    Every case here is a shape where a removal decision was taken over a name or a node that stood
+    for more code than the pass could see. Keeping junk costs nothing; deleting a call that runs is
+    the failure this suite exists to catch, so each test asserts the payload survives rather than
+    asserting an exact rendering.
+    """
+
+    def test_a_nested_redefinition_keeps_the_name_from_being_inert(self):
+        # Regression: `acting` was collected from top-level statements while call sites were
+        # collected tree-wide, so the empty definition made the name inert and the call that reaches
+        # the payload definition — an `if` body is not a new scope in PowerShell — was removed.
+        result = self._deobfuscate(cleandoc(
+            """
+            function j { }
+            if ($env:c) { function j { Start-Process calc } }
+            j
+            """
+        ))
+        self.assertIn('Start-Process calc', result)
+        self.assertRegex(result, r'(?m)^j$')
+
+    def test_a_payload_definition_inside_a_function_keeps_its_call(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function Outer { function j { Start-Process calc }; j }
+            function j { }
+            Outer
+            """
+        ))
+        self.assertIn('Start-Process calc', result)
+        self.assertIn('Outer', result)
+
+    def test_a_statement_valued_dead_assignment_is_kept_whole(self):
+        # Regression: an assignment whose value is a statement (`$x = if (...) { ... }`, and the
+        # switch/foreach/try forms beside it) has no expression statement to be rewritten into, and
+        # the branch that could not rewrite it deleted the statement along with the branch bodies.
+        for value in (
+            'if ($env:c) { Start-Process calc }',
+            'switch ($env:c) { 1 { Start-Process calc } }',
+            'foreach ($i in 1..2) { Start-Process calc }',
+        ):
+            with self.subTest(value):
+                self.assertIn(
+                    'Start-Process calc', self._deobfuscate(F'$x = {value}\nWrite-Host done'))
+                self.assertIn(
+                    'Start-Process calc',
+                    self._deobfuscate(F'$x = {value}\n$x = 1\nWrite-Host $x'))
+
+    def test_a_scope_qualified_local_function_is_not_alias_inlined(self):
+        # Regression: local definitions were keyed by their written spelling, so `function
+        # global:gci` did not shield the call `gci`, which was rewritten to `Get-ChildItem` and then
+        # deleted as a pure cmdlet — taking the definition with it.
+        result = self._deobfuscate(cleandoc(
+            """
+            function global:gci { Start-Process calc }
+            gci
+            Write-Host done
+            """
+        ))
+        self.assertIn('Start-Process calc', result)
+        self.assertNotIn('Get-ChildItem', result)

@@ -328,8 +328,13 @@ def is_execution_context_invoke(expr: Expression) -> bool:
     """
     Whether `expr` invokes a member of `$ExecutionContext.InvokeCommand` — `.InvokeScript(...)`,
     `.NewScriptBlock(...)`, `.ExpandString(...)` — each of which runs or compiles code from a
-    string. Matched on the `$ExecutionContext.InvokeCommand` receiver chain rather than the member
-    name, so the whole command surface is covered.
+    string. Matched on the `.InvokeCommand` receiver chain rather than the member name, so the whole
+    command surface is covered.
+
+    The chain is followed to whatever it is rooted in rather than being pinned to one depth:
+    `$ExecutionContext.SessionState.InvokeCommand` reaches the same
+    `CommandInvocationIntrinsics` object as `$ExecutionContext.InvokeCommand`, so accepting only the
+    shorter spelling would leave the longer one reading as an ordinary member call.
     """
     if not (isinstance(expr, Ps1InvokeMember) and expr.access is Ps1AccessKind.INSTANCE):
         return False
@@ -337,12 +342,12 @@ def is_execution_context_invoke(expr: Expression) -> bool:
     if not isinstance(middle, Ps1MemberAccess):
         return False
     inner = get_member_name(middle.member)
-    return (
-        inner is not None
-        and inner.lower() == 'invokecommand'
-        and isinstance(middle.object, Ps1Variable)
-        and middle.object.name.lower() == 'executioncontext'
-    )
+    if inner is None or inner.lower() != 'invokecommand':
+        return False
+    receiver = middle.object
+    while isinstance(receiver, Ps1MemberAccess):
+        receiver = receiver.object
+    return isinstance(receiver, Ps1Variable) and receiver.name.lower() == 'executioncontext'
 
 
 def is_builtin_variable(

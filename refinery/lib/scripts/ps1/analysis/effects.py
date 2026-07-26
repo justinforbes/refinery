@@ -278,9 +278,9 @@ _PURE_READ_TYPES = _canonical_sealed_value_type_set({
 #: `(type, member)` asserts that reading it runs no observable code and cannot throw — a property
 #: whose getter only returns cached data (`Process.ProcessName`, where `Process.ExitCode` throws
 #: until exit and is deliberately absent), or a static field whose declaring type's static
-#: constructor is inert (`Math.PI`). The floor confirms each names a collected reflection property or
-#: field, so an entry that turns into an Extended Type System member across a regeneration fails the
-#: load rather than vouching for a member that now runs code.
+#: constructor is inert (`Math.PI`). The floor confirms each names a collected reflection property
+#: or field, so an entry that turns into an Extended Type System member across a regeneration fails
+#: the load rather than vouching for a member that now runs code.
 _PURE_READS = _canonical_read_set({
     ('diagnostics.process', 'processname'),
     ('environment', 'machinename'),
@@ -767,7 +767,9 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
     if isinstance(node, Ps1ParenExpression):
         return node.expression is None or is_side_effect_free(node.expression, oracle)
     if isinstance(node, Ps1CastExpression):
-        return is_side_effect_free(node.operand, oracle)
+        # A cast is a conversion the engine performs by calling into the target type, so it is a
+        # present-type grant like any other and a remapped accelerator invalidates it.
+        return _grant(is_side_effect_free(node.operand, oracle), node, oracle)
     if isinstance(node, Ps1UnaryExpression):
         if node.operator in ('++', '--'):
             return False
@@ -790,7 +792,10 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
                 return is_side_effect_free(stmt.expression, oracle)
         return len(node.body) == 0
     if isinstance(node, Ps1IndexExpression):
-        return is_side_effect_free(node.object, oracle) and is_side_effect_free(node.index, oracle)
+        # Indexing selects the `Item` member, so it is the bracket spelling of the member read
+        # below and carries the same Extended Type System exposure.
+        pure = is_side_effect_free(node.object, oracle) and is_side_effect_free(node.index, oracle)
+        return _grant(pure, node, oracle)
     if isinstance(node, Ps1MemberAccess):
         # A read is side-effect free only when the object is pure to evaluate *and* selecting the
         # member runs no code. Returning the object's own purity was the fail-open shape this gate
@@ -844,7 +849,7 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
             return False
         new_object = extract_new_object(node)
         if new_object is not None:
-            if oracle.is_shadowed('new-object'):
+            if oracle.is_shadowed('new-object', node):
                 return False
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
@@ -855,9 +860,9 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
         if name is None:
             return False
         name = name.lower()
-        # A command the script redefines as a function no longer runs what the metadata describes, so
-        # its purity is not the built-in's; the grant is withheld before the name is trusted.
-        if oracle.is_shadowed(name):
+        # A command the script redefines as a function no longer runs what the metadata describes,
+        # so its purity is not the built-in's; the grant is withheld before the name is trusted.
+        if oracle.is_shadowed(name, node):
             return False
         # The pipeline set is checked through the same gate rather than after the plain one: three
         # of its four members are in both, so testing the plain set first would make the body check
@@ -1060,7 +1065,7 @@ def _pipeline_ends_with_out_null(
     value the pipeline never carried and is not a junk sink.
     """
     out_null = _terminal_command(pipeline, 'out-null')
-    if out_null is None or oracle.is_shadowed('out-null'):
+    if out_null is None or oracle.is_shadowed('out-null', out_null):
         return False
     return _command_arguments_are_pure(out_null, oracle)
 
@@ -1118,7 +1123,7 @@ def _pipeline_ends_with_void_foreach(
     the blocks they saw, and a body that was never shown is not among them.
     """
     foreach = _terminal_command(pipeline, 'foreach-object')
-    if foreach is None or oracle.is_shadowed('foreach-object'):
+    if foreach is None or oracle.is_shadowed('foreach-object', foreach):
         return False
     if not _command_arguments_are_pure(foreach, oracle):
         return False

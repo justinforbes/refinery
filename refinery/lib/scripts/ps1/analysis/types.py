@@ -119,8 +119,8 @@ def resolve_expression_type(
 #: Commands whose declared `[OutputType]` is a trustworthy *superset* of what they emit at runtime,
 #: not merely a lower bound. Most commands under-declare: one that forwards its input emits the
 #: input's type, which it never lists — `Get-Random -InputObject $procs` returns a `Process`,
-#: `Get-Content` on a non-filesystem provider returns whatever that provider yields — so trusting the
-#: declaration lets the member gate prove `(...).Path` pure over an incomplete candidate set and
+#: `Get-Content` on a non-filesystem provider returns whatever that provider yields — so trusting
+#: the declaration lets the member gate prove `(...).Path` pure over an incomplete candidate set and
 #: delete a live effect. Only commands that emit their own output and cannot pass input through
 #: belong here; a read on any other command's result stays unresolved, and therefore kept.
 _CLOSED_OUTPUT_CMDLETS = frozenset({
@@ -141,10 +141,10 @@ class TypeOracle:
     oracle only adds the reads whose object is a typed variable or a pipeline item.
 
     It also carries the two command-table facts the gate consults: `world_closed_at`, whether the
-    script's type system is unmutated (a present-member purity grant requires it), and `is_shadowed`,
-    whether the script redefines a command name so the metadata no longer describes it (a name-trust
-    grant must decline it). An oracle built without a world denies the first and trusts the second:
-    fail-closed on member grants, fail-*open* on name trust. Never assume one from the other.
+    script's type system is unmutated (a present-member purity grant requires it), and
+    `is_shadowed`, whether the metadata still describes what a command name runs (a name-trust grant
+    must decline it when it does not). Both read the same world and both withhold when there is
+    none, so a caller can never obtain a grant from one that the other would refuse.
     """
 
     def __init__(
@@ -174,16 +174,22 @@ class TypeOracle:
         """
         return self._world is not None and self._world.world_closed_at(node)
 
-    def is_shadowed(self, name: str) -> bool:
+    def is_shadowed(self, name: str, node) -> bool:
         """
-        Whether `name` is a command the script redefines with a script-local function/filter or an
-        identity-scope assignment, so the collected metadata no longer describes what it runs. Every
-        site that trusts a command name — for typing or for purity — asks this before acting on the
-        name. Delegates to the `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` a model has
-        supplied; an oracle built without one answers `False`, which trusts every name — the one
-        place in this class where a missing world grants rather than withholds.
+        Whether the collected metadata no longer describes what the command `name` runs at `node`,
+        so no site may trust it — for typing or for purity. Two things make it stop describing it,
+        and both are the world's to answer: the script redefines the name where the walk can
+        classify the redefinition, or the world is open at `node`, in which case a dot-sourced file,
+        an imported module, an `iex`, an item cmdlet writing the `function:` provider or an opaque
+        dispatch can bind *any* name to code this tree does not contain. Reading the shadow set
+        alone would trust every name in exactly the scripts able to rebind them, and the shadow set
+        holds only the two spellings the classifier sees. An oracle built without a world distrusts
+        every name, matching `world_closed_at`: both questions withhold when there is nothing to
+        ask.
         """
-        return self._world is not None and self._world.command_shadowed(name)
+        if self._world is None:
+            return True
+        return not self._world.world_closed_at(node) or self._world.command_shadowed(name)
 
     def resolve(self, expr: Expression) -> str | None:
         """
@@ -255,7 +261,7 @@ class TypeOracle:
         if name is None:
             return frozenset()
         lower = name.lower()
-        if self.is_shadowed(lower):
+        if self.is_shadowed(lower, cmd):
             return frozenset()
         if lower in TYPE_ARG_COMMANDS:
             single = resolve_expression_type(cmd, self._variable_types)

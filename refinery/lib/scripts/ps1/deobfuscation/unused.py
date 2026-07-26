@@ -219,21 +219,32 @@ class Ps1UnusedVariableRemoval(Transformer):
     def _remove_mutation(self, mutation: Node, oracle: TypeOracle):
         if isinstance(mutation, Ps1AssignmentExpression):
             rhs = mutation.value
-            if rhs is not None and not is_side_effect_free(rhs, oracle) and isinstance(rhs, Expression):
-                stmt = _find_removable_statement(mutation)
-                if stmt is None:
-                    return
-                replacement = Ps1ExpressionStatement(expression=rhs)
-                _replace_in_parent(stmt, replacement)
-                self.mark_changed()
-            else:
-                stmt = _find_removable_statement(mutation)
-                if stmt is not None and _remove_from_parent(stmt):
-                    self.mark_changed()
-        elif isinstance(mutation, Ps1UnaryExpression):
-            stmt = _find_removable_statement(mutation)
-            if stmt is not None and _remove_from_parent(stmt):
-                self.mark_changed()
+            if rhs is not None and not is_side_effect_free(rhs, oracle):
+                self._drop_store_keep_value(mutation, rhs)
+                return
+        elif not isinstance(mutation, Ps1UnaryExpression):
+            return
+        stmt = _find_removable_statement(mutation)
+        if stmt is not None and _remove_from_parent(stmt):
+            self.mark_changed()
+
+    def _drop_store_keep_value(self, mutation: Ps1AssignmentExpression, rhs: Node):
+        """
+        Replace the statement holding `mutation` with its right-hand side alone: the store is dead
+        but evaluating the value is not, so what it does has to survive.
+
+        A right-hand side that is a *statement* rather than an expression — `$x = if ($c) { ... }`,
+        and the `switch`/`foreach`/`while`/`try` forms beside it, all legal assignment sources — has
+        no expression-statement spelling to be moved into, so the whole assignment stays. Removing
+        it instead would take the branch bodies with it.
+        """
+        if not isinstance(rhs, Expression):
+            return
+        stmt = _find_removable_statement(mutation)
+        if stmt is None:
+            return
+        _replace_in_parent(stmt, Ps1ExpressionStatement(expression=rhs))
+        self.mark_changed()
 
 
 class Ps1JunkStatementRemoval(Transformer):
@@ -311,21 +322,24 @@ class Ps1JunkStatementRemoval(Transformer):
         result might then be observed or its identity might not be provable.
 
         A name is inert only when *every* definition of it is, since the calls are attributed to the
-        name rather than to one of its definitions: removing them because the last definition is
-        empty would silence a payload-bearing earlier one.
+        name rather than to one of its definitions: removing them because one definition is empty
+        would silence a payload-bearing other one. Definitions are looked for over the whole tree,
+        not only at the top level, because a `function` inside an `if` or a loop body is written
+        into the enclosing scope just the same — while only a top-level definition is itself
+        removable, since a nested one is not this pass's to reason about.
         """
         if self._any_dynamic_dispatch(node):
             return
         inert: dict[str, list[Ps1FunctionDefinition]] = {}
         acting: set[str] = set()
-        for stmt in node.body:
-            if not isinstance(stmt, Ps1FunctionDefinition):
+        for definition in node.walk():
+            if not isinstance(definition, Ps1FunctionDefinition):
                 continue
-            key = normalize_command_name(stmt.name)
-            if body_is_inert(stmt.body, oracle):
-                inert.setdefault(key, []).append(stmt)
-            else:
+            key = normalize_command_name(definition.name)
+            if not body_is_inert(definition.body, oracle):
                 acting.add(key)
+            elif definition.parent is node:
+                inert.setdefault(key, []).append(definition)
         for key in acting:
             inert.pop(key, None)
         if not inert:
@@ -429,10 +443,21 @@ class Ps1DeadStoreElimination(Transformer):
     only through a nested scriptblock is correctly seen as live rather than skipped.
     """
 
+    def __init__(self):
+        super().__init__()
+        self._oracle: TypeOracle | None = None
+
     def visit(self, node: Node):
         cache = model_cache(self, node)
         model = cache.model
-        oracle = cache.oracle
+        # The model is re-read per body, because removing a store changes what the next body's scope
+        # says; the world behind the oracle is not, because it is a whole-script fact and this pass
+        # only removes stores. Re-reading it would rebuild the whole-tree walk after every removal
+        # to reach a verdict that can only have become *more* closed, and the captured one — taken
+        # before those removals — is the more open, and so more conservative, of the two.
+        if self._oracle is None:
+            self._oracle = cache.oracle
+        oracle = self._oracle
         body = get_body(node)
         scope = model.scope_of(node)
         if body is None or scope is None:
@@ -467,9 +492,13 @@ class Ps1DeadStoreElimination(Transformer):
             rhs = stmt.expression
             if isinstance(rhs, Ps1AssignmentExpression):
                 rhs = rhs.value
-            if rhs is not None and isinstance(rhs, Expression) and not is_side_effect_free(rhs, oracle):
-                replacement = Ps1ExpressionStatement(expression=rhs)
-                _replace_in_parent(stmt, replacement)
+            if rhs is not None and not is_side_effect_free(rhs, oracle):
+                # A statement-valued right-hand side (`$x = if ($c) { ... }`) has no expression
+                # statement to be moved into, so the dead store is kept whole rather than dropped
+                # along with what its branches run.
+                if not isinstance(rhs, Expression):
+                    continue
+                _replace_in_parent(stmt, Ps1ExpressionStatement(expression=rhs))
             else:
                 _remove_from_parent(stmt)
             self.mark_changed()

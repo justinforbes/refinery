@@ -14,6 +14,7 @@ from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_member_name,
     is_builtin_variable,
+    normalize_command_name,
     normalize_type_expression,
     string_value,
     unwrap_assignment_target,
@@ -649,7 +650,7 @@ class LocalFunctionAwareTransformer(Transformer):
         self._entry = True
         try:
             self._local_functions = {
-                n.name.lower()
+                normalize_command_name(n.name)
                 for n in node.walk()
                 if isinstance(n, Ps1FunctionDefinition) and n.name
             }

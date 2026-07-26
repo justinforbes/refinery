@@ -3,11 +3,17 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle, resolve_expression_type
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
 class Ps1TypeOracleTest(TestBase):
+
+    #: The world every script that redefines nothing and runs no opaque code has. Typing questions
+    #: are asked through it because a command name is only trustworthy in a closed world, so an
+    #: oracle carrying no world at all answers nothing and would test the absence, not the typing.
+    CLOSED = Ps1TypeWorld(True, frozenset())
 
     @staticmethod
     def _expr(source: str):
@@ -25,7 +31,7 @@ class TestPs1TypeOracleCandidates(Ps1TypeOracleTest):
     """
 
     def setUp(self):
-        self.oracle = TypeOracle()
+        self.oracle = TypeOracle(world=self.CLOSED)
 
     def test_a_cmdlet_contributes_every_output_type_it_declares(self):
         # Get-Date carries [OutputType([datetime], [string])]; both are candidates, since which one
@@ -52,14 +58,14 @@ class TestPs1TypeOracleCandidates(Ps1TypeOracleTest):
         )
 
     def test_a_static_call_with_disagreeing_overloads_is_empty(self):
-        # Math.Max is overloaded across every numeric type; with no argument typing the return is not
-        # decidable, so the oracle reports nothing rather than picking one.
+        # Math.Max is overloaded across every numeric type; with no argument typing the return is
+        # not decidable, so the oracle reports nothing rather than picking one.
         self.assertEqual(self.oracle.candidate_types(self._expr('[Math]::Max(1, 2)')), frozenset())
 
     def test_a_static_call_surfaces_an_imprecise_supertype_return(self):
         # Convert.ChangeType is declared to return Object; the oracle reports that supertype as-is.
-        # Narrowing it is not the oracle's job — a caller that must not act on a supertype is the one
-        # that neutralises it.
+        # Narrowing it is not the oracle's job — a caller that must not act on a supertype is the
+        # one that neutralises it.
         self.assertEqual(
             self.oracle.candidate_types(self._expr('[Convert]::ChangeType($x, [int])')),
             frozenset({'system.object'}),
@@ -83,14 +89,15 @@ class TestPs1TypeOracleCandidates(Ps1TypeOracleTest):
                 self.assertEqual(self.oracle.candidate_types(self._expr(source)), frozenset({single}))
 
     def test_an_untyped_variable_is_empty_without_a_model(self):
-        # The empty oracle carries no variable typing; a bare local resolves to nothing until a model
-        # populates the oracle. Its automatic-variable typing still applies, so this is a plain local.
+        # The empty oracle carries no variable typing; a bare local resolves to nothing until a
+        # model populates the oracle. Its automatic-variable typing still applies, so this is a
+        # plain local.
         self.assertEqual(self.oracle.candidate_types(self._expr('$notavariabletype')), frozenset())
 
     def test_a_populated_oracle_resolves_a_typed_variable(self):
-        # The typing a model supplies is what an empty oracle lacks: given it, the same read the empty
-        # oracle cannot type now carries the variable's type.
-        oracle = TypeOracle({'client': 'system.net.webclient'})
+        # The typing a model supplies is what an empty oracle lacks: given it, the same read the
+        # empty oracle cannot type now carries the variable's type.
+        oracle = TypeOracle({'client': 'system.net.webclient'}, self.CLOSED)
         self.assertEqual(
             oracle.candidate_types(self._expr('$client')), frozenset({'system.net.webclient'}))
         self.assertEqual(self.oracle.candidate_types(self._expr('$client')), frozenset())
@@ -104,7 +111,7 @@ class TestPs1TypeOracleResolve(Ps1TypeOracleTest):
     """
 
     def setUp(self):
-        self.oracle = TypeOracle()
+        self.oracle = TypeOracle(world=self.CLOSED)
 
     def test_a_lone_candidate_is_the_answer(self):
         self.assertEqual(
@@ -125,9 +132,9 @@ class TestPs1TypeOracleResolve(Ps1TypeOracleTest):
                 self.assertEqual(self.oracle.resolve(self._expr(source)), single)
 
     def test_resolve_is_a_strict_superset_of_the_free_function(self):
-        # The free function has no arm for a static method call and returns None; the oracle resolves
-        # it. This is the widening that keeps resolve out of the transforms that depend on the
-        # narrower answer.
+        # The free function has no arm for a static method call and returns None; the oracle
+        # resolves it. This is the widening that keeps resolve out of the transforms that depend on
+        # the narrower answer.
         call = self._expr('[Diagnostics.Process]::GetCurrentProcess()')
         self.assertIsNone(resolve_expression_type(call))
         self.assertEqual(self.oracle.resolve(call), 'system.diagnostics.process')

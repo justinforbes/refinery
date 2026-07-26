@@ -64,9 +64,15 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 #: Commands that execute arbitrary code supplied as data. `Invoke-Expression` is the canonical one;
-#: the opaque dispatch and scriptblock-execution forms are recognized syntactically instead.
+#: the opaque dispatch and scriptblock-execution forms are recognized syntactically instead. The job
+#: and remoting cmdlets belong here rather than beside the mutators: each takes a scriptblock the
+#: walk cannot read when it is written as a variable, and the type-system effects such a block
+#: performs are runspace-global, so a child scope does not contain them.
 _LEAK_CMDLETS = frozenset({
+    'invoke-command',
     'invoke-expression',
+    'start-job',
+    'start-threadjob',
 })
 
 #: Commands that mutate the .NET type system, so reflection can no longer be trusted to describe a
@@ -74,7 +80,9 @@ _LEAK_CMDLETS = frozenset({
 #: mutation allow-list would be vacuous. Names are compared after alias resolution.
 _MUTATION_CMDLETS = frozenset({
     'add-member',
+    'add-type',
     'import-module',
+    'new-module',
     'update-typedata',
 })
 
@@ -83,10 +91,15 @@ _MUTATION_CMDLETS = frozenset({
 #: single-definition alias is inlined away before this runs, so a *surviving* one is an alias the
 #: inliner could not resolve.
 _ALIAS_CMDLETS = frozenset({
+    'import-alias',
     'new-alias',
     'remove-alias',
     'set-alias',
 })
+
+#: The file extension of a PowerShell script. Invoking one runs its definitions and whatever type
+#: mutations it performs into this session, whichever operator carries the call.
+_SCRIPT_FILE_SUFFIX = '.ps1'
 
 #: The variable namespaces that name a command rather than a value: assigning into either redefines
 #: command identity the way `_ALIAS_CMDLETS` do.
@@ -146,7 +159,8 @@ def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
     shadowed: set[str] = set()
     for node in root.walk():
         redefined = _identity_redefinitions(node)
-        shadowed.update(record.name for record in redefined)
+        if redefined:
+            shadowed.update(record.name for record in redefined)
         if _opens_world(node, redefined):
             closed = False
     return Ps1TypeWorld(closed, frozenset(shadowed))
@@ -255,10 +269,7 @@ def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> bool:
 def _command_opens_world(cmd: Ps1CommandInvocation) -> bool:
     if is_opaque_dispatch(cmd):
         return True
-    if cmd.invocation_operator == '.' and isinstance(cmd.name, Ps1StringLiteral):
-        # Dot-sourcing a file runs its definitions into the current scope, adding types and
-        # redefining commands. A dot-sourced inline block (`.{ ... }`) runs only its visible body,
-        # which the walk covers, and `. $x` is already opaque dispatch.
+    if _runs_another_script_file(cmd):
         return True
     name = _resolved_command_name(cmd)
     if name is None:
@@ -268,15 +279,41 @@ def _command_opens_world(cmd: Ps1CommandInvocation) -> bool:
     return _touches_identity_provider(cmd)
 
 
+def _runs_another_script_file(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether `cmd` runs a `.ps1` file that is not part of this tree, so the analysis cannot see what
+    it defines or mutates. Dot-sourcing is the spelling that matters most — it runs the file's
+    definitions into the current scope — but the operator is not what makes the file opaque: a
+    `& '.\\stage2.ps1'` or a bareword `stage2.ps1` runs the same code, and the Extended Type System
+    and accelerator mutations it may perform are runspace-global rather than scope-local, so the
+    child scope a call operator opens does not contain them.
+
+    A dot-sourced inline block (`.{ ... }`) runs only its visible body, which the walk covers, and
+    `. $x` is already opaque dispatch.
+    """
+    if not isinstance(cmd.name, Ps1StringLiteral):
+        return False
+    return (
+        cmd.invocation_operator == '.'
+        or cmd.name.value.lower().endswith(_SCRIPT_FILE_SUFFIX)
+    )
+
+
 def _resolved_command_name(cmd: Ps1CommandInvocation) -> str | None:
     """
     The lowercased command name a call resolves to, following one level of known alias
     (`ipmo` → `import-module`), or `None` when the name is not a static literal.
+
+    A module qualifier is dropped first: `Microsoft.PowerShell.Utility\\Invoke-Expression` runs what
+    the bare spelling runs, and a deny-list keyed on bare names would otherwise never see it. Erring
+    toward the deny-list is the safe direction — a module of one's own that exports a name on it is
+    then read as an opener too, which only keeps more.
     """
     name = get_command_name(cmd)
     if name is None:
         return None
-    return KNOWN_ALIAS.get(name.lower(), name).lower()
+    name = name.rpartition('\\')[2].lower()
+    return KNOWN_ALIAS.get(name, name).lower()
 
 
 def _touches_identity_provider(cmd: Ps1CommandInvocation) -> bool:

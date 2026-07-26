@@ -193,3 +193,60 @@ class TestPs1ShadowedCommands(Ps1TypeWorldTest):
         # the qualifier off this spelling would distrust a command nothing redefined.
         world = build_closed_world(Ps1Parser('function Module\\Get-Date { 1 }').parse())
         self.assertFalse(world.command_shadowed('get-date'))
+
+
+class TestPs1OffTreeCodeOpensTheWorld(Ps1TypeWorldTest):
+    """
+    Every construct that runs code this tree does not contain has to open the world, whatever
+    spelling it wears. The mutations that matter — an Extended Type System member, a type
+    accelerator, an exported command — are runspace-global, so neither the operator used to reach
+    the code nor the scope it runs in contains them.
+    """
+
+    def test_running_another_script_file_opens_the_world(self):
+        for source in (
+            ". '.\\stage2.ps1'",
+            "& '.\\stage2.ps1'",
+            'stage2.ps1',
+            '& $PSScriptRoot\\stage2.ps1',
+        ):
+            with self.subTest(source):
+                self.assertFalse(self._closed(source))
+
+    def test_running_a_block_supplied_as_data_opens_the_world(self):
+        for source in (
+            'Invoke-Command -ScriptBlock $sb',
+            'Start-Job -ScriptBlock $sb',
+            'New-Module -ScriptBlock $sb',
+        ):
+            with self.subTest(source):
+                self.assertFalse(self._closed(source))
+
+    def test_defining_types_or_importing_identity_opens_the_world(self):
+        for source in ('Add-Type -TypeDefinition $src', 'Import-Alias .\\a.csv'):
+            with self.subTest(source):
+                self.assertFalse(self._closed(source))
+
+    def test_a_module_qualifier_does_not_hide_an_opener(self):
+        # A qualifier selects which module's export is meant; it does not make the command something
+        # the deny-list has never heard of. Only the quoted spelling is covered: the lexer splits an
+        # unquoted `Module\\Command` at the backslash, so the name never reaches this predicate
+        # whole.
+        for source in (
+            "& 'Microsoft.PowerShell.Utility\\Invoke-Expression' $x",
+            "& 'Microsoft.PowerShell.Core\\Import-Module' Foo",
+            "& 'Microsoft.PowerShell.Utility\\Update-TypeData' -TypeName System.String",
+        ):
+            with self.subTest(source):
+                self.assertFalse(self._closed(source))
+
+    def test_the_execution_context_chain_is_matched_at_any_depth(self):
+        # `$ExecutionContext.SessionState.InvokeCommand` reaches the same object the short spelling
+        # does, so accepting only one depth leaves the other reading as an ordinary member call.
+        for source in (
+            '$ExecutionContext.InvokeCommand.InvokeScript($s)',
+            '$ExecutionContext.SessionState.InvokeCommand.InvokeScript($s)',
+            '$ExecutionContext.SessionState.InvokeCommand.NewScriptBlock($s)',
+        ):
+            with self.subTest(source):
+                self.assertFalse(self._closed(source))
