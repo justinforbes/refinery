@@ -413,6 +413,16 @@ class TestPs1CommandRedefinition(TestPs1):
             "function Helper { 'x' }\n$Null = (Get-Date).Ticks\nWrite-Output 'keep'\n")
         self.assertNotIn('Get-Date', out)
 
+    def test_a_cast_to_a_script_defined_type_keeps_the_constructor_it_runs(self):
+        # PowerShell converts a string to a custom type by invoking a one-argument constructor, so
+        # the cast is the call. The type is defined in this very script and the constructor body is
+        # standing in the tree, and the conversion was still deleted.
+        out = self._deobfuscate_iterative(
+            "class Loader { Loader([String]$s) { [IO.File]::WriteAllText('C:\\p.txt', $s) } }\n"
+            "$Null = [Loader]'payload'\n"
+            "Write-Host 'keep'")
+        self.assertIn('[Loader]', out)
+
     def test_a_name_is_inert_only_when_every_definition_of_it_is(self):
         # Call sites are attributed to the name, not to one of its definitions, so dropping them
         # because one definition is empty silences the other: the calls go first, then the surviving

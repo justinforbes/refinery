@@ -768,7 +768,15 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
         return node.expression is None or is_side_effect_free(node.expression, oracle)
     if isinstance(node, Ps1CastExpression):
         # A cast is a conversion the engine performs by calling into the target type, so it is a
-        # present-type grant like any other and a remapped accelerator invalidates it.
+        # present-type grant like any other: a remapped accelerator invalidates it, and a name the
+        # metadata cannot resolve is not a type this analysis knows anything about. `Add-Type`, a
+        # PowerShell `class` and `[Reflection.Assembly]::Load` all make such a name denote code —
+        # PowerShell converts a string to it by running a constructor — so granting on the operand
+        # alone deleted the call. Resolving is necessary here, not sufficient: a conversion to a
+        # collected type can still run code (`[xml]$s` parses, and follows external DTDs), which
+        # `_PURE_CAST_TYPES` is the eventual answer to.
+        if data.resolve_type(node.type_name) is None:
+            return False
         return _grant(is_side_effect_free(node.operand, oracle), node, oracle)
     if isinstance(node, Ps1UnaryExpression):
         if node.operator in ('++', '--'):

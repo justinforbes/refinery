@@ -178,6 +178,22 @@ class TestPs1Purity(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertTrue(self._pure(self._expression(source)))
 
+    def test_a_cast_to_a_type_the_metadata_cannot_resolve_is_kept(self):
+        # Converting a string to a custom type runs that type's constructor, and `Add-Type`, a
+        # PowerShell `class` and `[Reflection.Assembly]::Load` each make such a name denote code the
+        # metadata never saw. Granting on the operand alone deleted the conversion — and the call
+        # inside it — even under a closed world, which is where the name is most trusted.
+        for source in ("[Loader]'payload'", '[Some.Unknown.Type]$x', '[NotAType]42'):
+            with self.subTest(source):
+                self.assertFalse(self._pure(self._expression(source)))
+
+    def test_a_cast_to_a_collected_type_is_still_removable(self):
+        # The guard above is a resolution check, not a blanket denial: the ordinary casts an
+        # obfuscator emits by the dozen have to keep pruning.
+        for source in ("[Int]'42'", '[Void]1', "[String]42", '[Char[]]$s'):
+            with self.subTest(source):
+                self.assertTrue(self._pure(self._expression(source)))
+
     def test_a_quoted_member_name_reads_the_same_member_as_a_bare_one(self):
         # A quoted member name (`.'Ticks'`) is one spelling of a literal member, not a computed one,
         # so the gate resolves it to the same member and reaches the same verdict as the bare form:
