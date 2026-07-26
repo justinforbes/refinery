@@ -9,6 +9,7 @@ import re
 
 from typing import Iterator
 
+from refinery.lib.scripts.ps1.analysis.constants import is_truthy
 from refinery.lib.scripts.ps1.ast import get_body, get_member_name, string_value, unwrap_parens
 from refinery.lib.scripts.ps1.data import (
     COMPARISON_OPS,
@@ -30,7 +31,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     is_array_reverse_call,
     is_pipeline_item,
     is_static_type_call,
-    is_truthy,
     make_string_literal,
     ps_divide,
     ps_modulo,

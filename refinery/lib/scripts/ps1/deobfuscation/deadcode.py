@@ -13,6 +13,7 @@ from refinery.lib.scripts import (
     set_child_list,
 )
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.constants import is_truthy
 from refinery.lib.scripts.ps1.analysis.effects import (
     BodyRole,
     body_role,
@@ -24,7 +25,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
-from refinery.lib.scripts.ps1.deobfuscation.helpers import is_truthy, switch_matches, unwrap_integer
+from refinery.lib.scripts.ps1.deobfuscation.helpers import switch_matches, unwrap_integer
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
