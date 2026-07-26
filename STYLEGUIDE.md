@@ -260,6 +260,19 @@ if (condition1
 ```
 where separate lines of the condition are indented further than one level. 
 
+## Multi-Line Strings in Test Data
+
+When defining multi-line strings in tests, specifically to encode short scripts, use:
+```python
+data = inspect.cleandoc("""
+  function _foobar() {
+    console.log("Hello");
+  }
+""")
+```
+This makes the code snippet easy to read while still matching indentation.
+Always use this techniqe instead of encoding line breaks as control characters.
+
 ## Paradigms
 
 ### Minimizing Copies
