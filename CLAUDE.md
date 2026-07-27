@@ -73,13 +73,10 @@ The following rules contradict common Python conventions. Check them explicitly:
 When asked to provide context for a code review, produce **only** the following, with no preface,
 no commentary, and nothing after it:
 
-1. The commit range on its own first line, as `<base>..<head>`, in backticks.
-2. A blank line, then `Notes from the author:`, then provide context for the reviewer on at least the following:
-   - scope
-   - standing prior
-   - highest-value targets
-   - deliberately open items
-   - most useful non-bug outcome
+1. The commit range on its own first line, as `<base>..<head>`
+2. A blank line, then `Notes from the author:`,
+   followed by any specific context and information you want to pass to the reviewer.
+   Keep this **minimal**; you do not want to bias the reviewer.
 
 Be specific and adversarial. The goal is to spend the reviewer's budget on what is not yet known,
 so never pad the notes with what the diff already shows.
