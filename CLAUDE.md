@@ -108,3 +108,8 @@ The goal for test coverage is 95%, but this has very important caveats:
   It is permitted to use code to modify authentic test data in order to cover error-specific code paths.
 - For example, never write code to synthesize an archive format:
   Use the original archive software to produce test samples or ask the user to provide them.
+
+The name of a test and its code should make its purpose and the correctness of its assertion obvious.
+The goal is that a test requires no further narration via comment or docstring.
+In the rare case where either requires an explanation:
+Use docstrings to explain purpose and comments to explain correctness.
