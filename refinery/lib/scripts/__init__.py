@@ -241,8 +241,7 @@ class Transformer(Visitor):
                 if isinstance(value, Node):
                     replacement = self.visit(value)
                     if replacement is not None:
-                        replacement.parent = node
-                        setattr(node, field_name, replacement)
+                        set_child(node, field_name, replacement)
                         self.mark_changed()
             elif kind == Kind.ChildList:
                 items = getattr(node, field_name)
@@ -253,13 +252,12 @@ class Transformer(Visitor):
                         if replacement is not None:
                             if new_list is None:
                                 new_list = list(items[:idx])
-                            replacement.parent = node
                             new_list.append(replacement)
                             continue
                     if new_list is not None:
                         new_list.append(item)
                 if new_list is not None:
-                    setattr(node, field_name, new_list)
+                    set_child_list(node, field_name, new_list)
                     self.mark_changed()
             elif kind == Kind.TupleList:
                 items = getattr(node, field_name)
@@ -271,7 +269,6 @@ class Transformer(Visitor):
                         if isinstance(elem, Node):
                             replacement = self.visit(elem)
                             if replacement is not None:
-                                replacement.parent = node
                                 new_tuple.append(replacement)
                                 tuple_changed = True
                             else:
@@ -285,7 +282,7 @@ class Transformer(Visitor):
                     elif new_list is not None:
                         new_list.append(item)
                 if new_list is not None:
-                    setattr(node, field_name, new_list)
+                    set_child_list(node, field_name, new_list)
                     self.mark_changed()
         return None
 
@@ -296,9 +293,11 @@ _tree_versions: WeakKeyDictionary[Node, int] = WeakKeyDictionary()
 def tree_version(root: Node) -> int:
     """
     The AST-mutation counter for the tree rooted at *root*. Every structural mutation made through
-    `_replace_in_parent`, `_remove_from_parent`, or `set_child_list` advances the counter of the one
-    tree it mutates, found by walking from the mutation site up to its topmost ancestor, and leaves
-    every other tree untouched. `refinery.lib.scripts.modelcache.ModelCacheBase` records the value
+    `_replace_in_parent`, `_remove_from_parent`, `set_child`, `set_child_list` or `BodyEdit` — and
+    so through `Transformer.generic_visit`, which installs every `visit_X` replacement through the
+    latter two — advances the counter of the one tree it mutates, found by walking from the mutation
+    site up to its topmost ancestor, and leaves every other tree untouched.
+    `refinery.lib.scripts.modelcache.ModelCacheBase` records the value
     its own root stood at when its models were built and rebuilds once that root's counter moves,
     so a transform observes models consistent with the current tree even when an earlier mutation
     in the same pass has not yet been announced through `Transformer.changed`. Mutations to
@@ -326,37 +325,47 @@ def _bump_tree_version(site: Node) -> None:
     _tree_versions[root] = _tree_versions.get(root, 0) + 1
 
 
-def _replace_in_parent(old: Node, new: Node):
+def _replace_in_parent(old: Node, new: Node) -> bool:
     """
     Replace `old` with `new` in `old`'s parent node. Sets `new.parent` and handles direct fields,
-    list items, and tuple-in-list items.
+    list items, and tuple-in-list items. Returns whether `old` was found and replaced, the same way
+    `_remove_from_parent` reports whether it removed anything — a caller that turns tree edits into
+    a `Transformer.changed` flag needs the answer, and reading `None` as "nothing moved" leaves the
+    pipeline calling a pass stable while its edit has already advanced the mutation counter.
+
+    `new.parent` is set only once a slot has been found, so that a failed replacement leaves `new`
+    naming no holder rather than naming one that does not hold it — a caller that abandons the
+    replacement then has nothing to undo.
     """
     parent = old.parent
     if parent is None:
-        return
-    new.parent = parent
+        return False
     for attr_name in vars(parent):
         if attr_name in _SKIP_FIELDS:
             continue
         value = getattr(parent, attr_name)
         if value is old:
+            new.parent = parent
             setattr(parent, attr_name, new)
             _bump_tree_version(parent)
-            return
+            return True
         if isinstance(value, list):
             for i, item in enumerate(value):
                 if item is old:
+                    new.parent = parent
                     value[i] = new
                     _bump_tree_version(parent)
-                    return
+                    return True
                 if isinstance(item, tuple):
                     lst = list(item)
                     for j, elem in enumerate(lst):
                         if elem is old:
+                            new.parent = parent
                             lst[j] = new
                             value[i] = tuple(lst)
                             _bump_tree_version(parent)
-                            return
+                            return True
+    return False
 
 
 def _remove_from_parent(node: Node) -> bool:
@@ -378,6 +387,55 @@ def _remove_from_parent(node: Node) -> bool:
                     _bump_tree_version(parent)
                     return True
     return False
+
+
+def reattach(node: Node) -> None:
+    """
+    Restore every parent pointer inside the subtree at `node` to name its actual holder.
+
+    Building a replacement node adopts the children handed to it — `Node.__post_init__` does this,
+    and it is what keeps a freshly built subtree consistent — so a replacement built over parts of a
+    statement that is then *not* installed leaves those parts still in the tree with their parent
+    pointers aimed at a node that is not. Anything reading upward from inside such a subtree, and
+    that includes every guard that asks what encloses a statement, then walks out of the tree. A
+    pass that may abandon a replacement it has already built calls this on what it kept.
+    """
+    for parent in node.walk():
+        parent._adopt(*_compute_children(parent))
+
+
+def owning_list(node: Node) -> tuple[Node, str] | None:
+    """
+    The parent node and attribute name of the child list `node` sits in, or `None` when it sits in
+    none. Every list attribute of the parent is searched, by identity, the same way
+    `_remove_from_parent` searches for the node it removes — a caller that wants to edit the list
+    around a node it found by a whole-tree walk needs the same answer that removal would reach.
+    """
+    parent = node.parent
+    if parent is None:
+        return None
+    for name, value in vars(parent).items():
+        if name in _SKIP_FIELDS or not isinstance(value, list):
+            continue
+        if any(item is node for item in value):
+            return parent, name
+    return None
+
+
+def owning_field(node: Node) -> tuple[Node, str] | None:
+    """
+    The parent node and attribute name of the single-node field `node` sits in, or `None` when it
+    sits in a list, in a tuple inside one, or nowhere. This is the counterpart of `owning_list` for
+    the shape a whole-tree walk also reaches: the inner store of `($y = ($z = 1))` is a statement to
+    every pass that finds it and a direct field to the parenthesis that holds it.
+    """
+    parent = node.parent
+    if parent is None:
+        return None
+    for name, value in vars(parent).items():
+        if name not in _SKIP_FIELDS and value is node:
+            return parent, name
+    return None
 
 
 def set_child_list(parent: Node, attr: str, items: list) -> None:
@@ -419,6 +477,84 @@ def set_body(parent: Node, statements: list) -> None:
     `refinery.lib.scripts.ps1.model.Ps1Code` body in place.
     """
     set_child_list(parent, 'body', statements)
+
+
+def set_child(parent: Node, attr: str, child: Node | None) -> None:
+    """
+    Replace the single child node at `parent.<attr>`, adopt it, and advance the mutation counter of
+    the tree `parent` belongs to. This is the direct-field counterpart to `set_child_list`; passing
+    `None` clears the field, which is how a transform drops an optional sub-node such as a loop's
+    condition or a `finally` block.
+    """
+    if child is not None:
+        child.parent = parent
+    setattr(parent, attr, child)
+    _bump_tree_version(parent)
+
+
+class BodyEdit:
+    """
+    A batch of splices against one child list, applied as a single mutation.
+
+    A transform that rewrites several entries of the same statement list registers each rewrite with
+    `splice` and then calls `apply` once. The alternative — one `set_child_list` per entry, or worse
+    a direct `list.remove` — advances the mutation counter once per entry, so every analysis cache
+    over the tree rebuilds mid-pass and each rebuild observes a body that is half rewritten. Here
+    the list the tree holds is untouched until `apply`, and the counter moves exactly once.
+
+    Splices are keyed by node identity, so an entry that appears twice by equality is still
+    rewritten only where it actually sits. An empty replacement list deletes the entry, which is the
+    shape a removal takes; the class itself knows nothing about why an entry is being removed and
+    enforces no policy about what may be.
+    """
+
+    def __init__(self, parent: Node, attr: str = 'body'):
+        self.parent = parent
+        self.attr = attr
+        #: The spliced-out node is kept beside its replacement, and not only its `id`, so that it
+        #: cannot be collected while the splice is pending: a recycled `id` would make the batch
+        #: rewrite whatever object next took the address.
+        self._splices: dict[int, tuple[Node, list]] = {}
+
+    def splice(self, node: Node, items: list) -> None:
+        """
+        Register that `node` is to be replaced by `items` in the target list. An empty `items`
+        deletes it. Registering the same node twice replaces the earlier splice.
+        """
+        self._splices[id(node)] = (node, items)
+
+    def result(self) -> list:
+        """
+        The list `apply` would install, without installing it. Entries with no registered splice are
+        carried over unchanged; a registered node that is not in the list at all is ignored, since a
+        splice describes an edit to this list and nothing else.
+        """
+        current = getattr(self.parent, self.attr, None) or []
+        if not self._splices:
+            return list(current)
+        result = []
+        for item in current:
+            try:
+                _, items = self._splices[id(item)]
+            except KeyError:
+                result.append(item)
+            else:
+                result.extend(items)
+        return result
+
+    def apply(self) -> bool:
+        """
+        Install the spliced list and advance the mutation counter, returning whether anything moved.
+        A batch whose splices all turn out to be no-ops leaves the tree and the counter alone.
+        """
+        if not self._splices:
+            return False
+        current = getattr(self.parent, self.attr, None) or []
+        result = self.result()
+        if len(result) == len(current) and all(a is b for a, b in zip(result, current)):
+            return False
+        set_child_list(self.parent, self.attr, result)
+        return True
 
 
 _N = TypeVar('_N', bound='Node')
