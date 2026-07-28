@@ -8,13 +8,12 @@ from typing import NamedTuple
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import (
-    BodyRole,
+    OutputSink,
     StatementEffect,
     body_is_inert,
-    body_role,
     is_side_effect_free,
-    output_is_covered,
     output_observed,
+    output_sink,
     pruning_erases_body,
     statement_effect,
 )
@@ -34,6 +33,7 @@ from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _find_removable_statement,
     _walk_outer_scope,
 )
+from refinery.lib.scripts.ps1.deobfuscation.helpers import store_dropped_to_value
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan, Ps1RemovalPlans
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -99,27 +99,6 @@ def _value_is_movable(rhs: Node) -> bool:
     return isinstance(rhs, Expression)
 
 
-def _store_dropped_to_value(rhs: Expression) -> Ps1ExpressionStatement:
-    """
-    The statement a dead store becomes: a discard of `rhs`, so the store goes but whatever
-    evaluating the value does survives.
-
-    The discard wrapper is not decoration. A bare expression statement *emits* its value, where the
-    assignment being removed swallowed it, so rewriting `$unused = [ordered]@{ a = 1 }` to the
-    hashtable alone makes the deobfuscated script print something the original never printed — and
-    inside a function body, return it. `$Null = ...` keeps the work and emits nothing, which is what
-    the dead store did.
-
-    Building this adopts `rhs`, which is why it may be built before the batch holding it is known
-    to land: registering it with `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`
-    gives the adoption straight back, and no replacement holds a claim on the tree until that plan
-    commits. A pass that builds one and never registers it owes the repair itself.
-    """
-    discard = Ps1AssignmentExpression(
-        target=Ps1Variable(name='Null'), operator='=', value=rhs)
-    return Ps1ExpressionStatement(expression=discard)
-
-
 class Ps1UnusedVariableRemoval(Transformer):
     """
     Remove assignments to variables that are never read anywhere in the outer scope. Liveness comes
@@ -173,7 +152,7 @@ class Ps1UnusedVariableRemoval(Transformer):
                     continue
                 replacement = None
                 if edit.keep_value is not None:
-                    replacement = [_store_dropped_to_value(edit.keep_value)]
+                    replacement = [store_dropped_to_value(edit.keep_value)]
                 if plans.propose(edit.statement, replacement):
                     claimed.add(id(edit.statement))
                     planned[id(mutation)] = edit
@@ -402,11 +381,11 @@ class Ps1JunkStatementRemoval(Transformer):
         called = self._reachable_functions(node)
         plans = Ps1RemovalPlans()
         for parent in node.walk():
-            role = body_role(parent)
-            if role is None or role is BodyRole.OPAQUE:
+            sink = output_sink(parent)
+            if sink is None or sink is OutputSink.CAPTURED:
                 continue
             body = get_body(parent)
-            removable = self._removable_in_body(body, role, called, oracle)
+            removable = self._removable_in_body(parent, sink, called, oracle)
             for statement in body:
                 if statement in removable:
                     plans.propose_in(parent, statement)
@@ -564,10 +543,9 @@ class Ps1JunkStatementRemoval(Transformer):
             removable_definitions.update(definitions)
         if not groups:
             return
-        role = body_role(node)
-        if role is not None:
+        if get_body(node) is not None:
             survivors = self._survivors(get_body(node), removable_definitions)
-            if pruning_erases_body(role, survivors):
+            if pruning_erases_body(node, survivors):
                 return
         plans = Ps1RemovalPlans()
         for group in groups.values():
@@ -616,13 +594,14 @@ class Ps1JunkStatementRemoval(Transformer):
         return False
 
     def _removable_in_body(
-        self, body: list, role: BodyRole, called: set[str], oracle: TypeOracle,
+        self, parent: Node, sink: OutputSink, called: set[str], oracle: TypeOracle,
     ) -> set[Node]:
         """
-        What this pass would drop from one statement list. Both set-level guards are answered here,
-        against the **pre-veto** survivors, which is the polarity they require — see
+        What this pass would drop from the statement list `parent` owns. Both set-level guards are
+        answered here, against the **pre-veto** survivors, which is the polarity they require — see
         `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`.
         """
+        body = get_body(parent)
         discard: set[Node] = set()
         output: set[Node] = set()
         dead_functions: set[Node] = set()
@@ -633,7 +612,7 @@ class Ps1JunkStatementRemoval(Transformer):
                 # imported module or an `iex` holds call sites the walk never read, so a definition
                 # with none here is not unreachable — it is reachable from somewhere unreadable.
                 if (
-                    role is BodyRole.SCRIPT
+                    isinstance(parent, Ps1Script)
                     and oracle.world_closed_at(stmt)
                     and normalize_command_name(stmt.name) not in called
                 ):
@@ -644,17 +623,16 @@ class Ps1JunkStatementRemoval(Transformer):
                 discard.add(stmt)
             elif effect is StatementEffect.OUTPUT:
                 output.add(stmt)
-        # A body whose value is observed may exist only to produce it, so a pure output statement
-        # is given up only when another survivor still carries the output. A `DISCARD` emits nothing
-        # and is always safe to drop, even when it empties the body — that is what turns a junk
-        # function inert.
-        if output and output_observed(role):
-            if not output_is_covered(self._survivors(body, discard | output | dead_functions)):
-                output.clear()
+        # A statement that emits is kept wherever someone reads the output, which is everywhere this
+        # pass looks — see `output_observed`. A `DISCARD` emits nothing and is always safe to drop,
+        # even when it empties the body; that is what turns a junk function inert, and it is the
+        # whole of what this pass removes on the emission axis.
+        if output_observed(sink):
+            output.clear()
         removable = discard | output | dead_functions
         if not removable:
             return set()
-        if pruning_erases_body(role, self._survivors(body, removable)):
+        if pruning_erases_body(parent, self._survivors(body, removable)):
             return set()
         return removable
 
@@ -725,7 +703,7 @@ class Ps1DeadStoreElimination(Transformer):
             if rhs is None or is_side_effect_free(rhs, oracle):
                 plan.propose(stmt)
             elif _value_is_movable(rhs):
-                plan.propose(stmt, [_store_dropped_to_value(rhs)])
+                plan.propose(stmt, [store_dropped_to_value(rhs)])
         if plan.commit():
             self.mark_changed()
         self.generic_visit(node)

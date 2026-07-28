@@ -12,19 +12,19 @@ from refinery.lib.scripts import (
 )
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import (
-    BodyRole,
-    body_role,
+    OutputSink,
     is_fault_free,
-    is_pure_constant,
     is_side_effect_free,
-    output_observed,
-    pruning_erases_body,
+    output_sink,
 )
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.values import is_truthy, unwrap_integer
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
-from refinery.lib.scripts.ps1.deobfuscation.helpers import switch_matches
+from refinery.lib.scripts.ps1.deobfuscation.helpers import (
+    store_dropped_to_value,
+    switch_matches,
+)
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
@@ -122,6 +122,25 @@ def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:
         if value is not None and not is_side_effect_free(value, oracle):
             return False
     return True
+
+
+def _hoisted_initializer(expr: Expression) -> Ps1ExpressionStatement:
+    """
+    The statement a `for` initializer becomes once its loop is pruned away.
+
+    PowerShell evaluates the initializer in a void context, so its value reaches nobody:
+    `for (5; $False; ) { }` and `for ((Get-Date); $False; ) { }` both put nothing on the output,
+    where the bare statements `5` and `(Get-Date)` put a value there. Hoisting one plainly would
+    therefore make the deobfuscated script print what the original never printed — the mirror image
+    of deleting output, and no less wrong.
+
+    An assignment already swallows its own value and is hoisted as written. Everything else is
+    wrapped, and the wrapper is `StatementEffect.DISCARD`, so a later pass drops it when the work
+    inside is pure and keeps it when it is not.
+    """
+    if isinstance(expr, Ps1AssignmentExpression):
+        return Ps1ExpressionStatement(expression=expr)
+    return store_dropped_to_value(expr)
 
 
 def _try_body_survivors(body: list[Statement], oracle: TypeOracle) -> list[Statement] | None:
@@ -369,45 +388,34 @@ class Ps1DeadCodeElimination(Transformer):
         # nodes and never introduces a leak, so a stale verdict is always the more open one.
         oracle = model_cache(self, node).oracle
         for parent in list(node.walk()):
-            role = body_role(parent)
-            if role is None or role is BodyRole.OPAQUE:
+            sink = output_sink(parent)
+            if sink is None or sink is OutputSink.CAPTURED:
                 continue
-            if self._prune_body(parent, oracle, role):
+            if self._prune_body(parent, oracle):
                 self.mark_changed()
 
-    def _prune_body(self, parent: Node, oracle: TypeOracle, role: BodyRole) -> bool:
-        # The output decision must be taken over what survives control-flow pruning, never over the
-        # original body: a branch like `if ($false) {}` looks like an anchor before pruning and
-        # produces nothing afterwards, so reading the original body would keep pruning enabled after
-        # its only apparent anchor is gone and silence the body's observable value.
-        rewrites: list[tuple[Statement, list[Statement]]] = []
+    def _prune_body(self, parent: Node, oracle: TypeOracle) -> bool:
+        """
+        Rewrite each statement of one body into what its condition has already been proved to make
+        of it, or leave it alone.
+
+        This pass used to also drop bare constants wherever it read the body's value as unobserved,
+        which was the narrowest slice of `StatementEffect.OUTPUT` and still a slice of it: `42` at
+        the script root prints `42`, and `if ($x) { 42 }` prints it too. `output_observed` is now
+        the answer at every body this walk reaches, so there was never a position where the drop
+        was licensed, and the whole decision is gone rather than gated to nothing.
+
+        What is left removes only constructs whose condition is already proved constant, so none of
+        it can be what an enclosing handler catches, and none of it can empty a body that pruning
+        was not already entitled to empty.
+        """
+        plan = Ps1RemovalPlan(parent, removals_may_fault=False)
         for stmt in get_body(parent):
             replacement = self._try_prune(stmt, oracle)
-            rewrites.append((stmt, [stmt] if replacement is None else replacement))
-        intermediate = [stmt for _, replacement in rewrites for stmt in replacement]
-        # This pass prunes only pure constants, the narrowest slice of `StatementEffect.OUTPUT`, and
-        # declines outright wherever the value could be observed. Whether another statement covers a
-        # RETURNING body's output is a question it never asks: `output_is_covered` answers it more
-        # permissively than is safe here, so only the junk pass consults it.
-        survivors = [stmt for stmt in intermediate if not self._is_constant_output(stmt)]
-        drop_constants = (
-            not output_observed(role)
-            and not pruning_erases_body(role, survivors)
-        )
-        # This pass removes only pure constants and constructs whose condition it has already proved
-        # constant, so none of its removals can be what an enclosing handler catches. What is left
-        # of the fault question for it is the set-level one: do not leave a protected body empty.
-        plan = Ps1RemovalPlan(parent, removals_may_fault=False)
-        for stmt, replacement in rewrites:
-            if drop_constants:
-                replacement = [s for s in replacement if not self._is_constant_output(s)]
-            if len(replacement) != 1 or replacement[0] is not stmt:
-                plan.propose(stmt, replacement)
+            if replacement is None:
+                continue
+            plan.propose(stmt, replacement)
         return plan.commit()
-
-    @staticmethod
-    def _is_constant_output(stmt: Statement) -> bool:
-        return isinstance(stmt, Ps1ExpressionStatement) and is_pure_constant(stmt.expression)
 
     def _try_prune(self, stmt: Statement, oracle: TypeOracle) -> list[Statement] | None:
         if isinstance(stmt, Ps1WhileLoop):
@@ -466,12 +474,12 @@ class Ps1DeadCodeElimination(Transformer):
         if truth is False:
             result: list[Statement] = []
             if node.initializer is not None:
-                result.append(Ps1ExpressionStatement(expression=node.initializer))
+                result.append(_hoisted_initializer(node.initializer))
             return result
         if node.body is not None and _body_breaks_unconditionally(node.body.body):
             result = []
             if node.initializer is not None:
-                result.append(Ps1ExpressionStatement(expression=node.initializer))
+                result.append(_hoisted_initializer(node.initializer))
             body = list(node.body.body[:-1])
             if truth is True or node.condition is None:
                 result.extend(body)

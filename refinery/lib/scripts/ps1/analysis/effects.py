@@ -26,10 +26,9 @@ import enum
 
 from typing import Iterator, Sequence, TypeGuard
 
-from refinery.lib.scripts import Block, Node
+from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
-from refinery.lib.scripts.ps1.analysis.values import is_truthy
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
@@ -39,7 +38,6 @@ from refinery.lib.scripts.ps1.ast import (
     get_param_block,
     is_builtin_variable,
     normalize_dotnet_type_name,
-    resolve_command_name,
 )
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -50,16 +48,12 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Attribute,
     Ps1BinaryExpression,
     Ps1CastExpression,
-    Ps1ClassDefinition,
     Ps1CommandArgument,
     Ps1CommandInvocation,
     Ps1DataSection,
     Ps1DoLoop,
-    Ps1EnumDefinition,
-    Ps1Exit,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
-    Ps1FileRedirection,
     Ps1ForEachLoop,
     Ps1ForLoop,
     Ps1FunctionDefinition,
@@ -69,23 +63,18 @@ from refinery.lib.scripts.ps1.model import (
     Ps1IndexExpression,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
-    Ps1Jump,
     Ps1MemberAccess,
-    Ps1MergingRedirection,
     Ps1ParamBlock,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1PipelineElement,
     Ps1RangeExpression,
     Ps1RealLiteral,
-    Ps1RedirectionStream,
-    Ps1ReturnStatement,
     Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1SwitchStatement,
-    Ps1TrapStatement,
     Ps1TryCatchFinally,
     Ps1TypeExpression,
     Ps1UnaryExpression,
@@ -578,69 +567,6 @@ _PURE_PIPELINE_CMDLETS = _canonical_command_set({
     'sort-object',
     'where-object',
 })
-
-#: Commands that put nothing on their caller's output. Every name here is a command whose whole job
-#: is to consume, format, or write elsewhere, so a statement calling one cannot carry the return
-#: value of the body it sits in. Three of them emit under `-PassThru`, and which three is read from
-#: the shipped parameter data rather than split by hand — `Out-GridView` has the switch while
-#: `Export-Csv` and `Export-Clixml` do not, which is the opposite of what the names suggest.
-#:
-#: `Out-String`, `Write-Output` and `Tee-Object` are deliberately absent, because they emit. Listing
-#: one costs recall and never a payload — see `_command_emits_nothing` — but it makes this table
-#: claim something false about PowerShell, and the next reader has no way to tell which entries were
-#: checked. The direction that does cost a payload is a name *missing* from here.
-_SILENT_COMMAND_NAMES = {
-    'add-content',
-    'export-clixml',
-    'export-csv',
-    'out-default',
-    'out-file',
-    'out-gridview',
-    'out-host',
-    'out-null',
-    'out-printer',
-    'set-content',
-    'write-debug',
-    'write-error',
-    'write-host',
-    'write-information',
-    'write-progress',
-    'write-verbose',
-    'write-warning',
-}
-
-
-def _split_silent_commands() -> tuple[frozenset[str], frozenset[str]]:
-    """
-    Partition the silent-command table into the names that never emit and the names that emit only
-    when `-PassThru` is supplied, reading the switch off the collected parameter data.
-
-    A name whose record declares an output type is rejected: a command cannot both be documented as
-    producing values and be listed here as producing none, so `Out-String` declares `System.String`
-    and fails the load. The floor reaches only that far, and it is worth being exact about how far
-    that is — `Write-Output` and `Tee-Object` declare no output type either, so both load cleanly
-    and neither is caught here. What stops them is the behavioral tests, not this check.
-
-    The parameter lookup is case-folded because the collected records are not consistent about it:
-    148 of them spell the switch `Passthru`, and an exact test would file the next such name under
-    the names that never emit while its `-PassThru` form goes on emitting.
-    """
-    always: set[str] = set()
-    gated: set[str] = set()
-    for name in _canonical_command_set(_SILENT_COMMAND_NAMES):
-        if data.command_output_types(name):
-            raise ValueError(
-                F'the PowerShell silent-command table names {name!r}, whose collected record '
-                F'declares output types; a command that emits cannot be listed as one that does '
-                F'not, so the data and the table are out of step.'
-            )
-        parameters = {p.lower() for p in data.command(name)['parameters']}
-        target = gated if 'passthru' in parameters else always
-        target.add(name)
-    return frozenset(always), frozenset(gated)
-
-
-_SILENT_COMMANDS, _SILENT_COMMANDS_UNLESS_PASSTHRU = _split_silent_commands()
 
 
 def _argument_values(cmd: Ps1CommandInvocation) -> Iterator[Expression | None]:
@@ -1206,48 +1132,6 @@ def _terminal_command(pipeline: Ps1Pipeline, name: str) -> Ps1CommandInvocation 
     return expr
 
 
-def _terminal_command_resolved(pipeline: Ps1Pipeline, name: str) -> Ps1CommandInvocation | None:
-    """
-    The invocation that terminates a pipeline when it *resolves* to `name`, so `%` and `foreach`
-    reach `foreach-object` the way the engine does.
-
-    Deliberately a second function rather than a flag on `_terminal_command`, because which of the
-    two a caller may use is decided by what its answer licenses. This one feeds
-    `_statement_can_emit`, where a match withholds a deletion, so following an alias can only keep
-    more code. `_terminal_command`'s callers reach `StatementEffect.DISCARD`, which deletes, and
-    they ask `may_trust_command_name` under the canonical name — a script defining
-    `function foreach` shadows the spelling `foreach`, which a question about `foreach-object`
-    cannot see, so resolving there would grant exactly the deletion the shadow set holds evidence
-    against.
-    """
-    expr = _terminal_invocation(pipeline)
-    if expr is None or resolve_command_name(expr) != name:
-        return None
-    return expr
-
-
-def _pipeline_sink_discards_its_input(pipeline: Ps1Pipeline) -> bool:
-    """
-    Whether the pipeline's terminator throws away everything that reaches it, so the statement puts
-    nothing on the enclosing body's output.
-
-    This is the shape question alone. What the terminator costs to evaluate is a separate matter and
-    belongs to `statement_effect`: `... | Out-Null -InputObject (Start-Process x)` runs a call and
-    still emits nothing, so it is an `EFFECT` that cannot carry a body's return value. Conflating
-    the two is what let a non-emitting survivor stand in for the value a `RETURNING` body exists to
-    produce.
-    """
-    if _terminal_command_resolved(pipeline, 'out-null') is not None:
-        return True
-    foreach = _terminal_command_resolved(pipeline, 'foreach-object')
-    if foreach is None:
-        return False
-    blocks = _scriptblock_arguments(foreach)
-    return bool(blocks) and all(
-        not _statement_can_emit(stmt) for block in blocks for stmt in block.body
-    )
-
-
 def _pipeline_ends_with_out_null(
     pipeline: Ps1Pipeline,
     oracle: TypeOracle,
@@ -1339,28 +1223,36 @@ def _pipeline_ends_with_cmdlet(pipeline: Ps1Pipeline, names: frozenset[str]) -> 
     return name is not None and name.lower() in names
 
 
-class BodyRole(enum.Enum):
+class OutputSink(enum.Enum):
     """
-    How a statement body relates to the code around it — the emission question every pruning pass
-    has to answer before it removes anything. A `refinery.lib.scripts.Block` or
-    `refinery.lib.scripts.ps1.model.Ps1Code` body is one of:
+    Who reads what a statement body writes to the output stream. Every pruning pass has to answer
+    this before it removes anything, because in PowerShell a statement that merely yields a value
+    has written to that stream:
 
-    - `OPAQUE`: the body's value is captured (an assignment right-hand side, `$(...)`, `@(...)`, a
-      stored or argument scriptblock, a piped `&{}`); pruning any statement could destroy an
-      observable value, so the body is left untouched.
-    - `SCRIPT`: the script root. It has no return value — its output goes to the host — but it must
-      never be pruned away entirely, which is what `pruning_erases_body` guards.
-    - `RETURNING`: a body whose value the caller observes — a function or method body, or a bare
-      `&{ ... }` / `.{ ... }` in statement position. Removing the statement that carries the output
-      silences the return value, so pruning goes through `output_observed` and `output_is_covered`.
-    - `NESTED`: a plain nested block that runs for its side effects (a loop or `if` body in
-      statement position); it has no observable value of its own, so statements may be pruned
-      freely.
+    - `HOST`: the user sees it. The script root, and every plain block that propagates outward to
+      it — a loop or `if` body, a `trap`, a `finally`, a `switch` clause, a bare `&{ ... }` in
+      statement position at script level.
+    - `CALLER`: a function's caller sees it. Only a function, `filter` or class method body is this
+      boundary, along with everything nested inside one.
+    - `CAPTURED`: a value slot holds it — an assignment right-hand side, `$( ... )`, `@( ... )`, a
+      `data` section, a stored or argument scriptblock. The body is never pruned at all, so no
+      statement in it is ever weighed.
+
+    **The contract is that output is preserved at `HOST` and `CALLER` alike**, which is what
+    `output_observed` says and the only thing either sink is asked. They are still separate members
+    because they are separate destinations and the walk really does distinguish them: a change that
+    buys recall back at one of them has to be able to name which.
+
+    This replaced a `BodyRole` that answered *where a body sits* and was read as *who reads it*.
+    Under that enum a bare value at the script root was unprotected, because the root was not a
+    "returning" body — so `'payload-marker'` beside `Write-Host 'go'` was deleted, and a `'junk'`
+    ahead of a `Write-Output` inside a function changed the caller's value from a two-element array
+    to a scalar. Position is the wrong question; the same block propagates to a different reader
+    depending on what encloses it, and only the walk outward answers that.
     """
-    OPAQUE = 'opaque'
-    SCRIPT = 'script'
-    RETURNING = 'returning'
-    NESTED = 'nested'
+    HOST = 'host'
+    CALLER = 'caller'
+    CAPTURED = 'captured'
 
 
 def _scriptblock_is_captured(block: Ps1ScriptBlock) -> bool:
@@ -1390,65 +1282,72 @@ def _scriptblock_is_captured(block: Ps1ScriptBlock) -> bool:
     return True
 
 
-def body_role(node) -> BodyRole | None:
+def output_sink(node) -> OutputSink | None:
     """
-    Classify the statement body that `node` owns as a `BodyRole`, or return `None` when `node` owns
-    no prunable body — which is also how `@( ... )` stays out of every pruning walk, since
-    `refinery.lib.scripts.ps1.ast.get_body` deliberately does not recognize it. Ambiguous capture
-    always resolves to `OPAQUE`.
+    Who reads the output of the statement body that `node` owns, or `None` when `node` owns no
+    prunable body — which is also how `@( ... )` stays out of every pruning walk, since
+    `refinery.lib.scripts.ps1.ast.get_body` deliberately does not recognize it.
 
-    A plain `refinery.lib.scripts.Block` — a loop, `if`, `try`, `catch`, `finally`, or `trap` body —
-    carries no role of its own and derives one by walking outward to the nearest body owner. That
-    walk reports the *owner's* role only for a function body, so the same block classifies three
-    ways depending on where it sits:
+    A body does not carry a sink of its own. It is found by walking outward until a node is reached
+    that *consumes* the output; a node that merely propagates it is walked past. Three things
+    consume: a value slot (`CAPTURED`), a function boundary (`CALLER`), and the script root
+    (`HOST`). Everything else — a loop, an `if`, a `try`, a `trap`, a `switch` clause, a bare
+    `&{ ... }` in statement position — writes through to whatever encloses it.
 
-        if ($x) { 1 }                    at script level  ->  NESTED
-        function f { if ($x) { 1 } }                      ->  RETURNING
-        &{ if ($x) { 1 } }                                ->  NESTED
+    So the same block answers differently depending on where it sits, and this is the point rather
+    than an inconsistency to resolve later:
 
-    A nested block's value is observed exactly when its owner's is, so the consistent answer would
-    be the owner's role in all three cases, and `NESTED` is the more permissive one at both the
-    script and the `&{}` boundary. The passes have shipped with this behavior and all three traces
-    are pinned by test; resolving it needs the reachability of the flow layer, so it is deliberately
-    left as it stands rather than changed as a side effect of consolidating the authority here.
+        if ($x) { 1 }                    at script level  ->  HOST
+        function f { if ($x) { 1 } }                      ->  CALLER
+        &{ if ($x) { 1 } }               at script level  ->  HOST
+
+    Ambiguous capture resolves to `CAPTURED`, which is the answer that prunes nothing.
+
+    Position alone decides this and no oracle is consulted. The `BodyRole` this replaced admitted
+    an inconsistency in its own docstring and deferred it to "the reachability of the flow layer";
+    the flow layer is not needed, because who reads a body's output is a question about the tree
+    above it and never about which paths through it run.
     """
     if get_body(node) is None:
         return None
-    if isinstance(node, Ps1Script):
-        return BodyRole.SCRIPT
-    if isinstance(node, Ps1SubExpression):
-        return BodyRole.OPAQUE
-    if isinstance(node, Ps1ScriptBlock):
-        if isinstance(node.parent, Ps1FunctionDefinition) and node.parent.body is node:
-            return BodyRole.RETURNING
-        return BodyRole.OPAQUE if _scriptblock_is_captured(node) else BodyRole.RETURNING
     prev = node
-    cursor = node.parent
+    cursor = node
     while cursor is not None:
         if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression, Ps1DataSection)):
-            return BodyRole.OPAQUE
+            return OutputSink.CAPTURED
         if isinstance(cursor, Ps1AssignmentExpression) and cursor.value is prev:
-            return BodyRole.OPAQUE
+            return OutputSink.CAPTURED
         if isinstance(cursor, Ps1ScriptBlock):
-            if _scriptblock_is_captured(cursor):
-                return BodyRole.OPAQUE
             if isinstance(cursor.parent, Ps1FunctionDefinition) and cursor.parent.body is cursor:
-                return BodyRole.RETURNING
-            return BodyRole.NESTED
+                return OutputSink.CALLER
+            if _scriptblock_is_captured(cursor):
+                return OutputSink.CAPTURED
         if isinstance(cursor, Ps1Script):
-            return BodyRole.NESTED
+            return OutputSink.HOST
         prev = cursor
         cursor = cursor.parent
-    return BodyRole.NESTED
+    return OutputSink.HOST
 
 
-def output_observed(role: BodyRole) -> bool:
+def output_observed(sink: OutputSink) -> bool:
     """
-    Whether a body of this role has a return value that pruning must protect. True only for
-    `BodyRole.RETURNING`: a `NESTED` body has no observable value, the `SCRIPT` root has no return
-    value, and an `OPAQUE` body is never pruned at all.
+    Whether a body feeding this sink has output that pruning must protect. **This is the output
+    contract, and it is the only place that states it:** a write to the output stream survives
+    deobfuscation, whether the host or a caller is the one reading. A `CAPTURED` body is never
+    pruned at all, so the answer there is moot and is `False` only to keep the predicate total.
+
+    There is no covering argument to be had. One used to be made — that a surviving statement which
+    can emit carries the body's output, so the pure-output statements around it are redundant — and
+    it is false for both readers of a body: PowerShell emits a *stream*, every write to it is its
+    own observable event, and neither the host nor a caller receives one value that some other
+    statement can stand in for.
+
+    The cost is stated rather than hidden. Junk removal keeps only what `StatementEffect.DISCARD`
+    recognizes — the four syntactic no-op shapes — and a bare literal at any prunable position is
+    now kept. That is a real loss of recall on injected noise, taken deliberately, because the
+    alternative is deciding what a value is worth by looking at it.
     """
-    return role is BodyRole.RETURNING
+    return sink is not OutputSink.CAPTURED
 
 
 def fault_is_observed(stmt: Node) -> bool:
@@ -1508,249 +1407,24 @@ _BODY_BEARING_STATEMENTS = (
 )
 
 
-def _redirection_takes_output_away(
-    redirection: Ps1FileRedirection | Ps1MergingRedirection,
-) -> bool:
+def pruning_erases_body(node, survivors: Sequence[Node]) -> bool:
     """
-    Whether a single redirection moves the output stream somewhere the enclosing body cannot see it.
-    A file redirection of `OUTPUT` or of `ALL` (`>`, `>>`, `*>`) writes the values to disk; a merge
-    carries them into whichever stream it names, so it takes them away exactly when it reads *from*
-    output and writes somewhere that is not output.
+    Whether pruning the body that `node` owns down to `survivors` would erase it: nothing would
+    survive, and this body must not become empty. Only the script root qualifies — a script that is
+    nothing but function definitions is a module whose functions may be dot-sourced, and a script
+    that is nothing but `42` still emits `42` — so emptying it would delete real code. Every other
+    body may legitimately prune to nothing; that is what turns an injected junk function inert.
 
-    The direction is what decides this, and reading the wrong end inverts the answer on the common
-    forms: `2>&1` and `3>&1` merge another stream *into* output and leave emission untouched, while
-    `1>&2` is the one that silences it. `*>&1` names `ALL` as its source, which includes output
-    merged onto itself, so it is not a removal either.
-    """
-    if isinstance(redirection, Ps1FileRedirection):
-        return redirection.stream in (Ps1RedirectionStream.OUTPUT, Ps1RedirectionStream.ALL)
-    return (
-        redirection.from_stream in (Ps1RedirectionStream.OUTPUT, Ps1RedirectionStream.ALL)
-        and redirection.to_stream is not Ps1RedirectionStream.OUTPUT
-    )
-
-
-def _output_is_redirected_away(cmd: Ps1CommandInvocation) -> bool:
-    """
-    Whether any redirection written on a call moves its output somewhere the enclosing body cannot
-    see it. The parser hangs every redirection off the invocation and never off the pipeline element
-    around it, so this is the whole of what a statement can carry; only the call whose output would
-    reach the body is asked, because an earlier pipeline element's redirection diverts what that
-    element hands downstream, which is a different question. Where a merge and a file redirection
-    are written together (`2>&1 > C:\\log`), the file redirection is still a removal and any one of
-    them is enough to answer yes.
-    """
-    return any(_redirection_takes_output_away(r) for r in cmd.redirections)
-
-
-def _passthru_is_requested(cmd: Ps1CommandInvocation) -> bool:
-    """
-    Whether a call provably asks for `-PassThru`, the switch that turns a writing command into an
-    emitting one. Anything short of proof is a no: `-PassThru:$false` binds false, and
-    `-PassThru:$env:x` binds something no analysis here can read, so both answer no and the command
-    keeps its silent verdict — which withholds a deletion rather than licensing one.
-
-    The leading dash is part of the parsed name and is stripped, but the rest is matched in full
-    rather than by prefix — the opposite of `_is_writing_parameter`. There the abbreviation
-    PowerShell would accept has to be caught because a match *refuses* a purity grant; here a match
-    asserts emission, so accepting `-Pass` would be the direction that deletes a payload.
-    """
-    for arg in cmd.arguments:
-        if not isinstance(arg, Ps1CommandArgument) or arg.name.lstrip('-').lower() != 'passthru':
-            continue
-        return arg.value is None or is_truthy(arg.value) is True
-    return False
-
-
-def _command_emits_nothing(cmd: Ps1CommandInvocation) -> bool:
-    """
-    Whether a command puts nothing on the output of the body its call sits in.
-
-    The name is resolved through `refinery.lib.scripts.ps1.ast.resolve_command_name`, so an alias
-    (`sc`, `ogv`, `%`) reaches the same entry the plain name does. That is safe in the direction
-    this table is read: a hit says "cannot emit", which withholds a deletion, so resolving toward a
-    bare name can only keep more code. A script that redefines `Write-Host` is wrong here for the
-    same reason and in the same harmless direction — the definition is not consulted, the call reads
-    as silent, and the payload beside it survives.
-
-    **The two error directions are not symmetric.** A name listed here in error costs recall: junk
-    that would have been deleted is kept. A name *missing* from here costs a payload, because the
-    call then reads as carrying the body's output and whatever stands beside it is deleted as
-    redundant. The table is far from complete in that sense — `Start-Sleep`, `Remove-Item`,
-    `Stop-Process` and every other command that acts without emitting are absent — so this is a
-    floor on what is known to be silent and never a decision that anything else emits.
-
-    It is a hand-written list because nothing shipped separates the two: the metadata records that
-    `Out-Null` and `Write-Output` have identical `output_types`, `output_type_declared` and `kind`,
-    so the command that swallows its input and the one that forwards it are indistinguishable in the
-    data. What must not happen is this predicate being re-keyed to feed a *deletion* decision,
-    `_pipeline_ends_with_void_foreach` being the tempting one, where a wrong name would delete code
-    instead of keeping it.
-    """
-    name = resolve_command_name(cmd)
-    if name is None:
-        return False
-    if name in _SILENT_COMMANDS:
-        return True
-    if name not in _SILENT_COMMANDS_UNLESS_PASSTHRU:
-        return False
-    return not _passthru_is_requested(cmd)
-
-
-def _emitting_invocation(expr: Expression) -> Ps1CommandInvocation | None:
-    """
-    The invocation whose output would reach the enclosing body: the call itself when a statement is
-    one, else the last element of its pipeline. Unlike `_terminal_invocation` this accepts a
-    single-element pipeline and a redirected call, because the question is what the statement emits
-    rather than what a sink consumes.
-    """
-    if isinstance(expr, Ps1CommandInvocation):
-        return expr
-    if isinstance(expr, Ps1Pipeline) and expr.elements:
-        last = expr.elements[-1]
-        if not isinstance(last, Ps1PipelineElement):
-            return None
-        if isinstance(last.expression, Ps1CommandInvocation):
-            return last.expression
-    return None
-
-
-def _body_can_emit(block: Block | None) -> bool:
-    return block is not None and any(_statement_can_emit(stmt) for stmt in block.body)
-
-
-def _expression_can_emit(expr: Expression | None) -> bool:
-    """
-    Whether the value of an expression standing alone as a statement reaches the enclosing body's
-    output. Split out of `_statement_can_emit` because `return $x` asks it of a statement that is
-    not a `Ps1ExpressionStatement`, and `(Write-Host x)` asks it of an operand one level down.
-
-    A grouping construct is transparent: `(...)` and `$(...)` emit whatever stands inside them, and
-    a silent call reads as silent through either. `@(...)` is not one of them — it builds an array
-    even when nothing filled it, so `@(Write-Host x)` puts an empty array on the output and keeps
-    the permissive answer. Neither is `($x = 1)`: parentheses around an assignment are the one form
-    that does put the bound value on the pipeline, so the paren is not unwrapped past one.
-    """
-    if expr is None:
-        return False
-    if isinstance(expr, Ps1ParenExpression):
-        inner = expr.expression
-        if isinstance(inner, Ps1AssignmentExpression):
-            return True
-        return _expression_can_emit(inner)
-    if isinstance(expr, Ps1SubExpression):
-        return any(_statement_can_emit(stmt) for stmt in expr.body)
-    if _is_void_cast(expr) or isinstance(expr, Ps1AssignmentExpression):
-        return False
-    invocation = _emitting_invocation(expr)
-    if invocation is not None:
-        if _output_is_redirected_away(invocation) or _command_emits_nothing(invocation):
-            return False
-    if isinstance(expr, Ps1Pipeline):
-        return not _pipeline_sink_discards_its_input(expr)
-    return True
-
-
-def _statement_can_emit(stmt: Node) -> bool:
-    """
-    Whether a statement can put a value on the enclosing body's output at all. This is the emission
-    question alone, deliberately divorced from what the statement costs to run:
-    `[Void](Start-Process x)` cannot carry a body's return value even though `statement_effect`
-    calls it an `EFFECT` for the call it wraps, and neither can `... | Out-Null -InputObject (...)`.
-
-    A declaration emits nothing, and neither does an assignment — `$x = 1` binds a value rather than
-    yielding one, whatever sits on its right-hand side. A named `data d { ... }` section is an
-    assignment too: it binds its block's value to `$d`. Only the unnamed `data { ... }` puts that
-    value on the output, and only when its block holds something that emits.
-
-    A statement that holds other statements emits whatever they do, so one is descended into rather
-    than granted emission for its shape: `if ($c) { }` and `foreach ($i in $x) { $Null = $i }` put
-    nothing anywhere, and answering `True` for them lets an empty branch stand in for the value a
-    body exists to produce. Owning a block is enough to be descended into, so a construct the parser
-    learns later cannot fall through to the permissive answer by being absent from a list;
-    `_BODY_BEARING_STATEMENTS` names the ones that must be descended into *even when they own no
-    block at all*, which is what `switch ($a) { }` parses to.
-
-    A `catch` handler is *not* descended into. It runs only when the `try` body faults, so what it
-    emits cannot stand in for the value the body produces on the path that does not throw — and
-    since the try/catch pass stopped dissolving a construct whose handler has a body, that handler
-    is now a survivor sitting beside the payload it would otherwise shadow. The `try` and `finally`
-    blocks both run on the normal path and are descended into as usual.
-
-    A jump or an exit leaves the body without putting anything on it; `return $x` is the one that
-    carries a value, and it carries exactly what the expression beside it would.
-
-    This is private on purpose. Its safe direction is `False` — see `output_is_covered`, whose one
-    production consumer withholds a deletion when nothing covers the output — and that polarity
-    lives in the caller rather than here, so a predicate that reads as "can emit" would be a trap to
-    reuse anywhere a `True` licenses an action.
-    """
-    if isinstance(stmt, (
-        Ps1ClassDefinition,
-        Ps1EnumDefinition,
-        Ps1FunctionDefinition,
-        Ps1TrapStatement,
-    )):
-        return False
-    if isinstance(stmt, Ps1Jump):
-        return False
-    if isinstance(stmt, Ps1ReturnStatement):
-        return _expression_can_emit(stmt.pipeline)
-    if isinstance(stmt, Ps1Exit):
-        return False
-    if isinstance(stmt, Ps1DataSection):
-        return not stmt.name and _body_can_emit(stmt.body)
-    blocks = list(_nested_blocks(stmt))
-    if blocks or isinstance(stmt, _BODY_BEARING_STATEMENTS):
-        return any(_body_can_emit(block) for block in blocks)
-    if not isinstance(stmt, Ps1ExpressionStatement):
-        return True
-    return _expression_can_emit(stmt.expression)
-
-
-def _nested_blocks(stmt: Node) -> Iterator[Block]:
-    """
-    The statement blocks that run on the path a body's output travels. A `catch` clause is skipped
-    rather than unwrapped: `Ps1CatchClause` is a wrapper carrying a type filter, and the handler
-    below it runs only on a fault.
-    """
-    for child in stmt.children():
-        if isinstance(child, Block):
-            yield child
-
-
-def output_is_covered(survivors: Sequence[Node]) -> bool:
-    """
-    Whether some statement in `survivors` still carries the body's output, so that removing the
-    pure-output statements around it cannot silence a `BodyRole.RETURNING` body's return value.
+    The node decides this and not its `OutputSink`, deliberately. A `trap` or an `if` body at script
+    level is `HOST` like the root is, and refusing to empty those is a different and wider rule than
+    the one meant here.
 
     `survivors` is the surviving statement set itself and never a node to walk up from. A caller may
     hold freshly synthesized statements that are not parented into a body yet, and statements
-    hoisted out of a pruned block still point at the block they came from; answering this question
-    by walking `parent` is what used to delete live return values.
-
-    The check is coarse: every survivor that can emit at all counts as covering, including a
-    conditional that may not execute. It therefore over-counts, permitting a prune that a precise
-    analysis would refuse. What it may not do is count a statement that provably emits nothing —
-    a definition, an assignment, a discard idiom — because such a survivor would silence the body
-    while appearing to cover it. Tightening the rest needs reachability.
+    hoisted out of a pruned block still point at the block they came from; answering this kind of
+    question by walking `parent` is what used to delete live return values.
     """
-    return any(_statement_can_emit(stmt) for stmt in survivors)
-
-
-def pruning_erases_body(role: BodyRole, survivors: Sequence[Node]) -> bool:
-    """
-    Whether pruning a body of this role down to `survivors` would erase it: nothing would survive,
-    and a body of this role must not become empty. Only the `BodyRole.SCRIPT` root qualifies — a
-    script that is nothing but function definitions is a module whose functions may be dot-sourced,
-    and a script that is nothing but `42` still emits `42` — so emptying it would delete real code.
-    Every other role may legitimately prune to nothing; that is what turns an injected junk function
-    inert.
-
-    Like `output_is_covered`, this takes the surviving statement set itself and never walks up from
-    a node.
-    """
-    return not survivors and role is BodyRole.SCRIPT
+    return not survivors and isinstance(node, Ps1Script)
 
 
 def _param_block_is_inert(

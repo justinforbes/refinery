@@ -237,20 +237,19 @@ class TestPs1JunkStatementRemoval(TestPs1):
         self.assertNotIn('Pow', result)
         self.assertIn('done', result)
 
-    def test_pure_static_method_removed(self):
-        result = self._deobfuscate('[Math]::Sqrt(36); Write-Host done')
-        self.assertNotIn('Sqrt', result)
-        self.assertIn('done', result)
-
-    def test_pure_cmdlet_removed(self):
-        result = self._deobfuscate('Get-Random -Minimum 1 -Maximum 100; Write-Host done')
-        self.assertNotIn('Get-Random', result)
-        self.assertIn('done', result)
-
-    def test_pure_instance_method_removed(self):
-        result = self._deobfuscate('(Get-Date).ToString("yyyy"); Write-Host done')
-        self.assertNotIn('ToString', result)
-        self.assertIn('done', result)
+    def test_a_pure_statement_that_writes_to_the_output_stream_is_kept(self):
+        # Purity is not silence. Each of these was deleted for being side-effect free, and each one
+        # prints on PowerShell 5.1 — `6`, a number in 1..100, `2026`, the formatted date.
+        for source, marker in (
+            ('[Math]::Sqrt(36); Write-Host done'               , 'Sqrt'),        # noqa
+            ('Get-Random -Minimum 1 -Maximum 100; Write-Host done', 'Get-Random'),  # noqa
+            ('(Get-Date).ToString("yyyy"); Write-Host done'    , 'ToString'),    # noqa
+            ('Get-Date | Out-String; Write-Host done'          , 'Get-Date'),    # noqa
+        ):
+            with self.subTest(source):
+                result = self._deobfuscate(source)
+                self.assertIn(marker, result)
+                self.assertIn('done', result)
 
     def test_side_effect_command_preserved(self):
         result = self._deobfuscate('Start-Sleep -s 1; Write-Host done')
@@ -268,20 +267,26 @@ class TestPs1JunkStatementRemoval(TestPs1):
             'function Helper { Get-Random }; Helper; Write-Host done')
         self.assertIn('Helper', result)
 
-    def test_expandable_string_removed(self):
-        result = self._deobfuscate('"noise ${x} text"; Write-Host done')
-        self.assertNotIn('noise', result)
-        self.assertIn('done', result)
+    def test_a_bare_string_is_kept_however_much_it_looks_like_noise(self):
+        # `'junk string'` prints `junk string` and `"noise ${x} text"` prints `noise  text`. What
+        # the text says is not a question this pipeline asks — an axis built on asking it was
+        # removed — so both are output like any other and both survive.
+        for source, marker in (
+            ('"noise ${x} text"; Write-Host done', 'noise'),
+            ("'junk string'; Write-Host done"    , 'junk'),  # noqa
+        ):
+            with self.subTest(source):
+                result = self._deobfuscate(source)
+                self.assertIn(marker, result)
+                self.assertIn('done', result)
 
-    def test_string_literal_removed(self):
-        result = self._deobfuscate("'junk string'; Write-Host done")
-        self.assertNotIn('junk', result)
-        self.assertIn('done', result)
-
-    def test_pure_pipeline_removed(self):
-        result = self._deobfuscate(
-            'Get-Date | Out-String; Write-Host done')
-        self.assertNotIn('Get-Date', result)
+    def test_a_neighbour_that_acts_without_emitting_does_not_license_a_deletion(self):
+        # `Write-Host done` puts nothing on the output stream — a caller collecting this body
+        # receives one item, the marker — so there is nothing it can stand in for. Every test above
+        # uses it as the neighbour, which is why the whole set would go green under a model that
+        # protected only a function's return value.
+        result = self._deobfuscate("'payload-marker'; Write-Host done")
+        self.assertIn('payload-marker', result)
         self.assertIn('done', result)
 
     def test_empty_body_guard(self):
@@ -494,22 +499,18 @@ class TestPs1InertFunctionRemoval(TestPs1):
 
 class TestPs1DiscardedObjectRemoval(TestPs1):
 
-    def test_bare_hash_literal_removed(self):
-        result = self._apply(
-            "@{ a = 1; b = 2 }\nWrite-Host 'keep'", Ps1JunkStatementRemoval)
-        self.assertEqual(result, "Write-Host 'keep'")
-
-    def test_pscustomobject_hash_removed(self):
-        result = self._apply(
-            "[pscustomobject]@{ Name = 'x'; Value = 42 }\nWrite-Host 'keep'",
-            Ps1JunkStatementRemoval)
-        self.assertEqual(result, "Write-Host 'keep'")
-
-    def test_synchronized_hashtable_removed(self):
-        result = self._apply(
-            "[Collections.Hashtable]::Synchronized(@{})\nWrite-Host 'keep'",
-            Ps1JunkStatementRemoval)
-        self.assertEqual(result, "Write-Host 'keep'")
+    def test_a_bare_object_literal_is_kept(self):
+        # Each of these writes one object to the output stream on PowerShell 5.1, so a caller
+        # collecting the body receives it. The synchronized empty table is the one worth naming:
+        # it *renders* as nothing, and rendering is not the question — the write still happened.
+        for source in (
+            '@{\n  a = 1\n  b = 2\n}',
+            "[pscustomobject]@{\n  Name = 'x'\n  Value = 42\n}",
+            '[Collections.Hashtable]::Synchronized(@{})',
+        ):
+            with self.subTest(source):
+                self._assertUnchanged(
+                    F"{source}\nWrite-Host 'keep'", Ps1JunkStatementRemoval)
 
     def test_void_foreach_pipeline_removed(self):
         result = self._apply(

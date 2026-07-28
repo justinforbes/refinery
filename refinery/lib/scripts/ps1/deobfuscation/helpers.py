@@ -65,6 +65,31 @@ BACKTICK_ENCODE = {v: F'`{k}' for k, v in BACKTICK_ESCAPE.items()}
 NONPRINT_CONTROL = frozenset(BACKTICK_ENCODE) - {'\n'}
 
 
+def store_dropped_to_value(rhs: Expression) -> Ps1ExpressionStatement:
+    """
+    The statement an expression becomes when it is lifted out of a position that swallowed its
+    value: a discard of `rhs`, so the swallowing goes but whatever evaluating it does survives.
+
+    The discard wrapper is not decoration. A bare expression statement *emits* its value, so
+    rewriting `$unused = [ordered]@{ a = 1 }` to the hashtable alone makes the deobfuscated script
+    print something the original never printed — and inside a function body, return it. The same
+    holds for a `for` initializer, which PowerShell evaluates in a void context:
+    `for ((Get-Date); $False; ) { }` prints nothing where the bare `(Get-Date)` prints the date.
+    `$Null = ...` keeps the work and emits nothing, which is what both positions did.
+
+    It is also `StatementEffect.DISCARD`, so a later pass removes it when the work it wraps is pure
+    and keeps it when it is not — which is the whole of the recall this costs.
+
+    Building this adopts `rhs`, which is why it may be built before the batch holding it is known
+    to land: registering it with `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`
+    gives the adoption straight back, and no replacement holds a claim on the tree until that plan
+    commits. A pass that builds one and never registers it owes the repair itself.
+    """
+    discard = Ps1AssignmentExpression(
+        target=Ps1Variable(name='Null'), operator='=', value=rhs)
+    return Ps1ExpressionStatement(expression=discard)
+
+
 def make_string_literal(value: str) -> Ps1StringLiteral | Ps1HereString:
     has_newline = '\n' in value
     has_nonprint = any(c in value for c in NONPRINT_CONTROL)

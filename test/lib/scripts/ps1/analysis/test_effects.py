@@ -1,23 +1,25 @@
 from __future__ import annotations
 
+from inspect import cleandoc
+
 from test import TestBase
 
 from refinery.lib.scripts import Statement, _remove_from_parent
 from refinery.lib.scripts.ps1.analysis.effects import (
-    BodyRole,
+    OutputSink,
     StatementEffect,
     body_is_inert,
-    body_role,
     is_fault_free,
     is_pure_constant,
     is_side_effect_free,
-    output_is_covered,
     output_observed,
+    output_sink,
     pruning_erases_body,
     statement_effect,
 )
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.ast import get_body
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1CommandInvocation,
@@ -739,18 +741,70 @@ class TestPs1EffectInvariant(Ps1EffectsTest):
                 self.assertEqual(self._violations(source), [])
 
 
-class TestPs1BodyRole(Ps1EffectsTest):
+#: Every construct that owns a body and merely propagates what it writes. Nothing here is a
+#: boundary, so each of these must answer with whatever reads the body holding it.
+_PROPAGATING_BODIES = cleandoc(
+    """
+    if ($a) { 1 } else { 2 }
+    while ($a) { 3 }
+    do { 4 } while ($a)
+    for ($i = 0; $i -lt 3; $i++) { 5 }
+    foreach ($i in $x) { 6 }
+    switch ($a) { 1 { 7 } default { 8 } }
+    try { 9 } catch { 10 } finally { 11 }
+    trap { 12 }
+    &{ 13 }
+    . { 14 }
+    """
+)
 
-    def test_the_script_root_is_its_own_role(self):
-        self.assertIs(body_role(self._parse('42')), BodyRole.SCRIPT)
+#: The same constructs plus every boundary, for the guards that weigh a body without asking who
+#: reads it.
+_EVERY_KIND_OF_BODY = F"""{_PROPAGATING_BODIES}
+function f {{ 15 }}
+filter g {{ 16 }}
+class C {{ [Int] m() {{ return 17 }} }}
+$cb = {{ 18 }}
+$y = $( 19 )
+$z = @( 20 )
+data d {{ 21 }}"""
 
-    def test_a_body_whose_value_the_caller_observes(self):
-        for source in ('function f { 42 }', '&{ 42 }', '. { 42 }'):
+
+class TestPs1OutputSink(Ps1EffectsTest):
+
+    @staticmethod
+    def _owning_body(node):
+        cursor = node.parent
+        while cursor is not None:
+            if get_body(cursor) is not None:
+                return cursor
+            cursor = cursor.parent
+        return None
+
+    def test_the_script_root_writes_to_the_host(self):
+        self.assertIs(output_sink(self._parse('42')), OutputSink.HOST)
+
+    def test_only_a_function_body_is_a_caller_boundary(self):
+        for source in ('function f { 42 }', 'filter f { 42 }'):
             with self.subTest(source):
                 block = self._first(source, Ps1ScriptBlock)
-                self.assertIs(body_role(block), BodyRole.RETURNING)
+                self.assertIs(output_sink(block), OutputSink.CALLER)
+        method = self._first('class C { [Int] m() { return 42 } }', Ps1ScriptBlock)
+        self.assertIs(output_sink(method), OutputSink.CALLER)
 
-    def test_a_captured_body_is_opaque(self):
+    def test_a_scriptblock_run_in_statement_position_writes_through_to_the_host(self):
+        # `&{ 42 }` and `. { 42 }` print 42; nothing captures what they yield, so the reader is
+        # whoever reads the body they stand in.
+        for source in ('&{ 42 }', '. { 42 }'):
+            with self.subTest(source):
+                block = self._first(source, Ps1ScriptBlock)
+                self.assertIs(output_sink(block), OutputSink.HOST)
+
+    def test_a_scriptblock_run_in_statement_position_inside_a_function_reaches_its_caller(self):
+        block = self._first('function f { &{ 42 } }', Ps1CommandInvocation).name
+        self.assertIs(output_sink(block), OutputSink.CALLER)
+
+    def test_a_captured_body_is_never_pruned(self):
         for source in (
             '$cb = { 42 }',
             '&{ 42 } | Out-Null',
@@ -759,193 +813,88 @@ class TestPs1BodyRole(Ps1EffectsTest):
         ):
             with self.subTest(source):
                 block = self._first(source, Ps1ScriptBlock)
-                self.assertIs(body_role(block), BodyRole.OPAQUE)
+                self.assertIs(output_sink(block), OutputSink.CAPTURED)
 
-    def test_a_subexpression_is_opaque(self):
-        self.assertIs(body_role(self._first('$x = $( 42 )', Ps1SubExpression)), BodyRole.OPAQUE)
+    def test_a_subexpression_is_captured(self):
+        self.assertIs(
+            output_sink(self._first('$x = $( 42 )', Ps1SubExpression)), OutputSink.CAPTURED)
 
     def test_an_array_expression_owns_no_prunable_body(self):
-        # `@( ... )` holds a captured value and is kept out of the pruning walks by having no role
+        # `@( ... )` holds a captured value and is kept out of the pruning walks by having no sink
         # at all. Teaching the body accessor about it would silently make its contents prunable.
-        self.assertIsNone(body_role(self._first('$x = @( 42 )', Ps1ArrayExpression)))
+        self.assertIsNone(output_sink(self._first('$x = @( 42 )', Ps1ArrayExpression)))
 
-    def test_a_node_that_owns_no_body_has_no_role(self):
-        self.assertIsNone(body_role(self._expression('42')))
+    def test_a_node_that_owns_no_body_has_no_sink(self):
+        self.assertIsNone(output_sink(self._expression('42')))
 
-    def test_a_nested_block_does_not_inherit_its_owner_role(self):
-        # Pinned, not endorsed. The same `if` body classifies three ways depending only on who owns
-        # it, although its value is observed exactly when its owner's is. Resolving this needs
-        # reachability, so the traces are asserted here to keep any change deliberate.
-        for source, expected in (
-            ('if ($x) { 1 }', BodyRole.NESTED),
-            ('function f { if ($x) { 1 } }', BodyRole.RETURNING),
-            ('&{ if ($x) { 1 } }', BodyRole.NESTED),
+    def test_a_nested_block_answers_with_whoever_reads_the_body_holding_it(self):
+        # The relation, not the three values: a block writes through to its holder, so any model
+        # that answers these two separately is answering one of them wrongly.
+        for source in ('if ($x) { 1 }', 'function f { if ($x) { 1 } }', '&{ if ($x) { 1 } }'):
+            with self.subTest(source):
+                block = self._first(source, Ps1IfStatement).clauses[0][1]
+                self.assertIs(output_sink(block), output_sink(self._owning_body(block)))
+
+    def test_a_block_inside_a_captured_body_is_captured(self):
+        for source in (
+            '$cb = { if ($x) { 1 } }',
+            '$y = $( if ($x) { 1 } )',
+            '$z = @( if ($x) { 1 } )',
+            'data d { if ($x) { 1 } }',
         ):
             with self.subTest(source):
                 block = self._first(source, Ps1IfStatement).clauses[0][1]
-                self.assertIs(body_role(block), expected)
+                self.assertIs(output_sink(block), OutputSink.CAPTURED)
 
-    def test_a_block_inside_a_captured_body_is_opaque(self):
-        for source in ('$cb = { if ($x) { 1 } }', '$y = $( if ($x) { 1 } )'):
-            with self.subTest(source):
-                block = self._first(source, Ps1IfStatement).clauses[0][1]
-                self.assertIs(body_role(block), BodyRole.OPAQUE)
+    def test_a_propagating_body_answers_with_whoever_reads_the_body_holding_it(self):
+        # Enumerated by walking one script rather than by listing node types, so a construct the
+        # parser learns later is covered here without anyone remembering to add it. Run at both
+        # boundaries: the same block has to follow its holder to the host and to a caller alike.
+        for wrap, expected in (
+            ('%s', OutputSink.HOST),
+            ('function outer {\n%s\n}', OutputSink.CALLER),
+        ):
+            script = self._parse(wrap % _PROPAGATING_BODIES)
+            walked = 0
+            for node in script.walk():
+                if get_body(node) is None or node is script:
+                    continue
+                if isinstance(node.parent, Ps1FunctionDefinition) and node.parent.body is node:
+                    continue
+                holder = self._owning_body(node)
+                if holder is None:
+                    continue
+                with self.subTest(F'{expected.name} {node!r}'):
+                    walked += 1
+                    self.assertIs(output_sink(node), output_sink(holder))
+                    self.assertIs(output_sink(node), expected)
+            self.assertGreater(walked, 10)
 
 
 class TestPs1EmitSafety(Ps1EffectsTest):
 
-    def test_only_a_returning_body_has_an_output_to_protect(self):
-        protected = {role for role in BodyRole if output_observed(role)}
-        self.assertEqual(protected, {BodyRole.RETURNING})
+    def test_output_is_protected_wherever_anyone_reads_it(self):
+        # The contract. A model that leaves `HOST` out is the one that deleted a bare value at the
+        # script root, and it satisfies every assertion phrased about `CALLER` alone.
+        protected = {sink for sink in OutputSink if output_observed(sink)}
+        self.assertEqual(protected, {OutputSink.HOST, OutputSink.CALLER})
 
     def test_only_the_script_root_may_not_be_emptied(self):
-        guarded = {role for role in BodyRole if pruning_erases_body(role, [])}
-        self.assertEqual(guarded, {BodyRole.SCRIPT})
+        script = self._parse(_EVERY_KIND_OF_BODY)
+        owners = [node for node in script.walk() if get_body(node) is not None]
+        guarded = [node for node in owners if pruning_erases_body(node, [])]
+        self.assertEqual(guarded, [script])
 
     def test_a_surviving_statement_never_trips_the_erasure_guard(self):
+        script = self._parse(_EVERY_KIND_OF_BODY)
         survivors = list(self._parse('Write-Host hi').body)
-        for role in BodyRole:
-            with self.subTest(role):
-                self.assertFalse(pruning_erases_body(role, survivors))
+        for node in script.walk():
+            if get_body(node) is None:
+                continue
+            with self.subTest(repr(node)):
+                self.assertFalse(pruning_erases_body(node, survivors))
 
-    def test_a_function_definition_alone_does_not_carry_a_bodys_output(self):
-        for source in ('function f { Write-Host hi }', '&{ function f { Write-Host hi } }'):
-            with self.subTest(source):
-                definition = self._first(source, Ps1FunctionDefinition)
-                self.assertFalse(output_is_covered([definition]))
-
-    def test_any_other_survivor_covers_the_output(self):
-        for source in ('Get-Item x', '42', 'if ($a) { 42 }', '($x = 1)'):
-            with self.subTest(source):
-                self.assertTrue(output_is_covered(list(self._parse(source).body)))
-
-    def test_a_statement_holding_only_silent_statements_does_not_cover_the_output(self):
-        # A body-bearing statement emits whatever the statements inside it emit, so it is descended
-        # into rather than granted emission for its shape. Answering `True` for an empty branch is
-        # what let one stand in for the value a `RETURNING` body exists to produce.
-        for source in (
-            'if ($a) { }',
-            'if ($a) { $Null = 1 } else { $x = 2 }',
-            'foreach ($i in $x) { $Null = $i }',
-            'while ($a) { }',
-            'do { } while ($a)',
-            'for ($i = 0; $i -lt 3; $i++) { }',
-            'switch ($a) { 1 { } }',
-            'switch ($a) { }',
-            'try { } catch { }',
-        ):
-            with self.subTest(source):
-                self.assertFalse(output_is_covered(list(self._parse(source).body)))
-
-    def test_a_statement_holding_an_emitting_statement_covers_the_output(self):
-        # The counterpart: descent has to find a real emitter. A `finally` block runs on the path
-        # that does not throw, so what it emits is the body's to carry.
-        for source in (
-            'if ($a) { 42 }',
-            'if ($a) { $Null = 1 } else { 42 }',
-            'foreach ($i in $x) { $i }',
-            'while ($a) { 42 }',
-            'switch ($a) { 1 { 42 } }',
-            'try { 42 } catch { }',
-            'try { } finally { 42 }',
-            'if ($a) { foreach ($i in $x) { 42 } }',
-        ):
-            with self.subTest(source):
-                self.assertTrue(output_is_covered(list(self._parse(source).body)))
-
-    def test_a_catch_handler_does_not_cover_the_output(self):
-        # A handler runs only when the `try` body faults, so what it emits cannot stand in for the
-        # value the body produces on the path that does not throw. Since the try/catch pass stopped
-        # dissolving a construct whose handler has a body, such a handler is now a survivor sitting
-        # beside the payload — and counting it deleted that payload.
-        for source in (
-            'try { } catch { 42 }',
-            'try { } catch { Start-Process calc }',
-            'try { $Null = 1 } catch { 42 } finally { $x = 2 }',
-        ):
-            with self.subTest(source):
-                self.assertFalse(output_is_covered(list(self._parse(source).body)))
-
-    def test_a_statement_that_leaves_the_body_does_not_cover_the_output(self):
-        # A jump or an exit puts nothing on the output, and neither does a bare `return`. Reading
-        # them as emitting let a guard clause stand in for the value the body exists to produce.
-        for source in (
-            'return',
-            'throw',
-            "throw 'x'",
-            'exit',
-            'exit 1',
-            'if ($a) { return }',
-            'if ($a) { throw "x" }',
-            'foreach ($i in $x) { break }',
-            'while ($a) { continue }',
-            'switch ($a) { 1 { break } }',
-        ):
-            with self.subTest(source):
-                self.assertFalse(output_is_covered(list(self._parse(source).body)))
-
-    def test_a_return_carries_whatever_stands_beside_it(self):
-        # `return $x` is the one exit that emits, and it emits exactly what the expression would.
-        for source, covers in (
-            ('return 42', True),
-            ('return $x', True),
-            ("return (Write-Host 'x')", False),
-            ('return ($Null = 1)', True),
-        ):
-            with self.subTest(source):
-                self.assertEqual(output_is_covered(list(self._parse(source).body)), covers)
-
-    def test_a_grouping_construct_does_not_hide_a_silent_command(self):
-        # `(...)` and `$(...)` emit whatever stands inside them, so a silent call reads as silent
-        # through either; wrapping one was enough to dodge the table entirely. `@(...)` is not a
-        # grouping construct — it builds an array even when nothing filled it — and `($x = 1)` is
-        # the one parenthesized form that does put the bound value on the pipeline.
-        for source, covers in (
-            ("(Write-Host 'x')"      , False),  # noqa
-            ("$(Write-Host 'x')"     , False),  # noqa
-            ("((Write-Host 'x'))"    , False),  # noqa
-            ("$(Set-Content C:\\l x)", False),  # noqa
-            ("@(Write-Host 'x')"     , True),   # noqa
-            ('($x = 1)'              , True),   # noqa
-            ('$($x = 1)'             , False),  # noqa
-            ("(Get-Item x)"          , True),   # noqa
-        ):
-            with self.subTest(source):
-                self.assertEqual(output_is_covered(list(self._parse(source).body)), covers)
-
-    def test_a_redirection_of_the_output_stream_stops_it_covering(self):
-        # Sending output to a file or merging it into another stream puts it where the enclosing
-        # body cannot see it. Reading the wrong end of a merge inverts the answer, so both
-        # directions are pinned: `1>&2` silences emission and `2>&1` leaves it alone.
-        for source, covers in (
-            (r'Get-Item x > C:\log.txt' , False),  # noqa
-            (r'Get-Item x >> C:\log.txt', False),  # noqa
-            (r'Get-Item x *> C:\log.txt', False),  # noqa
-            (r'Get-Item x 1>&2'         , False),  # noqa
-            (r'Get-Item x 2>&1 > C:\log', False),  # noqa
-            (r'Get-Item x 2>&1'         , True),   # noqa
-            (r'Get-Item x 3>&1'         , True),   # noqa
-            (r'Get-Item x 2> C:\err.txt', True),   # noqa
-        ):
-            with self.subTest(source):
-                self.assertEqual(output_is_covered(list(self._parse(source).body)), covers)
-
-    def test_a_statement_that_only_binds_does_not_cover_the_output(self):
-        # An assignment yields nothing to the pipeline, so it cannot stand in for the value a
-        # `RETURNING` body exists to produce. Same for the named `data` section, which is an
-        # assignment in block clothing — `data d { 42 }` binds `$d` rather than emitting `42`.
-        for source in ('$x = 1', '$x += 1', '$a, $b = 1, 2', 'data d { 42 }'):
-            with self.subTest(source):
-                self.assertFalse(output_is_covered(list(self._parse(source).body)))
-
-    def test_an_unnamed_data_section_emits_what_its_block_holds(self):
-        # Being unnamed is what makes the section put its block's value on the output, but there
-        # still has to be a value: `data { }` is an empty branch by another spelling.
-        self.assertTrue(output_is_covered(list(self._parse('data { 42 }').body)))
-        self.assertFalse(output_is_covered(list(self._parse('data { }').body)))
-        self.assertFalse(output_is_covered(list(self._parse('data { $x = 1 }').body)))
-
-    def test_emit_safety_reads_only_the_sequence_it_is_given(self):
+    def test_the_erasure_guard_reads_only_the_sequence_it_is_given(self):
         # The contract that used to be broken: a caller holds statements hoisted out of a block it
         # just pruned, whose `parent` still points at the block they came from, and statements that
         # are not parented into any body yet. The verdict has to be the same either way.
@@ -956,128 +905,39 @@ class TestPs1EmitSafety(Ps1EffectsTest):
             '&{ if ($true) { Write-Host hi }; 42 }',
         ):
             with self.subTest(source):
+                script = self._parse(source)
                 block = self._first(source, Ps1ScriptBlock)
                 survivors = list(block.body)
-                before = (
-                    output_is_covered(survivors),
-                    pruning_erases_body(BodyRole.SCRIPT, survivors),
-                )
+                before = pruning_erases_body(script, survivors)
                 for statement in survivors:
                     _remove_from_parent(statement)
-                after = (
-                    output_is_covered(survivors),
-                    pruning_erases_body(BodyRole.SCRIPT, survivors),
-                )
-                self.assertEqual(before, after)
+                self.assertEqual(before, pruning_erases_body(script, survivors))
 
     def test_the_erasure_guard_answers_per_candidate_set(self):
-        # `[Void]1; 42` at script root. The dead-code pass prunes only pure constants, so the
-        # `[Void]1` survives and dropping `42` is allowed; the junk pass also removes the discard,
-        # so nothing would survive and it must decline. One shared guard, two candidate sets, two
-        # answers — the passes are not interchangeable. Pinned so that unifying them is a decision.
+        # `[Void]1; 42` at script root. One shared guard, two candidate sets, two answers: dropping
+        # only the discard leaves `42` standing, and dropping everything the junk pass would take
+        # leaves nothing, which it must decline. Pinned so that unifying the passes is a decision.
         script = self._parse('[Void]1\n42')
-        constants = {
+        discards = {
             statement for statement in script.body
-            if isinstance(statement, Ps1ExpressionStatement)
-            and is_pure_constant(statement.expression)
+            if self._effect(statement) is StatementEffect.DISCARD
         }
         junk = {
             statement for statement in script.body
             if self._effect(statement) is not StatementEffect.EFFECT
         }
-        self.assertEqual(len(constants), 1)
+        self.assertEqual(len(discards), 1)
         self.assertEqual(len(junk), 2)
         self.assertFalse(pruning_erases_body(
-            BodyRole.SCRIPT, [s for s in script.body if s not in constants]))
+            script, [s for s in script.body if s not in discards]))
         self.assertTrue(pruning_erases_body(
-            BodyRole.SCRIPT, [s for s in script.body if s not in junk]))
-
-    def test_a_discard_never_covers_a_bodys_output(self):
-        # A discard idiom emits nothing whatever its operand costs, so it cannot stand in for the
-        # value a `RETURNING` body exists to produce — counting it silences the body.
-        for source in (
-            'function f { [Void](Start-Process notepad) }',
-            'function f { [Void]$sb.Append(1) }',
-            'function f { $Null = Start-Process notepad }',
-            'function f { Get-Item x | Out-Null }',
-        ):
-            with self.subTest(source):
-                block = self._first(source, Ps1ScriptBlock)
-                self.assertFalse(output_is_covered(list(block.body)))
-
-    def test_a_statement_that_emits_covers_the_output(self):
-        # Acting and emitting are two questions, and this pair is the point. Both bodies below are
-        # `EFFECT`, so purity cannot tell them apart; only the second puts a value anywhere the
-        # caller can see, and only the second may stand in for a body's return value.
-        for source in ('function f { Get-Item x }', 'function f { Write-Output hi }'):
-            with self.subTest(source):
-                block = self._first(source, Ps1ScriptBlock)
-                self.assertTrue(output_is_covered(list(block.body)))
-
-    def test_a_statement_that_acts_without_emitting_does_not_cover_the_output(self):
-        for source in (
-            'function f { Write-Host hi }',
-            'function f { Write-Error hi }',
-            'function f { Write-Verbose hi }',
-            r'function f { $p | Out-File C:\log }',
-            r'function f { Set-Content C:\log x }',
-            r'function f { Export-Csv -Path C:\log }',
-        ):
-            with self.subTest(source):
-                block = self._first(source, Ps1ScriptBlock)
-                self.assertFalse(output_is_covered(list(block.body)))
-
-    def test_a_silent_command_is_matched_through_its_alias(self):
-        # Six of the silent commands ship aliases, so a table matched on the literal spelling fixes
-        # `Set-Content` and leaves `sc` losing the payload beside it. Resolving toward the bare name
-        # can only match more entries, and every extra match here withholds a deletion.
-        for source in (
-            r'function f { sc C:\log x }',
-            r'function f { ac C:\log x }',
-            r'function f { ogv }',
-            r'function f { oh }',
-            r'function f { epcsv }',
-        ):
-            with self.subTest(source):
-                block = self._first(source, Ps1ScriptBlock)
-                self.assertFalse(output_is_covered(list(block.body)))
-
-    def test_a_passthru_switch_turns_a_writing_command_back_into_an_emitter(self):
-        # Three of the seventeen emit under `-PassThru`, and only a provable request counts: a bound
-        # false is not one, and a value nothing here can read is not one either. Both of those keep
-        # the silent verdict, which is the answer that withholds a deletion rather than allowing it.
-        for source, covers in (
-            (r'function f { Set-Content C:\log x -PassThru }'          , True),   # noqa
-            (r'function f { Out-GridView -PassThru }'                  , True),   # noqa
-            (r'function f { Out-GridView -PassThru:$true }'            , True),   # noqa
-            (r'function f { Out-GridView -PassThru:$false }'           , False),  # noqa
-            (r'function f { Out-GridView -PassThru:$env:x }'           , False),  # noqa
-            (r'function f { Out-GridView -PassThru:([bool]0) }'        , False),  # noqa
-            (r'function f { Write-Host hi -PassThru }'                 , False),  # noqa
-        ):
-            with self.subTest(source):
-                block = self._first(source, Ps1ScriptBlock)
-                self.assertEqual(output_is_covered(list(block.body)), covers)
-
-    def test_the_commands_that_do_emit_are_not_in_the_silent_table(self):
-        # The three most plausible wrong additions. Each forwards or produces values, and listing
-        # one would make it stand in for a return value it never carries.
-        for source in (
-            'function f { Get-Date | Out-String }',
-            'function f { Write-Output hi }',
-            r'function f { $p | Tee-Object C:\log }',
-        ):
-            with self.subTest(source):
-                block = self._first(source, Ps1ScriptBlock)
-                self.assertTrue(output_is_covered(list(block.body)))
+            script, [s for s in script.body if s not in junk]))
 
     def test_a_sink_that_licenses_deletion_does_not_follow_an_alias(self):
-        # The two questions about a `ForEach-Object` sink resolve names differently on purpose, and
-        # the reason is what each answer licenses. The emission side withholds a deletion, so
-        # following `%` to `foreach-object` can only keep more code. The discard side *deletes*, and
-        # it clears the name with `may_trust_command_name('foreach-object')` — a script defining
-        # `function foreach` shadows the spelling `foreach`, which that question cannot see. Letting
-        # the discard side resolve aliases would delete a call reaching the payload below.
+        # The `ForEach-Object` discard sink *deletes*, so it matches the written spelling and clears
+        # it with `may_trust_command_name('foreach-object')` — a script defining `function foreach`
+        # shadows the spelling `foreach`, which a question about `foreach-object` cannot see.
+        # Resolving aliases here would delete a call reaching the payload below.
         from refinery.lib.scripts.ps1.analysis import effects
         from refinery.lib.scripts.ps1.analysis.world import build_closed_world
 
@@ -1087,36 +947,6 @@ class TestPs1EmitSafety(Ps1EffectsTest):
         statement = tree.body[-1]
         self.assertFalse(effects._pipeline_ends_with_void_foreach(statement.expression, oracle))
         self.assertIsNot(effects.statement_effect(statement, oracle), StatementEffect.DISCARD)
-
-    def test_the_silent_command_table_is_floored_by_the_shipped_metadata(self):
-        # The table is hand-written, so the load has to refuse an entry the data contradicts: a name
-        # no host reported at all, and a name whose record declares it produces output. The second
-        # is the shape a wrong addition actually takes, and `Out-String` is the likeliest one.
-        from unittest.mock import patch
-
-        from refinery.lib.scripts.ps1.analysis import effects
-
-        with self.assertRaises(ValueError):
-            effects._canonical_command_set({'definitely-notacommand'})
-        names = effects._SILENT_COMMAND_NAMES | {'out-string'}
-        with patch.object(effects, '_SILENT_COMMAND_NAMES', names):
-            with self.assertRaises(ValueError):
-                effects._split_silent_commands()
-
-    def test_the_passthru_split_is_derived_and_not_hand_written(self):
-        # Which names carry `-PassThru` is read off the parameter data, and the answer is not what
-        # the names suggest: `Out-GridView` has the switch while the two `Export-*` commands do not.
-        from refinery.lib.scripts.ps1.analysis import effects
-
-        self.assertEqual(
-            effects._SILENT_COMMANDS_UNLESS_PASSTHRU,
-            frozenset({'add-content', 'out-gridview', 'set-content'}),
-        )
-        self.assertFalse(effects._SILENT_COMMANDS & effects._SILENT_COMMANDS_UNLESS_PASSTHRU)
-        self.assertEqual(
-            effects._SILENT_COMMANDS | effects._SILENT_COMMANDS_UNLESS_PASSTHRU,
-            frozenset(effects._SILENT_COMMAND_NAMES),
-        )
 
     def test_a_named_block_body_is_never_inert(self):
         # The parser fills either `body` or the named blocks, so an advanced function reports an
@@ -1159,7 +989,7 @@ class TestPs1EmitSafety(Ps1EffectsTest):
         # `data d { 42 }` binds the block's value to `$d`, so pruning into it is as destructive as
         # pruning into `$(...)`.
         block = self._first('data d { 42 }', Ps1DataSection).body
-        self.assertIs(body_role(block), BodyRole.OPAQUE)
+        self.assertIs(output_sink(block), OutputSink.CAPTURED)
 
     def test_a_body_of_pure_discards_is_inert(self):
         for source in ('function j { $Null = 915 }', 'function j { }', 'function j { [Void]1 }'):

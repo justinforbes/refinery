@@ -477,13 +477,15 @@ class TestPs1ErrorHandlerSurvival(TestPs1):
                 out = self._deobfuscate_iterative(F"{script}\nWrite-Host 'keep'")
                 self.assertIn('Start-Process', out)
 
-    def test_an_empty_catch_still_lets_a_junk_try_be_pruned(self):
-        # The guard is scoped to a handler that does something. `catch {}` swallows the error and
-        # execution continues either way, so removing a throwing statement changes nothing — and
-        # that is the shape obfuscators actually emit, which is why the guard costs so little.
+    def test_an_empty_catch_lets_a_noise_bareword_go_and_keeps_what_may_emit(self):
+        # An empty `catch` licenses *deleting* a statement that raises, and licenses nothing wider.
+        # `[Int]'abc'` is the case where the two halves of that disagree: measured on PowerShell
+        # 5.1, the construct prints nothing when the cast fails and prints `5` when it succeeds, so
+        # it can be neither deleted nor moved out, and the whole of it stays. The bareword goes on
+        # the separate guess that nothing defines it.
         out = self._deobfuscate_iterative(
             "try { foo =5 } catch {}\ntry { [Int]'abc' } catch {}\nWrite-Host 'keep'")
-        self.assertEqual(out, "Write-Host 'keep'")
+        self.assertEqual(out, "try {\n  [Int]'abc'\n} catch {}\nWrite-Host 'keep'")
 
 
 class TestPs1NameTrustSurvivesRewriting(TestPs1):

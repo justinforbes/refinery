@@ -34,9 +34,12 @@ def _witness(witness: type) -> str:
 _DEAD_CODE = _witness(test_deadcode.TestPs1DeadCodeElimination)
 _DEAD_CODE_EXTRA = _witness(test_deadcode.TestPs1DeadCodeExtra)
 _DEAD_CODE_TREE = _witness(test_deadcode.TestPs1DeadCodeLeavesTheTreeConsistent)
+_DISCARDED = _witness(test_unused.TestPs1DiscardedObjectRemoval)
 _EMULATOR = _witness(test_emulator.TestPs1FunctionEvaluator)
 _HANDLER = _witness(test_removal.TestPs1DeadCodeEliminationDoesNotUnhookAHandler)
 _INTEGRATION = _witness(test_deobfuscation.TestPs1Integration)
+_ITERATIVE = _witness(test_removal.TestPs1IterativeRemoval)
+_JUNK = _witness(test_unused.TestPs1JunkStatementRemoval)
 _PLAN = _witness(test_removal.TestPs1RemovalPlan)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _TREE = _witness(test_unused.TestPs1RemovalLeavesTheTreeConsistent)
@@ -265,3 +268,19 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_DEAD_CODE_EXTRA],
             patch.object(
                 deadcode, '_try_body_survivors', _try_body_survivors_hoisting_anything_pure))
+
+    def test_the_output_contract_is_witnessed(self):
+        # The guard that says a write to the output stream survives. Patched in the module that
+        # reads it rather than in `effects`, since the pass imported the name at import time.
+        self._assertWitnessed(
+            [_JUNK, _DISCARDED, _ITERATIVE],
+            patch.object(unused, 'output_observed', lambda sink: False))
+
+    def test_discarding_a_hoisted_for_initializer_is_witnessed(self):
+        # `for (5; $False; ) { }` puts nothing on the output; the bare statement `5` does. Hoisting
+        # one plainly is the mirror image of deleting output.
+        self._assertWitnessed(
+            [_DEAD_CODE_TREE],
+            patch.object(
+                deadcode, '_hoisted_initializer',
+                lambda expr: Ps1ExpressionStatement(expression=expr)))
