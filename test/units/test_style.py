@@ -1,25 +1,23 @@
 import ast
 import functools
+import importlib
 import os.path
+import pkgutil
 import pytest
-import re
+import unittest
 
+from contextlib import ExitStack
 from glob import glob
+from unittest.mock import patch
 
 from . import TestBase, TestUnitBase
+
+from refinery.lib.scripts.ps1.deobfuscation import removal
 
 
 #: The module that owns statement removal, and so the one place a removal may be spelled out. Path
 #: anchored rather than matched by base name, so a `removal.py` elsewhere in the tree is still read.
 _RATCHET_OWNER = os.path.join('deobfuscation', 'removal.py')
-
-#: A `try` block, as opposed to the letters that end a word such as `registry`.
-_PROTECTED_BODY = re.compile(R'\btry\b\s*\{')
-
-#: A `catch` whose body says something. An empty handler is deliberately not one that acts — see
-#: `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` — so a removal that empties the
-#: body beside it is never refused, and a test written that way reaches none of the veto below.
-_ACTING_HANDLER = re.compile(R'\bcatch\b[^{]*\{\s*[^\s}]')
 
 
 def _project_root() -> str:
@@ -122,15 +120,23 @@ class TestRemovalIsTriedInsideAProtectedBody(TestBase):
     lived in exactly that shape and both survived suites that were otherwise well formed, so the
     shape is required rather than hoped for: what a suite never puts inside a `try` it never checks.
 
-    A pass is credited by the test *method* that exercises it, not by the single call, because the
-    script a method feeds to a pass is as often bound to a local first — a call-scoped scan reads
-    such a method as evidence of nothing and demands a duplicate of the test that already exists.
+    **A pass is credited by the veto firing, not by its tests looking as though it would.** The
+    reading this replaced matched `try` and `catch` against every string constant in a test method,
+    which is a proxy for the thing and wrong in both directions: it read a docstring mentioning
+    `try`, it accepted a handler holding nothing but `catch { # comment }`, it missed the lowercase
+    spellings PowerShell accepts, and it credited a pass for a script that reached the veto with no
+    proposal for it to decline. Running the suite with the fault veto under observation asks the
+    question directly: which passes actually put a removal in front of it and were told no.
     """
 
     PASSES = os.path.join('refinery', 'lib', 'scripts', 'ps1', 'deobfuscation')
     TESTS = os.path.join('test', 'lib', 'scripts', 'ps1', 'deobfuscation')
     PLANS = ('Ps1RemovalPlan', 'Ps1RemovalPlans')
-    HELPERS = ('_apply', '_assertUnchanged', '_assertTreeIsIntact')
+
+    #: The witness suite runs whole suites of its own under mutation, so a run of it would report
+    #: the veto firing inside a deliberately broken analysis. Excluded to keep the evidence the
+    #: tests' own, and because rerunning it here costs more than the rest of the directory together.
+    EXCLUDED = 'test_witnessed'
 
     @classmethod
     def _passes_that_remove(cls) -> set[str]:
@@ -148,35 +154,69 @@ class TestRemovalIsTriedInsideAProtectedBody(TestBase):
                         found.add(node.name)
         return found
 
-    @staticmethod
-    def _scripts(node: ast.AST) -> list[str]:
-        return [
-            item.value for item in ast.walk(node)
-            if isinstance(item, ast.Constant) and isinstance(item.value, str)
-        ]
+    @classmethod
+    def _pass_type(cls, name: str) -> type:
+        """
+        The class object a pass name denotes. Looked up across the package's modules rather than
+        through one import, so a pass that moves between modules is still found; the name comes from
+        `_passes_that_remove`, which read the same tree, so an unresolvable one is a bug here.
+        """
+        package = importlib.import_module(cls.PASSES.replace(os.sep, '.'))
+        for _, module_name, _ in pkgutil.iter_modules(package.__path__):
+            module = importlib.import_module(F'{package.__name__}.{module_name}')
+            found = getattr(module, name, None)
+            if isinstance(found, type):
+                return found
+        raise AssertionError(F'{name} removes statements but no module in {cls.PASSES} defines it')
 
     @classmethod
-    def _passes_tried_under_a_handler(cls) -> set[str]:
-        found = set()
-        for _, tree in _sources(cls.TESTS):
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.FunctionDef):
-                    continue
-                if not any(
-                    _PROTECTED_BODY.search(script) and _ACTING_HANDLER.search(script)
-                    for script in cls._scripts(node)
-                ):
-                    continue
-                for call in ast.walk(node):
-                    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute):
-                        continue
-                    if call.func.attr not in cls.HELPERS:
-                        continue
-                    found.update(arg.id for arg in call.args if isinstance(arg, ast.Name))
-        return found
+    def _suite(cls) -> unittest.TestSuite:
+        names = []
+        for path in sorted(glob(os.path.join(_project_root(), cls.TESTS, 'test_*.py'))):
+            stem = os.path.splitext(os.path.basename(path))[0]
+            if stem != cls.EXCLUDED:
+                names.append(F"{cls.TESTS.replace(os.sep, '.')}.{stem}")
+        assert names, F'no test modules under {cls.TESTS}'
+        return unittest.defaultTestLoader.loadTestsFromNames(names)
+
+    @classmethod
+    def _passes_whose_veto_fires(cls, names: set[str]) -> set[str]:
+        """
+        Run the suite with the fault veto watched and report which passes it declined something for.
+        The pass is read off a stack of the `visit` calls in flight rather than from the plan, since
+        a plan is told nothing about who built it and this must not become a reason to tell it.
+        """
+        active: list[str] = []
+        fired: set[str] = set()
+        answer = removal.fault_is_observed
+
+        def watched(statement):
+            observed = answer(statement)
+            if observed and active:
+                fired.add(active[-1])
+            return observed
+
+        def entered(name: str, visit):
+            def visiting(self, node):
+                active.append(name)
+                try:
+                    return visit(self, node)
+                finally:
+                    active.pop()
+            return visiting
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(removal, 'fault_is_observed', watched))
+            for name in sorted(names):
+                pass_type = cls._pass_type(name)
+                stack.enter_context(
+                    patch.object(pass_type, 'visit', entered(name, pass_type.visit)))
+            cls._suite().run(unittest.TestResult())
+        return fired
 
     def test_every_pass_that_removes_is_tried_inside_a_protected_body(self):
-        missing = sorted(self._passes_that_remove() - self._passes_tried_under_a_handler())
+        removing = self._passes_that_remove()
+        missing = sorted(removing - self._passes_whose_veto_fires(removing))
         self.assertListEqual(
             missing, [], 'apply each of these to a removal inside try/catch and pin what survives')
 

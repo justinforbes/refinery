@@ -10,15 +10,28 @@ from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
 
 class TestPs1(TestBase):
 
-    def _deobfuscate(self, source: str, remove_junk: bool = True) -> str:
+    def _deobfuscate(
+        self,
+        source: str,
+        remove_junk: bool = True,
+        preserve_bare_output: bool = False,
+    ) -> str:
         ast = Ps1Parser(source).parse()
-        deobfuscate(ast, remove_junk=remove_junk)
+        deobfuscate(ast, remove_junk=remove_junk, preserve_bare_output=preserve_bare_output)
         return Ps1Synthesizer().convert(ast)
 
-    def _deobfuscate_iterative(self, source: str, iterations: int = 100, remove_junk: bool = True) -> str:
+    def _deobfuscate_iterative(
+        self,
+        source: str,
+        iterations: int = 100,
+        remove_junk: bool = True,
+        preserve_bare_output: bool = False,
+    ) -> str:
         ast = Ps1Parser(source).parse()
         for _ in range(iterations):
-            if not deobfuscate(ast, remove_junk=remove_junk):
+            if not deobfuscate(
+                ast, remove_junk=remove_junk, preserve_bare_output=preserve_bare_output
+            ):
                 break
         return Ps1Synthesizer().convert(ast)
 

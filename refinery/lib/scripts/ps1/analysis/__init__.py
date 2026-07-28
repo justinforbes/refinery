@@ -3,10 +3,11 @@ Static-analysis substrate for PowerShell deobfuscation. Transforms query a share
 the program here instead of each re-deriving scope, binding, effect, and liveness facts on their
 own.
 
-The foundation is `model`, a semantic model of scopes and resolved variable bindings. On top of it,
-`effects` decides what evaluating a node does and what a statement contributes to its body's output.
-Later layers (control-flow graphs, interprocedural summaries) attach behind the same
-representation-agnostic surface.
+The foundation is `model`, a semantic model of scopes and resolved variable bindings, and `callgraph`,
+which records what a command name denotes and who reaches it. On top of both, `effects` decides what
+evaluating a node does, whether it can raise, and — through the call graph — where the value a body
+writes to the output stream is finally read. Later layers (control-flow graphs, interprocedural
+summaries) attach behind the same representation-agnostic surface.
 """
 from __future__ import annotations
 

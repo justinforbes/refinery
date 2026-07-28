@@ -402,3 +402,18 @@ class TestPs1EmulatorExtra(TestPs1):
             }
             f 1
         """))
+
+    def test_a_redirected_call_is_not_folded_into_its_value(self):
+        # Regression: the replacement is an expression and an expression carries no redirections,
+        # so folding `f > C:\log` into the string `f` returns printed it to the console and left
+        # the file unwritten. Every spelling is refused, including the merges that leave the output
+        # stream alone, because none of them survives the substitution either.
+        for redirection in (r'> C:\log.txt', r'>> C:\log.txt', '1>&2', '2>&1', r'*> C:\log.txt'):
+            with self.subTest(redirection):
+                source = F"function f {{ 'FOLDED' }}\n$x = f {redirection}"
+                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), cleandoc(F"""
+                    function f {{
+                      'FOLDED'
+                    }}
+                    $x = f {redirection}
+                """))

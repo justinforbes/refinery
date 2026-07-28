@@ -54,6 +54,17 @@ class TestPs1UnusedVariableRemoval(TestPs1):
             "function Test { Param($x); Write-Host done }; Test")
         self.assertIn('$x', result)
 
+    def test_a_script_reduced_to_this_passs_own_discards_is_left_alone(self):
+        # Every store here is dead and every value acts, so the batch would leave a script of
+        # nothing but `$Null = ...` husks. Those are this pass's own residue and not evidence the
+        # script still says something, so the batch is abandoned and the stores stand as written.
+        for source in (
+            '$x = Start-Process calc',
+            "$x = Start-Process calc\n$y = Remove-Item C:\\z",
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1UnusedVariableRemoval), source)
+
     def test_compound_assignment_removed(self):
         result = self._deobfuscate("$x = 0; $x += 1; Write-Host done")
         self.assertNotIn('$x', result)
@@ -83,14 +94,6 @@ class TestPs1JunkStatementRemoval(TestPs1):
         result = self._deobfuscate(
             'function f { Write-Host hi; [Void](Remove-Item C:\\important) }\nf')
         self.assertIn('Remove-Item', result)
-
-    def test_a_void_cast_does_not_stand_in_for_the_value_it_replaced(self):
-        # Keeping the wrapped call must not cost the body its return value: a discard emits nothing,
-        # so it cannot be the survivor that makes dropping the real output safe.
-        result = self._deobfuscate(
-            "function f { [Void](Remove-Item C:\\important); 'payload' }\nf")
-        self.assertIn('Remove-Item', result)
-        self.assertIn('payload', result)
 
     def test_an_advanced_function_is_not_junk(self):
         # A `process` block is a body like any other; reading the empty unnamed body as an inert
@@ -226,12 +229,6 @@ class TestPs1JunkStatementRemoval(TestPs1):
         self.assertIn('Start-Process', result)
         self.assertIn('done', result)
 
-    def test_a_data_section_does_not_stand_in_for_a_return_value(self):
-        # `data d { 42 }` binds `$d` and emits nothing, so it cannot be the survivor that makes
-        # dropping the function's real output safe.
-        result = self._deobfuscate("function f { data d { 42 }; 'payload' }\nf")
-        self.assertIn('payload', result)
-
     def test_out_null_pipeline_removed(self):
         result = self._deobfuscate('[Math]::Pow(2, 8) | Out-Null; Write-Host done')
         self.assertNotIn('Pow', result)
@@ -267,26 +264,12 @@ class TestPs1JunkStatementRemoval(TestPs1):
             'function Helper { Get-Random }; Helper; Write-Host done')
         self.assertIn('Helper', result)
 
-    def test_a_bare_string_is_kept_however_much_it_looks_like_noise(self):
-        # `'junk string'` prints `junk string` and `"noise ${x} text"` prints `noise  text`. What
-        # the text says is not a question this pipeline asks — an axis built on asking it was
-        # removed — so both are output like any other and both survive.
-        for source, marker in (
-            ('"noise ${x} text"; Write-Host done', 'noise'),
-            ("'junk string'; Write-Host done"    , 'junk'),  # noqa
-        ):
-            with self.subTest(source):
-                result = self._deobfuscate(source)
-                self.assertIn(marker, result)
-                self.assertIn('done', result)
-
-    def test_a_neighbour_that_acts_without_emitting_does_not_license_a_deletion(self):
-        # `Write-Host done` puts nothing on the output stream — a caller collecting this body
-        # receives one item, the marker — so there is nothing it can stand in for. Every test above
-        # uses it as the neighbour, which is why the whole set would go green under a model that
-        # protected only a function's return value.
-        result = self._deobfuscate("'payload-marker'; Write-Host done")
-        self.assertIn('payload-marker', result)
+    def test_an_expandable_string_is_kept_however_much_it_looks_like_noise(self):
+        # `"noise ${x} text"` prints `noise  text`, and what the text says is not a question this
+        # pipeline asks. It is kept for the reason a plain `'junk string'` is not: expanding one
+        # runs whatever the parts hold, so it can raise, and nothing here can rule that out.
+        result = self._deobfuscate('"noise ${x} text"; Write-Host done')
+        self.assertIn('noise', result)
         self.assertIn('done', result)
 
     def test_empty_body_guard(self):
@@ -425,8 +408,8 @@ class TestPs1InertFunctionRemoval(TestPs1):
 
     def test_emitting_function_kept(self):
         result = self._apply(
-            "function f { 42 }\nf\nWrite-Host 'keep'", Ps1JunkStatementRemoval)
-        self.assertEqual(result, "function f {\n  42\n}\nf\nWrite-Host 'keep'")
+            "function f { Get-Random }\nf\nWrite-Host 'keep'", Ps1JunkStatementRemoval)
+        self.assertEqual(result, "function f {\n  Get-Random\n}\nf\nWrite-Host 'keep'")
 
     def test_effectful_function_kept(self):
         result = self._apply(
@@ -438,6 +421,27 @@ class TestPs1InertFunctionRemoval(TestPs1):
             "function j { $Null = 1 }\nj\n& $name\nWrite-Host 'keep'",
             Ps1JunkStatementRemoval)
         self.assertEqual(result, "function j {}\nj\n& $name\nWrite-Host 'keep'")
+
+    def test_a_call_to_an_inert_function_that_opens_a_file_is_kept(self):
+        # Regression: an inert function's call sites were found by shape alone, so `j > out.txt`
+        # read as a bare call and went with the definition — taking with it the file the redirection
+        # creates. PowerShell opens the target as it sets the redirection up, whatever the command
+        # writes, so the stream named does not matter and every file spelling is one of these.
+        for redirection in (r'> C:\out.txt', r'>> C:\out.txt', r'2> C:\err.txt', r'3>> C:\v.txt'):
+            with self.subTest(redirection):
+                source = F"function j {{ $Null = 1 }}\nj {redirection}\nWrite-Host 'keep'"
+                self.assertEqual(
+                    self._apply(source, Ps1JunkStatementRemoval),
+                    F"function j {{}}\nj {redirection}\nWrite-Host 'keep'")
+
+    def test_a_call_to_an_inert_function_that_only_merges_streams_is_removed(self):
+        # A merge names no file and moves nothing an inert command never wrote, so `j 2>&1` really
+        # is the no-op it looks like. Pinned beside the case above because the two redirection
+        # questions are separate and a gate that answered both the same way would be wrong at one.
+        self.assertEqual(
+            self._apply(
+                "function j { $Null = 1 }\nj 2>&1\nWrite-Host 'keep'", Ps1JunkStatementRemoval),
+            "Write-Host 'keep'")
 
     def test_function_with_argful_call_kept(self):
         result = self._apply(
@@ -497,14 +501,284 @@ class TestPs1InertFunctionRemoval(TestPs1):
         self.assertIn('function Ge', result)
         self.assertIn('Write-Host', result)
 
+
+#: A statement that acts, so it is never a candidate for either model and its survival says only
+#: that the script was not emptied.
+_ANCHOR = "Write-Host 'ANCHOR'"
+
+#: The bare-output shapes whose value provably reaches the console and cannot raise, each with a
+#: marker that is present in the source and absent once it is deleted. Written as a table because
+#: the two models are asked exactly the same question about exactly the same shapes, and a table
+#: neither of them can edit privately is what makes them comparable.
+_STRIPPABLE = {
+    'string literal'   : ("'Xtjbnwqm'"           , 'Xtjbnwqm'),    # noqa
+    'integer'          : ('4242424242'           , '4242424242'),  # noqa
+    'negated integer'  : ('(-7654321)'           , '7654321'),     # noqa
+    'real'             : ('3.14159265'           , '3.14159265'),  # noqa
+    'boolean'          : ('$True'                , '$True'),       # noqa
+    'string sum'       : ("'Xtjb' + 'nwqm'"      , 'Xtjb'),        # noqa
+    'comparison'       : ('4242424242 -GT 3'     , '$True'),       # noqa
+    'array literal'    : ('@(4242424242, 8484)'  , '4242424242'),  # noqa
+    'hash literal'     : ("@{ a = 'Xtjbnwqm' }"  , 'Xtjbnwqm'),    # noqa
+    'range'            : ('4242424242..4242424245', '4242424242'),  # noqa
+}
+
+
+class TestPs1BareOutputIsStrippedByDefault(TestPs1):
+    """
+    A statement whose only effect is to write a value to the success output stream is deleted when
+    the value provably reaches the console and nothing else, and when evaluating it cannot raise.
+    Each test names why a shape qualifies rather than pinning a rendering.
+    """
+
+    def _assertStripped(self, junk: str, marker: str) -> None:
+        result = self._deobfuscate(F'{junk}\n{_ANCHOR}')
+        self.assertNotIn(marker, result)
+        self.assertIn('ANCHOR', result)
+
+    def test_a_bare_literal_at_the_root_is_stripped(self):
+        for kind in ('string literal', 'integer', 'negated integer', 'real', 'boolean'):
+            with self.subTest(kind):
+                self._assertStripped(*_STRIPPABLE[kind])
+
+    def test_an_expression_that_folds_to_a_literal_is_stripped(self):
+        # Folding runs first, so what the removal is shown is a literal like any other. Both of
+        # these print on PowerShell 5.1 — `Xtjbnwqm` and `True`.
+        for kind in ('string sum', 'comparison'):
+            with self.subTest(kind):
+                self._assertStripped(*_STRIPPABLE[kind])
+
+    def test_a_container_built_only_out_of_literals_is_stripped(self):
+        # Constructing an array, a hash table or a range cannot fail when nothing inside it can, so
+        # these join the literals rather than needing a rule of their own.
+        for kind in ('array literal', 'hash literal', 'range'):
+            with self.subTest(kind):
+                self._assertStripped(*_STRIPPABLE[kind])
+
+    def test_a_bare_value_in_a_function_every_call_site_only_prints_is_stripped(self):
+        # The direction that needs the call graph: position alone says only that the value leaves
+        # the body, and a bare call is what makes the console the one thing that reads it. Measured
+        # on PowerShell 5.1 — a bare call to a two-value function writes both to the console and
+        # leaves nothing for anything else to read.
+        result = self._deobfuscate(F"function Qzmr {{ 'Xtjbnwqm' }}\nQzmr\n{_ANCHOR}")
+        self.assertNotIn('Xtjbnwqm', result)
+        self.assertIn('ANCHOR', result)
+
+
+class TestPs1BareOutputIsKeptWhenAsked(TestPs1):
+    """
+    The same shapes with `preserve_bare_output` on, which is what a caller passes for a module, for
+    a fragment of a larger script, or whenever the printed output is itself the artifact.
+    """
+
+    def _assertKept(self, junk: str, marker: str) -> None:
+        result = self._deobfuscate(F'{junk}\n{_ANCHOR}', preserve_bare_output=True)
+        self.assertIn(marker, result)
+        self.assertIn('ANCHOR', result)
+
+    def test_a_bare_literal_at_the_root_is_kept(self):
+        for kind in ('string literal', 'integer', 'negated integer', 'real', 'boolean'):
+            with self.subTest(kind):
+                self._assertKept(*_STRIPPABLE[kind])
+
+    def test_a_folded_literal_is_kept(self):
+        for kind in ('string sum', 'comparison'):
+            with self.subTest(kind):
+                self._assertKept(*_STRIPPABLE[kind])
+
+    def test_a_container_built_only_out_of_literals_is_kept(self):
+        for kind in ('array literal', 'hash literal', 'range'):
+            with self.subTest(kind):
+                self._assertKept(*_STRIPPABLE[kind])
+
+    def test_a_bare_value_in_a_function_every_call_site_only_prints_is_kept(self):
+        result = self._deobfuscate(
+            F"function Qzmr {{ 'Xtjbnwqm' }}\nQzmr\n{_ANCHOR}", preserve_bare_output=True)
+        self.assertIn('Xtjbnwqm', result)
+        self.assertIn('ANCHOR', result)
+
+
+class TestPs1OutputSomethingElseHoldsIsKeptEitherWay(TestPs1):
+    """
+    The claim here *is* mode-invariance, which is why every case runs under both models and asserts
+    they agree. A value anything but the console could read is not the switch's to give away, so a
+    model that keeps these only when asked has put them behind the wrong gate.
+    """
+
+    #: A function whose body writes the payload to the output stream, carrying a `Write-Host` so the
+    #: function evaluator cannot fold a call to it into that payload. Folding is not wrong, but it
+    #: takes the call site out of the tree, and the call site is the whole subject here: without it
+    #: these tests pass with the destination analysis removed entirely.
+    _QZMR = "function Qzmr { Write-Host 'inner'; 'Xtjbnwqm' }\n"
+
+    def _assertKeptEitherWay(self, source: str, marker: str) -> None:
+        default = self._deobfuscate(source)
+        preserved = self._deobfuscate(source, preserve_bare_output=True)
+        self.assertEqual(default, preserved)
+        self.assertIn(marker, default)
+
+    def test_a_value_a_caller_stores_is_kept(self):
+        # `@(f)` and `$(f)` hold whole statements, so a model that reads "is this call a statement?"
+        # as "is its value discarded?" lets both of these through while `$r` receives what f wrote.
+        # Measured on PowerShell 5.1 with a two-value body: `$r = @(f)`, `$r = $(f)` and `$r = f`
+        # all give `$r` two elements, while the bare call writes both to the console instead.
+        for call in ('$r = Qzmr', '$r = @(Qzmr)', '$r = $(Qzmr)'):
+            with self.subTest(call):
+                self._assertKeptEitherWay(
+                    F'{self._QZMR}{call}\nWrite-Host $r', 'Xtjbnwqm')
+
+    def test_a_value_a_redirection_moves_elsewhere_is_kept(self):
+        # `>` writes the values to a file and `1>&2` sends them to the error stream; neither reaches
+        # the console, so neither is text the switch is about. Measured: `f > out.txt` leaves the
+        # console empty and the file holding both values.
+        for call in (r'Qzmr > C:\out.txt', 'Qzmr 1>&2'):
+            with self.subTest(call):
+                self._assertKeptEitherWay(F'{self._QZMR}{call}\n{_ANCHOR}', 'Xtjbnwqm')
+
+    def test_a_value_a_pipeline_consumes_is_kept_though_nothing_could_tell(self):
+        """
+        This one is a policy choice and not a semantic requirement, which is why it is named for the
+        choice. `f | Out-Null` prints nothing whether or not `f` still writes anything, so deleting
+        the write is unobservable and no measurement can settle it. It is kept because the pass
+        reasons about where a value goes and not about what the command downstream will do with it,
+        and a model that started making exceptions for known sinks would be back to keying deletions
+        on a table of command names.
+        """
+        self._assertKeptEitherWay(F'{self._QZMR}Qzmr | Out-Null\n{_ANCHOR}', 'Xtjbnwqm')
+
+    def test_a_statement_that_can_raise_is_kept(self):
+        # Each of these terminates the script where it stands, so deleting one resumes execution
+        # that had stopped. Both classify as output like `42` does, and only the fault gate parts
+        # them from it.
+        for junk in ("[Int]'Xtjbnwqm'", '4242424242 / $zero'):
+            with self.subTest(junk):
+                self._assertKeptEitherWay(F'{junk}\n{_ANCHOR}', 'Xtjbnwqm' if "'" in junk else '/')
+
+    def test_a_fault_inside_a_function_a_handler_catches_is_kept(self):
+        # The fault gate has to hold across a call, where the veto that reads a `try` body cannot
+        # see: deleting the throw makes the handler dead code.
+        self._assertKeptEitherWay(
+            "function Qzmr { [Int]'Xtjbnwqm' }\n"
+            "try { Qzmr } catch { Write-Host 'CAUGHT' }", 'CAUGHT')
+
+    def test_a_value_in_a_function_nothing_calls_is_kept(self):
+        # No call site is no evidence, and the answer has to be the same one an unreachable cycle
+        # gets. A nested definition is the shape that makes it visible: `Inner` is written into the
+        # enclosing scope and still nothing names it.
+        self._assertKeptEitherWay(
+            F"function Outer {{ function Inner {{ 'Xtjbnwqm' }} }}\nOuter\n{_ANCHOR}", 'Xtjbnwqm')
+
+    def test_one_captured_call_site_captures_every_definition_of_the_name(self):
+        # Calls are attributed to the name, not to one of its definitions, so the join has to be
+        # pessimistic across the whole name, or the definition the bare call reaches is the wrong
+        # one.
+        self._assertKeptEitherWay(
+            "function Qzmr { 'Xtjbnwqm' }\n"
+            "function Qzmr { 'Ldkrpwsz' }\n"
+            F"Qzmr\n$r = Qzmr\nWrite-Host $r\n{_ANCHOR}", 'Xtjbnwqm')
+
+    def test_a_recursion_no_call_grounds_is_kept(self):
+        # `Qzmr` and `Vbxl` call each other and nothing else calls either, so the only evidence
+        # available is the evidence an uncalled function has: none. Reading their calls to each
+        # other as grounding would hand a cycle a licence a single uncalled function is refused.
+        # Nested inside a function that *is* called, because a definition standing at the root with
+        # no call site is deleted outright and the cycle would never be weighed.
+        self._assertKeptEitherWay(
+            'function Outer {\n'
+            "  function Qzmr { 'Xtjbnwqm'; Vbxl }\n"
+            '  function Vbxl { Qzmr }\n'
+            F'}}\nOuter\n{_ANCHOR}', 'Xtjbnwqm')
+
+    def test_a_grounded_recursion_one_caller_captures_is_kept(self):
+        # The same cycle reached from the root, so it is grounded, with one call site that stores
+        # what it receives. Grounded is not enough on its own.
+        self._assertKeptEitherWay(
+            "function Qzmr { 'Xtjbnwqm'; Vbxl }\n"
+            'function Vbxl { Qzmr }\n'
+            F'Qzmr\n$r = Vbxl\nWrite-Host $r\n{_ANCHOR}', 'Xtjbnwqm')
+
+
+#: Every way a name in this tree can be bound or reached from somewhere the walk cannot read. Listed
+#: once, because the properties below say the same thing about all of them and a row that goes
+#: missing from the analysis should fail here without anyone having thought to name it.
+_UNKNOWNS = (
+    ". '.\\stage2.ps1'",
+    'Invoke-Expression $code',
+    'Import-Module .\\m.psm1',
+    '& $dispatch',
+    '${function:Qzmr} = { }',
+    'Export-ModuleMember -Function Qzmr',
+)
+
+
+def _statements(result: str) -> set[str]:
+    return {line.strip() for line in result.splitlines() if line.strip()}
+
+
+class TestPs1RemovalIsMonotoneInWhatItKnows(TestPs1):
+    """
+    Properties rather than cases. Each says something about *every* unknown at once, so an analysis
+    that learns a new way to bind a name and forgets to fail closed on it is caught here without a
+    test having to name the row.
+    """
+
+    #: A function whose body only prints, called once, beside a bare value at the root. Under a
+    #: closed world every part of this is removable; under any unknown none of it is.
+    _SCRIPT = (
+        "function Qzmr { 'Xtjbnwqm' }\n"
+        'Qzmr\n'
+        "'Ldkrpwsz'\n"
+        F'{_ANCHOR}'
+    )
+
+    def test_an_unknown_may_only_keep_more(self):
+        known = _statements(self._deobfuscate(self._SCRIPT))
+        for opener in _UNKNOWNS:
+            with self.subTest(opener):
+                unknown = _statements(self._deobfuscate(F'{opener}\n{self._SCRIPT}'))
+                self.assertLessEqual(known, unknown)
+
+    def test_the_default_removes_whole_statements_and_never_rewrites_one(self):
+        # Whatever the switch is worth, turning it off may only *delete*. A default output holding a
+        # line the preserving one does not is a rewrite wearing a deletion's clothes, and it is how
+        # a value would come to be altered rather than dropped.
+        for source in (
+            self._SCRIPT,
+            F"@(1, 2, 3)\n@{{ a = 1 }}\n'Xtjbnwqm'\n{_ANCHOR}",
+            F"function Qzmr {{ 42; Write-Host 'inner' }}\nQzmr\n{_ANCHOR}",
+        ):
+            with self.subTest(source):
+                self.assertLessEqual(
+                    _statements(self._deobfuscate(source)),
+                    _statements(self._deobfuscate(source, preserve_bare_output=True)))
+
+    def test_one_readability_verdict_governs_both_name_keyed_removals(self):
+        # An inert function and a bare-output function stand side by side, and the two removals that
+        # would take them read the same predicate. An unknown that reached one and not the other
+        # would be a second copy of the verdict, drifting.
+        #
+        # `Qzmr` carries a `Write-Host` so that the function evaluator cannot fold the call into its
+        # value: a folded call leaves the payload standing at the root, where nothing about a name
+        # is being asked and the property would be measuring another pass.
+        script = (
+            'function Ldkr { $Null = 1 }\n'
+            "function Qzmr { Write-Host 'inner'; 'Xtjbnwqm' }\n"
+            F'Ldkr\nQzmr\n{_ANCHOR}'
+        )
+        for opener in ('', *_UNKNOWNS):
+            with self.subTest(opener or 'closed world'):
+                result = self._deobfuscate(F'{opener}\n{script}' if opener else script)
+                self.assertEqual('Ldkr' in result, 'Xtjbnwqm' in result)
+
+
 class TestPs1DiscardedObjectRemoval(TestPs1):
 
-    def test_a_bare_object_literal_is_kept(self):
-        # Each of these writes one object to the output stream on PowerShell 5.1, so a caller
-        # collecting the body receives it. The synchronized empty table is the one worth naming:
-        # it *renders* as nothing, and rendering is not the question — the write still happened.
+    def test_a_bare_object_a_cast_or_a_call_produces_is_kept(self):
+        # Each of these writes one object to the output stream on PowerShell 5.1, and each is kept
+        # because building it runs code that could raise: a cast converts by calling into the target
+        # type, and the synchronized table is a call like any other. The plain `@{ a = 1 }` beside
+        # them is not, which is why it is stripped and these are not.
         for source in (
-            '@{\n  a = 1\n  b = 2\n}',
             "[pscustomobject]@{\n  Name = 'x'\n  Value = 42\n}",
             '[Collections.Hashtable]::Synchronized(@{})',
         ):
@@ -697,131 +971,49 @@ class TestPs1PayloadRetention(TestPs1):
                     'Start-Process calc',
                     self._deobfuscate(F'$x = {value}\n$x = 1\nWrite-Host $x'))
 
-    def test_a_redirected_survivor_does_not_cover_a_functions_return_value(self):
-        # Inside a function a bare value is the return value, so a payload is deleted whenever
-        # something beside it reads as carrying the output. A statement whose output goes to a file
-        # or into another stream carries nothing, and counting it was enough to lose the payload.
+    def test_a_bare_value_in_a_function_follows_its_call_sites_and_not_its_neighbours(self):
+        # The shape that carried a whole family of losses: a payload inside a function was deleted
+        # because something beside it read as carrying the body's output. Nothing beside it is
+        # consulted any more — where the value goes is decided at the call sites — so the same body
+        # answers differently only when the *call* does. Every junk shape here was one of the
+        # reported covers.
         for junk in (
             r'Get-Date > C:\log.txt',
-            r'Get-Date >> C:\log.txt',
-            r'Get-Date *> C:\log.txt',
             r'Get-Date 1>&2',
             r'Get-Date 2>&1 > C:\log.txt',
-        ):
-            with self.subTest(junk):
-                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
-                self.assertIn('TVqQAAMA', result)
-
-    def test_a_silent_command_does_not_cover_a_functions_return_value(self):
-        # The reported shapes. A command whose whole job is to write elsewhere was counted as
-        # carrying the body's output, so the payload beside it was deleted as redundant junk.
-        for junk in (
             "Write-Host 'loading'",
-            r'$p | Out-File C:\log',
             r'Set-Content C:\log x',
-            r'Write-Error hi',
-            r'sc C:\log x',
-        ):
-            with self.subTest(junk):
-                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
-                self.assertIn('TVqQAAMA', result)
-
-    def test_a_redirected_multi_element_pipeline_does_not_cover_the_return_value(self):
-        # The redirection check reads the redirections off the pipeline's terminal invocation, and
-        # nothing pinned that: every other redirection case is a bare command, which reaches the
-        # answer without ever looking inside a pipeline.
-        for junk in (
             r'$p | Out-String > C:\log.txt',
-            r'$p | Out-String 1>&2',
-            r'$p | Out-String *> C:\log.txt',
-        ):
-            with self.subTest(junk):
-                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
-                self.assertIn('TVqQAAMA', result)
-
-    def test_a_shadowed_foreach_sink_does_not_cover_the_return_value(self):
-        # The one shape that needs the emission side to resolve aliases. Everywhere else the alias
-        # pass rewrites `%` to `ForEach-Object` before this question is asked, so only a script that
-        # takes the spelling `foreach` over reaches the sink under a name the literal match misses.
-        result = self._deobfuscate(
-            'function foreach { Start-Process calc }\n'
-            "function f { 1..3 | foreach { $Null = $_ }; 'TVqQAAMA' }\nf")
-        self.assertIn('TVqQAAMA', result)
-
-    def test_a_silent_command_nested_in_a_branch_does_not_cover_the_return_value(self):
-        # The same loss one nesting level in. A body-bearing statement was granted emission for its
-        # shape, so descending into it is what makes the table reach these at all.
-        for junk in (
             "if ($env:X) { Write-Host 'x' }",
-            "foreach ($i in 1..3) { Write-Host $i }",
-            "while ($env:X) { Write-Host 'x' }",
-            "try { Write-Host 'x' } catch { Write-Host 'y' }",
-        ):
-            with self.subTest(junk):
-                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
-                self.assertIn('TVqQAAMA', result)
-
-    def test_a_live_catch_handler_does_not_cover_the_return_value(self):
-        # Regression: two passes met here. One stopped dissolving a `try` whose handler has a body,
-        # which is right, and the surviving construct was then read as carrying the body's output
-        # because the descent walked into the handler. A handler runs only on a fault, so it carried
-        # nothing — and the payload beside it was deleted as redundant.
-        for junk in (
             'try { } catch { Start-Process calc }',
-            'try { $Null = 1 } catch { Write-Output 9 }',
-        ):
-            with self.subTest(junk):
-                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
-                self.assertIn('TVqQAAMA', result)
-
-    def test_a_statement_that_leaves_the_body_does_not_cover_the_return_value(self):
-        # A guard clause is the common shape: it emits nothing and reading it as an emitter let it
-        # stand in for the value the function exists to produce.
-        for junk in (
-            'if ($env:X) { return }',
             "if ($env:X) { throw 'x' }",
-            'if ($env:X) { exit }',
-            'foreach ($i in 1..3) { break }',
-            'switch ($env:X) { 1 { break } }',
-        ):
-            with self.subTest(junk):
-                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
-                self.assertIn('TVqQAAMA', result)
-
-    def test_a_grouped_silent_command_does_not_cover_the_return_value(self):
-        # Wrapping the call in a grouping construct was enough to dodge the silent table, because
-        # the lookup only ever saw a bare invocation or a pipeline's last element.
-        for junk in (
             "(Write-Host 'x')",
-            "$(Write-Host 'x')",
-            r'$(Set-Content C:\log x)',
             'data { }',
+            '[Void](Remove-Item C:\\important)',
+            'data d { 42 }',
         ):
             with self.subTest(junk):
-                result = self._deobfuscate(F"function f {{ {junk}; 'TVqQAAMA' }}\nf")
-                self.assertIn('TVqQAAMA', result)
+                definition = F"function f {{ {junk}; 'TVqQAAMA' }}\n"
+                self.assertNotIn('TVqQAAMA', self._deobfuscate(F'{definition}f'))
+                self.assertIn(
+                    'TVqQAAMA', self._deobfuscate(F'{definition}$r = f\nWrite-Host $r'))
 
-    def test_a_void_foreach_sink_survives_under_both_spellings(self):
-        # This one carries the invariant the whole emission axis rests on. `_statement_can_emit` is
-        # safe only because a `True` from it *withholds* nothing — its answer feeds
-        # `output_is_covered`, whose caller keeps code when the answer is no. The sibling question
-        # "does this pipeline discard?" reaches `StatementEffect.DISCARD` and deletes
-        # unconditionally, so re-keying that one onto the emission predicate would turn every
-        # conservative entry into a deletion. A table-shaped test cannot see that; this can.
+    def test_a_void_foreach_sink_is_a_discard_under_both_spellings(self):
+        # `%` and `ForEach-Object` are the same command, and only one of them is what the discard
+        # idiom is written against. A body that writes is not a discard under either.
         for sink in ('ForEach-Object', '%'):
             with self.subTest(sink):
                 result = self._deobfuscate(
                     F"1..3 | {sink} {{ Write-Host $_ }}\nWrite-Output 'keep'")
                 self.assertIn('Write-Host', result)
 
-    def test_a_redefined_silent_command_is_wrong_in_the_direction_that_keeps_code(self):
-        # The table is keyed on a name, so a script that takes the name over makes it wrong. The
-        # cost is recall and never a payload: the call reads as silent, nothing covers the output,
-        # and the statements around it are kept.
+    def test_a_redefined_command_keeps_the_body_the_script_gave_it(self):
+        # A script that takes a built-in name over makes every table keyed on that name wrong, so
+        # nothing may be concluded from the name alone — least of all a deletion.
         result = self._deobfuscate(
             "function Write-Host { Start-Process calc }\n"
-            "function f { Write-Host 'x'; 'TVqQAAMA' }\nf")
-        self.assertIn('TVqQAAMA', result)
+            "function f { Write-Host 'x'; Get-Random }\nf")
+        self.assertIn('Get-Random', result)
         self.assertIn('Start-Process calc', result)
 
     def test_a_scope_qualified_local_function_is_not_alias_inlined(self):

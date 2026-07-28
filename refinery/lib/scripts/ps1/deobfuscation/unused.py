@@ -7,15 +7,18 @@ from typing import NamedTuple
 
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     StatementEffect,
     body_is_inert,
+    is_fault_free,
     is_side_effect_free,
-    output_observed,
+    opens_a_redirection_target,
     output_sink,
     pruning_erases_body,
     statement_effect,
+    unconsumed_statement,
 )
 from refinery.lib.scripts.ps1.analysis.model import Binding, Ps1SemanticModel, Scope
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
@@ -24,53 +27,39 @@ from refinery.lib.scripts.ps1.ast import (
     assignment_target_is_all_variables,
     assignment_target_variables,
     get_body,
-    get_command_name,
-    is_opaque_dispatch,
     normalize_command_name,
 )
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _PS1_SKIP_VARIABLES,
     _find_removable_statement,
-    _walk_outer_scope,
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import store_dropped_to_value
+from refinery.lib.scripts.ps1.deobfuscation.options import bare_output_is_preserved
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan, Ps1RemovalPlans
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AssignmentExpression,
-    Ps1CommandInvocation,
     Ps1ExpressionStatement,
     Ps1ForLoop,
     Ps1FunctionDefinition,
-    Ps1Pipeline,
-    Ps1PipelineElement,
     Ps1ScopeModifier,
     Ps1Script,
     Ps1UnaryExpression,
     Ps1Variable,
 )
 
-#: The variable namespaces that name a command rather than a value. Kept in step with
-#: `refinery.lib.scripts.ps1.analysis.world._IDENTITY_SCOPES`, which this pass cannot reuse because
-#: the world reports one verdict for the whole script and this pass needs the individual node.
-_IDENTITY_SCOPES = frozenset({
-    Ps1ScopeModifier.ALIAS,
-    Ps1ScopeModifier.FUNCTION,
-})
 
-
-def _binds_command_identity(node: Node) -> bool:
+def _writes_only_what_cannot_fault(stmt: Node) -> bool:
     """
-    Whether `node` writes the `function:` or `alias:` namespace, binding a command name to something
-    the definition scan does not read as a definition and the call scan does not read as a call.
-    Both of this module's name-keyed removals have to treat such a node as an unknown: it can bind
-    the name they are about to delete, and it can be the only thing that reaches it.
+    Whether a statement writes a value to the output stream and can do nothing else — not even
+    raise. `refinery.lib.scripts.ps1.analysis.effects.StatementEffect.OUTPUT` says the first half
+    and deliberately says nothing about the second, so a caller about to delete such a statement
+    asks the fault question here.
     """
-    if not isinstance(node, Ps1AssignmentExpression):
-        return False
-    return any(
-        variable.scope in _IDENTITY_SCOPES
-        for variable in assignment_target_variables(node.target)
+    return (
+        isinstance(stmt, Ps1ExpressionStatement)
+        and stmt.expression is not None
+        and is_fault_free(stmt.expression)
     )
 
 
@@ -376,99 +365,58 @@ class Ps1JunkStatementRemoval(Transformer):
     def visit(self, node: Node):
         """
         Decide the whole batch, then apply it once.
+
+        **Two different sinks are read here and they answer two different questions.** Whether a
+        body may be reasoned about at all is positional: `output_sink` calls a stored closure or a
+        `$( ... )` opaque, and this pass has never touched one. Whether a *write to the output
+        stream* inside it may be deleted needs the destination that write reaches, which position
+        cannot supply for a function body, so `Ps1OutputFlow` resolves it across the call graph.
+
+        Collapsing the two costs recall and did: a body the flow reports captured — a function whose
+        result someone stores — still holds `$Null = 1` discards that write nothing at all, and
+        skipping it over the output question left them standing.
         """
-        oracle = model_cache(self, node).oracle
-        called = self._reachable_functions(node)
+        cache = model_cache(self, node)
+        oracle = cache.oracle
+        flow = cache.output_flow
+        called = cache.call_graph.reachable_names()
         plans = Ps1RemovalPlans()
         for parent in node.walk():
-            sink = output_sink(parent)
-            if sink is None or sink is OutputSink.CAPTURED:
+            position = output_sink(parent)
+            if position is None or position is OutputSink.CAPTURED:
                 continue
             body = get_body(parent)
-            removable = self._removable_in_body(parent, sink, called, oracle)
+            removable = self._removable_in_body(parent, flow.sink_of(parent), called, oracle)
             for statement in body:
                 if statement in removable:
                     plans.propose_in(parent, statement)
         if plans.commit():
             self.mark_changed()
-        self._remove_inert_functions(node, oracle)
+        self._remove_inert_functions(node, model_cache(self, node).call_graph, oracle)
 
-    @staticmethod
-    def _reachable_functions(node: Node) -> set[str]:
-        """
-        Collect all function names transitively reachable from top-level call sites. First gather
-        direct calls from the outer scope, then expand through function bodies until stable. When an
-        invocation may dispatch dynamically (see
-        `refinery.lib.scripts.ps1.ast.is_opaque_dispatch`), every defined function is treated as
-        reachable so a function called only through `& $f` is never removed.
-
-        Definitions and calls are keyed through `refinery.lib.scripts.ps1.ast.normalize_command_name`,
-        so `function global:F` is reached by a call to `F`. Every definition sharing a key is walked,
-        not just the last one: a redefinition shadows the earlier body only from the point it runs,
-        which is order and scope information this pass does not have.
-        """
-        directly_called: set[str] = set()
-        functions: dict[str, list[Ps1FunctionDefinition]] = {}
-        dynamic_call = False
-        for n in _walk_outer_scope(node):
-            if isinstance(n, Ps1CommandInvocation):
-                name = get_command_name(n)
-                if name is not None:
-                    directly_called.add(normalize_command_name(name))
-                elif is_opaque_dispatch(n):
-                    dynamic_call = True
-            elif isinstance(n, Ps1FunctionDefinition):
-                functions.setdefault(normalize_command_name(n.name), []).append(n)
-            elif _binds_command_identity(n):
-                # `${alias:q} = 'j'` reaches `j` without naming it in command position, so a
-                # definition with no call site is not evidence of anything once one of these is in
-                # the tree. Treated like an opaque dispatch, which is the same unknown.
-                dynamic_call = True
-        if dynamic_call:
-            return set(functions.keys()) | directly_called
-        reachable = set(directly_called)
-        frontier = list(reachable & functions.keys())
-        while frontier:
-            for fdef in functions[frontier.pop()]:
-                if fdef.body is None:
-                    continue
-                for n in fdef.body.walk():
-                    if isinstance(n, Ps1CommandInvocation):
-                        name = get_command_name(n)
-                        if name is None:
-                            if is_opaque_dispatch(n):
-                                return set(functions.keys()) | reachable
-                            continue
-                        key = normalize_command_name(name)
-                        if key not in reachable:
-                            reachable.add(key)
-                            if key in functions:
-                                frontier.append(key)
-        return reachable
-
-    def _remove_inert_functions(self, node: Node, oracle: TypeOracle):
+    def _remove_inert_functions(self, node: Node, graph: Ps1CallGraph, oracle: TypeOracle):
         """
         Remove top-level functions whose body carries no observable output or side effect together
         with the bare call statements that invoke them. After body pruning, an injected junk function
         such as `function j { $Null = 915 }` has an empty body; calling it is a no-op, so the
         definition and its call sites drop out as a unit. Only whole-statement, argument-free
-        invocations of the function count as call sites — if the name is referenced any other way, or
-        anything in the script dispatches dynamically (`& $f`), the function is kept, because its
-        result might then be observed or its identity might not be provable.
+        invocations count as call sites — a name referenced any other way is a name whose value
+        could be observed.
 
         A name is inert only when *every* definition of it is, since the calls are attributed to the
         name rather than to one of its definitions: removing them because one definition is empty
-        would silence a payload-bearing other one. Definitions are looked for over the whole tree,
-        not only at the top level, because a `function` inside an `if` or a loop body is written
-        into the enclosing scope just the same — while only a top-level definition is itself
-        removable, since a nested one is not this pass's to reason about.
+        would silence a payload-bearing other one. `Ps1CallGraph` reports every definition, wherever
+        it sits, because a `function` inside an `if` or a loop body is written into the enclosing
+        scope just the same — while only a top-level definition is itself removable, since a nested
+        one is not this pass's to reason about.
 
         "Every definition" can only mean every definition standing in this tree, so the tree has to
-        be the whole story: an open world binds names from a file the walk never read, and an
-        identity-namespace assignment binds one by a spelling this scan does not read as a
-        definition. In either case the empty body standing here is not the body the call reaches.
+        be the whole story. That is the graph's own `is_readable`, which this pass no longer answers
+        for itself: an open world, an opaque dispatch, an identity-namespace assignment and an export
+        all bind a name from somewhere the walk cannot read, and the empty body standing here is then
+        not the body the call reaches.
 
-        Both walks run in source order, because removal is by identity scan over the containing
+        The graph is built in source order, because removal is by identity scan over the containing
         list: taking the reverse order `Node.walk` yields would delete from the back and make every
         scan traverse the whole body.
 
@@ -500,47 +448,22 @@ class Ps1JunkStatementRemoval(Transformer):
         `pruning_erases_body` is asked *before* any of this, against the full set, because it is
         permissive in the survivors and a withdrawal is a veto by another name.
         """
-        if self._any_dynamic_dispatch(node) or not oracle.world_closed_at(node):
+        if not graph.is_readable:
             return
-        inert: dict[str, list[Ps1FunctionDefinition]] = {}
-        acting: set[str] = set()
-        for definition in node.walk_in_order():
-            if _binds_command_identity(definition):
-                return
-            if not isinstance(definition, Ps1FunctionDefinition):
-                continue
-            key = normalize_command_name(definition.name)
-            if not body_is_inert(definition.body, oracle):
-                acting.add(key)
-            elif definition.parent is node:
-                inert.setdefault(key, []).append(definition)
-        for key in acting:
-            inert.pop(key, None)
-        if not inert:
-            return
-        call_sites: dict[str, list[Node]] = {name: [] for name in inert}
-        other_reference: set[str] = set()
-        for ref in node.walk_in_order():
-            if not isinstance(ref, Ps1CommandInvocation):
-                continue
-            name = get_command_name(ref)
-            if name is None:
-                continue
-            key = normalize_command_name(name)
-            if key not in inert:
-                continue
-            statement = self._bare_call_statement(ref)
-            if statement is not None and not ref.arguments:
-                call_sites[key].append(statement)
-            else:
-                other_reference.add(key)
         groups: dict[str, list[Node]] = {}
         removable_definitions: set[Node] = set()
-        for key, definitions in inert.items():
-            if key in other_reference:
+        for key in graph.defined_names:
+            definitions = graph.definitions(key)
+            if not all(body_is_inert(d.body, oracle) for d in definitions):
                 continue
-            groups[key] = [*call_sites[key], *definitions]
-            removable_definitions.update(definitions)
+            removable_here = [d for d in definitions if d.parent is node]
+            if not removable_here:
+                continue
+            call_statements = self._inert_call_statements(graph, key)
+            if call_statements is None:
+                continue
+            groups[key] = [*call_statements, *removable_here]
+            removable_definitions.update(removable_here)
         if not groups:
             return
         if get_body(node) is not None:
@@ -566,45 +489,57 @@ class Ps1JunkStatementRemoval(Transformer):
             self.mark_changed()
 
     @staticmethod
-    def _bare_call_statement(cmd: Ps1CommandInvocation) -> Node | None:
+    def _inert_call_statements(graph: Ps1CallGraph, key: str) -> list[Node] | None:
         """
-        Return the enclosing statement when `cmd` is invoked as a whole expression statement (`f`
-        alone, or `f` as the sole element of a statement-level pipeline), or `None` when its result
-        flows into a larger expression where the call's value could be observed.
-        """
-        parent = cmd.parent
-        if isinstance(parent, Ps1ExpressionStatement):
-            return parent
-        if isinstance(parent, Ps1PipelineElement):
-            pipeline = parent.parent
-            if (
-                isinstance(pipeline, Ps1Pipeline)
-                and len(pipeline.elements) == 1
-                and isinstance(pipeline.parent, Ps1ExpressionStatement)
-            ):
-                return pipeline.parent
-        return None
+        The statements that call `key` and nothing else, or `None` when some reference to the name
+        is not one — which means the name and every definition of it stay.
 
-    @staticmethod
-    def _any_dynamic_dispatch(node: Node) -> bool:
-        for n in node.walk():
-            if isinstance(n, Ps1CommandInvocation):
-                if get_command_name(n) is None and is_opaque_dispatch(n):
-                    return True
-        return False
+        A call site qualifies only when it is argument-free, its value is what the enclosing
+        statement yields, and nothing on the way to that statement opens a file. The two redirection
+        questions are separate and both have to be asked: `j > out.txt` sends the value somewhere the
+        body cannot see it, which `unconsumed_statement` answers, and `j 2> err.txt` sends nothing
+        anywhere while still creating the file, which only `opens_a_redirection_target` catches. The
+        call is inert either way; the statement around it is not.
+        """
+        statements: list[Node] = []
+        for site in graph.call_sites(key):
+            statement = unconsumed_statement(site.invocation)
+            if statement is None or site.invocation.arguments:
+                return None
+            cursor: Node | None = site.invocation
+            while cursor is not None and cursor is not statement:
+                if opens_a_redirection_target(cursor):
+                    return None
+                cursor = cursor.parent
+            statements.append(statement)
+        return statements
 
     def _removable_in_body(
-        self, parent: Node, sink: OutputSink, called: set[str], oracle: TypeOracle,
+        self, parent: Node, sink: OutputSink, called: frozenset[str], oracle: TypeOracle,
     ) -> set[Node]:
         """
-        What this pass would drop from the statement list `parent` owns. Both set-level guards are
-        answered here, against the **pre-veto** survivors, which is the polarity they require — see
+        What this pass would drop from the statement list `parent` owns, where `sink` is the
+        *resolved* destination of what that body writes. Both set-level guards are answered here,
+        against the **pre-veto** survivors, which is the polarity they require — see
         `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`.
+
+        A `DISCARD` emits nothing and is always safe to drop wherever the body's output goes, even
+        when it empties the body; that is what turns a junk function inert. An `OUTPUT` writes a
+        value someone could see, and dropping it needs three separate things to hold, none of which
+        implies another:
+
+        - the caller asks for it, which is `bare_output_is_preserved` read the other way round;
+        - the value provably reaches the host and nothing else, which is `sink`. A body whose writes
+          land anywhere else keeps every one of them — that is the whole of what the resolution
+          across the call graph buys, and the reason this is not the positional answer;
+        - evaluating it cannot raise, which is `is_fault_free`. `[Int]'abc'` and `1/0` are `OUTPUT`
+          like `42` is, and both terminate the script where they stand, so deleting one resumes
+          execution that had stopped — and does it across a function boundary, where the `try` veto
+          in `Ps1RemovalPlan` cannot see.
         """
         body = get_body(parent)
-        discard: set[Node] = set()
-        output: set[Node] = set()
-        dead_functions: set[Node] = set()
+        removable: set[Node] = set()
+        strip_bare_output = sink is OutputSink.HOST and not bare_output_is_preserved(self.options)
         for stmt in body:
             if isinstance(stmt, Ps1FunctionDefinition):
                 # `called` is every call site standing in this tree, which is only the whole story
@@ -616,20 +551,14 @@ class Ps1JunkStatementRemoval(Transformer):
                     and oracle.world_closed_at(stmt)
                     and normalize_command_name(stmt.name) not in called
                 ):
-                    dead_functions.add(stmt)
+                    removable.add(stmt)
                 continue
             effect = statement_effect(stmt, oracle)
             if effect is StatementEffect.DISCARD:
-                discard.add(stmt)
-            elif effect is StatementEffect.OUTPUT:
-                output.add(stmt)
-        # A statement that emits is kept wherever someone reads the output, which is everywhere this
-        # pass looks — see `output_observed`. A `DISCARD` emits nothing and is always safe to drop,
-        # even when it empties the body; that is what turns a junk function inert, and it is the
-        # whole of what this pass removes on the emission axis.
-        if output_observed(sink):
-            output.clear()
-        removable = discard | output | dead_functions
+                removable.add(stmt)
+            elif effect is StatementEffect.OUTPUT and strip_bare_output:
+                if _writes_only_what_cannot_fault(stmt):
+                    removable.add(stmt)
         if not removable:
             return set()
         if pruning_erases_body(parent, self._survivors(body, removable)):

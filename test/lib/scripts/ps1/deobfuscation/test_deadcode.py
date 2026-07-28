@@ -209,15 +209,18 @@ class TestPs1DeadCodeElimination(TestPs1):
         )
         self.assertNotIn('[Char]-', result.lower())
 
-    def test_bare_integer_statements_are_kept(self):
-        # `42` prints `42` on PowerShell 5.1 and `(-7)` prints `-7`, so neither is junk however
-        # much it looks like it. This pass used to drop both wherever it read the body's value as
-        # unobserved, and the script root reads that way while printing everything it is handed.
-        result = self._deobfuscate_iterative(
+    def test_bare_integer_statements_are_not_this_passs_to_drop(self):
+        # `42` prints `42` on PowerShell 5.1 and `(-7)` prints `-7`. This pass used to drop both
+        # wherever it read the body's value as unobserved, which was never a position it held, and
+        # deleting a write to the output stream is a decision `Ps1JunkStatementRemoval` owns alone.
+        # Run in isolation for that reason: through the whole pipeline the assertion would hold or
+        # fail on the other pass's answer.
+        result = self._apply(
             '$x = Get-Process\n'
             '42\n'
             'Write-Host $x\n'
-            '(-7)\n'
+            '(-7)\n',
+            Ps1DeadCodeElimination,
         )
         self.assertIn('42', result)
         self.assertIn('-7', result)
@@ -236,14 +239,15 @@ class TestPs1DeadCodeElimination(TestPs1):
         )
         self.assertIn('hello', result)
 
-    def test_constant_in_switch_case_is_kept(self):
+    def test_a_constant_in_a_switch_case_is_not_this_passs_to_drop(self):
         # A switch clause body writes through to whoever reads the switch: `switch (1) { 1 { 7 } }`
-        # prints `7`.
-        result = self._deobfuscate_iterative(
+        # prints `7`. Reading the clause as a body nothing observes is what dropped it here.
+        result = self._apply(
             'switch ($action) {\n'
             '  1 { 99 }\n'
             '  2 { Write-Host "ok" }\n'
-            '}\n'
+            '}\n',
+            Ps1DeadCodeElimination,
         )
         self.assertIn('99', result)
         self.assertIn('Write-Host', result)
@@ -345,6 +349,13 @@ class TestPs1DeadCodeExtra(TestPs1):
         result = self._apply(
             'for ($i = 5; $i -LT 0; $i++) {}', Ps1DeadCodeElimination)
         self.assertEqual(result, '$i = 5')
+
+    def test_a_hoisted_for_initializer_does_not_start_printing_its_value(self):
+        # A `for` initializer's value reaches nobody — `for ((Get-Date); $False; ) { }` prints
+        # nothing — so carrying one out of the dissolved loop as a bare statement would make the
+        # script write to the output stream where it did not. It is hoisted as a discard instead.
+        result = self._apply("for (5; $False; ) { }\nWrite-Host 'go'", Ps1DeadCodeElimination)
+        self.assertEqual(result, "$Null = 5\nWrite-Host 'go'")
 
     def test_empty_for_infinite_kept(self):
         result = self._apply('for (;;) {}', Ps1DeadCodeElimination)

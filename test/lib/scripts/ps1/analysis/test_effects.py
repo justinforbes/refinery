@@ -10,12 +10,11 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     StatementEffect,
     body_is_inert,
     is_fault_free,
-    is_pure_constant,
     is_side_effect_free,
-    output_observed,
     output_sink,
     pruning_erases_body,
     statement_effect,
+    unconsumed_statement,
 )
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
@@ -630,37 +629,54 @@ class TestPs1StatementEffect(Ps1EffectsTest):
         self.assertTrue(self._pure(self._expression('1..3 | Where-Object { $_ }')))
         self.assertIs(self._effect(statement), StatementEffect.EFFECT)
 
-    def test_pure_constants_are_a_strict_refinement_of_output(self):
-        # The dead-code pass prunes only pure constants and the junk pass prunes the whole OUTPUT
-        # set. That is only defensible while the candidate sets stay nested.
-        for source in ('42', '-3', '(7)', '$Null', '$True', '$False', '+9', '3.5'):
-            with self.subTest(source):
-                self.assertTrue(is_pure_constant(self._expression(source)))
-                self.assertIs(self._effect(self._statement(source)), StatementEffect.OUTPUT)
-
-    def test_a_string_literal_is_not_a_prunable_constant(self):
-        # A bare string is very often the point of the script, so it is deliberately left out of the
-        # constant set even though it is side-effect free.
-        expression = self._expression("'hi'")
-        self.assertTrue(self._pure(expression))
-        self.assertFalse(is_pure_constant(expression))
-
-    def test_a_computed_expression_is_not_a_constant(self):
-        for source in ('1 + 1', '$x', '[Math]::Abs(-3)'):
-            with self.subTest(source):
-                self.assertFalse(is_pure_constant(self._expression(source)))
-
 
 class TestPs1FaultFreedom(Ps1EffectsTest):
     """
     `is_fault_free` decides whether an expression may be moved out of a `try` whose `catch` is
-    empty, so what it accepts has to be everything that cannot raise and nothing else.
+    empty, and whether a statement that only writes it to the output stream may be deleted. What it
+    accepts therefore has to be everything that cannot raise and nothing else.
     """
 
     def test_literals_and_builtin_constants_cannot_raise(self):
         for source in ('42', '3.5', "'hi'", '$Null', '$True', '$False', '(7)', '-3', '+9'):
             with self.subTest(source):
                 self.assertTrue(is_fault_free(self._expression(source)))
+
+    def test_a_container_of_things_that_cannot_raise_cannot_raise(self):
+        for source in (
+            '@(1, 2, 3)',
+            "@('a', 'b')",
+            '@{ a = 1; b = 2 }',
+            "@{ 'k' = 'v' }",
+            '@{}',
+            '1..5',
+            '@(1, @(2, @{ c = 3 }))',
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_fault_free(self._expression(source)))
+
+    def test_a_container_is_only_as_safe_as_what_it_holds(self):
+        for source in (
+            "@(1, [Int]'abc')",
+            "@{ a = [Int]'abc' }",
+            '@{ a = $x }',
+            '$lo..$hi',
+            '@($x)',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_fault_free(self._expression(source)))
+
+    def test_a_hash_literal_powershell_refuses_to_build_is_not_fault_free(self):
+        # PowerShell rejects a duplicate key outright, so a script carrying one never runs at all
+        # and deleting the literal would make the rest of it run.
+        for source in ('@{ a = 1; a = 2 }', '@{ a = 1; A = 2 }', "@{ 1 = 'x'; '1' = 'y' }"):
+            with self.subTest(source):
+                self.assertFalse(is_fault_free(self._expression(source)))
+
+    def test_a_key_that_cannot_be_compared_is_not_a_key_proven_distinct(self):
+        for source in ('@{ $k = 1 }', '@{ 1.5 = 1 }'):
+            with self.subTest(source):
+                self.assertFalse(is_fault_free(self._expression(source)))
 
     def test_side_effect_free_is_not_an_answer_to_this_question(self):
         # Each of these was hoisted out of its `try` on a purity argument, and each one raises on
@@ -671,12 +687,10 @@ class TestPs1FaultFreedom(Ps1EffectsTest):
                 self.assertTrue(self._pure(expression))
                 self.assertFalse(is_fault_free(expression))
 
-    def test_pure_constants_are_a_strict_refinement_of_fault_freedom(self):
-        for source in ('42', '3.5', '$Null', '$True', '$False', '(7)', '-3', '+9', "'hi'", '1 + 1'):
+    def test_a_call_is_never_granted_however_safe_it_looks(self):
+        for source in ('[Math]::Sqrt(36)', 'Get-Random', "[Convert]::ToInt32('x')"):
             with self.subTest(source):
-                expression = self._expression(source)
-                if is_pure_constant(expression):
-                    self.assertTrue(is_fault_free(expression))
+                self.assertFalse(is_fault_free(self._expression(source)))
 
 
 class TestPs1EffectInvariant(Ps1EffectsTest):
@@ -872,12 +886,6 @@ class TestPs1OutputSink(Ps1EffectsTest):
 
 
 class TestPs1EmitSafety(Ps1EffectsTest):
-
-    def test_output_is_protected_wherever_anyone_reads_it(self):
-        # The contract. A model that leaves `HOST` out is the one that deleted a bare value at the
-        # script root, and it satisfies every assertion phrased about `CALLER` alone.
-        protected = {sink for sink in OutputSink if output_observed(sink)}
-        self.assertEqual(protected, {OutputSink.HOST, OutputSink.CALLER})
 
     def test_only_the_script_root_may_not_be_emptied(self):
         script = self._parse(_EVERY_KIND_OF_BODY)

@@ -247,10 +247,13 @@ class TestPs1RemovalPlan(TestPs1):
 
 
 class TestPs1IterativeRemoval(TestPs1):
-    def test_a_junk_string_beside_an_anchor_is_kept(self):
+    def test_a_junk_string_beside_an_anchor_is_kept_when_output_is_preserved(self):
         # `Write-Host done` writes nothing to the output stream, so it is no anchor: on
-        # PowerShell 5.1 a caller collecting this body receives one item, `junk string`.
-        result = self._deobfuscate_iterative("'junk string'\nWrite-Host done")
+        # PowerShell 5.1 the console receives one item, `junk string`. Under the preserving model
+        # that item survives however much it looks like padding, and repeating the whole pipeline
+        # never wears it away.
+        result = self._deobfuscate_iterative(
+            "'junk string'\nWrite-Host done", preserve_bare_output=True)
         self.assertIn('junk string', result)
         self.assertIn('Write-Host done', result)
 

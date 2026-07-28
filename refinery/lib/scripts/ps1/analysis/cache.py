@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from refinery.lib.scripts import Transformer
 from refinery.lib.scripts.modelcache import ModelCacheBase
+from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, build_call_graph
+from refinery.lib.scripts.ps1.analysis.effects import Ps1OutputFlow, build_output_flow
 from refinery.lib.scripts.ps1.analysis.model import Ps1SemanticModel, build_semantic_model
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld, build_closed_world
@@ -20,18 +22,23 @@ from refinery.lib.scripts.ps1.model import Ps1Script
 class Ps1ModelCache(ModelCacheBase):
     """
     Lazily builds and memoizes the analysis models for one root script — the
-    `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel` and the
-    `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` — each dropped whenever this root's
-    AST-mutation counter advances past the value it was built at. Later phases add a `control_flow`
-    slot behind the same shape.
+    `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`, the
+    `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld`, the
+    `refinery.lib.scripts.ps1.analysis.callgraph.Ps1CallGraph` and the
+    `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow` derived from it — each dropped
+    whenever this root's AST-mutation counter advances past the value it was built at. Later
+    phases add a
+    `control_flow` slot behind the same shape.
     """
 
-    _SLOTS = ('_model', '_closed_world', '_oracle')
+    _SLOTS = ('_model', '_closed_world', '_oracle', '_call_graph', '_output_flow')
 
     root: Ps1Script
     _model: Ps1SemanticModel | None
     _closed_world: Ps1TypeWorld | None
     _oracle: TypeOracle | None
+    _call_graph: Ps1CallGraph | None
+    _output_flow: Ps1OutputFlow | None
 
     @property
     def model(self) -> Ps1SemanticModel:
@@ -40,6 +47,25 @@ class Ps1ModelCache(ModelCacheBase):
     @property
     def closed_world(self) -> Ps1TypeWorld:
         return self._lazy('_closed_world', lambda: build_closed_world(self.root))
+
+    @property
+    def call_graph(self) -> Ps1CallGraph:
+        """
+        Which definitions a command name reaches and which invocations reach it, over this root. The
+        `oracle` is a parameter of the build rather than of the queries because the world verdict it
+        supplies is one of the reasons the graph declares itself unreadable, and a graph that
+        answered that differently per caller would be two graphs.
+        """
+        return self._lazy('_call_graph', lambda: build_call_graph(self.root, self.oracle))
+
+    @property
+    def output_flow(self) -> Ps1OutputFlow:
+        """
+        Where each function body's output ends up, joined over the call sites in `call_graph`.
+        Every pass that deletes a write to the output stream reads this one, so no two of them can
+        disagree about who was going to see the value.
+        """
+        return self._lazy('_output_flow', lambda: build_output_flow(self.call_graph))
 
     @property
     def oracle(self) -> TypeOracle:

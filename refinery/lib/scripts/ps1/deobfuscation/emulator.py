@@ -1233,6 +1233,12 @@ class Ps1FunctionEvaluator(Transformer):
 
     def visit_Ps1CommandInvocation(self, node: Ps1CommandInvocation):
         self.generic_visit(node)
+        if node.redirections:
+            # What this pass installs is an expression, and an expression carries no redirections,
+            # so folding `f > C:\log` into the value `f` returns writes it to the console instead of
+            # to the file. Every spelling is refused and not only the ones that take output away:
+            # the question is whether the replacement can carry the redirection, and it never can.
+            return None
         name_str = get_command_name(node)
         if name_str is None:
             return None

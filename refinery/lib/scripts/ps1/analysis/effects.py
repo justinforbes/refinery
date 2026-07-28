@@ -3,17 +3,23 @@ The effect layer of the PowerShell analysis substrate: whether evaluating a node
 observable side effect, and what a standalone statement contributes to the body it sits in. Every
 pass that decides "is it safe to delete this?" asks here, so that no two of them can disagree.
 
-These are free functions rather than a model class because the facts they compute are syntactic: a
-conservative allow-list over one expression, needing no information from anywhere else in the tree.
-A cached model arrives with the first genuine summary fact — interprocedural purity, which has to be
-computed over the `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`.
+Most of these are free functions because the facts they compute are syntactic: a conservative
+allow-list over one expression, needing no information from anywhere else in the tree.
+`Ps1OutputFlow` is the exception and the first genuine summary fact here — where a body's output
+ends up cannot be
+read off the body, only off every call that reaches it — so it is a model built once over the whole
+script and held in a `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot.
 
-**Scope.** Three questions about a statement are separable, and only two are answered here. Whether
-it performs a side effect is `statement_effect`; whether it can put a value on its body's output is
-`output_is_covered`, which is not the same question — `Write-Host x` acts and emits nothing. Whether
-it may *throw* is the third and has no representation at all: `StatementEffect` has no member for
-it, so the trap and try/catch passes keep statement predicates of their own, and folding those in
-requires deciding a fault semantics first. It is not a simplification that can be made silently.
+**Scope.** Three questions about a statement are separable and all three are now answered, each by a
+different thing, and no one of them may stand in for another:
+
+- whether it performs a side effect — `statement_effect`;
+- whether it may *throw* — `is_fault_free`, a closed allow-list that answers `False` for everything
+  it does not recognize. Purity is not this question: `is_side_effect_free` accepts `[Int]$x` and
+  `$a / $b`, both of which raise;
+- where the value it writes to the output stream is read — `output_sink` positionally, and
+  `Ps1OutputFlow` through the call graph, which is the only one that can see past a function
+  boundary.
 
 One site still answers an emission question with a purity verdict: `_command_body_is_pure` reads an
 `EFFECT` statement as disqualifying, where what it means to ask is whether the body emits. It costs
@@ -24,10 +30,11 @@ from __future__ import annotations
 
 import enum
 
-from typing import Iterator, Sequence, TypeGuard
+from typing import Iterator, NamedTuple, Sequence, TypeGuard
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1 import data
+from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
@@ -54,6 +61,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1DoLoop,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
+    Ps1FileRedirection,
     Ps1ForEachLoop,
     Ps1ForLoop,
     Ps1FunctionDefinition,
@@ -64,12 +72,14 @@ from refinery.lib.scripts.ps1.model import (
     Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1MemberAccess,
+    Ps1MergingRedirection,
     Ps1ParamBlock,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1PipelineElement,
     Ps1RangeExpression,
     Ps1RealLiteral,
+    Ps1RedirectionStream,
     Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
@@ -954,10 +964,11 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
 
 def is_fault_free(node) -> bool:
     """
-    Whether evaluating an expression can raise: a literal, one of the built-in constants `$Null`,
-    `$True`, `$False`, or either through enclosing parentheses and a unary sign. Everything else
-    answers `False`, including expressions that are obviously fine, because this is a closed
-    allow-list and the safe answer to an unlisted node is that it might raise.
+    Whether evaluating an expression provably cannot raise: a literal, one of the built-in constants
+    `$Null`, `$True`, `$False`, a container built entirely out of such values, or any of those
+    through enclosing parentheses and a unary sign. Everything else answers `False`, including
+    expressions that are obviously fine, because this is a closed allow-list and the safe answer to
+    an unlisted node is that it might raise.
 
     Purity is a different question and neither implies the other. `is_side_effect_free` accepts
     `[Int]$x`, `$a / $b` and `$a[$i]`, all of which raise on the wrong operand, and it is the
@@ -965,9 +976,15 @@ def is_fault_free(node) -> bool:
     construct on a purity argument, because an empty `catch` was swallowing what the hoisted
     statement now raises into the caller.
 
-    `is_pure_constant` is a strict refinement: it excludes string literals, which cannot raise but
-    can be intentional output, so anything it accepts this accepts too. `TestPs1FaultFreedom` pins
-    that containment, since the two are one string literal apart and will not stay so by accident.
+    The container arm recurses into the elements rather than granting the form: constructing an
+    array, a hash table or a range cannot fail, so `@(1, 2, 3)` and `@{ a = 1 }` cannot, while
+    `@{ a = [Int]'x' }` still can and is rejected by the element it holds. A hash literal with a
+    duplicate key is the one construction PowerShell refuses outright, so the keys are compared
+    rather than trusted; see `_hash_literal_is_fault_free`.
+
+    A method or cmdlet call is deliberately not here, however obviously safe. `[Math]::Sqrt(36)`
+    cannot throw and `[Convert]::ToInt32('x')` can, and telling those apart is a table of .NET
+    semantics rather than a rule about the syntax.
     """
     if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral, Ps1StringLiteral)):
         return True
@@ -977,30 +994,44 @@ def is_fault_free(node) -> bool:
         return is_fault_free(node.expression)
     if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
         return is_fault_free(node.operand)
+    if isinstance(node, Ps1ArrayLiteral):
+        return all(is_fault_free(element) for element in node.elements)
+    if isinstance(node, Ps1RangeExpression):
+        return is_fault_free(node.start) and is_fault_free(node.end)
+    if isinstance(node, Ps1HashLiteral):
+        return _hash_literal_is_fault_free(node)
+    if isinstance(node, Ps1ArrayExpression):
+        if len(node.body) == 1:
+            stmt = node.body[0]
+            return isinstance(stmt, Ps1ExpressionStatement) and is_fault_free(stmt.expression)
+        return len(node.body) == 0
     return False
 
 
-def is_pure_constant(node) -> bool:
+def _hash_literal_is_fault_free(node: Ps1HashLiteral) -> bool:
     """
-    Whether an expression is a side-effect-free constant that can be removed as a standalone
-    statement: a numeric literal or one of the built-in constants `$Null`, `$True`, `$False`,
-    through any enclosing parentheses and unary sign. String literals are excluded because they may
-    be intentional pipeline output.
+    Whether building a hash literal is guaranteed to succeed. Every key and value has to be
+    fault-free in its own right, and the keys additionally have to be distinct — PowerShell rejects
+    `@{ a = 1; a = 2 }` outright, so a script carrying one never runs at all, and deleting it would
+    make the rest of the script run. That is exactly the change this predicate exists to prevent,
+    and it is why the keys are compared here rather than assumed apart.
 
-    This is a strict refinement of `StatementEffect.OUTPUT`: an expression statement whose
-    expression is a pure constant always classifies as `OUTPUT`. The two pruning passes therefore
-    have nested candidate sets rather than independently drifting ones — the dead-code pass, which
-    prunes only constants, is provably the more conservative of the two.
+    Only a string or integer key is compared, folded to a lowercased string, so the case-insensitive
+    collision and the `@{ 1 = 'a'; '1' = 'b' }` cross-type one both count. Anything else — a real
+    literal, a computed key — is rejected without comparison, since a key this cannot read is a
+    duplicate it cannot rule out.
     """
-    if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
-        return True
-    if is_builtin_variable(node):
-        return True
-    if isinstance(node, Ps1ParenExpression):
-        return is_pure_constant(node.expression)
-    if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
-        return is_pure_constant(node.operand)
-    return False
+    keys: set[str] = set()
+    for key, value in node.pairs:
+        if not isinstance(key, (Ps1IntegerLiteral, Ps1StringLiteral)):
+            return False
+        if not is_fault_free(value):
+            return False
+        written = str(key.value).lower()
+        if written in keys:
+            return False
+        keys.add(written)
+    return True
 
 
 class StatementEffect(enum.Enum):
@@ -1023,9 +1054,12 @@ class StatementEffect(enum.Enum):
 
     `EFFECT` deliberately says nothing about emission, and splitting it into an emitting and a
     silent member would not pay: a silent `EFFECT` is still un-removable, so every consumer would
-    grow a branch to reach the verdict it already reaches. Whether a statement emits is a second and
-    orthogonal fact, asked through `output_is_covered` — `Write-Host x` and `Get-Item x` are both
-    `EFFECT` and only the second can carry a body's return value.
+    grow a branch to reach the verdict it already reaches. `Write-Host x` and `Get-Item x` are both
+    `EFFECT`, and nothing here distinguishes them because nothing needs to.
+
+    Nor does any member say whether the statement can *throw*. That is `is_fault_free`, which a
+    caller about to remove an `OUTPUT` statement has to ask separately: `[Int]'abc'` and `1/0` are
+    both `OUTPUT`, and removing either resumes a script that had terminated.
     """
     EFFECT = 'effect'
     OUTPUT = 'output'
@@ -1234,14 +1268,15 @@ class OutputSink(enum.Enum):
       statement position at script level.
     - `CALLER`: a function's caller sees it. Only a function, `filter` or class method body is this
       boundary, along with everything nested inside one.
-    - `CAPTURED`: a value slot holds it — an assignment right-hand side, `$( ... )`, `@( ... )`, a
-      `data` section, a stored or argument scriptblock. The body is never pruned at all, so no
-      statement in it is ever weighed.
+    - `CAPTURED`: something other than a reader holds it — an assignment right-hand side,
+      `$( ... )`, `@( ... )`, a `data` section, a stored or argument scriptblock, an upstream
+      pipeline position, a redirection to a file. The body is never pruned at all, so no statement
+      in it is ever weighed.
 
-    **The contract is that output is preserved at `HOST` and `CALLER` alike**, which is what
-    `output_observed` says and the only thing either sink is asked. They are still separate members
-    because they are separate destinations and the walk really does distinguish them: a change that
-    buys recall back at one of them has to be able to name which.
+    `CALLER` is not a destination, it is a deferral: it says the value leaves this body and nothing
+    about where it lands. `Ps1OutputFlow` resolves it into one of the other two by reading every
+    call site, and `sink_of` therefore never answers `CALLER`. Only `output_sink`, the positional
+    question, does — and a caller that reads that answer as a destination is guessing.
 
     This replaced a `BodyRole` that answered *where a body sits* and was read as *who reads it*.
     Under that enum a bare value at the script root was unprotected, because the root was not a
@@ -1255,46 +1290,139 @@ class OutputSink(enum.Enum):
     CAPTURED = 'captured'
 
 
+def _redirection_takes_output_away(
+    redirection: Ps1FileRedirection | Ps1MergingRedirection,
+) -> bool:
+    """
+    Whether a single redirection moves the output stream somewhere the enclosing body cannot see it.
+    A file redirection of `OUTPUT` or of `ALL` (`>`, `>>`, `*>`) writes the values to disk; a merge
+    carries them into whichever stream it names, so it takes them away exactly when it reads *from*
+    output and writes somewhere that is not output.
+
+    The direction is what decides this, and reading the wrong end inverts the answer on the common
+    forms: `2>&1` and `3>&1` merge another stream *into* output and leave emission untouched, while
+    `1>&2` is the one that silences it. `*>&1` names `ALL` as its source, which includes output
+    merged onto itself, so it is not a removal either.
+    """
+    if isinstance(redirection, Ps1FileRedirection):
+        return redirection.stream in (Ps1RedirectionStream.OUTPUT, Ps1RedirectionStream.ALL)
+    return (
+        redirection.from_stream in (Ps1RedirectionStream.OUTPUT, Ps1RedirectionStream.ALL)
+        and redirection.to_stream is not Ps1RedirectionStream.OUTPUT
+    )
+
+
+def _output_is_redirected_away(node) -> bool:
+    """
+    Whether any redirection written on `node` moves its output somewhere the enclosing body cannot
+    see it. Where a merge and a file redirection are written together (`2>&1 > C:\\log`), the file
+    redirection is still a removal and any one of them is enough to answer yes.
+
+    The redirection list is read off the node rather than matched against the node types known to
+    carry one, because the two that do — a command invocation and the pipeline element around it —
+    are both written in practice and the failure is asymmetric: a carrier this did not recognize
+    would report that the output propagates, which is the answer that deletes a payload into a file.
+    """
+    return any(_redirection_takes_output_away(r) for r in getattr(node, 'redirections', ()))
+
+
+def opens_a_redirection_target(node) -> bool:
+    """
+    Whether any redirection written on `node` opens a file. PowerShell creates or truncates the
+    target as it sets the redirection up, whatever the command then writes, so `j > log` touches the
+    disk even when `j` does nothing at all.
+
+    The stream is deliberately not consulted, which is what separates this from
+    `_redirection_takes_output_away`: `2> err.txt` creates its file exactly as `> out.txt` does, and
+    a caller asking whether a statement is nothing but a call has to know about both. A merge names
+    no file and is not one of these — `j 2>&1` on a silent command really is a no-op.
+    """
+    return any(isinstance(r, Ps1FileRedirection) for r in getattr(node, 'redirections', ()))
+
+
+def unconsumed_statement(expr: Node) -> Ps1ExpressionStatement | None:
+    """
+    The statement whose output is exactly what `expr` yields — `expr` standing alone as an
+    expression statement, or as the sole element of a statement-level pipeline — or `None` when the
+    value is consumed on the way out: by an assignment, an argument, a longer pipeline, or a
+    redirection that writes the output stream elsewhere.
+
+    **This is not a capture test**, and the two are one walk apart. `$r = @(f)` and `$r = $(f)` hold
+    `f` as a whole statement, so this answers with that statement while the value is very much
+    captured — by the `@( ... )` around the *body* the statement sits in, which only the outward
+    walk in `_output_reader` sees. Reading this as "the value escapes" is how an assigned call came
+    to look like a discardable one.
+
+    What it does answer is where the value goes *next*, which is why the redirections are read here:
+    `f > out.txt` yields nothing to the body around it, and a caller that judges it by shape alone
+    deletes the call together with the file it writes.
+    """
+    if _output_is_redirected_away(expr):
+        return None
+    parent = expr.parent
+    if isinstance(parent, Ps1ExpressionStatement):
+        return parent
+    if isinstance(parent, Ps1PipelineElement):
+        if _output_is_redirected_away(parent):
+            return None
+        pipeline = parent.parent
+        if (
+            isinstance(pipeline, Ps1Pipeline)
+            and len(pipeline.elements) == 1
+            and isinstance(pipeline.parent, Ps1ExpressionStatement)
+        ):
+            return pipeline.parent
+    return None
+
+
 def _scriptblock_is_captured(block: Ps1ScriptBlock) -> bool:
     """
     Return `True` when the value of a `refinery.lib.scripts.ps1.model.Ps1ScriptBlock` is captured
     rather than run for its observable output. A bare `&{ ... }` / `.{ ... }` in statement position
     produces output that the pass may prune into; every other scriptblock (a stored closure
-    `$x = { ... }`, an argument block, or an invocation whose result is assigned, passed, or piped)
-    is treated as captured and left opaque.
+    `$x = { ... }`, an argument block, or an invocation whose result is assigned, passed, piped or
+    redirected) is treated as captured and left opaque.
     """
     parent = block.parent
     if isinstance(parent, Ps1FunctionDefinition):
         return False
     if not (isinstance(parent, Ps1CommandInvocation) and parent.name is block):
         return True
-    invocation_parent = parent.parent
-    if isinstance(invocation_parent, Ps1ExpressionStatement):
-        return False
-    if isinstance(invocation_parent, Ps1PipelineElement):
-        pipeline = invocation_parent.parent
-        if (
-            isinstance(pipeline, Ps1Pipeline)
-            and len(pipeline.elements) == 1
-            and isinstance(pipeline.parent, Ps1ExpressionStatement)
-        ):
-            return False
-    return True
+    return unconsumed_statement(parent) is None
 
 
-def output_sink(node) -> OutputSink | None:
+def _feeds_downstream(element: Ps1PipelineElement) -> bool:
     """
-    Who reads the output of the statement body that `node` owns, or `None` when `node` owns no
-    prunable body — which is also how `@( ... )` stays out of every pruning walk, since
-    `refinery.lib.scripts.ps1.ast.get_body` deliberately does not recognize it.
+    Whether a pipeline element hands its output to the element after it rather than out of the
+    pipeline. Only the last element's output leaves, which is what makes `f | Out-Null` a capture of
+    `f` and not a bare call to it.
+    """
+    pipeline = element.parent
+    if not isinstance(pipeline, Ps1Pipeline) or not pipeline.elements:
+        return True
+    return element is not pipeline.elements[-1]
 
-    A body does not carry a sink of its own. It is found by walking outward until a node is reached
-    that *consumes* the output; a node that merely propagates it is walked past. Three things
-    consume: a value slot (`CAPTURED`), a function boundary (`CALLER`), and the script root
-    (`HOST`). Everything else — a loop, an `if`, a `try`, a `trap`, a `switch` clause, a bare
-    `&{ ... }` in statement position — writes through to whatever encloses it.
 
-    So the same block answers differently depending on where it sits, and this is the point rather
+class Ps1OutputPath(NamedTuple):
+    """
+    Where the value written at some point in the tree is read, as far as position alone can say.
+    `function` is the definition whose body was left on the way out, and is set exactly when `sink`
+    is `OutputSink.CALLER`: it is the handle `Ps1OutputFlow` needs to carry the question across the
+    boundary that position cannot see past.
+    """
+    sink: OutputSink
+    function: Ps1FunctionDefinition | None
+
+
+def _output_reader(node) -> Ps1OutputPath:
+    """
+    Walk outward from `node` until something *consumes* the value written there; a node that merely
+    propagates it is walked past. Four things consume: a value slot, a redirection, an upstream
+    pipeline position (all `CAPTURED`), and a function boundary (`CALLER`). Reaching the script
+    root without one is `HOST`. Everything else — a loop, an `if`, a `try`, a `trap`, a `switch`
+    clause, a bare `&{ ... }` in statement position — writes through to whatever encloses it.
+
+    So the same node answers differently depending on where it sits, and this is the point rather
     than an inconsistency to resolve later:
 
         if ($x) { 1 }                    at script level  ->  HOST
@@ -1303,51 +1431,174 @@ def output_sink(node) -> OutputSink | None:
 
     Ambiguous capture resolves to `CAPTURED`, which is the answer that prunes nothing.
 
-    Position alone decides this and no oracle is consulted. The `BodyRole` this replaced admitted
-    an inconsistency in its own docstring and deferred it to "the reachability of the flow layer";
-    the flow layer is not needed, because who reads a body's output is a question about the tree
-    above it and never about which paths through it run.
+    This takes any node and not only a body owner, because the same walk answers both questions that
+    need it: where a body's output goes, and where the value produced by one call site goes. Asking
+    it of a call site is what lets `Ps1OutputFlow` resolve a `CALLER` into a real destination.
     """
-    if get_body(node) is None:
-        return None
     prev = node
     cursor = node
     while cursor is not None:
+        if _output_is_redirected_away(cursor):
+            return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression, Ps1DataSection)):
-            return OutputSink.CAPTURED
+            return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, Ps1AssignmentExpression) and cursor.value is prev:
-            return OutputSink.CAPTURED
+            return Ps1OutputPath(OutputSink.CAPTURED, None)
+        if isinstance(cursor, Ps1PipelineElement) and _feeds_downstream(cursor):
+            return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, Ps1ScriptBlock):
-            if isinstance(cursor.parent, Ps1FunctionDefinition) and cursor.parent.body is cursor:
-                return OutputSink.CALLER
+            holder = cursor.parent
+            if isinstance(holder, Ps1FunctionDefinition) and holder.body is cursor:
+                return Ps1OutputPath(OutputSink.CALLER, holder)
             if _scriptblock_is_captured(cursor):
-                return OutputSink.CAPTURED
+                return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, Ps1Script):
-            return OutputSink.HOST
+            return Ps1OutputPath(OutputSink.HOST, None)
         prev = cursor
         cursor = cursor.parent
-    return OutputSink.HOST
+    return Ps1OutputPath(OutputSink.HOST, None)
 
 
-def output_observed(sink: OutputSink) -> bool:
+def output_sink(node) -> OutputSink | None:
     """
-    Whether a body feeding this sink has output that pruning must protect. **This is the output
-    contract, and it is the only place that states it:** a write to the output stream survives
-    deobfuscation, whether the host or a caller is the one reading. A `CAPTURED` body is never
-    pruned at all, so the answer there is moot and is `False` only to keep the predicate total.
+    Who reads the output of the statement body that `node` owns as far as position can say, or
+    `None` when `node` owns no prunable body — which is also how `@( ... )` stays out of every
+    pruning walk, since `refinery.lib.scripts.ps1.ast.get_body` deliberately does not recognize it.
 
-    There is no covering argument to be had. One used to be made — that a surviving statement which
-    can emit carries the body's output, so the pure-output statements around it are redundant — and
-    it is false for both readers of a body: PowerShell emits a *stream*, every write to it is its
-    own observable event, and neither the host nor a caller receives one value that some other
-    statement can stand in for.
-
-    The cost is stated rather than hidden. Junk removal keeps only what `StatementEffect.DISCARD`
-    recognizes — the four syntactic no-op shapes — and a bare literal at any prunable position is
-    now kept. That is a real loss of recall on injected noise, taken deliberately, because the
-    alternative is deciding what a value is worth by looking at it.
+    A body does not carry a sink of its own; it is found by the outward walk in `_output_reader`.
+    This is the positional answer and it stops at a function boundary, which is enough for a caller
+    that only needs to know whether the body is prunable at all. A caller deciding whether to delete
+    a *write* to the output stream needs `Ps1OutputFlow.sink_of` instead, which resolves `CALLER`
+    into a destination by reading the call graph.
     """
-    return sink is not OutputSink.CAPTURED
+    if get_body(node) is None:
+        return None
+    return _output_reader(node).sink
+
+
+class Ps1OutputFlow:
+    """
+    Where each function body's output ends up, resolved across the call graph. The verdict of
+    `build_output_flow`, held in a `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot so
+    that every pass in a run reads the same one.
+
+    This is the fact `output_sink` alone cannot supply. A function body's output is whatever its
+    callers do with it, so the same `function f { 'junk'; Write-Host 'go' }` is a script that prints
+    two lines when `f` is called bare, and a value someone stored when it is called as `$r = f`.
+    """
+
+    def __init__(self, reaching_host: frozenset[Ps1FunctionDefinition]):
+        self._reaching_host = reaching_host
+
+    def sink_of(self, node) -> OutputSink | None:
+        """
+        Who reads the output of the statement body `node` owns, or `None` when it owns no prunable
+        body. Never `OutputSink.CALLER`: a body that writes to its caller is resolved into the
+        destination that caller writes to, or into `CAPTURED` when no such destination is provable.
+        """
+        if get_body(node) is None:
+            return None
+        return self.resolved(_output_reader(node))
+
+    def resolved(self, path: Ps1OutputPath) -> OutputSink:
+        """
+        The destination a positional `Ps1OutputPath` really names. A path that already names one is
+        returned unchanged; a `CALLER` path is `HOST` only when its function is one this flow proved
+        writes to the process output, and `CAPTURED` otherwise — including for a class method, which
+        no call site in the tree names and which is therefore never among them.
+        """
+        if path.sink is not OutputSink.CALLER:
+            return path.sink
+        if path.function in self._reaching_host:
+            return OutputSink.HOST
+        return OutputSink.CAPTURED
+
+
+def _path_reaches_host(
+    path: Ps1OutputPath,
+    key_of: dict[Ps1FunctionDefinition, str],
+    grounded: set[str],
+) -> bool:
+    """
+    Whether one call site's value is known to end up on the process output: it reaches the host
+    directly, or it leaves a function that is itself known to.
+    """
+    if path.sink is OutputSink.HOST:
+        return True
+    return path.sink is OutputSink.CALLER and key_of.get(path.function) in grounded
+
+
+def _path_is_captured(
+    path: Ps1OutputPath,
+    key_of: dict[Ps1FunctionDefinition, str],
+    captured: set[str],
+) -> bool:
+    """
+    Whether one call site's value goes anywhere other than the process output: it is captured where
+    it stands, or it leaves a function that is itself captured — or one whose name nothing in this
+    tree calls, which is the same unknown seen from the other side.
+    """
+    if path.sink is OutputSink.CAPTURED:
+        return True
+    if path.sink is not OutputSink.CALLER:
+        return False
+    key = key_of.get(path.function)
+    return key is None or key in captured
+
+
+def build_output_flow(graph: Ps1CallGraph) -> Ps1OutputFlow:
+    """
+    Resolve every function in `graph` to the destination its output reaches, by joining the readers
+    of its call sites.
+
+    A function writes to the process output only when **both** halves hold, and they are separate
+    fixpoints running in opposite directions because they answer opposite failures:
+
+    - *grounded* — some call site really does carry the value out to the host, computed forward from
+      the script itself. This is what an ungrounded recursion cycle fails: `function a { 'x'; b }`
+      and `function b { a }` with nothing calling either would otherwise vouch for each other and
+      hand a deletion licence to a cycle carrying no evidence at all, while the identical evidence —
+      none — keeps an uncalled `function c { 'x' }`. Seeding at the root and propagating outward
+      makes those two answer alike.
+    - *not captured* — no call site sends the value anywhere else, computed as the least set closed
+      under "some call site captures it". One captured call site captures the whole function, since
+      the definitions are what get pruned and every caller reads the same body.
+
+    Both are needed and neither implies the other. `$r = b` beside a bare `a` — where `a` calls `b`
+    and `b` calls `a` — leaves both grounded and both captured, and only the second fixpoint keeps
+    them.
+
+    An unreadable graph resolves nothing: with a name bindable from outside the tree, a call site
+    the walk never read can capture any function in it.
+    """
+    if not graph.is_readable:
+        return Ps1OutputFlow(frozenset())
+    key_of = {
+        definition: name
+        for name in graph.defined_names
+        for definition in graph.definitions(name)
+    }
+    readers = {
+        name: [_output_reader(site.invocation) for site in graph.call_sites(name)]
+        for name in graph.defined_names
+    }
+    grounded: set[str] = set()
+    captured: set[str] = set()
+    for target, test in ((grounded, _path_reaches_host), (captured, _path_is_captured)):
+        growing = True
+        while growing:
+            growing = False
+            for name, paths in readers.items():
+                if name in target:
+                    continue
+                if any(test(path, key_of, target) for path in paths):
+                    target.add(name)
+                    growing = True
+    return Ps1OutputFlow(frozenset(
+        definition
+        for definition, name in key_of.items()
+        if name in grounded and name not in captured
+    ))
 
 
 def fault_is_observed(stmt: Node) -> bool:

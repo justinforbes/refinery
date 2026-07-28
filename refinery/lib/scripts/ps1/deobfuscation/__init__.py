@@ -15,6 +15,7 @@ from refinery.lib.scripts.ps1.deobfuscation.emulator import Ps1ForEachPipeline, 
 from refinery.lib.scripts.ps1.deobfuscation.expandable import Ps1ExpandableStringHoist
 from refinery.lib.scripts.ps1.deobfuscation.folding import Ps1ConstantFolding
 from refinery.lib.scripts.ps1.deobfuscation.iexinline import Ps1IexInlining
+from refinery.lib.scripts.ps1.deobfuscation.options import Ps1DeobfuscationOptions
 from refinery.lib.scripts.ps1.deobfuscation.rename import Ps1VariableRenaming
 from refinery.lib.scripts.ps1.deobfuscation.securestring import Ps1SecureStringDecryptor
 from refinery.lib.scripts.ps1.deobfuscation.simplify import Ps1Simplifications
@@ -96,20 +97,38 @@ _phase2 = DeobfuscationPipeline(
 )
 
 
-def deobfuscate(ast: Ps1Script, max_steps: int = 0, remove_junk: bool = True) -> int:
+def deobfuscate(
+    ast: Ps1Script,
+    max_steps: int = 0,
+    remove_junk: bool = True,
+    preserve_bare_output: bool = False,
+) -> int:
     """
     Apply all available deobfuscators to the input. When `remove_junk` is `True`, a second pass
     removes unused variable assignments, uncalled function definitions, and side-effect-free
     expression statements.
+
+    The two switches are not the same knob at different strengths. `remove_junk` decides whether
+    that second pass runs at all, so turning it off also keeps every dead store and uncalled
+    function;
+    `preserve_bare_output` decides one question inside it — whether a statement whose only effect is
+    to write a value to the success output stream may be deleted — and leaves the rest of the pass
+    working. See `refinery.lib.scripts.ps1.deobfuscation.options.Ps1DeobfuscationOptions` for what
+    that costs and the assumption it rests on.
     """
     # One analysis cache is built over the script and shared across both phases; the now-honored
     # `tree_version` counter keeps it consistent even across the two pipeline runs, so a transform in
     # either phase queries models built on the current tree instead of rebuilding them per pass.
     cache = Ps1ModelCache(ast)
-    steps = _phase1.run(ast, max_steps=max_steps, models=cache)
+    # Both phases are handed the same options, because a configuration two pipelines disagree about
+    # is a configuration neither of them states. Only phase 2 holds the pass that reads this one
+    # today, and building the phase-1 call that way would encode which pass that is.
+    options = Ps1DeobfuscationOptions(preserve_bare_output=preserve_bare_output)
+    steps = _phase1.run(ast, max_steps=max_steps, models=cache, options=options)
     if not remove_junk:
         return steps
     # Carry the phase-1 step count into phase 2 so a single `max_steps` budget is enforced across
     # both phases. Splitting the budget instead lets a phase-1 result of exactly `max_steps` leave a
     # remaining budget of 0, which the pipeline would read as "unlimited" and run phase 2 unbounded.
-    return _phase2.run(ast, max_steps=max_steps, initial_steps=steps, models=cache)
+    return _phase2.run(
+        ast, max_steps=max_steps, initial_steps=steps, models=cache, options=options)

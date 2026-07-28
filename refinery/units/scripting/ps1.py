@@ -4,6 +4,8 @@ from refinery.lib.scripts.ps1.deobfuscation import deobfuscate
 from refinery.lib.scripts.ps1.model import Ps1Script
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
+from refinery.lib.types import Param
+from refinery.units import Arg
 from refinery.units.scripting import IterativeDeobfuscator
 
 
@@ -16,25 +18,41 @@ class ps1(IterativeDeobfuscator):
     operations, case normalization, invoke simplification, uncurly variables), and synthesizes
     clean output. Iterates until stable; running this twice does not change the output.
 
-    **What the output preserves.** Every side effect the script performs, and every value it writes
-    to an output stream. In PowerShell a statement that merely yields a value has written to that
-    stream, so a bare `'literal'`, `42` or `[Math]::Sqrt(36)` is output like any other and survives
-    — at the script root, where the host prints it, and inside a function, where it becomes part of
-    what the caller receives. Statements are removed only when they provably write nothing and do
-    nothing: an empty statement, the `$Null = ...` and `[Void]...` discard idioms, a pipeline ending
-    in `Out-Null`, and code no path reaches.
+    **What the output preserves.** Every side effect the script performs, and every value that
+    anything other than the console could read. In PowerShell a statement that merely yields a value
+    has written to the success output stream, so a bare `'literal'` or `42` is output like any
+    other. Such a statement is deleted only where three things are provable at once: that evaluating
+    it cannot raise, that its value reaches the process output and nothing else — traced through
+    every call site, so a bare value inside a function is kept unless every caller merely prints it
+    — and that no redirection moves that output elsewhere. Anything that fails one of them is kept,
+    as is every statement that does something, whatever it writes.
 
-    This costs recall on injected noise, deliberately. A junk literal an obfuscator padded the
-    script with is indistinguishable, by any property of the *program*, from a literal the script
-    exists to emit, and telling them apart would mean judging what the bytes are rather than what
-    the code does. Deobfuscation here is a semantics-preserving rewrite; it is not a filter for
-    what is worth reading.
+    That leaves a real class of junk standing. `[Math]::Sqrt(36)` and `Get-Random` are removed by
+    neither model, because nothing here can prove a call does not throw.
+
+    **The assumption behind the default.** Stripping console output treats the input as a standalone
+    script. A file cannot say whether it is a module: a `.psm1` exports its functions to callers no
+    walk over this tree can see, and a bare value inside such a function is part of what those
+    callers receive. Use the switch for a module, for a fragment that runs as part of something
+    larger, or whenever the printed output is itself the artifact.
     """
+
+    def __init__(
+        self,
+        timeout=500,
+        keep_output: Param[bool, Arg.Switch('-k', help=(
+            'Keep every statement that writes a value to the success output stream, including bare '
+            'literals an obfuscator injected as noise. Use this when the input is a module or a '
+            'fragment of a larger script, where such a value can reach a caller rather than only '
+            'the console.'))] = False,
+    ):
+        super().__init__(timeout=timeout, keep_output=keep_output)
 
     def parse(self, data: str) -> Ps1Script:
         return Ps1Parser(data).parse()
 
-    transform = staticmethod(deobfuscate)
+    def transform(self, ast: Ps1Script) -> int:
+        return deobfuscate(ast, preserve_bare_output=self.args.keep_output)
 
     def synthesize(self, ast: Ps1Script) -> str:
         return Ps1Synthesizer().convert(ast)
