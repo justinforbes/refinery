@@ -520,7 +520,7 @@ _STRIPPABLE = {
     'comparison'       : ('4242424242 -GT 3'     , '$True'),       # noqa
     'array literal'    : ('@(4242424242, 8484)'  , '4242424242'),  # noqa
     'hash literal'     : ("@{ a = 'Xtjbnwqm' }"  , 'Xtjbnwqm'),    # noqa
-    'range'            : ('4242424242..4242424245', '4242424242'),  # noqa
+    'range'            : ('7654321..7654325'     , '7654321'),     # noqa
 }
 
 
@@ -635,6 +635,34 @@ class TestPs1OutputSomethingElseHoldsIsKeptEitherWay(TestPs1):
             with self.subTest(call):
                 self._assertKeptEitherWay(F'{self._QZMR}{call}\n{_ANCHOR}', 'Xtjbnwqm')
 
+    def test_a_value_a_call_site_hands_to_anything_at_all_is_kept(self):
+        # Regression: the outward walk enumerated the positions that *consume* a value and walked
+        # past everything else, so every slot the enumeration did not name read as the console. The
+        # first two write the payload to disk, the rest decide what runs next — measured on
+        # PowerShell 5.1, `Qzmr` returns `Xtjbnwqm` and the branch is taken.
+        for call in (
+            r"[IO.File]::WriteAllText('C:\out.txt', (Qzmr))",
+            r'Set-Content C:\out.txt (Qzmr)',
+            'if (Qzmr) { Start-Process calc }',
+            'while (Qzmr) { Start-Process calc }',
+            'foreach ($i in Qzmr) { Start-Process $i }',
+            'switch (Qzmr) { 1 { Start-Process calc } }',
+            'Write-Host (Qzmr)',
+            'throw (Qzmr)',
+            '$a = @(1, 2)[(Qzmr)]',
+        ):
+            with self.subTest(call):
+                self._assertKeptEitherWay(F'{self._QZMR}{call}\n{_ANCHOR}', 'Xtjbnwqm')
+
+    def test_a_value_a_parameter_default_holds_is_kept(self):
+        # A default runs on every call that omits the argument, and the walk out of one reaches a
+        # genuine function boundary — so it answers `CALLER` and grounds the callee whenever the
+        # function holding the default is grounded, which no arm added for an argument position
+        # would have caught.
+        self._assertKeptEitherWay(
+            F'{self._QZMR}function Ldkr {{ param($p = (Qzmr)) Write-Host $p }}\nLdkr\n{_ANCHOR}',
+            'Xtjbnwqm')
+
     def test_a_value_a_pipeline_consumes_is_kept_though_nothing_could_tell(self):
         """
         This one is a policy choice and not a semantic requirement, which is why it is named for the
@@ -708,6 +736,7 @@ _UNKNOWNS = (
     '& $dispatch',
     '${function:Qzmr} = { }',
     'Export-ModuleMember -Function Qzmr',
+    "& 'Microsoft.PowerShell.Core\\Export-ModuleMember' -Function Qzmr",
 )
 
 
@@ -737,6 +766,41 @@ class TestPs1RemovalIsMonotoneInWhatItKnows(TestPs1):
             with self.subTest(opener):
                 unknown = _statements(self._deobfuscate(F'{opener}\n{self._SCRIPT}'))
                 self.assertLessEqual(known, unknown)
+
+    def test_an_unknown_keeps_the_name_it_could_bind_and_everything_that_name_writes(self):
+        # The subset property above holds vacuously while `known` is the anchor alone — every
+        # statement it could report missing has already been stripped from `known` — so it is not
+        # what says the removal fails closed. This is: under every unknown the definition and the
+        # value its body writes both have to be standing, because the name could be bound or reached
+        # from a file this walk never read. The bare `'Ldkrpwsz'` at the root is deliberately not
+        # asserted — an unknown says nothing about who reads the root, which is the console under
+        # the default model whatever else the script imports, and `preserve_bare_output` is the
+        # switch that keeps it.
+        #
+        # Asked of the pass, because that is the scope on which it holds for every unknown.
+        # `Ps1FunctionEvaluator` folds a call into its value and then deletes the definition, and it
+        # declines that deletion for an export alone — the other unknowns are risks it takes
+        # deliberately, in exchange for resolving `iex` trampolines. The export case, where the
+        # property does reach the whole pipeline, is pinned separately below.
+        for opener in _UNKNOWNS:
+            with self.subTest(opener):
+                result = self._apply(F'{opener}\n{self._SCRIPT}', Ps1JunkStatementRemoval)
+                self.assertIn('function Qzmr', result)
+                self.assertIn('Xtjbnwqm', result)
+
+    def test_an_exported_name_keeps_what_it_writes_through_the_whole_pipeline(self):
+        # Regression: an export says in as many words that a caller outside the file reaches this
+        # name, and the junk pass honoured it while the function evaluator did not — it folded the
+        # internal call, deleted the definition, and left a bare literal at the root that the junk
+        # pass then stripped as console text. A `.psm1`'s whole payload went, under the default.
+        for export in (
+            'Export-ModuleMember -Function Qzmr',
+            "& 'Microsoft.PowerShell.Core\\Export-ModuleMember' -Function Qzmr",
+        ):
+            with self.subTest(export):
+                result = self._deobfuscate(F'{export}\n{self._SCRIPT}')
+                self.assertIn('function Qzmr', result)
+                self.assertIn('Xtjbnwqm', result)
 
     def test_the_default_removes_whole_statements_and_never_rewrites_one(self):
         # Whatever the switch is worth, turning it off may only *delete*. A default output holding a
@@ -1098,6 +1162,18 @@ class TestPs1NameRemovalNeedsTheWholeStory(TestPs1):
 
 
 class TestPs1RemovalLeavesNoDanglingReference(TestPs1):
+    def test_a_call_inside_a_nested_definition_keeps_the_definition_it_names(self):
+        # Regression: a call site was credited to the innermost function around it, so the call to
+        # `Payload` counted as `Inner`'s and `Inner` is named by nothing. `Payload` then read as
+        # reached from nowhere and was deleted — while `Inner`, which no pass removes because only a
+        # top-level definition is removable, stayed behind calling a name the script no longer
+        # defines. A call is credited to the enclosing scope for exactly this reason.
+        result = self._deobfuscate(
+            'function Outer { function Inner { Payload } }\n'
+            'Outer\n'
+            'function Payload { Start-Process calc }')
+        self.assertIn('Start-Process calc', result)
+
     def test_a_kept_call_site_keeps_the_definition_it_names(self):
         result = self._apply(cleandoc(
             """

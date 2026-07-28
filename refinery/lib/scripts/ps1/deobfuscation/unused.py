@@ -15,7 +15,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     is_fault_free,
     is_side_effect_free,
     opens_a_redirection_target,
-    output_sink,
+    output_path,
     pruning_erases_body,
     statement_effect,
     unconsumed_statement,
@@ -367,10 +367,13 @@ class Ps1JunkStatementRemoval(Transformer):
         Decide the whole batch, then apply it once.
 
         **Two different sinks are read here and they answer two different questions.** Whether a
-        body may be reasoned about at all is positional: `output_sink` calls a stored closure or a
+        body may be reasoned about at all is positional: `output_path` calls a stored closure or a
         `$( ... )` opaque, and this pass has never touched one. Whether a *write to the output
         stream* inside it may be deleted needs the destination that write reaches, which position
         cannot supply for a function body, so `Ps1OutputFlow` resolves it across the call graph.
+
+        One outward walk answers both. The positional `Ps1OutputPath` is what the resolution reads,
+        so asking the two questions separately walked every ancestor chain twice for one answer.
 
         Collapsing the two costs recall and did: a body the flow reports captured — a function whose
         result someone stores — still holds `$Null = 1` discards that write nothing at all, and
@@ -382,17 +385,19 @@ class Ps1JunkStatementRemoval(Transformer):
         called = cache.call_graph.reachable_names()
         plans = Ps1RemovalPlans()
         for parent in node.walk():
-            position = output_sink(parent)
-            if position is None or position is OutputSink.CAPTURED:
-                continue
             body = get_body(parent)
-            removable = self._removable_in_body(parent, flow.sink_of(parent), called, oracle)
+            if body is None:
+                continue
+            path = output_path(parent)
+            if path.sink is OutputSink.CAPTURED:
+                continue
+            removable = self._removable_in_body(parent, flow.resolved(path), called, oracle)
             for statement in body:
                 if statement in removable:
                     plans.propose_in(parent, statement)
         if plans.commit():
             self.mark_changed()
-        self._remove_inert_functions(node, model_cache(self, node).call_graph, oracle)
+        self._remove_inert_functions(node, cache.call_graph, oracle)
 
     def _remove_inert_functions(self, node: Node, graph: Ps1CallGraph, oracle: TypeOracle):
         """
@@ -412,9 +417,9 @@ class Ps1JunkStatementRemoval(Transformer):
 
         "Every definition" can only mean every definition standing in this tree, so the tree has to
         be the whole story. That is the graph's own `is_readable`, which this pass no longer answers
-        for itself: an open world, an opaque dispatch, an identity-namespace assignment and an export
-        all bind a name from somewhere the walk cannot read, and the empty body standing here is then
-        not the body the call reaches.
+        for itself: an open world, an opaque dispatch, an identity-namespace assignment and an
+        export all bind a name from somewhere the walk cannot read, and the empty body standing here
+        is then not the body the call reaches.
 
         The graph is built in source order, because removal is by identity scan over the containing
         list: taking the reverse order `Node.walk` yields would delete from the back and make every
@@ -496,10 +501,10 @@ class Ps1JunkStatementRemoval(Transformer):
 
         A call site qualifies only when it is argument-free, its value is what the enclosing
         statement yields, and nothing on the way to that statement opens a file. The two redirection
-        questions are separate and both have to be asked: `j > out.txt` sends the value somewhere the
-        body cannot see it, which `unconsumed_statement` answers, and `j 2> err.txt` sends nothing
-        anywhere while still creating the file, which only `opens_a_redirection_target` catches. The
-        call is inert either way; the statement around it is not.
+        questions are separate and both have to be asked: `j > out.txt` sends the value somewhere
+        the body cannot see it, which `unconsumed_statement` answers, and `j 2> err.txt` sends
+        nothing anywhere while still creating the file, which only `opens_a_redirection_target`
+        catches. The call is inert either way; the statement around it is not.
         """
         statements: list[Node] = []
         for site in graph.call_sites(key):

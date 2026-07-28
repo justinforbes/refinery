@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     _Value: TypeAlias = str | int | float | bool | list | None
 
 from refinery.lib.scripts import Block, Transformer
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
 from refinery.lib.scripts.ps1.ast import (
     get_command_name,
@@ -1190,7 +1191,20 @@ class Ps1FunctionEvaluator(Transformer):
             if not self._functions:
                 return None
             super().visit(node)
-            self._remove_resolved_definitions(node)
+            # Folding a call into its value preserves meaning whoever else can reach the name, so
+            # the substitution above is unconditional. Deleting the *definition* is a name-keyed
+            # removal, and an exported name has a caller this walk never read: the definition is a
+            # reachable entry point and folding its one internal call proves nothing about it.
+            # Without the gate a `.psm1` lost the definition here, and the value it had been folded
+            # into was then a bare literal at the root that junk removal stripped as console text.
+            #
+            # `exports_a_name` and not `is_readable`, deliberately. The other three unknowns that
+            # verdict carries — an open world, an opaque dispatch, an identity binding — are risks
+            # this pass has always taken in exchange for resolving the `iex` trampolines obfuscators
+            # are built out of, and `TestPs1FunctionEvaluator` pins several of them. An export is
+            # not a risk taken for anything.
+            if not model_cache(self, node).call_graph.exports_a_name:
+                self._remove_resolved_definitions(node)
             return None
         finally:
             self._entry = False

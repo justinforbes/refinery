@@ -26,9 +26,8 @@ class Ps1ModelCache(ModelCacheBase):
     `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld`, the
     `refinery.lib.scripts.ps1.analysis.callgraph.Ps1CallGraph` and the
     `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow` derived from it — each dropped
-    whenever this root's AST-mutation counter advances past the value it was built at. Later
-    phases add a
-    `control_flow` slot behind the same shape.
+    whenever this root's AST-mutation counter advances past the value it was built at. Later phases
+    add a `control_flow` slot behind the same shape.
     """
 
     _SLOTS = ('_model', '_closed_world', '_oracle', '_call_graph', '_output_flow')

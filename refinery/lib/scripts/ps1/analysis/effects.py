@@ -6,9 +6,9 @@ pass that decides "is it safe to delete this?" asks here, so that no two of them
 Most of these are free functions because the facts they compute are syntactic: a conservative
 allow-list over one expression, needing no information from anywhere else in the tree.
 `Ps1OutputFlow` is the exception and the first genuine summary fact here — where a body's output
-ends up cannot be
-read off the body, only off every call that reaches it — so it is a model built once over the whole
-script and held in a `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot.
+ends up cannot be read off the body, only off every call that reaches it — so it is a model built
+once over the whole script and held in a
+`refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot.
 
 **Scope.** Three questions about a statement are separable and all three are now answered, each by a
 different thing, and no one of them may stand in for another:
@@ -32,7 +32,7 @@ import enum
 
 from typing import Iterator, NamedTuple, Sequence, TypeGuard
 
-from refinery.lib.scripts import Node
+from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
@@ -55,6 +55,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Attribute,
     Ps1BinaryExpression,
     Ps1CastExpression,
+    Ps1CatchClause,
     Ps1CommandArgument,
     Ps1CommandInvocation,
     Ps1DataSection,
@@ -962,6 +963,50 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
     return False
 
 
+#: The widest and narrowest values PowerShell's range operator accepts. Both bounds go through
+#: `Int32`, so an endpoint outside this window raises the same conversion error a bad cast does.
+_INT32_RANGE = range(-0x80000000, 0x80000000)
+
+
+def _is_numeric_constant(node) -> bool:
+    """
+    Whether `node` is a constant that PowerShell reads as a number without running a conversion that
+    can fail: a numeric literal or one of the built-in constants, through parentheses and a further
+    unary sign.
+
+    A string literal is deliberately not one, which is the whole of why this is separate from
+    `is_fault_free`. `is_fault_free('abc')` is `True` because *evaluating* a string cannot raise,
+    while `-'abc'` raises the `Int32` conversion error the caller is trying to rule out.
+    """
+    if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
+        return True
+    if is_builtin_variable(node):
+        return True
+    if isinstance(node, Ps1ParenExpression):
+        return _is_numeric_constant(node.expression)
+    if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
+        return _is_numeric_constant(node.operand)
+    return False
+
+
+def _is_range_bound(node) -> bool:
+    """
+    Whether `node` is an endpoint the range operator provably accepts: an integer literal whose
+    value fits in `Int32`, through parentheses and a unary sign.
+
+    Narrower than `_is_numeric_constant` because the operator converts to `Int32` rather than merely
+    reading a number. `4242424242..4242424245` is two perfectly good integer literals and still
+    raises, since neither fits, and a real literal rounds rather than converting cleanly.
+    """
+    if isinstance(node, Ps1IntegerLiteral):
+        return node.value in _INT32_RANGE
+    if isinstance(node, Ps1ParenExpression):
+        return _is_range_bound(node.expression)
+    if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
+        return _is_range_bound(node.operand)
+    return False
+
+
 def is_fault_free(node) -> bool:
     """
     Whether evaluating an expression provably cannot raise: a literal, one of the built-in constants
@@ -985,6 +1030,11 @@ def is_fault_free(node) -> bool:
     A method or cmdlet call is deliberately not here, however obviously safe. `[Math]::Sqrt(36)`
     cannot throw and `[Convert]::ToInt32('x')` can, and telling those apart is a table of .NET
     semantics rather than a rule about the syntax.
+
+    **A unary sign and a range coerce, and coercion is the fault this predicate exists to see.**
+    Both read their operands through `Int32`, so `-'abc'` and `'a'..'z'` raise exactly what
+    `[Int]'abc'` raises; neither may inherit the string-literal grant, and both go through
+    `_is_numeric_constant` instead.
     """
     if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral, Ps1StringLiteral)):
         return True
@@ -993,11 +1043,11 @@ def is_fault_free(node) -> bool:
     if isinstance(node, Ps1ParenExpression):
         return is_fault_free(node.expression)
     if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
-        return is_fault_free(node.operand)
+        return _is_numeric_constant(node.operand)
     if isinstance(node, Ps1ArrayLiteral):
         return all(is_fault_free(element) for element in node.elements)
     if isinstance(node, Ps1RangeExpression):
-        return is_fault_free(node.start) and is_fault_free(node.end)
+        return _is_range_bound(node.start) and _is_range_bound(node.end)
     if isinstance(node, Ps1HashLiteral):
         return _hash_literal_is_fault_free(node)
     if isinstance(node, Ps1ArrayExpression):
@@ -1275,8 +1325,9 @@ class OutputSink(enum.Enum):
 
     `CALLER` is not a destination, it is a deferral: it says the value leaves this body and nothing
     about where it lands. `Ps1OutputFlow` resolves it into one of the other two by reading every
-    call site, and `sink_of` therefore never answers `CALLER`. Only `output_sink`, the positional
-    question, does — and a caller that reads that answer as a destination is guessing.
+    call site, and `Ps1OutputFlow.resolved` therefore never answers `CALLER`. Only `output_path` and
+    `output_sink`, the positional question, do — and a caller that reads that answer as a
+    destination is guessing.
 
     This replaced a `BodyRole` that answered *where a body sits* and was read as *who reads it*.
     Under that enum a bare value at the script root was unprotected, because the root was not a
@@ -1350,7 +1401,7 @@ def unconsumed_statement(expr: Node) -> Ps1ExpressionStatement | None:
     **This is not a capture test**, and the two are one walk apart. `$r = @(f)` and `$r = $(f)` hold
     `f` as a whole statement, so this answers with that statement while the value is very much
     captured — by the `@( ... )` around the *body* the statement sits in, which only the outward
-    walk in `_output_reader` sees. Reading this as "the value escapes" is how an assigned call came
+    walk in `output_path` sees. Reading this as "the value escapes" is how an assigned call came
     to look like a discardable one.
 
     What it does answer is where the value goes *next*, which is why the redirections are read here:
@@ -1414,13 +1465,48 @@ class Ps1OutputPath(NamedTuple):
     function: Ps1FunctionDefinition | None
 
 
-def _output_reader(node) -> Ps1OutputPath:
+def _output_writes_through(cursor, prev) -> bool:
     """
-    Walk outward from `node` until something *consumes* the value written there; a node that merely
-    propagates it is walked past. Four things consume: a value slot, a redirection, an upstream
-    pipeline position (all `CAPTURED`), and a function boundary (`CALLER`). Reaching the script
-    root without one is `HOST`. Everything else — a loop, an `if`, a `try`, a `trap`, a `switch`
-    clause, a bare `&{ ... }` in statement position — writes through to whatever encloses it.
+    Whether `cursor` hands the value produced at `prev` on to whatever encloses it, rather than
+    being the thing that reads it.
+
+    **This is an allow-list of propagating positions, and the polarity is the whole point.** The
+    walk that reads it answers for any node in the tree, so a position this does not recognize is a
+    position whose reader is unknown, and the answer to an unknown reader is `CAPTURED` — the one
+    that prunes nothing. Enumerating the *consumers* instead and propagating by default is the
+    inverse, and it deletes payloads: every value slot such an enumeration missed — a command
+    argument, an `if` condition, a `foreach` source, an index, a `param` default — read as a value
+    nobody holds, so the function called there was judged to write only to the console and the bare
+    values in its body were deleted.
+
+    A `refinery.lib.scripts.Block` is only ever a write-through statement list: an `if` branch, a
+    loop or `switch` body, a `try`, `catch` or `finally` body, a `trap` body. The two spellings that
+    are not — the body of a `data` section and a named block of a script block — are answered by
+    their holder before the walk reaches here. `Ps1CatchClause` is the one clause node standing
+    between such a block and the construct holding it.
+    """
+    if isinstance(prev, (Block, Ps1CatchClause)):
+        return True
+    if isinstance(cursor, Ps1ExpressionStatement):
+        return cursor.expression is prev
+    if isinstance(cursor, Ps1ParenExpression):
+        return cursor.expression is prev
+    if isinstance(cursor, Ps1CommandInvocation):
+        return cursor.name is prev
+    if isinstance(cursor, Ps1Pipeline):
+        return bool(cursor.elements) and cursor.elements[-1] is prev
+    if isinstance(cursor, Ps1PipelineElement):
+        return not _feeds_downstream(cursor)
+    body = get_body(cursor)
+    return body is not None and any(statement is prev for statement in body)
+
+
+def output_path(node) -> Ps1OutputPath:
+    """
+    Walk outward from `node` until something *reads* the value written there, stepping past only the
+    positions `_output_writes_through` recognizes. A function boundary answers `CALLER`, the script
+    root answers `HOST`, and everything else — a value slot, a redirection, an upstream pipeline
+    position, and every position the allow-list does not name — answers `CAPTURED`.
 
     So the same node answers differently depending on where it sits, and this is the point rather
     than an inconsistency to resolve later:
@@ -1433,18 +1519,15 @@ def _output_reader(node) -> Ps1OutputPath:
 
     This takes any node and not only a body owner, because the same walk answers both questions that
     need it: where a body's output goes, and where the value produced by one call site goes. Asking
-    it of a call site is what lets `Ps1OutputFlow` resolve a `CALLER` into a real destination.
+    it of a call site is what lets `Ps1OutputFlow` resolve a `CALLER` into a real destination, and
+    it is also what makes the allow-list polarity load bearing — a body owner only ever sits in a
+    handful of positions, while a call site sits in every position an expression can.
     """
-    prev = node
     cursor = node
     while cursor is not None:
         if _output_is_redirected_away(cursor):
             return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression, Ps1DataSection)):
-            return Ps1OutputPath(OutputSink.CAPTURED, None)
-        if isinstance(cursor, Ps1AssignmentExpression) and cursor.value is prev:
-            return Ps1OutputPath(OutputSink.CAPTURED, None)
-        if isinstance(cursor, Ps1PipelineElement) and _feeds_downstream(cursor):
             return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, Ps1ScriptBlock):
             holder = cursor.parent
@@ -1454,9 +1537,11 @@ def _output_reader(node) -> Ps1OutputPath:
                 return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, Ps1Script):
             return Ps1OutputPath(OutputSink.HOST, None)
-        prev = cursor
-        cursor = cursor.parent
-    return Ps1OutputPath(OutputSink.HOST, None)
+        parent = cursor.parent
+        if parent is None or not _output_writes_through(parent, cursor):
+            return Ps1OutputPath(OutputSink.CAPTURED, None)
+        cursor = parent
+    return Ps1OutputPath(OutputSink.CAPTURED, None)
 
 
 def output_sink(node) -> OutputSink | None:
@@ -1465,15 +1550,15 @@ def output_sink(node) -> OutputSink | None:
     `None` when `node` owns no prunable body — which is also how `@( ... )` stays out of every
     pruning walk, since `refinery.lib.scripts.ps1.ast.get_body` deliberately does not recognize it.
 
-    A body does not carry a sink of its own; it is found by the outward walk in `_output_reader`.
+    A body does not carry a sink of its own; it is found by the outward walk in `output_path`.
     This is the positional answer and it stops at a function boundary, which is enough for a caller
     that only needs to know whether the body is prunable at all. A caller deciding whether to delete
-    a *write* to the output stream needs `Ps1OutputFlow.sink_of` instead, which resolves `CALLER`
-    into a destination by reading the call graph.
+    a *write* to the output stream needs `Ps1OutputFlow.resolved` on the whole `Ps1OutputPath`
+    instead, which turns `CALLER` into a destination by reading the call graph.
     """
     if get_body(node) is None:
         return None
-    return _output_reader(node).sink
+    return output_path(node).sink
 
 
 class Ps1OutputFlow:
@@ -1490,22 +1575,17 @@ class Ps1OutputFlow:
     def __init__(self, reaching_host: frozenset[Ps1FunctionDefinition]):
         self._reaching_host = reaching_host
 
-    def sink_of(self, node) -> OutputSink | None:
-        """
-        Who reads the output of the statement body `node` owns, or `None` when it owns no prunable
-        body. Never `OutputSink.CALLER`: a body that writes to its caller is resolved into the
-        destination that caller writes to, or into `CAPTURED` when no such destination is provable.
-        """
-        if get_body(node) is None:
-            return None
-        return self.resolved(_output_reader(node))
-
     def resolved(self, path: Ps1OutputPath) -> OutputSink:
         """
-        The destination a positional `Ps1OutputPath` really names. A path that already names one is
-        returned unchanged; a `CALLER` path is `HOST` only when its function is one this flow proved
-        writes to the process output, and `CAPTURED` otherwise — including for a class method, which
-        no call site in the tree names and which is therefore never among them.
+        The destination a positional `Ps1OutputPath` really names, and never `OutputSink.CALLER`. A
+        path that already names a destination is returned unchanged; a `CALLER` path is `HOST` only
+        when its function is one this flow proved writes to the process output, and `CAPTURED`
+        otherwise — including for a class method, which no call site in the tree names and which is
+        therefore never among them.
+
+        It takes the whole path rather than the node, so that a caller which already has the
+        positional answer — every one of them does, since it is what decides whether the body is
+        prunable at all — pays for the outward walk once.
         """
         if path.sink is not OutputSink.CALLER:
             return path.sink
@@ -1579,7 +1659,7 @@ def build_output_flow(graph: Ps1CallGraph) -> Ps1OutputFlow:
         for definition in graph.definitions(name)
     }
     readers = {
-        name: [_output_reader(site.invocation) for site in graph.call_sites(name)]
+        name: [output_path(site.invocation) for site in graph.call_sites(name)]
         for name in graph.defined_names
     }
     grounded: set[str] = set()

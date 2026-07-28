@@ -417,3 +417,31 @@ class TestPs1EmulatorExtra(TestPs1):
                     }}
                     $x = f {redirection}
                 """))
+
+    def test_an_exported_definition_is_not_removed_after_its_calls_are_folded(self):
+        # Regression: folding a call into its value is safe whoever else can reach the name, but
+        # deleting the definition afterwards is a name-keyed removal, and an exported name has a
+        # caller this tree does not contain. A `.psm1` lost the definition here, and the value it
+        # had been folded into was then a bare literal at the root that junk removal stripped as
+        # console text — so the module's whole payload went, under the default model, with an export
+        # statement standing right there saying it was reachable.
+        for export in (
+            'Export-ModuleMember -Function f',
+            "& 'Microsoft.PowerShell.Core\\Export-ModuleMember' -Function f",
+        ):
+            with self.subTest(export):
+                result = self._apply(
+                    F"{export}\nfunction f {{ 'FOLDED' }}\n$x = f", Ps1FunctionEvaluator)
+                self.assertIn('function f', result)
+                self.assertIn('FOLDED', result)
+
+    def test_a_definition_no_export_names_is_still_removed_after_folding(self):
+        # The other three unknowns `is_readable` carries are risks this pass takes deliberately, so
+        # gating on the whole verdict would stop it resolving the `iex` trampolines above. Only the
+        # export withholds.
+        for opener in ('', 'Invoke-Expression $code\n', '& $dispatch\n'):
+            with self.subTest(opener or '(closed world)'):
+                result = self._apply(
+                    F"{opener}function f {{ 'FOLDED' }}\n$x = f", Ps1FunctionEvaluator)
+                self.assertNotIn('function f', result)
+                self.assertIn("$x = 'FOLDED'", result)

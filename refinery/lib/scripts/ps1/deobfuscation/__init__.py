@@ -110,11 +110,10 @@ def deobfuscate(
 
     The two switches are not the same knob at different strengths. `remove_junk` decides whether
     that second pass runs at all, so turning it off also keeps every dead store and uncalled
-    function;
-    `preserve_bare_output` decides one question inside it — whether a statement whose only effect is
-    to write a value to the success output stream may be deleted — and leaves the rest of the pass
-    working. See `refinery.lib.scripts.ps1.deobfuscation.options.Ps1DeobfuscationOptions` for what
-    that costs and the assumption it rests on.
+    function, `preserve_bare_output` decides one question inside it — whether a statement whose only
+    effect is to write a value to the success output stream may be deleted — and leaves the rest of
+    the pass working. See `refinery.lib.scripts.ps1.deobfuscation.options.Ps1DeobfuscationOptions`
+    for what that costs and the assumption it rests on.
     """
     # One analysis cache is built over the script and shared across both phases; the now-honored
     # `tree_version` counter keeps it consistent even across the two pipeline runs, so a transform in
@@ -131,4 +130,9 @@ def deobfuscate(
     # both phases. Splitting the budget instead lets a phase-1 result of exactly `max_steps` leave a
     # remaining budget of 0, which the pipeline would read as "unlimited" and run phase 2 unbounded.
     return _phase2.run(
-        ast, max_steps=max_steps, initial_steps=steps, models=cache, options=options)
+        ast,
+        max_steps=max_steps,
+        initial_steps=steps,
+        models=cache,
+        options=options,
+    )

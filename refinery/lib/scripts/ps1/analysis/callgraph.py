@@ -24,6 +24,7 @@ from refinery.lib.scripts.ps1.ast import (
     get_command_name,
     is_opaque_dispatch,
     normalize_command_name,
+    resolve_command_name,
 )
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
@@ -43,7 +44,10 @@ _IDENTITY_SCOPES = frozenset({
 })
 
 #: Commands that hand a name to code outside this file. A `.psm1` exporting a function has call
-#: sites in whatever imported it, and no walk over this tree can see them.
+#: sites in whatever imported it, and no walk over this tree can see them. Read through
+#: `refinery.lib.scripts.ps1.ast.resolve_command_name`, which is the deny-list reading of a name:
+#: a hit here withholds every name-keyed removal, so a spelling that dodges the table is the
+#: dangerous direction and a module qualifier must not be enough to dodge it.
 _EXPORTING_COMMANDS = frozenset({
     'export-modulemember',
 })
@@ -75,27 +79,34 @@ def _is_class_method(definition: Ps1FunctionDefinition) -> bool:
 
 def _enclosing_function(node: Node) -> str | None:
     """
-    The key of the function definition whose body holds `node`, or `None` when `node` runs as part
-    of the script itself.
+    The key of the **outermost** function definition whose body holds `node`, or `None` when `node`
+    runs as part of the script itself.
 
-    A class method answers `None` rather than its own name, which is the conservative direction for
-    both readers. A method body runs whenever something constructs or calls into the class, and this
-    graph cannot see that happen; treating its calls as unconditional keeps every name they reach
-    reachable, and `Ps1OutputFlow` separately refuses to ground a method body because no call site
-    ever names it.
+    Outermost rather than innermost, because the only reader is `Ps1CallGraph.reachable_names` and a
+    nested definition is never called by name. `function Outer { function Inner { Payload } }`
+    credits the call to `Outer`: reading it as `Inner`'s leaves `Payload` reached by nothing, so it
+    is deleted while `Inner` — which no pass removes, since only a top-level definition is
+    removable — stands there calling a name the emitted script no longer defines. Attribution to the
+    enclosing scope is what makes the two answers agree.
+
+    A class method answers `None` rather than its own name, which is the conservative direction. A
+    method body runs whenever something constructs or calls into the class, and this graph cannot
+    see that happen; treating its calls as unconditional keeps every name they reach reachable, and
+    `Ps1OutputFlow` separately refuses to ground a method body because no call site ever names it.
     """
+    found: str | None = None
     cursor = node.parent
     while cursor is not None:
         if isinstance(cursor, Ps1FunctionDefinition):
-            return None if _is_class_method(cursor) else normalize_command_name(cursor.name)
+            found = None if _is_class_method(cursor) else normalize_command_name(cursor.name)
         cursor = cursor.parent
-    return None
+    return found
 
 
 class Ps1CallSite(NamedTuple):
     """
-    One invocation of a command name, paired with the key of the function whose body holds it: the
-    edge's source, where the invocation is its target.
+    One invocation of a command name, paired with the key of the outermost function whose body holds
+    it — see `_enclosing_function` — which is the edge's source, where the invocation is its target.
     """
     invocation: Ps1CommandInvocation
     caller: str | None
@@ -115,10 +126,12 @@ class Ps1CallGraph:
         definitions: Mapping[str, Sequence[Ps1FunctionDefinition]],
         call_sites: Mapping[str, Sequence[Ps1CallSite]],
         readable: bool,
+        exports: bool,
     ):
         self._definitions = dict(definitions)
         self._call_sites = dict(call_sites)
         self._readable = readable
+        self._exports = exports
 
     @property
     def is_readable(self) -> bool:
@@ -143,6 +156,22 @@ class Ps1CallGraph:
         caller can see it in `refinery.units.scripting.ps1`.
         """
         return self._readable
+
+    @property
+    def exports_a_name(self) -> bool:
+        """
+        Whether this script hands a command name to code outside the file, which is one of the four
+        things `is_readable` reads and the only one that says a *definition* has a reader elsewhere.
+
+        The distinction is worth the separate name because the two questions have different answers
+        for the same script. An `Invoke-Expression` opens the type world and could in principle call
+        anything, and every pass here has long accepted that risk in exchange for resolving the
+        trampolines obfuscators are built out of; `TestPs1FunctionEvaluator` pins several. An export
+        is not a risk taken for anything: the script says in as many words that a caller it cannot
+        see will call this name, so a pass that deletes the definition deletes a reachable entry
+        point.
+        """
+        return self._exports
 
     def definitions(self, name: str) -> Sequence[Ps1FunctionDefinition]:
         """
@@ -204,6 +233,7 @@ def build_call_graph(root: Ps1Script, oracle: TypeOracle) -> Ps1CallGraph:
     definitions: dict[str, list[Ps1FunctionDefinition]] = {}
     call_sites: dict[str, list[Ps1CallSite]] = {}
     readable = oracle.world_closed_at(root)
+    exports = False
     for node in root.walk_in_order():
         if isinstance(node, Ps1FunctionDefinition):
             if not _is_class_method(node):
@@ -215,9 +245,10 @@ def build_call_graph(root: Ps1Script, oracle: TypeOracle) -> Ps1CallGraph:
                     readable = False
                 continue
             key = normalize_command_name(name)
-            if key in _EXPORTING_COMMANDS:
+            if resolve_command_name(node) in _EXPORTING_COMMANDS:
                 readable = False
+                exports = True
             call_sites.setdefault(key, []).append(Ps1CallSite(node, _enclosing_function(node)))
         elif binds_command_identity(node):
             readable = False
-    return Ps1CallGraph(definitions, call_sites, readable)
+    return Ps1CallGraph(definitions, call_sites, readable, exports)

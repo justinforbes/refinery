@@ -11,6 +11,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     body_is_inert,
     is_fault_free,
     is_side_effect_free,
+    output_path,
     output_sink,
     pruning_erases_body,
     statement_effect,
@@ -18,7 +19,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
 )
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
-from refinery.lib.scripts.ps1.ast import get_body
+from refinery.lib.scripts.ps1.ast import get_body, get_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1CommandInvocation,
@@ -678,6 +679,27 @@ class TestPs1FaultFreedom(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertFalse(is_fault_free(self._expression(source)))
 
+    def test_an_operator_that_converts_to_int_raises_on_a_string_it_accepts(self):
+        # A string literal cannot raise by being evaluated, which is why the plain arm grants it,
+        # and both of these read their operands through `Int32` — so each raises exactly what
+        # `[Int]'abc'` raises. Inheriting the string grant is what deleted a guard that had already
+        # terminated the script.
+        for source in ("-'Xtjbnwqm'", "+'Xtjbnwqm'", "'a'..'z'", "1..'z'", "@('a'..'z')"):
+            with self.subTest(source):
+                self.assertFalse(is_fault_free(self._expression(source)))
+
+    def test_a_range_bound_that_does_not_fit_in_int32_is_not_fault_free(self):
+        # `4242424242` is a perfectly good integer literal and still too large for the conversion
+        # the range operator performs, so the endpoints are weighed rather than counted.
+        for source in ('4242424242..4242424245', '1..4242424242', '1..2147483648'):
+            with self.subTest(source):
+                self.assertFalse(is_fault_free(self._expression(source)))
+
+    def test_a_range_of_int32_literals_is_still_fault_free(self):
+        for source in ('1..5', '(-3)..(+9)', '0..2147483647'):
+            with self.subTest(source):
+                self.assertTrue(is_fault_free(self._expression(source)))
+
     def test_side_effect_free_is_not_an_answer_to_this_question(self):
         # Each of these was hoisted out of its `try` on a purity argument, and each one raises on
         # the wrong operand.
@@ -840,6 +862,54 @@ class TestPs1OutputSink(Ps1EffectsTest):
 
     def test_a_node_that_owns_no_body_has_no_sink(self):
         self.assertIsNone(output_sink(self._expression('42')))
+
+    def _call_to_f(self, source: str) -> Ps1CommandInvocation:
+        return next(
+            node for node in self._parse(source).walk_in_order()
+            if isinstance(node, Ps1CommandInvocation) and get_command_name(node) == 'f'
+        )
+
+    def test_a_value_position_the_walk_cannot_read_is_captured(self):
+        # A body owner sits in a handful of positions; a call site sits in every position an
+        # expression can, and the walk answers for both. Reading an unrecognized position as
+        # propagating reported all of these as HOST, which is the answer that deletes what the
+        # callee wrote.
+        for source in (
+            "[IO.File]::WriteAllText('C:\\x', (f))",
+            'Write-Host (f)',
+            'if (f) { 1 }',
+            'while (f) { 1 }',
+            'foreach ($i in f) { 1 }',
+            'switch (f) { 1 { 2 } }',
+            'for (; f; ) { 1 }',
+            'do { 1 } while (f)',
+            'function g { param($p = (f)) 1 }',
+            '$a = @(1, 2)[(f)]',
+            'throw (f)',
+            '[Int](f)',
+            '-not (f)',
+            "(f) -join ','",
+            '$o.M((f))',
+        ):
+            with self.subTest(source):
+                self.assertIs(output_path(self._call_to_f(source)).sink, OutputSink.CAPTURED)
+
+    def test_a_call_the_walk_does_read_still_reaches_its_reader(self):
+        # The other half of the same claim: inverting the allow-list may not cost the positions it
+        # was already right about, or the answer is conservative by being useless.
+        for source, expected in (
+            ('f'                    , OutputSink.HOST),      # noqa
+            ('if ($x) { f }'        , OutputSink.HOST),      # noqa
+            ('&{ f }'               , OutputSink.HOST),      # noqa
+            ('try { f } catch { 1 }', OutputSink.HOST),      # noqa
+            ('Get-Item | f'         , OutputSink.HOST),      # noqa
+            ('f | Out-Null'         , OutputSink.CAPTURED),  # noqa
+            ('$r = f'               , OutputSink.CAPTURED),  # noqa
+            ('$r = $( f )'          , OutputSink.CAPTURED),  # noqa
+            ('function g { f }'     , OutputSink.CALLER),    # noqa
+        ):
+            with self.subTest(source):
+                self.assertIs(output_path(self._call_to_f(source)).sink, expected)
 
     def test_a_nested_block_answers_with_whoever_reads_the_body_holding_it(self):
         # The relation, not the three values: a block writes through to its holder, so any model

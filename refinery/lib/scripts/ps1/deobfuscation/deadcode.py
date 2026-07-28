@@ -401,9 +401,12 @@ class Ps1DeadCodeElimination(Transformer):
 
         This pass used to also drop bare constants wherever it read the body's value as unobserved,
         which was the narrowest slice of `StatementEffect.OUTPUT` and still a slice of it: `42` at
-        the script root prints `42`, and `if ($x) { 42 }` prints it too. `output_observed` is now
-        the answer at every body this walk reaches, so there was never a position where the drop
-        was licensed, and the whole decision is gone rather than gated to nothing.
+        the script root prints `42`, and `if ($x) { 42 }` prints it too. Reading a body's value as
+        unobserved is not something position can say — only
+        `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow` can, by resolving the destination
+        across the call graph — so deleting a write to the output stream is a decision
+        `refinery.lib.scripts.ps1.deobfuscation.unused.Ps1JunkStatementRemoval` owns alone, and the
+        whole decision is gone from here rather than gated to nothing.
 
         What is left removes only constructs whose condition is already proved constant, so none of
         it can be what an enclosing handler catches, and none of it can empty a body that pruning
