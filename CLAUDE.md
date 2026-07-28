@@ -68,19 +68,6 @@ The following rules contradict common Python conventions. Check them explicitly:
 - When making commits on the user's behalf, do not include a comment about AI co-authorship.
 - When asked to commit changes to git, only use one-line commit messages.
 
-# Code Review Context
-
-When asked to provide context for a code review, produce **only** the following, with no preface,
-no commentary, and nothing after it:
-
-1. The commit range on its own first line, as `<base>..<head>`
-2. A blank line, then `Notes from the author:`,
-   followed by any specific context and information you want to pass to the reviewer.
-   Keep this **minimal**; you do not want to bias the reviewer.
-
-Be specific and adversarial. The goal is to spend the reviewer's budget on what is not yet known,
-so never pad the notes with what the diff already shows.
-
 # Architecture is P0
 
 - Your highest priority is good architecture, clear separation of concerns, and maintainability.
@@ -91,6 +78,32 @@ so never pad the notes with what the diff already shows.
   Pause and devise a clean solution. Prompt to draft a new plan if necessary.
 - When fixing a bug, **always** identify the root issue first.
 - When a bug has been identified and understood, always write a small, targeted regression test for it.
+
+# Planning
+
+Whenever you make or substantially change a plan: Have it be challenged by 3 agents:
+
+1. one general purpose adversarial critic
+2. one architectural critic: it enforces the above "Architecture is P0" rule
+3. a testability critic which makes sure that the design is testable
+
+After a plan is written, always pause to compact your context window before an implementation round begins.
+
+# Code Review Context
+
+After each round of implementation, a code review is scheduled.
+Whenever you complete a plan, or when you are asked to provide context for a code review,
+produce **only** the following, with no preface, no commentary, and nothing after it:
+
+1. The commit range on its own first line, as `<base>..<head>`
+2. A blank line, then `Notes from the author:`,
+   followed by any specific context and information you want to pass to the reviewer.
+   Keep this **minimal**; you do not want to bias the reviewer.
+3. A brief reminder for the reviewer to add targeted regression tests where applicable.
+
+Your output must match this exactly so that it can be easily copied and pasted.
+Be specific and adversarial. The goal is to spend the reviewer's budget on what is not yet known,
+so never pad the notes with what the diff already shows.
 
 # Test Coverage
 
