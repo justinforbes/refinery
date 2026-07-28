@@ -3,14 +3,15 @@ Remove unused variable assignments and junk expression statements.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Node, Transformer, _remove_from_parent, _replace_in_parent
+from typing import NamedTuple
+
+from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import (
     BodyRole,
     StatementEffect,
     body_is_inert,
     body_role,
-    fault_is_observed,
     is_side_effect_free,
     output_is_covered,
     output_observed,
@@ -33,6 +34,7 @@ from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _find_removable_statement,
     _walk_outer_scope,
 )
+from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan, Ps1RemovalPlans
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AssignmentExpression,
@@ -72,10 +74,35 @@ def _binds_command_identity(node: Node) -> bool:
     )
 
 
-def _drop_store_keep_value(stmt: Node, rhs: Node) -> bool:
+class _MutationEdit(NamedTuple):
     """
-    Replace `stmt` — a dead store — with a discard of `rhs`, so the store goes but whatever
-    evaluating the value does survives. Returns whether the tree changed.
+    One intended edit to a dead store: the statement to be removed, and the right-hand side that has
+    to be kept as a discard because evaluating it does something, or `None` when it does not.
+    """
+    statement: Node
+    keep_value: Expression | None
+
+
+def _value_is_movable(rhs: Node) -> bool:
+    """
+    Whether a dead store's right-hand side can be kept as a statement of its own.
+
+    A right-hand side that is a *statement* rather than an expression — `$x = if ($c) { ... }`, and
+    the `switch`/`foreach`/`while`/`try` forms beside it, all legal assignment sources — has no
+    expression-statement spelling to be moved into, so the whole assignment stays. Removing it
+    instead would take the branch bodies with it.
+
+    Both passes that drop a dead store share this, rather than each spelling the rule: the two
+    outcomes are keep-the-value and keep-the-statement, and a pass that learned only one of them
+    would delete what the other keeps.
+    """
+    return isinstance(rhs, Expression)
+
+
+def _store_dropped_to_value(rhs: Expression) -> Ps1ExpressionStatement:
+    """
+    The statement a dead store becomes: a discard of `rhs`, so the store goes but whatever
+    evaluating the value does survives.
 
     The discard wrapper is not decoration. A bare expression statement *emits* its value, where the
     assignment being removed swallowed it, so rewriting `$unused = [ordered]@{ a = 1 }` to the
@@ -83,25 +110,14 @@ def _drop_store_keep_value(stmt: Node, rhs: Node) -> bool:
     inside a function body, return it. `$Null = ...` keeps the work and emits nothing, which is what
     the dead store did.
 
-    A right-hand side that is a *statement* rather than an expression — `$x = if ($c) { ... }`, and
-    the `switch`/`foreach`/`while`/`try` forms beside it, all legal assignment sources — has no
-    expression-statement spelling to be moved into, so the whole assignment stays and this reports
-    no change. Removing it instead would take the branch bodies with it.
-
-    Both passes that drop a dead store share this, rather than each spelling the rule: the two
-    outcomes are keep-the-value and keep-the-statement, and a pass that learned only one of them
-    would delete what the other keeps.
+    Building this adopts `rhs`, which is why it may be built before the batch holding it is known
+    to land: registering it with `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`
+    gives the adoption straight back, and no replacement holds a claim on the tree until that plan
+    commits. A pass that builds one and never registers it owes the repair itself.
     """
-    if not isinstance(rhs, Expression):
-        return False
-    target = Ps1Variable(name='Null')
-    discard = Ps1AssignmentExpression(target=target, operator='=', value=rhs)
-    target.parent = discard
-    rhs.parent = discard
-    replacement = Ps1ExpressionStatement(expression=discard)
-    discard.parent = replacement
-    _replace_in_parent(stmt, replacement)
-    return True
+    discard = Ps1AssignmentExpression(
+        target=Ps1Variable(name='Null'), operator='=', value=rhs)
+    return Ps1ExpressionStatement(expression=discard)
 
 
 class Ps1UnusedVariableRemoval(Transformer):
@@ -114,6 +130,24 @@ class Ps1UnusedVariableRemoval(Transformer):
     """
 
     def visit(self, node: Node):
+        """
+        Plan every candidate edit, ask the batch what it would accept, and only then decide which
+        bindings are dead.
+
+        The order matters and used to run the other way. A binding is dead because its every read
+        sits inside a right-hand side that is going away, so liveness is *restrictive* in the
+        survivor set and has to be asked of what the batch will actually do — see
+        `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan.accepted`. Two things keep a
+        right-hand side standing, and neither is visible before the edits are planned: a value that
+        does something survives as `$Null = <value>`, and a statement the fault veto declines to
+        delete survives whole. Deciding first and planning afterwards read both as erased and
+        deleted the assignment the surviving read needs.
+
+        Planning up front means the replacements exist before the batch is known to land, which
+        costs this pass nothing: registering one gives back whatever it adopted, so the tree the
+        liveness question is asked of is the tree as written, and a batch that ends in `abandon` —
+        or is simply dropped — owes it nothing.
+        """
         cache = model_cache(self, node)
         model = cache.model
         oracle = cache.oracle
@@ -126,28 +160,66 @@ class Ps1UnusedVariableRemoval(Transformer):
                 candidates[binding] = mutations
         if not candidates:
             return None
-        dead = self._dead_bindings(candidates)
-        if not dead:
-            return None
-        removable = self._removable_statements(candidates, dead, model)
+        plans = Ps1RemovalPlans()
+        planned: dict[int, _MutationEdit] = {}
+        installed: set[int] = set()
+        claimed: set[int] = set()
+        for mutations in candidates.values():
+            for mutation in mutations:
+                if id(mutation) in planned:
+                    continue
+                edit = self._plan_mutation(mutation, oracle)
+                if edit is None or id(edit.statement) in claimed:
+                    continue
+                replacement = None
+                if edit.keep_value is not None:
+                    replacement = [_store_dropped_to_value(edit.keep_value)]
+                if plans.propose(edit.statement, replacement):
+                    claimed.add(id(edit.statement))
+                    planned[id(mutation)] = edit
+                    if replacement is not None:
+                        installed.update(id(stmt) for stmt in replacement)
+        accepted = {id(statement) for statement in plans.accepted}
+        dissolving = {
+            key for key, edit in planned.items()
+            if edit.keep_value is None and id(edit.statement) in accepted
+        }
+        dead = self._dead_bindings(candidates, dissolving)
+        removable = self._removable_statements(candidates, dead, model) if dead else []
+        keep = {id(mutation) for mutation in removable}
+        for key, edit in planned.items():
+            if key not in keep:
+                plans.withdraw(edit.statement)
         if not removable:
+            plans.abandon()
             return None
-        body = get_body(node)
-        if body is not None:
-            dead_stmts: set[Node] = set()
-            for mutation in removable:
-                stmt = _find_removable_statement(mutation)
-                if stmt is not None:
-                    dead_stmts.add(stmt)
-            surviving = [
-                s for s in body
-                if s not in dead_stmts
-                and not isinstance(s, Ps1FunctionDefinition)
-            ]
-            if not surviving:
-                return None
-        for mutation in removable:
-            self._remove_mutation(mutation, oracle)
+        if get_body(node) is not None and not self._leaves_anything(plans, node, installed):
+            plans.abandon()
+            return None
+        if plans.commit():
+            self.mark_changed()
+
+    @staticmethod
+    def _leaves_anything(plans: Ps1RemovalPlans, node: Node, installed: set[int]) -> bool:
+        """
+        Whether the script still says something of its own once this batch lands.
+
+        A pass may not reduce a whole script to nothing, for the reason `_remove_inert_functions`
+        spells out: what is left would be a module whose callers the walk never read, and the
+        definitions that would prove it live are exactly what is out of reach. Definitions are
+        therefore not survivors here.
+
+        Neither is a `$Null = <value>` discard this pass is installing. It preserves a side effect
+        and it is genuinely observable, but it is **this pass's own residue**, and a guard against
+        erasure that counts its own output as proof it erased nothing answers itself. A script
+        reduced to nothing but discards has had everything it said deleted; that the deletions left
+        husks behind is not evidence to the contrary.
+        """
+        surviving = plans.survivors(node)
+        return any(
+            not isinstance(stmt, Ps1FunctionDefinition) and id(stmt) not in installed
+            for stmt in surviving
+        )
 
     @staticmethod
     def _removable_mutations(binding: Binding) -> list[Node]:
@@ -179,21 +251,39 @@ class Ps1UnusedVariableRemoval(Transformer):
                 return parent
         return None
 
-    def _dead_bindings(self, candidates: dict[Binding, list[Node]]) -> list[Binding]:
+    def _dead_bindings(
+        self, candidates: dict[Binding, list[Node]], dissolving: set[int],
+    ) -> list[Binding]:
         """
         From candidate bindings mapped to their removable mutations, return those that are dead. A
-        binding is live if it has a read not contained in the right-hand side of any candidate
+        binding is live if it has a read not contained in the right-hand side of any *dissolving*
         assignment — a use in live code, in a live function, or a captured scriptblock. Liveness
         propagates back along right-hand sides: if a live binding's assignment reads another
         candidate, that candidate is live too. The rest, whose every read sits inside the right-hand
         side of an assignment that is itself dead, are dead — removing those assignments removes the
         reads, so nothing observes the value.
+
+        `dissolving` holds the mutations whose planned edit really does take their right-hand side
+        with it. A right-hand side that survives — as the value of a `$Null = <value>` discard, or
+        because the fault veto declined to delete the whole statement — still holds its reads, so
+        the bindings they name stay live and their own assignments stay. Reading every candidate as
+        dissolving is what left `$Null = Start-Process -FilePath $a` beside no `$a`.
+
+        The veto is not the only thing that keeps an assignment standing, so this asks the same
+        question `_all_targets_dead` asks. A target such as `$a, $arr[0]` names exactly one variable
+        and is still never removable, because the slot beside it writes memory this pass reasons
+        nothing about; a right-hand side that is only ever going away when that binding dies is a
+        right-hand side that is never going away at all.
         """
         bindings = list(candidates)
         rhs_owner: dict[int, Binding] = {}
         for binding, mutations in candidates.items():
             for mutation in mutations:
+                if id(mutation) not in dissolving:
+                    continue
                 if not isinstance(mutation, Ps1AssignmentExpression) or mutation.value is None:
+                    continue
+                if not assignment_target_is_all_variables(mutation.target):
                     continue
                 if len(assignment_target_variables(mutation.target)) == 1:
                     rhs_owner[id(mutation.value)] = binding
@@ -272,26 +362,30 @@ class Ps1UnusedVariableRemoval(Transformer):
                 return False
         return True
 
-    def _remove_mutation(self, mutation: Node, oracle: TypeOracle):
+    @staticmethod
+    def _plan_mutation(mutation: Node, oracle: TypeOracle) -> _MutationEdit | None:
+        """
+        What this pass intends to do with the statement holding `mutation`, decided without touching
+        the tree: the statement to edit, and the right-hand side that has to survive the edit, or
+        `None` where the store can go whole.
+
+        Deciding before building matters because the caller may still abandon the batch. Whether the
+        value can be moved is therefore answered here, by `_value_is_movable`, rather than by trying
+        to build the replacement and reading the failure.
+        """
+        keep_value = None
         if isinstance(mutation, Ps1AssignmentExpression):
             rhs = mutation.value
             if rhs is not None and not is_side_effect_free(rhs, oracle):
-                self._drop_store_keep_value(mutation, rhs)
-                return
+                if not _value_is_movable(rhs):
+                    return None
+                keep_value = rhs
         elif not isinstance(mutation, Ps1UnaryExpression):
-            return
+            return None
         stmt = _find_removable_statement(mutation)
-        if stmt is not None and not fault_is_observed(stmt) and _remove_from_parent(stmt):
-            self.mark_changed()
-
-    def _drop_store_keep_value(self, mutation: Ps1AssignmentExpression, rhs: Node):
-        """
-        Replace the statement holding `mutation` with its right-hand side alone: the store is dead
-        but evaluating the value is not, so what it does has to survive.
-        """
-        stmt = _find_removable_statement(mutation)
-        if stmt is not None and _drop_store_keep_value(stmt, rhs):
-            self.mark_changed()
+        if stmt is None:
+            return None
+        return _MutationEdit(stmt, keep_value)
 
 
 class Ps1JunkStatementRemoval(Transformer):
@@ -301,13 +395,23 @@ class Ps1JunkStatementRemoval(Transformer):
     """
 
     def visit(self, node: Node):
+        """
+        Decide the whole batch, then apply it once.
+        """
         oracle = model_cache(self, node).oracle
         called = self._reachable_functions(node)
-        for parent in list(node.walk()):
+        plans = Ps1RemovalPlans()
+        for parent in node.walk():
             role = body_role(parent)
             if role is None or role is BodyRole.OPAQUE:
                 continue
-            self._prune_body(get_body(parent), role, called, oracle)
+            body = get_body(parent)
+            removable = self._removable_in_body(body, role, called, oracle)
+            for statement in body:
+                if statement in removable:
+                    plans.propose_in(parent, statement)
+        if plans.commit():
+            self.mark_changed()
         self._remove_inert_functions(node, oracle)
 
     @staticmethod
@@ -315,9 +419,9 @@ class Ps1JunkStatementRemoval(Transformer):
         """
         Collect all function names transitively reachable from top-level call sites. First gather
         direct calls from the outer scope, then expand through function bodies until stable. When an
-        invocation may dispatch dynamically (see `refinery.lib.scripts.ps1.ast.is_opaque_dispatch`),
-        every defined function is treated as reachable so a function called only through `& $f` is
-        never removed.
+        invocation may dispatch dynamically (see
+        `refinery.lib.scripts.ps1.ast.is_opaque_dispatch`), every defined function is treated as
+        reachable so a function called only through `& $f` is never removed.
 
         Definitions and calls are keyed through `refinery.lib.scripts.ps1.ast.normalize_command_name`,
         so `function global:F` is reached by a call to `F`. Every definition sharing a key is walked,
@@ -393,18 +497,29 @@ class Ps1JunkStatementRemoval(Transformer):
         set at once. A script of nothing but inert definitions is inert by every measure this pass
         has and still may not be emptied — it is a module whose functions are dot-sourced from a
         caller the walk never read, and the call sites that would prove them live are exactly what
-        is out of reach. The same invariant already governs `_prune_body`; enforcing it there and
-        not here left one removal site able to erase what the other refuses to.
+        is out of reach. The same invariant already governs `_removable_in_body`; enforcing it there
+        and not here left one removal site able to erase what the other refuses to.
 
         Only the definitions are weighed against that invariant, because only they are what a
         dot-sourcing caller would come for. A script holding a call site of its own is not the
         module the guard protects — it uses the function here — so `function j { $Null = 1 }` beside
         a bare `j` reduces to nothing, while the same definition standing alone survives.
 
-        `fault_is_observed` is applied for the same reason it is applied in `_prune_body`: emptying
-        a `try` body beside a handler that does something is what makes the handler read as
+        `fault_is_observed` is applied for the same reason it is applied when a body is pruned:
+        emptying a `try` body beside a handler that does something is what makes the handler read as
         unreachable. Both removal sites have to answer that question the same way, and this one
         did not.
+
+        A definition and the calls to it are one edit, and they routinely land in *different* plans,
+        so no single plan's `all_or_nothing` can hold them together. The batch is therefore planned
+        whole and then asked what it would accept: a name any part of which is declined is withdrawn
+        entirely, because half the edit is not a smaller edit. Deleting `function j` while a veto
+        keeps `try { j }` leaves the script calling a function it no longer defines, and deleting
+        the call while the definition is kept leaves a definition the emitted script never reaches.
+        The withdrawals are read back to a fixpoint rather than applied once, so a group broken by
+        another group's withdrawal is caught too; it terminates because the batch only shrinks.
+        `pruning_erases_body` is asked *before* any of this, against the full set, because it is
+        permissive in the survivors and a withdrawal is a veto by another name.
         """
         if self._any_dynamic_dispatch(node) or not oracle.world_closed_at(node):
             return
@@ -440,26 +555,37 @@ class Ps1JunkStatementRemoval(Transformer):
                 call_sites[key].append(statement)
             else:
                 other_reference.add(key)
-        removable: list[Node] = []
-        removable_definitions: list[Node] = []
+        groups: dict[str, list[Node]] = {}
+        removable_definitions: set[Node] = set()
         for key, definitions in inert.items():
             if key in other_reference:
                 continue
-            removable.extend(call_sites[key])
-            removable.extend(definitions)
-            removable_definitions.extend(definitions)
-        if not removable:
+            groups[key] = [*call_sites[key], *definitions]
+            removable_definitions.update(definitions)
+        if not groups:
             return
         role = body_role(node)
         if role is not None:
-            survivors = self._survivors(get_body(node), set(removable_definitions))
+            survivors = self._survivors(get_body(node), removable_definitions)
             if pruning_erases_body(role, survivors):
                 return
-        for statement in removable:
-            if fault_is_observed(statement):
-                continue
-            if _remove_from_parent(statement):
-                self.mark_changed()
+        plans = Ps1RemovalPlans()
+        for group in groups.values():
+            for statement in group:
+                plans.propose(statement)
+        while True:
+            accepted = {id(statement) for statement in plans.accepted}
+            broken = [
+                key for key, group in groups.items()
+                if any(id(statement) not in accepted for statement in group)
+            ]
+            if not broken:
+                break
+            for key in broken:
+                for statement in groups.pop(key):
+                    plans.withdraw(statement)
+        if plans.commit():
+            self.mark_changed()
 
     @staticmethod
     def _bare_call_statement(cmd: Ps1CommandInvocation) -> Node | None:
@@ -489,7 +615,14 @@ class Ps1JunkStatementRemoval(Transformer):
                     return True
         return False
 
-    def _prune_body(self, body: list, role: BodyRole, called: set[str], oracle: TypeOracle):
+    def _removable_in_body(
+        self, body: list, role: BodyRole, called: set[str], oracle: TypeOracle,
+    ) -> set[Node]:
+        """
+        What this pass would drop from one statement list. Both set-level guards are answered here,
+        against the **pre-veto** survivors, which is the polarity they require — see
+        `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`.
+        """
         discard: set[Node] = set()
         output: set[Node] = set()
         dead_functions: set[Node] = set()
@@ -520,13 +653,10 @@ class Ps1JunkStatementRemoval(Transformer):
                 output.clear()
         removable = discard | output | dead_functions
         if not removable:
-            return
+            return set()
         if pruning_erases_body(role, self._survivors(body, removable)):
-            return
-        for stmt in list(body):
-            if stmt in removable and not fault_is_observed(stmt):
-                if _remove_from_parent(stmt):
-                    self.mark_changed()
+            return set()
+        return removable
 
     @staticmethod
     def _survivors(body: list, removable: set[Node]) -> list[Node]:
@@ -585,19 +715,18 @@ class Ps1DeadStoreElimination(Transformer):
         if not dead:
             self.generic_visit(node)
             return None
+        plan = Ps1RemovalPlan(node)
         for stmt in dead:
             if not isinstance(stmt, Ps1ExpressionStatement):
                 continue
             rhs = stmt.expression
             if isinstance(rhs, Ps1AssignmentExpression):
                 rhs = rhs.value
-            if rhs is not None and not is_side_effect_free(rhs, oracle):
-                if not _drop_store_keep_value(stmt, rhs):
-                    continue
-            elif not fault_is_observed(stmt):
-                _remove_from_parent(stmt)
-            else:
-                continue
+            if rhs is None or is_side_effect_free(rhs, oracle):
+                plan.propose(stmt)
+            elif _value_is_movable(rhs):
+                plan.propose(stmt, [_store_dropped_to_value(rhs)])
+        if plan.commit():
             self.mark_changed()
         self.generic_visit(node)
 

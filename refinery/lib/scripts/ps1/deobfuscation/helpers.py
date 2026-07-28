@@ -7,25 +7,23 @@ import enum
 import math
 import re
 
-from typing import Callable, Generator, NamedTuple, TypeGuard, TypeVar
+from typing import Callable, Generator, NamedTuple, TypeGuard
 
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.values import collect_typed_arguments, unwrap_integer
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_member_name,
-    is_builtin_variable,
     normalize_type_expression,
     string_value,
     unwrap_assignment_target,
-    unwrap_parens,
 )
 from refinery.lib.scripts.ps1.data import FOREACH_ALIASES, FORMAT_PATTERN, is_type
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
     Ps1ArrayExpression,
-    Ps1ArrayLiteral,
     Ps1AssignmentExpression,
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
@@ -34,7 +32,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ForEachLoop,
     Ps1HereString,
     Ps1IndexExpression,
-    Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1ParameterDeclaration,
@@ -48,8 +45,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
 )
 from refinery.lib.scripts.ps1.token import BACKTICK_ESCAPE
-
-_T = TypeVar('_T')
 
 
 class MutationKind(enum.Enum):
@@ -94,23 +89,6 @@ def make_string_literal(value: str) -> Ps1StringLiteral | Ps1HereString:
     return Ps1StringLiteral(value=value, raw=raw)
 
 
-def collect_typed_arguments(
-    node: Expression, extract: Callable[[Expression], _T | None],
-) -> list[_T] | None:
-    if isinstance(node, Ps1ArrayLiteral):
-        result: list[_T] = []
-        for elem in node.elements:
-            value = extract(elem)
-            if value is None:
-                return None
-            result.append(value)
-        return result
-    value = extract(node)
-    if value is not None:
-        return [value]
-    return None
-
-
 def collect_string_arguments(node: Expression) -> list[str] | None:
     return collect_typed_arguments(node, string_value)
 
@@ -128,47 +106,6 @@ def extract_format_argument(node: Expression) -> str | int | None:
 
 def collect_format_arguments(node: Expression) -> list[str | int] | None:
     return collect_typed_arguments(node, extract_format_argument)
-
-
-def extract_int(node: Expression) -> int | None:
-    return node.value if isinstance(node, Ps1IntegerLiteral) else None
-
-
-def collect_int_arguments(node: Expression) -> list[int] | None:
-    if isinstance(node, Ps1ParenExpression) and node.expression is not None:
-        return collect_int_arguments(node.expression)
-    return collect_typed_arguments(node, extract_int)
-
-
-def collect_byte_array(node: Expression) -> bytes | None:
-    """
-    Extract an integer array from `node` and convert to `bytes`. Handles
-    `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral`,
-    `refinery.lib.scripts.ps1.model.Ps1ArrayExpression`, and parenthesized wrappers.
-    """
-    array = unwrap_to_array_literal(node)
-    if array is not None:
-        node = array
-    elif isinstance(node, Ps1ArrayExpression):
-        items: list[int] = []
-        for stmt in node.body:
-            if not isinstance(stmt, Ps1ExpressionStatement) or stmt.expression is None:
-                return None
-            value = extract_int(stmt.expression)
-            if value is None:
-                return None
-            items.append(value)
-        try:
-            return bytes(items)
-        except (ValueError, OverflowError):
-            return None
-    values = collect_int_arguments(node)
-    if values is None:
-        return None
-    try:
-        return bytes(values)
-    except (ValueError, OverflowError):
-        return None
 
 
 def unwrap_single_paren(node: Expression) -> Expression:
@@ -196,37 +133,6 @@ def inside_value_producing_context(node) -> bool:
         prev = cursor
         cursor = cursor.parent
     return False
-
-
-def unwrap_to_array_literal(node: Node) -> Ps1ArrayLiteral | None:
-    """
-    Unwrap parentheses and array expressions to find an inner
-    `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral`.
-    """
-    node = unwrap_parens(node)
-    if isinstance(node, Ps1ArrayLiteral):
-        return node
-    if isinstance(node, Ps1ArrayExpression) and len(node.body) == 1:
-        stmt = node.body[0]
-        if isinstance(stmt, Ps1ExpressionStatement) and isinstance(stmt.expression, Ps1ArrayLiteral):
-            return stmt.expression
-    return None
-
-
-def unwrap_integer(node: Node | None) -> Ps1IntegerLiteral | None:
-    """
-    Peel parentheses and unary negation to extract an integer literal, or return `None`.
-    """
-    node = unwrap_parens(node) if isinstance(node, Expression) else node
-    if isinstance(node, Ps1IntegerLiteral):
-        return node
-    if is_builtin_variable(node, {'null'}):
-        return Ps1IntegerLiteral(value=0, raw='0')
-    if isinstance(node, Ps1UnaryExpression) and node.operator == '-':
-        inner = unwrap_parens(node.operand) if isinstance(node.operand, Expression) else node.operand
-        if isinstance(inner, Ps1IntegerLiteral):
-            return Ps1IntegerLiteral(value=-inner.value, raw=str(-inner.value))
-    return None
 
 
 def is_static_type_call(node: Ps1InvokeMember, canonical: str) -> bool:

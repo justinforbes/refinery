@@ -9,11 +9,8 @@ from refinery.lib.scripts import (
     Node,
     Statement,
     Transformer,
-    set_body,
-    set_child_list,
 )
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
-from refinery.lib.scripts.ps1.analysis.constants import is_truthy
 from refinery.lib.scripts.ps1.analysis.effects import (
     BodyRole,
     body_role,
@@ -23,9 +20,11 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     pruning_erases_body,
 )
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
+from refinery.lib.scripts.ps1.analysis.values import is_truthy, unwrap_integer
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
-from refinery.lib.scripts.ps1.deobfuscation.helpers import switch_matches, unwrap_integer
+from refinery.lib.scripts.ps1.deobfuscation.helpers import switch_matches
+from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
@@ -363,37 +362,38 @@ class Ps1DeadCodeElimination(Transformer):
             role = body_role(parent)
             if role is None or role is BodyRole.OPAQUE:
                 continue
-            body = get_body(parent)
-            new_body = self._prune_body(body, oracle, role)
-            if new_body is not body:
-                set_body(parent, new_body)
+            if self._prune_body(parent, oracle, role):
                 self.mark_changed()
 
-    def _prune_body(
-        self, body: list[Statement], oracle: TypeOracle, role: BodyRole = BodyRole.NESTED
-    ) -> list[Statement]:
+    def _prune_body(self, parent: Node, oracle: TypeOracle, role: BodyRole) -> bool:
         # The output decision must be taken over what survives control-flow pruning, never over the
         # original body: a branch like `if ($false) {}` looks like an anchor before pruning and
         # produces nothing afterwards, so reading the original body would keep pruning enabled after
         # its only apparent anchor is gone and silence the body's observable value.
-        intermediate: list[Statement] = []
-        changed = False
-        for stmt in body:
+        rewrites: list[tuple[Statement, list[Statement]]] = []
+        for stmt in get_body(parent):
             replacement = self._try_prune(stmt, oracle)
-            if replacement is not None:
-                intermediate.extend(replacement)
-                changed = True
-            else:
-                intermediate.append(stmt)
+            rewrites.append((stmt, [stmt] if replacement is None else replacement))
+        intermediate = [stmt for _, replacement in rewrites for stmt in replacement]
         # This pass prunes only pure constants, the narrowest slice of `StatementEffect.OUTPUT`, and
         # declines outright wherever the value could be observed. Whether another statement covers a
         # RETURNING body's output is a question it never asks: `output_is_covered` answers it more
         # permissively than is safe here, so only the junk pass consults it.
-        survivors = [s for s in intermediate if not self._is_constant_output(s)]
-        if not output_observed(role) and not pruning_erases_body(role, survivors):
-            changed = changed or len(survivors) != len(intermediate)
-            intermediate = survivors
-        return intermediate if changed else body
+        survivors = [stmt for stmt in intermediate if not self._is_constant_output(stmt)]
+        drop_constants = (
+            not output_observed(role)
+            and not pruning_erases_body(role, survivors)
+        )
+        # This pass removes only pure constants and constructs whose condition it has already proved
+        # constant, so none of its removals can be what an enclosing handler catches. What is left
+        # of the fault question for it is the set-level one: do not leave a protected body empty.
+        plan = Ps1RemovalPlan(parent, removals_may_fault=False)
+        for stmt, replacement in rewrites:
+            if drop_constants:
+                replacement = [s for s in replacement if not self._is_constant_output(s)]
+            if len(replacement) != 1 or replacement[0] is not stmt:
+                plan.propose(stmt, replacement)
+        return plan.commit()
 
     @staticmethod
     def _is_constant_output(stmt: Statement) -> bool:
@@ -496,8 +496,11 @@ class Ps1DeadCodeElimination(Transformer):
             return []
         if len(kept_clauses) == len(node.clauses):
             return None
-        set_child_list(node, 'clauses', kept_clauses)
-        return [node]
+        # A new statement rather than a clause list spliced into this one: a pass proposes an edit
+        # and does not perform it, so the proposal has to be something the vetoes can compare
+        # against the original. Dropping the clauses in place makes the two the same object, and a
+        # payload under the `if ($false)` arm of a chain would read as having survived it.
+        return [Ps1IfStatement(clauses=kept_clauses, else_block=node.else_block)]
 
     @staticmethod
     def _prune_switch(node: Ps1SwitchStatement) -> list[Statement] | None:

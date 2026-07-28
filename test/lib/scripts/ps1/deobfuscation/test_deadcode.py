@@ -502,10 +502,8 @@ class TestPs1DeadCodeExtra(TestPs1):
 
 class TestPs1InjectedNoiseBareword(TestPs1):
     """
-    The bareword rule deletes a statement and the `try` around it on a guess about an obfuscator
-    artifact. What separates the artifact from a command line is that the artifact is a mis-lexed
-    two-token assignment and nothing else, so a real invocation — which carries operands — has to
-    survive even when one of its arguments happens to start with `=`.
+    An artifact is a mis-lexed two-token assignment and nothing else, so a real invocation carrying
+    operands has to survive the guess even when an argument starts with `=`.
     """
 
     def test_an_assignment_residue_is_dropped(self):
@@ -534,9 +532,8 @@ class TestPs1InjectedNoiseBareword(TestPs1):
 
 class TestPs1NoiseBarewordSpellings(TestPs1):
     """
-    The residue rule deletes a statement and the `try` around it on a guess about a lexer artifact.
-    An artifact is what the lexer leaves when it meets two tokens where a command was expected, so
-    every spelling that only a hand-written command line can produce has to survive the guess.
+    An artifact is what the lexer leaves on meeting two tokens where a command was expected, so
+    every spelling only a hand-written command line can produce has to survive the guess.
     """
 
     def test_a_quoted_argument_is_not_assignment_residue(self):
@@ -567,3 +564,74 @@ class TestPs1NoiseBarewordSpellings(TestPs1):
                     F"try {{ {source} }} catch {{ }}\nWrite-Host 'keep'",
                     Ps1DeadCodeElimination)
                 self.assertEqual(result, "Write-Host 'keep'")
+
+
+class TestPs1DeadCodeLeavesTheTreeConsistent(TestPs1):
+    def test_a_construct_pruned_to_nothing_inside_a_protected_body(self):
+        self._assertTreeIsIntact(cleandoc(
+            """
+            try {
+              for (5; $False; ) { }
+            } catch {
+              Write-Host 'oops'
+            }
+            Write-Host 'go'
+            """
+        ), cleandoc(
+            """
+            try {
+              for (5; $False; ) {}
+            } catch {
+              Write-Host 'oops'
+            }
+            Write-Host 'go'
+            """
+        ), Ps1DeadCodeElimination)
+
+    def test_a_construct_with_an_update_pruned_to_nothing(self):
+        self._assertTreeIsIntact(cleandoc(
+            """
+            try {
+              for (5; $False; 6) { }
+            } catch {
+              Write-Host 'oops'
+            }
+            """
+        ), cleandoc(
+            """
+            try {
+              for (5; $False; 6) {}
+            } catch {
+              Write-Host 'oops'
+            }
+            """
+        ), Ps1DeadCodeElimination)
+
+    def test_a_construct_pruned_to_nothing_beside_a_nested_handler(self):
+        self._assertTreeIsIntact(cleandoc(
+            """
+            try {
+              try {
+                for (5; $False; ) { }
+              } catch {
+                Write-Host 'in'
+              }
+            } catch {
+              Write-Host 'out'
+            }
+            Write-Host 'go'
+            """
+        ), cleandoc(
+            """
+            try {
+              try {
+                for (5; $False; ) {}
+              } catch {
+                Write-Host 'in'
+              }
+            } catch {
+              Write-Host 'out'
+            }
+            Write-Host 'go'
+            """
+        ), Ps1DeadCodeElimination)

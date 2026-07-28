@@ -6,12 +6,14 @@ from __future__ import annotations
 import string
 
 from refinery.lib.scripts import Transformer
+from refinery.lib.scripts.ps1.analysis.values import (
+    collect_int_arguments,
+    unwrap_integer,
+)
 from refinery.lib.scripts.ps1.ast import normalize_dotnet_type_name, string_value
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    collect_int_arguments,
     collect_string_arguments,
     make_string_literal,
-    unwrap_integer,
     unwrap_single_paren,
 )
 from refinery.lib.scripts.ps1.model import (

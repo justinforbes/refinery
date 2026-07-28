@@ -9,7 +9,14 @@ import re
 
 from typing import Iterator
 
-from refinery.lib.scripts.ps1.analysis.constants import is_truthy
+from refinery.lib.scripts import set_child, set_child_list
+from refinery.lib.scripts.ps1.analysis.values import (
+    collect_byte_array,
+    collect_int_arguments,
+    is_truthy,
+    unwrap_integer,
+    unwrap_to_array_literal,
+)
 from refinery.lib.scripts.ps1.ast import get_body, get_member_name, string_value, unwrap_parens
 from refinery.lib.scripts.ps1.data import (
     COMPARISON_OPS,
@@ -21,9 +28,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     StringMethodError,
     apply_format_string,
     apply_string_method,
-    collect_byte_array,
     collect_format_arguments,
-    collect_int_arguments,
     collect_string_arguments,
     detect_encoding_chain,
     dotnet_regex_replace,
@@ -36,9 +41,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     ps_modulo,
     ps_shift_left,
     ps_shift_right,
-    unwrap_integer,
     unwrap_single_paren,
-    unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.deobfuscation.typenames import (
     is_known_member,
@@ -524,8 +527,8 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                 continue
             value = expr.value
             if isinstance(value, Ps1ArrayLiteral):
-                value.elements.reverse()
-                node.expression = None
+                set_child_list(value, 'elements', value.elements[::-1])
+                set_child(node, 'expression', None)
                 self.mark_changed()
                 return True
             if isinstance(value, Ps1ArrayExpression) and len(value.body) == 1:
@@ -534,16 +537,15 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                     isinstance(inner, Ps1ExpressionStatement)
                     and isinstance(inner.expression, Ps1ArrayLiteral)
                 ):
-                    inner.expression.elements.reverse()
-                    node.expression = None
+                    literal = inner.expression
+                    set_child_list(literal, 'elements', literal.elements[::-1])
+                    set_child(node, 'expression', None)
                     self.mark_changed()
                     return True
             sv = string_value(value)
             if sv is not None:
-                replacement = make_string_literal(sv[::-1])
-                replacement.parent = expr
-                expr.value = replacement
-                node.expression = None
+                set_child(expr, 'value', make_string_literal(sv[::-1]))
+                set_child(node, 'expression', None)
                 self.mark_changed()
                 return True
             return False

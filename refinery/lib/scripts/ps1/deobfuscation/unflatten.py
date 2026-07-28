@@ -17,6 +17,7 @@ from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_p
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS
 from refinery.lib.scripts.ps1.deobfuscation.emulator import evaluate_truthy
 from refinery.lib.scripts.ps1.deobfuscation.helpers import inside_value_producing_context
+from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AssignmentExpression,
@@ -1246,11 +1247,16 @@ class Ps1ControlFlowDeflattening(Transformer):
                 s for s in recovered
                 if _is_state_assignment(s, match.state_var_name, match.state_var_scope) is None
             ]
-            # Preserve any unrelated statements that sit between the state initialization and the
-            # dispatcher loop; only the loop and its `$state = ...` seed are replaced.
-            intervening = body[init_index + 1:i]
-            for s in recovered:
-                s.parent = parent
-            body[init_index:i + 1] = intervening + recovered
+            # Statements that sit between the state initialization and the dispatcher loop are
+            # unrelated and stay where they are; only the loop and its `$state = ...` seed move.
+            # A vetoed half would leave the machine partly dissolved and the cursor pointing into a
+            # body that no longer has the shape the arithmetic below assumes, so the whole recovery
+            # stands or falls together.
+            plan = Ps1RemovalPlan(parent, all_or_nothing=True)
+            plan.propose(body[init_index])
+            plan.propose(stmt, recovered)
+            if not plan.commit():
+                i += 1
+                continue
             self.mark_changed()
-            i = init_index + len(intervening) + len(recovered)
+            i += len(recovered) - 1

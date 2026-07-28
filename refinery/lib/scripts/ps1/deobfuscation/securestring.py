@@ -4,8 +4,9 @@ PowerShell SecureString decryption transformer.
 from __future__ import annotations
 
 from refinery.lib.scripts import Transformer, set_child_list
+from refinery.lib.scripts.ps1.analysis.values import collect_byte_array
 from refinery.lib.scripts.ps1.ast import get_command_name
-from refinery.lib.scripts.ps1.deobfuscation.helpers import collect_byte_array, make_string_literal
+from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandArgumentKind,

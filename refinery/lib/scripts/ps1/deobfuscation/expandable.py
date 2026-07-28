@@ -13,7 +13,7 @@ statement to preserve execution order.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Block, Transformer, _replace_in_parent
+from refinery.lib.scripts import Block, BodyEdit, Transformer, _replace_in_parent
 from refinery.lib.scripts.ps1.ast import get_body
 from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
 from refinery.lib.scripts.ps1.model import (
@@ -40,16 +40,14 @@ class Ps1ExpandableStringHoist(Transformer):
                 continue
             i = 0
             while i < len(body):
-                before, after = self._extract_void_subexpressions(body[i])
+                before, after, replaced = self._extract_void_subexpressions(body[i])
                 if before or after:
-                    for stmt in before:
-                        stmt.parent = container
-                    for stmt in after:
-                        stmt.parent = container
-                    body[i + 1:i + 1] = after
-                    body[i:i] = before
-                    self.mark_changed()
+                    edit = BodyEdit(container)
+                    edit.splice(body[i], [*before, body[i], *after])
+                    edit.apply()
                     i += len(before) + len(after)
+                if replaced:
+                    self.mark_changed()
                 i += 1
         return None
 
@@ -86,16 +84,35 @@ class Ps1ExpandableStringHoist(Transformer):
             parent = parent.parent
         return True
 
-    def _extract_void_subexpressions(self, stmt) -> tuple[list, list]:
+    def _extract_void_subexpressions(self, stmt) -> tuple[list, list, bool]:
         """
-        Walk the statement tree, find expandable strings where all
-        subexpressions are void, replace them with string literals, and
-        return `(before_stmts, after_stmts)`.
+        Walk the statement tree, find expandable strings whose every part is either literal text or
+        a void subexpression, replace them with string literals, and return
+        `(before_stmts, after_stmts, replaced)`.
+
+        Every part has to be accounted for and not only the subexpressions. A part that is neither
+        — the `$env:APPDATA` in `"$env:APPDATA$($z=1)\\dropper.exe"` — has no text this can write
+        down, so rewriting the string around it would silently delete what it interpolated and leave
+        a literal the script never said.
+
+        `replaced` is reported separately from the two lists because a subexpression with an empty
+        body hoists no statement and still rewrites the string, so the lists alone cannot say
+        whether the tree moved.
+
+        The hoisted statements are collected only once the string has actually been replaced. The
+        walk is a snapshot, so a string nested inside one already rewritten is no longer reachable
+        from its parent, and hoisting its subexpressions out while it stands would run them twice.
         """
         before: list = []
         after: list = []
+        replaced = False
         for node in list(stmt.walk_in_order()):
             if not isinstance(node, Ps1ExpandableString):
+                continue
+            if not all(
+                isinstance(part, (Ps1StringLiteral, Ps1SubExpression))
+                for part in node.parts
+            ):
                 continue
             subs = [p for p in node.parts if isinstance(p, Ps1SubExpression)]
             if not subs:
@@ -112,10 +129,12 @@ class Ps1ExpandableStringHoist(Transformer):
             collected: list = []
             for sub in subs:
                 collected.extend(sub.body)
-            if self._is_leftmost(node):
+            leftmost = self._is_leftmost(node)
+            if not _replace_in_parent(node, make_string_literal(''.join(text_parts))):
+                continue
+            if leftmost:
                 before.extend(collected)
             else:
                 after.extend(collected)
-            replacement = make_string_literal(''.join(text_parts))
-            _replace_in_parent(node, replacement)
-        return before, after
+            replaced = True
+        return before, after, replaced

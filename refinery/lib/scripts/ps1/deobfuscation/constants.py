@@ -11,10 +11,11 @@ from refinery.lib.scripts import (
     Node,
     Transformer,
     _clone_node,
-    _remove_from_parent,
     _replace_in_parent,
+    set_child,
 )
 from refinery.lib.scripts.ps1.analysis import is_assignment_write_target
+from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_body,
@@ -26,8 +27,8 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     is_array_reverse_call,
     iter_variable_mutations,
     make_string_literal,
-    unwrap_to_array_literal,
 )
+from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlans
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
@@ -484,14 +485,17 @@ class Ps1ConstantInlining(Transformer):
         root: Node,
         candidates: dict[str, list[_CandidateEntry]],
         seal_points: dict[str, list[tuple[list, int]]],
-    ) -> tuple[dict[str, int], dict[str, int]]:
+    ) -> tuple[dict[str, int], dict[str, list[Node]]]:
         """
-        Inline constant values. Returns `(remaining, inlined)` where remaining maps lower_name
-        to count of references that could not be substituted, and inlined maps lower_name to
-        count of successful substitutions.
+        Inline constant values. Returns `(remaining, inlined)` where remaining maps a lower-cased
+        name to the count of references that could not be substituted, and inlined maps it to the
+        replacement nodes that were installed for it.
+
+        The nodes matter and not just their count: they are where the value now stands, so they are
+        what this pass can point at when it claims that removing the assignment destroys nothing.
         """
         remaining: dict[str, int] = {}
-        inlined: dict[str, int] = {}
+        inlined: dict[str, list[Node]] = {}
         bloat_blocked: set[str] = set()
 
         synth = Ps1Synthesizer()
@@ -592,7 +596,7 @@ class Ps1ConstantInlining(Transformer):
         seal_points: dict[str, list[tuple[list, int]]],
         assign_nodes: set[Ps1AssignmentExpression],
         remaining: dict[str, int],
-        inlined: dict[str, int],
+        inlined: dict[str, list[Node]],
         handled_vars: set[Ps1Variable],
         bloat_blocked: set[str],
     ) -> None:
@@ -614,10 +618,9 @@ class Ps1ConstantInlining(Transformer):
                 return
             if isinstance(const_value, Ps1StringLiteral):
                 replacement = _clone_constant(const_value)
-                replacement.parent = node
-                node.object = replacement
+                set_child(node, 'object', replacement)
                 self.mark_changed()
-                inlined[key] = inlined.get(key, 0) + 1
+                inlined.setdefault(key, []).append(replacement)
                 handled_vars.add(var)
             else:
                 remaining[key] = remaining.get(key, 0) + 1
@@ -632,7 +635,7 @@ class Ps1ConstantInlining(Transformer):
             replacement = make_string_literal(s[idx])
             _replace_in_parent(node, replacement)
             self.mark_changed()
-            inlined[key] = inlined.get(key, 0) + 1
+            inlined.setdefault(key, []).append(replacement)
             handled_vars.add(var)
             return
         array = _get_array_literal(const_value)
@@ -647,7 +650,7 @@ class Ps1ConstantInlining(Transformer):
         replacement = _clone_constant(elements[idx])
         _replace_in_parent(node, replacement)
         self.mark_changed()
-        inlined[key] = inlined.get(key, 0) + 1
+        inlined.setdefault(key, []).append(replacement)
         handled_vars.add(var)
 
     def _substitute_variable_reference(
@@ -657,7 +660,7 @@ class Ps1ConstantInlining(Transformer):
         candidates: dict[str, list[_CandidateEntry]],
         seal_points: dict[str, list[tuple[list, int]]],
         remaining: dict[str, int],
-        inlined: dict[str, int],
+        inlined: dict[str, list[Node]],
     ) -> None:
         if is_assignment_write_target(node):
             return
@@ -670,7 +673,7 @@ class Ps1ConstantInlining(Transformer):
         replacement = _clone_constant(entry.value)
         _replace_in_parent(node, replacement)
         self.mark_changed()
-        inlined[key] = inlined.get(key, 0) + 1
+        inlined.setdefault(key, []).append(replacement)
 
     @staticmethod
     def _exclude_own_seal_points(
@@ -708,21 +711,23 @@ class Ps1ConstantInlining(Transformer):
         self,
         candidates: dict[str, list[_CandidateEntry]],
         remaining: dict[str, int],
-        inlined: dict[str, int],
+        inlined: dict[str, list[Node]],
     ):
+        plans = Ps1RemovalPlans()
         for key, entries in candidates.items():
             if remaining.get(key, 0) > 0:
                 continue
-            if self.min_inlines_to_prune is not None and inlined.get(key, 0) < self.min_inlines_to_prune:
+            substitutions = inlined.get(key, [])
+            if self.min_inlines_to_prune is not None and len(substitutions) < self.min_inlines_to_prune:
                 continue
             for assign_node, _, _ in entries:
                 if assign_node is None:
                     continue
                 stmt = self._find_removable_statement(assign_node)
-                if stmt is None:
-                    continue
-                if _remove_from_parent(stmt):
-                    self.mark_changed()
+                if stmt is not None:
+                    plans.propose(stmt)
+        if plans.commit():
+            self.mark_changed()
 
     _find_removable_statement = staticmethod(_find_removable_statement)
 

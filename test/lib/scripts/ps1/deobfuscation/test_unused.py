@@ -651,10 +651,8 @@ class TestPs1DeadStoreElimination(TestPs1):
 
 class TestPs1PayloadRetention(TestPs1):
     """
-    Every case here is a shape where a removal decision was taken over a name or a node that stood
-    for more code than the pass could see. Keeping junk costs nothing; deleting a call that runs is
-    the failure this suite exists to catch, so each test asserts the payload survives rather than
-    asserting an exact rendering.
+    Each test asserts the payload survives rather than pinning a rendering: keeping junk costs
+    nothing and deleting a call that runs is the failure.
     """
 
     def test_a_nested_redefinition_keeps_the_name_from_being_inert(self):
@@ -842,10 +840,8 @@ class TestPs1PayloadRetention(TestPs1):
 
 class TestPs1NameRemovalNeedsTheWholeStory(TestPs1):
     """
-    Both name-keyed removals in this module reason from the definitions and calls standing in the
-    tree. That is the whole story only while the tree is: an open world holds definitions and calls
-    in a file the walk never read, and an identity-namespace assignment binds a name by a spelling
-    neither scan recognizes. Each test asserts the payload path survives, never an exact rendering.
+    Each test asserts the payload path survives rather than pinning a rendering, because what is
+    missing from the tree is exactly what the removal cannot see.
     """
 
     def test_an_open_world_keeps_the_call_to_an_apparently_inert_function(self):
@@ -906,3 +902,126 @@ class TestPs1NameRemovalNeedsTheWholeStory(TestPs1):
             """
         ))
         self.assertEqual(result, "Write-Host 'keep'")
+
+
+class TestPs1RemovalLeavesNoDanglingReference(TestPs1):
+    def test_a_kept_call_site_keeps_the_definition_it_names(self):
+        result = self._apply(cleandoc(
+            """
+            function j {
+              $Null = 915
+            }
+            try {
+              j
+            } catch {
+              Write-Host 'err'
+            }
+            """
+        ), Ps1JunkStatementRemoval)
+        self.assertEqual(result, cleandoc(
+            """
+            function j {}
+            try {
+              j
+            } catch {
+              Write-Host 'err'
+            }
+            """
+        ))
+
+    def test_a_kept_value_keeps_the_variable_it_reads(self):
+        result = self._apply(cleandoc(
+            """
+            $a = 'seed'
+            $b = Start-Process -FilePath $a
+            Write-Host 'go'
+            """
+        ), Ps1UnusedVariableRemoval)
+        self.assertEqual(result, cleandoc(
+            """
+            $a = 'seed'
+            $Null = Start-Process -FilePath $a
+            Write-Host 'go'
+            """
+        ))
+
+    def test_an_assignment_the_fault_veto_keeps_keeps_the_variable_it_reads(self):
+        self._assertUnchanged(cleandoc(
+            """
+            $payload = 'x'
+            try {
+              $q = 'seed' + $payload
+            } catch {
+              Write-Host 'err'
+            }
+            Write-Host 'go'
+            """
+        ), Ps1UnusedVariableRemoval)
+
+    def test_a_target_slot_that_is_not_a_variable_keeps_the_whole_statement_alive(self):
+        self._assertUnchanged(cleandoc(
+            """
+            $payload = 'seed'
+            $a, $arr[0] = 1, $payload
+            Write-Host 'go'
+            """
+        ), Ps1UnusedVariableRemoval)
+
+
+class TestPs1RemovalLeavesTheTreeConsistent(TestPs1):
+    def test_a_store_the_batch_cannot_edit_at_all(self):
+        # An `if` condition sits in a tuple inside `clauses`: no list to splice, no field to take.
+        self._assertTreeIsIntact(cleandoc(
+            """
+            if ($x = Start-Process -FilePath 'a.exe') { Write-Host 'hi' }
+            Write-Host 'go'
+            """
+        ), cleandoc(
+            """
+            if ($x = Start-Process -FilePath 'a.exe') {
+              Write-Host 'hi'
+            }
+            Write-Host 'go'
+            """
+        ), Ps1UnusedVariableRemoval)
+
+    def test_a_live_store_holding_a_dead_one(self):
+        self._assertTreeIsIntact(cleandoc(
+            """
+            $outer = ($inner = Start-Process -FilePath 'a.exe')
+            Write-Host $outer
+            """
+        ), cleandoc(
+            """
+            $outer = ($Null = Start-Process -FilePath 'a.exe')
+            Write-Host $outer
+            """
+        ), Ps1UnusedVariableRemoval)
+
+    def test_a_live_store_holding_a_dead_one_in_a_nested_body(self):
+        self._assertTreeIsIntact(cleandoc(
+            """
+            $outer = $(if ($true) { $inner = Start-Process -FilePath 'a.exe' })
+            Write-Host $outer
+            """
+        ), cleandoc(
+            """
+            $outer = $(if ($true) {
+              $Null = Start-Process -FilePath 'a.exe'
+            })
+            Write-Host $outer
+            """
+        ), Ps1UnusedVariableRemoval)
+
+    def test_two_dead_stores_nested_inside_a_live_one(self):
+        self._assertTreeIsIntact(cleandoc(
+            """
+            $q = ($r = ($s = Start-Process -FilePath 'a.exe'))
+            Write-Host $q
+            """
+        ), cleandoc(
+            """
+            $q = ($Null = ($Null = Start-Process -FilePath 'a.exe'))
+            Write-Host $q
+            """
+        ), Ps1UnusedVariableRemoval)

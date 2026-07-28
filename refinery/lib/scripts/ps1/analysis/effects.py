@@ -28,8 +28,8 @@ from typing import Iterator, Sequence, TypeGuard
 
 from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1 import data
-from refinery.lib.scripts.ps1.analysis.constants import is_truthy
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
+from refinery.lib.scripts.ps1.analysis.values import is_truthy
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,

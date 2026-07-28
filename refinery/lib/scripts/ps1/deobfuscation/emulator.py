@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     _Value: TypeAlias = str | int | float | bool | list | None
 
 from refinery.lib.scripts import Block, Transformer
+from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
 from refinery.lib.scripts.ps1.ast import (
     get_command_name,
     get_member_name,
@@ -42,8 +43,8 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     ps_shift_left,
     ps_shift_right,
     switch_matches,
-    unwrap_to_array_literal,
 )
+from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
@@ -1471,26 +1472,24 @@ class Ps1FunctionEvaluator(Transformer):
                 continue
             if not callers.issubset(removed):
                 continue
-            self._remove_funcdef(funcdef)
-            removed.add(key)
+            # A removal can be declined — a definition holding a payload is kept whatever the call
+            # graph says — and recording it as removed anyway would let the closure delete what it
+            # still calls, manufacturing a call to a function that is no longer defined.
+            if self._remove_funcdef(funcdef):
+                removed.add(key)
         if dead_functions:
             self._remove_dead_calls(root, dead_functions)
 
     def _remove_funcdef(self, funcdef: Ps1FunctionDefinition) -> bool:
         parent = funcdef.parent
-        if parent is None:
+        if not isinstance(parent, (Ps1Script, Block)):
             return False
-        if isinstance(parent, Ps1Script):
-            body = parent.body
-        elif isinstance(parent, Block):
-            body = parent.body
-        else:
+        plan = Ps1RemovalPlan(parent)
+        plan.propose(funcdef)
+        if not plan.commit():
             return False
-        if funcdef in body:
-            body.remove(funcdef)
-            self.mark_changed()
-            return True
-        return False
+        self.mark_changed()
+        return True
 
     def _remove_dead_calls(self, root, dead_functions: set[str]):
         if isinstance(root, Ps1Script):
@@ -1499,13 +1498,12 @@ class Ps1FunctionEvaluator(Transformer):
             body = root.body
         else:
             return
-        to_remove = []
+        plan = Ps1RemovalPlan(root)
         for stmt in body:
             target = self._get_call_target(stmt)
             if target is not None and target in dead_functions:
-                to_remove.append(stmt)
-        for stmt in to_remove:
-            body.remove(stmt)
+                plan.propose(stmt)
+        if plan.commit():
             self.mark_changed()
 
     @staticmethod

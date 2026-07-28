@@ -12,7 +12,14 @@ import base64
 import gzip
 import zlib
 
-from refinery.lib.scripts import Expression, Transformer, _replace_in_parent
+from refinery.lib.scripts import (
+    BodyEdit,
+    Expression,
+    Transformer,
+    _replace_in_parent,
+    set_child,
+)
+from refinery.lib.scripts.ps1.analysis.values import collect_byte_array
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
@@ -21,10 +28,7 @@ from refinery.lib.scripts.ps1.ast import (
     string_value,
 )
 from refinery.lib.scripts.ps1.data import ENCODING_MAP
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    collect_byte_array,
-    extract_foreach_scriptblock,
-)
+from refinery.lib.scripts.ps1.deobfuscation.helpers import extract_foreach_scriptblock
 from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
     Ps1ArrayExpression,
@@ -411,9 +415,9 @@ class Ps1IexInlining(Transformer):
                 if parsed is None:
                     i += 1
                     continue
-                for stmt in parsed:
-                    stmt.parent = container
-                body[i:i + 1] = parsed
+                edit = BodyEdit(container)
+                edit.splice(body[i], parsed)
+                edit.apply()
                 self.mark_changed()
                 i += len(parsed)
 
@@ -436,8 +440,7 @@ class Ps1IexInlining(Transformer):
             and isinstance(parsed[0], Ps1ExpressionStatement)
             and parsed[0].expression is not None
         ):
-            assignment.value = parsed[0].expression
-            parsed[0].expression.parent = assignment
+            set_child(assignment, 'value', parsed[0].expression)
             return [stmt]
         return None
 
