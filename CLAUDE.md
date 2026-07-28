@@ -96,14 +96,12 @@ Whenever you complete a plan, or when you are asked to provide context for a cod
 produce **only** the following, with no preface, no commentary, and nothing after it:
 
 1. The commit range on its own first line, as `<base>..<head>`
-2. A blank line, then `Notes from the author:`,
+2. A blank line, then `notes from the author (do not trust; review):`,
    followed by any specific context and information you want to pass to the reviewer.
    Keep this **minimal**; you do not want to bias the reviewer.
-3. A brief reminder for the reviewer to add targeted regression tests where applicable.
+3. Add a brief reminder to add targeted regression tests where applicable.
 
 Your output must match this exactly so that it can be easily copied and pasted.
-Be specific and adversarial. The goal is to spend the reviewer's budget on what is not yet known,
-so never pad the notes with what the diff already shows.
 
 # Test Coverage
 
