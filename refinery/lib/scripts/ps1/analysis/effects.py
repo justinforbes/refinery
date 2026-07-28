@@ -1026,6 +1026,34 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
     return False
 
 
+def is_fault_free(node) -> bool:
+    """
+    Whether evaluating an expression can raise: a literal, one of the built-in constants `$Null`,
+    `$True`, `$False`, or either through enclosing parentheses and a unary sign. Everything else
+    answers `False`, including expressions that are obviously fine, because this is a closed
+    allow-list and the safe answer to an unlisted node is that it might raise.
+
+    Purity is a different question and neither implies the other. `is_side_effect_free` accepts
+    `[Int]$x`, `$a / $b` and `$a[$i]`, all of which raise on the wrong operand, and it is the
+    predicate that was standing in for this one — a `try` body cannot be hoisted out of its own
+    construct on a purity argument, because an empty `catch` was swallowing what the hoisted
+    statement now raises into the caller.
+
+    `is_pure_constant` is a strict refinement: it excludes string literals, which cannot raise but
+    can be intentional output, so anything it accepts this accepts too. `TestPs1FaultFreedom` pins
+    that containment, since the two are one string literal apart and will not stay so by accident.
+    """
+    if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral, Ps1StringLiteral)):
+        return True
+    if is_builtin_variable(node):
+        return True
+    if isinstance(node, Ps1ParenExpression):
+        return is_fault_free(node.expression)
+    if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
+        return is_fault_free(node.operand)
+    return False
+
+
 def is_pure_constant(node) -> bool:
     """
     Whether an expression is a side-effect-free constant that can be removed as a standalone
@@ -1440,13 +1468,22 @@ def fault_is_observed(stmt: Node) -> bool:
     being emptied through the pruning path at all, and that one covers every other route.
 
     An empty `catch { }` is deliberately not a handler that does something: it swallows the error
-    and execution continues either way, so removing a throwing statement changes nothing observable.
-    That is the shape obfuscators emit, which is why this costs the cleanup passes almost nothing.
+    and execution continues either way, so *removing* a throwing statement changes nothing
+    observable. That is the shape obfuscators emit, which is why this costs the cleanup passes
+    almost nothing.
+
+    What that argument licenses is removal and nothing wider. It does not license *moving* a
+    throwing statement out of the construct, which is what dissolving one does — the swallowing
+    `catch` is gone by then and the throw reaches the caller. `_prune_try` read this as the broader
+    licence and hoisted anything `is_side_effect_free` accepted, so `try { [Int]'abc' } catch { }`
+    became a bare `[Int]'abc'` that raises. It now gates on `is_fault_free` instead.
 
     The converse under-deletion is left alone: `_prune_try` requires *every* catch clause to be
     empty before it dissolves a construct, where a body proven not to throw would let it dissolve
-    one with a live handler and delete that handler as unreachable. Both directions are the same
-    missing axis, and both are the fault axis's to settle.
+    one with a live handler and delete that handler as unreachable. `is_fault_free` decides that
+    narrowly enough to act on — `try { 42 } catch { Start-Process calc }` has an unreachable
+    handler — and deleting a payload on a purity-adjacent proof is not a step to take alongside the
+    fix for taking one too broadly. Both directions remain the fault axis's to settle.
     """
     block = stmt.parent
     if block is None:

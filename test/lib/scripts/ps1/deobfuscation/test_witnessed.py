@@ -16,7 +16,9 @@ from test.lib.scripts.ps1.deobfuscation import (
 )
 
 from refinery.lib.scripts import owning_list
-from refinery.lib.scripts.ps1.deobfuscation import removal, unused
+from refinery.lib.scripts.ps1.analysis.effects import is_side_effect_free
+from refinery.lib.scripts.ps1.deobfuscation import deadcode, removal, unused
+from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement
 
 
 def _witness(witness: type) -> str:
@@ -30,6 +32,7 @@ def _witness(witness: type) -> str:
 
 
 _DEAD_CODE = _witness(test_deadcode.TestPs1DeadCodeElimination)
+_DEAD_CODE_EXTRA = _witness(test_deadcode.TestPs1DeadCodeExtra)
 _DEAD_CODE_TREE = _witness(test_deadcode.TestPs1DeadCodeLeavesTheTreeConsistent)
 _EMULATOR = _witness(test_emulator.TestPs1FunctionEvaluator)
 _HANDLER = _witness(test_removal.TestPs1DeadCodeEliminationDoesNotUnhookAHandler)
@@ -120,6 +123,28 @@ def _leaves_anything_counting_its_own_residue(original: Callable) -> staticmetho
     def mutated(plans, node, installed):
         return original(plans, node, set())
     return staticmethod(mutated)
+
+
+def _try_body_survivors_hoisting_anything_pure(body: list, oracle) -> list | None:
+    """
+    The two predicates as they read before fault-freedom separated them: a body qualifies if every
+    statement is side-effect free, and every side-effect-free statement is carried out. Purity is
+    not an answer to whether a statement raises, so this hoists `[Int]'abc'` past the empty `catch`
+    that was swallowing it.
+    """
+    survivors = []
+    for stmt in body:
+        if not isinstance(stmt, Ps1ExpressionStatement):
+            return None
+        if stmt.expression is None:
+            continue
+        if is_side_effect_free(stmt.expression, oracle):
+            survivors.append(stmt)
+            continue
+        if deadcode._is_injected_noise_bareword(stmt.expression, oracle):
+            continue
+        return None
+    return survivors
 
 
 
@@ -234,3 +259,9 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
                 unused.Ps1UnusedVariableRemoval, '_leaves_anything',
                 _leaves_anything_counting_its_own_residue(
                     unused.Ps1UnusedVariableRemoval._leaves_anything)))
+
+    def test_carrying_only_fault_free_statements_out_of_a_try_is_witnessed(self):
+        self._assertWitnessed(
+            [_DEAD_CODE_EXTRA],
+            patch.object(
+                deadcode, '_try_body_survivors', _try_body_survivors_hoisting_anything_pure))

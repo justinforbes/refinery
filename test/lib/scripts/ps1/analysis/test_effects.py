@@ -8,6 +8,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     StatementEffect,
     body_is_inert,
     body_role,
+    is_fault_free,
     is_pure_constant,
     is_side_effect_free,
     output_is_covered,
@@ -646,6 +647,34 @@ class TestPs1StatementEffect(Ps1EffectsTest):
         for source in ('1 + 1', '$x', '[Math]::Abs(-3)'):
             with self.subTest(source):
                 self.assertFalse(is_pure_constant(self._expression(source)))
+
+
+class TestPs1FaultFreedom(Ps1EffectsTest):
+    """
+    `is_fault_free` decides whether an expression may be moved out of a `try` whose `catch` is
+    empty, so what it accepts has to be everything that cannot raise and nothing else.
+    """
+
+    def test_literals_and_builtin_constants_cannot_raise(self):
+        for source in ('42', '3.5', "'hi'", '$Null', '$True', '$False', '(7)', '-3', '+9'):
+            with self.subTest(source):
+                self.assertTrue(is_fault_free(self._expression(source)))
+
+    def test_side_effect_free_is_not_an_answer_to_this_question(self):
+        # Each of these was hoisted out of its `try` on a purity argument, and each one raises on
+        # the wrong operand.
+        for source in ("[Int]'abc'", '$a / $b', '$a[$i]', '[Math]::Sqrt($x)'):
+            with self.subTest(source):
+                expression = self._expression(source)
+                self.assertTrue(self._pure(expression))
+                self.assertFalse(is_fault_free(expression))
+
+    def test_pure_constants_are_a_strict_refinement_of_fault_freedom(self):
+        for source in ('42', '3.5', '$Null', '$True', '$False', '(7)', '-3', '+9', "'hi'", '1 + 1'):
+            with self.subTest(source):
+                expression = self._expression(source)
+                if is_pure_constant(expression):
+                    self.assertTrue(is_fault_free(expression))
 
 
 class TestPs1EffectInvariant(Ps1EffectsTest):

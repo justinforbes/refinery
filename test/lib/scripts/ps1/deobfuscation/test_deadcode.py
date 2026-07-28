@@ -375,18 +375,31 @@ class TestPs1DeadCodeExtra(TestPs1):
             "try { foo =5 } catch {} finally { Write-Host 'f' }", Ps1DeadCodeElimination)
         self.assertEqual(result, "Write-Host 'f'")
 
-    def test_try_pure_body_removed(self):
-        result = self._apply(
-            "try { [Math]::Sqrt(9) } catch {}\nWrite-Host 'keep'", Ps1DeadCodeElimination)
-        self.assertNotIn('try', result)
-        self.assertIn('Write-Host', result)
+    def test_a_try_body_that_may_raise_keeps_its_construct(self):
+        # Dissolving moves these out of the `try`, where the empty `catch` was swallowing what they
+        # raise; each one is side-effect-free, which is what used to be asked and does not answer it.
+        for body in ("[Math]::Sqrt(9)", "[Int]'abc'", '1 / $d', '$a[$i]'):
+            with self.subTest(body):
+                self._assertUnchanged(cleandoc(
+                    F"""
+                    try {{
+                      {body}
+                    }} catch {{}}
+                    Write-Host 'keep'
+                    """
+                ), Ps1DeadCodeElimination)
 
-    def test_try_pure_body_kept_when_the_world_is_open(self):
-        # The same body, in a script that runs opaque code: `Sqrt` is only provably inert while the
-        # type system is the one the metadata describes, and `iex` can have re-pointed it.
-        result = self._apply(
-            "iex $x\ntry { [Math]::Sqrt(9) } catch {}\nWrite-Host 'keep'", Ps1DeadCodeElimination)
-        self.assertIn('Sqrt', result)
+    def test_a_noise_bareword_in_a_try_is_kept_when_the_world_is_open(self):
+        # A bareword is dropped on a guess that nothing defines it, and `iex` can have defined it.
+        self._assertUnchanged(cleandoc(
+            """
+            iex $x
+            try {
+              foo =5
+            } catch {}
+            Write-Host 'keep'
+            """
+        ), Ps1DeadCodeElimination)
 
     def test_try_function_return_value_preserved(self):
         result = self._apply(

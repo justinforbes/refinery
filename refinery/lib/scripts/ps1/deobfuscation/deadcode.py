@@ -14,6 +14,7 @@ from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import (
     BodyRole,
     body_role,
+    is_fault_free,
     is_pure_constant,
     is_side_effect_free,
     output_observed,
@@ -123,26 +124,35 @@ def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:
     return True
 
 
-def _try_body_is_harmless(body: list[Statement], oracle: TypeOracle) -> bool:
+def _try_body_survivors(body: list[Statement], oracle: TypeOracle) -> list[Statement] | None:
     """
-    Return `True` when every statement in a try body is a pure expression whose value is discarded
-    or a bareword `_is_injected_noise_bareword` recognizes as obfuscator padding.
+    What a try body leaves behind once its construct is dissolved, or `None` when it cannot be.
 
-    The second half is a heuristic, so this does not guarantee the body is harmless; it says the body
-    is pure apart from statements we are willing to guess are noise. A bareword the script redefines
-    runs that definition and is never such a guess, which is one of the facts `oracle` carries.
+    A statement survives dissolution only if it means the same thing outside the construct as
+    inside it, which asks two questions of it and not one. It must not raise, or the empty `catch`
+    that was swallowing the error is gone and the throw reaches the caller. And it must keep its
+    output, so a statement that can emit is carried over rather than dropped. `is_fault_free`
+    answers both at once: what it accepts cannot raise and is carried, and a body holding anything
+    else keeps its construct.
+
+    The one exception is a bareword `_is_injected_noise_bareword` recognizes as obfuscator padding,
+    which is dropped rather than carried. That is a heuristic and it is the reason this returns a
+    body that is *believed* inert rather than one proven so; a bareword the script redefines runs
+    that definition and is never such a guess, which is one of the facts `oracle` carries.
     """
+    survivors: list[Statement] = []
     for stmt in body:
         if not isinstance(stmt, Ps1ExpressionStatement):
-            return False
+            return None
         if stmt.expression is None:
             continue
-        if is_side_effect_free(stmt.expression, oracle):
+        if is_fault_free(stmt.expression):
+            survivors.append(stmt)
             continue
         if _is_injected_noise_bareword(stmt.expression, oracle):
             continue
-        return False
-    return True
+        return None
+    return survivors
 
 
 def _evaluate_for_condition(node: Ps1ForLoop) -> bool | None:
@@ -540,33 +550,31 @@ class Ps1DeadCodeElimination(Transformer):
 
     def _prune_try(self, node: Ps1TryCatchFinally, oracle: TypeOracle) -> list[Statement] | None:
         """
-        Resolve a `try`/`catch`/`finally` whose `try` body cannot produce observable side effects.
-        A body that `_try_body_is_harmless` accepts is treated as a no-op, and an empty or absent
-        one needs no separate case because it satisfies that predicate vacuously: the construct is
-        replaced with any pure-constant statements from the try body (preserving integer/boolean
-        literals that may be a function's implicit return value) followed by the `finally` body,
-        which always runs.
+        Resolve a `try`/`catch`/`finally` into what its `try` body leaves behind, followed by the
+        `finally` body, which always runs. An empty or absent try body needs no separate case
+        because `_try_body_survivors` accepts it vacuously.
 
-        Both routes require every `catch` clause to be empty. Dissolving the construct is sound for
-        a body that really is pure, because an empty `catch` only swallows a throw the removed
-        statements can no longer raise — but a handler with a body is live code whose reachability
-        this pass cannot decide. An empty try body is no license to drop one: emptiness here is
-        rarely how the source was written, it is what an earlier pass left behind, so it is evidence
-        about that pass and not about whether the original body could throw.
+        Both routes require every `catch` clause to be empty, because a handler with a body is live
+        code whose reachability this pass cannot decide. An empty try body is no license to drop
+        one: emptiness here is rarely how the source was written, it is what an earlier pass left
+        behind, so it is evidence about that pass and not about whether the original body could
+        throw.
+
+        What an empty `catch` licenses is narrower than it looks, and this used to take it as broad.
+        It licenses *deleting* a statement that raises, since the error was being swallowed either
+        way. It does not license moving one out, and every statement here is moved, not deleted —
+        so the gate is fault-freedom rather than purity, and a body whose statements merely look
+        harmless keeps its construct.
         """
         for clause in node.catch_clauses:
             if clause.body is not None and clause.body.body:
                 return None
         try_body = node.try_block.body if node.try_block is not None else []
-        if not _try_body_is_harmless(try_body, oracle):
+        survivors = _try_body_survivors(try_body, oracle)
+        if survivors is None:
             return None
         finally_body = node.finally_block.body if node.finally_block is not None else []
-        output_stmts = [
-            stmt for stmt in try_body
-            if isinstance(stmt, Ps1ExpressionStatement)
-            and is_side_effect_free(stmt.expression, oracle)
-        ]
-        return output_stmts + list(finally_body)
+        return survivors + list(finally_body)
 
     def _prune_trap(self, node: Ps1TrapStatement, oracle: TypeOracle) -> list[Statement] | None:
         """
