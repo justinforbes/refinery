@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
-from refinery.lib.scripts.ps1.deobfuscation import Ps1ConstantFolding
+from refinery.lib.scripts.ps1.deobfuscation import Ps1ConstantFolding, Ps1ConstantInlining
 
 
 class TestPS1StringConcatenations(TestPs1):
@@ -741,3 +741,75 @@ class TestPs1FoldingExtra(TestPs1):
 
     def test_leading_zero_integer_is_decimal(self):
         self.assertEqual(self._apply('007 + 1', Ps1ConstantFolding), '8')
+
+
+class TestPs1SelectionKeepsWhatBuildingTheContainerDid(TestPs1):
+
+    def test_an_array_element_that_runs_a_command_is_not_dropped(self):
+        self._assertUnchanged('$r = @(1, (Start-Process calc))[0]', Ps1ConstantFolding)
+
+    def test_an_array_element_that_writes_a_variable_is_not_dropped(self):
+        self._assertUnchanged('$r = @(1, $x++)[0]', Ps1ConstantFolding)
+
+    def test_an_array_element_that_can_raise_is_not_dropped(self):
+        # `[Int]'abc'` terminates where it stands, so the input runs the handler and a folded
+        # output cannot: the payload path would be dead code. Purity does not answer this — the
+        # cast is side-effect free and still raises.
+        self.assertEqual(
+            self._apply(
+                "try { $r = @(1, [Int]'abc')[0] } catch { Start-Process calc }",
+                Ps1ConstantFolding),
+            "try {\n  $r = @(1, [Int]'abc')[0]\n} catch {\n  Start-Process calc\n}")
+
+    def test_a_hashtable_value_that_runs_a_command_is_not_dropped(self):
+        self.assertEqual(
+            self._apply("$r = @{ a = 1; b = (Start-Process calc) }['a']", Ps1ConstantFolding),
+            "$r = @{\n  a = 1\n  b = (Start-Process calc)\n}['a']")
+
+    def test_a_hashtable_key_that_runs_a_command_is_not_dropped(self):
+        # PowerShell rejects a bare subexpression key, so this is the spelling that reaches here.
+        self.assertEqual(
+            self._apply(
+                '$r = @{ "$(Start-Process calc)" = 1; a = 2 }[\'a\']', Ps1ConstantFolding),
+            '$r = @{\n  "$(Start-Process calc)" = 1\n  a = 2\n}[\'a\']')
+
+    def test_an_array_of_literals_is_still_selected_from(self):
+        self.assertEqual(self._apply('$r = @(1, 2)[0]', Ps1ConstantFolding), '$r = 1')
+
+    def test_several_indices_into_an_array_of_literals_still_select(self):
+        self.assertEqual(self._apply('$r = @(1, 2, 3)[0, 2]', Ps1ConstantFolding), '$r = 1, 3')
+
+    def test_a_hashtable_of_literals_is_still_looked_up(self):
+        self.assertEqual(
+            self._apply("$r = @{ a = 1; b = 2 }['a']", Ps1ConstantFolding), '$r = 1')
+
+    def test_a_character_of_a_string_leaves_no_evaluation_behind(self):
+        # A string is a value and not a container of expressions, so the characters this does not
+        # select are not work the folded script stops doing and no gate applies to them. The array
+        # of the same shape one line up is refused.
+        self.assertEqual(self._apply("$r = 'abc'[0]", Ps1ConstantFolding), "$r = 'a'")
+
+
+class TestPs1ConstantInliningSelectsOnlyFromConstants(TestPs1):
+    """
+    `Ps1ConstantInlining` selects out of a container too, and the claim that it needs no gate is
+    that its containers are already proven constant. These pin the claim rather than the gate.
+    """
+
+    def test_an_array_holding_a_command_is_not_a_constant_to_inline_from(self):
+        self._assertUnchanged(
+            '$a = @(1, (Start-Process calc))\n$r = $a[0]', Ps1ConstantInlining)
+
+    def test_an_array_holding_an_increment_is_not_a_constant_to_inline_from(self):
+        self._assertUnchanged('$a = @(1, $x++)\n$r = $a[0]', Ps1ConstantInlining)
+
+    def test_an_array_holding_a_raising_cast_is_not_a_constant_to_inline_from(self):
+        self._assertUnchanged("$a = @(1, [Int]'abc')\n$r = $a[0]", Ps1ConstantInlining)
+
+    def test_an_array_of_literals_is_still_inlined_from(self):
+        self.assertEqual(
+            self._apply('$a = @(1, 2)\n$r = $a[0]', Ps1ConstantInlining), '$r = 1')
+
+    def test_a_string_is_still_indexed_when_inlined(self):
+        self.assertEqual(
+            self._apply("$a = 'abc'\n$r = $a[0]", Ps1ConstantInlining), "$r = 'a'")

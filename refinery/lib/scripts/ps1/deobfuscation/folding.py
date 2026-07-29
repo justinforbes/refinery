@@ -7,9 +7,9 @@ import base64
 import codecs
 import re
 
-from typing import Iterator
+from typing import Iterator, NamedTuple
 
-from refinery.lib.scripts.ps1.analysis.effects import is_fault_free
+from refinery.lib.scripts.ps1.analysis.effects import is_fault_free, may_be_dropped
 from refinery.lib.scripts.ps1.analysis.values import (
     collect_byte_array,
     collect_int_arguments,
@@ -278,37 +278,70 @@ def _resolve_index_values(index: Expression) -> int | list[int] | None:
     return None
 
 
-def _index_into_string(s: str, indices: int | list[int]) -> Expression | None:
+class _Selection(NamedTuple):
+    """
+    What selecting out of a literal container yields, beside what building the container evaluated
+    and the selection then leaves behind.
+
+    The two halves are answered together because they are one decision. A fold that reports only
+    what it carries forward leaves its caller to reconstruct the rest, and the reconstruction is
+    what went wrong: indexing an array literal was read as choosing among *values*, where the
+    elements are also *work* — `@(1, (Start-Process calc))[0]` folded to `1` and the command ran in
+    the original. It is the same rule the effect layer already states for `[Void](Start-Process x)`,
+    which is an `EFFECT` because the wrapper discards a value and never the evaluation behind it.
+    """
+    carried: Expression
+    dropped: list[Expression]
+
+
+def _index_into_string(s: str, indices: int | list[int]) -> _Selection | None:
+    """
+    A string is a value and not a container of expressions, so a character selected out of one
+    leaves no evaluation behind, whatever the index.
+    """
     n = len(s)
     if isinstance(indices, int):
         if -n <= indices < n:
-            return make_string_literal(s[indices])
+            return _Selection(make_string_literal(s[indices]), [])
         return None
     selected: list[Expression] = []
     for i in indices:
         if not (-n <= i < n):
             return None
         selected.append(make_string_literal(s[i]))
-    return Ps1ArrayLiteral(elements=selected)
+    return _Selection(Ps1ArrayLiteral(elements=selected), [])
 
 
 def _index_into_array(
     array: Ps1ArrayLiteral, indices: int | list[int],
-) -> Expression | None:
+) -> _Selection | None:
     n = len(array.elements)
     if isinstance(indices, int):
-        if -n <= indices < n:
-            return array.elements[indices]
-        return None
-    selected: list[Expression] = []
-    for i in indices:
-        if not (-n <= i < n):
+        if not (-n <= indices < n):
             return None
-        selected.append(array.elements[i])
-    return Ps1ArrayLiteral(elements=selected)
+        selected = [array.elements[indices]]
+        carried = selected[0]
+    else:
+        selected = []
+        for i in indices:
+            if not (-n <= i < n):
+                return None
+            selected.append(array.elements[i])
+        carried = Ps1ArrayLiteral(elements=list(selected))
+    kept = {id(element) for element in selected}
+    return _Selection(
+        carried, [element for element in array.elements if id(element) not in kept])
 
 
-def _lookup_hashtable(ht: Ps1HashLiteral, index: Expression) -> Expression | None:
+def _lookup_hashtable(ht: Ps1HashLiteral, index: Expression) -> _Selection | None:
+    """
+    The value a literal hash table holds for `index`, beside every other part of the literal.
+
+    Both halves of each pair are reported as dropped, keys included. PowerShell 5.1 rejects a bare
+    subexpression key outright, so the shape that runs is an expandable string holding one, and
+    telling that spelling apart from a plain name here would be a second rule about which parts of
+    a literal are evaluated — where the whole literal plainly is.
+    """
     key = string_value(index)
     if key is None:
         return None
@@ -316,7 +349,12 @@ def _lookup_hashtable(ht: Ps1HashLiteral, index: Expression) -> Expression | Non
     for pair_key, pair_value in ht.pairs:
         k = string_value(pair_key)
         if k is not None and k.lower() == lower:
-            return pair_value
+            return _Selection(pair_value, [
+                part
+                for other_key, other_value in ht.pairs
+                for part in (other_key, other_value)
+                if part is not pair_value
+            ])
     return None
 
 
@@ -482,21 +520,38 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
         return Ps1ArrayLiteral(elements=[
             Ps1IntegerLiteral(value=v, raw=str(v)) for v in range(a, b + step, step)])
 
+    def _selected(self, selection: _Selection | None) -> Expression | None:
+        """
+        The expression a selection folds to, or `None` when what it leaves behind is work the script
+        would no longer do; see
+        `refinery.lib.scripts.ps1.analysis.effects.may_be_dropped` for what that means.
+
+        The oracle is the one captured at the root by
+        `refinery.lib.scripts.ps1.deobfuscation.helpers.LocalFunctionAwareTransformer`. This pass
+        only folds, so a verdict taken before its own edits is the more open, and so the more
+        conservative, of the two.
+        """
+        if selection is None:
+            return None
+        if not all(may_be_dropped(part, self._oracle) for part in selection.dropped):
+            return None
+        return selection.carried
+
     def visit_Ps1IndexExpression(self, node: Ps1IndexExpression):
         self.generic_visit(node)
         if node.index is None or node.object is None:
             return None
         if isinstance(node.object, Ps1HashLiteral):
-            return _lookup_hashtable(node.object, node.index)
+            return self._selected(_lookup_hashtable(node.object, node.index))
         indices = _resolve_index_values(node.index)
         if indices is None:
             return None
         obj_str = string_value(node.object)
         if obj_str is not None:
-            return _index_into_string(obj_str, indices)
+            return self._selected(_index_into_string(obj_str, indices))
         array = unwrap_to_array_literal(node.object)
         if array is not None:
-            return _index_into_array(array, indices)
+            return self._selected(_index_into_array(array, indices))
         return None
 
     def visit_Ps1ExpressionStatement(self, node: Ps1ExpressionStatement):

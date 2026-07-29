@@ -11,6 +11,7 @@ from test.lib.scripts.ps1 import test_deobfuscation
 from test.lib.scripts.ps1.deobfuscation import (
     test_deadcode,
     test_emulator,
+    test_folding,
     test_iexinline,
     test_removal,
     test_unused,
@@ -23,6 +24,7 @@ from refinery.lib.scripts.ps1.analysis.effects import OutputSink, is_side_effect
 from refinery.lib.scripts.ps1.deobfuscation import (
     deadcode,
     emulator,
+    folding,
     removal,
     substitution,
     unused,
@@ -53,6 +55,7 @@ _KEPT_EITHER_WAY = _witness(test_unused.TestPs1OutputSomethingElseHoldsIsKeptEit
 _KEPT_WHEN_ASKED = _witness(test_unused.TestPs1BareOutputIsKeptWhenAsked)
 _PLAN = _witness(test_removal.TestPs1RemovalPlan)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
+_SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
 _TREE = _witness(test_unused.TestPs1RemovalLeavesTheTreeConsistent)
 _UNUSED = _witness(test_unused.TestPs1UnusedVariableRemoval)
@@ -400,3 +403,19 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_EMULATOR_EXTRA],
             patch.object(emulator, 'opens_a_redirection_target', lambda node: False),
             notices='test_a_body_that_opens_a_file_is_not_folded_into_the_value_it_returns')
+
+    def test_the_gate_on_an_element_a_selection_drops_is_witnessed(self):
+        # Selecting out of a literal container evaluates the whole container, so what the selection
+        # does not carry forward is work the folded script no longer does.
+        self._assertWitnessed(
+            [_SELECTION],
+            patch.object(folding, 'may_be_dropped', lambda node, oracle: True),
+            notices='test_an_array_element_that_runs_a_command_is_not_dropped')
+
+    def test_the_fault_half_of_that_gate_is_witnessed(self):
+        # And the half a purity argument alone would have granted: `[Int]'abc'` is side-effect free
+        # and raises where it stands.
+        self._assertWitnessed(
+            [_SELECTION],
+            patch.object(effects, 'is_fault_free', lambda node: True),
+            notices='test_an_array_element_that_can_raise_is_not_dropped')

@@ -1090,6 +1090,30 @@ def is_fault_free(node) -> bool:
     return False
 
 
+def may_be_dropped(node, oracle: TypeOracle) -> bool:
+    """
+    Whether an expression the script evaluates may be deleted without changing what the script does.
+
+    This is the question a rewrite asks about the parts it does not carry forward: the elements a
+    selection indexes past, which building the container evaluated all the same. Both axes are
+    asked, and neither answers for the other in principle. `is_side_effect_free` rules out
+    `$x++` and `(Start-Process calc)` — work the folded script would stop doing.
+    `is_fault_free` rules out `[Int]'abc'`, which raises where it stands, so
+    `try { $r = @(1, [Int]'abc')[0] } catch { <payload> }` keeps a handler the drop would otherwise
+    leave unreachable.
+
+    **As the two predicates stand the fault half is the narrower, and it is the only one a test can
+    see refuse.** `is_fault_free` is a closed allow-list of constants and containers of constants,
+    and nothing it admits does anything, so today it refuses everything purity refuses and more.
+    Purity is asked anyway because that containment is a fact about the current allow-lists rather
+    than about the question: an `is_fault_free` widened to admit an increment on a variable it has
+    typed would start answering yes to work. The conjunction lives here, under one name, so that
+    the guard a caller installs is one thing a probe can mutate rather than a pair whose second
+    half nothing can be shown to notice.
+    """
+    return is_side_effect_free(node, oracle) and is_fault_free(node)
+
+
 def _hash_literal_is_fault_free(node: Ps1HashLiteral) -> bool:
     """
     Whether building a hash literal is guaranteed to succeed. Every key and value has to be

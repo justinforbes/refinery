@@ -11,6 +11,7 @@ from typing import Callable, Generator, NamedTuple, TypeGuard
 
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.values import collect_typed_arguments, unwrap_integer
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
@@ -558,6 +559,7 @@ class LocalFunctionAwareTransformer(Transformer):
     def __init__(self):
         super().__init__()
         self._local_functions: frozenset[str] = frozenset()
+        self._oracle: TypeOracle | None = None
         self._entry = False
 
     def visit(self, node: Node):
@@ -565,7 +567,14 @@ class LocalFunctionAwareTransformer(Transformer):
             return super().visit(node)
         self._entry = True
         try:
-            self._local_functions = model_cache(self, node).closed_world.shadowed_names
+            cache = model_cache(self, node)
+            self._local_functions = cache.closed_world.shadowed_names
+            # Read here beside the shadow set rather than per node, for the reason
+            # `refinery.lib.scripts.ps1.deobfuscation.unused.Ps1DeadStoreElimination` gives: every
+            # purity verdict in a run has to be asked through the same oracle, and one taken before
+            # this run's own edits can only be the more open — and so the more conservative — of the
+            # two. A subclass that asks nothing about purity pays a dictionary lookup for it.
+            self._oracle = cache.oracle
             return super().visit(node)
         finally:
             self._entry = False
