@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from test import TestBase
 from test.lib.scripts.ps1 import test_deobfuscation
+from test.lib.scripts.ps1.analysis import test_callgraph
 from test.lib.scripts.ps1.deobfuscation import (
     test_deadcode,
     test_emulator,
@@ -19,7 +20,7 @@ from test.lib.scripts.ps1.deobfuscation import (
 )
 
 from refinery.lib.scripts import owning_list
-from refinery.lib.scripts.ps1.analysis import effects
+from refinery.lib.scripts.ps1.analysis import callgraph, effects
 from refinery.lib.scripts.ps1.analysis.effects import OutputSink, is_side_effect_free
 from refinery.lib.scripts.ps1.deobfuscation import (
     deadcode,
@@ -43,6 +44,7 @@ def _witness(witness: type) -> str:
     return F'{witness.__module__}.{witness.__qualname__}'
 
 
+_CALL_GRAPH = _witness(test_callgraph.TestPs1CallGraphReadability)
 _DEAD_CODE = _witness(test_deadcode.TestPs1DeadCodeElimination)
 _DEAD_CODE_EXTRA = _witness(test_deadcode.TestPs1DeadCodeExtra)
 _DEAD_CODE_TREE = _witness(test_deadcode.TestPs1DeadCodeLeavesTheTreeConsistent)
@@ -54,6 +56,7 @@ _INTEGRATION = _witness(test_deobfuscation.TestPs1Integration)
 _KEPT_EITHER_WAY = _witness(test_unused.TestPs1OutputSomethingElseHoldsIsKeptEitherWay)
 _KEPT_WHEN_ASKED = _witness(test_unused.TestPs1BareOutputIsKeptWhenAsked)
 _PLAN = _witness(test_removal.TestPs1RemovalPlan)
+_QUALIFIED = _witness(test_unused.TestPs1AQualifiedCallKeepsTheNameItResolvesOnto)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
@@ -419,3 +422,13 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_SELECTION],
             patch.object(effects, 'is_fault_free', lambda node: True),
             notices='test_an_array_element_that_can_raise_is_not_dropped')
+
+    def test_the_collision_row_on_a_qualified_call_is_witnessed(self):
+        # Only the collision detection is patched. Pinning `is_readable` False instead produces 22
+        # failures across the package, so a blanket mutation would be satisfied by tests that have
+        # nothing to do with this row and would prove nothing about it.
+        self._assertWitnessed(
+            [_QUALIFIED, _CALL_GRAPH],
+            patch.object(
+                callgraph, '_collides_with_a_definition', lambda resolved, definitions: False),
+            notices='test_a_quoted_module_qualified_call_keeps_the_definition_it_resolves_onto')

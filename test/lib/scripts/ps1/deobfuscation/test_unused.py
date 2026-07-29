@@ -1315,3 +1315,56 @@ class TestPs1RemovalLeavesTheTreeConsistent(TestPs1):
             Write-Host $q
             """
         ), Ps1UnusedVariableRemoval)
+
+
+class TestPs1AQualifiedCallKeepsTheNameItResolvesOnto(TestPs1):
+    """
+    `& 'MyModule\\Qzmr'` keys as `mymodule\\qzmr` while `function Qzmr` keys as `qzmr`, so nothing
+    matched, the definition read as uncalled, and the emitted script called a name it no longer
+    defined.
+
+    Real PowerShell errors on such a call rather than reaching the local definition, so keeping the
+    definition is not what the language says: it is the internal invariant that no removal leaves a
+    dangling reference, plus a decision to fail closed in front of the lexer's qualified-name hole.
+    """
+
+    def test_a_quoted_module_qualified_call_keeps_the_definition_it_resolves_onto(self):
+        result = self._deobfuscate(
+            "function Qzmr { Write-Host 'P' }\n& 'MyModule\\Qzmr'")
+        self.assertIn('function Qzmr', result)
+
+    def test_a_bare_module_qualified_call_keeps_the_definition_it_resolves_onto(self):
+        # The call operator is what makes the name arrive whole, not the quoting; both spellings
+        # reach the graph as one token and have to be answered the same way.
+        result = self._deobfuscate(
+            "function Qzmr { Write-Host 'P' }\n& MyModule\\Qzmr")
+        self.assertIn('function Qzmr', result)
+
+    def test_a_scope_qualified_call_still_reaches_the_definition_by_key(self):
+        result = self._deobfuscate(
+            "function Qzmr { Write-Host 'P' }\n& 'global:Qzmr'")
+        self.assertIn('function Qzmr', result)
+
+    def test_an_executable_invoked_by_path_does_not_switch_the_analysis_off(self):
+        # Reading the backslash itself as the signal would make every script that runs an
+        # executable by path unreadable, and this inert function would survive with it.
+        result = self._deobfuscate(
+            "function j { $Null = 1 }\nj\n& 'C:\\tools\\stage2.exe'")
+        self.assertNotIn('function j', result)
+        self.assertIn('stage2.exe', result)
+
+    def test_an_executable_whose_stem_names_a_definition_keeps_it(self):
+        result = self._deobfuscate(
+            "function stage2.exe { Write-Host 'P' }\n& 'C:\\tools\\stage2.exe'")
+        self.assertIn('function stage2.exe', result)
+
+    def test_an_uncalled_definition_beside_no_qualified_call_is_still_removed(self):
+        result = self._deobfuscate(
+            "function Qzmr { Write-Host 'P' }\nWrite-Host 'x'")
+        self.assertNotIn('function Qzmr', result)
+
+    def test_a_module_qualified_export_still_reports_an_export(self):
+        result = self._deobfuscate(
+            "& 'Microsoft.PowerShell.Core\\Export-ModuleMember' -Function f\n"
+            "function f { Write-Host 'P' }")
+        self.assertIn('function f', result)

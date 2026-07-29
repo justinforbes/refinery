@@ -142,13 +142,15 @@ def resolve_command_name(cmd: Ps1CommandInvocation) -> str | None:
     nothing — every extra match is the conservative answer, and a spelling that dodges the table is
     the dangerous one. A table whose hits *grant* something must not read a name this way.
 
-    **The stripping reaches only a quoted name.** Written bare, `Microsoft.PowerShell.Utility\\iex`
-    and `global:iex` never arrive here as one token: the lexer splits at the backslash and at the
-    scope colon, so `get_command_name` answers `'Microsoft.PowerShell.Utility'` and `'global'`, and
-    every table keyed on the bare spelling is dodged. That is a hole in the lexer rather than here,
-    and it is the dangerous direction on every caller — a world opener that reads as closed, a
-    silent command that reads as emitting. Until the lexer joins a qualified name, do not read this
-    function as evidence that a qualified call has been seen.
+    **What decides whether a qualified name arrives here whole is the call operator, not the
+    quoting.** `& Microsoft.PowerShell.Utility\\iex` and `& 'Microsoft.PowerShell.Utility\\iex'`
+    both reach this as one token, and so do both spellings of `& global:iex`. Written as a bare
+    command statement they do not: the lexer splits at the backslash and at the scope colon, so
+    `get_command_name` answers `'Microsoft.PowerShell.Utility'` and `'global'`, and every table
+    keyed on the bare spelling is dodged. That is a hole in the lexer rather than here, and it is
+    the dangerous direction on every caller — a world opener that reads as closed, a silent command
+    that reads as emitting. Until the lexer joins a qualified name, do not read this function as
+    evidence that every qualified call has been seen.
     """
     name = get_command_name(cmd)
     if name is None:

@@ -47,9 +47,10 @@ _IDENTITY_SCOPES = frozenset({
 #: sites in whatever imported it, and no walk over this tree can see them. Read through
 #: `refinery.lib.scripts.ps1.ast.resolve_command_name`, which is the deny-list reading of a name:
 #: a hit here withholds every name-keyed removal, so a spelling that dodges the table is the
-#: dangerous direction. That closes a *quoted* module qualifier only — written bare, the lexer
-#: splits the name at the backslash, and `Microsoft.PowerShell.Core\Export-ModuleMember` still
-#: dodges this table. See `resolve_command_name` for why that hole is the lexer's.
+#: dangerous direction. That closes a module qualifier written after the call operator, quoted or
+#: not — `& Microsoft.PowerShell.Core\Export-ModuleMember` arrives as one token either way. Written
+#: as a bare command statement the lexer splits the name at the backslash and the table is dodged;
+#: see `resolve_command_name` for why that hole is the lexer's.
 _EXPORTING_COMMANDS = frozenset({
     'export-modulemember',
 })
@@ -143,7 +144,7 @@ class Ps1CallGraph:
     def is_readable(self) -> bool:
         """
         Whether this tree is the whole story about what a command name denotes and who reaches it.
-        Four independent things say it is not, and every one of them has to be asked, because none
+        Five independent things say it is not, and every one of them has to be asked, because none
         implies another:
 
         - the type world is open, so a dot-sourced file, an imported module or an `iex` holds
@@ -152,7 +153,9 @@ class Ps1CallGraph:
         - an assignment binds the `function:` or `alias:` namespace, which defines a command under a
           spelling the definition scan does not read — and leaves the world closed while doing it,
           since `${function:j} = { }` remaps nothing in the type system;
-        - the script calls `Export-ModuleMember`, which hands a name to a caller outside the file.
+        - the script calls `Export-ModuleMember`, which hands a name to a caller outside the file;
+        - a call written under a qualifier resolves onto a name this script defines; see
+          `_collides_with_a_definition`.
 
         Every consumer reads this as fail-closed: an unreadable graph keeps more, never less.
 
@@ -226,6 +229,43 @@ class Ps1CallGraph:
         return frozenset(reachable)
 
 
+def _collides_with_a_definition(
+    resolved: Sequence[str],
+    definitions: Mapping[str, Sequence[Ps1FunctionDefinition]],
+) -> bool:
+    """
+    Whether some call keyed under a qualifier resolves onto a name this script defines.
+
+    `& 'MyModule\\Qzmr'` keys as `mymodule\\qzmr` while `function Qzmr` keys as `qzmr`, so nothing
+    matches, the definition reads as uncalled, and deleting it leaves a script calling a name it no
+    longer defines. `resolved` holds the stripped reading of every call whose written key differs
+    from it, which is the deny-list reading `refinery.lib.scripts.ps1.ast.resolve_command_name`
+    gives — so an alias is here too, and `iex $x` beside a `function Invoke-Expression` collides for
+    the same reason.
+
+    **The condition is the collision and not the qualifier.** A quoted executable path is the same
+    shape: `& 'C:\\tools\\stage2.exe'` keys as the path and resolves to `stage2.exe`. Reading the
+    backslash itself as the signal would make every script that invokes an executable by path
+    unreadable, and `& 'C:\\Windows\\Temp\\payload.exe'` is one of the commonest shapes there is;
+    that is not failing closed, it is switching the analysis off. Asked this way it costs nothing
+    unless the stripped name is one this tree actually defines.
+
+    **This has no PowerShell oracle and is a policy choice.** Real PowerShell errors on
+    `& 'MyModule\\Qzmr'` when no such module is loaded — it does not reach the local definition — so
+    the language does not say the definition must survive. What says so is the internal invariant
+    that no removal leaves a dangling reference, plus a decision to fail closed in front of the
+    lexer's qualified-name hole rather than behind it. `& 'global:Qzmr'` is a different case and is
+    oracle-backed: the scope qualifier is stripped by the *key*, so the call and the definition
+    already meet and nothing here fires.
+
+    The call is not filed under the stripped key instead, which would be the other way to make the
+    two meet. The same list feeds `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow`, where
+    an extra call site *grounds* a function and licenses deleting what its body writes — so a guess
+    that keeps a definition alive would buy that at the price of a payload.
+    """
+    return any(name in definitions for name in resolved)
+
+
 def build_call_graph(root: Ps1Script, oracle: TypeOracle) -> Ps1CallGraph:
     """
     Walk the whole tree once, recording every function definition, every statically named invocation
@@ -234,9 +274,13 @@ def build_call_graph(root: Ps1Script, oracle: TypeOracle) -> Ps1CallGraph:
     The walk runs in source order so that a consumer removing what it finds removes from the front,
     and cannot short-circuit on the first unknown, because the definitions and call sites are still
     needed to decide what to keep.
+
+    The collision row is decided after the walk rather than during it, because a definition may be
+    written below the call that resolves onto it and a script is not read top to bottom.
     """
     definitions: dict[str, list[Ps1FunctionDefinition]] = {}
     call_sites: dict[str, list[Ps1CallSite]] = {}
+    qualified: list[str] = []
     readable = oracle.world_closed_at(root)
     exports = False
     for node in root.walk_in_order():
@@ -250,10 +294,15 @@ def build_call_graph(root: Ps1Script, oracle: TypeOracle) -> Ps1CallGraph:
                     readable = False
                 continue
             key = normalize_command_name(name)
-            if resolve_command_name(node) in _EXPORTING_COMMANDS:
+            resolved = resolve_command_name(node)
+            if resolved in _EXPORTING_COMMANDS:
                 readable = False
                 exports = True
+            if resolved is not None and resolved != key:
+                qualified.append(resolved)
             call_sites.setdefault(key, []).append(Ps1CallSite(node, _enclosing_function(node)))
         elif binds_command_identity(node):
             readable = False
+    if _collides_with_a_definition(qualified, definitions):
+        readable = False
     return Ps1CallGraph(definitions, call_sites, readable, exports)
