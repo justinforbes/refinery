@@ -10,7 +10,10 @@ free variable of the expression it inlines: an expression may be relocated to a 
 inlined binding *and* every variable the expression reads all still hold, at the use, the value they
 held at the definition. The layer sits above two others. Dominance
 (`refinery.lib.scripts.js.analysis.dominance.DominanceModel`) orders the definition strictly before
-the use and supplies the reachability primitive `path_between`; the effect model
+the use and supplies the reachability primitive
+`refinery.lib.scripts.js.analysis.dominance.DominanceModel.reachable`, from which the path-between
+question is asked as a forward walk from the definition intersected with a backward walk from the
+use; the effect model
 (`refinery.lib.scripts.js.analysis.effects.EffectModel`) says where a binding may change — a
 reassignment recorded on the binding, or a call to a function that may write it. Kills the model
 cannot pin to a site — a mutating function that escapes, a write through a global-object alias or a
