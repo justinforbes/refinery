@@ -549,11 +549,23 @@ class TestPs1BareOutputIsStrippedByDefault(TestPs1):
                 self._assertStripped(*_STRIPPABLE[kind])
 
     def test_a_container_built_only_out_of_literals_is_stripped(self):
-        # Constructing an array, a hash table or a range cannot fail when nothing inside it can, so
-        # these join the literals rather than needing a rule of their own.
+        # Constructing an array or a hash table cannot fail when nothing inside it can, so these
+        # join the literals rather than needing a rule of their own. A range is not one of them —
+        # the operator converts both endpoints and then allocates the span, so it is weighed
+        # separately and only a short range of `Int32` bounds qualifies.
         for kind in ('array literal', 'hash literal', 'range'):
             with self.subTest(kind):
                 self._assertStripped(*_STRIPPABLE[kind])
+
+    def test_a_range_the_operator_cannot_build_is_not_stripped(self):
+        # Regression: `4242424242..4242424245` raises the same `Int32` conversion error `[Int]'x'`
+        # raises, so it is a guard that already stopped the script and deleting it resumes
+        # execution. Folding expanded it into an array of literals before anything asked, and an
+        # array of literals is granted unconditionally.
+        for junk in ('4242424242..4242424245', '1..2147483648', '0..2147483647'):
+            with self.subTest(junk):
+                self.assertIn('ANCHOR', (result := self._deobfuscate(F'{junk}\n{_ANCHOR}')))
+                self.assertIn('4242424242' if junk.startswith('42') else '2147483', result)
 
     def test_a_bare_value_in_a_function_every_call_site_only_prints_is_stripped(self):
         # The direction that needs the call graph: position alone says only that the value leaves
@@ -637,9 +649,9 @@ class TestPs1OutputSomethingElseHoldsIsKeptEitherWay(TestPs1):
 
     def test_a_value_a_call_site_hands_to_anything_at_all_is_kept(self):
         # Regression: the outward walk enumerated the positions that *consume* a value and walked
-        # past everything else, so every slot the enumeration did not name read as the console. The
-        # first two write the payload to disk, the rest decide what runs next — measured on
-        # PowerShell 5.1, `Qzmr` returns `Xtjbnwqm` and the branch is taken.
+        # past everything else, so every slot the enumeration did not name read as the console. Each
+        # of these hands the value to something other than the console, which is the whole claim —
+        # what the value then decides varies by row and is not what is being pinned.
         for call in (
             r"[IO.File]::WriteAllText('C:\out.txt', (Qzmr))",
             r'Set-Content C:\out.txt (Qzmr)',
@@ -655,10 +667,9 @@ class TestPs1OutputSomethingElseHoldsIsKeptEitherWay(TestPs1):
                 self._assertKeptEitherWay(F'{self._QZMR}{call}\n{_ANCHOR}', 'Xtjbnwqm')
 
     def test_a_value_a_parameter_default_holds_is_kept(self):
-        # A default runs on every call that omits the argument, and the walk out of one reaches a
-        # genuine function boundary — so it answers `CALLER` and grounds the callee whenever the
-        # function holding the default is grounded, which no arm added for an argument position
-        # would have caught.
+        # A default runs on every call that omits the argument, and a `param` declaration is not a
+        # position the allow-list names — so the walk out of one answers `CAPTURED` and the value is
+        # kept, which no arm added for an argument position would have covered.
         self._assertKeptEitherWay(
             F'{self._QZMR}function Ldkr {{ param($p = (Qzmr)) Write-Host $p }}\nLdkr\n{_ANCHOR}',
             'Xtjbnwqm')
@@ -1171,6 +1182,16 @@ class TestPs1RemovalLeavesNoDanglingReference(TestPs1):
         result = self._deobfuscate(
             'function Outer { function Inner { Payload } }\n'
             'Outer\n'
+            'function Payload { Start-Process calc }')
+        self.assertIn('Start-Process calc', result)
+
+    def test_a_call_inside_a_method_of_a_nested_class_keeps_the_definition_it_names(self):
+        # Crediting a call to the outermost enclosing function has to stop at a class method, or the
+        # method's calls become conditional on a name that reaches the *class*, which nothing here
+        # can prove. A method is reached through `$object.Method()` and never through a bare name,
+        # so its calls are the ones that must stay unconditional.
+        result = self._deobfuscate(
+            'function Setup { class Impl { [void] Run() { Payload } } }\n'
             'function Payload { Start-Process calc }')
         self.assertIn('Start-Process calc', result)
 

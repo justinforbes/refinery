@@ -43,8 +43,8 @@ class defu(IterativeDeobfuscator):
 
     Where the selected language has a notion of a statement whose only effect is to write a value to
     the console, such a statement is deleted by default and the switch below keeps it; see
-    `refinery.units.scripting.ps1` for what that costs and the assumption it rests on. A language
-    without that notion ignores the switch.
+    `refinery.ps1` for what that costs and the assumption it rests on. A language without that
+    notion ignores the switch.
     """
 
     _backend: _Backend
@@ -66,8 +66,13 @@ class defu(IterativeDeobfuscator):
         from refinery.lib.scripts.ps1.parser import Ps1Parser
         from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
         yield _Backend(
-            'ps1', Ps1Parser, ps1_deobfuscate, Ps1Synthesizer, Ps1ErrorNode,
-            keep_output='preserve_bare_output')
+            'ps1',
+            Ps1Parser,
+            ps1_deobfuscate,
+            Ps1Synthesizer,
+            Ps1ErrorNode,
+            keep_output='preserve_bare_output',
+        )
 
         from refinery.lib.scripts.vba.deobfuscation import deobfuscate as vba_deobfuscate
         from refinery.lib.scripts.vba.model import VbaErrorNode
@@ -106,9 +111,8 @@ class defu(IterativeDeobfuscator):
 
     def transform(self, ast: Node) -> int:
         keyword = self._backend.keep_output
-        if keyword is None:
-            return self._backend.deobfuscate(ast)
-        return self._backend.deobfuscate(ast, **{keyword: self.args.keep_output})
+        options = {} if keyword is None else {keyword: self.args.keep_output}
+        return self._backend.deobfuscate(ast, **options)
 
     def synthesize(self, ast: Node) -> str:
         return self._backend.synthesizer().convert(ast)

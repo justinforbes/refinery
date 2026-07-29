@@ -10,6 +10,7 @@ import re
 from typing import Iterator
 
 from refinery.lib.scripts import set_child, set_child_list
+from refinery.lib.scripts.ps1.analysis.effects import is_fault_free
 from refinery.lib.scripts.ps1.analysis.values import (
     collect_byte_array,
     collect_int_arguments,
@@ -472,6 +473,8 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
         step = 1 if (b := upper.value) >= (a := lower.value) else -1
         count = abs(b - a) + 1
         if count > _MAX_RANGES_EXPAND:
+            return None
+        if not is_fault_free(node):
             return None
         return Ps1ArrayLiteral(elements=[
             Ps1IntegerLiteral(value=v, raw=str(v)) for v in range(a, b + step, step)])

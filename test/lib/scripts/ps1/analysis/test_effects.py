@@ -695,8 +695,22 @@ class TestPs1FaultFreedom(Ps1EffectsTest):
             with self.subTest(source):
                 self.assertFalse(is_fault_free(self._expression(source)))
 
-    def test_a_range_of_int32_literals_is_still_fault_free(self):
-        for source in ('1..5', '(-3)..(+9)', '0..2147483647'):
+    def test_a_range_whose_bounds_fit_but_whose_span_does_not_is_not_fault_free(self):
+        # Both endpoints convert cleanly and PowerShell still dies building the array they span:
+        # `0..2147483647` raises `OutOfMemoryException`, which an enclosing handler may be catching.
+        for source in ('0..2147483647', '(-2147483648)..2147483647', '2147483647..0'):
+            with self.subTest(source):
+                self.assertFalse(is_fault_free(self._expression(source)))
+
+    def test_a_short_range_of_int32_literals_is_still_fault_free(self):
+        # `-2147483648` is the narrowest `Int32` there is and parses as a sign over a literal that
+        # is not one, so the sign has to be applied rather than walked past.
+        for source in (
+            '1..5',
+            '(-3)..(+9)',
+            '(-2147483648)..(-2147483640)',
+            '2147483647..2147483640',
+        ):
             with self.subTest(source):
                 self.assertTrue(is_fault_free(self._expression(source)))
 
@@ -903,10 +917,13 @@ class TestPs1OutputSink(Ps1EffectsTest):
             ('&{ f }'               , OutputSink.HOST),      # noqa
             ('try { f } catch { 1 }', OutputSink.HOST),      # noqa
             ('Get-Item | f'         , OutputSink.HOST),      # noqa
+            ('return f'             , OutputSink.HOST),      # noqa
+            ('exit (f)'             , OutputSink.CAPTURED),  # noqa
             ('f | Out-Null'         , OutputSink.CAPTURED),  # noqa
             ('$r = f'               , OutputSink.CAPTURED),  # noqa
             ('$r = $( f )'          , OutputSink.CAPTURED),  # noqa
             ('function g { f }'     , OutputSink.CALLER),    # noqa
+            ('function g { return f }', OutputSink.CALLER),  # noqa
         ):
             with self.subTest(source):
                 self.assertIs(output_path(self._call_to_f(source)).sink, expected)

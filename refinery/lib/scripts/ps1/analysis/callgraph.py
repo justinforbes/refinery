@@ -47,7 +47,9 @@ _IDENTITY_SCOPES = frozenset({
 #: sites in whatever imported it, and no walk over this tree can see them. Read through
 #: `refinery.lib.scripts.ps1.ast.resolve_command_name`, which is the deny-list reading of a name:
 #: a hit here withholds every name-keyed removal, so a spelling that dodges the table is the
-#: dangerous direction and a module qualifier must not be enough to dodge it.
+#: dangerous direction. That closes a *quoted* module qualifier only — written bare, the lexer
+#: splits the name at the backslash, and `Microsoft.PowerShell.Core\Export-ModuleMember` still
+#: dodges this table. See `resolve_command_name` for why that hole is the lexer's.
 _EXPORTING_COMMANDS = frozenset({
     'export-modulemember',
 })
@@ -89,16 +91,20 @@ def _enclosing_function(node: Node) -> str | None:
     removable — stands there calling a name the emitted script no longer defines. Attribution to the
     enclosing scope is what makes the two answers agree.
 
-    A class method answers `None` rather than its own name, which is the conservative direction. A
-    method body runs whenever something constructs or calls into the class, and this graph cannot
-    see that happen; treating its calls as unconditional keeps every name they reach reachable, and
-    `Ps1OutputFlow` separately refuses to ground a method body because no call site ever names it.
+    A class method anywhere on the way out answers `None` and stops the walk, which is the
+    conservative direction. A method body runs whenever something constructs or calls into the
+    class, and this graph cannot see that happen; treating its calls as unconditional keeps every
+    name they reach reachable, and `Ps1OutputFlow` separately refuses to ground a method body
+    because no call site ever names it. Carrying on to the enclosing function instead would make
+    those calls conditional on a name that reaches the *class*, which nothing here can prove.
     """
     found: str | None = None
     cursor = node.parent
     while cursor is not None:
         if isinstance(cursor, Ps1FunctionDefinition):
-            found = None if _is_class_method(cursor) else normalize_command_name(cursor.name)
+            if _is_class_method(cursor):
+                return None
+            found = normalize_command_name(cursor.name)
         cursor = cursor.parent
     return found
 
@@ -166,10 +172,9 @@ class Ps1CallGraph:
         The distinction is worth the separate name because the two questions have different answers
         for the same script. An `Invoke-Expression` opens the type world and could in principle call
         anything, and every pass here has long accepted that risk in exchange for resolving the
-        trampolines obfuscators are built out of; `TestPs1FunctionEvaluator` pins several. An export
-        is not a risk taken for anything: the script says in as many words that a caller it cannot
-        see will call this name, so a pass that deletes the definition deletes a reachable entry
-        point.
+        trampolines obfuscators are built out of. An export is not a risk taken for anything: the
+        script says in as many words that a caller it cannot see will call this name, so a pass that
+        deletes the definition deletes a reachable entry point.
         """
         return self._exports
 

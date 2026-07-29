@@ -81,6 +81,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1RangeExpression,
     Ps1RealLiteral,
     Ps1RedirectionStream,
+    Ps1ReturnStatement,
     Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
@@ -965,7 +966,13 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
 
 #: The widest and narrowest values PowerShell's range operator accepts. Both bounds go through
 #: `Int32`, so an endpoint outside this window raises the same conversion error a bad cast does.
-_INT32_RANGE = range(-0x80000000, 0x80000000)
+_INT32_MIN = -0x80000000
+_INT32_MAX = +0x7FFFFFFF
+
+#: How many elements a range may span before *building* it is the fault rather than converting its
+#: endpoints. PowerShell materializes the whole array eagerly, so `0..2147483647` is two perfectly
+#: good `Int32` bounds and an `OutOfMemoryException` an enclosing handler may well be catching.
+_MAX_FAULT_FREE_RANGE = 0x10000
 
 
 def _is_numeric_constant(node) -> bool:
@@ -989,22 +996,46 @@ def _is_numeric_constant(node) -> bool:
     return False
 
 
-def _is_range_bound(node) -> bool:
+def _signed_integer_value(node) -> int | None:
     """
-    Whether `node` is an endpoint the range operator provably accepts: an integer literal whose
-    value fits in `Int32`, through parentheses and a unary sign.
+    The value of an integer literal read through parentheses and any number of unary signs, or
+    `None` when `node` is not one.
 
-    Narrower than `_is_numeric_constant` because the operator converts to `Int32` rather than merely
-    reading a number. `4242424242..4242424245` is two perfectly good integer literals and still
-    raises, since neither fits, and a real literal rounds rather than converting cleanly.
+    The signs are *applied* rather than walked past, which is the difference between an endpoint and
+    its magnitude: `-2147483648` parses as unary minus over the literal `2147483648`, so discarding
+    the sign weighs a value the source never names and rejects the narrowest `Int32` there is.
     """
     if isinstance(node, Ps1IntegerLiteral):
-        return node.value in _INT32_RANGE
+        return node.value
     if isinstance(node, Ps1ParenExpression):
-        return _is_range_bound(node.expression)
+        return _signed_integer_value(node.expression)
     if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
-        return _is_range_bound(node.operand)
-    return False
+        value = _signed_integer_value(node.operand)
+        if value is None:
+            return None
+        return -value if node.operator == '-' else value
+    return None
+
+
+def _range_is_fault_free(node: Ps1RangeExpression) -> bool:
+    """
+    Whether the range operator provably neither converts nor allocates its way into a fault.
+
+    Two separate faults, and weighing only the first is how a range that had already stopped the
+    script came to be deleted. Both endpoints go through `Int32`, so `4242424242..4242424245` is two
+    perfectly good integer literals that still raise — the reason this is narrower than
+    `_is_numeric_constant`, which merely reads a number, and why a real literal is not an endpoint
+    at all since it rounds rather than converting cleanly. Then the operator materializes the whole
+    array eagerly, so `0..2147483647` converts cleanly and raises `OutOfMemoryException` instead;
+    only a span under `_MAX_FAULT_FREE_RANGE` provably survives both.
+    """
+    start = _signed_integer_value(node.start)
+    end = _signed_integer_value(node.end)
+    if start is None or end is None:
+        return False
+    if not _INT32_MIN <= start <= _INT32_MAX or not _INT32_MIN <= end <= _INT32_MAX:
+        return False
+    return abs(end - start) < _MAX_FAULT_FREE_RANGE
 
 
 def is_fault_free(node) -> bool:
@@ -1034,7 +1065,7 @@ def is_fault_free(node) -> bool:
     **A unary sign and a range coerce, and coercion is the fault this predicate exists to see.**
     Both read their operands through `Int32`, so `-'abc'` and `'a'..'z'` raise exactly what
     `[Int]'abc'` raises; neither may inherit the string-literal grant, and both go through
-    `_is_numeric_constant` instead.
+    `_is_numeric_constant` and `_range_is_fault_free` instead.
     """
     if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral, Ps1StringLiteral)):
         return True
@@ -1047,7 +1078,7 @@ def is_fault_free(node) -> bool:
     if isinstance(node, Ps1ArrayLiteral):
         return all(is_fault_free(element) for element in node.elements)
     if isinstance(node, Ps1RangeExpression):
-        return _is_range_bound(node.start) and _is_range_bound(node.end)
+        return _range_is_fault_free(node)
     if isinstance(node, Ps1HashLiteral):
         return _hash_literal_is_fault_free(node)
     if isinstance(node, Ps1ArrayExpression):
@@ -1484,21 +1515,25 @@ def _output_writes_through(cursor, prev) -> bool:
     are not — the body of a `data` section and a named block of a script block — are answered by
     their holder before the walk reaches here. `Ps1CatchClause` is the one clause node standing
     between such a block and the construct holding it.
+
+    `return` is the one `refinery.lib.scripts.ps1.model.Ps1Exit` that propagates: its value is what
+    the enclosing body yields. `throw` and `exit` name no value the body writes and are left to the
+    default answer.
     """
     if isinstance(prev, (Block, Ps1CatchClause)):
         return True
-    if isinstance(cursor, Ps1ExpressionStatement):
+    if isinstance(cursor, (Ps1ExpressionStatement, Ps1ParenExpression)):
         return cursor.expression is prev
-    if isinstance(cursor, Ps1ParenExpression):
-        return cursor.expression is prev
+    if isinstance(cursor, Ps1ReturnStatement):
+        return cursor.pipeline is prev
     if isinstance(cursor, Ps1CommandInvocation):
-        return cursor.name is prev
+        return isinstance(prev, Ps1ScriptBlock) and cursor.name is prev
     if isinstance(cursor, Ps1Pipeline):
-        return bool(cursor.elements) and cursor.elements[-1] is prev
+        return isinstance(prev, Ps1PipelineElement) and not _feeds_downstream(prev)
     if isinstance(cursor, Ps1PipelineElement):
-        return not _feeds_downstream(cursor)
+        return cursor.expression is prev and not _feeds_downstream(cursor)
     body = get_body(cursor)
-    return body is not None and any(statement is prev for statement in body)
+    return body is not None and prev in body
 
 
 def output_path(node) -> Ps1OutputPath:
@@ -1524,7 +1559,7 @@ def output_path(node) -> Ps1OutputPath:
     handful of positions, while a call site sits in every position an expression can.
     """
     cursor = node
-    while cursor is not None:
+    while True:
         if _output_is_redirected_away(cursor):
             return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression, Ps1DataSection)):
@@ -1541,7 +1576,6 @@ def output_path(node) -> Ps1OutputPath:
         if parent is None or not _output_writes_through(parent, cursor):
             return Ps1OutputPath(OutputSink.CAPTURED, None)
         cursor = parent
-    return Ps1OutputPath(OutputSink.CAPTURED, None)
 
 
 def output_sink(node) -> OutputSink | None:

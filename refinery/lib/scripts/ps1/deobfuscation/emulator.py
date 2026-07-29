@@ -1190,6 +1190,10 @@ class Ps1FunctionEvaluator(Transformer):
             self._collect_functions(node)
             if not self._functions:
                 return None
+            # Read before the fold rather than after it: folding a call into its value can neither
+            # create nor destroy an `Export-ModuleMember` invocation, and asking afterwards drops
+            # the whole shared model on the mutation counter to rebuild it for one boolean.
+            exports = model_cache(self, node).call_graph.exports_a_name
             super().visit(node)
             # Folding a call into its value preserves meaning whoever else can reach the name, so
             # the substitution above is unconditional. Deleting the *definition* is a name-keyed
@@ -1201,9 +1205,8 @@ class Ps1FunctionEvaluator(Transformer):
             # `exports_a_name` and not `is_readable`, deliberately. The other three unknowns that
             # verdict carries — an open world, an opaque dispatch, an identity binding — are risks
             # this pass has always taken in exchange for resolving the `iex` trampolines obfuscators
-            # are built out of, and `TestPs1FunctionEvaluator` pins several of them. An export is
-            # not a risk taken for anything.
-            if not model_cache(self, node).call_graph.exports_a_name:
+            # are built out of. An export is not a risk taken for anything.
+            if not exports:
                 self._remove_resolved_definitions(node)
             return None
         finally:
