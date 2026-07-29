@@ -13,9 +13,10 @@ statement to preserve execution order.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Block, BodyEdit, Transformer, _replace_in_parent
+from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.ast import get_body
 from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
+from refinery.lib.scripts.ps1.deobfuscation.substitution import substitute, substitute_statement
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
@@ -42,9 +43,7 @@ class Ps1ExpandableStringHoist(Transformer):
             while i < len(body):
                 before, after, replaced = self._extract_void_subexpressions(body[i])
                 if before or after:
-                    edit = BodyEdit(container)
-                    edit.splice(body[i], [*before, body[i], *after])
-                    edit.apply()
+                    substitute_statement(container, body[i], [*before, body[i], *after])
                     i += len(before) + len(after)
                 if replaced:
                     self.mark_changed()
@@ -130,7 +129,7 @@ class Ps1ExpandableStringHoist(Transformer):
             for sub in subs:
                 collected.extend(sub.body)
             leftmost = self._is_leftmost(node)
-            if not _replace_in_parent(node, make_string_literal(''.join(text_parts))):
+            if not substitute(node, make_string_literal(''.join(text_parts))):
                 continue
             if leftmost:
                 before.extend(collected)

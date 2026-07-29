@@ -12,13 +12,7 @@ import base64
 import gzip
 import zlib
 
-from refinery.lib.scripts import (
-    BodyEdit,
-    Expression,
-    Transformer,
-    _replace_in_parent,
-    set_child,
-)
+from refinery.lib.scripts import Expression, Transformer
 from refinery.lib.scripts.ps1.analysis.values import collect_byte_array
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
@@ -29,6 +23,11 @@ from refinery.lib.scripts.ps1.ast import (
 )
 from refinery.lib.scripts.ps1.data import ENCODING_MAP
 from refinery.lib.scripts.ps1.deobfuscation.helpers import extract_foreach_scriptblock
+from refinery.lib.scripts.ps1.deobfuscation.substitution import (
+    substitute,
+    substitute_field,
+    substitute_statement,
+)
 from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
     Ps1ArrayExpression,
@@ -415,9 +414,7 @@ class Ps1IexInlining(Transformer):
                 if parsed is None:
                     i += 1
                     continue
-                edit = BodyEdit(container)
-                edit.splice(body[i], parsed)
-                edit.apply()
+                substitute_statement(container, body[i], parsed)
                 self.mark_changed()
                 i += len(parsed)
 
@@ -440,7 +437,7 @@ class Ps1IexInlining(Transformer):
             and isinstance(parsed[0], Ps1ExpressionStatement)
             and parsed[0].expression is not None
         ):
-            set_child(assignment, 'value', parsed[0].expression)
+            substitute_field(assignment, 'value', parsed[0].expression)
             return [stmt]
         return None
 
@@ -468,7 +465,7 @@ class Ps1IexInlining(Transformer):
                 continue
             if replacement is None:
                 continue
-            _replace_in_parent(expr, replacement)
+            substitute(expr, replacement)
             self.mark_changed()
 
     def _try_inline_expression(self, node: Ps1CommandInvocation) -> Expression | None:

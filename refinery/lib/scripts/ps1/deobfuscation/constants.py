@@ -11,8 +11,6 @@ from refinery.lib.scripts import (
     Node,
     Transformer,
     _clone_node,
-    _replace_in_parent,
-    set_child,
 )
 from refinery.lib.scripts.ps1.analysis import is_assignment_write_target
 from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
@@ -29,6 +27,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     make_string_literal,
 )
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlans
+from refinery.lib.scripts.ps1.deobfuscation.substitution import substitute, substitute_field
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
@@ -618,7 +617,7 @@ class Ps1ConstantInlining(Transformer):
                 return
             if isinstance(const_value, Ps1StringLiteral):
                 replacement = _clone_constant(const_value)
-                set_child(node, 'object', replacement)
+                substitute_field(node, 'object', replacement)
                 self.mark_changed()
                 inlined.setdefault(key, []).append(replacement)
                 handled_vars.add(var)
@@ -633,7 +632,7 @@ class Ps1ConstantInlining(Transformer):
                 remaining[key] = remaining.get(key, 0) + 1
                 return
             replacement = make_string_literal(s[idx])
-            _replace_in_parent(node, replacement)
+            substitute(node, replacement)
             self.mark_changed()
             inlined.setdefault(key, []).append(replacement)
             handled_vars.add(var)
@@ -648,7 +647,7 @@ class Ps1ConstantInlining(Transformer):
             remaining[key] = remaining.get(key, 0) + 1
             return
         replacement = _clone_constant(elements[idx])
-        _replace_in_parent(node, replacement)
+        substitute(node, replacement)
         self.mark_changed()
         inlined.setdefault(key, []).append(replacement)
         handled_vars.add(var)
@@ -671,7 +670,7 @@ class Ps1ConstantInlining(Transformer):
             remaining[key] = remaining.get(key, 0) + 1
             return
         replacement = _clone_constant(entry.value)
-        _replace_in_parent(node, replacement)
+        substitute(node, replacement)
         self.mark_changed()
         inlined.setdefault(key, []).append(replacement)
 
@@ -785,5 +784,5 @@ class Ps1NullVariableInlining(Transformer):
                 continue
             if not self._is_null_eligible(ref):
                 continue
-            _replace_in_parent(ref, Ps1Variable(name='Null'))
+            substitute(ref, Ps1Variable(name='Null'))
             self.mark_changed()

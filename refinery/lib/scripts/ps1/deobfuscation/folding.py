@@ -9,7 +9,6 @@ import re
 
 from typing import Iterator
 
-from refinery.lib.scripts import set_child, set_child_list
 from refinery.lib.scripts.ps1.analysis.effects import is_fault_free
 from refinery.lib.scripts.ps1.analysis.values import (
     collect_byte_array,
@@ -43,6 +42,10 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     ps_shift_left,
     ps_shift_right,
     unwrap_single_paren,
+)
+from refinery.lib.scripts.ps1.deobfuscation.substitution import (
+    substitute_field,
+    substitute_list,
 )
 from refinery.lib.scripts.ps1.deobfuscation.typenames import (
     is_known_member,
@@ -530,8 +533,8 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                 continue
             value = expr.value
             if isinstance(value, Ps1ArrayLiteral):
-                set_child_list(value, 'elements', value.elements[::-1])
-                set_child(node, 'expression', None)
+                substitute_list(value, 'elements', value.elements[::-1])
+                substitute_field(node, 'expression', None)
                 self.mark_changed()
                 return True
             if isinstance(value, Ps1ArrayExpression) and len(value.body) == 1:
@@ -541,14 +544,14 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                     and isinstance(inner.expression, Ps1ArrayLiteral)
                 ):
                     literal = inner.expression
-                    set_child_list(literal, 'elements', literal.elements[::-1])
-                    set_child(node, 'expression', None)
+                    substitute_list(literal, 'elements', literal.elements[::-1])
+                    substitute_field(node, 'expression', None)
                     self.mark_changed()
                     return True
             sv = string_value(value)
             if sv is not None:
-                set_child(expr, 'value', make_string_literal(sv[::-1]))
-                set_child(node, 'expression', None)
+                substitute_field(expr, 'value', make_string_literal(sv[::-1]))
+                substitute_field(node, 'expression', None)
                 self.mark_changed()
                 return True
             return False

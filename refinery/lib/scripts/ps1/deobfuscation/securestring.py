@@ -3,10 +3,11 @@ PowerShell SecureString decryption transformer.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Transformer, set_child_list
+from refinery.lib.scripts import Transformer
 from refinery.lib.scripts.ps1.analysis.values import collect_byte_array
 from refinery.lib.scripts.ps1.ast import get_command_name
 from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
+from refinery.lib.scripts.ps1.deobfuscation.substitution import substitute_list
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
@@ -96,7 +97,7 @@ class Ps1SecureStringDecryptor(Transformer):
             replacement = make_string_literal(plaintext)
             new_element = Ps1PipelineElement(expression=replacement)
             replacement.parent = new_element
-            set_child_list(
+            substitute_list(
                 node, 'elements', node.elements[:k] + [new_element] + node.elements[k + 2:])
             self.mark_changed()
         return None
