@@ -14,7 +14,6 @@ import re
 from fnmatch import translate as fnmatch_translate
 from typing import Iterable
 
-from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
 from refinery.lib.scripts.ps1.ast import (
     extract_first_positional_string,
@@ -32,7 +31,7 @@ from refinery.lib.scripts.ps1.data import (
     TYPE_MEMBERS,
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
-from refinery.lib.scripts.ps1.deobfuscation.substitution import may_substitute
+from refinery.lib.scripts.ps1.deobfuscation.substitution import substituted
 from refinery.lib.scripts.ps1.deobfuscation.typenames import VariableTypeAwareTransformer
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -326,43 +325,24 @@ def _extract_where_object_wildcard(
 
 class Ps1WildcardResolution(VariableTypeAwareTransformer):
 
-    def _substituted(self, node: Node, replacement: Expression | None) -> Expression | None:
-        """
-        The replacement this pass may install for `node`, or `None` to leave it standing.
-
-        Every resolution below rewrites a command into the value it would have produced, which is
-        the one shape `refinery.lib.scripts.ps1.deobfuscation.substitution.may_substitute` exists to
-        refuse: `Get-Variable payload -ValueOnly > C:\\out.txt` became `$payload`, so the value went
-        to the console and the file was never created.
-
-        The question is asked here and not where the replacement lands, because
-        `refinery.lib.scripts.Transformer.generic_visit` installs whatever a `visit_X` returns and by
-        then this pass has decided. That is not a detail of this pass: a guard that returns before
-        the body runs and one that discards the body's result are the same guard only for a pass
-        that keeps no bookkeeping on the way, and no rule can promise that for every pass.
-        """
-        if replacement is None or not may_substitute(node, replacement):
-            return None
-        return replacement
-
     def visit_Ps1MemberAccess(self, node: Ps1MemberAccess):
         self.generic_visit(node)
-        return self._substituted(node, self._try_resolve_variable_value(node))
+        return substituted(node, self._try_resolve_variable_value(node))
 
     def visit_Ps1InvokeMember(self, node: Ps1InvokeMember):
         self.generic_visit(node)
-        return self._substituted(node, self._try_resolve_cmdlet_method(node))
+        return substituted(node, self._try_resolve_cmdlet_method(node))
 
     def visit_Ps1Pipeline(self, node: Ps1Pipeline):
         self.generic_visit(node)
-        return self._substituted(node, self._try_resolve_where_object_wildcard(node))
+        return substituted(node, self._try_resolve_where_object_wildcard(node))
 
     def visit_Ps1CommandInvocation(self, node: Ps1CommandInvocation):
         self.generic_visit(node)
         replacement = self._try_resolve_get_variable_value_only(node)
         if replacement is None:
             replacement = self._try_resolve_set_variable(node)
-        return self._substituted(node, replacement)
+        return substituted(node, replacement)
 
     def _try_resolve_variable_value(
         self,

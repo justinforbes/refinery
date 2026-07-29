@@ -50,6 +50,7 @@ _DEAD_CODE_EXTRA = _witness(test_deadcode.TestPs1DeadCodeExtra)
 _DEAD_CODE_TREE = _witness(test_deadcode.TestPs1DeadCodeLeavesTheTreeConsistent)
 _EMULATOR = _witness(test_emulator.TestPs1FunctionEvaluator)
 _EMULATOR_EXTRA = _witness(test_emulator.TestPs1EmulatorExtra)
+_FOREACH_PIPELINE = _witness(test_emulator.TestPs1EmulatorRedirections)
 _HANDLER = _witness(test_removal.TestPs1DeadCodeEliminationDoesNotUnhookAHandler)
 _IEX_REDIRECTIONS = _witness(test_iexinline.TestPs1IexRedirections)
 _INTEGRATION = _witness(test_deobfuscation.TestPs1Integration)
@@ -59,6 +60,7 @@ _PLAN = _witness(test_removal.TestPs1RemovalPlan)
 _QUALIFIED = _witness(test_unused.TestPs1AQualifiedCallKeepsTheNameItResolvesOnto)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
+_SELECTION_COUNT = _witness(test_folding.TestPs1CountingAnArrayKeepsWhatBuildingItDid)
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
 _TREE = _witness(test_unused.TestPs1RemovalLeavesTheTreeConsistent)
 _UNUSED = _witness(test_unused.TestPs1UnusedVariableRemoval)
@@ -385,19 +387,27 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
     def test_the_refusal_to_substitute_away_a_redirection_is_witnessed(self):
         # The rule itself, patched in the module that owns it. Both callers are named, because the
         # two shapes reach it by different routes: an expression in a slot asks through
-        # `substitute`, and a pass returning a replacement from `visit_X` asks before it returns.
+        # `substitute`, and a pass returning a replacement from `visit_X` asks through
+        # `substituted`. Both are in the owning module, so this one mutation reaches both.
         self._assertWitnessed(
-            [_IEX_REDIRECTIONS, _WILDCARD_REDIRECTIONS],
+            [_IEX_REDIRECTIONS, _WILDCARD_REDIRECTIONS, _FOREACH_PIPELINE],
             patch.object(substitution, 'may_substitute', lambda *parts: True),
             notices='test_a_redirected_iex_statement_is_not_replaced_by_the_code_it_holds')
 
     def test_asking_the_rule_where_a_wildcard_rewrite_decides_is_witnessed(self):
         # `refinery.lib.scripts.Transformer.generic_visit` installs whatever a `visit_X` returns, so
-        # a pass that does not ask is a pass whose replacement lands unexamined.
+        # a pass that does not ask is a pass whose replacement lands unexamined. Patched at the
+        # pass rather than in the owner: what this measures is that the pass asks at all.
         self._assertWitnessed(
             [_WILDCARD_REDIRECTIONS],
-            patch.object(wildcards, 'may_substitute', lambda *parts: True),
+            patch.object(wildcards, 'substituted', lambda old, new, moved=(): new),
             notices='test_a_redirected_variable_read_is_not_rewritten_to_the_variable')
+
+    def test_asking_the_rule_where_a_foreach_pipeline_fold_decides_is_witnessed(self):
+        self._assertWitnessed(
+            [_FOREACH_PIPELINE],
+            patch.object(emulator, 'substituted', lambda old, new, moved=(): new),
+            notices='test_a_redirected_foreach_pipeline_is_not_folded_into_its_value')
 
     def test_the_interpreter_refusing_a_body_that_opens_a_file_is_witnessed(self):
         # The emulator's own half: the call site carries no redirection, the body does, and folding
@@ -411,7 +421,7 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
         # Selecting out of a literal container evaluates the whole container, so what the selection
         # does not carry forward is work the folded script no longer does.
         self._assertWitnessed(
-            [_SELECTION],
+            [_SELECTION, _SELECTION_COUNT],
             patch.object(folding, 'may_be_dropped', lambda node, oracle: True),
             notices='test_an_array_element_that_runs_a_command_is_not_dropped')
 

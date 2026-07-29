@@ -10,8 +10,11 @@ file it named uncreated.
 
 The entry points are named for the slot the node sits in — a direct field, one entry of a child
 list, the whole of one — rather than for the passes that reach them, because the slot is the only
-thing they differ in. `substitute_statement` is the exception in that it edits nothing itself: a
-statement list is a body, a body is edited as a batch, and
+thing they differ in. `substituted` is named for none of them: a pass that decides by returning a
+replacement from `visit_X` never touches a slot, because
+`refinery.lib.scripts.Transformer.generic_visit` installs the answer for it, so what it asks for is
+a verdict rather than an edit. `substitute_statement` is the exception in that it edits nothing
+itself: a statement list is a body, a body is edited as a batch, and
 `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan` is that batch. It is here so that a
 pass substituting inside a body has an owner to ask rather than a `refinery.lib.scripts.BodyEdit` to
 build, and it refuses an empty replacement: whether a statement may go is the other module's
@@ -26,7 +29,7 @@ refuse the second for no reason.
 """
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 
 from refinery.lib.scripts import (
     Node,
@@ -45,9 +48,19 @@ Part = Node | None | Iterable['Part']
 
 
 def _nodes(part: Part) -> Iterable[Node]:
-    for item in part if isinstance(part, (list, tuple)) else [part]:
-        if isinstance(item, Node):
-            yield item
+    """
+    Every node `part` holds, however deeply it is wrapped.
+
+    The unwrapping follows `Part` rather than the list and tuple two callers happen to pass:
+    a shape this did not unwrap yields nothing, and nothing on the `removed` side of
+    `may_substitute` is a redirection-free original — the one answer this module must never give by
+    accident.
+    """
+    if isinstance(part, Node):
+        yield part
+    elif isinstance(part, Iterable) and not isinstance(part, (str, bytes)):
+        for item in part:
+            yield from _nodes(item)
 
 
 def carried_redirections(*parts: Part) -> list:
@@ -93,9 +106,15 @@ def may_substitute(removed: Part, installed: Part, moved: Part = ()) -> bool:
     Identity decides whether a redirection survived, not equality. A pass that rebuilt one would be
     refused although it wrote the same thing down, which is the conservative direction: what a
     wrong answer the other way costs is a payload deleted into a file that is never created.
+
+    The original is read first because almost nothing carries a redirection, and a substitution that
+    takes none away cannot lose one whatever the replacement holds.
     """
+    lost = carried_redirections(removed)
+    if not lost:
+        return True
     kept = {id(redirection) for redirection in carried_redirections(installed, moved)}
-    return all(id(redirection) in kept for redirection in carried_redirections(removed))
+    return all(id(redirection) in kept for redirection in lost)
 
 
 def _release(part: Part) -> bool:
@@ -113,6 +132,27 @@ def _release(part: Part) -> bool:
     return False
 
 
+def substituted(old: Node, new: Node | None, moved: Part = ()) -> Node | None:
+    """
+    The replacement a `visit_X` method may return for `old`, or `None` to leave it standing.
+
+    This is the route with no slot to edit: `refinery.lib.scripts.Transformer.generic_visit`
+    installs whatever a `visit_X` returns, so by the time the node reaches a slot the pass has
+    already decided, and a pass that keeps bookkeeping on the way cannot express the refusal as an
+    early return. Asking here is the same rule the other entry points hold, answered one step
+    earlier.
+
+    A refused replacement is released for the reason `_release` gives: building it adopted the parts
+    of `old` it reuses, and those parts are still standing in the tree.
+    """
+    if new is None:
+        return None
+    if not may_substitute(old, new, moved):
+        _release(old)
+        return None
+    return new
+
+
 def substitute(old: Node, new: Node, moved: Part = ()) -> bool:
     """
     Put `new` where `old` stands, reporting whether it landed. Refused when the swap would lose a
@@ -121,10 +161,16 @@ def substitute(old: Node, new: Node, moved: Part = ()) -> bool:
     `old` may sit in a direct field, in a child list, or in a tuple inside one, and the search is
     the same one a removal makes, so a pass that found its node by walking the tree does not have to
     know which of the three it is looking at.
+
+    A slot that is not found is a refusal like any other, and it is released the same way: the
+    caller has built `new` over parts of `old` either way, and reporting the two the same while
+    repairing only one leaves the caller no way to tell which it got.
     """
     if not may_substitute(old, new, moved):
         return _release(old)
-    return _replace_in_parent(old, new)
+    if not _replace_in_parent(old, new):
+        return _release(old)
+    return True
 
 
 def substitute_field(parent: Node, attr: str, new: Node | None) -> bool:

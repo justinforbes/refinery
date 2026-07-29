@@ -813,3 +813,62 @@ class TestPs1ConstantInliningSelectsOnlyFromConstants(TestPs1):
     def test_a_string_is_still_indexed_when_inlined(self):
         self.assertEqual(
             self._apply("$a = 'abc'\n$r = $a[0]", Ps1ConstantInlining), "$r = 'a'")
+
+
+class TestPs1FoldingRedirections(TestPs1):
+
+    def test_a_redirected_regex_pipeline_is_not_folded_into_its_value(self):
+        self._assertUnchanged(
+            "$m = [regex]::Matches('abc', 'b') | ForEach-Object {\n  $_.Value\n} > C:\\o.txt",
+            Ps1ConstantFolding)
+
+    def test_an_unredirected_regex_pipeline_is_still_folded(self):
+        self.assertEqual(
+            self._apply(
+                "$m = [regex]::Matches('abc', 'b') | %{ $_.Value }", Ps1ConstantFolding),
+            "$m = 'b'")
+
+
+class TestPs1CountingAnArrayKeepsWhatBuildingItDid(TestPs1):
+
+    def test_the_length_of_an_array_holding_a_command_is_not_folded(self):
+        self.assertEqual(
+            self._apply('$x = @(1, (Start-Process calc)).Length', Ps1ConstantFolding),
+            '$x = @(1, (Start-Process calc)).Length')
+
+    def test_the_count_of_an_array_holding_an_increment_is_not_folded(self):
+        self._assertUnchanged('$x = @(1, $y++).Count', Ps1ConstantFolding)
+
+    def test_the_length_of_an_array_holding_a_raising_cast_is_not_folded(self):
+        self._assertUnchanged("$x = @(1, [Int]'abc').Length", Ps1ConstantFolding)
+
+    def test_the_length_of_an_array_of_literals_is_still_folded(self):
+        self.assertEqual(self._apply('$x = @(1, 2).Length', Ps1ConstantFolding), '$x = 2')
+
+    def test_the_length_of_a_string_is_still_folded(self):
+        self.assertEqual(self._apply("$x = 'abc'.Length", Ps1ConstantFolding), '$x = 3')
+
+    def test_a_refused_selection_leaves_every_parent_pointer_true(self):
+        source = '$r = @(1, 2, (Start-Process calc))[0, 1]'
+        self._assertTreeIsIntact(source, source, Ps1ConstantFolding)
+
+    def test_a_refused_count_leaves_every_parent_pointer_true(self):
+        source = '$x = @(1, (Start-Process calc)).Length'
+        self._assertTreeIsIntact(source, source, Ps1ConstantFolding)
+
+    def test_a_repeated_index_into_an_array_is_not_folded(self):
+        # Folding would put the array's own node in two slots of the result, where `Node.parent`
+        # holds one holder: a later replacement rewrites one occurrence of two and a walk counts it
+        # twice. Copying it would run whatever it holds twice instead.
+        self._assertUnchanged('$r = @(1, 2, 3)[0, 0]', Ps1ConstantFolding)
+
+    def test_a_repeated_index_reached_through_a_negative_one_is_not_folded_either(self):
+        self._assertUnchanged('$r = @(1, 2, 3)[0, -3]', Ps1ConstantFolding)
+
+    def test_distinct_indices_into_the_same_array_still_select(self):
+        self.assertEqual(self._apply('$r = @(1, 2, 3)[2, 0]', Ps1ConstantFolding), '$r = 3, 1')
+
+    def test_a_repeated_index_into_a_string_still_folds(self):
+        # A character is built fresh per index out of a value that was never a node, so nothing is
+        # shared and the shape obfuscators actually write keeps working.
+        self.assertEqual(self._apply("$r = 'abc'[0, 0, 1]", Ps1ConstantFolding), "$r = 'a', 'a', 'b'")

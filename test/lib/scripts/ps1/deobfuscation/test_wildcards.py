@@ -218,3 +218,9 @@ class TestPs1WildcardRedirections(TestPs1):
     def test_a_refused_rewrite_leaves_every_parent_pointer_true(self):
         source = 'Get-Variable payload -ValueOnly > C:\\out.txt'
         self._assertTreeIsIntact(source, source, Ps1WildcardResolution)
+
+    def test_a_refused_variable_write_leaves_every_parent_pointer_true(self):
+        # `Set-Variable` builds its replacement out of the argument the command already holds, so a
+        # refusal that does not put it back leaves that argument naming a node the pass threw away.
+        source = "Set-Variable x 'v' > C:\\out.txt"
+        self._assertTreeIsIntact(source, source, Ps1WildcardResolution)

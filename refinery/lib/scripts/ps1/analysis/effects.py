@@ -1419,7 +1419,7 @@ def _redirection_takes_output_away(
     )
 
 
-def _output_is_redirected_away(node) -> bool:
+def takes_output_away(node) -> bool:
     """
     Whether any redirection written on `node` moves its output somewhere the enclosing body cannot
     see it. Where a merge and a file redirection are written together (`2>&1 > C:\\log`), the file
@@ -1482,13 +1482,13 @@ def unconsumed_statement(expr: Node) -> Ps1ExpressionStatement | None:
     `f > out.txt` yields nothing to the body around it, and a caller that judges it by shape alone
     deletes the call together with the file it writes.
     """
-    if _output_is_redirected_away(expr):
+    if takes_output_away(expr):
         return None
     parent = expr.parent
     if isinstance(parent, Ps1ExpressionStatement):
         return parent
     if isinstance(parent, Ps1PipelineElement):
-        if _output_is_redirected_away(parent):
+        if takes_output_away(parent):
             return None
         pipeline = parent.parent
         if (
@@ -1603,7 +1603,7 @@ def output_path(node) -> Ps1OutputPath:
     """
     cursor = node
     while True:
-        if _output_is_redirected_away(cursor):
+        if takes_output_away(cursor):
             return Ps1OutputPath(OutputSink.CAPTURED, None)
         if isinstance(cursor, (Ps1SubExpression, Ps1ArrayExpression, Ps1DataSection)):
             return Ps1OutputPath(OutputSink.CAPTURED, None)

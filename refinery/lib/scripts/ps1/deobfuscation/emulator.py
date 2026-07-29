@@ -17,7 +17,10 @@ if TYPE_CHECKING:
 
 from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
-from refinery.lib.scripts.ps1.analysis.effects import opens_a_redirection_target
+from refinery.lib.scripts.ps1.analysis.effects import (
+    opens_a_redirection_target,
+    takes_output_away,
+)
 from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
 from refinery.lib.scripts.ps1.ast import (
     get_command_name,
@@ -47,7 +50,10 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     switch_matches,
 )
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
-from refinery.lib.scripts.ps1.deobfuscation.substitution import carried_redirections
+from refinery.lib.scripts.ps1.deobfuscation.substitution import (
+    carried_redirections,
+    substituted,
+)
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
@@ -409,17 +415,28 @@ class _Ps1Interpreter:
         The value a command in the emulated body produces, or `_Ps1InterpreterError` when this
         cannot say.
 
-        A redirection that opens a file is one of the cases it cannot say. This computes a value and
-        never touches the disk, while PowerShell creates or truncates the target as it sets the
-        redirection up whatever the command then writes, so folding the enclosing call into the
-        result would delete a file the script produced. The other spellings are left alone: a merge
-        names no file, and `> $Null` is the shell's discard, so neither is work this failed to do.
+        A redirection is two questions and both have to be asked, because neither implies the other
+        and they have different answers. Opening a file is work this cannot do: PowerShell creates
+        or truncates the target as it sets the redirection up whatever the command then writes, so
+        folding the enclosing call into the result would delete a file the script produced, and the
+        only honest answer is that this cannot say. Taking the output away is not a reason to stop —
+        the command still runs, and `Invoke-Expression $code > $Null` still hands its code out — it
+        only means the value never reaches the caller: `$a = j > $Null` binds `$a` to `$null`. So it
+        is asked *after* the command has been evaluated and discards what came back. Asking it
+        before would refuse a body this can fold; not asking it at all answers `4` for
+        `$a = New-Object byte[] 4 > $Null; $a.Length`. A merge that neither opens nor takes —
+        `j 2>&1` — leaves both alone.
+
         The call site asks its own, blunter question through
         `refinery.lib.scripts.ps1.deobfuscation.substitution.may_substitute`, because there the
         replacement stands where the redirection was written and changes what it evaluates to.
         """
         if opens_a_redirection_target(node):
             raise _Ps1InterpreterError
+        value = self._eval_command_value(node)
+        return None if takes_output_away(node) else value
+
+    def _eval_command_value(self, node: Ps1CommandInvocation) -> _Value:
         if not isinstance(node.name, Ps1StringLiteral):
             raise _Ps1InterpreterError
         name = node.name.value.lower()
@@ -1267,12 +1284,6 @@ class Ps1FunctionEvaluator(Transformer):
 
     def visit_Ps1CommandInvocation(self, node: Ps1CommandInvocation):
         self.generic_visit(node)
-        if carried_redirections(node):
-            # Asked before `_call_counts` moves, not after the value comes back. What this pass
-            # installs is an expression and an expression carries no redirections, so the answer is
-            # the same for every call and every spelling; asking late would leave the counter saying
-            # every call was folded and the definition removal reading that as licence.
-            return None
         name_str = get_command_name(node)
         if name_str is None:
             return None
@@ -1281,6 +1292,12 @@ class Ps1FunctionEvaluator(Transformer):
         if funcdef is None or key in self._ambiguous:
             return None
         self._call_counts[key] = self._call_counts.get(key, 0) + 1
+        if carried_redirections(node):
+            # Counted first and refused after. What this pass installs is an expression and an
+            # expression carries no redirections, so the answer is the same for every call and every
+            # spelling — but a call the counter never heard of is one `_remove_resolved_definitions`
+            # reads as absent, and it then deletes the definition this call still names.
+            return None
         args = self._extract_constant_args(node)
         if args is None:
             return None
@@ -1579,9 +1596,9 @@ class Ps1ForEachPipeline(Transformer):
             return None
         src_elem = node.elements[0]
         cmd_elem = node.elements[1]
-        if not isinstance(src_elem, Ps1PipelineElement) or src_elem.redirections:
+        if not isinstance(src_elem, Ps1PipelineElement):
             return None
-        if not isinstance(cmd_elem, Ps1PipelineElement) or cmd_elem.redirections:
+        if not isinstance(cmd_elem, Ps1PipelineElement):
             return None
         items = self._get_constant_array(src_elem.expression)
         if items is None:
@@ -1601,7 +1618,7 @@ class Ps1ForEachPipeline(Transformer):
             except (_Ps1InterpreterError, InvokeExpression):
                 return None
             results.append(result)
-        return self._results_to_node(results)
+        return substituted(node, self._results_to_node(results))
 
     @staticmethod
     def _has_free_variables(script_block: Ps1ScriptBlock) -> bool:

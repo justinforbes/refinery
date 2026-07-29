@@ -265,3 +265,19 @@ class TestPs1IexRedirections(TestPs1):
         self.assertEqual(
             self._apply("Invoke-Expression 'Write-Host hello'", Ps1IexInlining),
             'Write-Host hello')
+
+
+class TestPs1IexInliningOfAnEmptyBlock(TestPs1):
+
+    def test_an_empty_scriptblock_resolves_to_nothing_rather_than_to_a_removal(self):
+        self._assertUnchanged('Invoke-Command -ScriptBlock {}', Ps1IexInlining)
+
+    def test_an_empty_scriptblock_does_not_abort_the_pipeline(self):
+        self.assertEqual(
+            self._deobfuscate("Invoke-Command -ScriptBlock {}\nWrite-Host 'go'"),
+            "Invoke-Command -ScriptBlock {}\nWrite-Host 'go'")
+
+    def test_a_scriptblock_holding_a_statement_is_still_inlined(self):
+        self.assertEqual(
+            self._apply("Invoke-Command -ScriptBlock { Write-Host 'x' }", Ps1IexInlining),
+            "Write-Host 'x'")

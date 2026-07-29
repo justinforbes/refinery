@@ -175,3 +175,18 @@ class TestPs1SimplifyExtra(TestPs1):
     def test_gcm_concrete_name_resolved(self):
         result = self._apply("& (gcm Write-Output) 'hi'", Ps1Simplifications)
         self.assertEqual(result, "Write-Output 'hi'")
+
+
+class TestPs1SimplifyRedirections(TestPs1):
+
+    def test_a_redirected_gcm_is_not_resolved_into_the_command_name(self):
+        self._assertUnchanged("& (Get-Command 'Write-Host' > C:\\o.txt) 'hi'", Ps1Simplifications)
+
+    def test_an_unredirected_gcm_is_still_resolved(self):
+        self.assertEqual(
+            self._apply("& (Get-Command 'Write-Host') 'hi'", Ps1Simplifications),
+            "Write-Host 'hi'")
+
+    def test_a_refused_resolution_leaves_every_parent_pointer_true(self):
+        source = "& (Get-Command 'Write-Host' > C:\\o.txt) 'hi'"
+        self._assertTreeIsIntact(source, source, Ps1Simplifications)

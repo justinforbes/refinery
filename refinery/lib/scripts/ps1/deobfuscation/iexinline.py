@@ -72,6 +72,11 @@ def _try_extract_invoke_command_body(cmd: Ps1CommandInvocation) -> list | None:
     """
     If `cmd` is `Invoke-Command -ScriptBlock { ... }` without remoting parameters, return the
     scriptblock body statements.
+
+    An empty block resolves to no statements, which is not code to inline but a statement to delete,
+    and deleting one is `refinery.lib.scripts.ps1.deobfuscation.removal`'s question rather than this
+    pass's. It is reported as nothing resolved, the same answer `_try_parse` gives for a string that
+    parses to an empty script.
     """
     if not isinstance(cmd.name, Ps1StringLiteral):
         return None
@@ -96,7 +101,7 @@ def _try_extract_invoke_command_body(cmd: Ps1CommandInvocation) -> list | None:
         if isinstance(value, Ps1ScriptBlock):
             scriptblock = value
         index += 2
-    if scriptblock is None:
+    if scriptblock is None or not scriptblock.body:
         return None
     return list(scriptblock.body)
 
@@ -429,9 +434,9 @@ class Ps1IexInlining(Transformer):
         assignment target silently discarded.
 
         A refused substitution is reported the same way as nothing to install, and the caller must
-        not advance the mutation counter for it: `refinery.lib.scripts.ps1.deobfuscation.deobfuscate`
-        runs its passes to a fixpoint, so a pass that reports a change it did not make never
-        converges.
+        not advance the mutation counter for it:
+        `refinery.lib.scripts.ps1.deobfuscation.deobfuscate` runs its passes to a fixpoint, so a
+        pass that reports a change it did not make never converges.
         """
         if (
             isinstance(stmt, Ps1ExpressionStatement)

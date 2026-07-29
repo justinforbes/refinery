@@ -84,9 +84,9 @@ class TestRemovalDiscipline(TestUnitBase):
     Both spellings of a bypass are looked for, because both have occurred. `_remove_from_parent` is
     searched for by *name*, anywhere in the module, so that reaching it through the module object
     rather than through a `from ... import` is caught too. `BodyEdit` is searched for by *use*, and
-    by any use rather than by the empty-replacement spelling a deletion takes: `iexinline.py` spliced
-    a statement out and its inlined code in through a raw edit, which is a substitution and so no
-    deletion at all, and the narrower reading let it past a check written for exactly that module.
+    by any use rather than by the empty-replacement spelling a deletion takes: `iexinline.py`
+    spliced a statement out and its inlined code in through a raw edit, which is a substitution and
+    so no deletion at all, and the narrower reading let it past a check written for that module.
     """
 
     #: Packages whose deobfuscation passes still remove statements without a removal plan. Every
@@ -218,6 +218,10 @@ def _pass_types() -> dict[str, type]:
     Every transform the deobfuscation package defines, by name. `_pass_type` answers for one name a
     static scan produced; this answers for all of them, which is what an observer watching who edits
     the tree needs — a pass credited to `<no pass>` is a report nobody can act on.
+
+    A class another one in the set derives from is dropped. Such a base is not a pass, and wrapping
+    its `visit` beside its subclass's inherited one wraps the same function twice: the report then
+    credits every edit to the base, which owns no rewrite and is the same unactionable answer.
     """
     package = importlib.import_module(_PASSES.replace(os.sep, '.'))
     found = {}
@@ -229,7 +233,11 @@ def _pass_types() -> dict[str, type]:
                 continue
             if item is not scripts.Transformer:
                 found[item.__name__] = item
-    return found
+    return {
+        name: item
+        for name, item in found.items()
+        if not any(other is not item and issubclass(other, item) for other in found.values())
+    }
 
 
 def _deobfuscation_suite() -> unittest.TestSuite:
@@ -260,9 +268,9 @@ def _watched_run() -> _Observations:
     the module glob and the `test_witnessed` exclusion, and a divergence between those copies is how
     one of them starts observing an analysis the other deliberately broke.
 
-    The pass a veto fired for is read off a stack of the `visit` calls in flight rather than from the
-    plan, since a plan is told nothing about who built it and this must not become a reason to tell
-    it.
+    The pass a veto fired for is read off a stack of the `visit` calls in flight rather than from
+    the plan, since a plan is told nothing about who built it and this must not become a reason to
+    tell it.
     """
     from refinery.lib.scripts.ps1.parser import Ps1Parser
 
@@ -361,6 +369,12 @@ class TestNoSubstitutionDropsARedirection(TestBase):
     #: times over by the smaller cases.
     LONGEST = 40
 
+    #: A line ending in one of these opens a construct the appended redirection would land inside,
+    #: which parses as something else entirely. A line ending in `}` is not one of them: it closes a
+    #: scriptblock, and `<pipeline> | %{ ... } > C:\o.txt` is the shape two redirection-dropping
+    #: folds took, so excluding it took the corpus's whole reason for existing with it.
+    OPENERS = ('{', '(', ',')
+
     @staticmethod
     def _redirections(part) -> list:
         found = []
@@ -373,18 +387,32 @@ class TestNoSubstitutionDropsARedirection(TestBase):
 
     @classmethod
     def _probes(cls) -> list[str]:
+        """
+        Only the variants that actually parse to a redirection are kept, so the corpus is measured
+        by what it can detect rather than by how many strings were built. A line the appended target
+        does not attach to — the parser answers a `Ps1ErrorNode` for a redirection after an
+        expression — probes nothing at all, and counting it hides a corpus that has gone blind.
+        """
+        from refinery.lib.scripts.ps1.parser import Ps1Parser
         probes = set()
         for source in _watched_run().parsed:
             lines = source.splitlines()
             if len(lines) > cls.LONGEST:
                 continue
             for index, line in enumerate(lines):
-                if not line.strip() or line.rstrip().endswith(('{', '}', '(', ',')):
+                if not line.strip() or line.rstrip().endswith(cls.OPENERS):
                     continue
                 variant = list(lines)
                 variant[index] = F'{line}{cls.TARGET}'
                 probes.add('\n'.join(variant))
-        return sorted(probes)
+        carrying = []
+        for probe in sorted(probes):
+            try:
+                if cls._redirections(Ps1Parser(probe).parse()):
+                    carrying.append(probe)
+            except Exception:
+                continue
+        return carrying
 
     @classmethod
     def _losses(cls, probes: list[str]) -> list[str]:
@@ -451,18 +479,27 @@ class TestNoSubstitutionDropsARedirection(TestBase):
             def visiting(self, node):
                 active.append(name)
                 try:
-                    return visit(self, node)
+                    result = visit(self, node)
                 finally:
                     active.pop()
-                    if not active:
-                        settle(node)
+                # Settled on the way out and not in the `finally`, so a pass that raises mid-edit
+                # is charged nothing: its tree is half rewritten, every take still open reads as
+                # lost, and the report would name `may_substitute` for a crash.
+                if not active:
+                    settle(node)
+                return result
             return visiting
 
         watched = substituting(substitution.substitute_statement)
         with ExitStack() as stack:
-            stack.enter_context(patch.object(scripts, 'set_child', installing(scripts.set_child)))
-            stack.enter_context(
-                patch.object(scripts, 'set_child_list', installing(scripts.set_child_list)))
+            # Patched per module and not only on `refinery.lib.scripts`, because a `from ... import`
+            # binds a name of its own: the owner's two slot entry points call the copy they bound at
+            # import time, and a patch on the defining module leaves both of them unobserved.
+            for module in (scripts, substitution):
+                stack.enter_context(
+                    patch.object(module, 'set_child', installing(module.set_child)))
+                stack.enter_context(
+                    patch.object(module, 'set_child_list', installing(module.set_child_list)))
             for module in (removal, substitution):
                 stack.enter_context(patch.object(
                     module, '_replace_in_parent', replacing(module._replace_in_parent)))
@@ -478,11 +515,12 @@ class TestNoSubstitutionDropsARedirection(TestBase):
             for probe in probes:
                 source[0] = probe
                 try:
-                    tree = Ps1Parser(probe).parse()
-                    for _ in range(100):
-                        if not deobfuscate(tree):
-                            break
-                except Exception:
+                    deobfuscate(Ps1Parser(probe).parse())
+                except Exception as error:
+                    # A probe that raises is a defect of its own and is reported as one, rather
+                    # than skipped: a regression that makes every redirected script throw would
+                    # otherwise empty this check without emptying its corpus.
+                    losses.append(F'{type(error).__name__}: {probe!r}')
                     taken.clear()
         return losses
 
@@ -498,7 +536,8 @@ class TestNoSubstitutionDropsARedirection(TestBase):
 
     def test_no_probe_loses_a_redirection_to_a_substitution(self):
         probes = self._probes()
-        self.assertGreater(len(probes), 100, 'the probe corpus collapsed; the suite run saw nothing')
+        self.assertGreater(
+            len(probes), 500, 'the probe corpus collapsed; the suite run saw nothing')
         self.assertListEqual(
             sorted(set(self._losses(probes))),
             [],

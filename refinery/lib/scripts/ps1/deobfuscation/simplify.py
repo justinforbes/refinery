@@ -23,6 +23,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     is_bare_command_name,
     make_string_literal,
 )
+from refinery.lib.scripts.ps1.deobfuscation.substitution import substitute_field
 from refinery.lib.scripts.ps1.deobfuscation.typenames import canonical_type_name
 from refinery.lib.scripts.ps1.model import (
     Ps1BinaryExpression,
@@ -237,8 +238,7 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
         if isinstance(node.name, Ps1ParenExpression) and node.name.expression is not None:
             inner = node.name.expression
             if isinstance(inner, Ps1StringLiteral):
-                node.name = inner
-                inner.parent = node
+                substitute_field(node, 'name', inner)
             elif isinstance(inner, Ps1CommandInvocation):
                 c = get_command_name(inner)
                 if c is not None and c.lower() in ('gcm', 'get-command'):
@@ -251,8 +251,7 @@ class Ps1Simplifications(LocalFunctionAwareTransformer):
                         # Only resolve a concrete command name; a wildcard pattern such as
                         # `gcm i*e-e*` must not be substituted verbatim as the command name.
                         if isinstance(arg, Ps1StringLiteral) and not _has_wildcard(arg.value):
-                            node.name = arg
-                            arg.parent = node
+                            substitute_field(node, 'name', arg)
         if node.name is not old_name:
             self.mark_changed()
         if node.name and isinstance(node.name, Ps1StringLiteral):

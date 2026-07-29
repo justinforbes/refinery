@@ -9,6 +9,7 @@ import re
 
 from typing import Iterator, NamedTuple
 
+from refinery.lib.scripts import Node, reattach
 from refinery.lib.scripts.ps1.analysis.effects import is_fault_free, may_be_dropped
 from refinery.lib.scripts.ps1.analysis.values import (
     collect_byte_array,
@@ -46,6 +47,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
 from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     substitute_field,
     substitute_list,
+    substituted,
 )
 from refinery.lib.scripts.ps1.deobfuscation.typenames import (
     is_known_member,
@@ -280,8 +282,11 @@ def _resolve_index_values(index: Expression) -> int | list[int] | None:
 
 class _Selection(NamedTuple):
     """
-    What selecting out of a literal container yields, beside what building the container evaluated
-    and the selection then leaves behind.
+    What reading a value out of a literal container yields, beside what building the container
+    evaluated and the read then leaves behind.
+
+    Indexing is one such read and `.Length` is another: the count carries nothing forward at all, so
+    every element is dropped and every element has to be answered for.
 
     The two halves are answered together because they are one decision. A fold that reports only
     what it carries forward leaves its caller to reconstruct the rest, and the reconstruction is
@@ -315,6 +320,22 @@ def _index_into_string(s: str, indices: int | list[int]) -> _Selection | None:
 def _index_into_array(
     array: Ps1ArrayLiteral, indices: int | list[int],
 ) -> _Selection | None:
+    """
+    The element or elements a literal array yields for `indices`, beside the elements the selection
+    leaves behind.
+
+    **An index that repeats is refused rather than folded.** The selected elements are the array's
+    own nodes, so `@(1, 2, 3)[0, 0]` would put one object in two slots of the result: `Node.parent`
+    holds one holder, so a later `refinery.lib.scripts._replace_in_parent` rewrites one occurrence
+    of two, a transformer visits it twice, and a walk counts whatever it carries twice.
+
+    Copying the node instead would answer a different question — whether the element may be
+    *evaluated* twice — and the answer is no for anything with an effect: `@($a.B(), 2)[0, 0]`
+    builds the array once and calls `B` once, where the copy calls it twice. That question has no
+    caller, because nothing in the corpus or the suite selects a repeated index out of an array
+    literal, so it is refused here rather than answered. `_index_into_string` is unaffected: it
+    builds a fresh literal per index out of a value that was never a node.
+    """
     n = len(array.elements)
     if isinstance(indices, int):
         if not (-n <= indices < n):
@@ -327,6 +348,8 @@ def _index_into_array(
             if not (-n <= i < n):
                 return None
             selected.append(array.elements[i])
+        if len({id(element) for element in selected}) != len(selected):
+            return None
         carried = Ps1ArrayLiteral(elements=list(selected))
     kept = {id(element) for element in selected}
     return _Selection(
@@ -362,7 +385,7 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
 
     def visit_Ps1Pipeline(self, node: Ps1Pipeline):
         if len(node.elements) == 2:
-            result = self._try_fold_regex_pipeline(node)
+            result = substituted(node, self._try_fold_regex_pipeline(node))
             if result is not None:
                 return result
         self.generic_visit(node)
@@ -411,8 +434,9 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                 return Ps1IntegerLiteral(value=len(s), raw=str(len(s)))
             array = unwrap_to_array_literal(obj)
             if array is not None:
-                return Ps1IntegerLiteral(
-                    value=len(array.elements), raw=str(len(array.elements)))
+                return self._selected(node, _Selection(
+                    Ps1IntegerLiteral(value=len(array.elements), raw=str(len(array.elements))),
+                    list(array.elements)))
         if (
             string_value(obj) is not None
             or isinstance(obj, Ps1IntegerLiteral)
@@ -520,20 +544,26 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
         return Ps1ArrayLiteral(elements=[
             Ps1IntegerLiteral(value=v, raw=str(v)) for v in range(a, b + step, step)])
 
-    def _selected(self, selection: _Selection | None) -> Expression | None:
+    def _selected(self, node: Node, selection: _Selection | None) -> Expression | None:
         """
-        The expression a selection folds to, or `None` when what it leaves behind is work the script
-        would no longer do; see
+        The expression a selection out of `node` folds to, or `None` when what it leaves behind is
+        work the script would no longer do; see
         `refinery.lib.scripts.ps1.analysis.effects.may_be_dropped` for what that means.
 
         The oracle is the one captured at the root by
         `refinery.lib.scripts.ps1.deobfuscation.helpers.LocalFunctionAwareTransformer`. This pass
         only folds, so a verdict taken before its own edits is the more open, and so the more
         conservative, of the two.
+
+        A refused selection is released the way
+        `refinery.lib.scripts.ps1.deobfuscation.substitution` releases one: a multi-index read has
+        already built the array literal that carries the result, and building it adopted elements
+        that are still standing under `node`.
         """
         if selection is None:
             return None
         if not all(may_be_dropped(part, self._oracle) for part in selection.dropped):
+            reattach(node)
             return None
         return selection.carried
 
@@ -542,16 +572,16 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
         if node.index is None or node.object is None:
             return None
         if isinstance(node.object, Ps1HashLiteral):
-            return self._selected(_lookup_hashtable(node.object, node.index))
+            return self._selected(node, _lookup_hashtable(node.object, node.index))
         indices = _resolve_index_values(node.index)
         if indices is None:
             return None
         obj_str = string_value(node.object)
         if obj_str is not None:
-            return self._selected(_index_into_string(obj_str, indices))
+            return self._selected(node, _index_into_string(obj_str, indices))
         array = unwrap_to_array_literal(node.object)
         if array is not None:
-            return self._selected(_index_into_array(array, indices))
+            return self._selected(node, _index_into_array(array, indices))
         return None
 
     def visit_Ps1ExpressionStatement(self, node: Ps1ExpressionStatement):
@@ -588,11 +618,8 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                 continue
             value = expr.value
             if isinstance(value, Ps1ArrayLiteral):
-                if not substitute_field(node, 'expression', None):
-                    return False
-                substitute_list(value, 'elements', value.elements[::-1])
-                self.mark_changed()
-                return True
+                return self._reversed(node, substitute_list(
+                    value, 'elements', value.elements[::-1]))
             if isinstance(value, Ps1ArrayExpression) and len(value.body) == 1:
                 inner = value.body[0]
                 if (
@@ -600,20 +627,31 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                     and isinstance(inner.expression, Ps1ArrayLiteral)
                 ):
                     literal = inner.expression
-                    if not substitute_field(node, 'expression', None):
-                        return False
-                    substitute_list(literal, 'elements', literal.elements[::-1])
-                    self.mark_changed()
-                    return True
+                    return self._reversed(node, substitute_list(
+                        literal, 'elements', literal.elements[::-1]))
             sv = string_value(value)
             if sv is not None:
-                if not substitute_field(node, 'expression', None):
-                    return False
-                substitute_field(expr, 'value', make_string_literal(sv[::-1]))
-                self.mark_changed()
-                return True
+                return self._reversed(node, substitute_field(
+                    expr, 'value', make_string_literal(sv[::-1])))
             return False
         return False
+
+    def _reversed(self, node: Ps1ExpressionStatement, applied: bool) -> bool:
+        """
+        Drop the `[Array]::Reverse` call `node` holds once the reversal it asks for has landed, and
+        report whether the pair happened.
+
+        The order is the whole of it. Clearing the call first and reversing second leaves a refused
+        reversal beside a deleted call, so the emitted script reads the array in its original order
+        with nothing left to say it should not — a silent change of values rather than a rewrite
+        declined.
+        """
+        if not applied:
+            return False
+        if not substitute_field(node, 'expression', None):
+            return False
+        self.mark_changed()
+        return True
 
     def visit_Ps1InvokeMember(self, node: Ps1InvokeMember):
         self.generic_visit(node)

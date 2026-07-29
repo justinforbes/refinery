@@ -470,3 +470,38 @@ class TestPs1EmulatorExtra(TestPs1):
                     F"{opener}function f {{ 'FOLDED' }}\n$x = f", Ps1FunctionEvaluator)
                 self.assertNotIn('function f', result)
                 self.assertIn("$x = 'FOLDED'", result)
+
+
+class TestPs1EmulatorRedirections(TestPs1):
+
+    def test_a_redirected_foreach_pipeline_is_not_folded_into_its_value(self):
+        self._assertUnchanged(
+            "@('a', 'b') | ForEach-Object {\n  $_\n} > C:\\o.txt", Ps1ForEachPipeline)
+
+    def test_a_merge_on_a_foreach_pipeline_is_refused_too(self):
+        self._assertUnchanged(
+            "@('a', 'b') | ForEach-Object {\n  $_\n} 2>&1", Ps1ForEachPipeline)
+
+    def test_an_unredirected_foreach_pipeline_is_still_folded(self):
+        self.assertEqual(
+            self._apply("@('a', 'b') | ForEach-Object { $_ }", Ps1ForEachPipeline), "'ab'")
+
+    def test_a_definition_a_redirected_call_still_names_is_kept(self):
+        # The redirected call cannot be folded, so the name still has a caller when the definition
+        # removal reads the counter. Emitting the fold without the definition leaves the script
+        # calling a function it no longer defines.
+        result = self._apply(
+            "function F { 'V' }\n$x = F\nF > C:\\o.txt", Ps1FunctionEvaluator)
+        self.assertIn('function F', result)
+        self.assertIn("$x = 'V'", result)
+
+    def test_a_value_a_discard_took_away_is_not_read_back(self):
+        # `$a = j > $Null` binds `$a` to `$null`, so `$a.Length` is not 4.
+        source = cleandoc("""
+            function F {
+              $a = New-Object byte[] 4 > $Null
+              $a.Length
+            }
+            $x = F
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), source)
