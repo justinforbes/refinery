@@ -11,14 +11,23 @@ from test.lib.scripts.ps1 import test_deobfuscation
 from test.lib.scripts.ps1.deobfuscation import (
     test_deadcode,
     test_emulator,
+    test_iexinline,
     test_removal,
     test_unused,
+    test_wildcards,
 )
 
 from refinery.lib.scripts import owning_list
 from refinery.lib.scripts.ps1.analysis import effects
 from refinery.lib.scripts.ps1.analysis.effects import OutputSink, is_side_effect_free
-from refinery.lib.scripts.ps1.deobfuscation import deadcode, removal, unused
+from refinery.lib.scripts.ps1.deobfuscation import (
+    deadcode,
+    emulator,
+    removal,
+    substitution,
+    unused,
+    wildcards,
+)
 from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement
 
 
@@ -36,7 +45,9 @@ _DEAD_CODE = _witness(test_deadcode.TestPs1DeadCodeElimination)
 _DEAD_CODE_EXTRA = _witness(test_deadcode.TestPs1DeadCodeExtra)
 _DEAD_CODE_TREE = _witness(test_deadcode.TestPs1DeadCodeLeavesTheTreeConsistent)
 _EMULATOR = _witness(test_emulator.TestPs1FunctionEvaluator)
+_EMULATOR_EXTRA = _witness(test_emulator.TestPs1EmulatorExtra)
 _HANDLER = _witness(test_removal.TestPs1DeadCodeEliminationDoesNotUnhookAHandler)
+_IEX_REDIRECTIONS = _witness(test_iexinline.TestPs1IexRedirections)
 _INTEGRATION = _witness(test_deobfuscation.TestPs1Integration)
 _KEPT_EITHER_WAY = _witness(test_unused.TestPs1OutputSomethingElseHoldsIsKeptEitherWay)
 _KEPT_WHEN_ASKED = _witness(test_unused.TestPs1BareOutputIsKeptWhenAsked)
@@ -45,6 +56,7 @@ _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
 _TREE = _witness(test_unused.TestPs1RemovalLeavesTheTreeConsistent)
 _UNUSED = _witness(test_unused.TestPs1UnusedVariableRemoval)
+_WILDCARD_REDIRECTIONS = _witness(test_wildcards.TestPs1WildcardRedirections)
 
 
 def _accepted_before_the_vetoes(plan: removal.Ps1RemovalPlan) -> list:
@@ -363,3 +375,28 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_KEPT_EITHER_WAY],
             patch.object(effects, '_redirection_takes_output_away', lambda redirection: False),
             notices='test_a_value_a_redirection_moves_elsewhere_is_kept')
+
+    def test_the_refusal_to_substitute_away_a_redirection_is_witnessed(self):
+        # The rule itself, patched in the module that owns it. Both callers are named, because the
+        # two shapes reach it by different routes: an expression in a slot asks through
+        # `substitute`, and a pass returning a replacement from `visit_X` asks before it returns.
+        self._assertWitnessed(
+            [_IEX_REDIRECTIONS, _WILDCARD_REDIRECTIONS],
+            patch.object(substitution, 'may_substitute', lambda *parts: True),
+            notices='test_a_redirected_iex_statement_is_not_replaced_by_the_code_it_holds')
+
+    def test_asking_the_rule_where_a_wildcard_rewrite_decides_is_witnessed(self):
+        # `refinery.lib.scripts.Transformer.generic_visit` installs whatever a `visit_X` returns, so
+        # a pass that does not ask is a pass whose replacement lands unexamined.
+        self._assertWitnessed(
+            [_WILDCARD_REDIRECTIONS],
+            patch.object(wildcards, 'may_substitute', lambda *parts: True),
+            notices='test_a_redirected_variable_read_is_not_rewritten_to_the_variable')
+
+    def test_the_interpreter_refusing_a_body_that_opens_a_file_is_witnessed(self):
+        # The emulator's own half: the call site carries no redirection, the body does, and folding
+        # the call deletes the body along with the file it creates.
+        self._assertWitnessed(
+            [_EMULATOR_EXTRA],
+            patch.object(emulator, 'opens_a_redirection_target', lambda node: False),
+            notices='test_a_body_that_opens_a_file_is_not_folded_into_the_value_it_returns')

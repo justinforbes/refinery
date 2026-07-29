@@ -533,8 +533,9 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                 continue
             value = expr.value
             if isinstance(value, Ps1ArrayLiteral):
+                if not substitute_field(node, 'expression', None):
+                    return False
                 substitute_list(value, 'elements', value.elements[::-1])
-                substitute_field(node, 'expression', None)
                 self.mark_changed()
                 return True
             if isinstance(value, Ps1ArrayExpression) and len(value.body) == 1:
@@ -544,14 +545,16 @@ class Ps1ConstantFolding(LocalFunctionAwareTransformer):
                     and isinstance(inner.expression, Ps1ArrayLiteral)
                 ):
                     literal = inner.expression
+                    if not substitute_field(node, 'expression', None):
+                        return False
                     substitute_list(literal, 'elements', literal.elements[::-1])
-                    substitute_field(node, 'expression', None)
                     self.mark_changed()
                     return True
             sv = string_value(value)
             if sv is not None:
+                if not substitute_field(node, 'expression', None):
+                    return False
                 substitute_field(expr, 'value', make_string_literal(sv[::-1]))
-                substitute_field(node, 'expression', None)
                 self.mark_changed()
                 return True
             return False

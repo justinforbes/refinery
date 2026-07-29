@@ -664,3 +664,12 @@ class TestPs1DeadCodeLeavesTheTreeConsistent(TestPs1):
             Write-Host 'go'
             """
         ), Ps1DeadCodeElimination)
+
+    def test_a_branch_that_never_runs_takes_its_redirection_with_it(self):
+        # A removal claims the code does not run at all, so what the dead branch would have written
+        # is not work being lost. Only a rewrite that keeps the value owes the redirection, and
+        # applying that rule here would leave every constant condition standing.
+        result = self._apply(
+            "if ($false) { Write-Host 'dead' > C:\\o.txt } else { Write-Host 'live' }",
+            Ps1DeadCodeElimination)
+        self.assertEqual(result, "Write-Host 'live'")

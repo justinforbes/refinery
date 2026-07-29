@@ -45,6 +45,7 @@ from refinery.lib.scripts.ps1.ast import (
     get_param_block,
     is_builtin_variable,
     normalize_dotnet_type_name,
+    unwrap_parens,
 )
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -1400,12 +1401,29 @@ def _output_is_redirected_away(node) -> bool:
     see it. Where a merge and a file redirection are written together (`2>&1 > C:\\log`), the file
     redirection is still a removal and any one of them is enough to answer yes.
 
-    The redirection list is read off the node rather than matched against the node types known to
-    carry one, because the two that do — a command invocation and the pipeline element around it —
-    are both written in practice and the failure is asymmetric: a carrier this did not recognize
-    would report that the output propagates, which is the answer that deletes a payload into a file.
+    The redirection list is read off the node rather than matched against the node types the model
+    declares as carriers, because only one of the two is ever filled: the parser writes every
+    redirection onto the command invocation and constructs `Ps1PipelineElement` without one, so a
+    guard spelled against the element is dead however it is written. Reading by name keeps this
+    right whichever carrier the parser starts using, and the failure of the alternative is
+    asymmetric — a carrier this did not recognize would report that the output propagates, which is
+    the answer that deletes a payload into a file.
     """
     return any(_redirection_takes_output_away(r) for r in getattr(node, 'redirections', ()))
+
+
+def _redirection_opens_a_file(redirection) -> bool:
+    """
+    Whether a single redirection opens a file on disk.
+
+    `> $Null` is PowerShell's discard and creates nothing: the shell special-cases the automatic
+    variable rather than writing a file of that name. Every other target is read as a path,
+    including one this cannot evaluate, because a target it does not understand is a file it cannot
+    promise is absent.
+    """
+    if not isinstance(redirection, Ps1FileRedirection):
+        return False
+    return not is_builtin_variable(unwrap_parens(redirection.target), {'null'})
 
 
 def opens_a_redirection_target(node) -> bool:
@@ -1417,9 +1435,10 @@ def opens_a_redirection_target(node) -> bool:
     The stream is deliberately not consulted, which is what separates this from
     `_redirection_takes_output_away`: `2> err.txt` creates its file exactly as `> out.txt` does, and
     a caller asking whether a statement is nothing but a call has to know about both. A merge names
-    no file and is not one of these — `j 2>&1` on a silent command really is a no-op.
+    no file and is not one of these — `j 2>&1` on a silent command really is a no-op — and neither
+    is a discard, which is why the target is read rather than the node type alone.
     """
-    return any(isinstance(r, Ps1FileRedirection) for r in getattr(node, 'redirections', ()))
+    return any(_redirection_opens_a_file(r) for r in getattr(node, 'redirections', ()))
 
 
 def unconsumed_statement(expr: Node) -> Ps1ExpressionStatement | None:

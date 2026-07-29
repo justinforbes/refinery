@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.effects import opens_a_redirection_target
 from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
 from refinery.lib.scripts.ps1.ast import (
     get_command_name,
@@ -46,6 +47,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     switch_matches,
 )
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
+from refinery.lib.scripts.ps1.deobfuscation.substitution import carried_redirections
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
@@ -403,6 +405,21 @@ class _Ps1Interpreter:
         raise _Ps1InterpreterError
 
     def _eval_command(self, node: Ps1CommandInvocation) -> _Value:
+        """
+        The value a command in the emulated body produces, or `_Ps1InterpreterError` when this
+        cannot say.
+
+        A redirection that opens a file is one of the cases it cannot say. This computes a value and
+        never touches the disk, while PowerShell creates or truncates the target as it sets the
+        redirection up whatever the command then writes, so folding the enclosing call into the
+        result would delete a file the script produced. The other spellings are left alone: a merge
+        names no file, and `> $Null` is the shell's discard, so neither is work this failed to do.
+        The call site asks its own, blunter question through
+        `refinery.lib.scripts.ps1.deobfuscation.substitution.may_substitute`, because there the
+        replacement stands where the redirection was written and changes what it evaluates to.
+        """
+        if opens_a_redirection_target(node):
+            raise _Ps1InterpreterError
         if not isinstance(node.name, Ps1StringLiteral):
             raise _Ps1InterpreterError
         name = node.name.value.lower()
@@ -1250,11 +1267,11 @@ class Ps1FunctionEvaluator(Transformer):
 
     def visit_Ps1CommandInvocation(self, node: Ps1CommandInvocation):
         self.generic_visit(node)
-        if node.redirections:
-            # What this pass installs is an expression, and an expression carries no redirections,
-            # so folding `f > C:\log` into the value `f` returns writes it to the console instead of
-            # to the file. Every spelling is refused and not only the ones that take output away:
-            # the question is whether the replacement can carry the redirection, and it never can.
+        if carried_redirections(node):
+            # Asked before `_call_counts` moves, not after the value comes back. What this pass
+            # installs is an expression and an expression carries no redirections, so the answer is
+            # the same for every call and every spelling; asking late would leave the counter saying
+            # every call was folded and the definition removal reading that as licence.
             return None
         name_str = get_command_name(node)
         if name_str is None:

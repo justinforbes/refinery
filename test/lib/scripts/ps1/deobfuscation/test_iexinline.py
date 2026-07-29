@@ -237,3 +237,31 @@ class TestPs1IexInlining(TestPs1):
     def test_piped_iex_keeps_assignment_target(self):
         result = self._apply("$x = 'Get-Date' | iex", Ps1IexInlining)
         self.assertEqual(result, '$x = Get-Date')
+
+
+class TestPs1IexRedirections(TestPs1):
+
+    def test_a_redirected_iex_statement_is_not_replaced_by_the_code_it_holds(self):
+        self._assertUnchanged(
+            "Invoke-Expression 'Write-Host hello' > C:\\o.txt", Ps1IexInlining)
+
+    def test_a_redirected_iex_in_a_value_slot_is_not_replaced_by_its_value(self):
+        # `$a` holds `$null` in the original, because the redirection takes the value away before
+        # the assignment sees it; inlining made it `42`.
+        self._assertUnchanged("$a = (Invoke-Expression '42' > C:\\o.txt)", Ps1IexInlining)
+
+    def test_a_refused_inlining_leaves_every_parent_pointer_true(self):
+        source = "$a = (Invoke-Expression '42' > C:\\o.txt)"
+        self._assertTreeIsIntact(source, source, Ps1IexInlining)
+
+    def test_a_refused_inlining_does_not_report_a_change_it_did_not_make(self):
+        # `deobfuscate` runs its passes to a fixpoint, so a pass reporting a change it declined to
+        # make never converges and the whole pipeline spins.
+        transform = Ps1IexInlining()
+        transform.visit(self._transform("Invoke-Expression 'Write-Host hi' > C:\\o.txt"))
+        self.assertFalse(transform.changed)
+
+    def test_an_unredirected_iex_statement_is_still_inlined(self):
+        self.assertEqual(
+            self._apply("Invoke-Expression 'Write-Host hello'", Ps1IexInlining),
+            'Write-Host hello')

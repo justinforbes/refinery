@@ -97,7 +97,10 @@ class Ps1SecureStringDecryptor(Transformer):
             replacement = make_string_literal(plaintext)
             new_element = Ps1PipelineElement(expression=replacement)
             replacement.parent = new_element
-            substitute_list(
-                node, 'elements', node.elements[:k] + [new_element] + node.elements[k + 2:])
+            if not substitute_list(
+                node, 'elements', node.elements[:k] + [new_element] + node.elements[k + 2:]
+            ):
+                k += 1
+                continue
             self.mark_changed()
         return None

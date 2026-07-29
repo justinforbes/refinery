@@ -43,8 +43,9 @@ class Ps1ExpandableStringHoist(Transformer):
             while i < len(body):
                 before, after, replaced = self._extract_void_subexpressions(body[i])
                 if before or after:
-                    substitute_statement(container, body[i], [*before, body[i], *after])
-                    i += len(before) + len(after)
+                    hoisted = [*before, body[i], *after]
+                    if substitute_statement(container, body[i], hoisted):
+                        i += len(before) + len(after)
                 if replaced:
                     self.mark_changed()
                 i += 1
@@ -129,7 +130,8 @@ class Ps1ExpandableStringHoist(Transformer):
             for sub in subs:
                 collected.extend(sub.body)
             leftmost = self._is_leftmost(node)
-            if not substitute(node, make_string_literal(''.join(text_parts))):
+            literal = make_string_literal(''.join(text_parts))
+            if not substitute(node, literal, moved=collected):
                 continue
             if leftmost:
                 before.extend(collected)

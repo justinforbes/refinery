@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
+from refinery.lib.scripts.ps1.deobfuscation import Ps1WildcardResolution
+
 
 class TestPs1VariableDriveResolution(TestPs1):
 
@@ -195,3 +197,24 @@ class TestPs1WildcardExtra(TestPs1):
         result = self._deobfuscate(data, remove_junk=False)
         self.assertNotIn('Exists', result)
         self.assertIn("'*ts'", result)
+
+
+class TestPs1WildcardRedirections(TestPs1):
+
+    def test_a_redirected_variable_read_is_not_rewritten_to_the_variable(self):
+        # The rewrite installs an expression and an expression carries no redirections, so the
+        # value went to the console and `C:\out.txt` was never created — PowerShell creates the
+        # target as it sets the redirection up, whatever the command then writes.
+        self._assertUnchanged(
+            'Get-Variable payload -ValueOnly > C:\\out.txt', Ps1WildcardResolution)
+
+    def test_a_redirected_variable_write_is_not_rewritten_to_an_assignment(self):
+        self._assertUnchanged("Set-Variable x 'v' > C:\\out.txt", Ps1WildcardResolution)
+
+    def test_an_unredirected_variable_read_is_still_rewritten(self):
+        self.assertEqual(
+            self._apply('Get-Variable payload -ValueOnly', Ps1WildcardResolution), '$payload')
+
+    def test_a_refused_rewrite_leaves_every_parent_pointer_true(self):
+        source = 'Get-Variable payload -ValueOnly > C:\\out.txt'
+        self._assertTreeIsIntact(source, source, Ps1WildcardResolution)

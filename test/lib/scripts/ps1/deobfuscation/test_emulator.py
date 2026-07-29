@@ -418,6 +418,31 @@ class TestPs1EmulatorExtra(TestPs1):
                     $x = f {redirection}
                 """))
 
+    def test_a_body_that_opens_a_file_is_not_folded_into_the_value_it_returns(self):
+        # The call site carries no redirection here; the body does. Folding the call deletes the
+        # body, so the file the redirection names is never created although the value is right.
+        source = cleandoc("""
+            function F {
+              $a = New-Object byte[] 4 > C:\\o.txt
+              'V'
+            }
+            $x = F
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), source)
+
+    def test_a_body_discarding_to_null_is_still_folded(self):
+        # `> $Null` is PowerShell's discard and creates nothing, so there is no work the value
+        # failed to capture. Reading it as a file would switch the trampoline resolution off for
+        # the spelling obfuscators use most.
+        source = cleandoc("""
+            function F {
+              $a = New-Object byte[] 4 > $Null
+              'V'
+            }
+            $x = F
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'V'")
+
     def test_an_exported_definition_is_not_removed_after_its_calls_are_folded(self):
         # Regression: folding a call into its value is safe whoever else can reach the name, but
         # deleting the definition afterwards is a name-keyed removal, and an exported name has a

@@ -8,9 +8,12 @@ import unittest
 
 from contextlib import ExitStack
 from glob import glob
+from typing import NamedTuple
 from unittest.mock import patch
 
 from . import TestBase, TestUnitBase
+
+import refinery.lib.scripts as scripts
 
 from refinery.lib.scripts.ps1.deobfuscation import removal
 
@@ -18,6 +21,21 @@ from refinery.lib.scripts.ps1.deobfuscation import removal
 #: The module that owns statement removal, and so the one place a removal may be spelled out. Path
 #: anchored rather than matched by base name, so a `removal.py` elsewhere in the tree is still read.
 _RATCHET_OWNER = os.path.join('deobfuscation', 'removal.py')
+
+#: The module that owns putting one node in another's place, exempt from the ratchet on the tree
+#: primitives for the same reason and read the same way.
+_SUBSTITUTION_OWNER = os.path.join('deobfuscation', 'substitution.py')
+
+_PASSES = os.path.join('refinery', 'lib', 'scripts', 'ps1', 'deobfuscation')
+
+_TESTS = os.path.join('test', 'lib', 'scripts', 'ps1', 'deobfuscation')
+
+#: The witness suite runs whole suites of its own under mutation, so a run of it would report a
+#: guard firing inside a deliberately broken analysis. Excluded to keep the evidence the tests'
+#: own, and because rerunning it here costs more than the rest of the directory together. Stated
+#: once because both observations below read the same run: a divergence in what either of them
+#: excludes is how one starts watching an analysis the other broke.
+_EXCLUDED = 'test_witnessed'
 
 
 def _project_root() -> str:
@@ -65,10 +83,10 @@ class TestRemovalDiscipline(TestUnitBase):
 
     Both spellings of a bypass are looked for, because both have occurred. `_remove_from_parent` is
     searched for by *name*, anywhere in the module, so that reaching it through the module object
-    rather than through a `from ... import` is caught too. `BodyEdit` is searched for by *use*: a
-    splice whose replacement is the empty list is a deletion however it is spelled, and that is the
-    form in which `emulator.py` and `unflatten.py` deleted statements past every veto while the
-    import check reported the package clean.
+    rather than through a `from ... import` is caught too. `BodyEdit` is searched for by *use*, and
+    by any use rather than by the empty-replacement spelling a deletion takes: `iexinline.py` spliced
+    a statement out and its inlined code in through a raw edit, which is a substitution and so no
+    deletion at all, and the narrower reading let it past a check written for exactly that module.
     """
 
     #: Packages whose deobfuscation passes still remove statements without a removal plan. Every
@@ -84,13 +102,9 @@ class TestRemovalDiscipline(TestUnitBase):
                 return True
             if isinstance(node, ast.alias) and node.name == '_remove_from_parent':
                 return True
-            if not isinstance(node, ast.Call):
-                continue
-            if not isinstance(node.func, ast.Attribute) or node.func.attr != 'splice':
-                continue
-            given = [*node.args, *(keyword.value for keyword in node.keywords)]
-            if any(isinstance(item, ast.List) and not item.elts for item in given):
-                return True
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if node.func.attr == 'splice':
+                    return True
         return False
 
     @classmethod
@@ -113,6 +127,181 @@ class TestRemovalDiscipline(TestUnitBase):
                 self.fail(F'{language} no longer needs the exemption; drop it from UNRATCHETED')
 
 
+class TestSubstitutionDiscipline(TestUnitBase):
+    """
+    One part of the PowerShell tree is put in another's place in exactly two modules: the one that
+    owns removals and the one that owns substitutions.
+
+    The rule those two hold is that a rewrite keeping a value has to keep what producing it did, and
+    a replacement expression carries no redirections, so a pass reaching for the tree primitives
+    itself writes a rewrite the rule never sees. Three passes did, in three different ways, and each
+    left the file a redirection named uncreated. The question this asks is *route* — is there a way
+    around the owners — which is the same question `TestRemovalDiscipline` asks about deletions and
+    is answered the same way, by reading the source rather than by watching a run.
+
+    Every primitive is searched for by name anywhere in the module, so that reaching one through the
+    module object rather than through a `from ... import` is caught too.
+    """
+
+    PRIMITIVES = ('_replace_in_parent', 'set_child', 'set_child_list', 'set_body', 'BodyEdit')
+
+    OWNERS = (_RATCHET_OWNER, _SUBSTITUTION_OWNER)
+
+    @classmethod
+    def _named_primitives(cls, tree: ast.Module) -> set[str]:
+        found = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name):
+                name = node.id
+            elif isinstance(node, ast.Attribute):
+                name = node.attr
+            elif isinstance(node, ast.alias):
+                name = node.name
+            else:
+                continue
+            if name in cls.PRIMITIVES:
+                found.add(name)
+        return found
+
+    def test_no_ps1_pass_rewrites_the_tree_outside_the_two_owners(self):
+        root = _project_root()
+        offenders = [
+            F'{os.path.relpath(path, root)}: {", ".join(sorted(named))}'
+            for path, tree in _sources('refinery', 'lib', 'scripts', 'ps1')
+            if not path.endswith(self.OWNERS)
+            and (named := self._named_primitives(tree))
+        ]
+        self.assertListEqual(
+            offenders, [], 'use refinery.lib.scripts.ps1.deobfuscation.substitution')
+
+
+_PLANS = ('Ps1RemovalPlan', 'Ps1RemovalPlans')
+
+
+def _passes_that_remove() -> set[str]:
+    """
+    The name of every pass that opens a removal plan, and so of every pass whose deletions have to
+    have been tried against the fault veto.
+    """
+    found = set()
+    for path, tree in _sources(_PASSES):
+        if path.endswith(_RATCHET_OWNER):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+                    continue
+                if call.func.id in _PLANS:
+                    found.add(node.name)
+    return found
+
+
+def _pass_type(name: str) -> type:
+    """
+    The class object a pass name denotes. Looked up across the package's modules rather than through
+    one import, so a pass that moves between modules is still found; the name comes from
+    `_passes_that_remove`, which read the same tree, so an unresolvable one is a bug here.
+    """
+    package = importlib.import_module(_PASSES.replace(os.sep, '.'))
+    for _, module_name, _ in pkgutil.iter_modules(package.__path__):
+        module = importlib.import_module(F'{package.__name__}.{module_name}')
+        found = getattr(module, name, None)
+        if isinstance(found, type):
+            return found
+    raise AssertionError(F'{name} removes statements but no module in {_PASSES} defines it')
+
+
+def _pass_types() -> dict[str, type]:
+    """
+    Every transform the deobfuscation package defines, by name. `_pass_type` answers for one name a
+    static scan produced; this answers for all of them, which is what an observer watching who edits
+    the tree needs — a pass credited to `<no pass>` is a report nobody can act on.
+    """
+    package = importlib.import_module(_PASSES.replace(os.sep, '.'))
+    found = {}
+    for _, module_name, _ in pkgutil.iter_modules(package.__path__):
+        module = importlib.import_module(F'{package.__name__}.{module_name}')
+        for name in dir(module):
+            item = getattr(module, name)
+            if not isinstance(item, type) or not issubclass(item, scripts.Transformer):
+                continue
+            if item is not scripts.Transformer:
+                found[item.__name__] = item
+    return found
+
+
+def _deobfuscation_suite() -> unittest.TestSuite:
+    names = []
+    for path in sorted(glob(os.path.join(_project_root(), _TESTS, 'test_*.py'))):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if stem != _EXCLUDED:
+            names.append(F"{_TESTS.replace(os.sep, '.')}.{stem}")
+    assert names, F'no test modules under {_TESTS}'
+    return unittest.defaultTestLoader.loadTestsFromNames(names)
+
+
+class _Observations(NamedTuple):
+    """
+    What one watched run of the ps1 deobfuscation suite reports.
+    """
+    vetoed: frozenset[str]
+    parsed: tuple[str, ...]
+
+
+@functools.lru_cache(maxsize=1)
+def _watched_run() -> _Observations:
+    """
+    Run the ps1 deobfuscation suite once, watching the fault veto and recording every source the
+    suite hands to the parser.
+
+    One run rather than two, because the checks below would otherwise each carry their own copy of
+    the module glob and the `test_witnessed` exclusion, and a divergence between those copies is how
+    one of them starts observing an analysis the other deliberately broke.
+
+    The pass a veto fired for is read off a stack of the `visit` calls in flight rather than from the
+    plan, since a plan is told nothing about who built it and this must not become a reason to tell
+    it.
+    """
+    from refinery.lib.scripts.ps1.parser import Ps1Parser
+
+    active: list[str] = []
+    fired: set[str] = set()
+    parsed: list[str] = []
+    answer = removal.fault_is_observed
+    build = Ps1Parser.__init__
+
+    def watched(statement):
+        observed = answer(statement)
+        if observed and active:
+            fired.add(active[-1])
+        return observed
+
+    def recording(self, source, *args, **kwargs):
+        if isinstance(source, str):
+            parsed.append(source)
+        return build(self, source, *args, **kwargs)
+
+    def entered(name: str, visit):
+        def visiting(self, node):
+            active.append(name)
+            try:
+                return visit(self, node)
+            finally:
+                active.pop()
+        return visiting
+
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(removal, 'fault_is_observed', watched))
+        stack.enter_context(patch.object(Ps1Parser, '__init__', recording))
+        for name in sorted(_passes_that_remove()):
+            pass_type = _pass_type(name)
+            stack.enter_context(patch.object(pass_type, 'visit', entered(name, pass_type.visit)))
+        _deobfuscation_suite().run(unittest.TestResult())
+    return _Observations(frozenset(fired), tuple(sorted(set(parsed))))
+
+
 class TestRemovalIsTriedInsideAProtectedBody(TestBase):
     """
     A removal that empties a `try` body beside an acting handler makes the handler unreachable, and
@@ -129,72 +318,134 @@ class TestRemovalIsTriedInsideAProtectedBody(TestBase):
     question directly: which passes actually put a removal in front of it and were told no.
     """
 
-    PASSES = os.path.join('refinery', 'lib', 'scripts', 'ps1', 'deobfuscation')
-    TESTS = os.path.join('test', 'lib', 'scripts', 'ps1', 'deobfuscation')
-    PLANS = ('Ps1RemovalPlan', 'Ps1RemovalPlans')
+    def test_every_pass_that_removes_is_tried_inside_a_protected_body(self):
+        missing = sorted(_passes_that_remove() - _watched_run().vetoed)
+        self.assertListEqual(
+            missing, [], 'apply each of these to a removal inside try/catch and pin what survives')
 
-    #: The witness suite runs whole suites of its own under mutation, so a run of it would report
-    #: the veto firing inside a deliberately broken analysis. Excluded to keep the evidence the
-    #: tests' own, and because rerunning it here costs more than the rest of the directory together.
-    EXCLUDED = 'test_witnessed'
 
-    @classmethod
-    def _passes_that_remove(cls) -> set[str]:
-        found = set()
-        for path, tree in _sources(cls.PASSES):
-            if path.endswith(_RATCHET_OWNER):
+class TestNoSubstitutionDropsARedirection(TestBase):
+    """
+    No pass installs a value-preserving replacement that takes a redirection out of the tree.
+
+    The suite the source ratchets watch never puts a redirection anywhere, so watching it directly
+    reports nothing with every one of these bugs present — three of them were, and an observer over
+    the tree primitives counted zero. The corpus is therefore built rather than found: every source
+    the suite hands to the parser is reissued once per line with a file redirection appended to that
+    line, which puts one in front of every rewrite the suite exercises. It grows as the suite does,
+    which is the floor a check that only watches has not got.
+
+    Edits made through `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan` are not
+    substitutions and are exempt. A removal claims the code does not run — resolving a constant `if`
+    deletes the branch that was never taken, redirections and all — and that claim is the plan's to
+    check. `refinery.lib.scripts.ps1.deobfuscation.substitution.substitute_statement` opens a plan
+    of its own, so the exemption is lifted around it, or the very shape this was written for would
+    hide inside the owner meant to enforce it.
+
+    **A redirection is counted lost when the pass has finished and it is still gone**, not at the
+    moment it leaves a slot. `Ps1ExpandableStringHoist` takes a subexpression out of a string and
+    puts it back one statement later, and telling that apart from a loss by reading the `moved`
+    argument the pass declares would be taking the pass's word for the very thing this checks. The
+    verdict is deferred to the end of the pass rather than to the end of the run, so a later
+    removal cannot be charged to an earlier substitution.
+
+    The redirections are counted by walking the trees here rather than by asking the predicate the
+    passes ask, so that a bug in that predicate cannot answer for itself.
+    """
+
+    TARGET = ' > C:\\o.txt'
+
+    #: A source longer than this is not reissued line by line. Every deobfuscation pass runs over
+    #: every probe, so the corpus is quadratic in the length of what the suite parses, and the few
+    #: sources above the bound are whole malware scripts whose individual lines are covered many
+    #: times over by the smaller cases.
+    LONGEST = 40
+
+    @staticmethod
+    def _redirections(part) -> list:
+        found = []
+        for node in part if isinstance(part, (list, tuple)) else [part]:
+            if not isinstance(node, scripts.Node):
                 continue
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.ClassDef):
-                    continue
-                for call in ast.walk(node):
-                    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
-                        continue
-                    if call.func.id in cls.PLANS:
-                        found.add(node.name)
+            for descendant in node.walk():
+                found.extend(getattr(descendant, 'redirections', None) or ())
         return found
 
     @classmethod
-    def _pass_type(cls, name: str) -> type:
-        """
-        The class object a pass name denotes. Looked up across the package's modules rather than
-        through one import, so a pass that moves between modules is still found; the name comes from
-        `_passes_that_remove`, which read the same tree, so an unresolvable one is a bug here.
-        """
-        package = importlib.import_module(cls.PASSES.replace(os.sep, '.'))
-        for _, module_name, _ in pkgutil.iter_modules(package.__path__):
-            module = importlib.import_module(F'{package.__name__}.{module_name}')
-            found = getattr(module, name, None)
-            if isinstance(found, type):
-                return found
-        raise AssertionError(F'{name} removes statements but no module in {cls.PASSES} defines it')
+    def _probes(cls) -> list[str]:
+        probes = set()
+        for source in _watched_run().parsed:
+            lines = source.splitlines()
+            if len(lines) > cls.LONGEST:
+                continue
+            for index, line in enumerate(lines):
+                if not line.strip() or line.rstrip().endswith(('{', '}', '(', ',')):
+                    continue
+                variant = list(lines)
+                variant[index] = F'{line}{cls.TARGET}'
+                probes.add('\n'.join(variant))
+        return sorted(probes)
 
     @classmethod
-    def _suite(cls) -> unittest.TestSuite:
-        names = []
-        for path in sorted(glob(os.path.join(_project_root(), cls.TESTS, 'test_*.py'))):
-            stem = os.path.splitext(os.path.basename(path))[0]
-            if stem != cls.EXCLUDED:
-                names.append(F"{cls.TESTS.replace(os.sep, '.')}.{stem}")
-        assert names, F'no test modules under {cls.TESTS}'
-        return unittest.defaultTestLoader.loadTestsFromNames(names)
+    def _losses(cls, probes: list[str]) -> list[str]:
+        from refinery.lib.scripts.ps1.deobfuscation import deobfuscate, substitution
+        from refinery.lib.scripts.ps1.parser import Ps1Parser
 
-    @classmethod
-    def _passes_whose_veto_fires(cls, names: set[str]) -> set[str]:
-        """
-        Run the suite with the fault veto watched and report which passes it declined something for.
-        The pass is read off a stack of the `visit` calls in flight rather than from the plan, since
-        a plan is told nothing about who built it and this must not become a reason to tell it.
-        """
         active: list[str] = []
-        fired: set[str] = set()
-        answer = removal.fault_is_observed
+        removing = [0]
+        taken: list[tuple[str, object]] = []
+        losses: list[str] = []
+        source = ['']
 
-        def watched(statement):
-            observed = answer(statement)
-            if observed and active:
-                fired.add(active[-1])
-            return observed
+        def took(removed, installed) -> None:
+            if removing[0]:
+                return
+            kept = {id(item) for item in cls._redirections(installed)}
+            who = active[-1] if active else '<no pass>'
+            taken.extend(
+                (who, item)
+                for item in cls._redirections(removed)
+                if id(item) not in kept
+            )
+
+        def settle(root) -> None:
+            standing = {id(item) for item in cls._redirections(root)}
+            losses.extend(
+                F'{who}: {source[0]!r}'
+                for who, item in taken
+                if id(item) not in standing
+            )
+            taken.clear()
+
+        def installing(original):
+            def install(parent, attr, value):
+                took(getattr(parent, attr, None), value)
+                return original(parent, attr, value)
+            return install
+
+        def replacing(original):
+            def replace(old, new):
+                took(old, new)
+                return original(old, new)
+            return replace
+
+        def committing(original):
+            def commit(plan):
+                removing[0] += 1
+                try:
+                    return original(plan)
+                finally:
+                    removing[0] -= 1
+            return commit
+
+        def substituting(original):
+            def substitute(*args, **kwargs):
+                removing[0] -= 1
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    removing[0] += 1
+            return substitute
 
         def entered(name: str, visit):
             def visiting(self, node):
@@ -203,22 +454,55 @@ class TestRemovalIsTriedInsideAProtectedBody(TestBase):
                     return visit(self, node)
                 finally:
                     active.pop()
+                    if not active:
+                        settle(node)
             return visiting
 
+        watched = substituting(substitution.substitute_statement)
         with ExitStack() as stack:
-            stack.enter_context(patch.object(removal, 'fault_is_observed', watched))
-            for name in sorted(names):
-                pass_type = cls._pass_type(name)
+            stack.enter_context(patch.object(scripts, 'set_child', installing(scripts.set_child)))
+            stack.enter_context(
+                patch.object(scripts, 'set_child_list', installing(scripts.set_child_list)))
+            for module in (removal, substitution):
+                stack.enter_context(patch.object(
+                    module, '_replace_in_parent', replacing(module._replace_in_parent)))
+            for plans in _PLANS:
+                owner = getattr(removal, plans)
+                stack.enter_context(
+                    patch.object(owner, 'commit', committing(owner.commit)))
+            for module in cls._importers('substitute_statement'):
+                stack.enter_context(patch.object(module, 'substitute_statement', watched))
+            for name, pass_type in sorted(_pass_types().items()):
                 stack.enter_context(
                     patch.object(pass_type, 'visit', entered(name, pass_type.visit)))
-            cls._suite().run(unittest.TestResult())
-        return fired
+            for probe in probes:
+                source[0] = probe
+                try:
+                    tree = Ps1Parser(probe).parse()
+                    for _ in range(100):
+                        if not deobfuscate(tree):
+                            break
+                except Exception:
+                    taken.clear()
+        return losses
 
-    def test_every_pass_that_removes_is_tried_inside_a_protected_body(self):
-        removing = self._passes_that_remove()
-        missing = sorted(removing - self._passes_whose_veto_fires(removing))
+    @classmethod
+    def _importers(cls, name: str) -> list:
+        package = importlib.import_module(_PASSES.replace(os.sep, '.'))
+        found = []
+        for _, module_name, _ in pkgutil.iter_modules(package.__path__):
+            module = importlib.import_module(F'{package.__name__}.{module_name}')
+            if hasattr(module, name):
+                found.append(module)
+        return found
+
+    def test_no_probe_loses_a_redirection_to_a_substitution(self):
+        probes = self._probes()
+        self.assertGreater(len(probes), 100, 'the probe corpus collapsed; the suite run saw nothing')
         self.assertListEqual(
-            missing, [], 'apply each of these to a removal inside try/catch and pin what survives')
+            sorted(set(self._losses(probes))),
+            [],
+            'ask substitution.may_substitute before deciding, not after installing')
 
 
 class TestStyleGuides(TestUnitBase):

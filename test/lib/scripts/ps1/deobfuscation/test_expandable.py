@@ -53,3 +53,11 @@ class TestPs1ExpandableExtra(TestPs1):
         result = self._apply(
             '$z = 1 + "$($a = 1)" + "$($b = $a)"', Ps1ExpandableStringHoist)
         self.assertLess(result.index('$a = 1'), result.index('$b = $a'))
+
+    def test_a_hoisted_subexpression_takes_its_redirection_with_it(self):
+        # The string is replaced by its text and the assignment moves out to the enclosing body, so
+        # the redirection leaves the substitution and returns one statement later. Refusing the
+        # rewrite would be as wrong as losing it.
+        self.assertEqual(
+            self._apply('$m = "a$($z = Get-Date > C:\\o.txt)b"', Ps1ExpandableStringHoist),
+            "$z = Get-Date > C:\\o.txt\n$m = 'ab'")

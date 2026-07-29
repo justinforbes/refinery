@@ -617,7 +617,10 @@ class Ps1ConstantInlining(Transformer):
                 return
             if isinstance(const_value, Ps1StringLiteral):
                 replacement = _clone_constant(const_value)
-                substitute_field(node, 'object', replacement)
+                if not substitute_field(node, 'object', replacement):
+                    remaining[key] = remaining.get(key, 0) + 1
+                    handled_vars.add(var)
+                    return
                 self.mark_changed()
                 inlined.setdefault(key, []).append(replacement)
                 handled_vars.add(var)
@@ -632,7 +635,10 @@ class Ps1ConstantInlining(Transformer):
                 remaining[key] = remaining.get(key, 0) + 1
                 return
             replacement = make_string_literal(s[idx])
-            substitute(node, replacement)
+            if not substitute(node, replacement):
+                remaining[key] = remaining.get(key, 0) + 1
+                handled_vars.add(var)
+                return
             self.mark_changed()
             inlined.setdefault(key, []).append(replacement)
             handled_vars.add(var)
@@ -647,7 +653,10 @@ class Ps1ConstantInlining(Transformer):
             remaining[key] = remaining.get(key, 0) + 1
             return
         replacement = _clone_constant(elements[idx])
-        substitute(node, replacement)
+        if not substitute(node, replacement):
+            remaining[key] = remaining.get(key, 0) + 1
+            handled_vars.add(var)
+            return
         self.mark_changed()
         inlined.setdefault(key, []).append(replacement)
         handled_vars.add(var)
@@ -670,7 +679,9 @@ class Ps1ConstantInlining(Transformer):
             remaining[key] = remaining.get(key, 0) + 1
             return
         replacement = _clone_constant(entry.value)
-        substitute(node, replacement)
+        if not substitute(node, replacement):
+            remaining[key] = remaining.get(key, 0) + 1
+            return
         self.mark_changed()
         inlined.setdefault(key, []).append(replacement)
 
@@ -784,5 +795,6 @@ class Ps1NullVariableInlining(Transformer):
                 continue
             if not self._is_null_eligible(ref):
                 continue
-            substitute(ref, Ps1Variable(name='Null'))
+            if not substitute(ref, Ps1Variable(name='Null')):
+                continue
             self.mark_changed()

@@ -406,40 +406,48 @@ class Ps1IexInlining(Transformer):
                 continue
             i = 0
             while i < len(body):
-                parsed = self._try_resolve_inline(body[i])
-                if parsed is None:
+                statement = body[i]
+                parsed = self._try_resolve_inline(statement)
+                installed = None
+                if parsed is not None:
+                    installed = self._install(container, statement, parsed)
+                if installed is None:
                     i += 1
                     continue
-                parsed = self._preserve_assignment_target(body[i], parsed)
-                if parsed is None:
-                    i += 1
-                    continue
-                substitute_statement(container, body[i], parsed)
                 self.mark_changed()
-                i += len(parsed)
+                i += installed
 
     @staticmethod
-    def _preserve_assignment_target(stmt, parsed: list) -> list | None:
+    def _install(container, stmt, parsed: list) -> int | None:
         """
-        When the statement being inlined assigns the (piped) `Invoke-Expression` result to a
-        target, keep the assignment by binding the inlined expression to it. If the resolved code is
-        not a single expression, return `None` so the statement is left untouched rather than
-        silently discarding the assignment target.
+        Put the parsed code where `stmt` stands and report how many statements now sit in its place,
+        or `None` when nothing was installed.
+
+        When the statement assigns the (piped) `Invoke-Expression` result to a target, the
+        assignment is kept and the inlined expression bound to it. Resolved code that is not a
+        single expression cannot be bound to one, so the statement is left untouched rather than the
+        assignment target silently discarded.
+
+        A refused substitution is reported the same way as nothing to install, and the caller must
+        not advance the mutation counter for it: `refinery.lib.scripts.ps1.deobfuscation.deobfuscate`
+        runs its passes to a fixpoint, so a pass that reports a change it did not make never
+        converges.
         """
-        if not (
-            isinstance(stmt, Ps1ExpressionStatement)
-            and isinstance(stmt.expression, Ps1AssignmentExpression)
-        ):
-            return parsed
-        assignment = stmt.expression
         if (
-            len(parsed) == 1
-            and isinstance(parsed[0], Ps1ExpressionStatement)
-            and parsed[0].expression is not None
+            isinstance(stmt, Ps1ExpressionStatement)
+            and isinstance(assignment := stmt.expression, Ps1AssignmentExpression)
         ):
-            substitute_field(assignment, 'value', parsed[0].expression)
-            return [stmt]
-        return None
+            if len(parsed) != 1:
+                return None
+            inlined = parsed[0]
+            if not isinstance(inlined, Ps1ExpressionStatement) or inlined.expression is None:
+                return None
+            if not substitute_field(assignment, 'value', inlined.expression):
+                return None
+            return 1
+        if not substitute_statement(container, stmt, parsed):
+            return None
+        return len(parsed)
 
     def _try_resolve_inline(self, stmt) -> list | None:
         code = self._try_extract_iex_string(stmt)
@@ -465,7 +473,8 @@ class Ps1IexInlining(Transformer):
                 continue
             if replacement is None:
                 continue
-            substitute(expr, replacement)
+            if not substitute(expr, replacement):
+                continue
             self.mark_changed()
 
     def _try_inline_expression(self, node: Ps1CommandInvocation) -> Expression | None:
