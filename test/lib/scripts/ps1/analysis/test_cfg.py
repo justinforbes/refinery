@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from test import TestBase
 
+from refinery.lib.scripts import Statement
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph
 from refinery.lib.scripts.ps1.analysis.cfg import build_ps1_control_flow
 from refinery.lib.scripts.ps1.model import (
@@ -34,12 +35,22 @@ _CORPUS = [
     "try { 'a' } catch { 'b' }",
     "try { 'a' } finally { 'c' }",
     "try { 'a' } catch { 'b' } finally { 'c' }",
+    "switch ($x) { 1 { } 2 { } 3 { } }",
+    "while ($x) { switch ($y) { 1 { continue } } }",
+    "try { 'a' } catch [System.IO.IOException] { 'b' } catch { 'c' }",
     "trap { continue }\n'a'",
+    "trap { 'h' }\ntrap [System.IO.IOException] { 'i' }\n'a'",
+    "if ($c) { trap { 'h' }\n'a' }\n'b'",
     "function f { 'a' }\nf",
     "function f { return 1 }",
+    "function f { dynamicparam { 'd' } begin { 'b' } process { 'p' } end { 'e' } }",
     "'a'\nexit\n'b'",
     "'a'\nthrow 'x'\n'b'",
     ":outer while ($x) { while ($y) { break outer } }",
+    ":outer while ($x) { while ($y) { continue outer } }",
+    "while ($x) { while ($y) { break } }\n'after'",
+    "do { try { 'a' } catch { 'b' } } while ($x)",
+    "for (;;) { 'a'\ncontinue }",
     "'a'",
 ]
 
@@ -70,6 +81,10 @@ class TestPs1ControlFlowGraph(TestBase):
             if isinstance(node.element, kind):
                 return node
         self.fail(F'no control-flow node stands for a {kind.__name__}')
+
+    def _tree_and_graph(self, source: str) -> tuple[Ps1Script, ControlFlowGraph]:
+        tree = Ps1Parser(source).parse()
+        return tree, build_ps1_control_flow(tree)[id(tree)]
 
     def test_every_graph_is_internally_consistent(self):
         for source in _CORPUS:
@@ -123,20 +138,65 @@ class TestPs1ControlFlowGraph(TestBase):
         self.assertIn(id(head), self._forward(body))
 
     def test_break_leaves_the_loop_and_does_not_return_to_its_head(self):
-        graph = self._script_graph("while ($x) { break }")
+        # Asserted against the statement *after* the loop rather than against the graph exit. A
+        # break that never resolved to its target is wired to the exit as a fallback, and with the
+        # loop written last the two answers coincide, so the exit assertion cannot discriminate.
+        tree, graph = self._tree_and_graph("while ($x) { break }\n'after'")
         jump = self._node_for(graph, Ps1BreakStatement)
-        self.assertIn(graph.exit, jump.successors)
+        self.assertIn(graph.node_of(tree.body[1]), jump.successors)
+        self.assertNotIn(graph.node_of(tree.body[0]), jump.successors)
+        self.assertNotIn(graph.exit, jump.successors)
+
+    def test_an_unlabelled_break_leaves_only_the_innermost_loop(self):
+        tree, graph = self._tree_and_graph("while ($x) { while ($y) { break } }\n'after'")
+        jump = self._node_for(graph, Ps1BreakStatement)
+        inner = tree.body[0].body.body[0]
+        self.assertNotIn(graph.node_of(tree.body[1]), jump.successors)
+        self.assertIn(graph.node_of(tree.body[0]), jump.successors)
+        self.assertNotIn(graph.node_of(inner), jump.successors)
 
     def test_continue_returns_to_the_loop_head(self):
-        graph = self._script_graph("while ($x) { continue }")
+        tree, graph = self._tree_and_graph("while ($x) { continue }")
         jump = self._node_for(graph, Ps1ContinueStatement)
-        self.assertNotIn(graph.exit, jump.successors)
-        self.assertTrue(jump.successors)
+        self.assertEqual(jump.successors, [graph.node_of(tree.body[0])])
 
     def test_a_labelled_break_leaves_the_named_loop(self):
-        graph = self._script_graph(":outer while ($x) { while ($y) { break outer } }")
+        tree, graph = self._tree_and_graph(
+            ":outer while ($x) { while ($y) { break outer } }\n'after'")
         jump = self._node_for(graph, Ps1BreakStatement)
-        self.assertTrue(jump.successors)
+        self.assertIn(graph.node_of(tree.body[1]), jump.successors)
+        self.assertNotIn(graph.exit, jump.successors)
+
+    def test_a_labelled_continue_returns_to_the_named_loop_head(self):
+        tree, graph = self._tree_and_graph(":outer while ($x) { while ($y) { continue outer } }")
+        jump = self._node_for(graph, Ps1ContinueStatement)
+        self.assertEqual(jump.successors, [graph.node_of(tree.body[0])])
+
+    def test_a_labelled_break_leaves_the_named_switch(self):
+        tree, graph = self._tree_and_graph(":sw switch ($x) { 1 { break sw } }\n'after'")
+        jump = self._node_for(graph, Ps1BreakStatement)
+        self.assertIn(graph.node_of(tree.body[1]), jump.successors)
+        self.assertNotIn(graph.exit, jump.successors)
+
+    def test_a_counted_loop_evaluates_its_initializer_condition_and_iterator_at_their_own_points(
+        self,
+    ):
+        """
+        The three parts run at three different points, and none of them is the loop statement.
+        """
+        # Asserted per part. The parts are expressions rather than statements, so the invariant that
+        # every statement is represented does not reach them: a builder that dropped the initializer
+        # would still produce a graph with a node for the loop body.
+        tree, graph = self._tree_and_graph("for ($i = 0; $i -lt 3; $i++) { 'a' }")
+        loop = tree.body[0]
+        for part in (loop.initializer, loop.condition, loop.iterator):
+            self.assertIsNotNone(graph.node_of(part))
+
+    def test_a_counted_loop_without_test_or_update_still_has_a_back_edge_from_continue(self):
+        tree, graph = self._tree_and_graph("for (;;) { 'a'\ncontinue }")
+        jump = self._node_for(graph, Ps1ContinueStatement)
+        body = tree.body[0].body.body[0]
+        self.assertEqual(jump.successors, [graph.node_of(body)])
 
     def test_code_after_exit_is_unreachable(self):
         tree = Ps1Parser("'a'\nexit\n'b'").parse()
@@ -179,21 +239,41 @@ class TestPs1ControlFlowGraph(TestBase):
         self.assertTrue(normal)
 
     def test_a_trap_is_reachable_from_a_statement_written_above_it(self):
-        # A trap catches for the whole body it is declared in, statements before it included, so the
-        # edge is not the one a guarded block would produce.
-        graph = self._script_graph("'a'\ntrap { continue }\n'b'")
+        """
+        A trap catches for the whole body it is declared in, statements before it included.
+        """
+        # Asserted as an edge from that specific statement. The resumption fan-out gives the trap
+        # node a predecessor whatever the handler's scope is, so a non-empty predecessor list holds
+        # even when the handler is installed only from the point the trap is written.
+        tree, graph = self._tree_and_graph("'a'\ntrap { continue }\n'b'")
         trap = self._node_for(graph, Ps1TrapStatement)
-        self.assertTrue(trap.predecessors)
+        self.assertIn(graph.node_of(tree.body[0]), trap.predecessors)
 
-    def test_a_switch_clause_may_be_entered_after_an_earlier_one_ran(self):
-        # PowerShell tests every clause and runs every match, so the first clause's body reaches the
-        # second's. Reading it as C-style fallthrough would give the same edge; reading it as
-        # exclusive would not.
-        tree = Ps1Parser("switch ($x) { 1 { 'a' } 2 { 'b' } }").parse()
-        graph = build_ps1_control_flow(tree)[id(tree)]
-        head = graph.node_of(tree.body[0])
-        self.assertIsNotNone(head)
-        self.assertGreaterEqual(len(head.successors), 2)
+    def test_a_trap_declared_inside_a_nested_block_still_guards_the_whole_body(self):
+        tree, graph = self._tree_and_graph("if ($c) { trap { 'h' }\n'a' }\n'b'")
+        trap = self._node_for(graph, Ps1TrapStatement)
+        self.assertIn(graph.node_of(tree.body[1]), trap.predecessors)
+        self.assertIsNotNone(graph.node_of(trap.element.body.body[0]))
+
+    def test_a_trap_that_continues_resumes_in_the_body_it_guards(self):
+        """
+        `continue` inside a trap resumes at the statement after the one that threw, so the guarded
+        body is reachable from it — it is not a loop back-jump and does not leave the body.
+        """
+        tree, graph = self._tree_and_graph("trap { continue }\n'a'\n'b'")
+        jump = self._node_for(graph, Ps1ContinueStatement)
+        self.assertIn(graph.node_of(tree.body[1]), jump.successors)
+        self.assertIn(graph.node_of(tree.body[2]), jump.successors)
+
+    def test_a_switch_clause_may_be_entered_after_the_previous_one_ran(self):
+        # Asserted as a direct edge from the first clause's body to the second's. Under EXCLUSIVE
+        # the head still reaches every arm, so counting the head's successors measures nothing;
+        # only an arm-to-arm edge distinguishes the answers.
+        tree, graph = self._tree_and_graph("switch ($x) { 1 { 'a' } 2 { 'b' } }")
+        clauses = tree.body[0].clauses
+        first = graph.node_of(clauses[0][1].body[0])
+        second = graph.node_of(clauses[1][1].body[0])
+        self.assertIn(second, first.successors)
 
     def test_a_switch_clause_may_be_skipped_when_a_later_one_matches(self):
         """
@@ -211,6 +291,79 @@ class TestPs1ControlFlowGraph(TestBase):
         self.assertIsNotNone(first)
         self.assertIsNotNone(third)
         self.assertIn(third, first.successors)
+
+    def test_continue_in_a_switch_clause_advances_to_the_next_input_value(self):
+        """
+        A PowerShell `switch` enumerates its input, so `continue` inside one re-enters the switch
+        rather than the loop around it.
+        """
+        tree, graph = self._tree_and_graph("while ($x) { switch ($y) { 1 { continue } } }")
+        jump = self._node_for(graph, Ps1ContinueStatement)
+        switch = tree.body[0].body.body[0]
+        self.assertEqual(jump.successors, [graph.node_of(switch)])
+
+    def test_a_switch_with_a_default_clause_may_still_be_left_without_entering_an_arm(self):
+        """
+        Over an empty input collection no clause of a PowerShell `switch` runs, `default` included.
+        """
+        tree, graph = self._tree_and_graph("switch ($x) { 1 { 'a' } default { 'b' } }\n'c'")
+        head = graph.node_of(tree.body[0])
+        self.assertIn(graph.node_of(tree.body[1]), head.successors)
+
+    def test_a_second_catch_clause_is_entered_only_on_the_exceptional_path(self):
+        tree, graph = self._tree_and_graph("try { 'a' } catch [System.IO.IOException] { 'b' } "
+                                           "catch { 'c' }")
+        clauses = tree.body[0].catch_clauses
+        first = graph.node_of(clauses[0])
+        second = graph.node_of(clauses[1])
+        self.assertIn(second, first.successors)
+        self.assertTrue(graph.is_exceptional(first, second))
+
+    def test_a_switch_of_empty_clauses_stays_linear_in_the_number_of_clauses(self):
+        """
+        The frontier a clause carries into the next one must not accumulate duplicates.
+        """
+        # An empty clause hands its incoming frontier back unchanged, so concatenating the two
+        # doubles it per clause. The last clause is deliberately not empty: that is where the
+        # accumulated frontier turns into edges, and without one the doubling stays invisible in a
+        # list nobody counts. At twenty clauses an unguarded builder wires 2**20 of them.
+        clauses = ' '.join(F'{index} {{ }}' for index in range(20))
+        graph = self._script_graph(F"switch ($x) {{ {clauses} 20 {{ 'z' }} }}")
+        edges = sum(len(node.successors) for node in graph.nodes)
+        self.assertLess(edges, 200)
+
+    def test_dynamicparam_runs_before_the_begin_block(self):
+        tree = Ps1Parser("function f { dynamicparam { 'd' } begin { 'b' } end { 'e' } }").parse()
+        definition = next(n for n in tree.walk() if isinstance(n, Ps1FunctionDefinition))
+        graph = build_ps1_control_flow(tree)[id(definition)]
+        code = definition.body
+        dynamic = graph.node_of(code.dynamicparam_block.body[0])
+        begin = graph.node_of(code.begin_block.body[0])
+        self.assertIn(id(begin), self._forward(dynamic))
+        self.assertNotIn(id(dynamic), self._forward(begin))
+
+    def test_every_statement_is_represented_by_a_node_or_by_one_of_its_parts(self):
+        """
+        A construct whose body the builder drops leaves no node behind, and a graph that never
+        created a node is not the same as one whose node is unreachable — no edge invariant sees it.
+        """
+        for source in _CORPUS:
+            with self.subTest(source):
+                tree = Ps1Parser(source).parse()
+                graphs = build_ps1_control_flow(tree)
+                held = {
+                    id(node.element)
+                    for graph in graphs.values()
+                    for node in graph.nodes
+                    if node.element is not None
+                }
+                for statement in tree.walk():
+                    if statement is tree or not isinstance(statement, Statement):
+                        continue
+                    self.assertTrue(
+                        any(id(part) in held for part in statement.walk()),
+                        F'no node stands for {type(statement).__name__} or any part of it',
+                    )
 
     def test_an_advanced_function_body_is_not_empty(self):
         # `Ps1Code` fills begin/process/end instead of `body`, and reading only `body` would report

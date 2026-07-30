@@ -30,12 +30,12 @@ _T = TypeVar('_T', bound=Hashable)
 #: overwrites. A node whose store is conditional — guarded by a short-circuit, a ternary, a
 #: destructuring default — contributes it to neither set, because the kill is what licenses calling
 #: an earlier store dead and a conditional one licenses nothing.
-NodeSets = Callable[[ControlFlowGraph, CfgNode], 'tuple[set[_T], set[_T]]']
+NodeSets = Callable[[ControlFlowGraph, CfgNode], tuple[set[_T], set[_T]]]
 
 
 def solve_liveness(
     graph: ControlFlowGraph,
-    node_sets: NodeSets,
+    node_sets: NodeSets[_T],
 ) -> tuple[dict[int, frozenset[_T]], dict[int, frozenset[_T]]]:
     """
     The live-in and live-out sets of every node in *graph*, keyed by node identity.
@@ -46,8 +46,18 @@ def solve_liveness(
     """
     use: dict[int, set[_T]] = {}
     kill: dict[int, set[_T]] = {}
+    normal_successors: dict[int, list[CfgNode]] = {}
+    exceptional_successors: dict[int, list[CfgNode]] = {}
     for node in graph.nodes:
         use[id(node)], kill[id(node)] = node_sets(graph, node)
+        normal_successors[id(node)] = [
+            successor for successor in node.successors
+            if not graph.is_exceptional(node, successor)
+        ]
+        exceptional_successors[id(node)] = [
+            successor for successor in node.successors
+            if graph.is_exceptional(node, successor)
+        ]
     live_in: dict[int, set[_T]] = {id(node): set() for node in graph.nodes}
     live_out: dict[int, set[_T]] = {id(node): set() for node in graph.nodes}
     changed = True
@@ -56,11 +66,10 @@ def solve_liveness(
         for node in reversed(graph.nodes):
             normal: set[_T] = set()
             exceptional: set[_T] = set()
-            for successor in node.successors:
-                if graph.is_exceptional(node, successor):
-                    exceptional |= live_in[id(successor)]
-                else:
-                    normal |= live_in[id(successor)]
+            for successor in normal_successors[id(node)]:
+                normal |= live_in[id(successor)]
+            for successor in exceptional_successors[id(node)]:
+                exceptional |= live_in[id(successor)]
             out = normal | exceptional
             inn = use[id(node)] | (normal - kill[id(node)]) | exceptional
             if out != live_out[id(node)] or inn != live_in[id(node)]:

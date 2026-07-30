@@ -128,6 +128,10 @@ class DominatorModel:
         A node with no predecessors that is not the entry is unreachable, and takes the empty set
         before adding itself — so it dominates only itself and is dominated by nothing, which keeps
         an unreachable region from claiming to dominate anything downstream of it.
+
+        The intersection is seeded from the first predecessor rather than from the set of every
+        node, which is the same value — every set here is a subset of that — without copying one
+        set per node per round.
         """
         nodes = graph.nodes
         all_ids = {id(node) for node in nodes}
@@ -142,8 +146,8 @@ class DominatorModel:
                     continue
                 incoming = node.predecessors
                 if incoming:
-                    new = set(all_ids)
-                    for predecessor in incoming:
+                    new = set(dom[id(incoming[0])])
+                    for predecessor in incoming[1:]:
                         new &= dom[id(predecessor)]
                 else:
                     new = set()

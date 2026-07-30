@@ -22,9 +22,9 @@ own node types, pulls the parts out of them, and calls the shape that matches. N
 field a language declares, which is what lets two languages whose `for` loops share nothing but their
 meaning share this code.
 
-The shapes are parameterised where languages genuinely differ rather than being duplicated: a
-`dispatch` either falls through from one arm to the next or does not, and both spellings exist in
-languages this substrate serves.
+The shapes are parameterised where languages genuinely differ rather than being duplicated: what an
+arm of a `dispatch` reaches when control runs off its end is an `ArmFlow`, and each of its members
+is some language's answer to the same construct.
 """
 from __future__ import annotations
 
@@ -147,12 +147,37 @@ class _Target:
     A jump destination active while a breakable or continuable construct is being built. `breaks`
     collects the nodes that leave it early, wired to whatever follows once that is known;
     `continue_to` is the node a back-jump reaches, or `None` for a construct only a break can leave.
+
+    `continues` collects the back-jumps of a loop whose `continue_to` is not yet known — a counted
+    loop with neither a test nor an update jumps back to its body's own entry, and that entry only
+    exists once the body has been built. Wiring them to the exit instead would drop the back-edge
+    the loop is made of.
     """
     label: str | None
     breaks: list[CfgNode]
     continue_to: CfgNode | None
-    is_loop: bool
+    is_continuable: bool
     is_breakable: bool
+    continues: list[CfgNode] = field(default_factory=list)
+
+
+def distinct(nodes: Iterable[CfgNode]) -> list[CfgNode]:
+    """
+    *nodes* with every repetition dropped, compared by identity and in first-seen order.
+
+    A frontier carried from one arm of a construct into the next must not accumulate duplicates. An
+    arm that creates no node of its own hands its incoming frontier straight back, so concatenating
+    the two doubles the list on every such arm: a `switch` with thirty empty clause bodies would
+    build 2**30 edges, every one of them a repetition of an edge already there.
+    """
+    seen: set[int] = set()
+    result: list[CfgNode] = []
+    for node in nodes:
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        result.append(node)
+    return result
 
 
 class CfgBuilder:
@@ -262,9 +287,20 @@ class CfgBuilder:
                 return node.successors[count], exits
         return None, exits
 
+    def park_label(self, label: str | None) -> None:
+        """
+        Park *label* for the construct about to be built, for `take_label` to consume.
+
+        `labelled` calls this for a language whose label is a statement wrapping the construct. A
+        language whose label is a field *of* the construct calls it directly, because there is no
+        wrapping statement to recognise — and a construct built without it carries no label, so
+        every jump naming it misses and leaves the body instead.
+        """
+        self._pending_label = label
+
     def take_label(self) -> str | None:
         """
-        The label a `labelled` shape parked for the construct about to be built, consumed once.
+        The label parked for the construct about to be built, consumed once.
         """
         label = self._pending_label
         self._pending_label = None
@@ -302,7 +338,7 @@ class CfgBuilder:
         """
         head = self.node(element)
         self.link(frontier, head)
-        target = _Target(self.take_label(), [], head, is_loop=True, is_breakable=True)
+        target = _Target(self.take_label(), [], head, is_continuable=True, is_breakable=True)
         self._targets.append(target)
         body_exits = self._branch(body, head)
         self._targets.pop()
@@ -317,7 +353,7 @@ class CfgBuilder:
         back-edge targets the body's own entry rather than the test.
         """
         test = self.node(element)
-        target = _Target(self.take_label(), [], test, is_loop=True, is_breakable=True)
+        target = _Target(self.take_label(), [], test, is_continuable=True, is_breakable=True)
         self._targets.append(target)
         entry, body_exits = self._capture_body(body, frontier)
         self._targets.pop()
@@ -350,7 +386,7 @@ class CfgBuilder:
         else:
             body_frontier = list(frontier)
         step = self.node(update) if update is not None else None
-        target = _Target(label, [], step or head, is_loop=True, is_breakable=True)
+        target = _Target(label, [], step or head, is_continuable=True, is_breakable=True)
         self._targets.append(target)
         entry, body_exits = self._capture_body(body, body_frontier)
         self._targets.pop()
@@ -361,6 +397,7 @@ class CfgBuilder:
         back_to = head if head is not None else entry
         if back_to is not None:
             self.link(latch, back_to)
+        self.link(target.continues, back_to if back_to is not None else self.cfg.exit)
         exits = list(target.breaks)
         if head is not None:
             exits.append(head)
@@ -389,8 +426,8 @@ class CfgBuilder:
             exits += self._branch(body, head)
             current = [head]
         if otherwise is not None:
-            return exits + self._body(otherwise, current)
-        return exits + current
+            return distinct(exits + self._body(otherwise, current))
+        return distinct(exits + current)
 
     def dispatch(
         self,
@@ -400,6 +437,7 @@ class CfgBuilder:
         *,
         arm_flow: ArmFlow,
         exhaustive: bool,
+        iterated: bool = False,
     ) -> list[CfgNode]:
         """
         A multi-way branch: one head the frontier enters and one arm per clause, each arm a statement
@@ -408,26 +446,37 @@ class CfgBuilder:
 
         `exhaustive` says some arm always runs — a default clause — so the head is not itself an
         exit.
+
+        `iterated` says the construct runs its arms once per element of an input, so a back-jump
+        inside an arm re-enters the head rather than resolving to an enclosing loop. PowerShell's
+        `switch` is this; JavaScript's is not, and reading one as the other both invents a back-edge
+        to a loop the jump never reaches and drops the one it does.
         """
         head = self.node(element)
         self.link(frontier, head)
-        target = _Target(self.take_label(), [], None, is_loop=False, is_breakable=True)
+        target = _Target(
+            self.take_label(),
+            [],
+            head if iterated else None,
+            is_continuable=iterated,
+            is_breakable=True,
+        )
         self._targets.append(target)
         carried: list[CfgNode] = []
         exits: list[CfgNode] = []
         for arm in arms:
-            reached = self.sequence(list(arm), [head] + carried)
+            reached = self.sequence(list(arm), distinct([head, *carried]))
             if arm_flow is ArmFlow.SEQUENTIAL:
                 carried = reached
             elif arm_flow is ArmFlow.CUMULATIVE:
-                carried = carried + reached
+                carried = distinct([*carried, *reached])
             else:
                 exits += reached
         self._targets.pop()
         exits += list(carried) + target.breaks
         if not exhaustive:
             exits.append(head)
-        return exits
+        return distinct(exits)
 
     def guarded(
         self,
@@ -447,12 +496,15 @@ class CfgBuilder:
 
         Several handlers are chained from the first, because which one runs depends on the type of
         the exception and none of them is guaranteed — a language with one handler passes a
-        one-element sequence and the chain degenerates.
+        one-element sequence and the chain degenerates. The chain edge is *exceptional*: control
+        takes it exactly when the earlier handler did not match, so nothing that handler's node
+        stands for has run and its kill must not apply along it.
 
         The finalizer is entered from the block's normal exits and from every handler's, and itself
         carries an exceptional edge outward, because a finalizer runs on the exceptional path too and
         control leaves the construct from it either way.
         """
+        handlers = list(handlers)
         entries = [self.node(handler) for handler, _ in handlers]
         finalizer_entry: CfgNode | None = None
         if finalizer is not None:
@@ -467,7 +519,7 @@ class CfgBuilder:
         normal_exits = list(block_exits)
         for index, ((_, body), entry) in enumerate(zip(handlers, entries)):
             if index:
-                self.add_edge(entries[index - 1], entry)
+                self.exceptional_edge(entries[index - 1], entry)
             normal_exits += (
                 self.statement(body, [entry]) if body is not None else [entry])
         if finalizer_entry is not None and finalizer is not None:
@@ -493,9 +545,9 @@ class CfgBuilder:
         the label names this statement itself and only a break can leave it.
         """
         if binds_to_body:
-            self._pending_label = label
+            self.park_label(label)
             return self.statement(body, frontier) if body is not None else list(frontier)
-        target = _Target(label, [], None, is_loop=False, is_breakable=False)
+        target = _Target(label, [], None, is_continuable=False, is_breakable=False)
         self._targets.append(target)
         exits = self.statement(body, frontier) if body is not None else list(frontier)
         self._targets.pop()
@@ -526,10 +578,12 @@ class CfgBuilder:
         node = self.node(element)
         self.link(frontier, node)
         target = self._continue_target(label)
-        if target is not None and target.continue_to is not None:
+        if target is None:
+            self.add_edge(node, self.cfg.exit)
+        elif target.continue_to is not None:
             self.add_edge(node, target.continue_to)
         else:
-            self.add_edge(node, self.cfg.exit)
+            target.continues.append(node)
         return []
 
     def terminate(
@@ -551,6 +605,14 @@ class CfgBuilder:
             self.add_edge(node, self.cfg.exit)
         return []
 
+    def has_continue_target(self, label: str | None) -> bool:
+        """
+        Whether a back-jump naming *label* — or an unlabelled one — resolves to a construct
+        currently being built. A language in which `continue` means something other than a back-jump
+        when no such construct is open asks this to tell the two spellings apart.
+        """
+        return self._continue_target(label) is not None
+
     def _break_target(self, label: str | None) -> _Target | None:
         for target in reversed(self._targets):
             if label is None:
@@ -562,7 +624,7 @@ class CfgBuilder:
 
     def _continue_target(self, label: str | None) -> _Target | None:
         for target in reversed(self._targets):
-            if not target.is_loop:
+            if not target.is_continuable:
                 continue
             if label is None or target.label == label:
                 return target

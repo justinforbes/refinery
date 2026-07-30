@@ -32,16 +32,19 @@ class ReachabilityQuery:
 
     def __init__(self, dominators: DominatorModel):
         self._dominators = dominators
-        self._reach: dict[tuple[int, bool], set[int]] = {}
+        self._reach: dict[tuple[int, bool], frozenset[int]] = {}
 
-    def reachable(self, node: CfgNode, *, forward: bool) -> set[int]:
+    def reachable(self, node: CfgNode, *, forward: bool) -> frozenset[int]:
         """
         The ids of the nodes reachable from *node* in the given direction, including *node*.
+
+        Frozen because it is the memo itself and not a copy of it: a caller that intersected or
+        discarded in place would corrupt the answer every later query against *node* receives.
         """
         key = (id(node), forward)
         cached = self._reach.get(key)
         if cached is None:
-            cached = self._dominators.reachable(node, forward=forward)
+            cached = frozenset(self._dominators.reachable(node, forward=forward))
             self._reach[key] = cached
         return cached
 

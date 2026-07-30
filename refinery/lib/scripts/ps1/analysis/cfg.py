@@ -3,19 +3,26 @@ PowerShell's contribution to the shared control-flow substrate: which node types
 control-flow shape, and where the parts of each are stored.
 
 Everything structural lives in `refinery.lib.scripts.analysis.cfg`. What is here is the dispatch, the
-accessors, and the four places PowerShell's answer differs from the shape JavaScript established:
+accessors, and the places PowerShell's answer differs from the shape JavaScript established:
 
 - **`switch` does not fall through, it keeps matching.** Every clause is tested against the value and
   every matching one runs, so an arm's exits may reach any *later* arm rather than only the next.
   That is `refinery.lib.scripts.analysis.cfg.ArmFlow.CUMULATIVE`, and reading it as C-style
   fallthrough would drop the path in which the first and third clauses match and the second does not.
+  It also *enumerates its input*, so `continue` inside it advances to the next input value rather
+  than to an enclosing loop, and a `default` clause does not make it exhaustive: over an empty
+  collection no clause runs at all.
 - **`if`/`elseif` is one flat statement**, not a nest, so the chain of tests is built through
   `branch_chain` and each `elseif` condition gets a node of its own.
 - **`trap` is a scope-wide handler**, not a guarded block: it catches for the whole body it is
-  declared in, including statements written above it, and `continue` inside it resumes at the
-  statement after the one that threw. See `_Builder.build`.
-- **`exit` leaves the script, not the function.** It is a terminator like `return`, but nothing after
-  it in *any* enclosing body runs, which no JavaScript statement does.
+  declared in — including statements written above it and one written inside a nested block — and
+  `continue` inside it resumes at the statement after the one that threw. See `_Builder.build`.
+- **`exit` is a terminator like `return`**, modelled as one: control does not continue in this body.
+  That it leaves the *script* rather than the function is a claim about the caller's body, which a
+  per-body graph does not make; keeping the caller's paths is the conservative reading.
+- **A label is a field of the construct**, not a statement wrapping it, so `park_label` is called
+  from the dispatch rather than through `labelled`, and the `:` the lexer keeps on the declaration
+  is stripped before a jump can be matched against it.
 
 `Ps1Code` also splits one body across `begin`/`process`/`end`/`dynamicparam` blocks, so `owner.body`
 alone is not what an advanced function runs.
@@ -33,7 +40,7 @@ from refinery.lib.scripts.analysis.cfg import (
     ControlFlowModel,
     build_control_flow,
 )
-from refinery.lib.scripts.ps1.ast import get_body, get_named_blocks, string_value
+from refinery.lib.scripts.ps1.ast import get_named_blocks, string_value
 from refinery.lib.scripts.ps1.model import (
     Ps1BreakStatement,
     Ps1Code,
@@ -44,6 +51,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ForLoop,
     Ps1FunctionDefinition,
     Ps1IfStatement,
+    Ps1Jump,
     Ps1ReturnStatement,
     Ps1Script,
     Ps1SwitchStatement,
@@ -65,15 +73,48 @@ _LOOP_NODES = (
 )
 
 
-def _jump_label(statement: Node) -> str | None:
+def _jump_label(statement: Ps1Jump) -> str | None:
     """
     The label a `break` or `continue` names, or `None` when it names none or names one this cannot
     read. PowerShell allows the label to be any expression — `break $name` is legal — and a label
     that is not a static string is one no lexical target can be matched against, so it is treated as
     unlabelled, which resolves to the innermost enclosing target and is the conservative reading.
     """
-    label = getattr(statement, 'label', None)
-    return string_value(label) if label is not None else None
+    return string_value(statement.label) if statement.label is not None else None
+
+
+def _construct_label(label: str | None) -> str | None:
+    """
+    The name a labelled loop or `switch` declares, without the `:` the lexer keeps on the token.
+
+    A jump names its target without the colon, so the declaration and the reference are two
+    spellings of one name and comparing them unnormalized never matches — which resolves every
+    labelled jump to nothing and sends it out of the body instead of out of the construct it names.
+    """
+    return label[1:] if label is not None and label.startswith(':') else label
+
+
+def _declared_traps(statements: Sequence[Node]) -> list[Ps1TrapStatement]:
+    """
+    Every `trap` declared anywhere in *statements*, in source order, without descending into a
+    nested body that owns a control-flow graph of its own.
+
+    A `trap` is not confined to the braces it is written in: one inside an `if` body catches for the
+    whole scope. Scanning only the top level of the body would leave such a handler with no edge
+    from any statement and its own body with no node at all, which reads as a handler that never
+    runs and a payload that is never evaluated.
+    """
+    found: list[Ps1TrapStatement] = []
+    stack = list(reversed(statements))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Ps1TrapStatement):
+            found.append(node)
+            continue
+        if isinstance(node, Ps1Code):
+            continue
+        stack.extend(reversed(node.children()))
+    return found
 
 
 class _Builder(CfgBuilder):
@@ -81,64 +122,80 @@ class _Builder(CfgBuilder):
     The PowerShell dispatch over `refinery.lib.scripts.analysis.cfg.CfgBuilder`.
     """
 
+    def __init__(self, owner: Node):
+        super().__init__(owner)
+        self._resumes: list[CfgNode] | None = None
+
     def build(self) -> ControlFlowGraph:
         """
-        The body, with any `trap` it declares installed as a handler over the whole of it.
+        The body, with every `trap` it declares installed as a handler over the whole of it.
 
         A `trap` is not a guarded block. It is declared somewhere in a body and catches for that
         body entire, including the statements written above it, so it cannot be pushed at the point
-        it appears the way a `try` is — it is pushed before the body is walked at all.
+        it appears the way a `try` is — it is pushed before the body is walked at all. Several traps
+        in one scope are peers and are chained the way `guarded` chains several `catch` clauses,
+        because which one runs depends on the type of the error and none of them is guaranteed.
 
         `continue` inside a trap resumes at the statement following the one that threw, which is a
-        shape this graph cannot express exactly. The handler's exits are therefore linked to *every*
-        node the body created, which is the over-approximation: it claims more paths than exist,
-        where claiming fewer would let an analysis call a statement after a trap unreachable, or let
-        a store before one look dead because the resumption that reads it was never modelled.
+        shape this graph cannot express exactly. Every resumption point is therefore linked to
+        *every* node the guarded body created, which is the over-approximation: it claims more paths
+        than exist, where claiming fewer would let an analysis call a statement after a trap
+        unreachable, or let a store before one look dead because the resumption that reads it was
+        never modelled.
         """
         statements = self.body_statements(self.cfg.owner)
-        traps = [node for node in statements if isinstance(node, Ps1TrapStatement)]
-        resumes: list[CfgNode] = []
+        traps = _declared_traps(statements)
+        entries: list[CfgNode] = []
         for trap in traps:
             handler = self.node(trap)
-            self._handlers.append(handler)
-            resumes += self._body(trap.body, [handler])
+            if entries:
+                self.exceptional_edge(entries[-1], handler)
+            entries.append(handler)
+        if entries:
+            self._handlers.append(entries[0])
+        resumes: list[CfgNode] = []
+        for trap, handler in zip(traps, entries):
+            self._resumes = []
+            resumes += self._body(trap.body, [handler]) + self._resumes
+        self._resumes = None
+        guarded_from = len(self.cfg.nodes)
         frontier = self.sequence(statements, [self.cfg.entry])
-        for _ in traps:
+        if entries:
             self._handlers.pop()
         self.link(frontier, self.cfg.exit)
-        if resumes:
-            landing = [
-                node for node in self.cfg.nodes
-                if node is not self.cfg.entry and node.element is not None
-            ]
-            for resume in resumes:
-                self.link([resume], self.cfg.exit)
-                for node in landing:
-                    self.add_edge(resume, node)
+        landing = [node for node in self.cfg.nodes[guarded_from:] if node.element is not None]
+        for resume in resumes:
+            self.add_edge(resume, self.cfg.exit)
+            for node in landing:
+                self.add_edge(resume, node)
         return self.cfg
 
     def body_statements(self, owner: Node) -> list[Node]:
         """
-        The statements *owner* runs. An advanced function fills `begin`/`process`/`end` instead of
-        `body`, and reading only `body` for one would report an empty graph for a function that runs
-        a great deal — the same trap `refinery.lib.scripts.ps1.ast.get_named_blocks` exists to warn
-        about.
+        The statements *owner* runs, in the order it runs them.
+
+        An advanced function fills `begin`/`process`/`end`/`dynamicparam` instead of `body`, and
+        reading only `body` for one would report an empty graph for a function that runs a great
+        deal — the same trap `refinery.lib.scripts.ps1.ast.get_named_blocks` exists to warn about.
+        `dynamicparam` is pulled to the front of the sequence because the engine evaluates it during
+        parameter binding, before `begin`, while that accessor reports the blocks in the order they
+        are declared in.
         """
-        code = owner if isinstance(owner, Ps1Code) else getattr(owner, 'body', None)
-        if isinstance(code, Ps1Code):
-            statements: list[Node] = []
-            for block in get_named_blocks(code):
-                statements.extend(block.body)
-            statements.extend(code.body)
-            return statements
-        body = get_body(owner)
-        if body is not None:
-            return list(body)
-        return [code] if isinstance(code, Node) else []
+        code = owner.body if isinstance(owner, Ps1FunctionDefinition) else owner
+        if not isinstance(code, Ps1Code):
+            return []
+        statements: list[Node] = []
+        blocks = get_named_blocks(code)
+        for block in sorted(blocks, key=lambda block: block is not code.dynamicparam_block):
+            statements.extend(block.body)
+        statements.extend(code.body)
+        return statements
 
     def statement(self, statement: Node, frontier: list[CfgNode]) -> list[CfgNode]:
         if isinstance(statement, Block):
             return self.sequence(statement.body, frontier)
+        if isinstance(statement, _LOOP_NODES):
+            self.park_label(_construct_label(statement.label))
         if isinstance(statement, Ps1IfStatement):
             return self._if(statement, frontier)
         if isinstance(statement, Ps1WhileLoop):
@@ -170,8 +227,29 @@ class _Builder(CfgBuilder):
         if isinstance(statement, Ps1BreakStatement):
             return self.jump_out(statement, _jump_label(statement), frontier)
         if isinstance(statement, Ps1ContinueStatement):
-            return self.jump_back(statement, _jump_label(statement), frontier)
+            label = _jump_label(statement)
+            resumes = self._resumes
+            if resumes is not None and not self.has_continue_target(label):
+                return self._resume(resumes, statement, frontier)
+            return self.jump_back(statement, label, frontier)
         return self.opaque(statement, frontier)
+
+    def _resume(
+        self, resumes: list[CfgNode], statement: Node, frontier: list[CfgNode],
+    ) -> list[CfgNode]:
+        """
+        A `continue` inside a `trap` body, which is not a back-jump: it resumes the guarded body at
+        the statement after the one that threw. The node is recorded for `build` to link to every
+        landing point once that body exists, and control does not fall through it here.
+
+        Reading it as a loop back-jump instead resolves it to nothing and wires it to the body exit,
+        which deletes the one path the trap exists to create — and leaves the whole resumption model
+        unexercised, because this is the spelling that resumes.
+        """
+        node = self.node(statement)
+        self.link(frontier, node)
+        resumes.append(node)
+        return []
 
     def _if(self, statement: Ps1IfStatement, frontier: list[CfgNode]) -> list[CfgNode]:
         """
@@ -186,15 +264,27 @@ class _Builder(CfgBuilder):
         return self.branch_chain(clauses, statement.else_block, frontier)
 
     def _switch(self, statement: Ps1SwitchStatement, frontier: list[CfgNode]) -> list[CfgNode]:
-        arms: list[Sequence[Node]] = []
-        exhaustive = False
-        for condition, block in statement.clauses:
-            arms.append(list(block.body) if block is not None else [])
-            if condition is None:
-                exhaustive = True
-        self._pending_label = statement.label
+        """
+        The clauses as arms of an iterated, cumulative dispatch.
+
+        A `default` clause does not make the construct exhaustive the way it does in a language
+        whose `switch` tests one value: PowerShell's enumerates its input, and over an empty
+        collection no clause runs at all — not even `default`. Reporting it exhaustive drops the
+        edge that leaves the switch without entering any arm, which is what makes the statement
+        after it look unreachable.
+        """
+        arms: list[Sequence[Node]] = [
+            list(block.body) if block is not None else [] for _, block in statement.clauses
+        ]
+        self.park_label(_construct_label(statement.label))
         return self.dispatch(
-            statement, arms, frontier, arm_flow=ArmFlow.CUMULATIVE, exhaustive=exhaustive)
+            statement,
+            arms,
+            frontier,
+            arm_flow=ArmFlow.CUMULATIVE,
+            exhaustive=False,
+            iterated=True,
+        )
 
     def _try(self, statement: Ps1TryCatchFinally, frontier: list[CfgNode]) -> list[CfgNode]:
         """
