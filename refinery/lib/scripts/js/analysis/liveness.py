@@ -36,6 +36,7 @@ from __future__ import annotations
 from typing import Iterator
 
 from refinery.lib.scripts import Node
+from refinery.lib.scripts.analysis.liveness import solve_liveness
 from refinery.lib.scripts.js.analysis.cfg import (
     CfgNode,
     ControlFlowGraph,
@@ -210,32 +211,13 @@ class LivenessModel:
 
     def _compute_graph(self, graph: ControlFlowGraph):
         owner_scope = self.model.function_scope(graph.owner)
-        use: dict[int, set[Binding]] = {}
-        kill: dict[int, set[Binding]] = {}
-        for node in graph.nodes:
-            use[id(node)], kill[id(node)] = self._node_sets(graph, node, owner_scope)
-        live_in: dict[int, set[Binding]] = {id(n): set() for n in graph.nodes}
-        live_out: dict[int, set[Binding]] = {id(n): set() for n in graph.nodes}
-        changed = True
-        while changed:
-            changed = False
-            for node in reversed(graph.nodes):
-                normal: set[Binding] = set()
-                exceptional: set[Binding] = set()
-                for successor in node.successors:
-                    if graph.is_exceptional(node, successor):
-                        exceptional |= live_in[id(successor)]
-                    else:
-                        normal |= live_in[id(successor)]
-                out = normal | exceptional
-                inn = use[id(node)] | (normal - kill[id(node)]) | exceptional
-                if out != live_out[id(node)] or inn != live_in[id(node)]:
-                    live_out[id(node)] = out
-                    live_in[id(node)] = inn
-                    changed = True
-        for node in graph.nodes:
-            self._live_in[id(node)] = frozenset(live_in[id(node)])
-            self._live_out[id(node)] = frozenset(live_out[id(node)])
+
+        def node_sets(_graph: ControlFlowGraph, node: CfgNode) -> tuple[set[Binding], set[Binding]]:
+            return self._node_sets(_graph, node, owner_scope)
+
+        live_in, live_out = solve_liveness(graph, node_sets)
+        self._live_in.update(live_in)
+        self._live_out.update(live_out)
 
     def _node_sets(
         self, graph: ControlFlowGraph, node: CfgNode, owner_scope: Scope | None,

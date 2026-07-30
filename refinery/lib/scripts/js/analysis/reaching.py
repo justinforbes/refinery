@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import Iterator
 
 from refinery.lib.scripts import Node
+from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.js.analysis.cfg import CfgNode, ControlFlowGraph
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import EffectModel
@@ -52,7 +53,7 @@ class ReachingModel:
         self.model = effects.model
         self._kill_cache: dict[tuple[int, int, int], frozenset[int] | None] = {}
         self._call_cache: dict[int, list[tuple[JsCallExpression, CfgNode]]] = {}
-        self._reach_cache: dict[tuple[int, bool], set[int]] = {}
+        self._between = ReachabilityQuery(dominance)
 
     def value_preserved(self, binding: Binding, definition: Node, use: Node) -> bool:
         """
@@ -80,25 +81,7 @@ class ReachingModel:
         kills = self._kill_nodes(binding, graph_d, definition)
         if kills is None:
             return False
-        if not kills:
-            return True
-        downstream = self._reachable(node_d, forward=True) & kills
-        if not downstream:
-            return True
-        return not (downstream & self._reachable(node_u, forward=False))
-
-    def _reachable(self, node: CfgNode, *, forward: bool) -> set[int]:
-        """
-        The control-flow nodes reachable from *node* in the given direction, memoized: the graphs do not
-        change over the model's lifetime, and one definition is queried against many uses, so a forward
-        set from the definition is reused across them.
-        """
-        key = (id(node), forward)
-        cached = self._reach_cache.get(key)
-        if cached is None:
-            cached = self.dominance.reachable(node, forward=forward)
-            self._reach_cache[key] = cached
-        return cached
+        return not self._between.any_between(node_d, node_u, kills)
 
     def _kill_nodes(
         self, binding: Binding, graph: ControlFlowGraph, definition: Node,
