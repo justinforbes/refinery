@@ -10,8 +10,10 @@ only declares the PowerShell model slot and its `build_*` wiring.
 from __future__ import annotations
 
 from refinery.lib.scripts import Transformer
+from refinery.lib.scripts.analysis.cfg import ControlFlowModel
 from refinery.lib.scripts.modelcache import ModelCacheBase
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, build_call_graph
+from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.analysis.effects import Ps1OutputFlow, build_output_flow
 from refinery.lib.scripts.ps1.analysis.model import Ps1SemanticModel, build_semantic_model
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
@@ -26,11 +28,17 @@ class Ps1ModelCache(ModelCacheBase):
     `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld`, the
     `refinery.lib.scripts.ps1.analysis.callgraph.Ps1CallGraph` and the
     `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow` derived from it — each dropped
-    whenever this root's AST-mutation counter advances past the value it was built at. Later phases
-    add a `control_flow` slot behind the same shape.
+    whenever this root's AST-mutation counter advances past the value it was built at.
     """
 
-    _SLOTS = ('_model', '_closed_world', '_oracle', '_call_graph', '_output_flow')
+    _SLOTS = (
+        '_model',
+        '_closed_world',
+        '_oracle',
+        '_call_graph',
+        '_output_flow',
+        '_control_flow',
+    )
 
     root: Ps1Script
     _model: Ps1SemanticModel | None
@@ -38,6 +46,7 @@ class Ps1ModelCache(ModelCacheBase):
     _oracle: TypeOracle | None
     _call_graph: Ps1CallGraph | None
     _output_flow: Ps1OutputFlow | None
+    _control_flow: ControlFlowModel | None
 
     @property
     def model(self) -> Ps1SemanticModel:
@@ -65,6 +74,18 @@ class Ps1ModelCache(ModelCacheBase):
         disagree about who was going to see the value.
         """
         return self._lazy('_output_flow', lambda: build_output_flow(self.call_graph))
+
+    @property
+    def control_flow(self) -> ControlFlowModel:
+        """
+        One control-flow graph per function definition and one for the script, over this root.
+
+        Purely syntactic, so it needs none of the models above and nothing about the order they are
+        built in matters. What it answers is the question every pass here has been approximating
+        privately: whether one statement runs before another, whether a branch runs at all, and
+        whether a handler is still reachable once a body is emptied.
+        """
+        return self._lazy('_control_flow', lambda: build_control_flow_model(self.root))
 
     @property
     def oracle(self) -> TypeOracle:

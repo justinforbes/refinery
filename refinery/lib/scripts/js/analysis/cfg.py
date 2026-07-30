@@ -15,6 +15,7 @@ from typing import Sequence
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.cfg import (
+    ArmFlow,
     CfgBuilder,
     CfgNode,
     ControlFlowGraph,
@@ -106,8 +107,7 @@ class _Builder(CfgBuilder):
             finalizer = statement.finalizer
             return self.guarded(
                 statement.block,
-                handler,
-                handler.body if handler is not None else None,
+                [(handler, handler.body)] if handler is not None else (),
                 finalizer,
                 list(finalizer.body) if finalizer is not None else (),
                 frontier,
@@ -137,7 +137,7 @@ class _Builder(CfgBuilder):
         arms: list[Sequence[Node]] = [list(case.body) for case in statement.cases]
         exhaustive = any(case.test is None for case in statement.cases)
         return self.dispatch(
-            statement, arms, frontier, falls_through=True, exhaustive=exhaustive)
+            statement, arms, frontier, arm_flow=ArmFlow.SEQUENTIAL, exhaustive=exhaustive)
 
 
 def build_cfg(owner: Node) -> ControlFlowGraph:

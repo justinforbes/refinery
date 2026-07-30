@@ -28,10 +28,32 @@ languages this substrate serves.
 """
 from __future__ import annotations
 
+import enum
+
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
 from refinery.lib.scripts import Node
+
+
+class ArmFlow(enum.Enum):
+    """
+    What an arm of a multi-way branch may reach when control runs off its end.
+
+    The three members are three languages' answers to the same construct, and reading one as another
+    either invents paths that cannot be taken or drops paths that can — the second of which is the
+    direction that lets an analysis call live code unreachable.
+
+    `EXCLUSIVE` — at most one arm ever runs, so an arm's exits leave the construct.
+    `SEQUENTIAL` — an arm that runs off its end enters the *next* arm's body unconditionally, which
+    is C-style fallthrough and what JavaScript's `switch` does.
+    `CUMULATIVE` — every arm is tested in turn and every matching one runs, so an arm's exits may
+    reach *any* later arm, not only the next. PowerShell's `switch` is this: it does not fall
+    through, it keeps matching, and a `break` is what stops it.
+    """
+    EXCLUSIVE  = enum.auto()  # noqa
+    SEQUENTIAL = enum.auto()  # noqa
+    CUMULATIVE = enum.auto()  # noqa
 
 
 @dataclass(eq=False)
@@ -344,23 +366,45 @@ class CfgBuilder:
             exits.append(head)
         return exits
 
+    def branch_chain(
+        self,
+        clauses: Sequence[tuple[Node, Node | None]],
+        otherwise: Node | None,
+        frontier: list[CfgNode],
+    ) -> list[CfgNode]:
+        """
+        A chain of guarded arms, each tested only when every earlier test failed: `if`/`elseif`/`else`
+        where the whole chain is one node rather than a nest of two-armed conditionals.
+
+        Each test gets its own node, because the tests run at different points and an analysis that
+        collapsed them could not order two of them. A test's node flows into its own arm and on to
+        the next test; the last test flows into `otherwise` when there is one, and out of the
+        construct when there is not.
+        """
+        exits: list[CfgNode] = []
+        current = frontier
+        for test, body in clauses:
+            head = self.node(test)
+            self.link(current, head)
+            exits += self._branch(body, head)
+            current = [head]
+        if otherwise is not None:
+            return exits + self._body(otherwise, current)
+        return exits + current
+
     def dispatch(
         self,
         element: Node,
         arms: Sequence[Sequence[Node]],
         frontier: list[CfgNode],
         *,
-        falls_through: bool,
+        arm_flow: ArmFlow,
         exhaustive: bool,
     ) -> list[CfgNode]:
         """
         A multi-way branch: one head the frontier enters and one arm per clause, each arm a statement
-        sequence the head may jump into.
-
-        `falls_through` is the parameter two languages genuinely disagree on. Where an arm that runs
-        off its end continues into the next one, its exits are threaded into the following arm's
-        entry; where each arm leaves the construct, they are not. Reading one language's answer as
-        the other's invents paths that cannot be taken, or drops paths that can.
+        sequence the head may jump into. `arm_flow` says what an arm reaches when it runs off its
+        end; see `ArmFlow`, which is where the languages differ.
 
         `exhaustive` says some arm always runs — a default clause — so the head is not itself an
         exit.
@@ -369,17 +413,18 @@ class CfgBuilder:
         self.link(frontier, head)
         target = _Target(self.take_label(), [], None, is_loop=False, is_breakable=True)
         self._targets.append(target)
-        fallthrough: list[CfgNode] = []
+        carried: list[CfgNode] = []
         exits: list[CfgNode] = []
         for arm in arms:
-            entry = [head] + fallthrough
-            reached = self.sequence(list(arm), entry)
-            if falls_through:
-                fallthrough = reached
+            reached = self.sequence(list(arm), [head] + carried)
+            if arm_flow is ArmFlow.SEQUENTIAL:
+                carried = reached
+            elif arm_flow is ArmFlow.CUMULATIVE:
+                carried = carried + reached
             else:
                 exits += reached
         self._targets.pop()
-        exits += list(fallthrough) + target.breaks
+        exits += list(carried) + target.breaks
         if not exhaustive:
             exits.append(head)
         return exits
@@ -387,39 +432,44 @@ class CfgBuilder:
     def guarded(
         self,
         block: Node | None,
-        handler: Node | None,
-        handler_body: Node | None,
+        handlers: Sequence[tuple[Node, Node | None]],
         finalizer: Node | None,
         finalizer_body: Sequence[Node],
         frontier: list[CfgNode],
     ) -> list[CfgNode]:
         """
-        A guarded block with an optional handler and an optional finalizer.
+        A guarded block with any number of handlers and an optional finalizer.
 
-        The handler node is created *before* the guarded block is built and pushed on the handler
-        stack, so that `node` joins every statement created inside the block to it. That ordering is
-        the whole mechanism: it is why no statement inside the block has to know it is guarded.
+        The handler nodes are created *before* the guarded block is built and the first is pushed on
+        the handler stack, so that `node` joins every statement created inside the block to it. That
+        ordering is the whole mechanism: it is why no statement inside the block has to know it is
+        guarded.
 
-        The finalizer is entered from the block's normal exits and from the handler's, and itself
+        Several handlers are chained from the first, because which one runs depends on the type of
+        the exception and none of them is guaranteed — a language with one handler passes a
+        one-element sequence and the chain degenerates.
+
+        The finalizer is entered from the block's normal exits and from every handler's, and itself
         carries an exceptional edge outward, because a finalizer runs on the exceptional path too and
         control leaves the construct from it either way.
         """
-        handler_entry = self.node(handler) if handler is not None else None
+        entries = [self.node(handler) for handler, _ in handlers]
         finalizer_entry: CfgNode | None = None
         if finalizer is not None:
             finalizer_entry = CfgNode(finalizer)
             self.cfg.nodes.append(finalizer_entry)
-        guard = handler_entry or finalizer_entry
+        guard = entries[0] if entries else finalizer_entry
         if guard is not None:
             self._handlers.append(guard)
         block_exits = self.statement(block, frontier) if block is not None else list(frontier)
         if guard is not None:
             self._handlers.pop()
         normal_exits = list(block_exits)
-        if handler_entry is not None:
+        for index, ((_, body), entry) in enumerate(zip(handlers, entries)):
+            if index:
+                self.add_edge(entries[index - 1], entry)
             normal_exits += (
-                self.statement(handler_body, [handler_entry])
-                if handler_body is not None else [handler_entry])
+                self.statement(body, [entry]) if body is not None else [entry])
         if finalizer_entry is not None and finalizer is not None:
             self.link(normal_exits, finalizer_entry)
             self.cfg._node_of[id(finalizer)] = finalizer_entry
