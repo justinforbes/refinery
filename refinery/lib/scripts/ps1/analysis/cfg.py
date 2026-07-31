@@ -49,11 +49,11 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ExitStatement,
     Ps1ForEachLoop,
     Ps1ForLoop,
-    Ps1FunctionDefinition,
     Ps1IfStatement,
     Ps1Jump,
     Ps1ReturnStatement,
     Ps1Script,
+    Ps1ScriptBlock,
     Ps1SwitchStatement,
     Ps1ThrowStatement,
     Ps1TrapStatement,
@@ -61,9 +61,17 @@ from refinery.lib.scripts.ps1.model import (
     Ps1WhileLoop,
 )
 
-#: The nodes that own a control-flow graph of their own. A class or enum definition owns none: its
-#: methods are `Ps1FunctionDefinition` bodies in their own right and are found by the same walk.
-FUNCTION_NODES = (Ps1FunctionDefinition,)
+#: The nodes that own a control-flow graph of their own, beside the script itself. A script block is
+#: PowerShell's anonymous function: it is a *value* where it is written and runs somewhere else
+#: entirely — as the body of `ForEach-Object`, through `&` or `.`, or as the body of a function,
+#: which is the only script block a `Ps1FunctionDefinition` has and why keying on the definition
+#: instead adds no graph but leaves every other block without one. A block with no graph is climbed
+#: out of, so its statements are reported as running where the block is *written*: they claim to
+#: precede everything after that point and lose their order among themselves.
+#:
+#: This is the same partition `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel.scope_of`
+#: makes, and the same boundary `_declared_traps` stops at — one body, one scope, one graph.
+FUNCTION_NODES = (Ps1ScriptBlock,)
 
 _LOOP_NODES = (
     Ps1WhileLoop,
@@ -181,14 +189,13 @@ class _Builder(CfgBuilder):
         parameter binding, before `begin`, while that accessor reports the blocks in the order they
         are declared in.
         """
-        code = owner.body if isinstance(owner, Ps1FunctionDefinition) else owner
-        if not isinstance(code, Ps1Code):
+        if not isinstance(owner, Ps1Code):
             return []
         statements: list[Node] = []
-        blocks = get_named_blocks(code)
-        for block in sorted(blocks, key=lambda block: block is not code.dynamicparam_block):
+        blocks = get_named_blocks(owner)
+        for block in sorted(blocks, key=lambda block: block is not owner.dynamicparam_block):
             statements.extend(block.body)
-        statements.extend(code.body)
+        statements.extend(owner.body)
         return statements
 
     def statement(self, statement: Node, frontier: list[CfgNode]) -> list[CfgNode]:
@@ -304,7 +311,7 @@ class _Builder(CfgBuilder):
 
 def build_ps1_control_flow(root: Ps1Script) -> dict[int, ControlFlowGraph]:
     """
-    One control-flow graph per function definition and one for the script itself.
+    One control-flow graph per script block — see `FUNCTION_NODES` — and one for the script itself.
     """
     return build_control_flow(root, _Builder, FUNCTION_NODES)
 

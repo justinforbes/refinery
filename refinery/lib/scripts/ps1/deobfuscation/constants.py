@@ -12,7 +12,9 @@ from refinery.lib.scripts import (
     Transformer,
     _clone_node,
 )
+from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.ps1.analysis import is_assignment_write_target
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
@@ -335,20 +337,6 @@ def _find_dominating_entry(
     return None
 
 
-def _is_inside_loop(node: Node) -> bool:
-    """
-    Check whether a node is inside the body of a loop or a switch statement. Switch is included
-    because `switch ($array)` iterates over each element, making self-referential assignments
-    behave like loop accumulators.
-    """
-    cursor = node.parent
-    while cursor is not None:
-        if isinstance(cursor, (Ps1WhileLoop, Ps1DoLoop, Ps1ForLoop, Ps1ForEachLoop, Ps1SwitchStatement)):
-            return True
-        cursor = cursor.parent
-    return False
-
-
 def _find_removable_statement(node: Node) -> Node | None:
     """
     Walk upward from an expression node to find the statement-level node that can be removed from
@@ -388,7 +376,12 @@ class Ps1ConstantInlining(Transformer):
         candidates, seal_points = self._collect_candidates(node)
         if not candidates:
             return None
-        remaining, inlined = self._substitute(node, candidates, seal_points)
+        # Captured once rather than re-read per reference: every substitution below marks the pass
+        # changed, which drops the cache, so a per-site lookup would rebuild the control-flow graphs
+        # of the whole script once per inlined variable. Nothing this pass installs is a statement,
+        # so the graphs it would rebuild are the graphs it already has.
+        cycles = model_cache(self, node).cycles
+        remaining, inlined = self._substitute(node, candidates, seal_points, cycles)
         self._remove_dead_assignments(candidates, remaining, inlined)
         return None
 
@@ -484,6 +477,7 @@ class Ps1ConstantInlining(Transformer):
         root: Node,
         candidates: dict[str, list[_CandidateEntry]],
         seal_points: dict[str, list[tuple[list, int]]],
+        cycles: CycleModel,
     ) -> tuple[dict[str, int], dict[str, list[Node]]]:
         """
         Inline constant values. Returns `(remaining, inlined)` where remaining maps a lower-cased
@@ -569,6 +563,7 @@ class Ps1ConstantInlining(Transformer):
                             inlined,
                             handled_vars,
                             bloat_blocked,
+                            cycles,
                         )
                 continue
             if isinstance(node, Ps1Variable):
@@ -582,6 +577,7 @@ class Ps1ConstantInlining(Transformer):
                             seal_points,
                             remaining,
                             inlined,
+                            cycles,
                         )
 
         return remaining, inlined
@@ -598,12 +594,13 @@ class Ps1ConstantInlining(Transformer):
         inlined: dict[str, list[Node]],
         handled_vars: set[Ps1Variable],
         bloat_blocked: set[str],
+        cycles: CycleModel,
     ) -> None:
         if node.parent in assign_nodes:
             handled_vars.add(var)
             return
         if sp := seal_points.get(key):
-            sp = self._exclude_own_seal_points(var, key, sp)
+            sp = self._exclude_own_seal_points(var, key, sp, cycles)
         entry = _find_dominating_entry(node, candidates[key], sp)
         if entry is None:
             remaining[key] = remaining.get(key, 0) + 1
@@ -669,11 +666,12 @@ class Ps1ConstantInlining(Transformer):
         seal_points: dict[str, list[tuple[list, int]]],
         remaining: dict[str, int],
         inlined: dict[str, list[Node]],
+        cycles: CycleModel,
     ) -> None:
         if is_assignment_write_target(node):
             return
         if sp := seal_points.get(key):
-            sp = self._exclude_own_seal_points(node, key, sp)
+            sp = self._exclude_own_seal_points(node, key, sp, cycles)
         entry = _find_dominating_entry(node, candidates[key], sp)
         if entry is None:
             remaining[key] = remaining.get(key, 0) + 1
@@ -690,6 +688,7 @@ class Ps1ConstantInlining(Transformer):
         node: Node,
         key: str,
         seal_points: list[tuple[list, int]],
+        cycles: CycleModel,
     ) -> list[tuple[list, int]]:
         """
         When a variable reference sits on the RHS of an assignment to the same variable
@@ -697,16 +696,17 @@ class Ps1ConstantInlining(Transformer):
         block this reference. The RHS is evaluated before the assignment takes effect, so
         the reference still sees the previous constant value.
 
-        This exclusion is suppressed when the assignment is inside a loop body, because
-        the variable may have been modified in a previous iteration and no longer holds
-        the pre-loop constant.
+        This exclusion is suppressed when control can reach the assignment more than once, because
+        the value the reference sees is then the one the previous visit stored and not the constant
+        established before any of them. Which constructs those are is a question about the control
+        flow graph rather than about the shape of the source, and `cycles` is where it is answered.
         """
         cursor = node
         while cursor.parent is not None:
             if isinstance(parent := cursor.parent, Ps1AssignmentExpression) and cursor is parent.value:
                 target = _assignment_target_variable(parent.target)
                 if target is not None and _candidate_key(target) == key:
-                    if _is_inside_loop(parent):
+                    if cycles.repeats(parent):
                         break
                     own = set()
                     for body, idx in _find_all_body_entries(parent):

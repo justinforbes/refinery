@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from refinery.lib.scripts import Transformer
 from refinery.lib.scripts.analysis.cfg import ControlFlowModel
+from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.modelcache import ModelCacheBase
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, build_call_graph
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
@@ -26,8 +27,10 @@ class Ps1ModelCache(ModelCacheBase):
     Lazily builds and memoizes the analysis models for one root script — the
     `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel`, the
     `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld`, the
-    `refinery.lib.scripts.ps1.analysis.callgraph.Ps1CallGraph` and the
-    `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow` derived from it — each dropped
+    `refinery.lib.scripts.ps1.analysis.callgraph.Ps1CallGraph`, the
+    `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow`, the
+    `refinery.lib.scripts.analysis.cfg.ControlFlowModel` and the
+    `refinery.lib.scripts.analysis.cycles.CycleModel` derived from it — each dropped
     whenever this root's AST-mutation counter advances past the value it was built at.
     """
 
@@ -38,6 +41,7 @@ class Ps1ModelCache(ModelCacheBase):
         '_call_graph',
         '_output_flow',
         '_control_flow',
+        '_cycles',
     )
 
     root: Ps1Script
@@ -47,6 +51,7 @@ class Ps1ModelCache(ModelCacheBase):
     _call_graph: Ps1CallGraph | None
     _output_flow: Ps1OutputFlow | None
     _control_flow: ControlFlowModel | None
+    _cycles: CycleModel | None
 
     @property
     def model(self) -> Ps1SemanticModel:
@@ -78,7 +83,8 @@ class Ps1ModelCache(ModelCacheBase):
     @property
     def control_flow(self) -> ControlFlowModel:
         """
-        One control-flow graph per function definition and one for the script, over this root.
+        One control-flow graph per script block and one for the script itself, over this root — see
+        `refinery.lib.scripts.ps1.analysis.cfg.FUNCTION_NODES` for what owns one and why.
 
         Purely syntactic, so it needs none of the models above and nothing about the order they are
         built in matters. What it answers is the question every pass here has been approximating
@@ -86,6 +92,16 @@ class Ps1ModelCache(ModelCacheBase):
         whether a handler is still reachable once a body is emptied.
         """
         return self._lazy('_control_flow', lambda: build_control_flow_model(self.root))
+
+    @property
+    def cycles(self) -> CycleModel:
+        """
+        Which points of this script can be reached more than once, over `control_flow`. A pass that
+        establishes a fact from one visit to a statement — a variable's value, a stream's contents —
+        asks this before carrying it to a reader, because a point control returns to has no single
+        value to carry.
+        """
+        return self._lazy('_cycles', lambda: CycleModel(self.control_flow))
 
     @property
     def oracle(self) -> TypeOracle:

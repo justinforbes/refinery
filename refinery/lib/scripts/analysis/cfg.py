@@ -112,6 +112,7 @@ class ElementLocator:
 
     def __init__(self, graphs: dict[int, ControlFlowGraph]):
         self._element_graph: dict[int, ControlFlowGraph] = {}
+        self._owners = {id(graph.owner) for graph in graphs.values()}
         for graph in graphs.values():
             for node in graph.nodes:
                 if node.element is not None:
@@ -129,6 +130,17 @@ class ElementLocator:
         """
         The graph and node that evaluate *element*, climbing out of any expression it is nested in to
         the enclosing statement or loop head, or `None` when it has no enclosing graph node.
+
+        The climb stops at the body *element* is written in rather than continuing into the body
+        around it. Something inside a body that no node of that body's graph stands for — the default
+        of a parameter, an attribute on the body itself — is evaluated when that body is invoked, and
+        the enclosing body's statement that mentions it is not that point. Answering with that
+        statement orders the element against code the invocation may never run beside, which is the
+        false claim the per-body split exists to avoid; `None` says the graphs do not place it, and a
+        caller reads that as unknown.
+
+        The body *element* is itself is not its own boundary: a block is a value written at a point
+        in the body around it, so locating one climbs out to the statement that mentions it.
         """
         cursor: Node | None = element
         while cursor is not None:
@@ -137,6 +149,8 @@ class ElementLocator:
                 node = graph.node_of(cursor)
                 if node is not None:
                     return graph, node
+            if cursor is not element and id(cursor) in self._owners:
+                return None
             cursor = cursor.parent
         return None
 
@@ -447,10 +461,16 @@ class CfgBuilder:
         `exhaustive` says some arm always runs — a default clause — so the head is not itself an
         exit.
 
-        `iterated` says the construct runs its arms once per element of an input, so a back-jump
-        inside an arm re-enters the head rather than resolving to an enclosing loop. PowerShell's
-        `switch` is this; JavaScript's is not, and reading one as the other both invents a back-edge
-        to a loop the jump never reaches and drops the one it does.
+        `iterated` says the construct runs its arms once per element of an input, so it is a loop:
+        a back-jump inside an arm re-enters the head rather than resolving to an enclosing loop, and
+        an arm that simply runs off its end re-enters it too, for the next element. Without that
+        second edge the arms lie on no cycle and an analysis reads a store inside one as happening
+        once, which is what lets a self-referential assignment be folded to its first value.
+        PowerShell's `switch` is this; JavaScript's is not, and reading one as the other both invents
+        a back-edge to a loop the jump never reaches and drops the one it does.
+
+        A jump *out* takes no back-edge: it leaves the construct rather than advancing it, which is
+        the whole difference between the two spellings.
         """
         head = self.node(element)
         self.link(frontier, head)
@@ -463,7 +483,7 @@ class CfgBuilder:
         )
         self._targets.append(target)
         carried: list[CfgNode] = []
-        exits: list[CfgNode] = []
+        completed: list[CfgNode] = []
         for arm in arms:
             reached = self.sequence(list(arm), distinct([head, *carried]))
             if arm_flow is ArmFlow.SEQUENTIAL:
@@ -471,9 +491,12 @@ class CfgBuilder:
             elif arm_flow is ArmFlow.CUMULATIVE:
                 carried = distinct([*carried, *reached])
             else:
-                exits += reached
+                completed += reached
         self._targets.pop()
-        exits += list(carried) + target.breaks
+        completed = distinct(completed + carried)
+        if iterated:
+            self.link(completed, head)
+        exits = completed + target.breaks
         if not exhaustive:
             exits.append(head)
         return distinct(exits)
