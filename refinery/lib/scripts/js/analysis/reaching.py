@@ -76,7 +76,7 @@ class ReachingModel:
             return False
         if node_d is node_u:
             return False
-        if not self.dominance.dominates_node(node_d, node_u):
+        if not self.dominance.dominates_node(graph_d, node_d, node_u):
             return False
         kills = self._kill_nodes(binding, graph_d, definition)
         if kills is None:

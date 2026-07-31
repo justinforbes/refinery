@@ -250,12 +250,14 @@ class TestDominance(TestBase):
         ast, dom = self._dominance('var a = 1; var b = 2;')
         a = self._idents(ast, 'a')[0]
         b = self._idents(ast, 'b')[0]
-        na = dom.cfg_node_of(a)
-        nb = dom.cfg_node_of(b)
-        assert na is not None and nb is not None
-        self.assertTrue(dom.dominates_node(na, na))
-        self.assertTrue(dom.dominates_node(na, nb))
-        self.assertFalse(dom.dominates_node(nb, na))
+        located_a = dom.locate(a)
+        located_b = dom.locate(b)
+        assert located_a is not None and located_b is not None
+        graph, na = located_a
+        nb = located_b[1]
+        self.assertTrue(dom.dominates_node(graph, na, na))
+        self.assertTrue(dom.dominates_node(graph, na, nb))
+        self.assertFalse(dom.dominates_node(graph, nb, na))
 
     def test_strictly_dominates_orders_sequential_statements(self):
         ast, dom = self._dominance('var a = 1; var b = 2;')

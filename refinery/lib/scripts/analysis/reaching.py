@@ -1,6 +1,6 @@
 """
-The path-between query: does anything in a given set of control-flow nodes lie on a path from one
-node to another.
+The path-between query — does anything in a given set of control-flow nodes lie on a path from one
+node to another — and the definition selection built on it.
 
 This is what a reaching-value question reduces to once dominance has ordered the two ends. The value
 established at a definition still holds at a use when the definition runs first on every path — which
@@ -11,19 +11,26 @@ kill outside that intersection cannot be on any path joining them.
 What is a *kill* is entirely the caller's question and is not asked here: a language names the sites
 at which the thing it tracks may change, or says it cannot enumerate them. The graph half is this
 module's, and it is the same for every language.
+
+**Between is asked by reachability, never by position.** A definition written after a use in the
+source still reaches it when a back edge carries control around, and one written before it may be
+re-executed by the same edge. Ordering the two by where they were typed answers both wrongly, and
+answers them wrongly in the direction that keeps a stale value.
 """
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Sequence, TypeVar
 
-from refinery.lib.scripts.analysis.cfg import CfgNode
+from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph
 from refinery.lib.scripts.analysis.dominance import DominatorModel
+
+_D = TypeVar('_D')
 
 
 class ReachabilityQuery:
     """
-    Memoized forward and backward reachability over one `DominatorModel`, and the path-between
-    question asked from them.
+    Memoized forward and backward reachability over one `DominatorModel`, the path-between question
+    asked from them, and the `reaching_definition` selection asked from that.
 
     The memo is the reason this is an object rather than a function. One definition is asked against
     many uses, so the forward set from the definition is computed once and reused; the graphs do not
@@ -68,3 +75,53 @@ class ReachabilityQuery:
         if not downstream:
             return False
         return bool(downstream & self.reachable(target, forward=False))
+
+    def reaching_definition(
+        self,
+        graph: ControlFlowGraph,
+        use: CfgNode,
+        definitions: Sequence[tuple[_D, CfgNode]],
+        kills: Iterable[int] = (),
+    ) -> _D | None:
+        """
+        The one definition among *definitions* whose value is observed at *use*, or `None` when no
+        single definition is.
+
+        *definitions* pairs each of the caller's own definition objects with the control-flow node
+        that evaluates it, and the caller's object is what comes back — the graph cannot say which of
+        several definitions sharing a node is meant, and does not have to. *kills* names further
+        nodes that may change the value without defining it, as ids.
+
+        A definition qualifies when it strictly dominates *use*: it runs first on every path there,
+        and does not merely share *use*'s statement, which this granularity cannot order. Of those,
+        the *nearest* is the one every other qualifying definition dominates — they form a chain,
+        because the dominators of any node do — and it is the only one whose value can survive, since
+        each of the others is overwritten by it.
+
+        **Every definition other than the chosen one is a kill, and the caller cannot opt out.** That
+        is what makes an earlier definition re-entered by a back edge, and a definition on a branch
+        that rejoins, both count against the answer. A caller that knows the language orders a
+        particular write after the read in the same statement leaves that write out of *definitions*
+        rather than being given a switch here, because the safe default has to be the one you get by
+        saying nothing.
+        """
+        qualifying: list[tuple[_D, CfgNode]] = []
+        seen: set[int] = set()
+        for value, node in definitions:
+            if node is use or not self._dominators.dominates_node(graph, node, use):
+                continue
+            if id(node) in seen:
+                return None
+            seen.add(id(node))
+            qualifying.append((value, node))
+        if not qualifying:
+            return None
+        nearest, nearest_node = qualifying[0]
+        for value, node in qualifying[1:]:
+            if self._dominators.dominates_node(graph, nearest_node, node):
+                nearest, nearest_node = value, node
+        blocking = {id(node) for _, node in definitions if node is not nearest_node}
+        blocking.update(kills)
+        if self.any_between(nearest_node, use, blocking):
+            return None
+        return nearest

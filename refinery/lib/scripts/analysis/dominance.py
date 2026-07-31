@@ -16,6 +16,12 @@ one.
 Exceptional edges take part in the computation like any other edge. A definition is therefore
 reported as dominating a use only when it runs first on *every* path, including the ones that leave a
 guarded block by throwing, which is the conservative direction and the one a caller may rely on.
+
+**Dominance orders, it does not certify.** That a definition dominates a use says the statement
+holding it ran, not that the store it performs completed: a statement may throw part-way through, and
+`refinery.lib.scripts.analysis.liveness` states the same asymmetry as the reason its transfer function
+is not the textbook one. A caller reading dominance as evidence a value was established needs the
+extra refusal, which `refinery.lib.scripts.analysis.reaching` makes.
 """
 from __future__ import annotations
 
@@ -23,19 +29,63 @@ from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
 
 
+def dominator_sets(graph: ControlFlowGraph) -> dict[int, frozenset[int]]:
+    """
+    For every node of *graph*, the ids of the nodes that dominate it, keyed by node identity.
+
+    The classic iterative intersection: every node starts dominated by everything, the entry by
+    itself alone, and each round replaces a node's set with the intersection over its predecessors
+    plus itself, until nothing moves.
+
+    A node with no predecessors that is not the entry is unreachable, and takes the empty set before
+    adding itself — so it dominates only itself and is dominated by nothing, which keeps an
+    unreachable region from claiming to dominate anything downstream of it.
+
+    The intersection is seeded from the first predecessor rather than from the set of every node,
+    which is the same value — every set here is a subset of that — without copying one set per node
+    per round.
+    """
+    nodes = graph.nodes
+    all_ids = {id(node) for node in nodes}
+    dom: dict[int, set[int]] = {
+        id(node): {id(node)} if node is graph.entry else set(all_ids) for node in nodes
+    }
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            if node is graph.entry:
+                continue
+            incoming = node.predecessors
+            if incoming:
+                new = set(dom[id(incoming[0])])
+                for predecessor in incoming[1:]:
+                    new &= dom[id(predecessor)]
+            else:
+                new = set()
+            new.add(id(node))
+            if new != dom[id(node)]:
+                dom[id(node)] = new
+                changed = True
+    return {key: frozenset(value) for key, value in dom.items()}
+
+
 class DominatorModel:
     """
-    Dominator relations for the per-body control-flow graphs of one script.
+    Dominator relations for the per-body control-flow graphs of one script. A graph's dominator sets
+    are computed once, on the first ordering question asked about that graph, and kept for as long as
+    this model lives.
 
-    Every graph's dominator sets are computed once, on construction, because the caller that asks one
-    ordering question almost always asks many, and the sets are fixed for as long as the tree is.
+    Computing them all on construction instead would charge every caller for the whole script, and
+    these sets are quadratic in the size of a body rather than linear: one straight-line body of two
+    thousand statements costs upwards of a hundred megabytes to build, most callers ask about one
+    graph, and the model is rebuilt from scratch whenever the tree version advances. This is the same
+    laziness `refinery.lib.scripts.analysis.cycles.CycleModel` has, for the same reason.
     """
 
     def __init__(self, flow: ControlFlowModel):
         self._flow = flow
-        self._dominators: dict[int, frozenset[int]] = {}
-        for graph in flow.graphs.values():
-            self._compute_dominators(graph)
+        self._dominators: dict[int, dict[int, frozenset[int]]] = {}
 
     def locate(self, element: Node) -> tuple[ControlFlowGraph, CfgNode] | None:
         """
@@ -53,11 +103,11 @@ class DominatorModel:
         located = self._flow.locate(element)
         return located[1] if located is not None else None
 
-    def locate_pair(self, a: Node, b: Node) -> tuple[CfgNode, CfgNode] | None:
+    def locate_pair(self, a: Node, b: Node) -> tuple[ControlFlowGraph, CfgNode, CfgNode] | None:
         """
-        The control-flow nodes that evaluate *a* and *b* when both lie in the same body's graph, or
-        `None` when either is unlocatable or the two lie in different graphs, where intraprocedural
-        dominance does not apply.
+        The graph and the two control-flow nodes that evaluate *a* and *b* when both lie in the same
+        body's graph, or `None` when either is unlocatable or the two lie in different graphs, where
+        intraprocedural dominance does not apply.
         """
         located_a = self._flow.locate(a)
         located_b = self._flow.locate(b)
@@ -67,7 +117,7 @@ class DominatorModel:
         graph_b, node_b = located_b
         if graph_a is not graph_b:
             return None
-        return node_a, node_b
+        return graph_a, node_a, node_b
 
     def dominates(self, a: Node, b: Node) -> bool:
         """
@@ -76,8 +126,8 @@ class DominatorModel:
         node, so a node dominates itself. `False` when either element is unlocatable or the two lie
         in different graphs.
         """
-        pair = self.locate_pair(a, b)
-        return pair is not None and self.dominates_node(*pair)
+        located = self.locate_pair(a, b)
+        return located is not None and self.dominates_node(*located)
 
     def strictly_dominates(self, a: Node, b: Node) -> bool:
         """
@@ -87,17 +137,31 @@ class DominatorModel:
         statement may be evaluated in either order as far as this granularity can tell, so the
         reflexive answer would accept a reference that is in fact evaluated first.
         """
-        pair = self.locate_pair(a, b)
-        if pair is None or pair[0] is pair[1]:
+        located = self.locate_pair(a, b)
+        if located is None or located[1] is located[2]:
             return False
-        return self.dominates_node(*pair)
+        return self.dominates_node(*located)
 
-    def dominates_node(self, a: CfgNode, b: CfgNode) -> bool:
+    def dominates_node(self, graph: ControlFlowGraph, a: CfgNode, b: CfgNode) -> bool:
         """
-        Whether control-flow node *a* dominates *b*. Reflexive. The node-level counterpart of
-        `dominates`, for a caller that has already located the two.
+        Whether control-flow node *a* dominates *b* within *graph*, which must be the graph both
+        belong to. Reflexive. The node-level counterpart of `dominates`, for a caller that has
+        already located the two.
+
+        *graph* is asked for rather than looked up because it is the key the dominator sets are
+        memoized under, and because a caller holding two nodes has already had to establish that they
+        share a body for the question to mean anything.
         """
-        return id(a) in self._dominators.get(id(b), frozenset())
+        return id(a) in self.dominators_of(graph).get(id(b), frozenset())
+
+    def dominators_of(self, graph: ControlFlowGraph) -> dict[int, frozenset[int]]:
+        """
+        The dominator sets of *graph*, computed on first use and kept thereafter.
+        """
+        found = self._dominators.get(id(graph))
+        if found is None:
+            found = self._dominators[id(graph)] = dominator_sets(graph)
+        return found
 
     def reachable(self, start: CfgNode, *, forward: bool) -> set[int]:
         """
@@ -118,42 +182,3 @@ class DominatorModel:
                     seen.add(id(neighbour))
                     stack.append(neighbour)
         return seen
-
-    def _compute_dominators(self, graph: ControlFlowGraph) -> None:
-        """
-        The classic iterative intersection: every node starts dominated by everything, the entry by
-        itself alone, and each round replaces a node's set with the intersection over its
-        predecessors plus itself, until nothing moves.
-
-        A node with no predecessors that is not the entry is unreachable, and takes the empty set
-        before adding itself — so it dominates only itself and is dominated by nothing, which keeps
-        an unreachable region from claiming to dominate anything downstream of it.
-
-        The intersection is seeded from the first predecessor rather than from the set of every
-        node, which is the same value — every set here is a subset of that — without copying one
-        set per node per round.
-        """
-        nodes = graph.nodes
-        all_ids = {id(node) for node in nodes}
-        dom: dict[int, set[int]] = {
-            id(node): {id(node)} if node is graph.entry else set(all_ids) for node in nodes
-        }
-        changed = True
-        while changed:
-            changed = False
-            for node in nodes:
-                if node is graph.entry:
-                    continue
-                incoming = node.predecessors
-                if incoming:
-                    new = set(dom[id(incoming[0])])
-                    for predecessor in incoming[1:]:
-                        new &= dom[id(predecessor)]
-                else:
-                    new = set()
-                new.add(id(node))
-                if new != dom[id(node)]:
-                    dom[id(node)] = new
-                    changed = True
-        for node in nodes:
-            self._dominators[id(node)] = frozenset(dom[id(node)])
