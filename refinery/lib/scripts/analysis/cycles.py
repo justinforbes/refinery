@@ -22,18 +22,29 @@ caller that would take `on_a_cycle` as licence to rotate or unroll.
 
 **One body's graph only answers for one invocation of that body.** A block written inside a loop is
 invoked once per iteration, so everything in it repeats even though its own graph is acyclic — the
-repetition is the *owner's*, and `CycleModel.repeats` asks the owner in turn. That walk is lexical:
-it follows a body to where its value is written, not to where it is called, so a body repeated by
-something other than the code around it is reported as running once. A block stored in a variable and
-invoked from a loop elsewhere is one such case; a block handed to a cmdlet that enumerates — the
-`ForEach-Object` a PowerShell pipeline is mostly made of — is the common one, and its statements run
-once per input element while the statement writing the block runs once. Answering either soundly is a
-call-graph question, and the graphs here do not hold it.
+repetition is the *owner's*, and `CycleModel.repeats` asks the owner in turn.
+
+That walk is lexical by default: it follows a body to where its value is *written*, not to where it
+is called, so a body repeated by something other than the code around it reads as running once. A
+language closes that gap by supplying a `BodySite`, which names the element that actually runs a body
+and says whether that site runs it more than once — the `ForEach-Object` a PowerShell pipeline is
+mostly made of runs its block once per input element while the statement handing it over runs once.
+What no `BodySite` can answer from a tree alone is a block stored in a variable and invoked from a
+loop somewhere else; that is a call-graph question, and these graphs do not hold it.
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
+
+#: What a language may answer about the body a control-flow graph belongs to: the element whose
+#: evaluation runs that body, and whether the site runs it more than once. `None` means the language
+#: has nothing to say and the walk falls back to where the body is *written*, which is the lexical
+#: reading the module docstring describes. A site given here replaces that reading, so answering is
+#: how a language reports a body run by something other than the code around it.
+BodySite = Callable[[Node], 'tuple[Node, bool] | None']
 
 
 def strongly_connected_components(graph: ControlFlowGraph) -> list[list[CfgNode]]:
@@ -118,8 +129,9 @@ class CycleModel:
     the caller that ends up asking nothing.
     """
 
-    def __init__(self, flow: ControlFlowModel):
+    def __init__(self, flow: ControlFlowModel, body_site: BodySite | None = None):
         self._flow = flow
+        self._body_site = body_site
         self._on_a_cycle: dict[int, frozenset[int]] = {}
 
     def on_a_cycle(self, graph: ControlFlowGraph, node: CfgNode) -> bool:
@@ -152,5 +164,13 @@ class CycleModel:
             graph, node = located
             if self.on_a_cycle(graph, node):
                 return True
-            located = self._flow.locate(graph.owner)
+            owner = graph.owner
+            site = self._body_site(owner) if self._body_site is not None else None
+            if site is None:
+                located = self._flow.locate(owner)
+                continue
+            invoked_at, repeatedly = site
+            if repeatedly:
+                return True
+            located = self._flow.locate(invoked_at)
         return False

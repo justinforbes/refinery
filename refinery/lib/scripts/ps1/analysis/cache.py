@@ -13,6 +13,7 @@ from refinery.lib.scripts import Transformer
 from refinery.lib.scripts.analysis.cfg import ControlFlowModel
 from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.modelcache import ModelCacheBase
+from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, build_block_model
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, build_call_graph
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.analysis.effects import Ps1OutputFlow, build_output_flow
@@ -29,7 +30,8 @@ class Ps1ModelCache(ModelCacheBase):
     `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld`, the
     `refinery.lib.scripts.ps1.analysis.callgraph.Ps1CallGraph`, the
     `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow`, the
-    `refinery.lib.scripts.analysis.cfg.ControlFlowModel` and the
+    `refinery.lib.scripts.analysis.cfg.ControlFlowModel`, the
+    `refinery.lib.scripts.ps1.analysis.blocks.Ps1BlockModel` and the
     `refinery.lib.scripts.analysis.cycles.CycleModel` derived from it — each dropped
     whenever this root's AST-mutation counter advances past the value it was built at.
     """
@@ -41,6 +43,7 @@ class Ps1ModelCache(ModelCacheBase):
         '_call_graph',
         '_output_flow',
         '_control_flow',
+        '_blocks',
         '_cycles',
     )
 
@@ -51,6 +54,7 @@ class Ps1ModelCache(ModelCacheBase):
     _call_graph: Ps1CallGraph | None
     _output_flow: Ps1OutputFlow | None
     _control_flow: ControlFlowModel | None
+    _blocks: Ps1BlockModel | None
     _cycles: CycleModel | None
 
     @property
@@ -94,14 +98,27 @@ class Ps1ModelCache(ModelCacheBase):
         return self._lazy('_control_flow', lambda: build_control_flow_model(self.root))
 
     @property
+    def blocks(self) -> Ps1BlockModel:
+        """
+        Where each script block of this root runs — at what point, in whose scope, how many times.
+        Purely syntactic like `control_flow`, and the answer three other layers used to guess from
+        the code a block is *written* in.
+        """
+        return self._lazy('_blocks', lambda: build_block_model(self.root))
+
+    @property
     def cycles(self) -> CycleModel:
         """
         Which points of this script can be reached more than once, over `control_flow`. A pass that
         establishes a fact from one visit to a statement — a variable's value, a stream's contents —
         asks this before carrying it to a reader, because a point control returns to has no single
         value to carry.
+
+        It is built over `blocks` so that a body run by a cmdlet that enumerates is known to repeat.
+        Without that the walk out of a block follows it to where its value was written, and a
+        `ForEach-Object` body reads as running exactly once.
         """
-        return self._lazy('_cycles', lambda: CycleModel(self.control_flow))
+        return self._lazy('_cycles', lambda: CycleModel(self.control_flow, self.blocks.body_site))
 
     @property
     def oracle(self) -> TypeOracle:
