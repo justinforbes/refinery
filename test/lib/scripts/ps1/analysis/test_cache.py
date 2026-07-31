@@ -26,6 +26,22 @@ class TestPs1ModelCache(TestBase):
         _remove_from_parent(script.body[0])
         self.assertIsNot(cache.model, first)
 
+    def test_cycles_are_memoized_while_the_tree_is_unchanged(self):
+        cache = Ps1ModelCache(self._script("while ($x) { $a = 1 }"))
+        first = cache.cycles
+        self.assertIs(cache.cycles, first)
+
+    def test_mutating_the_cached_tree_rebuilds_the_cycles(self):
+        """
+        The cycle sets are read off the control-flow graphs, which are keyed to node identity, so a
+        model kept across a mutation would answer about statements the tree no longer holds.
+        """
+        script = self._script("while ($x) { $a = 1 }\n$b = 2")
+        cache = Ps1ModelCache(script)
+        first = cache.cycles
+        _remove_from_parent(script.body[1])
+        self.assertIsNot(cache.cycles, first)
+
     def test_mutating_an_unrelated_tree_keeps_the_cached_model(self):
         cache = Ps1ModelCache(self._script("$a = 1\n$b = 2"))
         first = cache.model

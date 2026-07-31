@@ -144,6 +144,14 @@ class _Builder(CfgBuilder):
         in one scope are peers and are chained the way `guarded` chains several `catch` clauses,
         because which one runs depends on the type of the error and none of them is guaranteed.
 
+        A trap does not guard itself: an error raised inside a trap body leaves the scope rather
+        than re-entering the handler it was raised in, so the trap bodies are built before the
+        handler is pushed and only the guarded statements are built under it. Pushing it first gives
+        every node of every trap body an exceptional edge back to a handler that already has a normal
+        edge into it, which is a cycle through the trap that no run can take — and reads as a body
+        that repeats. `refinery.lib.scripts.analysis.cfg.CfgBuilder.guarded` pops before building its
+        `catch` bodies for the same reason.
+
         `continue` inside a trap resumes at the statement following the one that threw, which is a
         shape this graph cannot express exactly. Every resumption point is therefore linked to
         *every* node the guarded body created, which is the over-approximation: it claims more paths
@@ -159,14 +167,14 @@ class _Builder(CfgBuilder):
             if entries:
                 self.exceptional_edge(entries[-1], handler)
             entries.append(handler)
-        if entries:
-            self._handlers.append(entries[0])
         resumes: list[CfgNode] = []
         for trap, handler in zip(traps, entries):
             self._resumes = []
             resumes += self._body(trap.body, [handler]) + self._resumes
         self._resumes = None
         guarded_from = len(self.cfg.nodes)
+        if entries:
+            self._handlers.append(entries[0])
         frontier = self.sequence(statements, [self.cfg.entry])
         if entries:
             self._handlers.pop()

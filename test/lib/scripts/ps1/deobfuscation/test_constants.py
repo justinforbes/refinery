@@ -438,6 +438,20 @@ class TestPs1ReassignedVariableInlining(TestPs1):
         result = self._deobfuscate(code)
         self.assertIn('$x', result)
 
+    def test_self_ref_in_a_parameter_default_inside_a_loop_not_inlined(self):
+        """
+        The default is evaluated once per invocation of the block, and the block is invoked once per
+        iteration, so `$x` accumulates. No control-flow node stands for a parameter default, and an
+        element the graphs do not place is not an element proven to run once.
+        """
+        code = (
+            "$x = 'a'\n"
+            "foreach ($i in $args) { & { param($p = ($x = $x + 'b')) $p } }\n"
+            'Write-Host $x'
+        )
+        result = self._deobfuscate(code)
+        self.assertIn("$x + 'b'", result)
+
     def test_foreach_rejects_candidate(self):
         result = self._deobfuscate(
             "$x = 'const'\nforeach ($x in @(1, 2, 3)) { Write-Host $x }"

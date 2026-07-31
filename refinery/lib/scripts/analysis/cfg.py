@@ -56,7 +56,7 @@ class ArmFlow(enum.Enum):
     CUMULATIVE = enum.auto()  # noqa
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, repr=False)
 class CfgNode:
     """
     One vertex of a control-flow graph. `element` is the AST node it stands for — a statement, or a
@@ -65,6 +65,12 @@ class CfgNode:
 
     `eq=False` is load bearing. Every map in every layer above is keyed by `id(node)`, and two
     structurally equal statements are two distinct points in the program.
+
+    `repr=False` is too. A generated repr expands `successors` and `predecessors`, and the guard
+    against recursion only covers the node currently being formatted, so a graph re-expands at every
+    join: a chain of five hundred nodes — a script of five hundred statements — exhausts the
+    interpreter's stack, and a handful of branches produces megabytes. A debugger, a failing
+    assertion, or `pytest --showlocals` would print one.
     """
     element: Node | None
     successors: list[CfgNode] = field(default_factory=list)

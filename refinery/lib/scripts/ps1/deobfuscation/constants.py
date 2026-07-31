@@ -378,8 +378,8 @@ class Ps1ConstantInlining(Transformer):
             return None
         # Captured once rather than re-read per reference: every substitution below marks the pass
         # changed, which drops the cache, so a per-site lookup would rebuild the control-flow graphs
-        # of the whole script once per inlined variable. Nothing this pass installs is a statement,
-        # so the graphs it would rebuild are the graphs it already has.
+        # of the whole script once per inlined variable. Nothing this pass adds or removes is a
+        # statement, so the graphs it would rebuild are the graphs it already has.
         cycles = model_cache(self, node).cycles
         remaining, inlined = self._substitute(node, candidates, seal_points, cycles)
         self._remove_dead_assignments(candidates, remaining, inlined)

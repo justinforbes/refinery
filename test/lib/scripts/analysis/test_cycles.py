@@ -3,23 +3,22 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts import Script
-from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph
+from refinery.lib.scripts.analysis.cfg import CfgBuilder, CfgNode, ControlFlowGraph
 from refinery.lib.scripts.analysis.cycles import nodes_on_a_cycle, strongly_connected_components
 
 
 def _graph(edges: dict[str, list[str]]) -> tuple[ControlFlowGraph, dict[str, CfgNode]]:
     """
-    A graph over the names in *edges*, each mapped to the names it reaches.
+    A graph over the names in *edges*, each mapped to the names it reaches. The synthetic entry and
+    exit a real graph carries are dropped, so that a component count is a count of the named nodes.
     """
     graph = ControlFlowGraph(Script())
     graph.nodes.clear()
     named = {name: CfgNode(None) for name in edges}
-    for name, node in named.items():
-        graph.nodes.append(node)
+    graph.nodes.extend(named.values())
     for name, successors in edges.items():
         for successor in successors:
-            named[name].successors.append(named[successor])
-            named[successor].predecessors.append(named[name])
+            CfgBuilder.add_edge(named[name], named[successor])
     return graph, named
 
 

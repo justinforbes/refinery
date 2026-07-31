@@ -62,6 +62,7 @@ _CORPUS = [
     "$f = { 'a' }\n& $f",
     "1..3 | ForEach-Object { 1..3 | ForEach-Object { 'a' } }",
     "function f { 1..3 | ForEach-Object { 'a' } }",
+    "1..3 | ForEach-Object { trap { 'h' }\n'a' }",
 ]
 
 
@@ -275,6 +276,25 @@ class TestPs1ControlFlowGraph(TestBase):
         self.assertIn(graph.node_of(tree.body[1]), jump.successors)
         self.assertIn(graph.node_of(tree.body[2]), jump.successors)
 
+    def test_a_trap_does_not_guard_its_own_body(self):
+        """
+        An error raised inside a trap body leaves the scope; it does not re-enter the handler it was
+        raised in. An exceptional edge back to that handler would close a cycle through it that no
+        run can take, and every statement of every trap body would read as repeating.
+        """
+        tree, graph = self._tree_and_graph("trap { return }\n'a'")
+        trap = self._node_for(graph, Ps1TrapStatement)
+        inside = graph.node_of(tree.body[0].body.body[0])
+        self.assertNotIn(trap, inside.successors)
+        self.assertFalse(CycleModel(build_control_flow_model(tree)).repeats(tree.body[0].body.body[0]))
+
+    def test_a_trap_still_guards_the_statements_it_is_declared_beside(self):
+        # The floor under the test above: building the trap bodies outside the handler must not take
+        # the guarded body out with them.
+        tree, graph = self._tree_and_graph("trap { return }\n'a'")
+        trap = self._node_for(graph, Ps1TrapStatement)
+        self.assertIn(trap, graph.node_of(tree.body[1]).successors)
+
     def test_a_switch_clause_may_be_entered_after_the_previous_one_ran(self):
         # Asserted as a direct edge from the first clause's body to the second's. Under EXCLUSIVE
         # the head still reaches every arm, so counting the head's successors measures nothing;
@@ -415,32 +435,33 @@ class TestPs1ControlFlowGraph(TestBase):
     def test_a_script_block_owns_its_own_graph(self):
         tree = Ps1Parser("1..3 | ForEach-Object { 'a' }").parse()
         graphs = build_ps1_control_flow(tree)
-        block = next(n for n in tree.walk() if isinstance(n, Ps1ScriptBlock))
+        block = next(n for n in tree.walk_in_order() if isinstance(n, Ps1ScriptBlock))
         self.assertIn(id(block), graphs)
         self.assertIsNotNone(graphs[id(block)].node_of(block.body[0]))
 
     def test_a_statement_in_a_script_block_is_not_ordered_against_one_outside_it(self):
         """
         A block is a value where it is written and runs when it is invoked, so nothing in it is
-        guaranteed to have run by the time the statement after the block does.
+        guaranteed to have run by the time the statement after the block does. Asserted in both
+        directions and against a statement *before* the block as well: a model that placed the
+        block's statements on the enclosing graph would order them against the code after it,
+        which is the claim that licenses carrying a value across the block.
         """
-        # Asserted in both directions and against a statement *before* the block as well. A model
-        # that placed the block's statements on the enclosing graph would order them against the
-        # code after it, which is the claim that licenses carrying a value across the block.
-        tree = Ps1Parser(
-            "$a = 1\n1..3 | ForEach-Object { $b = 2 }\n$c = 3").parse()
+        tree = Ps1Parser("$a = 1\n1..3 | ForEach-Object { $b = 2 }\n$c = 3").parse()
         dominators = DominatorModel(build_control_flow_model(tree))
-        block = next(n for n in tree.walk() if isinstance(n, Ps1ScriptBlock))
+        block = next(n for n in tree.walk_in_order() if isinstance(n, Ps1ScriptBlock))
         inside = block.body[0]
         self.assertFalse(dominators.dominates(inside, tree.body[2]))
         self.assertFalse(dominators.dominates(tree.body[0], inside))
 
     def test_two_statements_in_one_script_block_are_ordered_against_each_other(self):
-        # The counterpart of the test above: refusing to place the block's statements at all would
-        # satisfy that one while losing every ordering the block does have.
+        """
+        The counterpart of the test above: refusing to place the block's statements at all would
+        satisfy that one while losing every ordering the block does have.
+        """
         tree = Ps1Parser("1..3 | ForEach-Object { $b = 2\n$c = 3 }").parse()
         dominators = DominatorModel(build_control_flow_model(tree))
-        block = next(n for n in tree.walk() if isinstance(n, Ps1ScriptBlock))
+        block = next(n for n in tree.walk_in_order() if isinstance(n, Ps1ScriptBlock))
         self.assertTrue(dominators.dominates(block.body[0], block.body[1]))
         self.assertFalse(dominators.dominates(block.body[1], block.body[0]))
 
@@ -454,8 +475,10 @@ class TestPs1ControlFlowGraph(TestBase):
         self.assertTrue(cycles.repeats(tree.body[0].clauses[0][1].body[0]))
 
     def test_a_branch_of_an_if_is_not_reached_again(self):
-        # The floor under the switch test above: a model that called every arm of every multi-way
-        # construct repeated would satisfy it while saying nothing about iteration.
+        """
+        The floor under the switch test above: a model that called every arm of every multi-way
+        construct repeated would satisfy it while saying nothing about iteration.
+        """
         tree = Ps1Parser("if ($x) { 'a' } else { 'b' }").parse()
         cycles = CycleModel(build_control_flow_model(tree))
         self.assertFalse(cycles.repeats(tree.body[0].clauses[0][1].body[0]))
@@ -480,13 +503,13 @@ class TestPs1ControlFlowGraph(TestBase):
         """
         tree = Ps1Parser("while ($x) { 1..3 | ForEach-Object { $a = 1 } }").parse()
         cycles = CycleModel(build_control_flow_model(tree))
-        block = next(n for n in tree.walk() if isinstance(n, Ps1ScriptBlock))
+        block = next(n for n in tree.walk_in_order() if isinstance(n, Ps1ScriptBlock))
         self.assertTrue(cycles.repeats(block.body[0]))
 
     def test_a_script_block_written_outside_a_loop_does_not_repeat(self):
-        tree = Ps1Parser("1..3 | ForEach-Object { $a = 1 }").parse()
+        tree = Ps1Parser("& { $a = 1 }").parse()
         cycles = CycleModel(build_control_flow_model(tree))
-        block = next(n for n in tree.walk() if isinstance(n, Ps1ScriptBlock))
+        block = next(n for n in tree.walk_in_order() if isinstance(n, Ps1ScriptBlock))
         self.assertFalse(cycles.repeats(block.body[0]))
 
     def test_a_parameter_default_is_not_placed_in_the_body_around_its_block(self):
@@ -495,7 +518,47 @@ class TestPs1ControlFlowGraph(TestBase):
         """
         tree = Ps1Parser("$a = 1\n$f = { param($p = 2) $p }\n$c = 3").parse()
         flow = build_control_flow_model(tree)
-        block = next(n for n in tree.walk() if isinstance(n, Ps1ScriptBlock))
+        block = next(n for n in tree.walk_in_order() if isinstance(n, Ps1ScriptBlock))
         default = block.param_block.parameters[0].default_value
         self.assertIsNotNone(default)
         self.assertIsNone(flow.locate(default))
+
+    def test_an_element_the_graphs_do_not_place_is_reported_as_repeating(self):
+        """
+        A parameter default is evaluated once per invocation of its block, and the graphs hold no
+        invocation. Reporting it as running once would be a claim these graphs cannot support, and
+        a caller asking whether a single-visit fact still holds would act on it.
+        """
+        tree = Ps1Parser("while ($c) { & { param($p = ($x = 1)) $p } }").parse()
+        flow = build_control_flow_model(tree)
+        cycles = CycleModel(flow)
+        block = next(n for n in tree.walk_in_order() if isinstance(n, Ps1ScriptBlock))
+        default = block.param_block.parameters[0].default_value
+        self.assertIsNone(flow.locate(default))
+        self.assertTrue(cycles.repeats(default))
+
+    def test_a_function_body_repeats_with_the_loop_its_definition_is_written_in(self):
+        """
+        The other spelling of the owner walk: a function body's graph is reached from its
+        definition, which is a statement of the enclosing graph, where a bare block is reached from
+        the statement that merely mentions it.
+        """
+        tree = Ps1Parser("while ($x) { function f { $a = 1 } }").parse()
+        cycles = CycleModel(build_control_flow_model(tree))
+        definition = next(n for n in tree.walk() if isinstance(n, Ps1FunctionDefinition))
+        self.assertTrue(cycles.repeats(definition.body.body[0]))
+
+    def test_a_function_body_outside_a_loop_does_not_repeat(self):
+        tree = Ps1Parser("function f { $a = 1 }").parse()
+        cycles = CycleModel(build_control_flow_model(tree))
+        definition = next(n for n in tree.walk() if isinstance(n, Ps1FunctionDefinition))
+        self.assertFalse(cycles.repeats(definition.body.body[0]))
+
+    def test_a_switch_whose_only_arm_is_empty_still_returns_to_its_head(self):
+        """
+        The head is then one node reaching only itself, which a component-size test reads as
+        acyclic.
+        """
+        tree = Ps1Parser("switch ($x) { 1 { } }").parse()
+        cycles = CycleModel(build_control_flow_model(tree))
+        self.assertTrue(cycles.repeats(tree.body[0]))
