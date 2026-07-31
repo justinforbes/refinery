@@ -16,6 +16,7 @@ from refinery.lib.scripts.modelcache import ModelCacheBase
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, build_block_model
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, build_call_graph
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
+from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow, build_variable_flow
 from refinery.lib.scripts.ps1.analysis.effects import Ps1OutputFlow, build_output_flow
 from refinery.lib.scripts.ps1.analysis.model import Ps1SemanticModel, build_semantic_model
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
@@ -45,6 +46,7 @@ class Ps1ModelCache(ModelCacheBase):
         '_control_flow',
         '_blocks',
         '_cycles',
+        '_variable_flow',
     )
 
     root: Ps1Script
@@ -56,6 +58,7 @@ class Ps1ModelCache(ModelCacheBase):
     _control_flow: ControlFlowModel | None
     _blocks: Ps1BlockModel | None
     _cycles: CycleModel | None
+    _variable_flow: Ps1VariableFlow | None
 
     @property
     def model(self) -> Ps1SemanticModel:
@@ -119,6 +122,16 @@ class Ps1ModelCache(ModelCacheBase):
         `ForEach-Object` body reads as running exactly once.
         """
         return self._lazy('_cycles', lambda: CycleModel(self.control_flow, self.blocks.body_site))
+
+    @property
+    def variable_flow(self) -> Ps1VariableFlow:
+        """
+        Which write each variable read observes, over `model`, `control_flow` and `blocks`. The one
+        place that question is answered: a pass that decides what a name holds at a point asks here
+        rather than walking the tree for an assignment that looks near enough.
+        """
+        return self._lazy('_variable_flow', lambda: build_variable_flow(
+            self.model, self.control_flow, self.blocks))
 
     @property
     def oracle(self) -> TypeOracle:
