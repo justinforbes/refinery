@@ -274,11 +274,9 @@ class Ps1BlockModel:
         if not isinstance(owner, Ps1ScriptBlock):
             return None
         facts = self.facts(owner)
-        if facts.iteration is Ps1BlockIteration.REPEATED:
-            return owner, True
         if facts.site is None:
             return None
-        return facts.site, False
+        return facts.site, facts.iteration is Ps1BlockIteration.REPEATED
 
 
 def build_block_model(root: Ps1Script) -> Ps1BlockModel:

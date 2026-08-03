@@ -607,3 +607,75 @@ class TestPs1ConstantInliningExtra(TestPs1):
     def test_preference_variable_not_substituted_when_assigned(self):
         result = self._deobfuscate("$VerbosePreference = 'Custom'\nWrite-Output $VerbosePreference[1]")
         self.assertIn("$VerbosePreference", result)
+
+    def test_a_write_the_body_performs_on_its_caller_is_not_a_dead_write(self):
+        """
+        `Ps1SemanticModel` binds the bare write inside a `. { }` or a `ForEach-Object` body to that
+        block, but the block performs it on whoever runs it, so `Binding.reads` is not the whole
+        list of readers and substituting all of them does not make the write dead.
+        """
+        for source, expected in (
+            (
+                ". {\n  $y = 'q'\n  Write-Host $y\n}\nWrite-Host $y",
+                ". {\n  $y = 'q'\n  Write-Host 'q'\n}\nWrite-Host $y",
+            ),
+            (
+                "1..3 | % {\n  $x = 'b'\n  Write-Host $x\n}\nWrite-Host $x",
+                "1..3 | % {\n  $x = 'b'\n  Write-Host 'b'\n}\nWrite-Host $x",
+            ),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+    def test_a_write_a_child_scope_performs_is_still_a_dead_write(self):
+        """
+        The floor under the test above: `&` opens a fresh scope, so nothing the block assigns
+        outlives it and refusing there would keep every write of every block.
+        """
+        self.assertEqual(
+            self._apply("& {\n  $y = 'q'\n  Write-Host $y\n}", Ps1ConstantInlining),
+            "& {\n  Write-Host 'q'\n}")
+
+    def test_a_name_an_assignment_stores_through_is_never_replaced_by_its_value(self):
+        """
+        `$x[0]` in target position names a place, not a value. A constant installed there is an
+        assignment to a literal, which is output that no longer parses.
+        """
+        for source in (
+            "$x = @(@('a', 'b'))\n$x[0][1] = 'z'\nWrite-Host $x[0][1]",
+            "$x = 'hello'\n($x).Length = 5\nWrite-Host $x",
+            "$x = 'hello'\n$x.A.B = 5\nWrite-Host $x",
+            "$x = @('a', 'b')\n$x[0], $x[1] = 'p', 'q'\nWrite-Host $x[0]",
+        ):
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1ConstantInlining)
+
+    def test_a_name_the_engine_maintains_holds_no_value_a_reader_may_be_given(self):
+        """
+        `-match` rewrites `$Matches` and the pipeline rebinds `$_` per object, so what the script
+        last assigned to one of these is not what the next read of it sees.
+        """
+        for source in (
+            "$Matches = 'nope'\nif ('abc' -match 'b') {\n  Write-Host $Matches\n}",
+            "$_ = 'a'\n1..3 | % {\n  Write-Host $_\n}",
+        ):
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1ConstantInlining)
+
+    def test_a_stored_block_dot_sourced_into_a_body_writes_that_body(self):
+        """
+        `. $b` performs the block's bare writes on whoever dot-sources it, so a block written at the
+        root reaches a binding local to a body it is not written inside.
+        """
+        self._assertUnchanged(
+            "$b = {\n  $x = 'INNER'\n}\n. {\n  $x = 'OUTER'\n  . $b\n  Write-Host $x\n}",
+            Ps1ConstantInlining)
+
+    def test_a_read_after_a_store_that_may_not_have_finished_gets_no_value(self):
+        """
+        The handler is entered on exactly the run in which the cast raised and `$x` was never
+        stored, and the statement after the whole `try` is reached that way too.
+        """
+        self._assertUnchanged(
+            "try {\n  [int]$x = 'abc'\n} catch {}\nWrite-Host $x",
+            Ps1ConstantInlining)

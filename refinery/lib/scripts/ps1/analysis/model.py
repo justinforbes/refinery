@@ -38,8 +38,14 @@ from typing import Iterator
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.ast import assignment_of
 from refinery.lib.scripts.ps1.model import (
+    Ps1ArrayLiteral,
+    Ps1AssignmentExpression,
+    Ps1CastExpression,
     Ps1ForEachLoop,
     Ps1FunctionDefinition,
+    Ps1IndexExpression,
+    Ps1MemberAccess,
+    Ps1ParenExpression,
     Ps1ParameterDeclaration,
     Ps1PropertyMember,
     Ps1ScopeModifier,
@@ -85,6 +91,43 @@ def observes_previous_value(var: Ps1Variable) -> bool:
     parent = var.parent
     if isinstance(parent, Ps1UnaryExpression) and parent.operator in ('++', '--'):
         return parent.operand is var
+    return False
+
+
+def is_mutated_in_place(var: Ps1Variable) -> bool:
+    """
+    Whether an assignment stores *through* `var` rather than into it — the `$x` of `$x[0] = 'z'`, of
+    `$x.Length = 5`, of `$x[0][1] = 'z'` and of the multi-assignment `$x[0], $x[1] = 'p', 'q'`.
+
+    Such an occurrence reads the variable in order to reach the part that is written, so
+    `is_write_occurrence` calls it a read and no occurrence of the name records the change. It is
+    also a position no value may be installed in: substituting `$x` there produces an assignment to
+    a literal, which is not a program.
+
+    The whole receiver chain counts, not just its innermost step. A target is only a target once the
+    index and member accesses, the parentheses, the casts and the multi-assignment slots between it
+    and the assignment have been climbed, and stopping at the first of them answers `$x[0] = 'z'`
+    while missing `$x[0][1] = 'z'`.
+    """
+    cursor: Node = var
+    parent = cursor.parent
+    through = False
+    while parent is not None:
+        if isinstance(parent, (Ps1IndexExpression, Ps1MemberAccess)):
+            if parent.object is not cursor:
+                return False
+            through = True
+        elif isinstance(parent, Ps1CastExpression):
+            if parent.operand is not cursor:
+                return False
+        elif isinstance(parent, (Ps1ParenExpression, Ps1ArrayLiteral)):
+            pass
+        elif isinstance(parent, Ps1AssignmentExpression):
+            return through and parent.target is cursor
+        else:
+            return False
+        cursor = parent
+        parent = cursor.parent
     return False
 
 

@@ -302,3 +302,54 @@ class TestPs1FlowUnknowns(TestBase):
         """
         self.assertIs(
             self._unknowns("$x = @('a', 'b'); Write-Host $x[0]"), Ps1FlowUnknown.NONE)
+
+
+class TestPs1VariableFlowRegressions(TestPs1VariableFlow):
+
+    def test_a_use_the_throwing_path_also_reaches_observes_no_store(self):
+        """
+        The statement after a `try` is reached both by the body completing and by the handler it
+        threw into, so dominance and a completed-exit walk on their own both accept it. The run that
+        enters the handler is the run in which the cast raised and `$x` was never stored.
+        """
+        self.assertIsNone(self._observed("try { [int]$x = 'abc' } catch { }; Write-Host $x"))
+
+    def test_a_statement_a_trap_resumes_into_observes_no_store(self):
+        """
+        The same asymmetry spelled as error handling: `continue` resumes at the statement after the
+        one that threw, so that statement is reached with the store never performed.
+        """
+        self.assertIsNone(self._observed("trap { continue }; [int]$x = 'abc'; Write-Host $x"))
+
+    def test_a_use_reached_only_by_completing_still_observes_the_store(self):
+        """
+        The floor under both tests above: refusing whenever the definition has an exceptional edge
+        at all refuses every write inside a `try`.
+        """
+        self.assertEqual(self._observed("try { $x = 'a'; Write-Host $x } catch { }"), 0)
+
+
+class TestPs1FlowUnknownRegressions(TestPs1FlowUnknowns):
+
+    def test_a_stored_block_outside_the_binding_body_is_still_a_deferred_writer(self):
+        """
+        `. $b` performs the block's bare writes on whoever dot-sources it, so a block written at the
+        root reaches a binding local to a body it is not written inside.
+        """
+        _, semantic, flow = _models(
+            "$b = { $x = 'INNER' }\n. {\n  $x = 'OUTER'\n  . $b\n  Write-Host $x\n}")
+        inner = next(
+            scope for scope in semantic.script_scope.children if 'x' in scope.bindings)
+        self.assertIn(
+            Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY,
+            flow.unknowns(inner.bindings['x']))
+
+    def test_a_receiver_chain_an_assignment_stores_through_mutates_the_binding_in_place(self):
+        for source in (
+            "$x = @(@('a','b'))\n$x[0][1] = 'z'",
+            "$x = 'abc'\n$x.A.B = 5",
+            "$x = @('a','b')\n($x)[0] = 'z'",
+            "$x = @('a','b')\n$x[0], $x[1] = 'p', 'q'",
+        ):
+            with self.subTest(source):
+                self.assertIn(Ps1FlowUnknown.MUTATED_IN_PLACE, self._unknowns(source))

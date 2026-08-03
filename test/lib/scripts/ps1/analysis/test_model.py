@@ -5,6 +5,7 @@ from test import TestBase
 from refinery.lib.scripts.ps1.analysis.model import (
     ScopeKind,
     build_semantic_model,
+    is_mutated_in_place,
     is_write_occurrence,
     observes_previous_value,
     replaces_value,
@@ -179,3 +180,40 @@ class TestPs1WriteOccurrenceKinds(TestBase):
                 write = self._write(source)
                 self.assertFalse(replaces_value(write))
                 self.assertFalse(observes_previous_value(write))
+
+    @staticmethod
+    def _read(source: str, name: str = 'x') -> Ps1Variable:
+        for node in Ps1Parser(source).parse().walk():
+            if isinstance(node, Ps1Variable) and node.name.lower() == name:
+                if not is_write_occurrence(node):
+                    return node
+        raise AssertionError(F'no read of ${name}')
+
+    def test_an_assignment_through_a_part_of_a_variable_mutates_it_in_place(self):
+        for source in (
+            "$x[0] = 'z'",
+            '$x.Length = 5',
+            "$x[0][1] = 'z'",
+            '$x.A.B = 5',
+            "($x)[0] = 'z'",
+            "([array]$x)[0] = 'z'",
+            "$x[0], $x[1] = 'p', 'q'",
+            "$x[0] += 'z'",
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_mutated_in_place(self._read(source)))
+
+    def test_a_variable_an_assignment_does_not_store_through_is_not_mutated_in_place(self):
+        for source in (
+            'Write-Host $x[0]',
+            'Write-Host $x.Length',
+            "$a[$x] = 'z'",
+            "$a[0] = $x",
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_mutated_in_place(self._read(source)))
+
+    def test_a_variable_an_assignment_replaces_outright_is_not_mutated_in_place(self):
+        for source in ("$x = 'a'", "$x, $y = 'p', 'q'", "[string]$x = 'a'"):
+            with self.subTest(source):
+                self.assertFalse(is_mutated_in_place(self._write(source)))

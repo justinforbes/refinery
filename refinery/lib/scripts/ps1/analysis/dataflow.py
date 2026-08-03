@@ -21,8 +21,11 @@ Dominance says a statement ran, not that its store completed —
 is not the textbook one — so `try { [int]$x = 'abc' } catch { Write-Host $x }` must not publish
 `'abc'`, because the run that enters the handler is exactly the run in which the cast raised and the
 store never happened. Dominance cannot see this: the handler *is* dominated by the statement that
-failed to store it. `_reached_after_completing` is the rule, and it is deliberately about the first
-edge only — once control has left the statement normally, the store is done.
+failed to store it. `Ps1VariableFlow._observes_completed_store` is the rule, and it decides on the
+first edge only — once control has left the statement normally, the store is done. It is asked of
+both walks, because a handler rejoins: the statement after a whole `try` and the one a
+`trap { continue }` resumes into are reached by completing *and* by throwing, and a use the throwing
+path reaches at all is a use that may observe no store.
 
 **A read inside a body is evaluated where that body runs, and that is a position this layer holds
 whenever `Ps1BlockModel` knows the site.** `$v = 'a'; 1..3 | %{ $v }` reads `$v` at the pipeline,
@@ -62,17 +65,20 @@ from __future__ import annotations
 
 import enum
 
+from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
 from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, Ps1BlockReach
-from refinery.lib.scripts.ps1.analysis.model import Binding, Ps1SemanticModel, binding_key
-from refinery.lib.scripts.ps1.ast import in_evaluation_order, unwrap_assignment_target
+from refinery.lib.scripts.ps1.analysis.model import (
+    Binding,
+    Ps1SemanticModel,
+    binding_key,
+    is_mutated_in_place,
+)
+from refinery.lib.scripts.ps1.ast import in_evaluation_order
 from refinery.lib.scripts.ps1.model import (
-    Ps1AssignmentExpression,
-    Ps1IndexExpression,
-    Ps1MemberAccess,
     Ps1ScriptBlock,
     Ps1Variable,
 )
@@ -126,7 +132,9 @@ class Ps1VariableFlow:
         self._dominators = DominatorModel(flow)
         self._between = ReachabilityQuery(self._dominators)
         self._unknowns: dict[int, Ps1FlowUnknown] = {}
-        self._completed: dict[tuple[int, int], frozenset[int]] = {}
+        self._exits: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]] = {}
+        self._kills: dict[tuple[int, str], frozenset[int]] = {}
+        self._blocks_by_owner: dict[int, list[Ps1ScriptBlock]] = {}
         self._mutated: frozenset[str] | None = None
 
     def reaching_definition(self, read: Ps1Variable) -> Ps1Variable | None:
@@ -141,16 +149,17 @@ class Ps1VariableFlow:
         `_position_of`.
         """
         binding = self.semantic.binding_of(read)
-        if binding is None:
+        if binding is None or not binding.writes:
             return None
         if self.unknowns(binding) is not Ps1FlowUnknown.NONE:
             return None
-        graph = self.flow.locate(binding.writes[0])[0]
+        placed = {id(write): self.flow.locate(write) for write in binding.writes}
+        graph = placed[id(binding.writes[0])][0]
         use = self._position_of(read, graph)
         if use is None:
             return None
         definitions = [
-            (write, self.flow.locate(write)[1]) for write in binding.writes
+            (write, placed[id(write)][1]) for write in binding.writes
             if not self._stores_after(use, read, write)
         ]
         found = self._between.reaching_definition(
@@ -161,8 +170,7 @@ class Ps1VariableFlow:
         )
         if found is None:
             return None
-        definition = self.flow.locate(found)[1]
-        if id(use) not in self._reached_after_completing(graph, definition):
+        if not self._observes_completed_store(graph, placed[id(found)][1], use):
             return None
         return found
 
@@ -212,13 +220,8 @@ class Ps1VariableFlow:
 
     def _iter_mutated_in_place(self):
         for node in self.semantic.root.walk():
-            if not isinstance(node, Ps1AssignmentExpression):
-                continue
-            target = unwrap_assignment_target(node.target)
-            if not isinstance(target, (Ps1IndexExpression, Ps1MemberAccess)):
-                continue
-            if isinstance(target.object, Ps1Variable):
-                yield binding_key(target.object)
+            if isinstance(node, Ps1Variable) and is_mutated_in_place(node):
+                yield binding_key(node)
 
     def _position_of(self, read: Ps1Variable, graph: ControlFlowGraph) -> CfgNode | None:
         """
@@ -286,8 +289,14 @@ class Ps1VariableFlow:
         ordered against *each other* however late the block runs, and counting it against itself
         makes every binding local to a stored block unanswerable — which reads as caution and is
         simply a wrong reading of the question.
+
+        Every other block of the script is one, wherever it is written. A stored block is a value
+        and its bare writes land in the scope of whoever runs it, so `$b = { $x = 'b' }` written at
+        the root reaches the `$x` of `. { $x = 'a'; . $b; … }` just as surely as one written inside
+        that body — searching only the binding's own subtree answers for the second and misses the
+        first.
         """
-        for block in self._blocks_of(binding.scope.node):
+        for block in self._blocks_of(self.semantic.root):
             if block is binding.scope.node:
                 continue
             facts = self.blocks.facts(block)
@@ -298,16 +307,31 @@ class Ps1VariableFlow:
                     return True
         return False
 
-    @staticmethod
-    def _blocks_of(owner) -> list[Ps1ScriptBlock]:
-        return [node for node in owner.walk() if isinstance(node, Ps1ScriptBlock)]
+    def _blocks_of(self, owner: Node) -> list[Ps1ScriptBlock]:
+        """
+        Every script block written inside *owner*. Read off the tree once per owner: a caller asks
+        this per read, and the walk is the whole subtree.
+        """
+        found = self._blocks_by_owner.get(id(owner))
+        if found is None:
+            found = self._blocks_by_owner[id(owner)] = [
+                node for node in owner.walk() if isinstance(node, Ps1ScriptBlock)
+            ]
+        return found
 
-    def _block_kills(self, graph: ControlFlowGraph, binding: Binding) -> set[int]:
+    def _block_kills(self, graph: ControlFlowGraph, binding: Binding) -> frozenset[int]:
         """
         The nodes of *graph* that run a script block writing *binding* into the scope that invokes
         it. A `. { $x = 'b' }` is one statement to the graph and its store is invisible in the tree
         around it, so without this the caller's `$x` reads as never having been touched.
+
+        The answer turns on the graph and the name alone, both fixed for as long as this model
+        lives, so it is computed once per pair rather than per read.
         """
+        key = (id(graph), binding.name)
+        found = self._kills.get(key)
+        if found is not None:
+            return found
         kills: set[int] = set()
         for block in self._blocks_of(graph.owner):
             if not any(
@@ -318,31 +342,61 @@ class Ps1VariableFlow:
             placed = self.flow.locate(block)
             if placed is not None and placed[0] is graph:
                 kills.add(id(placed[1]))
-        return kills
+        found = self._kills[key] = frozenset(kills)
+        return found
 
-    def _reached_after_completing(
+    def _observes_completed_store(
         self,
         graph: ControlFlowGraph,
         definition: CfgNode,
-    ) -> frozenset[int]:
+        use: CfgNode,
+    ) -> bool:
         """
-        The ids of the nodes reached from *definition* by first leaving it *normally* — that is, on
-        a path where the statement holding the definition ran to completion.
+        Whether *use* is reached from *definition* only on runs where the statement holding the
+        definition ran to completion — that is, whether every path joining them leaves *definition*
+        by an edge that is not exceptional.
 
-        A node reached only by throwing out of *definition* is left out, and that is the whole point:
         `try { [int]$x = 'abc' } catch { … }` enters the handler because the cast failed, which is
-        exactly the run in which the store never happened. Dominance cannot see this, since the
-        handler is dominated by the statement that failed to store. Once control has left the
-        statement normally the store is done, so every edge after the first step is followed.
+        exactly the run in which the store never happened, and dominance cannot see it: the handler
+        is dominated by the statement that failed to store. Reaching the use *after* completing is
+        therefore not enough on its own, because a handler rejoins — the statement after the whole
+        `try` is reached both ways, and so is every statement a `trap { continue }` resumes into. A
+        use the throwing path also reaches has to be refused however it is spelled. Once control has
+        left the statement normally the store is done, so only the first edge out of *definition*
+        decides which walk a node belongs to.
+        """
+        completed, thrown = self._exit_reach(graph, definition)
+        return id(use) in completed and id(use) not in thrown
+
+    def _exit_reach(
+        self,
+        graph: ControlFlowGraph,
+        definition: CfgNode,
+    ) -> tuple[frozenset[int], frozenset[int]]:
+        """
+        The ids of the nodes reached from *definition* by first leaving it normally, and the ids of
+        those reached by first leaving it exceptionally.
         """
         key = (id(graph), id(definition))
-        found = self._completed.get(key)
-        if found is not None:
-            return found
+        found = self._exits.get(key)
+        if found is None:
+            found = self._exits[key] = (
+                self._reached_from(graph, definition, exceptional=False),
+                self._reached_from(graph, definition, exceptional=True),
+            )
+        return found
+
+    @staticmethod
+    def _reached_from(
+        graph: ControlFlowGraph,
+        definition: CfgNode,
+        *,
+        exceptional: bool,
+    ) -> frozenset[int]:
         seen: set[int] = set()
         stack: list[CfgNode] = []
         for successor in definition.successors:
-            if graph.is_exceptional(definition, successor):
+            if bool(graph.is_exceptional(definition, successor)) != exceptional:
                 continue
             if id(successor) not in seen:
                 seen.add(id(successor))
@@ -353,9 +407,7 @@ class Ps1VariableFlow:
                 if id(successor) not in seen:
                     seen.add(id(successor))
                     stack.append(successor)
-        found = frozenset(seen)
-        self._completed[key] = found
-        return found
+        return frozenset(seen)
 
 
 def build_variable_flow(

@@ -18,6 +18,7 @@ from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
     binding_key,
     is_assignment_write_target,
+    is_mutated_in_place,
     is_write_occurrence,
     observes_previous_value,
 )
@@ -57,6 +58,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1PipelineElement,
     Ps1RealLiteral,
     Ps1ScopeModifier,
+    Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SwitchStatement,
     Ps1TypeExpression,
@@ -139,6 +141,12 @@ _PS1_SKIP_VARIABLES = (
     | frozenset(PS1_KNOWN_VARIABLES)
     | frozenset(_PS1_DEFAULT_VARIABLES)
 )
+
+#: The names the engine maintains between statements, so what the script last assigned to one is not
+#: what it is worth at the next read: `$_` is rebound per pipeline object, `$Matches` at every
+#: `-match`, `$LASTEXITCODE` by every native command, and a preference variable is read by the
+#: engine itself. No write of one of these establishes a value this pass may carry to a reader.
+_PS1_ENGINE_VARIABLES = _PS1_AUTOMATIC_VARIABLES | frozenset(_PS1_DEFAULT_VARIABLES)
 
 _MIN_EXPANSION_BUDGET = 256
 
@@ -309,9 +317,10 @@ class _ConstantTable:
             if len(targets) != 1:
                 continue
             key = _candidate_key(targets[0])
-            if key is None or key in _PS1_DEFAULT_VARIABLES:
-                # A preference variable is the engine's as much as the script's: it reads and writes
-                # these names between statements, so what the script last assigned is not what the
+            if key is None or key in _PS1_ENGINE_VARIABLES:
+                # A preference or automatic variable is the engine's as much as the script's: it
+                # reads and writes these names between statements — `$_` per pipeline object,
+                # `$Matches` at every `-match` — so what the script last assigned is not what the
                 # name is worth. The ambient table is the only thing that may answer for one, and it
                 # answers only while the script leaves the name alone.
                 continue
@@ -424,7 +433,7 @@ class Ps1ConstantInlining(Transformer):
             return None
         state = _Inlining(table, flow, self._blocked_by_expansion(node, table))
         self._substitute(node, state)
-        self._remove_dead_assignments(table, state.record)
+        self._remove_dead_assignments(table, state)
         return None
 
     def _blocked_by_expansion(self, root: Node, table: _ConstantTable) -> set[str]:
@@ -485,6 +494,12 @@ class Ps1ConstantInlining(Transformer):
         answers, so descending would only spend a query per reference to be told nothing; and a
         class body is opaque to the graphs, so a property initializer inside one locates to the
         class statement and would be ordered against code it does not run beside.
+
+        An occurrence an assignment stores *through* is left alone whatever the flow model would say
+        about it. `$x[0] = 'z'` names a place, not a value, and a constant installed there is an
+        assignment to a literal — output that no longer parses. The flow model refuses such a name
+        as well, through `Ps1FlowUnknown.MUTATED_IN_PLACE`, but that is a fact about the *binding*
+        and this is a fact about the *position*: the ambient table answers without a binding at all.
         """
         for node in list(_walk_outer_scope(root)):
             if isinstance(node, Ps1IndexExpression):
@@ -496,10 +511,12 @@ class Ps1ConstantInlining(Transformer):
                 # would install the whole value where an element of it now stands.
                 state.handled.add(id(var))
                 key = _candidate_key(var)
-                if key is not None:
+                if key is not None and not is_mutated_in_place(var):
                     self._substitute_index_reference(node, var, key, state)
             elif isinstance(node, Ps1Variable):
                 if id(node) in state.handled or is_write_occurrence(node):
+                    continue
+                if is_mutated_in_place(node):
                     continue
                 key = _candidate_key(node)
                 if key is not None and key not in state.blocked:
@@ -552,7 +569,7 @@ class Ps1ConstantInlining(Transformer):
             self.mark_changed()
             state.installed(node, replacement)
 
-    def _remove_dead_assignments(self, table: _ConstantTable, record: _InlineRecord):
+    def _remove_dead_assignments(self, table: _ConstantTable, state: _Inlining):
         """
         Delete the constant writes of every binding whose value nothing observes any more.
 
@@ -567,10 +584,20 @@ class Ps1ConstantInlining(Transformer):
         is never dead however many of its reads were substituted; and a write whose value this pass
         holds no constant for stays, because deleting it would drop whatever it does to produce that
         value.
+
+        `Binding.reads` is the whole list of readers only when the binding ends with its own body.
+        `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel` binds a bare write to the
+        block it is written in, and `refinery.lib.scripts.ps1.analysis.blocks.Ps1BlockModel` is
+        the layer that says a `. { }` or a `ForEach-Object` body performs that write on whoever runs
+        it — where the readers are other bindings entirely, and `_block_kills` already honours the
+        same fact on the read side. Deleting such a write leaves the caller reading the value from
+        before the body.
         """
         plans = Ps1RemovalPlans()
-        for binding, replacements in record:
+        for binding, replacements in state.record:
             if len(replacements) < len(binding.reads):
+                continue
+            if self._writes_leave_the_body(state.flow, binding):
                 continue
             if any(observes_previous_value(write) for write in binding.writes):
                 continue
@@ -586,6 +613,17 @@ class Ps1ConstantInlining(Transformer):
                     plans.propose(statement)
         if plans.commit():
             self.mark_changed()
+
+    @staticmethod
+    def _writes_leave_the_body(flow: Ps1VariableFlow, binding: Binding) -> bool:
+        """
+        Whether *binding*'s writes land in the scope of whatever runs the body they are written in,
+        rather than in a scope that ends with that body. True for every block but a proven child
+        scope — see `refinery.lib.scripts.ps1.analysis.blocks` for why that asymmetry is the safe
+        one.
+        """
+        node = binding.scope.node
+        return isinstance(node, Ps1ScriptBlock) and flow.blocks.may_write_caller_scope(node)
 
     _find_removable_statement = staticmethod(_find_removable_statement)
 
