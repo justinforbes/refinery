@@ -121,15 +121,26 @@ class ReachingModel:
                 kills.add(id(def_node))
         for call, node in self._graph_calls(graph):
             target = self.effects.static_callee(call)
-            if target is not None and self.effects.function_can_mutate(target, binding):
-                kills.add(id(node))
+            if target is None or not self.effects.function_can_mutate(target, binding):
+                continue
+            if node is None:
+                return None
+            kills.add(id(node))
         return frozenset(kills)
 
-    def _graph_calls(self, graph: ControlFlowGraph) -> list[tuple[JsCallExpression, CfgNode]]:
+    def _graph_calls(
+        self, graph: ControlFlowGraph,
+    ) -> list[tuple[JsCallExpression, CfgNode | None]]:
         """
-        The call expressions whose control-flow node lies in *graph*, each paired with that node. A call
-        inside a nested function locates into that function's own graph and is left out. Memoized per
-        graph.
+        The call expressions of *graph*'s body that are not inside a nested function, each paired
+        with the control-flow node that evaluates it, or with `None` when the graphs place it
+        nowhere. Memoized per graph.
+
+        A call inside a nested function locates into that function's own graph and is left out. A
+        call the graphs do not place at all is a different answer and is kept: it is evaluated when
+        the body around it is invoked, which is a point no node of this graph stands for — a
+        parameter default of a function *expression* is one — so it can neither be ordered here nor
+        dismissed, and the caller has to refuse rather than drop the kill.
         """
         cached = self._call_cache.get(id(graph))
         if cached is None:
@@ -138,7 +149,9 @@ class ReachingModel:
                 if not isinstance(node, JsCallExpression):
                     continue
                 located = self.dominance.locate(node)
-                if located is not None and located[0] is graph:
+                if located is None:
+                    cached.append((node, None))
+                elif located[0] is graph:
                     cached.append((node, located[1]))
             self._call_cache[id(graph)] = cached
         return cached

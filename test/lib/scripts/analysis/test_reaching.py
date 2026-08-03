@@ -100,3 +100,22 @@ class TestReachingDefinition(TestBase):
         """
         edges = {'a': ['b'], 'b': ['c'], 'c': [], 'orphan': []}
         self.assertEqual(self._observed(edges, [('first', 'a'), ('lost', 'orphan')], 'c'), 'first')
+
+    def test_two_definitions_that_do_not_form_a_chain_are_refused(self):
+        """
+        A use in an unreachable *cycle* keeps the seed the iteration starts from — its predecessor is
+        as unreachable as it is, so nothing ever narrows either — and is therefore reported as
+        dominated by every node of the graph. Both branch definitions then qualify while neither
+        dominates the other, which the nearest-of-a-chain scan has no answer for: it would return
+        whichever the caller happened to list first.
+        """
+        edges = {
+            'a': ['t', 'f'],
+            't': ['j'],
+            'f': ['j'],
+            'j': [],
+            'u': ['v'],
+            'v': ['u'],
+        }
+        self.assertIsNone(self._observed(edges, [('taken', 't'), ('other', 'f')], 'u'))
+        self.assertIsNone(self._observed(edges, [('other', 'f'), ('taken', 't')], 'u'))

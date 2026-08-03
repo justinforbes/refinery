@@ -134,3 +134,24 @@ class TestReaching(TestBase):
 
     def test_reaches_across_bare_var_declaration(self):
         self.assertTrue(self._free_variable_reaches('var r = x; var x; r;'))
+
+    def test_does_not_reach_past_a_mutating_call_the_graphs_do_not_place(self):
+        """
+        A parameter default of a function *expression* is evaluated when that function is invoked,
+        which is a point no node of the enclosing graph stands for, so `locate` answers `None` for
+        the call inside it. That is not the same answer as the call belonging to another graph: it
+        says the call cannot be ordered here, and a call that may write the binding then has to
+        refuse rather than be dropped from the kills.
+        """
+        self.assertFalse(self._query(
+            'var x = 1; function m() { x = 2; } var f = function (a = m()) { return a; }; f(); x;'
+        ))
+
+    def test_reaches_past_an_unplaced_call_that_does_not_mutate(self):
+        """
+        The floor under the test above: refusing on every unplaced call refuses every script that
+        gives a function expression a parameter default.
+        """
+        self.assertTrue(self._query(
+            'var x = 1; function m() { y = 2; } var f = function (a = m()) { return a; }; f(); x;'
+        ))
