@@ -101,13 +101,12 @@ class TestReachingDefinition(TestBase):
         edges = {'a': ['b'], 'b': ['c'], 'c': [], 'orphan': []}
         self.assertEqual(self._observed(edges, [('first', 'a'), ('lost', 'orphan')], 'c'), 'first')
 
-    def test_two_definitions_that_do_not_form_a_chain_are_refused(self):
+    def test_a_use_no_path_reaches_observes_no_definition(self):
         """
-        A use in an unreachable *cycle* keeps the seed the iteration starts from — its predecessor is
-        as unreachable as it is, so nothing ever narrows either — and is therefore reported as
-        dominated by every node of the graph. Both branch definitions then qualify while neither
-        dominates the other, which the nearest-of-a-chain scan has no answer for: it would return
-        whichever the caller happened to list first.
+        A use in an unreachable cycle is ordered against nothing, so no definition qualifies and the
+        answer does not depend on the order the caller listed them in. Reporting such a use as
+        dominated by both branch definitions instead — which a dominator set an unreachable region
+        never narrows does — would make the selection return whichever came first.
         """
         edges = {
             'a': ['t', 'f'],

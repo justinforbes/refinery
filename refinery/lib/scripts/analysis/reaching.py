@@ -95,15 +95,10 @@ class ReachabilityQuery:
         A definition qualifies when it strictly dominates *use*: it runs first on every path there,
         and does not merely share *use*'s statement, which this granularity cannot order. Of those,
         the *nearest* is the one every other qualifying definition dominates — they form a chain,
-        because the dominators of any node do — and it is the only one whose value can survive, since
-        each of the others is overwritten by it.
-
-        That they form a chain is checked rather than assumed. It is a property of the *dominator
-        sets*, and an unreachable region can make those sets report more than they should — a node
-        with no path from the entry keeps its seed, so a node on a cycle with one is reported as
-        dominated by everything. Two qualifying definitions neither of which dominates the other
-        would make the scan above return whichever the caller listed first, so the answer is refused
-        instead.
+        because the dominators of any node are the path from it to the root of the dominance tree —
+        and it is the only one whose value can survive, since each of the others is overwritten by
+        it. Two qualifying definitions sharing one node are refused before the scan, because nothing
+        orders them and the scan would return whichever the caller listed first.
 
         **Every definition other than the chosen one is a kill, and the caller cannot opt out.** That
         is what makes an earlier definition re-entered by a back edge, and a definition on a branch
@@ -127,11 +122,6 @@ class ReachabilityQuery:
         for value, node in qualifying[1:]:
             if self._dominators.dominates_node(graph, nearest_node, node):
                 nearest, nearest_node = value, node
-        for _, node in qualifying:
-            if node is nearest_node:
-                continue
-            if not self._dominators.dominates_node(graph, node, nearest_node):
-                return None
         blocking = {id(node) for _, node in definitions if node is not nearest_node}
         blocking.update(kills)
         if self.any_between(nearest_node, use, blocking):

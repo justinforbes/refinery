@@ -679,3 +679,38 @@ class TestPs1ConstantInliningExtra(TestPs1):
         self._assertUnchanged(
             "try {\n  [int]$x = 'abc'\n} catch {}\nWrite-Host $x",
             Ps1ConstantInlining)
+
+
+class TestPs1ConstantInliningAroundUnreachableCode(TestPs1):
+    """
+    Code no path reaches orders nothing, in either direction: it neither blocks a fold between two
+    statements that do run, nor lets a value into a region that never runs. Obfuscated scripts carry
+    a great deal of it, so both directions are the ordinary case rather than the exotic one.
+    """
+
+    def test_a_dead_tail_does_not_block_the_fold_at_the_statement_after_it(self):
+        """
+        `$y = 'q'` cannot run, but it is still what the branch falls out of into the statement after
+        it, and `$x = 'a'` runs before that statement on every path there is. PowerShell prints `a`.
+        """
+        self.assertEqual(
+            self._apply("$x = 'a'\nif ($c) { exit; $y = 'q' }\nWrite-Host $x", Ps1ConstantInlining),
+            "if ($c) {\n  exit\n  $y = 'q'\n}\nWrite-Host 'a'")
+
+    def test_a_read_no_path_reaches_observes_no_definition(self):
+        """
+        Nothing enters the loop after `exit`, so no assignment is ordered against the read inside it
+        — not even the one a reachable read in the same place would observe.
+        """
+        self._assertUnchanged(
+            "$x = 'a'\nexit\nwhile ($true) {\n  Write-Host $x\n}", Ps1ConstantInlining)
+
+    def test_two_writes_neither_of_which_can_run_first_do_not_pick_a_winner(self):
+        """
+        Both arms precede the loop in the source and neither precedes it in the graph, so any rule
+        other than refusing returns whichever of the two was enumerated first.
+        """
+        self._assertUnchanged(
+            "if ($c) {\n  $x = 'a'\n} else {\n  $x = 'b'\n}\nexit\n"
+            "while ($true) {\n  Write-Host $x\n}",
+            Ps1ConstantInlining)
