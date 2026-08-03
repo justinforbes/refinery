@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import io
 
-from typing import TypeGuard
+from typing import Iterator, TypeGuard
 
 from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1.data import BUILTIN_VARIABLES, KNOWN_ALIAS
@@ -438,6 +438,36 @@ def assignment_target_is_all_variables(target: Node | None) -> bool:
     if isinstance(target, Ps1ArrayLiteral):
         return all(isinstance(unwrap_assignment_target(e), Ps1Variable) for e in target.elements)
     return False
+
+
+def in_evaluation_order(node: Node) -> Iterator[Node]:
+    """
+    The subtree of `node` in the order PowerShell evaluates it, `node` itself first.
+
+    Source order, with one inversion: an assignment produces the value before it stores it, so its
+    value is yielded ahead of its target. That is why `$x = [char]($x)` reads the previous `$x` and
+    why `$x, $y = $y, $x` swaps. Every other form evaluates its parts left to right, which is the
+    order `refinery.lib.scripts.Node.children` returns them in.
+
+    This orders the parts of *one* statement against each other, which the control-flow graphs do
+    not: a graph node stands for a whole statement, so a read and a write inside it share a point.
+    It says nothing across statements, where the graph is the authority and source order is not.
+    """
+    stack: list[Node] = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(reversed(list(_evaluation_children(current))))
+
+
+def _evaluation_children(node: Node) -> Iterator[Node]:
+    if isinstance(node, Ps1AssignmentExpression) and node.value is not None:
+        yield node.value
+        for child in node.children():
+            if child is not node.value:
+                yield child
+        return
+    yield from node.children()
 
 
 def assignment_of(var: Ps1Variable) -> Ps1AssignmentExpression | None:

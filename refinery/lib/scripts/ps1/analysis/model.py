@@ -70,6 +70,24 @@ def replaces_value(var: Ps1Variable) -> bool:
     return assignment is not None and assignment.operator == '='
 
 
+def observes_previous_value(var: Ps1Variable) -> bool:
+    """
+    Whether `var` occupies a position that reads the variable as part of writing it: the target of a
+    compound assignment (`+=`, `.=`, …) or the operand of `++`/`--`. Such a write is also a use, so a
+    binding that has one is not dead however many of its `Binding.reads` a caller has accounted for.
+
+    The complement of `replaces_value` over assignment targets only. A `foreach` variable and a
+    parameter declaration are neither: each is handed a value from outside and observes nothing.
+    """
+    assignment = assignment_of(var)
+    if assignment is not None:
+        return assignment.operator != '='
+    parent = var.parent
+    if isinstance(parent, Ps1UnaryExpression) and parent.operator in ('++', '--'):
+        return parent.operand is var
+    return False
+
+
 def is_write_occurrence(var: Ps1Variable) -> bool:
     """
     Whether `var` occurs in a position that writes it: the target of an assignment (including a
@@ -98,7 +116,7 @@ def _is_member_declaration(var: Ps1Variable) -> bool:
     return isinstance(parent, Ps1PropertyMember) and parent.variable is var
 
 
-def _binding_key(var: Ps1Variable) -> str:
+def binding_key(var: Ps1Variable) -> str:
     """
     The key a variable binds under within a scope's binding table: its lowercased name, prefixed
     with `env:` for an environment variable so the process-global `$env:X` namespace stays distinct
@@ -289,7 +307,7 @@ class Ps1SemanticModel:
         scope = self._defining_scope(var, current)
         if scope is None:
             return
-        key = _binding_key(var)
+        key = binding_key(var)
         if key not in scope.bindings:
             scope.bindings[key] = Binding(name=key, scope=scope)
 
@@ -335,13 +353,13 @@ class Ps1SemanticModel:
         defining = self._defining_scope(var, scope)
         if defining is None:
             return None
-        return defining.bindings.get(_binding_key(var))
+        return defining.bindings.get(binding_key(var))
 
     def _attribute_read(self, var: Ps1Variable, scope: Scope):
         if var.scope is Ps1ScopeModifier.NONE:
             self._attribute_bare_read(var, scope)
         elif var.scope is Ps1ScopeModifier.ENV:
-            binding = self.root_scope.bindings.get(_binding_key(var))
+            binding = self.root_scope.bindings.get(binding_key(var))
             if binding is not None:
                 binding.reads.append(var)
                 self._binding_of[id(var)] = binding

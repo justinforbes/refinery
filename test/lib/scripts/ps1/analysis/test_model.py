@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from test import TestBase
 
-from refinery.lib.scripts.ps1.analysis.model import ScopeKind, build_semantic_model
+from refinery.lib.scripts.ps1.analysis.model import (
+    ScopeKind,
+    build_semantic_model,
+    is_write_occurrence,
+    observes_previous_value,
+    replaces_value,
+)
 from refinery.lib.scripts.ps1.model import Ps1AssignmentExpression, Ps1Variable
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
@@ -133,3 +139,43 @@ class TestPs1SemanticModel(TestBase):
             n for n in model.root.walk()
             if isinstance(n, Ps1Variable) and n.name.lower() == 'x')
         self.assertIs(model.scope_of(inner), function_scope)
+
+
+class TestPs1WriteOccurrenceKinds(TestBase):
+    """
+    Which write positions also read the variable. A caller that removes a write on the grounds that
+    nothing reads the binding any more has to count these, and the difference between `=` and `+=`
+    is the whole of it.
+    """
+
+    @staticmethod
+    def _write(source: str, name: str = 'x') -> Ps1Variable:
+        for node in Ps1Parser(source).parse().walk():
+            if isinstance(node, Ps1Variable) and node.name.lower() == name:
+                if is_write_occurrence(node):
+                    return node
+        raise AssertionError(F'no write of ${name}')
+
+    def test_a_plain_assignment_replaces_without_observing(self):
+        write = self._write("$x = 'a'")
+        self.assertTrue(replaces_value(write))
+        self.assertFalse(observes_previous_value(write))
+
+    def test_a_compound_assignment_observes_the_previous_value(self):
+        for source in ("$x += 'a'", '$x -= 1', '$x *= 2', '$x /= 2', '$x %= 2'):
+            with self.subTest(source):
+                write = self._write(source)
+                self.assertFalse(replaces_value(write))
+                self.assertTrue(observes_previous_value(write))
+
+    def test_an_increment_observes_the_previous_value(self):
+        for source in ('$x++', '$x--'):
+            with self.subTest(source):
+                self.assertTrue(observes_previous_value(self._write(source)))
+
+    def test_a_value_handed_in_from_outside_observes_nothing(self):
+        for source in ('foreach ($x in 1, 2) { }', 'function f { param($x) }'):
+            with self.subTest(source):
+                write = self._write(source)
+                self.assertFalse(replaces_value(write))
+                self.assertFalse(observes_previous_value(write))

@@ -24,12 +24,30 @@ store never happened. Dominance cannot see this: the handler *is* dominated by t
 failed to store it. `_reached_after_completing` is the rule, and it is deliberately about the first
 edge only — once control has left the statement normally, the store is done.
 
-**A read that cannot be ordered against its writes is not answered.** A block is a value, so `$b = {
-Write-Host $x }` may be invoked before or after any statement here; ordering the read inside it
-against the script around it reads the script as if the block ran there. That is not a special case —
-it falls out of `WRITE_IN_ANOTHER_BODY`, since the read and the writes then sit in different graphs.
-A read whose writes are all in its *own* body is answered normally, block or not, which is why there
-is no blanket refusal for blocks.
+**A read inside a body is evaluated where that body runs, and that is a position this layer holds
+whenever `Ps1BlockModel` knows the site.** `$v = 'a'; 1..3 | %{ $v }` reads `$v` at the pipeline,
+which `$v = 'a'` dominates, and refusing it because the read and the write sit in different graphs
+throws away most of what obfuscated PowerShell is made of. So the read is *projected* to its body's
+site and asked there, climbing out through each enclosing body in turn.
+
+What may not be projected is a body that does not run when its site does — a function body, a stored
+block, a block handed to something that may or may not invoke it. `$b = { Write-Host $x }` is a
+value, and ordering the read inside it against the script around it reads the script as if the block
+ran where it was written. The climb stops at the first such body and the read goes unanswered.
+
+That is a fact about *the read*, never about the binding: `$x = 'a'; function f { Write-Host $x }`
+still tells the read beside the write exactly what it observes. Widening it to the binding refuses
+every name a function body mentions, which is most of them, and — because it then answers nothing —
+leaves the question of whether a write may be *deleted* resting on nothing at all.
+
+**One statement is one point to the graphs, and PowerShell orders what is inside it.** A read and a
+write of the same name can share a control-flow node — `$x = [char]($x)`, `Write-Host $x ($x = 'new')`
+— and the graph cannot say which came first, so on its own it must refuse both. What it *can* be told
+is `refinery.lib.scripts.ps1.ast.in_evaluation_order`, which is the language's answer: a write later
+in it than the read has not happened when the read is evaluated, so it is not a definition for that
+read and is left out rather than counted against it. The exception is a statement control returns to,
+where the previous visit's store is exactly what the read observes — `while ($c) { $x = $x[0] }` — so
+the exclusion is asked of `refinery.lib.scripts.analysis.cycles.CycleModel` first.
 
 A write inside a `trap` is a case this layer gets right for the wrong reason, and the distinction
 matters if either half is touched. 5.1 runs a trap body in a child scope, so the write cannot reach a
@@ -45,11 +63,19 @@ from __future__ import annotations
 import enum
 
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
+from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, Ps1BlockReach
-from refinery.lib.scripts.ps1.analysis.model import Binding, Ps1SemanticModel
-from refinery.lib.scripts.ps1.model import Ps1ScriptBlock, Ps1Variable
+from refinery.lib.scripts.ps1.analysis.model import Binding, Ps1SemanticModel, binding_key
+from refinery.lib.scripts.ps1.ast import in_evaluation_order, unwrap_assignment_target
+from refinery.lib.scripts.ps1.model import (
+    Ps1AssignmentExpression,
+    Ps1IndexExpression,
+    Ps1MemberAccess,
+    Ps1ScriptBlock,
+    Ps1Variable,
+)
 
 
 class Ps1FlowUnknown(enum.Flag):
@@ -63,15 +89,21 @@ class Ps1FlowUnknown(enum.Flag):
     #: A write occurrence the control-flow graphs do not place. Its point of evaluation is not a
     #: point these graphs hold, so nothing can be ordered against it.
     UNPLACED_WRITE = enum.auto()
-    #: A write in a different body from a read of the same binding. Whether one body runs before
-    #: another is a question about calls, which this layer does not answer.
-    WRITE_IN_ANOTHER_BODY = enum.auto()
+    #: The binding's writes are spread over more than one body. Whether one body runs before another
+    #: is a question about calls, which this layer does not answer, so no read of it can be. A write
+    #: in one body and a *read* in another is not this: only that read is out of reach, and
+    #: `reaching_definition` refuses it where it stands.
+    WRITES_IN_SEVERAL_BODIES = enum.auto()
     #: The binding is reachable through a scope qualifier or a dynamic scope, so an occurrence that
     #: does not appear in `reads` or `writes` at all may still touch it.
     REACHED_BY_QUALIFIER = enum.auto()
     #: A body that may write this binding runs at a time this layer cannot place — a stored block, a
     #: block handed to a command that may or may not invoke it.
     WRITTEN_BY_DEFERRED_BODY = enum.auto()
+    #: A statement changes the binding's value through a part of it rather than by replacing it —
+    #: `$x[0] = 'z'`, `$x.Length = 5`. No occurrence of the name writes it, so every occurrence is in
+    #: `reads` and the change is invisible to the ordering above.
+    MUTATED_IN_PLACE = enum.auto()
 
 
 class Ps1VariableFlow:
@@ -85,35 +117,41 @@ class Ps1VariableFlow:
         semantic: Ps1SemanticModel,
         flow: ControlFlowModel,
         blocks: Ps1BlockModel,
+        cycles: CycleModel,
     ):
         self.semantic = semantic
         self.flow = flow
         self.blocks = blocks
+        self.cycles = cycles
         self._dominators = DominatorModel(flow)
         self._between = ReachabilityQuery(self._dominators)
         self._unknowns: dict[int, Ps1FlowUnknown] = {}
         self._completed: dict[tuple[int, int], frozenset[int]] = {}
+        self._mutated: frozenset[str] | None = None
 
     def reaching_definition(self, read: Ps1Variable) -> Ps1Variable | None:
         """
         The write occurrence whose value *read* observes, or `None` when no single write does.
 
-        `None` is the answer to every kind of doubt — the binding is unknown, the read is in a body
-        this layer cannot place, two writes reach, a write between them may have changed the value —
-        so a caller may treat a returned occurrence as the one and only value the read can see, and
-        must treat `None` as knowing nothing.
+        `None` is the answer to every kind of doubt — the binding is unknown, two writes reach, a
+        write between them may have changed the value — so a caller may treat a returned occurrence
+        as the one and only value the read can see, and must treat `None` as knowing nothing.
+
+        A read in another body is asked at the point that body runs, or not at all — see
+        `_position_of`.
         """
         binding = self.semantic.binding_of(read)
         if binding is None:
             return None
         if self.unknowns(binding) is not Ps1FlowUnknown.NONE:
             return None
-        located = self.flow.locate(read)
-        if located is None:
+        graph = self.flow.locate(binding.writes[0])[0]
+        use = self._position_of(read, graph)
+        if use is None:
             return None
-        graph, use = located
         definitions = [
             (write, self.flow.locate(write)[1]) for write in binding.writes
+            if not self._stores_after(use, read, write)
         ]
         found = self._between.reaching_definition(
             graph,
@@ -143,17 +181,100 @@ class Ps1VariableFlow:
         if binding.dynamic_or_qualified:
             found |= Ps1FlowUnknown.REACHED_BY_QUALIFIER
         graphs: set[int] = set()
-        for occurrence in (*binding.writes, *binding.reads):
-            placed = self.flow.locate(occurrence)
+        for write in binding.writes:
+            placed = self.flow.locate(write)
             if placed is None:
                 found |= Ps1FlowUnknown.UNPLACED_WRITE
                 continue
             graphs.add(id(placed[0]))
         if len(graphs) > 1:
-            found |= Ps1FlowUnknown.WRITE_IN_ANOTHER_BODY
+            found |= Ps1FlowUnknown.WRITES_IN_SEVERAL_BODIES
         if self._deferred_body_writes(binding):
             found |= Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY
+        if binding.name in self.mutated_in_place:
+            found |= Ps1FlowUnknown.MUTATED_IN_PLACE
         return found
+
+    @property
+    def mutated_in_place(self) -> frozenset[str]:
+        """
+        The binding keys some assignment writes through rather than to — the `$x` of `$x[0] = 'z'`
+        and of `$x.Length = 5`. Nothing here is a write occurrence, so `Ps1SemanticModel` files each
+        of them in `Binding.reads` and the ordering above sees a name whose value never changes.
+
+        Keyed by name over the whole script rather than per scope: which of two same-named bindings
+        an in-place write reaches is the question this layer cannot answer for it, and answering it
+        by scope would pick one of them and leave the other reading a value the statement replaced.
+        """
+        if self._mutated is None:
+            self._mutated = frozenset(self._iter_mutated_in_place())
+        return self._mutated
+
+    def _iter_mutated_in_place(self):
+        for node in self.semantic.root.walk():
+            if not isinstance(node, Ps1AssignmentExpression):
+                continue
+            target = unwrap_assignment_target(node.target)
+            if not isinstance(target, (Ps1IndexExpression, Ps1MemberAccess)):
+                continue
+            if isinstance(target.object, Ps1Variable):
+                yield binding_key(target.object)
+
+    def _position_of(self, read: Ps1Variable, graph: ControlFlowGraph) -> CfgNode | None:
+        """
+        The node of *graph* at which *read* is evaluated, or `None` when *graph* never evaluates it.
+
+        A read inside a body happens wherever that body runs, so a read one graph in is projected
+        onto the statement that runs its body, and again for each body around that one. It is the
+        step that lets `$v = 'a'; 1..3 | %{ $v }` be answered at all: the read sits in the block's
+        graph and every write of `$v` in the script's, and the pipeline is a point both can be
+        ordered against.
+
+        Only a body that runs exactly when its site does may be projected — `Ps1BlockReach.IMMEDIATE`
+        and nothing else. A function body runs at its call sites, a stored block whenever its value
+        is invoked, and a block handed to an unrecognized command perhaps never; giving any of them
+        the position of the statement they are *written* in is the false claim the per-body split
+        exists to avoid, so the climb stops there and the read goes unanswered.
+        """
+        located = self.flow.locate(read)
+        while located is not None:
+            found, node = located
+            if found is graph:
+                return node
+            owner = found.owner
+            if not isinstance(owner, Ps1ScriptBlock):
+                return None
+            facts = self.blocks.facts(owner)
+            if facts.reach is not Ps1BlockReach.IMMEDIATE or facts.site is None:
+                return None
+            located = self.flow.locate(facts.site)
+        return None
+
+    def _stores_after(self, use: CfgNode, read: Ps1Variable, write: Ps1Variable) -> bool:
+        """
+        Whether *write* stores its value only once *read* has already been evaluated, both of them
+        parts of the one statement *use* stands for.
+
+        Such a write is not a definition for that read and is left out of the selection entirely
+        rather than counted against it — the distinction `refinery.lib.scripts.analysis.reaching`
+        asks the caller to make, since a write left in kills whether or not it wins. What decides it
+        is `refinery.lib.scripts.ps1.ast.in_evaluation_order`, not source position: `$x = [char]($x)`
+        writes a target written to the *left* of the read and stores after it.
+
+        A statement control can return to is excluded from the exclusion: there the store of the
+        previous visit is what the read observes, so `while ($c) { $x = $x[0] }` knows nothing.
+        """
+        placed = self.flow.locate(write)
+        if use.element is None or placed is None or placed[1] is not use:
+            return False
+        if self.cycles.repeats(use.element):
+            return False
+        for node in in_evaluation_order(use.element):
+            if node is read:
+                return True
+            if node is write:
+                return False
+        return False
 
     def _deferred_body_writes(self, binding: Binding) -> bool:
         """
@@ -241,8 +362,9 @@ def build_variable_flow(
     semantic: Ps1SemanticModel,
     flow: ControlFlowModel,
     blocks: Ps1BlockModel,
+    cycles: CycleModel,
 ) -> Ps1VariableFlow:
     """
-    Build the `Ps1VariableFlow` for a script from the three models it joins.
+    Build the `Ps1VariableFlow` for a script from the models it joins.
     """
-    return Ps1VariableFlow(semantic, flow, blocks)
+    return Ps1VariableFlow(semantic, flow, blocks, cycles)

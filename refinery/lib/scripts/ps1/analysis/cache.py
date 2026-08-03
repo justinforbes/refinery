@@ -126,12 +126,12 @@ class Ps1ModelCache(ModelCacheBase):
     @property
     def variable_flow(self) -> Ps1VariableFlow:
         """
-        Which write each variable read observes, over `model`, `control_flow` and `blocks`. The one
-        place that question is answered: a pass that decides what a name holds at a point asks here
-        rather than walking the tree for an assignment that looks near enough.
+        Which write each variable read observes, over `model`, `control_flow`, `blocks` and
+        `cycles`. The one place that question is answered: a pass that decides what a name holds at a
+        point asks here rather than walking the tree for an assignment that looks near enough.
         """
         return self._lazy('_variable_flow', lambda: build_variable_flow(
-            self.model, self.control_flow, self.blocks))
+            self.model, self.control_flow, self.blocks, self.cycles))
 
     @property
     def oracle(self) -> TypeOracle:
