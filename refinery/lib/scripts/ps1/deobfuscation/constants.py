@@ -4,7 +4,7 @@ Inline constant variable references in PowerShell scripts.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import NamedTuple
+from typing import Iterator
 
 from refinery.lib.scripts import (
     Expression,
@@ -12,13 +12,19 @@ from refinery.lib.scripts import (
     Transformer,
     _clone_node,
 )
-from refinery.lib.scripts.analysis.cycles import CycleModel
-from refinery.lib.scripts.ps1.analysis import is_assignment_write_target
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow
+from refinery.lib.scripts.ps1.analysis.model import (
+    Binding,
+    binding_key,
+    is_assignment_write_target,
+    is_write_occurrence,
+    observes_previous_value,
+)
 from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
 from refinery.lib.scripts.ps1.ast import (
+    assignment_of,
     assignment_target_variables,
-    get_body,
     is_builtin_variable,
     unwrap_parens,
 )
@@ -40,15 +46,12 @@ from refinery.lib.scripts.ps1.model import (
     Ps1DoLoop,
     Ps1EnumDefinition,
     Ps1ExpressionStatement,
-    Ps1ForEachLoop,
     Ps1ForLoop,
     Ps1FunctionDefinition,
     Ps1HereString,
     Ps1IfStatement,
     Ps1IndexExpression,
     Ps1IntegerLiteral,
-    Ps1MemberAccess,
-    Ps1ParameterDeclaration,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1PipelineElement,
@@ -138,18 +141,6 @@ _PS1_SKIP_VARIABLES = (
 )
 
 _MIN_EXPANSION_BUDGET = 256
-
-
-def _assignment_target_variable(target) -> Ps1Variable | None:
-    """
-    Extract the single variable written by an assignment target, unwrapping any type constraint
-    casts and parentheses. Handles both `$x = expr` and `[Type]$x = expr`. Returns `None` for a
-    multi-assignment target (`$a, $b = 1, 2`), which writes more than one variable; use
-    `refinery.lib.scripts.ps1.ast.assignment_target_variables` when every written variable is
-    needed.
-    """
-    variables = assignment_target_variables(target)
-    return variables[0] if len(variables) == 1 else None
 
 
 def _collect_mutated_variables(root: Node) -> set[str]:
@@ -262,81 +253,6 @@ def _walk_outer_scope(root: Node):
             stack.append(child)
 
 
-def _find_body_entry(node: Node) -> tuple[list, int] | None:
-    entries = _find_all_body_entries(node)
-    return entries[0] if entries else None
-
-
-def _find_all_body_entries(node: Node) -> list[tuple[list, int]]:
-    """
-    Walk upward from `node` and return a body-list position at every ancestor level.
-    """
-    result: list[tuple[list, int]] = []
-    cursor = node
-    while cursor.parent is not None:
-        parent = cursor.parent
-        body = get_body(parent)
-        if body is not None:
-            for idx, entry in enumerate(body):
-                if entry is cursor:
-                    result.append((body, idx))
-                    break
-        cursor = parent
-    return result
-
-
-def _find_dominating_entry(
-    node: Node,
-    entries: list[_CandidateEntry],
-    seal_points: list[tuple[list, int]] | None = None,
-) -> _CandidateEntry | None:
-    """
-    For a variable reference, find the assignment entry that dominates it. When multiple
-    constant assignments exist, pick the latest one whose scope position precedes the reference
-    without any later assignment of the same variable intervening.
-
-    If `seal_points` is provided, a candidate is rejected when a non-constant assignment
-    (seal point) falls between the candidate's position and the reference position.
-    """
-    cursor = node
-    while cursor.parent is not None:
-        parent = cursor.parent
-        body = get_body(parent)
-        if body is None:
-            cursor = parent
-            continue
-        ref_idx: int | None = None
-        for idx, entry in enumerate(body):
-            if entry is cursor:
-                ref_idx = idx
-                break
-        if ref_idx is not None:
-            best: _CandidateEntry | None = None
-            best_idx = -1
-            for candidate_entry in entries:
-                scope = candidate_entry.scope
-                if scope is None:
-                    continue
-                assign_body, assign_idx = scope
-                if assign_body is body and assign_idx < ref_idx and assign_idx > best_idx:
-                    best = candidate_entry
-                    best_idx = assign_idx
-            if best is not None and seal_points:
-                for sp_body, sp_idx in seal_points:
-                    if sp_body is body and best_idx < sp_idx <= ref_idx:
-                        best = None
-                        break
-            if best is not None:
-                return best
-        cursor = parent
-    if not entries:
-        return None
-    for candidate_entry in entries:
-        if candidate_entry.scope is None:
-            return candidate_entry
-    return None
-
-
 def _find_removable_statement(node: Node) -> Node | None:
     """
     Walk upward from an expression node to find the statement-level node that can be removed from
@@ -359,10 +275,135 @@ def _find_removable_statement(node: Node) -> Node | None:
     return None
 
 
-class _CandidateEntry(NamedTuple):
-    assign: Ps1AssignmentExpression | None
-    value: Node
-    scope: tuple[list, int] | None
+class _ConstantTable:
+    """
+    The constant value each write of a script establishes, keyed by the identity of the occurrence
+    that writes it, and the constants of the names the script never writes at all.
+
+    Two tables because they answer two questions. A write is a point in the program and the flow
+    model orders it against a read; an ambient constant is a value the engine established before the
+    script ran — `$env:ComSpec`, `$ErrorActionPreference` — and there is no point to order it
+    against. The pass this replaces held one table for both and used the absence of a position as
+    the marker, so a write it could not place and a value that has no position were the same entry.
+
+    A write with no entry here is not a lesser kind of write. It is a write whose value this pass has
+    nothing to say about, and the flow model orders and kills it exactly as it does any other:
+    sorting writes by whether their value happens to be constant is what made `if ($c) { $x = 'b' }`
+    fold and `if ($c) { $x = $y }` refuse.
+    """
+
+    def __init__(self, root: Node, flow: Ps1VariableFlow):
+        self.by_write: dict[int, Expression] = {}
+        self.ambient: dict[str, Expression] = {}
+        self.values: defaultdict[str, list[Expression]] = defaultdict(list)
+        self._collect_writes(root)
+        self._collect_ambient(root, flow)
+
+    def _collect_writes(self, root: Node):
+        for node in root.walk():
+            if not isinstance(node, Ps1AssignmentExpression):
+                continue
+            if node.operator != '=' or node.value is None:
+                continue
+            targets = assignment_target_variables(node.target)
+            if len(targets) != 1:
+                continue
+            key = _candidate_key(targets[0])
+            if key is None or key in _PS1_DEFAULT_VARIABLES:
+                # A preference variable is the engine's as much as the script's: it reads and writes
+                # these names between statements, so what the script last assigned is not what the
+                # name is worth. The ambient table is the only thing that may answer for one, and it
+                # answers only while the script leaves the name alone.
+                continue
+            if _constant_value_key(node.value) is None:
+                continue
+            value = unwrap_parens(node.value)
+            self.by_write[id(targets[0])] = value
+            self.values[key].append(value)
+
+    def _collect_ambient(self, root: Node, flow: Ps1VariableFlow):
+        """
+        A default the engine supplies is only this name's value while the script leaves the name
+        alone. Any write of it anywhere, and any statement that reaches into its value, replaces the
+        default with something this table has no claim on — including a write inside a block, which
+        `Ps1SemanticModel` binds locally but `. { }` performs on the caller.
+        """
+        touched = set(flow.mutated_in_place)
+        for node in root.walk():
+            if isinstance(node, Ps1Variable) and is_write_occurrence(node):
+                touched.add(binding_key(node))
+        for key, value in _PS1_DEFAULT_VARIABLES.items():
+            if key not in touched:
+                self._add_ambient(key, make_string_literal(value))
+        for name, value in PS1_ENV_CONSTANTS.items():
+            key = F'env:{name}'
+            if key not in touched:
+                self._add_ambient(key, make_string_literal(value))
+
+    def _add_ambient(self, key: str, value: Expression):
+        self.ambient[key] = value
+        self.values[key].append(value)
+
+    def __bool__(self) -> bool:
+        return bool(self.by_write or self.ambient)
+
+
+class _InlineRecord:
+    """
+    The read occurrences one substitution walk replaced, per binding.
+
+    The count is what licenses removing the binding's writes — every occurrence in `Binding.reads`
+    has to be accounted for, and that set includes reads this pass never walked, such as one inside a
+    function body — and the replacement nodes are where the value now stands, so they are what the
+    pass can point at when it claims that removing the write destroys nothing.
+    """
+
+    def __init__(self):
+        self._bindings: dict[int, Binding] = {}
+        self._replacements: defaultdict[int, list[Node]] = defaultdict(list)
+
+    def add(self, binding: Binding, replacement: Node):
+        self._bindings[id(binding)] = binding
+        self._replacements[id(binding)].append(replacement)
+
+    def __iter__(self) -> Iterator[tuple[Binding, list[Node]]]:
+        for key, binding in self._bindings.items():
+            yield binding, self._replacements[key]
+
+
+class _Inlining:
+    """
+    The state one substitution walk carries: the constants it may install, the flow model that says
+    which of them a read observes, the keys the expansion budget has already refused, the variable
+    occurrences an enclosing index expression has already spoken for, and what was replaced.
+    """
+
+    def __init__(self, table: _ConstantTable, flow: Ps1VariableFlow, blocked: set[str]):
+        self.table = table
+        self.flow = flow
+        self.blocked = blocked
+        self.handled: set[int] = set()
+        self.record = _InlineRecord()
+
+    def value_at(self, var: Ps1Variable, key: str) -> Expression | None:
+        """
+        The constant *var* holds where it stands, or `None` when no single value does.
+        """
+        binding = self.binding_of(var)
+        if binding is None:
+            return self.table.ambient.get(key)
+        write = self.flow.reaching_definition(var)
+        if write is None:
+            return None
+        return self.table.by_write.get(id(write))
+
+    def binding_of(self, var: Ps1Variable) -> Binding | None:
+        return self.flow.semantic.binding_of(var)
+
+    def installed(self, var: Ps1Variable, replacement: Node):
+        binding = self.binding_of(var)
+        if binding is not None:
+            self.record.add(binding, replacement)
 
 
 class Ps1ConstantInlining(Transformer):
@@ -373,369 +414,176 @@ class Ps1ConstantInlining(Transformer):
         self.min_inlines_to_prune = min_inlines_to_prune
 
     def visit(self, node: Node):
-        candidates, seal_points = self._collect_candidates(node)
-        if not candidates:
-            return None
         # Captured once rather than re-read per reference: every substitution below marks the pass
         # changed, which drops the cache, so a per-site lookup would rebuild the control-flow graphs
         # of the whole script once per inlined variable. Nothing this pass adds or removes is a
         # statement, so the graphs it would rebuild are the graphs it already has.
-        cycles = model_cache(self, node).cycles
-        remaining, inlined = self._substitute(node, candidates, seal_points, cycles)
-        self._remove_dead_assignments(candidates, remaining, inlined)
+        flow = model_cache(self, node).variable_flow
+        table = _ConstantTable(node, flow)
+        if not table:
+            return None
+        state = _Inlining(table, flow, self._blocked_by_expansion(node, table))
+        self._substitute(node, state)
+        self._remove_dead_assignments(table, state.record)
         return None
 
-    def _collect_candidates(
-        self,
-        root: Node,
-    ) -> tuple[dict[str, list[_CandidateEntry]], dict[str, list[tuple[list, int]]]]:
+    def _blocked_by_expansion(self, root: Node, table: _ConstantTable) -> set[str]:
         """
-        Collect constant assignment entries per variable. Each entry is a `_CandidateEntry` of
-        `(assignment_node, constant_value, scope_entry)`. A variable may have multiple entries
-        when it is reassigned to different constants; each entry covers the region from its
-        assignment to the next reassignment.
-
-        Also returns a dict of seal points: body-list positions of non-constant `=` assignments
-        that terminate the preceding constant region. Each seal point is expanded to all ancestor
-        body levels so that nested non-constant assignments correctly block references in outer
-        scopes.
+        The keys whose substitution would grow the script past the expansion budget, estimated over
+        every reference before any of them is installed. Purely a size heuristic: it withholds an
+        inlining that is correct, and it is asked before the flow model so that a script full of
+        references to one large array does not pay for a reaching-definition query per reference.
         """
-        rejected: set[str] = set()
-        sealed: dict[str, list[tuple[list, int]]] = {}
-        candidates: dict[str, list[_CandidateEntry]] = {}
-
-        def _reject(k: str):
-            rejected.add(k)
-            candidates.pop(k, None)
-
-        for node in _walk_outer_scope(root):
-            if isinstance(node, Ps1AssignmentExpression):
-                targets = assignment_target_variables(node.target)
-                if len(targets) > 1:
-                    for target in targets:
-                        key = _candidate_key(target)
-                        if key is not None:
-                            _reject(key)
-                elif len(targets) == 1:
-                    key = _candidate_key(targets[0])
-                    if key is None or key in rejected:
-                        continue
-                    if node.operator == '=' and node.value is not None:
-                        vk = _constant_value_key(node.value)
-                        if vk is None:
-                            sealed.setdefault(key, []).extend(_find_all_body_entries(node))
-                        else:
-                            const_value = unwrap_parens(node.value)
-                            entry = _find_body_entry(node)
-                            candidates.setdefault(key, []).append(_CandidateEntry(node, const_value, entry))
-                    else:
-                        _reject(key)
-                else:
-                    raw = node.target
-                    while isinstance(raw, (Ps1CastExpression, Ps1ParenExpression)):
-                        raw = raw.operand if isinstance(raw, Ps1CastExpression) else raw.expression
-                    if isinstance(raw, (Ps1IndexExpression, Ps1MemberAccess)) and isinstance(raw.object, Ps1Variable):
-                        key = _candidate_key(raw.object)
-                        if key is not None:
-                            _reject(key)
-
-            elif isinstance(node, Ps1ForEachLoop):
-                if isinstance(node.variable, Ps1Variable):
-                    key = _candidate_key(node.variable)
-                    if key is not None:
-                        _reject(key)
-
-            elif isinstance(node, Ps1UnaryExpression):
-                if node.operator in ('++', '--'):
-                    operand = node.operand
-                    if isinstance(operand, Ps1Variable):
-                        key = _candidate_key(operand)
-                        if key is not None:
-                            _reject(key)
-
-            elif isinstance(node, Ps1ParameterDeclaration):
-                if isinstance(node.variable, Ps1Variable):
-                    key = _candidate_key(node.variable)
-                    if key is not None:
-                        _reject(key)
-
-        result: dict[str, list[_CandidateEntry]] = {
-            key: val for key, val in candidates.items()
-            if key not in _PS1_DEFAULT_VARIABLES
-        }
-        for key, value in _PS1_DEFAULT_VARIABLES.items():
-            if key not in rejected and key not in sealed and key not in candidates:
-                result[key] = [_CandidateEntry(None, make_string_literal(value), None)]
-        for key, value in PS1_ENV_CONSTANTS.items():
-            env_key = F'env:{key}'
-            if env_key not in rejected and env_key not in sealed and env_key not in candidates:
-                result[env_key] = [_CandidateEntry(None, make_string_literal(value), None)]
-        return result, sealed
-
-    def _substitute(
-        self,
-        root: Node,
-        candidates: dict[str, list[_CandidateEntry]],
-        seal_points: dict[str, list[tuple[list, int]]],
-        cycles: CycleModel,
-    ) -> tuple[dict[str, int], dict[str, list[Node]]]:
-        """
-        Inline constant values. Returns `(remaining, inlined)` where remaining maps a lower-cased
-        name to the count of references that could not be substituted, and inlined maps it to the
-        replacement nodes that were installed for it.
-
-        The nodes matter and not just their count: they are where the value now stands, so they are
-        what this pass can point at when it claims that removing the assignment destroys nothing.
-        """
-        remaining: dict[str, int] = {}
-        inlined: dict[str, list[Node]] = {}
-        bloat_blocked: set[str] = set()
-
         synth = Ps1Synthesizer()
         script_size = len(synth.convert(root))
         max_budget = max(_MIN_EXPANSION_BUDGET, int(script_size * self.max_expansion_ratio))
 
         value_lengths: dict[str, int] = {}
         array_literals: dict[str, Ps1ArrayLiteral | None] = {}
-        for key, entries in candidates.items():
-            value_lengths[key] = max(len(synth.convert(e.value)) for e in entries)
-            array_literals[key] = _get_array_literal(entries[0].value)
+        for key, values in table.values.items():
+            value_lengths[key] = max(len(synth.convert(value)) for value in values)
+            array_literals[key] = _get_array_literal(values[0])
         elem_lengths: dict[tuple[str, int], int] = {}
 
         expansion: defaultdict[str, int] = defaultdict(int)
         for node in _walk_outer_scope(root):
             if isinstance(node, Ps1IndexExpression):
                 var = node.object
-                if isinstance(var, Ps1Variable):
-                    key = _candidate_key(var)
-                    if key is not None and key in candidates:
-                        if node.index is None:
-                            continue
-                        if isinstance(node.index, Ps1IntegerLiteral):
-                            array = array_literals[key]
-                            if array is not None:
-                                idx = node.index.value
-                                if 0 <= idx < len(array.elements):
-                                    ref_len = 1 + len(var.name) + 1 + len(node.index.raw) + 1
-                                    cache_key = (key, idx)
-                                    if cache_key not in elem_lengths:
-                                        elem_lengths[cache_key] = len(synth.convert(array.elements[idx]))
-                                    expansion[key] += max(0, elem_lengths[cache_key] - ref_len)
-                        else:
-                            const_value = candidates[key][0].value
-                            if isinstance(const_value, (Ps1StringLiteral, Ps1HereString)):
-                                var_len = 1 + len(var.name)
-                                expansion[key] += max(0, value_lengths[key] - var_len)
+                if not isinstance(var, Ps1Variable):
+                    continue
+                key = _candidate_key(var)
+                if key is None or key not in table.values or node.index is None:
+                    continue
+                if isinstance(node.index, Ps1IntegerLiteral):
+                    array = array_literals[key]
+                    if array is None:
+                        continue
+                    idx = node.index.value
+                    if not 0 <= idx < len(array.elements):
+                        continue
+                    ref_len = 1 + len(var.name) + 1 + len(node.index.raw) + 1
+                    cache_key = (key, idx)
+                    if cache_key not in elem_lengths:
+                        elem_lengths[cache_key] = len(synth.convert(array.elements[idx]))
+                    expansion[key] += max(0, elem_lengths[cache_key] - ref_len)
+                elif isinstance(table.values[key][0], (Ps1StringLiteral, Ps1HereString)):
+                    expansion[key] += max(0, value_lengths[key] - (1 + len(var.name)))
             elif isinstance(node, Ps1Variable):
                 key = _candidate_key(node)
-                if key is not None and key in candidates:
-                    if is_assignment_write_target(node):
-                        continue
-                    var_len = 1 + len(node.name)
-                    expansion[key] += max(0, value_lengths[key] - var_len)
+                if key is None or key not in table.values or is_write_occurrence(node):
+                    continue
+                expansion[key] += max(0, value_lengths[key] - (1 + len(node.name)))
 
-        for key in candidates:
-            if expansion[key] > max_budget:
-                bloat_blocked.add(key)
+        return {key for key in table.values if expansion[key] > max_budget}
 
-        assign_nodes: set[Ps1AssignmentExpression] = set()
-        for entries in candidates.values():
-            for assign_node, _, _ in entries:
-                if assign_node is not None:
-                    assign_nodes.add(assign_node)
+    def _substitute(self, root: Node, state: _Inlining):
+        """
+        Replace every reference this pass can resolve with the value it observes.
 
-        handled_vars: set[Ps1Variable] = set()
-
+        The walk stops at a function, class, or enum body. What a read inside one observes is a
+        question about the call sites that reach it, which the flow model refuses rather than
+        answers, so descending would only spend a query per reference to be told nothing; and a
+        class body is opaque to the graphs, so a property initializer inside one locates to the
+        class statement and would be ordered against code it does not run beside.
+        """
         for node in list(_walk_outer_scope(root)):
             if isinstance(node, Ps1IndexExpression):
                 var = node.object
-                if isinstance(var, Ps1Variable):
-                    key = _candidate_key(var)
-                    if key is not None and key in candidates:
-                        self._substitute_index_reference(
-                            node,
-                            var,
-                            key,
-                            candidates,
-                            seal_points,
-                            assign_nodes,
-                            remaining,
-                            inlined,
-                            handled_vars,
-                            bloat_blocked,
-                            cycles,
-                        )
-                continue
-            if isinstance(node, Ps1Variable):
-                if node not in handled_vars:
-                    key = _candidate_key(node)
-                    if key is not None and key in candidates and key not in bloat_blocked:
-                        self._substitute_variable_reference(
-                            node,
-                            key,
-                            candidates,
-                            seal_points,
-                            remaining,
-                            inlined,
-                            cycles,
-                        )
-
-        return remaining, inlined
+                if not isinstance(var, Ps1Variable):
+                    continue
+                # Spoken for either way: the walk snapshot still holds this occurrence after the
+                # index expression around it has been swapped out, and substituting it a second time
+                # would install the whole value where an element of it now stands.
+                state.handled.add(id(var))
+                key = _candidate_key(var)
+                if key is not None:
+                    self._substitute_index_reference(node, var, key, state)
+            elif isinstance(node, Ps1Variable):
+                if id(node) in state.handled or is_write_occurrence(node):
+                    continue
+                key = _candidate_key(node)
+                if key is not None and key not in state.blocked:
+                    self._substitute_variable_reference(node, key, state)
 
     def _substitute_index_reference(
         self,
         node: Ps1IndexExpression,
         var: Ps1Variable,
         key: str,
-        candidates: dict[str, list[_CandidateEntry]],
-        seal_points: dict[str, list[tuple[list, int]]],
-        assign_nodes: set[Ps1AssignmentExpression],
-        remaining: dict[str, int],
-        inlined: dict[str, list[Node]],
-        handled_vars: set[Ps1Variable],
-        bloat_blocked: set[str],
-        cycles: CycleModel,
+        state: _Inlining,
     ) -> None:
-        if node.parent in assign_nodes:
-            handled_vars.add(var)
+        const_value = state.value_at(var, key)
+        if const_value is None:
             return
-        if sp := seal_points.get(key):
-            sp = self._exclude_own_seal_points(var, key, sp, cycles)
-        entry = _find_dominating_entry(node, candidates[key], sp)
-        if entry is None:
-            remaining[key] = remaining.get(key, 0) + 1
-            handled_vars.add(var)
-            return
-        const_value = entry.value
         if not isinstance(node.index, Ps1IntegerLiteral):
-            if key in bloat_blocked:
-                remaining[key] = remaining.get(key, 0) + 1
-                handled_vars.add(var)
+            if key in state.blocked or not isinstance(const_value, Ps1StringLiteral):
                 return
-            if isinstance(const_value, Ps1StringLiteral):
-                replacement = _clone_constant(const_value)
-                if not substitute_field(node, 'object', replacement):
-                    remaining[key] = remaining.get(key, 0) + 1
-                    handled_vars.add(var)
-                    return
+            replacement = _clone_constant(const_value)
+            if substitute_field(node, 'object', replacement):
                 self.mark_changed()
-                inlined.setdefault(key, []).append(replacement)
-                handled_vars.add(var)
-            else:
-                remaining[key] = remaining.get(key, 0) + 1
-                handled_vars.add(var)
+                state.installed(var, replacement)
             return
         idx = node.index.value
         if isinstance(const_value, Ps1StringLiteral):
-            s = const_value.value
-            if idx < 0 or idx >= len(s):
-                remaining[key] = remaining.get(key, 0) + 1
+            text = const_value.value
+            if not 0 <= idx < len(text):
                 return
-            replacement = make_string_literal(s[idx])
-            if not substitute(node, replacement):
-                remaining[key] = remaining.get(key, 0) + 1
-                handled_vars.add(var)
+            replacement = make_string_literal(text[idx])
+        else:
+            array = _get_array_literal(const_value)
+            if array is None or not 0 <= idx < len(array.elements):
                 return
+            replacement = _clone_constant(array.elements[idx])
+        if substitute(node, replacement):
             self.mark_changed()
-            inlined.setdefault(key, []).append(replacement)
-            handled_vars.add(var)
-            return
-        array = _get_array_literal(const_value)
-        if array is None:
-            remaining[key] = remaining.get(key, 0) + 1
-            handled_vars.add(var)
-            return
-        elements = array.elements
-        if idx < 0 or idx >= len(elements):
-            remaining[key] = remaining.get(key, 0) + 1
-            return
-        replacement = _clone_constant(elements[idx])
-        if not substitute(node, replacement):
-            remaining[key] = remaining.get(key, 0) + 1
-            handled_vars.add(var)
-            return
-        self.mark_changed()
-        inlined.setdefault(key, []).append(replacement)
-        handled_vars.add(var)
+            state.installed(var, replacement)
 
     def _substitute_variable_reference(
         self,
         node: Ps1Variable,
         key: str,
-        candidates: dict[str, list[_CandidateEntry]],
-        seal_points: dict[str, list[tuple[list, int]]],
-        remaining: dict[str, int],
-        inlined: dict[str, list[Node]],
-        cycles: CycleModel,
+        state: _Inlining,
     ) -> None:
-        if is_assignment_write_target(node):
+        const_value = state.value_at(node, key)
+        if const_value is None:
             return
-        if sp := seal_points.get(key):
-            sp = self._exclude_own_seal_points(node, key, sp, cycles)
-        entry = _find_dominating_entry(node, candidates[key], sp)
-        if entry is None:
-            remaining[key] = remaining.get(key, 0) + 1
-            return
-        replacement = _clone_constant(entry.value)
-        if not substitute(node, replacement):
-            remaining[key] = remaining.get(key, 0) + 1
-            return
-        self.mark_changed()
-        inlined.setdefault(key, []).append(replacement)
+        replacement = _clone_constant(const_value)
+        if substitute(node, replacement):
+            self.mark_changed()
+            state.installed(node, replacement)
 
-    @staticmethod
-    def _exclude_own_seal_points(
-        node: Node,
-        key: str,
-        seal_points: list[tuple[list, int]],
-        cycles: CycleModel,
-    ) -> list[tuple[list, int]]:
+    def _remove_dead_assignments(self, table: _ConstantTable, record: _InlineRecord):
         """
-        When a variable reference sits on the RHS of an assignment to the same variable
-        (e.g. `$x = [char]($x)`), the seal points generated by that assignment must not
-        block this reference. The RHS is evaluated before the assignment takes effect, so
-        the reference still sees the previous constant value.
+        Delete the constant writes of every binding whose value nothing observes any more.
 
-        This exclusion is suppressed when control can reach the assignment more than once, because
-        the value the reference sees is then the one the previous visit stored and not the constant
-        established before any of them. Which constructs those are is a question about the control
-        flow graph rather than about the shape of the source, and `cycles` is where it is answered.
+        Removal is decided per binding, and counted against that binding's own reads rather than
+        against the references this walk resolved. Every occurrence in `Binding.reads` observes the
+        value, including the ones the walk cannot answer for — a read inside a function body, a read
+        after a write whose value is not constant, an index this pass cannot evaluate — and each of
+        them is a reader the write still has. Counting only what the walk replaced is what let
+        `$x = 'a'; function f { Write-Host $x }; Write-Host $x; f` delete the assignment `f` reads.
+
+        A write that observes the previous value is a read as much as a write, so a binding with one
+        is never dead however many of its reads were substituted; and a write whose value this pass
+        holds no constant for stays, because deleting it would drop whatever it does to produce that
+        value.
         """
-        cursor = node
-        while cursor.parent is not None:
-            if isinstance(parent := cursor.parent, Ps1AssignmentExpression) and cursor is parent.value:
-                target = _assignment_target_variable(parent.target)
-                if target is not None and _candidate_key(target) == key:
-                    if cycles.repeats(parent):
-                        break
-                    own = set()
-                    for body, idx in _find_all_body_entries(parent):
-                        own.add((id(body), idx))
-                    return [
-                        sp for sp in seal_points if (id(sp[0]), sp[1]) not in own
-                    ]
-            cursor = parent
-        return seal_points
-
-    def _remove_dead_assignments(
-        self,
-        candidates: dict[str, list[_CandidateEntry]],
-        remaining: dict[str, int],
-        inlined: dict[str, list[Node]],
-    ):
         plans = Ps1RemovalPlans()
-        for key, entries in candidates.items():
-            if remaining.get(key, 0) > 0:
+        for binding, replacements in record:
+            if len(replacements) < len(binding.reads):
                 continue
-            substitutions = inlined.get(key, [])
-            if self.min_inlines_to_prune is not None and len(substitutions) < self.min_inlines_to_prune:
+            if any(observes_previous_value(write) for write in binding.writes):
                 continue
-            for assign_node, _, _ in entries:
-                if assign_node is None:
+            if self.min_inlines_to_prune is not None:
+                if len(replacements) < self.min_inlines_to_prune:
                     continue
-                stmt = self._find_removable_statement(assign_node)
-                if stmt is not None:
-                    plans.propose(stmt)
+            for write in binding.writes:
+                assignment = assignment_of(write)
+                if assignment is None or id(write) not in table.by_write:
+                    continue
+                statement = self._find_removable_statement(assignment)
+                if statement is not None:
+                    plans.propose(statement)
         if plans.commit():
             self.mark_changed()
 

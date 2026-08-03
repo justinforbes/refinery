@@ -471,16 +471,19 @@ class TestPs1ReassignedVariableInlining(TestPs1):
         self.assertIn('$x', result)
 
     def test_same_stmt_assign_does_not_dominate_earlier_ref(self):
-        result = self._deobfuscate(
-            "$x = 'old'\nWrite-Host $x ($x = 'new')"
-        )
-        self.assertIn('old', result)
+        """
+        Asserted as exact output because the source itself contains `old`: an `assertIn` here passes
+        on a script nothing was done to, and passes just as well on one where the argument was folded
+        to `'new'` and the assignment left standing.
+        """
+        self.assertEqual(
+            self._deobfuscate("$x = 'old'\nWrite-Host $x ($x = 'new')"),
+            "Write-Host 'old' ($x = 'new')")
 
     def test_same_stmt_binary_assign_does_not_dominate(self):
-        result = self._deobfuscate(
-            "$x = 'old'\n$y = $x + ($x = 'new')"
-        )
-        self.assertIn('old', result)
+        self.assertEqual(
+            self._deobfuscate("$x = 'old'\n$y = $x + ($x = 'new')"),
+            "$y = 'old' + ($x = 'new')")
 
     def test_nested_assign_seal_exclusion(self):
         result = self._deobfuscate(
@@ -495,6 +498,104 @@ class TestPs1ReassignedVariableInlining(TestPs1):
         )
         self.assertIn('deep', result)
         self.assertNotIn('$x', result)
+
+
+class TestPs1ConstantInliningAcrossControlFlow(TestPs1):
+    """
+    Scripts this pass used to change the meaning of, each asserted as exact output against the pass
+    alone. The full pipeline is the wrong instrument for them: it removes the dead branch of the
+    first and unrolls the loop of the last, so a corruption this pass commits is repaired by another
+    one and the test attributes the fix to the wrong place.
+
+    Every expectation is what PowerShell prints for the input, not what the pass happens to produce.
+    """
+
+    def test_a_write_in_a_branch_is_not_ignored_because_its_value_is_constant(self):
+        """
+        `if ($c) { $x = 'b' }` and `if ($c) { $x = $y }` are the same statement in the same position,
+        and the pass this replaces folded the first to `'a'` while correctly refusing the second.
+        """
+        self.assertEqual(
+            self._apply("$x = 'a'; if ($c) { $x = 'b' }; Write-Host $x", Ps1ConstantInlining),
+            "$x = 'a'\nif ($c) {\n  $x = 'b'\n}\nWrite-Host $x")
+
+    def test_a_dotted_block_writes_the_scope_that_invokes_it(self):
+        self.assertEqual(
+            self._apply("$x = 'a'; . { $x = 'b' }; Write-Host $x", Ps1ConstantInlining),
+            "$x = 'a'\n. {\n  $x = 'b'\n}\nWrite-Host $x")
+
+    def test_an_ampersand_block_writes_a_scope_of_its_own(self):
+        """
+        The floor under the case above, and the reason the two cannot share an answer: `&` opens a
+        child scope, so PowerShell prints `a` here and folding it is correct.
+        """
+        self.assertEqual(
+            self._apply("$x = 'a'; & { $x = 'b' }; Write-Host $x", Ps1ConstantInlining),
+            "& {\n  $x = 'b'\n}\nWrite-Host 'a'")
+
+    def test_a_read_inside_a_stored_block_is_not_ordered_against_the_script_holding_it(self):
+        """
+        `$b` runs where it is invoked, not where it is written, so by the time the block runs `$x` is
+        `'b'`. Asserted as exact output: `assertIn('$x', ...)` is satisfied by the assignment target
+        alone while the read inside the block is already folded to the wrong value.
+        """
+        self._assertUnchanged(
+            "$x = 'a'\n$b = {\n  Write-Host $x\n}\n$x = 'b'\n& $b", Ps1ConstantInlining)
+
+    def test_a_read_inside_a_function_body_keeps_the_assignment_it_observes(self):
+        """
+        A reference this pass never walked is still a reference. Counting only its own substitutions
+        let it conclude that the one reference it saw was the last one and delete the assignment `f`
+        reads — while the substitution itself was correct and stays.
+        """
+        self.assertEqual(
+            self._apply(
+                "$x = 'a'; function f { Write-Host $x }; Write-Host $x; f", Ps1ConstantInlining),
+            "$x = 'a'\nfunction f {\n  Write-Host $x\n}\nWrite-Host 'a'\nf")
+
+    def test_a_body_a_cmdlet_runs_per_input_object_is_not_a_single_visit(self):
+        self._assertUnchanged(
+            "$x = 5\n1..3 | % {\n  $x = $x + 1\n}\nWrite-Host $x", Ps1ConstantInlining)
+
+    def test_a_write_that_observes_the_previous_value_keeps_the_write_before_it(self):
+        """
+        `$x += 'b'` reads `$x` as much as it writes it, so the store it reads cannot be deleted for
+        having no readers left. The existing `$i = 0; $i++` test asserts only that `$i` appears,
+        which the `$i` inside `$i++` satisfies with the store already gone.
+        """
+        for source, expected in [
+            ("$x = 'a'; Write-Host $x; $x += 'b'", "$x = 'a'\nWrite-Host 'a'\n$x += 'b'"),
+            ('$x = 1; Write-Host $x; $x++', '$x = 1\nWrite-Host 1\n$x++'),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+    def test_a_default_the_engine_supplies_is_not_a_value_the_script_overwrote(self):
+        """
+        `. { }` performs its writes on the caller, so `$ErrorActionPreference` no longer holds the
+        default the engine gave it. The write binds inside the block and the read resolves outside,
+        so neither is an occurrence of the other's binding and only the untouched-name rule sees it.
+        """
+        self._assertUnchanged(
+            ". {\n  $ErrorActionPreference = 'Stop'\n}\nWrite-Host $ErrorActionPreference",
+            Ps1ConstantInlining)
+        self.assertEqual(
+            self._apply('Write-Host $ErrorActionPreference', Ps1ConstantInlining),
+            "Write-Host 'Continue'")
+
+    def test_a_branch_that_writes_nothing_still_leaves_the_value_standing(self):
+        """
+        The floor under the branch rule: refusing on the presence of a branch at all passes the first
+        test here and inlines nothing anywhere.
+        """
+        self.assertEqual(
+            self._apply("$x = 'a'; if ($c) { Write-Host 1 }; Write-Host $x", Ps1ConstantInlining),
+            "if ($c) {\n  Write-Host 1\n}\nWrite-Host 'a'")
+
+    def test_a_loop_that_only_reads_still_leaves_the_value_standing(self):
+        self.assertEqual(
+            self._apply("$x = 'a'; while ($c) { Write-Host $x }", Ps1ConstantInlining),
+            "while ($c) {\n  Write-Host 'a'\n}")
 
 
 class TestPs1ConstantInliningExtra(TestPs1):
