@@ -3,9 +3,14 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.ps1.ast import in_evaluation_order, is_reference_cast
+from refinery.lib.scripts.ps1.ast import (
+    bound_argument_value,
+    in_evaluation_order,
+    is_reference_cast,
+)
 from refinery.lib.scripts.ps1.model import (
     Ps1CastExpression,
+    Ps1CommandInvocation,
     Ps1StringLiteral,
     Ps1Variable,
 )
@@ -88,3 +93,58 @@ class TestPs1ReferenceCast(TestBase):
         node = Ps1Parser('$n').parse()
         self.assertFalse(is_reference_cast(node))
         self.assertFalse(is_reference_cast(None))
+
+
+class TestPs1BoundArgumentValue(TestBase):
+    """
+    Which value a command binds to a named parameter. PowerShell decides this from the command's own
+    parameter metadata, which the parser does not have — it leaves `-Name x` as a switch followed by
+    a positional, exactly as it leaves `-Recurse C:\\` — so the accessor has to reconstruct it and
+    the caller has to know the parameter takes a value.
+    """
+
+    @staticmethod
+    def _command(source: str) -> Ps1CommandInvocation:
+        for node in Ps1Parser(source).parse().walk():
+            if isinstance(node, Ps1CommandInvocation):
+                return node
+        raise AssertionError(F'no command in {source!r}')
+
+    def _value(self, source: str, parameter: str) -> str | None:
+        found = bound_argument_value(self._command(source), parameter)
+        return None if found is None else found.value
+
+    def test_both_spellings_of_a_binding_are_found(self):
+        for source in (
+            'Set-Variable -Name x -Value 5',
+            'Set-Variable -Name:x -Value:5',
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._value(source, 'name'), 'x')
+
+    def test_an_abbreviation_binds_the_parameter_it_abbreviates(self):
+        for source in ('Set-Variable -Na x', 'Set-Variable -N x', 'Set-Variable -Nam:x'):
+            with self.subTest(source):
+                self.assertEqual(self._value(source, 'name'), 'x')
+
+    def test_a_longer_parameter_that_merely_starts_the_same_does_not_bind(self):
+        """
+        `-Namespace` is not an abbreviation of `-Name`; the abbreviation relation runs the other way,
+        and testing it backwards binds every parameter whose name begins with this one's.
+        """
+        self.assertIsNone(self._value('Set-Variable -Namespace x', 'name'))
+
+    def test_a_parameter_that_is_not_written_binds_nothing(self):
+        self.assertIsNone(self._value('Set-Variable -Value 5', 'name'))
+
+    def test_the_append_form_of_a_name_keeps_its_marker(self):
+        """
+        `-OutVariable +p` appends to `$p` and reads its previous value where `-OutVariable p`
+        replaces it, so the `+` has to survive to the caller that tells the two apart.
+        """
+        self.assertEqual(self._value('Get-Process -OutVariable +p', 'outvariable'), '+p')
+        self.assertEqual(self._value('Get-Process -OutVariable p', 'outvariable'), 'p')
+
+    def test_an_alias_of_a_parameter_binds_it_only_as_its_own_name(self):
+        self.assertEqual(self._value('Get-Process -ov p', 'ov'), 'p')
+        self.assertIsNone(self._value('Get-Process -ov p', 'outvariable'))

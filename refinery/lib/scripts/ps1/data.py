@@ -289,6 +289,52 @@ for _record in _COMMAND_TABLE.values():
                 tuple(_alias.lower() for _alias in _info['aliases']),
             )
 
+#: The common parameters that bind their argument as the *name* of a variable the command fills:
+#: `-OutVariable`, `-ErrorVariable` and the rest, with their aliases (`ov`, `ev`, ...). A common
+#: parameter names a variable exactly when its name ends in `Variable`, the convention the engine
+#: defines them under, which `-OutBuffer` (a count) is the one common parameter to fail.
+#:
+#: These are the names a caller means when it asks which parameters address a variable by string,
+#: and they are deliberately *not* the same set as the parameters that make a command impure:
+#: `refinery.lib.scripts.ps1.analysis.effects` adds `-SetSeed` to that one, a `Get-Random` switch
+#: that rewrites the generator state and names no variable at all. A consumer reading the impurity
+#: set for names would take the `5` of `Get-Random -SetSeed 5` for a variable called `5`.
+#: The out-variable parameters the derivation below must produce. Each is a fixed engine contract
+#: whose loss silences a real write, so a collected surface that no longer carries one fails the
+#: load rather than letting the set shrink silently.
+REQUIRED_OUT_VARIABLE_PARAMETERS = frozenset({
+    'errorvariable',
+    'informationvariable',
+    'outvariable',
+    'pipelinevariable',
+    'warningvariable',
+})
+
+
+def _derive_out_variable_parameters(common: dict[str, tuple[str, ...]]) -> frozenset[str]:
+    """
+    The out-variable parameters and their aliases, from a collected common-parameter surface.
+
+    Taken as an argument rather than read from the module so the floor below can be exercised
+    against a surface that has lost one; a check that only ever runs on the real data, at import,
+    cannot be shown to work.
+    """
+    names: set[str] = set()
+    for parameter, aliases in common.items():
+        if parameter.endswith('variable'):
+            names.add(parameter)
+            names.update(aliases)
+    if missing := REQUIRED_OUT_VARIABLE_PARAMETERS - names:
+        raise ValueError(
+            F'the collected common parameters no longer surface the out-variable parameters '
+            F'{sorted(missing)!r}; every view built on them would silently stop treating those '
+            F'parameters as naming a variable, so the data and this module are out of step.'
+        )
+    return frozenset(names)
+
+
+OUT_VARIABLE_PARAMETERS = _derive_out_variable_parameters(COMMON_PARAMETERS)
+
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_]\w*$')
 
 OBJ_COMMANDS = frozenset({

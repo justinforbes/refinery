@@ -389,23 +389,19 @@ class TestPs1Purity(Ps1EffectsTest):
                 self.assertFalse(self._pure(self._expression(source)))
 
     def test_the_write_parameter_derivation_fails_loud_when_data_drops_one(self):
-        # The out-variable write parameters are derived from the collected common parameters. If a
+        # The out-variable parameters are derived from the collected common parameters. If a
         # regenerated surface stopped flagging one, the set would silently shrink and a real
         # `-OutVariable` write would be judged pure and dropped; the derivation floors itself
         # against that and refuses to build rather than failing open in the deletion direction.
-        from unittest.mock import patch
-
         from refinery.lib.scripts.ps1 import data
-        from refinery.lib.scripts.ps1.analysis import effects
 
         reduced = {
             name: aliases
             for name, aliases in data.COMMON_PARAMETERS.items()
             if name != 'outvariable'
         }
-        with patch.object(data, 'COMMON_PARAMETERS', reduced):
-            with self.assertRaises(ValueError):
-                effects._writing_parameters()
+        with self.assertRaises(ValueError):
+            data._derive_out_variable_parameters(reduced)
 
     def test_a_command_that_only_reads_stays_pure(self):
         for source in (

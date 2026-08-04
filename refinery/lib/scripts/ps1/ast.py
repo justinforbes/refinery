@@ -396,6 +396,62 @@ def is_builtin_variable(
     )
 
 
+def binding_key(var: Ps1Variable) -> str:
+    """
+    The key a variable binds under within a scope's binding table: its lowercased name, prefixed
+    with `env:` for an environment variable so the process-global `$env:X` namespace stays distinct
+    from a script variable `$X` of the same name.
+
+    This lives here rather than with the semantic model because a name addressed as a *string* —
+    `Set-Variable X` — has to be keyed the same way as one addressed as a variable, and the layer
+    that recognises those cannot depend on the model that consumes them.
+    """
+    if var.scope is Ps1ScopeModifier.ENV:
+        return F'env:{var.name.lower()}'
+    return var.name.lower()
+
+
+def binds_parameter(written: str, parameter: str) -> bool:
+    """
+    Whether the parameter name *written* in a command binds *parameter*, given in full, lowercased
+    and without its dash.
+
+    PowerShell binds any unambiguous abbreviation, so the written name is a *prefix* of the
+    parameter and not the other way round. Testing it the other way round matches `-NameFoo`, which
+    is a different parameter, and misses `-Na`, which is this one. An abbreviation short enough to
+    be ambiguous is a runtime error in PowerShell, so accepting it here costs nothing.
+    """
+    written = written.lstrip('-').lower()
+    return bool(written) and parameter.startswith(written)
+
+
+def bound_argument_value(
+    cmd: Ps1CommandInvocation, parameter: str,
+) -> Expression | None:
+    """
+    The value bound to *parameter* in `cmd`, written either `-Parameter:value` or `-Parameter
+    value`, or `None` when the parameter is not written or is given no value.
+
+    **The caller must know that *parameter* takes a value.** PowerShell tells `-Recurse C:\\` — a
+    switch and an unrelated positional path — from `-Name x` by the command's own parameter
+    metadata, and the parser has none, so it leaves both as a switch followed by a positional.
+    Asking this about a parameter that takes no value would claim whatever positional came next.
+    """
+    arguments = [
+        argument for argument in cmd.arguments if isinstance(argument, Ps1CommandArgument)
+    ]
+    for index, argument in enumerate(arguments):
+        if not binds_parameter(argument.name, parameter):
+            continue
+        if argument.kind is Ps1CommandArgumentKind.NAMED and argument.value is not None:
+            return argument.value
+        if argument.kind is Ps1CommandArgumentKind.SWITCH:
+            following = arguments[index + 1] if index + 1 < len(arguments) else None
+            if following is not None and following.kind is Ps1CommandArgumentKind.POSITIONAL:
+                return following.value
+    return None
+
+
 #: Type names that denote a by-reference wrapper. `[Ref]` is the PowerShell shorthand; the framework
 #: name it resolves to spells the same thing and appears in obfuscated scripts.
 _REFERENCE_TYPE_NAMES = frozenset({

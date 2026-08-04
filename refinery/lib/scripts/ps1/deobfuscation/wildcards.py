@@ -20,6 +20,7 @@ from refinery.lib.scripts.ps1.ast import (
     extract_positional_values,
     get_command_name,
     get_member_name,
+    bound_argument_value,
     string_value,
     unwrap_parens,
 )
@@ -198,24 +199,6 @@ def _candidates_from_type(
     if type_name is None:
         return None
     return TYPE_MEMBERS.get(type_name)
-
-
-def _extract_named_value(
-    cmd: Ps1CommandInvocation,
-    param_name: str,
-) -> Expression | None:
-    """
-    Extract the value of a named parameter (case-insensitive prefix match).
-    """
-    param_lower = param_name.lower()
-    for arg in cmd.arguments:
-        if not isinstance(arg, Ps1CommandArgument):
-            continue
-        if arg.kind != Ps1CommandArgumentKind.NAMED:
-            continue
-        if arg.name.lower().startswith(param_lower) and arg.value is not None:
-            return arg.value
-    return None
 
 
 def _concat_expressions(exprs: list[Expression]) -> Expression:
@@ -534,9 +517,9 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         """
         Set-Variable X val or Set-Variable -Name X -Value val → $X = val
         """
-        named_value = _extract_named_value(node, '-value')
+        named_value = bound_argument_value(node, 'value')
         positionals = extract_positional_values(node)
-        name_expr = _extract_named_value(node, '-name')
+        name_expr = bound_argument_value(node, 'name')
         if name_expr is not None:
             var_name = _variable_name_value(name_expr)
         elif positionals:

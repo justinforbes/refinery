@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.ps1.ast import assignment_of, is_reference_cast
+from refinery.lib.scripts.ps1.ast import assignment_of, binding_key, is_reference_cast
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
@@ -241,17 +241,6 @@ def _is_member_declaration(var: Ps1Variable) -> bool:
     """
     parent = var.parent
     return isinstance(parent, Ps1PropertyMember) and parent.variable is var
-
-
-def binding_key(var: Ps1Variable) -> str:
-    """
-    The key a variable binds under within a scope's binding table: its lowercased name, prefixed
-    with `env:` for an environment variable so the process-global `$env:X` namespace stays distinct
-    from a script variable `$X` of the same name.
-    """
-    if var.scope is Ps1ScopeModifier.ENV:
-        return F'env:{var.name.lower()}'
-    return var.name.lower()
 
 
 class ScopeKind(enum.Enum):
