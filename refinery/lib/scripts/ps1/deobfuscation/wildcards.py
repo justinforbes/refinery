@@ -16,6 +16,7 @@ from typing import Iterable
 
 from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
 from refinery.lib.scripts.ps1.ast import (
+    binds_parameter,
     free_positional_values,
     get_command_name,
     get_member_name,
@@ -244,6 +245,56 @@ _EXPRESSIBLE_SCOPES: dict[str, Ps1ScopeModifier] = {
 }
 
 
+#: Parameters whose effect an assignment cannot carry, so binding one declines the rewrite.
+#:
+#: Measured: after `New-Variable x -Option ReadOnly` a later `$x = …` raises
+#: `SessionStateUnauthorizedAccessException`, where after `$x = …` it succeeds — so the option is
+#: not decoration, it decides what every later store in the script does. `-PassThru` makes the
+#: command emit the variable object, which an assignment does not emit, and `-Force` is what lets a
+#: write land on a name an option protects.
+#:
+#: `-Description` is deliberately absent: it is metadata no read or write observes. Anything not
+#: listed is *allowed*, which is the wrong polarity for a corruption and the right one for a
+#: rewrite — see `refinery.lib.scripts.ps1.analysis.naming` on why the two tables differ.
+_INEXPRESSIBLE_PARAMETERS = (
+    'force',
+    'option',
+    'passthru',
+    'visibility',
+)
+
+
+def _expresses_every_effect(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether an assignment carries everything *cmd* does, or drops an effect on the floor.
+    """
+    for argument in cmd.arguments:
+        if not isinstance(argument, Ps1CommandArgument):
+            continue
+        if any(binds_parameter(argument.name, name) for name in _INEXPRESSIBLE_PARAMETERS):
+            return False
+    return True
+
+
+def _subject_argument_value(
+    cmd: Ps1CommandInvocation,
+    command: str,
+    parameter: str,
+) -> str | None:
+    """
+    The literal name *cmd* is about, written either as `-Name x` / `-Path x` or as the first
+    argument it binds by position, or `None` when it is not a literal this can read. The same
+    reading `refinery.lib.scripts.ps1.analysis.naming` takes, so the two layers agree on which
+    argument a variable command names.
+    """
+    explicit = bound_argument_value(cmd, parameter)
+    if explicit is not None:
+        return string_value(explicit)
+    for value in free_positional_values(cmd, command):
+        return string_value(value)
+    return None
+
+
 def _expressible_scope(
     node: Ps1CommandInvocation,
     var_name: str,
@@ -382,22 +433,31 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
             return None
         if node.object is None:
             return None
-        resolved = self._resolve_get_variable_pattern(node.object)
-        if resolved is None:
+        found = self._resolve_get_variable_pattern(node.object)
+        if found is None:
             return None
+        resolved, scope = found
         if member_lower == 'value':
+            if scope is None:
+                return None
             return Ps1Variable(
                 offset=node.offset,
                 name=resolved,
-                scope=Ps1ScopeModifier.NONE,
+                scope=scope,
             )
         return make_string_literal(resolved)
 
     @staticmethod
-    def _resolve_get_variable_pattern(expr: Expression) -> str | None:
+    def _resolve_get_variable_pattern(
+        expr: Expression,
+    ) -> tuple[str, Ps1ScopeModifier | None] | None:
         """
         Given the object expression of a member access, check if it is a `Get-Item Variable:X` or
-        `Get-Variable X` invocation and resolve the variable name (supporting wildcards).
+        `Get-Variable X` invocation and resolve the variable name (supporting wildcards) together
+        with the qualifier a reference replacing it must carry.
+
+        The qualifier is `None` for a `-Scope` no reference can name, which only the `.Value`
+        rewrite has to decline: the name a command is about is that name whichever scope it reads.
         """
         inner = unwrap_parens(expr)
         if not isinstance(inner, Ps1CommandInvocation):
@@ -411,10 +471,8 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         command = resolve_command_name(inner)
         if command is None:
             return None
-        positionals = free_positional_values(inner, command)
-        if not positionals:
-            return None
-        arg_value = string_value(positionals[0])
+        subject = 'path' if name_lower in _GET_ITEM_COMMANDS else 'name'
+        arg_value = _subject_argument_value(inner, command, subject)
         if arg_value is None:
             return None
         if name_lower in _GET_ITEM_COMMANDS:
@@ -425,7 +483,10 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
             pattern = pattern.lstrip('/\\')
         else:
             pattern = arg_value
-        return _resolve_variable_name(pattern)
+        resolved = _resolve_variable_name(pattern)
+        if resolved is None:
+            return None
+        return resolved, _expressible_scope(inner, resolved)
 
     def _try_resolve_get_variable_value_only(
         self,
@@ -442,10 +503,13 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         command = resolve_command_name(node)
         if command is None:
             return None
-        positionals = free_positional_values(node, command)
-        if not positionals:
-            return None
-        arg_value = _variable_name_value(positionals[0])
+        name_expr = bound_argument_value(node, 'name')
+        if name_expr is None:
+            positionals = free_positional_values(node, command)
+            if not positionals:
+                return None
+            name_expr = positionals[0]
+        arg_value = _variable_name_value(name_expr)
         if arg_value is None:
             return None
         resolved = _resolve_variable_name(arg_value)
@@ -543,11 +607,21 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
     ) -> Expression | None:
         """
         Set-Item Variable:/X val1 val2 → $X = val1 + val2
+
+        `-Path` and `-Value` name the same two arguments the positional spelling does, and a command
+        binding either of them by name leaves nothing free for the positional reading to find.
         """
         positionals = free_positional_values(node, command)
-        if len(positionals) < 2:
+        path_expr = bound_argument_value(node, 'path')
+        if path_expr is None:
+            if not positionals:
+                return None
+            path_expr, positionals = positionals[0], positionals[1:]
+        named_value = bound_argument_value(node, 'value')
+        values = [named_value] if named_value is not None else positionals
+        if not values:
             return None
-        path_str = string_value(positionals[0])
+        path_str = string_value(path_expr)
         if path_str is None:
             return None
         prefix = 'variable:'
@@ -557,7 +631,6 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         resolved = _resolve_variable_name(var_name)
         if resolved is None:
             return None
-        values = positionals[1:]
         return self._build_assignment(node.offset, resolved, values, Ps1ScopeModifier.NONE)
 
     def _handle_set_variable(
@@ -568,6 +641,8 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         """
         Set-Variable X val or Set-Variable -Name X -Value val → $X = val
         """
+        if not _expresses_every_effect(node):
+            return None
         named_value = bound_argument_value(node, 'value')
         positionals = free_positional_values(node, command)
         name_expr = bound_argument_value(node, 'name')

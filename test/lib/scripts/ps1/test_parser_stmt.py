@@ -27,6 +27,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1RedirectionStream,
     Ps1ReturnStatement,
     Ps1Script,
+    Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SwitchStatement,
     Ps1ThrowStatement,
@@ -744,6 +745,30 @@ class TestPs1TypeLiteralOwnsItsLexerMode(TestBase):
         self.assertEqual(
             [clause.types for clause in script.body[0].catch_clauses],
             [['System.Collections.Generic.List[int]']])
+
+    def test_a_typed_param_in_a_block_argument_keeps_the_body_around_it(self):
+        """
+        A block handed to the call operator is an argument, so the attribute reader is reached in
+        argument mode exactly as the `catch` type reader was. The type name then swallowed the
+        parameter, the body and every statement after the block.
+        """
+        script = self._parse("& { param([int]$x) $x }\nWrite-Host 'keep'")
+        self.assertEqual(len(script.body), 2)
+        block = self._only_block(script)
+        self.assertIsNotNone(block.param_block)
+        self.assertEqual(len(block.body), 1)
+
+    def test_a_typed_param_in_a_dot_sourced_block_keeps_the_body_around_it(self):
+        script = self._parse(". { param([string]$s) Write-Host $s }\nWrite-Host 'keep'")
+        self.assertEqual(len(script.body), 2)
+        self.assertEqual(len(self._only_block(script).body), 1)
+
+    @staticmethod
+    def _only_block(script: Ps1Script) -> Ps1ScriptBlock:
+        blocks = [node for node in script.walk() if isinstance(node, Ps1ScriptBlock)]
+        if len(blocks) != 1:
+            raise AssertionError(F'expected one script block, found {len(blocks)}')
+        return blocks[0]
 
     def test_a_trap_after_a_command_keeps_its_type_body_and_successor(self):
         script = self._parse("Write-Host a\ntrap [System.Exception] { Start-Process calc }\n$x")

@@ -166,6 +166,7 @@ class Ps1VariableFlow:
         self._unattributable_ids_by_graph: dict[int, frozenset[int]] = {}
         self._deferred_unattributable: bool | None = None
         self._any_unattributable: bool | None = None
+        self._any_placed: bool | None = None
         self._blocks_by_owner: dict[int, list[Ps1ScriptBlock]] = {}
         self._mutated: frozenset[str] | None = None
 
@@ -462,11 +463,12 @@ class Ps1VariableFlow:
         parts of the one statement *use* stands for.
 
         **A read the call is given is evaluated to produce its argument**, so it always happens
-        first, however deeply it sits — `Invoke-Expression ($a | %{ [char]($_ -bxor $k) })` reads
-        `$k` inside a body, and the whole argument is built, iterations and all, before the call
-        runs. That is the shape an obfuscated loader is made of, and refusing it does more than lose
-        a fold: the read is the payload, so a kill that blocks it stops the call ever becoming
-        literal, which stops it expanding, which leaves the kill in place.
+        first, however deeply it sits, which `Node.is_descendant_of` is the question for —
+        `Invoke-Expression ($a | %{ [char]($_ -bxor $k) })` reads `$k` inside a body, and the whole
+        argument is built, iterations and all, before the call runs. That is the shape an obfuscated
+        loader is made of, and refusing it does more than lose a fold: the read is the payload, so a
+        kill that blocks it stops the call ever becoming literal, which stops it expanding, which
+        leaves the kill in place.
 
         **A read inside the body the effect stands for is a different thing entirely.** When the
         effect is a block projected onto this statement, a read within it is not an argument the
@@ -487,7 +489,7 @@ class Ps1VariableFlow:
         """
         if use.element is None or self.cycles.repeats(use.element):
             return False
-        if not isinstance(effect, Ps1ScriptBlock) and _descends_from(read, effect):
+        if not isinstance(effect, Ps1ScriptBlock) and read.is_descendant_of(effect):
             return True
         placed = self.flow.locate(read)
         if placed is None or placed[0] is not graph:
@@ -510,9 +512,14 @@ class Ps1VariableFlow:
         answers it exactly as it answers any other read. `iex $c; Write-Host $env:ComSpec` must not
         publish the default, and `Write-Host $env:ComSpec; iex $c` must still publish it.
 
-        Refused outright where nothing places the doubt: a scope held in doubt as a whole, an
-        unattributable write in a body whose run time is unknown, and a read this cannot project
-        into the script's own graph.
+        Refused outright where nothing places the doubt: a scope held in doubt as a whole, and an
+        unattributable write in a body whose run time is unknown.
+
+        A read this cannot project into the script's own graph — one inside a function body or a
+        stored block — has no position to order against either, so it is answered by whether the
+        script holds any such write *at all*. Refusing it outright instead costs the `$PSHome` and
+        `$env:` unpacking of every loader whose first stage sits inside a body, in scripts where
+        nothing could have displaced the default in the first place.
         """
         if self._doubt_without_a_point():
             return False
@@ -521,9 +528,21 @@ class Ps1VariableFlow:
             return False
         use = self._position_of(read, graph)
         if use is None:
-            return False
+            return not self._any_placed_unattributable_write()
         kills = self._unattributable_kills(graph, read, use)
         return not self._between.any_between(graph.entry, use, kills)
+
+    def _any_placed_unattributable_write(self) -> bool:
+        """
+        Whether any graph of the script holds a write nobody can attribute. The question a read
+        this cannot place has to fall back on: nothing orders it, so what is left is whether there
+        is anything to order it against.
+        """
+        if self._any_placed is None:
+            self._any_placed = any(
+                self._unattributable_pairs(graph) for graph in self.flow.graphs.values()
+            )
+        return self._any_placed
 
     def _doubt_without_a_point(self) -> bool:
         """
@@ -625,20 +644,6 @@ def _scopes_of(scope: Scope) -> Iterator[Scope]:
     yield scope
     for child in scope.children:
         yield from _scopes_of(child)
-
-
-def _descends_from(node: Node, ancestor: Node) -> bool:
-    """
-    Whether *node* sits inside *ancestor*. Asked of a read and the call that runs unreadable code:
-    a read the call is *given* is evaluated to produce the call's argument, so it happens before the
-    call does anything at all.
-    """
-    cursor: Node | None = node
-    while cursor is not None:
-        if cursor is ancestor:
-            return True
-        cursor = cursor.parent
-    return False
 
 
 def build_variable_flow(

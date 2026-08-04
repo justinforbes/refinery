@@ -540,6 +540,27 @@ class TestPs1UnattributableWrites(TestPs1VariableFlow):
                 )
                 self.assertEqual(flow.ambient_value_survives(read), survives)
 
+    def test_an_ambient_value_a_body_reads_survives_where_nothing_can_displace_it(self):
+        """
+        A read inside a stored block has no position in the script's graph, so nothing orders it —
+        which leaves only the question of whether there is anything to order it against. Refusing
+        it outright costs the `$env:` and `$PSHome` unpacking of every loader whose first stage
+        sits inside a body.
+        """
+        for source, survives in (
+            ('$b = { Write-Host $env:ComSpec }', True),
+            ('function f { Write-Host $env:ComSpec }', True),
+            ('$b = { Write-Host $env:ComSpec }; iex $c', False),
+            ("$b = { Write-Host $env:ComSpec }; Set-Variable $n 'v'", False),
+        ):
+            with self.subTest(source):
+                tree, _, flow = _models(source)
+                read = next(
+                    node for node in _in_source_order(tree)
+                    if isinstance(node, Ps1Variable) and node.name.lower() == 'comspec'
+                )
+                self.assertEqual(flow.ambient_value_survives(read), survives)
+
     def test_an_ambient_value_is_refused_where_the_doubt_has_no_point(self):
         for source in (
             "Set-Variable $n 'v' -Scope Global; Write-Host $env:ComSpec",
@@ -552,6 +573,20 @@ class TestPs1UnattributableWrites(TestPs1VariableFlow):
                     if isinstance(node, Ps1Variable) and node.name.lower() == 'comspec'
                 )
                 self.assertFalse(flow.ambient_value_survives(read))
+
+    def test_a_relative_path_command_kills_nothing(self):
+        """
+        `.\\tool.exe` runs a program, not a dot-source, so it writes no variable of this script at
+        all — while `. .\\stage2.ps1` reads a file into the caller's scope and kills everything.
+        """
+        self.assertEqual(self._observed(r"$x = 'a'; .\tool.exe; Write-Host $x"), 0)
+        self.assertIsNone(self._observed(r"$x = 'a'; . .\stage2.ps1; Write-Host $x"))
+
+    def test_invoke_command_kills_only_where_it_is_told_not_to_open_a_scope(self):
+        self.assertIsNone(
+            self._observed("$x = 'a'; Invoke-Command -NoNewScope -ScriptBlock $sb; Write-Host $x"))
+        self.assertEqual(
+            self._observed("$x = 'a'; Invoke-Command -ScriptBlock $sb; Write-Host $x"), 0)
 
     def test_a_write_naming_another_scope_is_not_one_of_the_placed_ones(self):
         """
@@ -593,4 +628,4 @@ class TestPs1UnattributableWriteHoles(TestPs1VariableFlow):
         `&` as a caller-scope write would close it and cost every fold across a call operator.
         """
         self.assertEqual(
-            self._observed("""$x = 'a'; & { iex '$script:x = 1' }; Write-Host $x"""), 0)
+            self._observed('''$x = 'a'; & { iex '$script:x = 1' }; Write-Host $x'''), 0)

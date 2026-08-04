@@ -264,13 +264,30 @@ class TestPs1VariableCommandScope(TestPs1):
             "$global:y = 'b'")
 
     def test_the_value_of_a_parameter_is_not_part_of_the_value_assigned(self):
+        self.assertEqual(
+            self._apply("Set-Variable y 'b' -Description 'd'", Ps1WildcardResolution),
+            "$y = 'b'")
+
+    def test_a_parameter_an_assignment_cannot_carry_declines_the_rewrite(self):
+        """
+        Measured: after `New-Variable x -Option ReadOnly` a later `$x = …` raises
+        `SessionStateUnauthorizedAccessException` where after `$x = …` it succeeds, so the option
+        decides what every later store in the script does and an assignment states the opposite.
+        `-Force` is what lets a write land on a name so protected, and `-PassThru` makes the command
+        emit an object an assignment does not emit.
+
+        `-Description` is the floor: it is metadata no read or write observes, so declining on any
+        parameter at all would cost the rewrite for nothing.
+        """
         for source in (
             "Set-Variable y 'b' -Option ReadOnly",
-            "Set-Variable y 'b' -Description 'd'",
-            "Set-Variable y 'b' -Visibility Public",
+            "Set-Variable y 'b' -Option Constant",
+            "Set-Variable y 'b' -Force",
+            "Set-Variable y 'b' -PassThru",
+            "Set-Variable y 'b' -Visibility Private",
         ):
             with self.subTest(source):
-                self.assertEqual(self._apply(source, Ps1WildcardResolution), "$y = 'b'")
+                self._assertUnchanged(source, Ps1WildcardResolution)
 
     def test_a_qualified_name_beside_a_scope_declines_the_rewrite(self):
         """
@@ -284,3 +301,34 @@ class TestPs1VariableCommandScope(TestPs1):
             self._apply('Get-Variable -Scope Global y -ValueOnly', Ps1WildcardResolution),
             '$global:y')
         self._assertUnchanged('Get-Variable y -ValueOnly -Scope 1', Ps1WildcardResolution)
+
+    def test_the_value_property_carries_the_scope_the_ValueOnly_spelling_does(self):
+        """
+        `(Get-Variable y -Scope Global).Value` and `Get-Variable y -ValueOnly -Scope Global` read
+        the same variable, so a rewrite that drops the qualifier on one of them silently reads a
+        shadowing local instead of the global the script named.
+        """
+        self.assertEqual(
+            self._apply('(Get-Variable y -Scope Global).Value', Ps1WildcardResolution),
+            '$global:y')
+        self._assertUnchanged('(Get-Variable y -Scope 1).Value', Ps1WildcardResolution)
+
+    def test_the_name_property_is_the_name_whichever_scope_is_read(self):
+        self.assertEqual(
+            self._apply('(Get-Variable y -Scope 1).Name', Ps1WildcardResolution), "'y'")
+
+    def test_a_subject_bound_by_name_is_read_like_a_positional_one(self):
+        """
+        A `-Name` or `-Path` argument leaves no free positional behind, so a reading that looks only
+        at positionals declines every named spelling of the same command.
+        """
+        for source, expected in (
+            ('Get-Variable -Name y -ValueOnly', '$y'),
+            ('(Get-Variable -Name y).Value', '$y'),
+            ('(Get-Item -Path Variable:y).Value', '$y'),
+            ("Set-Item -Path Variable:y -Value 'b'", "$y = 'b'"),
+            ("Set-Item Variable:y -Value 'b'", "$y = 'b'"),
+            ("Set-Item -Path Variable:y 'b'", "$y = 'b'"),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1WildcardResolution), expected)

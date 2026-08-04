@@ -39,19 +39,31 @@ from __future__ import annotations
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.naming import Ps1NameTarget, unreadable_name_target
-from refinery.lib.scripts.ps1.ast import resolve_command_name
-from refinery.lib.scripts.ps1.model import Ps1CommandInvocation, Ps1ScriptBlock
+from refinery.lib.scripts.ps1.ast import binds_parameter, resolve_command_name
+from refinery.lib.scripts.ps1.model import (
+    Ps1CommandArgument,
+    Ps1CommandArgumentKind,
+    Ps1CommandInvocation,
+    Ps1ScriptBlock,
+    Ps1StringLiteral,
+)
 
 #: Commands that run arbitrary code supplied as data, in the scope of whatever calls them. Resolved
 #: through `refinery.lib.scripts.ps1.ast.resolve_command_name`, so `iex` arrives here canonical.
 #:
 #: `Start-Job` and `Start-ThreadJob` are absent although
 #: `refinery.lib.scripts.ps1.analysis.world` counts them: they run their block in another runspace,
-#: which has no access to these variables at all. `Invoke-Command` is absent for the same kind of
-#: reason — without `-NoNewScope` it opens a child scope, and
-#: `refinery.lib.scripts.ps1.analysis.blocks` already places a literal block handed to it there.
+#: which has no access to these variables at all.
 _UNREADABLE_CODE_COMMANDS = frozenset({
     'invoke-expression',
+})
+
+#: `Invoke-Command` runs its block in the caller's scope only when told to, so the switch is part of
+#: what makes the call opaque. Without it the command opens a child scope; with it the block may be
+#: an expression this analysis never reads — `Invoke-Command -NoNewScope -ScriptBlock $sb` — which
+#: `refinery.lib.scripts.ps1.analysis.blocks` cannot place, since no block node stands there at all.
+_NO_NEW_SCOPE_COMMANDS = frozenset({
+    'invoke-command',
 })
 
 
@@ -79,13 +91,56 @@ def runs_unreadable_code(node: Node) -> bool:
     three measured — so even a function this tree defines writes somewhere no call graph here
     accounts for. Only `. { … }` is exempt, because its body is written where it runs and every
     layer already reads it.
+
+    `.\\tool.exe` is not a dot-invocation at all. The dot there opens a relative path and the command
+    runs as any other external program does, in a scope of its own; PowerShell dot-sources only when
+    the operator stands apart from its target. `_names_a_relative_path` is the spelling that says so,
+    and anything it cannot tell apart stays a dot-invocation, since a missed one folds a value across
+    a write.
     """
     if not isinstance(node, Ps1CommandInvocation):
         return False
-    if resolve_command_name(node) in _UNREADABLE_CODE_COMMANDS:
+    command = resolve_command_name(node)
+    if command in _UNREADABLE_CODE_COMMANDS:
+        return True
+    if command in _NO_NEW_SCOPE_COMMANDS and _binds_switch(node, 'nonewscope'):
         return True
     return (
         node.invocation_operator == '.'
         and node.name is not None
         and not isinstance(node.name, Ps1ScriptBlock)
+        and not _names_a_relative_path(node)
     )
+
+
+def _binds_switch(node: Ps1CommandInvocation, parameter: str) -> bool:
+    """
+    Whether *node* is written with a switch that binds *parameter*, given in full, lowercased and
+    without its dash. PowerShell binds any unambiguous abbreviation, which
+    `refinery.lib.scripts.ps1.ast.binds_parameter` is the rule for.
+    """
+    for argument in node.arguments:
+        if not isinstance(argument, Ps1CommandArgument):
+            continue
+        if argument.kind is not Ps1CommandArgumentKind.SWITCH:
+            continue
+        if binds_parameter(argument.name, parameter):
+            return True
+    return False
+
+
+def _names_a_relative_path(node: Ps1CommandInvocation) -> bool:
+    """
+    Whether the dot of *node* opens a relative path rather than standing on its own as the
+    dot-source operator — `.\\tool.exe`, which runs a program, against `. .\\stage2.ps1`, which
+    reads a script into the caller's scope.
+
+    The lexer gives both the same invocation operator, so what tells them apart is that a path
+    leaves no room between the dot and the name and carries the separator it was written with.
+    """
+    name = node.name
+    if not isinstance(name, Ps1StringLiteral):
+        return False
+    if name.offset != node.offset + 1:
+        return False
+    return name.value.startswith(('\\', '/'))

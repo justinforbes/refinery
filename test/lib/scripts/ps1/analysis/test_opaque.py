@@ -57,6 +57,35 @@ class TestPs1UnreadableCode(TestBase):
             with self.subTest(source):
                 self.assertTrue(runs_unreadable_code(_command(source)))
 
+    def test_a_relative_path_command_is_not_a_dot_invocation(self):
+        """
+        The dot of `.\\tool.exe` opens a path and the program runs in a scope of its own; only a dot
+        standing apart from its target dot-sources. Reading the two as one turns every relative-path
+        call in a script into a kill nothing performs.
+        """
+        for source in (r'.\tool.exe', r'./tool.exe', r'.\sub\stage.ps1 -Foo bar'):
+            with self.subTest(source):
+                self.assertFalse(runs_unreadable_code(_command(source)))
+
+    def test_a_dot_source_of_a_relative_path_is_still_unreadable(self):
+        for source in (r'. .\stage2.ps1', r'. ./stage2.ps1'):
+            with self.subTest(source):
+                self.assertTrue(runs_unreadable_code(_command(source)))
+
+    def test_invoke_command_runs_unreadable_code_only_with_no_new_scope(self):
+        """
+        `Invoke-Command` opens a child scope unless told not to, and `-NoNewScope` with a block this
+        analysis never reads is the shape no other layer places: no block node stands at
+        `-ScriptBlock $sb`, so `Ps1BlockModel` has nothing to carry out to the caller.
+        """
+        for source in (
+            'Invoke-Command -NoNewScope -ScriptBlock $sb',
+            'Invoke-Command -ScriptBlock $sb -NoNewScope',
+        ):
+            with self.subTest(source):
+                self.assertTrue(runs_unreadable_code(_command(source)))
+        self.assertFalse(runs_unreadable_code(_command('Invoke-Command -ScriptBlock $sb')))
+
     def test_a_dot_invoked_inline_block_is_not_unreadable(self):
         """
         Its body is written where it runs, so every layer above already reads it — and

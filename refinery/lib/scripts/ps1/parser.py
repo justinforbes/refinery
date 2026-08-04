@@ -1946,6 +1946,21 @@ class Ps1Parser:
             offset=offset, variable=var, attributes=attrs, default_value=default)
 
     def _parse_attribute(self) -> Ps1Attribute | Ps1TypeExpression:
+        """
+        A type name and its arguments are read in expression mode no matter which mode the caller
+        left behind, for the reason `_try_parse_type_literal` states: in argument mode a generic
+        token does not end at `]`, so the name absorbs its own closing bracket and everything after
+        it. `& { param([int]$x) $x }` reaches here in argument mode, because the block is an
+        argument of the call operator, and swallowed the whole body before this.
+        """
+        self._lexer.push_mode(Ps1LexerMode.EXPRESSION)
+        try:
+            return self._read_attribute()
+        finally:
+            self._lexer.pop_mode()
+            self._rescan_current()
+
+    def _read_attribute(self) -> Ps1Attribute | Ps1TypeExpression:
         offset = self._current.offset
         self._expect(Ps1TokenKind.LBRACKET)
         self._skip_newlines()
