@@ -3,11 +3,15 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts.ps1.analysis.model import (
+    Ps1OccurrenceRole,
     ScopeKind,
     build_semantic_model,
+    declares_binding,
     is_mutated_in_place,
+    is_substitutable_position,
     is_write_occurrence,
     observes_previous_value,
+    occurrence_role,
     replaces_value,
 )
 from refinery.lib.scripts.ps1.model import Ps1AssignmentExpression, Ps1Variable
@@ -217,3 +221,147 @@ class TestPs1WriteOccurrenceKinds(TestBase):
         for source in ("$x = 'a'", "$x, $y = 'p', 'q'", "[string]$x = 'a'"):
             with self.subTest(source):
                 self.assertFalse(is_mutated_in_place(self._write(source)))
+
+
+class TestPs1OccurrenceRoles(TestBase):
+    """
+    What each occurrence of a name does to the value it holds, and the two questions that are not
+    the role: whether a value may be installed in its place, and whether it brings the binding into
+    existence. Every transform used to assemble its own answer from a handful of positional
+    predicates, and `[ref]$n` came out a plain read in all of them at once.
+    """
+
+    @staticmethod
+    def _occurrence(source: str, name: str = 'x', index: int = 0) -> Ps1Variable:
+        found = [
+            node for node in Ps1Parser(source).parse().walk()
+            if isinstance(node, Ps1Variable) and node.name.lower() == name
+        ]
+        if len(found) <= index:
+            raise AssertionError(F'no occurrence {index} of ${name} in {source!r}')
+        return found[index]
+
+    def _role(self, source: str, name: str = 'x', index: int = 0) -> Ps1OccurrenceRole:
+        return occurrence_role(self._occurrence(source, name, index))
+
+    def test_an_occurrence_that_only_observes_the_value_is_a_read(self):
+        for source in ('Write-Host $x', '$y = $x + 1', 'Write-Host $x[0]', 'Get-Item @x'):
+            with self.subTest(source):
+                self.assertIs(self._role(source), Ps1OccurrenceRole.READ)
+
+    def test_an_occurrence_handed_a_value_from_outside_replaces_it(self):
+        for source in (
+            "$x = 'a'",
+            "[string]$x = 'a'",
+            "$x, $y = 'p', 'q'",
+            'foreach ($x in 1, 2) { }',
+            'function f { param($x) }',
+        ):
+            with self.subTest(source):
+                self.assertIs(self._role(source), Ps1OccurrenceRole.WRITE_REPLACING)
+
+    def test_an_occurrence_that_reads_what_it_writes_observes_the_previous_value(self):
+        for source in ("$x += 'a'", '$x -= 1', '$x++', '$x--'):
+            with self.subTest(source):
+                self.assertIs(self._role(source), Ps1OccurrenceRole.WRITE_OBSERVING)
+
+    def test_a_reference_the_callee_may_store_through_observes_the_previous_value(self):
+        """
+        `[Int]::TryParse($s, [ref]$n)` assigns `$n`. The occurrence is a write however it reads, and
+        reading it as anything else lets a value from before the call reach a use after it.
+        """
+        for source in (
+            "[void][int]::TryParse('7', [ref]$x)",
+            "[void][int]::TryParse('7', ([ref]$x))",
+            "[void][int]::TryParse('7', [management.automation.psreference]$x)",
+        ):
+            with self.subTest(source):
+                self.assertIs(self._role(source), Ps1OccurrenceRole.WRITE_OBSERVING)
+
+    def test_an_occurrence_an_assignment_stores_through_keeps_its_own_value(self):
+        for source in ("$x[0] = 'z'", '$x.Length = 5', "$x[0][1] = 'z'", "$x[0] += 'z'"):
+            with self.subTest(source):
+                self.assertIs(self._role(source), Ps1OccurrenceRole.WRITE_THROUGH)
+
+    def test_a_class_property_declaration_references_no_variable(self):
+        self.assertIs(
+            self._role('class C { [int]$x }'), Ps1OccurrenceRole.NOT_A_REFERENCE)
+
+    def test_a_plain_read_is_the_only_position_a_value_may_be_installed_in(self):
+        self.assertTrue(is_substitutable_position(self._occurrence('Write-Host $x')))
+        for source in (
+            "$x = 'a'",
+            "$x[0] = 'z'",
+            "[void][int]::TryParse('7', [ref]$x)",
+            "$x += 'a'",
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_substitutable_position(self._occurrence(source)))
+
+    def test_a_splatted_read_is_not_a_position_a_value_may_be_installed_in(self):
+        """
+        `@x` spreads an array over a command's parameters, so `Get-Item @x` with `$x` holding
+        `'-Path', 'C:\\'` binds `-Path`. The array written in its place is one positional argument
+        instead, which is a different command.
+        """
+        splatted = self._occurrence('Get-Item @x')
+        self.assertIs(occurrence_role(splatted), Ps1OccurrenceRole.READ)
+        self.assertFalse(is_substitutable_position(splatted))
+
+    def test_every_write_but_a_reference_brings_the_binding_into_existence(self):
+        for source in ("$x = 'a'", "$x += 'a'", '$x++', 'foreach ($x in 1, 2) { }'):
+            with self.subTest(source):
+                self.assertTrue(declares_binding(self._occurrence(source)))
+        for source in ("[void][int]::TryParse('7', [ref]$x)", 'Write-Host $x', "$x[0] = 'z'"):
+            with self.subTest(source):
+                self.assertFalse(declares_binding(self._occurrence(source)))
+
+
+class TestPs1ReferenceAttribution(TestBase):
+    """
+    Where a `[ref]$n` occurrence lands in the model. It is resolved the way a read is — PowerShell
+    looks the name up and creates nothing — and recorded the way a write is, because the callee
+    stores through it.
+    """
+
+    @staticmethod
+    def _model(source: str):
+        return build_semantic_model(Ps1Parser(source).parse())
+
+    def test_a_reference_is_a_write_of_the_binding_and_not_a_read(self):
+        model = self._model("$n = 0\n[void][int]::TryParse('7', [ref]$n)")
+        binding = model.script_scope.bindings['n']
+        self.assertEqual(len(binding.writes), 2)
+        self.assertEqual(len(binding.reads), 0)
+
+    def test_a_reference_keeps_the_binding_alive_although_nothing_reads_it(self):
+        """
+        The store the callee performs is only observable through the binding, so a pass that deletes
+        `$n = 0` for having no readers deletes the storage the call writes into.
+        """
+        model = self._model("$n = 0\n[void][int]::TryParse('7', [ref]$n)")
+        binding = model.script_scope.bindings['n']
+        self.assertEqual(len(binding.uses), 1)
+        self.assertFalse(binding.is_dead)
+
+    def test_a_reference_inside_a_body_declares_nothing_there(self):
+        """
+        `[ref]$n` resolves by ordinary lookup, so the name it names is the enclosing one. A local
+        binding invented for it would hide the outer binding the callee actually stores through.
+        """
+        model = self._model("$n = 0\nfunction f { [void][int]::TryParse('7', [ref]$n) }")
+        function_scope = model.script_scope.children[0]
+        self.assertIs(function_scope.kind, ScopeKind.FUNCTION)
+        self.assertNotIn('n', function_scope.bindings)
+        self.assertEqual(len(model.script_scope.bindings['n'].writes), 2)
+
+    def test_a_binding_whose_only_use_is_a_compound_assignment_is_not_dead(self):
+        """
+        `Binding.reads` holds no occurrence here and the value is observed all the same, which is
+        the shape `Binding.uses` exists for.
+        """
+        model = self._model("$x = 'a'\n$x += 'b'")
+        binding = model.script_scope.bindings['x']
+        self.assertEqual(len(binding.reads), 0)
+        self.assertEqual(len(binding.uses), 1)
+        self.assertFalse(binding.is_dead)

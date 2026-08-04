@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.ps1.ast import assignment_of
+from refinery.lib.scripts.ps1.ast import assignment_of, is_reference_cast
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
@@ -56,12 +56,101 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 
+class Ps1OccurrenceRole(enum.Enum):
+    """
+    What one occurrence of a variable does to the value the name holds. Every occurrence has exactly
+    one role, and the transforms ask for it rather than each assembling an answer from a handful of
+    positional predicates — which is how `[ref]$n` came to be read as a plain read by every one of
+    them at once.
+
+    `NOT_A_REFERENCE` — the occurrence does not reference a variable at all: a class property member
+    declaration names a member of the class, a namespace of its own.
+    `READ` — observes the value and does not change it.
+    `WRITE_REPLACING` — stores without observing what was there: `$x = v`, a `foreach` variable, a
+    parameter.
+    `WRITE_OBSERVING` — stores *and* observes: `$x += v`, `$x++`, and `[ref]$x`, whose callee may
+    store back through the wrapper it is handed.
+    `WRITE_THROUGH` — reads the variable to reach a place inside it that is written: the `$x` of
+    `$x[0] = 'z'` or `$x.Length = 5`. The name still holds whatever it held, so this observes the
+    value like a read, but no value may be installed in its place.
+    """
+    NOT_A_REFERENCE = enum.auto()
+    READ            = enum.auto()  # noqa
+    WRITE_REPLACING = enum.auto()
+    WRITE_OBSERVING = enum.auto()
+    WRITE_THROUGH   = enum.auto()  # noqa
+
+
+def occurrence_role(var: Ps1Variable) -> Ps1OccurrenceRole:
+    """
+    The `Ps1OccurrenceRole` of `var`.
+
+    The order the cases are tried in is the order they nest. An occurrence an assignment stores
+    through is a target position as much as a plain target is, and is decided first because
+    `assignment_of` deliberately answers `None` for it; a reference cast is decided last among the
+    writes because everything above it is a syntactic position and a cast is a value form.
+    """
+    if _is_member_declaration(var):
+        return Ps1OccurrenceRole.NOT_A_REFERENCE
+    if _stores_through(var):
+        return Ps1OccurrenceRole.WRITE_THROUGH
+    assignment = assignment_of(var)
+    if assignment is not None:
+        if assignment.operator == '=':
+            return Ps1OccurrenceRole.WRITE_REPLACING
+        return Ps1OccurrenceRole.WRITE_OBSERVING
+    parent = var.parent
+    if isinstance(parent, Ps1UnaryExpression) and parent.operator in ('++', '--'):
+        if parent.operand is var:
+            return Ps1OccurrenceRole.WRITE_OBSERVING
+    if isinstance(parent, Ps1ForEachLoop) and parent.variable is var:
+        return Ps1OccurrenceRole.WRITE_REPLACING
+    if isinstance(parent, Ps1ParameterDeclaration) and parent.variable is var:
+        return Ps1OccurrenceRole.WRITE_REPLACING
+    if is_reference_cast(parent) and parent.operand is var:
+        return Ps1OccurrenceRole.WRITE_OBSERVING
+    return Ps1OccurrenceRole.READ
+
+
+def is_substitutable_position(var: Ps1Variable) -> bool:
+    """
+    Whether a value may be installed where `var` stands, replacing the occurrence.
+
+    This is not the complement of writing, and reading it off the role alone is what let two
+    corruptions through. A splatted `@p` observes the value like any read, but it spreads an array
+    over a command's parameters, and the array written in its place is one argument rather than
+    several. A `[ref]$n` observes the value too, and the literal put in its place is a reference to
+    nothing that the callee's store is silently lost through.
+    """
+    return occurrence_role(var) is Ps1OccurrenceRole.READ and not var.splatted
+
+
+def declares_binding(var: Ps1Variable) -> bool:
+    """
+    Whether the occurrence brings the binding into existence in the scope it resolves to.
+
+    Every write does except a reference: PowerShell resolves `[ref]$n` by ordinary lookup and
+    creates nothing, so filing one as a declaration invents a local binding in whatever body the
+    reference is written in and hides the outer one the callee actually stores through.
+    """
+    if is_reference_cast(var.parent):
+        return False
+    return occurrence_role(var) in (
+        Ps1OccurrenceRole.WRITE_REPLACING,
+        Ps1OccurrenceRole.WRITE_OBSERVING,
+    )
+
+
 def is_assignment_write_target(var: Ps1Variable) -> bool:
     """
     Whether `var` occupies the target position of an enclosing
     `refinery.lib.scripts.ps1.model.Ps1AssignmentExpression`, including as an element of a
     multi-assignment `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral` target. Enclosing casts and
     parentheses are transparent.
+
+    A question about syntax rather than about role, which is why it is not derived from
+    `occurrence_role`: a `foreach` variable and a parameter replace the value exactly as a plain
+    assignment target does and occupy no assignment at all.
     """
     return assignment_of(var) is not None
 
@@ -79,19 +168,11 @@ def replaces_value(var: Ps1Variable) -> bool:
 def observes_previous_value(var: Ps1Variable) -> bool:
     """
     Whether `var` occupies a position that reads the variable as part of writing it: the target of a
-    compound assignment (`+=`, `.=`, …) or the operand of `++`/`--`. Such a write is also a use, so a
-    binding that has one is not dead however many of its `Binding.reads` a caller has accounted for.
-
-    The complement of `replaces_value` over assignment targets only. A `foreach` variable and a
-    parameter declaration are neither: each is handed a value from outside and observes nothing.
+    compound assignment (`+=`, `.=`, …), the operand of `++`/`--`, or a `[ref]` cast the callee may
+    store back through. Such a write is also a use, so a binding that has one is not dead however
+    many of its `Binding.reads` a caller has accounted for.
     """
-    assignment = assignment_of(var)
-    if assignment is not None:
-        return assignment.operator != '='
-    parent = var.parent
-    if isinstance(parent, Ps1UnaryExpression) and parent.operator in ('++', '--'):
-        return parent.operand is var
-    return False
+    return occurrence_role(var) is Ps1OccurrenceRole.WRITE_OBSERVING
 
 
 def is_mutated_in_place(var: Ps1Variable) -> bool:
@@ -100,14 +181,19 @@ def is_mutated_in_place(var: Ps1Variable) -> bool:
     `$x.Length = 5`, of `$x[0][1] = 'z'` and of the multi-assignment `$x[0], $x[1] = 'p', 'q'`.
 
     Such an occurrence reads the variable in order to reach the part that is written, so
-    `is_write_occurrence` calls it a read and no occurrence of the name records the change. It is
-    also a position no value may be installed in: substituting `$x` there produces an assignment to
-    a literal, which is not a program.
+    `is_write_occurrence` calls it a read and no occurrence of the name records the change.
+    """
+    return occurrence_role(var) is Ps1OccurrenceRole.WRITE_THROUGH
 
-    The whole receiver chain counts, not just its innermost step. A target is only a target once the
-    index and member accesses, the parentheses, the casts and the multi-assignment slots between it
-    and the assignment have been climbed, and stopping at the first of them answers `$x[0] = 'z'`
-    while missing `$x[0][1] = 'z'`.
+
+def _stores_through(var: Ps1Variable) -> bool:
+    """
+    The receiver-chain climb behind `Ps1OccurrenceRole.WRITE_THROUGH`.
+
+    The whole chain counts, not just its innermost step. A target is only a target once the index
+    and member accesses, the parentheses, the casts and the multi-assignment slots between it and
+    the assignment have been climbed, and stopping at the first of them answers `$x[0] = 'z'` while
+    missing `$x[0][1] = 'z'`.
     """
     cursor: Node = var
     parent = cursor.parent
@@ -134,19 +220,17 @@ def is_mutated_in_place(var: Ps1Variable) -> bool:
 def is_write_occurrence(var: Ps1Variable) -> bool:
     """
     Whether `var` occurs in a position that writes it: the target of an assignment (including a
-    multi-assignment slot), the operand of a `++`/`--` update, the loop variable of a `foreach`, or
-    a parameter declaration. Every other occurrence reads the variable.
+    multi-assignment slot), the operand of a `++`/`--` update, the loop variable of a `foreach`, a
+    parameter declaration, or the operand of a `[ref]` cast. Every other occurrence reads the
+    variable.
+
+    An occurrence an assignment stores *through* is not one of these: `$x[0] = 'z'` leaves `$x`
+    holding what it held, so the name records no change and the occurrence counts as a read.
     """
-    if is_assignment_write_target(var):
-        return True
-    parent = var.parent
-    if isinstance(parent, Ps1UnaryExpression) and parent.operator in ('++', '--'):
-        return parent.operand is var
-    if isinstance(parent, Ps1ForEachLoop):
-        return parent.variable is var
-    if isinstance(parent, Ps1ParameterDeclaration):
-        return parent.variable is var
-    return False
+    return occurrence_role(var) in (
+        Ps1OccurrenceRole.WRITE_REPLACING,
+        Ps1OccurrenceRole.WRITE_OBSERVING,
+    )
 
 
 def _is_member_declaration(var: Ps1Variable) -> bool:
@@ -214,13 +298,27 @@ class Binding:
         return bool(self.reads)
 
     @property
+    def uses(self) -> list[Ps1Variable]:
+        """
+        Every occurrence that observes the binding's value: its `reads`, and those of its `writes`
+        that read what was there in order to write it.
+
+        The two lists are buckets, not roles, and an occurrence that both reads and writes has no
+        bucket of its own — `$x += 1` and `[ref]$x` are filed under `writes` and observe the value
+        as surely as anything in `reads`. Every consumer deciding whether a value is still wanted
+        asks this rather than `reads`, because asking `reads` is exactly how a store whose only
+        reader is a compound assignment came to be deletable.
+        """
+        return [*self.reads, *(w for w in self.writes if observes_previous_value(w))]
+
+    @property
     def is_dead(self) -> bool:
         """
-        Whether no use observes the binding's value: it is read through no occurrence and reached
-        by no qualifier or dynamic scope. The write occurrences of a dead binding can be removed
-        when they carry no other side effect (which the caller decides).
+        Whether no use observes the binding's value: no occurrence observes it and no qualifier or
+        dynamic scope reaches it. The write occurrences of a dead binding can be removed when they
+        carry no other side effect (which the caller decides).
         """
-        return not self.reads and not self.dynamic_or_qualified
+        return not self.uses and not self.dynamic_or_qualified
 
 
 @dataclass(eq=False)
@@ -337,7 +435,7 @@ class Ps1SemanticModel:
                 self._populate(child)
                 continue
             self._node_scope[id(node)] = scope
-            if isinstance(node, Ps1Variable) and is_write_occurrence(node):
+            if isinstance(node, Ps1Variable) and declares_binding(node):
                 self._declare(node, scope)
 
     @staticmethod
@@ -381,7 +479,9 @@ class Ps1SemanticModel:
             scope = self._node_scope.get(id(node))
             if scope is None:
                 continue
-            if is_write_occurrence(node):
+            if is_reference_cast(node.parent):
+                self._attribute_reference(node, scope)
+            elif is_write_occurrence(node):
                 self._attribute_write(node, scope)
             else:
                 self._attribute_read(node, scope)
@@ -391,6 +491,34 @@ class Ps1SemanticModel:
         if binding is not None:
             binding.writes.append(var)
             self._binding_of[id(var)] = binding
+
+    def _attribute_reference(self, var: Ps1Variable, scope: Scope):
+        """
+        Attribute a `[ref]$x` occurrence: resolved the way a read is, recorded the way a write is.
+
+        The two halves are not the same question. PowerShell resolves the name by ordinary lookup,
+        so a reference written inside a body reaches the enclosing binding and declares nothing —
+        resolving it the way a write is resolved would look for a local binding that was never
+        created and attribute the occurrence to nothing at all, losing the very use this exists to
+        keep. What it then does to that binding is store into it, so it is recorded among the
+        writes, where it both keeps the binding alive through `Binding.uses` and stops an earlier
+        value reaching a later read.
+        """
+        if var.scope is not Ps1ScopeModifier.NONE:
+            self._attribute_read(var, scope)
+            return
+        name = binding_key(var)
+        primary: Binding | None = None
+        cursor: Scope | None = scope
+        while cursor is not None:
+            binding = cursor.bindings.get(name)
+            if binding is not None:
+                binding.writes.append(var)
+                if primary is None:
+                    primary = binding
+            cursor = cursor.parent
+        if primary is not None:
+            self._binding_of[id(var)] = primary
 
     def _lookup_write_binding(self, var: Ps1Variable, scope: Scope) -> Binding | None:
         defining = self._defining_scope(var, scope)

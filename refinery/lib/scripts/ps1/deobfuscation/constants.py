@@ -18,7 +18,7 @@ from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
     binding_key,
     is_assignment_write_target,
-    is_mutated_in_place,
+    is_substitutable_position,
     is_write_occurrence,
     observes_previous_value,
 )
@@ -495,11 +495,13 @@ class Ps1ConstantInlining(Transformer):
         class body is opaque to the graphs, so a property initializer inside one locates to the
         class statement and would be ordered against code it does not run beside.
 
-        An occurrence an assignment stores *through* is left alone whatever the flow model would say
-        about it. `$x[0] = 'z'` names a place, not a value, and a constant installed there is an
-        assignment to a literal — output that no longer parses. The flow model refuses such a name
-        as well, through `Ps1FlowUnknown.MUTATED_IN_PLACE`, but that is a fact about the *binding*
-        and this is a fact about the *position*: the ambient table answers without a binding at all.
+        Which positions may hold a value at all is
+        `refinery.lib.scripts.ps1.analysis.model.is_substitutable_position`, asked once here rather
+        than reassembled from the positional predicates it is made of. It is a fact about the
+        *position*, not about the binding: the flow model refuses a name stored through as well,
+        via `Ps1FlowUnknown.MUTATED_IN_PLACE`, but the ambient table answers with no binding at all
+        and would otherwise install a constant where `$x[0] = 'z'` names a place rather than a
+        value.
         """
         for node in list(_walk_outer_scope(root)):
             if isinstance(node, Ps1IndexExpression):
@@ -511,12 +513,10 @@ class Ps1ConstantInlining(Transformer):
                 # would install the whole value where an element of it now stands.
                 state.handled.add(id(var))
                 key = _candidate_key(var)
-                if key is not None and not is_mutated_in_place(var):
+                if key is not None and is_substitutable_position(var):
                     self._substitute_index_reference(node, var, key, state)
             elif isinstance(node, Ps1Variable):
-                if id(node) in state.handled or is_write_occurrence(node):
-                    continue
-                if is_mutated_in_place(node):
+                if id(node) in state.handled or not is_substitutable_position(node):
                     continue
                 key = _candidate_key(node)
                 if key is not None and key not in state.blocked:

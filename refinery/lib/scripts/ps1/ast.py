@@ -396,6 +396,26 @@ def is_builtin_variable(
     )
 
 
+#: Type names that denote a by-reference wrapper. `[Ref]` is the PowerShell shorthand; the framework
+#: name it resolves to spells the same thing and appears in obfuscated scripts.
+_REFERENCE_TYPE_NAMES = frozenset({
+    'management.automation.psreference',
+    'ref',
+})
+
+
+def is_reference_cast(expr: Node | None) -> bool:
+    """
+    Whether `expr` is a `[ref]` cast, which hands the callee a wrapper it can store back through
+    rather than the operand's value. What the operand then denotes is the caller's question: a cast
+    over a variable names storage the callee may write, and one over a literal names nothing.
+    """
+    return (
+        isinstance(expr, Ps1CastExpression)
+        and normalize_dotnet_type_name(expr.type_name) in _REFERENCE_TYPE_NAMES
+    )
+
+
 def unwrap_assignment_target(target: Node | None) -> Node | None:
     """
     Peel type-constraint casts and parentheses from an assignment target, so `[Type]$x` and `($x)`

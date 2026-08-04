@@ -210,6 +210,15 @@ class Ps1UnusedVariableRemoval(Transformer):
 
     @staticmethod
     def _mutation_of(var: Ps1Variable) -> Node | None:
+        """
+        The node this pass would remove to undo the write `var` performs, or `None` when the write
+        is one it cannot remove.
+
+        A `[ref]$x` is such a write and must stay `None`: the store happens inside a callee, so
+        there is nothing here to delete, and the enclosing call is not this pass's to touch. That
+        also makes the reference a use nothing discounts, which is what keeps the assignment it
+        stores into alive.
+        """
         assignment = assignment_of(var)
         if assignment is not None:
             return assignment
@@ -224,7 +233,7 @@ class Ps1UnusedVariableRemoval(Transformer):
     ) -> list[Binding]:
         """
         From candidate bindings mapped to their removable mutations, return those that are dead. A
-        binding is live if it has a read not contained in the right-hand side of any *dissolving*
+        binding is live if it has a use not contained in the right-hand side of any *dissolving*
         assignment — a use in live code, in a live function, or a captured scriptblock. Liveness
         propagates back along right-hand sides: if a live binding's assignment reads another
         candidate, that candidate is live too. The rest, whose every read sits inside the right-hand
@@ -242,6 +251,14 @@ class Ps1UnusedVariableRemoval(Transformer):
         and is still never removable, because the slot beside it writes memory this pass reasons
         nothing about; a right-hand side that is only ever going away when that binding dies is a
         right-hand side that is never going away at all.
+
+        The uses are `Binding.uses`, not `Binding.reads`: a write that observes the previous value
+        reads the binding as surely as anything in `reads` and is filed among the writes. Such a use
+        is discounted when the mutation performing it is itself dissolving, on the same reasoning as
+        a read inside a dissolving right-hand side — the store consumes the read, so removing the
+        store removes the read, and `$x = 1; $x += 2` that nothing else reads is dead whole. A
+        `[ref]$x` has no mutation this pass can remove, so it is never discounted and always keeps
+        its binding live.
         """
         bindings = list(candidates)
         rhs_owner: dict[int, Binding] = {}
@@ -258,8 +275,11 @@ class Ps1UnusedVariableRemoval(Transformer):
         readers: dict[Binding, set[Binding]] = {binding: set() for binding in bindings}
         live: set[Binding] = set()
         for binding in bindings:
-            for read in binding.reads:
-                owner = self._covering_owner(read, rhs_owner)
+            for use in binding.uses:
+                mutation = self._mutation_of(use)
+                if mutation is not None and id(mutation) in dissolving:
+                    continue
+                owner = self._covering_owner(use, rhs_owner)
                 if owner is None or owner is binding:
                     live.add(binding)
                 else:

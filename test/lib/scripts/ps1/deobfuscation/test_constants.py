@@ -681,6 +681,59 @@ class TestPs1ConstantInliningExtra(TestPs1):
             Ps1ConstantInlining)
 
 
+class TestPs1ConstantInliningAcrossAStoreItCannotSee(TestPs1):
+    """
+    Positions that observe a value without being a place a value may be put, and writes performed by
+    something other than an assignment. Each was read as a plain read by every predicate this pass
+    consulted, so each folded a value across a store or installed a literal where the syntax means
+    something else.
+
+    Every expectation is what PowerShell does with the input, not what the pass happens to produce.
+    """
+
+    def test_a_reference_argument_is_not_a_place_a_value_may_be_installed(self):
+        """
+        `[ref]5` is a reference to nothing. Whatever the callee stores through it is lost, and the
+        statement then looks pure enough for a later pass to delete outright.
+        """
+        self._assertUnchanged(
+            "$n = 5\n[void][int]::TryParse('7', [ref]$n)", Ps1ConstantInlining)
+
+    def test_a_read_after_a_reference_does_not_observe_the_value_before_it(self):
+        """
+        `[Int]::TryParse` assigns `$n` through the reference, so PowerShell prints `7` here. The
+        store happens inside the callee and no assignment in the script records it.
+        """
+        self._assertUnchanged(
+            "$n = 0\n[void][int]::TryParse('7', [ref]$n)\nWrite-Host $n", Ps1ConstantInlining)
+
+    def test_a_reference_in_a_body_stores_through_the_binding_the_script_holds(self):
+        self._assertUnchanged(
+            "$n = 0\nfunction f {\n  [void][int]::TryParse('7', [ref]$n)\n}\nf\nWrite-Host $n",
+            Ps1ConstantInlining)
+
+    def test_a_splatted_argument_is_not_a_place_a_value_may_be_installed(self):
+        """
+        `Get-Item @p` with `$p` holding `'-Path', 'C:\\'` binds `-Path`; `Get-Item ('-Path', 'C:\\')`
+        hands the array to the first positional parameter instead, which is a different command.
+        """
+        self._assertUnchanged(
+            "$p = @('-Path', 'C:\\')\nGet-Item @p", Ps1ConstantInlining)
+
+    def test_the_assignment_a_reference_stores_into_is_not_removed_as_unread(self):
+        """
+        The read before the call is substituted, so every occurrence in `Binding.reads` is
+        accounted for and the removal is reached — and must still decline, because the reference
+        observes the value too. The fold of the read itself is correct and stays: it runs before the
+        call.
+        """
+        self.assertEqual(
+            self._apply(
+                "$n = 0\nWrite-Host $n\n[void][int]::TryParse('7', [ref]$n)",
+                Ps1ConstantInlining),
+            "$n = 0\nWrite-Host 0\n[void][int]::TryParse('7', [ref]$n)")
+
+
 class TestPs1ConstantInliningAroundUnreachableCode(TestPs1):
     """
     Code no path reaches orders nothing, in either direction: it neither blocks a fold between two

@@ -44,6 +44,7 @@ from refinery.lib.scripts.ps1.ast import (
     get_named_blocks,
     get_param_block,
     is_builtin_variable,
+    is_reference_cast,
     normalize_dotnet_type_name,
     unwrap_parens,
 )
@@ -339,14 +340,6 @@ _PURE_READS = _canonical_read_set({
     ('threading.thread', 'managedthreadid'),
 })
 
-#: Type names that denote a by-reference wrapper. `[Ref]` is the PowerShell shorthand; the framework
-#: name it resolves to spells the same thing and appears in obfuscated scripts.
-_REFERENCE_TYPE_NAMES = frozenset({
-    'management.automation.psreference',
-    'ref',
-})
-
-
 #: The out-variable common parameters PowerShell defines on every advanced command. Naming them here
 #: floors the derivation below the way `_canonical_type_name` floors the type allow-list: each is a
 #: fixed engine contract whose loss silences a real write, so a collected surface that no longer
@@ -488,11 +481,7 @@ def _is_writable_reference(node) -> bool:
     """
     while isinstance(node, Ps1ParenExpression):
         node = node.expression
-    return (
-        isinstance(node, Ps1CastExpression)
-        and normalize_dotnet_type_name(node.type_name) in _REFERENCE_TYPE_NAMES
-        and _denotes_shared_storage(node.operand)
-    )
+    return is_reference_cast(node) and _denotes_shared_storage(node.operand)
 
 
 def _writes_through_out_parameter(

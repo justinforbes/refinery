@@ -4,11 +4,13 @@ from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
+from refinery.lib.scripts.ps1.analysis.model import build_semantic_model
 from refinery.lib.scripts.ps1.deobfuscation import (
     Ps1DeadStoreElimination,
     Ps1JunkStatementRemoval,
     Ps1UnusedVariableRemoval,
 )
+from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
 class TestPs1UnusedVariableRemoval(TestPs1):
@@ -74,6 +76,34 @@ class TestPs1UnusedVariableRemoval(TestPs1):
         result = self._deobfuscate("$x = 0; $x = $x + 1; Write-Host $x")
         self.assertNotIn('$x', result)
         self.assertIn('1', result)
+
+    def test_a_store_a_callee_writes_through_a_reference_is_kept(self):
+        """
+        Nothing in the script reads `$n`, and `[Int]::TryParse` assigns it through the reference —
+        so the assignment is the storage the call writes into, and removing it removes the write.
+
+        Asserted as exact output: `assertIn('$n', ...)` is satisfied by the `[ref]$n` of the
+        surviving call while the assignment it stores into has already been deleted.
+        """
+        self._assertUnchanged(
+            "$n = 0\n[void][int]::TryParse('7', [ref]$n)\nWrite-Host done",
+            Ps1UnusedVariableRemoval)
+
+    def test_a_reference_is_not_a_mutation_this_pass_can_remove(self):
+        """
+        The store happens inside the callee, so there is no assignment here to delete — which is
+        also what makes the reference a use that nothing discounts. `_removable_mutations` yielding
+        one would offer the enclosing call up for removal.
+        """
+        model = build_semantic_model(
+            Ps1Parser("$n = 0\n[void][int]::TryParse('7', [ref]$n)").parse())
+        binding = model.script_scope.bindings['n']
+        references = [
+            write for write in binding.writes
+            if Ps1UnusedVariableRemoval._mutation_of(write) is None
+        ]
+        self.assertEqual(len(references), 1)
+        self.assertEqual(len(Ps1UnusedVariableRemoval._removable_mutations(binding)), 1)
 
 
 class TestPs1JunkStatementRemoval(TestPs1):

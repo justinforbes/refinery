@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from test import TestBase
 
-from refinery.lib.scripts.ps1.ast import in_evaluation_order
-from refinery.lib.scripts.ps1.model import Ps1StringLiteral, Ps1Variable
+from refinery.lib.scripts import Node
+from refinery.lib.scripts.ps1.ast import in_evaluation_order, is_reference_cast
+from refinery.lib.scripts.ps1.model import (
+    Ps1CastExpression,
+    Ps1StringLiteral,
+    Ps1Variable,
+)
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -47,3 +52,39 @@ class TestPs1EvaluationOrder(TestBase):
         `$x, $y = $y, $x` swaps, so neither target may be ordered before either source.
         """
         self.assertEqual(self._order("$x, $y = $y, $x"), ['$y', '$x', '$x', '$y'])
+
+
+class TestPs1ReferenceCast(TestBase):
+    """
+    The `[ref]` recognizer, which decides whether a callee is handed storage it can write back
+    through rather than a value. Its answer is what makes the difference between a name a store may
+    be folded across and one it may not.
+    """
+
+    @staticmethod
+    def _cast(source: str) -> Node:
+        for node in Ps1Parser(source).parse().walk():
+            if isinstance(node, Ps1CastExpression):
+                return node
+        raise AssertionError(F'no cast in {source!r}')
+
+    def test_both_spellings_of_the_wrapper_type_are_recognized(self):
+        for source in (
+            '[ref]$n',
+            '[Ref]$n',
+            '[REF]$n',
+            '[management.automation.psreference]$n',
+            '[System.Management.Automation.PSReference]$n',
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_reference_cast(self._cast(source)))
+
+    def test_an_unrelated_cast_is_not_a_reference(self):
+        for source in ('[int]$n', '[string]$n', '[scriptblock]$n', '[refx]$n'):
+            with self.subTest(source):
+                self.assertFalse(is_reference_cast(self._cast(source)))
+
+    def test_something_that_is_not_a_cast_is_not_a_reference(self):
+        node = Ps1Parser('$n').parse()
+        self.assertFalse(is_reference_cast(node))
+        self.assertFalse(is_reference_cast(None))

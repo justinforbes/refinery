@@ -19,27 +19,35 @@ from refinery.lib.scripts.ps1.analysis.effects import (
 )
 from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
+    Ps1OccurrenceRole,
     Ps1SemanticModel,
     Scope,
     ScopeKind,
     build_semantic_model,
+    declares_binding,
     is_assignment_write_target,
+    is_substitutable_position,
     is_write_occurrence,
+    occurrence_role,
     replaces_value,
 )
 
 __all__ = [
     'Binding',
     'Ps1ModelCache',
+    'Ps1OccurrenceRole',
     'Ps1SemanticModel',
     'Scope',
     'ScopeKind',
     'StatementEffect',
     'build_semantic_model',
+    'declares_binding',
     'is_assignment_write_target',
     'is_side_effect_free',
+    'is_substitutable_position',
     'is_write_occurrence',
     'model_cache',
+    'occurrence_role',
     'replaces_value',
     'statement_effect',
 ]
