@@ -335,6 +335,39 @@ def _derive_out_variable_parameters(common: dict[str, tuple[str, ...]]) -> froze
 
 OUT_VARIABLE_PARAMETERS = _derive_out_variable_parameters(COMMON_PARAMETERS)
 
+_VALUE_PARAMETERS: dict[str, frozenset[str]] = {}
+
+_COMMAND_RECORDS: dict[str, dict] = {
+    _name.lower(): _record for _name, _record in _COMMAND_TABLE.items()
+}
+
+
+def value_parameters(command: str) -> frozenset[str]:
+    """
+    The lowercased parameter names and aliases of *command* that take a value, as opposed to the
+    switches that stand alone. Empty for a command the collected surface does not carry.
+
+    A caller reading a command's arguments needs this to tell `-Name x`, where `x` is the value of
+    `-Name`, from `-Recurse C:\\`, where the path is a positional argument of its own. The parser
+    renders both as a switch followed by a positional because it has no parameter metadata; this is
+    that metadata.
+
+    Looked up and memoized per command rather than built for every command at import: the table
+    carries thousands of commands and a caller asks about a handful.
+    """
+    command = command.lower()
+    found = _VALUE_PARAMETERS.get(command)
+    if found is None:
+        names: set[str] = set()
+        for _parameter, _info in _COMMAND_RECORDS.get(command, {}).get('parameters', {}).items():
+            if _info['switch']:
+                continue
+            names.add(_parameter.lower())
+            names.update(_alias.lower() for _alias in _info['aliases'])
+        found = _VALUE_PARAMETERS[command] = frozenset(names)
+    return found
+
+
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_]\w*$')
 
 OBJ_COMMANDS = frozenset({
