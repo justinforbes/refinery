@@ -52,6 +52,17 @@ read and is left out rather than counted against it. The exception is a statemen
 where the previous visit's store is exactly what the read observes — `while ($c) { $x = $x[0] }` — so
 the exclusion is asked of `refinery.lib.scripts.analysis.cycles.CycleModel` first.
 
+**A write nobody can attribute to a name is still a write at a known point.** `Set-Variable $n 'v'`
+may land on any binding of the scope it runs in, and no reading of the source narrows that — but when
+it runs is not in doubt at all, so `Write-Host $x; Set-Variable $n 'v'` observes the value it always
+would have. Holding the fact on the `Scope` instead refuses that read too, and refuses it for as long
+as the tree stands: `$x = 'a'; . { Set-Variable $n 'v' }; Write-Host $x` then folded to `'a'` at the
+same time, because the flag sat on the block's scope while the write landed in the caller's.
+`unattributable_writes` is the kill, and `Ps1BlockModel.unattributable_writes_reaching_caller` is what
+carries it out of a body that runs in its caller's scope. What stays on the scope is only what has no
+point to stand at: a write aimed at the script scope from anywhere, one aimed at a scope the lexical
+chain cannot name, and one run by a block whose own run time this layer cannot place.
+
 A write inside a `trap` is a case this layer gets right for the wrong reason, and the distinction
 matters if either half is touched. 5.1 runs a trap body in a child scope, so the write cannot reach a
 read outside the trap at all; `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel` does not model
@@ -65,6 +76,8 @@ from __future__ import annotations
 
 import enum
 
+from typing import Iterator
+
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
 from refinery.lib.scripts.analysis.cycles import CycleModel
@@ -76,9 +89,12 @@ from refinery.lib.scripts.ps1.analysis.model import (
     Ps1SemanticModel,
     binding_key,
     is_mutated_in_place,
+    scope_local_nodes,
 )
+from refinery.lib.scripts.ps1.analysis.naming import Ps1NameTarget, unreadable_name_target
 from refinery.lib.scripts.ps1.ast import in_evaluation_order
 from refinery.lib.scripts.ps1.model import (
+    Ps1CommandInvocation,
     Ps1ScriptBlock,
     Ps1Variable,
 )
@@ -106,10 +122,12 @@ class Ps1FlowUnknown(enum.Flag):
     #: A body that may write this binding runs at a time this layer cannot place — a stored block, a
     #: block handed to a command that may or may not invoke it.
     WRITTEN_BY_DEFERRED_BODY = enum.auto()
-    #: Something in the binding's scope writes a name that cannot be read off the source —
-    #: `Set-Variable $n 'v'` — so a write may have landed on this binding with no occurrence of it
-    #: anywhere. Kept apart from `REACHED_BY_QUALIFIER`, which says a *known* name is reachable
-    #: another way: these are different reasons and a caller may be able to live with one.
+    #: A write whose name cannot be read off the source — `Set-Variable $n 'v'` — may land on this
+    #: binding at a moment nothing here can place: aimed at the script scope out of any body, at a
+    #: scope the lexical chain cannot name, or run by a block whose own run time is unplaceable.
+    #: The placeable ones are not this; they are nodes in `unattributable_writes`. Kept apart from
+    #: `REACHED_BY_QUALIFIER`, which says a *known* name is reachable another way: these are
+    #: different reasons and a caller may be able to live with one.
     WRITTEN_BY_UNREADABLE_NAME = enum.auto()
     #: A statement changes the binding's value through a part of it rather than by replacing it —
     #: `$x[0] = 'z'`, `$x.Length = 5`. No occurrence of the name writes it, so every occurrence is in
@@ -139,6 +157,9 @@ class Ps1VariableFlow:
         self._unknowns: dict[int, Ps1FlowUnknown] = {}
         self._exits: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]] = {}
         self._kills: dict[tuple[int, str], frozenset[int]] = {}
+        self._unattributable: dict[int, tuple[CfgNode, ...]] = {}
+        self._unattributable_ids: dict[int, frozenset[int]] = {}
+        self._deferred_unattributable: bool | None = None
         self._blocks_by_owner: dict[int, list[Ps1ScriptBlock]] = {}
         self._mutated: frozenset[str] | None = None
 
@@ -171,7 +192,7 @@ class Ps1VariableFlow:
             graph,
             use,
             definitions,
-            self._block_kills(graph, binding),
+            self._block_kills(graph, binding) | self._unattributable_kills(graph),
         )
         if found is None:
             return None
@@ -204,7 +225,7 @@ class Ps1VariableFlow:
             found |= Ps1FlowUnknown.WRITES_IN_SEVERAL_BODIES
         if self._deferred_body_writes(binding):
             found |= Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY
-        if binding.scope.writes_unreadable_names:
+        if binding.scope.writes_unreadable_names or self.deferred_unattributable_writes:
             found |= Ps1FlowUnknown.WRITTEN_BY_UNREADABLE_NAME
         if binding.name in self.mutated_in_place:
             found |= Ps1FlowUnknown.MUTATED_IN_PLACE
@@ -351,6 +372,63 @@ class Ps1VariableFlow:
                 kills.add(id(placed[1]))
         found = self._kills[key] = frozenset(kills)
         return found
+
+    def unattributable_writes(self, graph: ControlFlowGraph) -> tuple[CfgNode, ...]:
+        """
+        The nodes of *graph* at which a write nobody can attribute to a name lands in the scope that
+        node runs in — `Set-Variable $n 'v'`, and a `. { }` running one in its caller's scope.
+
+        Such a write is a fact about a *point*. Which binding it hit is unknown and stays unknown,
+        but when it happened is not, so a read reaching its definition without passing this node
+        observes the value it would have observed had the write not been there. Recording it against
+        the whole scope instead — which is what `Scope.writes_unreadable_names` still does for the
+        writes that cannot be placed — refuses those reads as well, and refuses them for as long as
+        the tree stands.
+        """
+        found = self._unattributable.get(id(graph))
+        if found is None:
+            found = self._unattributable[id(graph)] = tuple(self._find_unattributable(graph))
+        return found
+
+    def _find_unattributable(self, graph: ControlFlowGraph) -> Iterator[CfgNode]:
+        for node in scope_local_nodes(graph.owner):
+            if isinstance(node, Ps1ScriptBlock):
+                if not self.blocks.unattributable_writes_reaching_caller(node):
+                    continue
+            elif not (
+                isinstance(node, Ps1CommandInvocation)
+                and unreadable_name_target(node) is Ps1NameTarget.LOCAL
+            ):
+                continue
+            placed = self.flow.locate(node)
+            if placed is not None and placed[0] is graph:
+                yield placed[1]
+
+    def _unattributable_kills(self, graph: ControlFlowGraph) -> frozenset[int]:
+        found = self._unattributable_ids.get(id(graph))
+        if found is None:
+            found = self._unattributable_ids[id(graph)] = frozenset(
+                id(node) for node in self.unattributable_writes(graph)
+            )
+        return found
+
+    @property
+    def deferred_unattributable_writes(self) -> bool:
+        """
+        Whether a block whose run time this layer cannot place runs a write nobody can attribute.
+        Its point is the point the block runs at, and that is exactly what a stored block does not
+        have, so the kill above has nowhere to land and the doubt belongs to the whole scope again.
+
+        A fact about the script rather than about any binding, unlike `_deferred_body_writes`, which
+        asks after one name: the name here is the part nobody can read.
+        """
+        if self._deferred_unattributable is None:
+            self._deferred_unattributable = any(
+                self.blocks.facts(block).reach in (Ps1BlockReach.STORED, Ps1BlockReach.UNKNOWN)
+                and self.blocks.unattributable_writes_reaching_caller(block)
+                for block in self._blocks_of(self.semantic.root)
+            )
+        return self._deferred_unattributable
 
     def _observes_completed_store(
         self,

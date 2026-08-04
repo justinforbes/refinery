@@ -45,6 +45,7 @@ from typing import Iterator
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
+from refinery.lib.scripts.ps1.analysis.naming import Ps1NameTarget, unreadable_name_target
 from refinery.lib.scripts.ps1.ast import resolve_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
@@ -207,6 +208,7 @@ class Ps1BlockModel:
         self.root = root
         self._facts: dict[int, Ps1BlockFacts] = {}
         self._caller_writes: dict[int, tuple[Ps1Variable, ...]] = {}
+        self._caller_unattributable: dict[int, bool] = {}
 
     def facts(self, block: Ps1ScriptBlock) -> Ps1BlockFacts:
         """
@@ -245,6 +247,41 @@ class Ps1BlockModel:
                 found = tuple(self._collect_writes(block))
             self._caller_writes[id(block)] = found
         return found
+
+    def unattributable_writes_reaching_caller(self, block: Ps1ScriptBlock) -> bool:
+        """
+        Whether *block* runs a write whose name this cannot read — `Set-Variable $n 'v'` — into the
+        scope of whatever runs it. The name is unknown, so the write may have landed on any binding
+        of that scope, and a caller can place *when* it happened without knowing *what* it hit.
+
+        Only the writes a command places in its own scope are reported. One that names a scope
+        outright reaches the same binding whichever body it sits in, so it is not a fact about where
+        this block runs, and reporting it here would have it stop at a child scope that does not
+        stop it — the same reason `writes_reaching_caller` leaves a `$script:` write out.
+        """
+        found = self._caller_unattributable.get(id(block))
+        if found is None:
+            found = self._caller_unattributable[id(block)] = (
+                self.may_write_caller_scope(block)
+                and self._runs_unattributable_write(block)
+            )
+        return found
+
+    def _runs_unattributable_write(self, block: Ps1ScriptBlock) -> bool:
+        stack: list[Node] = list(block.children())
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Ps1ScriptBlock):
+                if self.unattributable_writes_reaching_caller(node):
+                    return True
+                continue
+            if (
+                isinstance(node, Ps1CommandInvocation)
+                and unreadable_name_target(node) is Ps1NameTarget.LOCAL
+            ):
+                return True
+            stack.extend(node.children())
+        return False
 
     def _collect_writes(self, block: Ps1ScriptBlock) -> Iterator[Ps1Variable]:
         stack: list[Node] = list(block.children())

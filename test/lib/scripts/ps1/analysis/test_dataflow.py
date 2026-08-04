@@ -353,3 +353,95 @@ class TestPs1FlowUnknownRegressions(TestPs1FlowUnknowns):
         ):
             with self.subTest(source):
                 self.assertIn(Ps1FlowUnknown.MUTATED_IN_PLACE, self._unknowns(source))
+
+
+class TestPs1UnattributableWrites(TestPs1VariableFlow):
+    """
+    `Set-Variable $n 'v'` writes a name nothing can read off the source. Which binding it landed on
+    stays unknown, but *when* it ran does not, so a read that reaches its write without passing the
+    command observes the value it always would have — and one that does pass it observes nothing.
+
+    Measured on 5.1 (`temp/ps1/census_measurements.md`): a bare `Set-Variable` writes the scope the
+    command stands in, so `. { }` running one writes its caller's scope, `& { }` and a function body
+    do not, and `-Scope 1` writes a scope the lexical chain cannot name at all.
+    """
+
+    def test_a_read_before_a_computed_write_still_observes_its_write(self):
+        self.assertEqual(self._observed("$x = 'a'; Write-Host $x; Set-Variable $n 'v'"), 0)
+
+    def test_a_computed_write_between_a_write_and_a_read_kills_it(self):
+        self.assertIsNone(self._observed("$x = 'a'; Set-Variable $n 'v'; Write-Host $x"))
+
+    def test_a_dotted_block_running_a_computed_write_kills_the_callers_write(self):
+        self.assertIsNone(self._observed("$x = 'a'; . { Set-Variable $n 'v' }; Write-Host $x"))
+
+    def test_a_body_nested_inside_a_caller_scoped_one_still_reaches_the_outermost_caller(self):
+        for source in (
+            "$x = 'a'; . { . { Set-Variable $n 'v' } }; Write-Host $x",
+            "$x = 'a'; 1..3 | %{ Set-Variable $n 'v' }; Write-Host $x",
+        ):
+            with self.subTest(source):
+                self.assertIsNone(self._observed(source))
+
+    def test_a_caller_scoped_body_inside_a_child_scope_stops_at_that_child(self):
+        """
+        The inner dot writes the `&` block's scope, and that scope ends with the block, so nothing
+        it wrote outlives it — the same asymmetry `writes_reaching_caller` turns on.
+        """
+        self.assertEqual(
+            self._observed("$x = 'a'; & { . { Set-Variable $n 'v' } }; Write-Host $x"), 0)
+
+    def test_a_child_scope_running_a_computed_write_kills_nothing_outside_it(self):
+        for source in (
+            "$x = 'a'; & { Set-Variable $n 'v' }; Write-Host $x",
+            "$x = 'a'; function f { Set-Variable $n 'v' }; f; Write-Host $x",
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._observed(source), 0)
+
+    def test_a_computed_write_naming_the_script_scope_kills_from_inside_a_child_scope(self):
+        self.assertIsNone(
+            self._observed("$x = 'a'; & { Set-Variable $n 'v' -Scope Global }; Write-Host $x"))
+
+    def test_a_scope_the_lexical_chain_cannot_name_kills_wherever_it_is_written(self):
+        self.assertIsNone(
+            self._observed("$x = 'a'; & { Set-Variable $n 'v' -Scope 1 }; Write-Host $x"))
+
+    def test_a_computed_write_in_a_stored_block_kills_without_a_point_to_stand_at(self):
+        """
+        A stored block runs whenever its value is invoked, so the kill has no position and the doubt
+        is about the binding rather than about any node.
+        """
+        source = "$x = 'a'; $b = { Set-Variable $n 'v' }; . $b; Write-Host $x"
+        self.assertIsNone(self._observed(source))
+        _, semantic, flow = _models(source)
+        self.assertIn(
+            Ps1FlowUnknown.WRITTEN_BY_UNREADABLE_NAME,
+            flow.unknowns(semantic.script_scope.bindings['x']))
+
+    def test_the_kill_is_placed_at_the_statement_that_runs_the_write(self):
+        tree, _, flow = _models(
+            "$x = 'a'\n. { Set-Variable $n 'v' }\nWrite-Host $x")
+        graph = flow.flow.graph_of(tree)
+        placed = [node.element for node in flow.unattributable_writes(graph)]
+        self.assertEqual(placed, [tree.body[1]])
+
+    def test_a_literal_named_write_is_no_kill_at_all(self):
+        tree, _, flow = _models("$x = 'a'\nSet-Variable y 'v'\nWrite-Host $x")
+        self.assertEqual(flow.unattributable_writes(flow.flow.graph_of(tree)), ())
+        self.assertEqual(self._observed("$x = 'a'; Set-Variable y 'v'; Write-Host $x"), 0)
+
+    def test_a_write_naming_another_scope_is_not_one_of_the_placed_ones(self):
+        """
+        A `-Scope Global` write reaches every binding of the script scope, from any body, for as
+        long as the run lasts. Listing it among the writes that land where they stand would say the
+        reads before it are safe from it, which is the one thing it does not promise — so it stays
+        with `Scope.writes_unreadable_names`, where it refuses them all.
+        """
+        for source in (
+            "$x = 'a'\nSet-Variable $n 'v' -Scope Global\nWrite-Host $x",
+            "$x = 'a'\nSet-Variable $n 'v' -Scope 1\nWrite-Host $x",
+        ):
+            with self.subTest(source):
+                tree, _, flow = _models(source)
+                self.assertEqual(flow.unattributable_writes(flow.flow.graph_of(tree)), ())

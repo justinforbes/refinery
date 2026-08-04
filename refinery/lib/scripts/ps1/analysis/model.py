@@ -352,19 +352,28 @@ class Scope:
     parent: Scope | None = None
     children: list[Scope] = field(default_factory=list)
     bindings: dict[str, Binding] = field(default_factory=dict)
-    #: Whether something in this scope writes a name that cannot be read off the source:
-    #: `Set-Variable $n 'v'`, or a write aimed at a scope the lexical chain cannot reach. Every
-    #: binding here is then in doubt, since the write may have landed on any of them. Kept apart
-    #: from `Binding.dynamic_or_qualified`, which says a *known* name is reachable another way;
-    #: these are different reasons and a consumer may be able to live with one and not the other.
+    #: Whether a write this cannot place reaches every binding here: one aimed at the script scope
+    #: from anywhere — `Set-Variable $n 'v' -Scope Global` — or at a scope the lexical chain cannot
+    #: name at all, of which `-Scope 1` is the one that occurs. Every binding is then in doubt for
+    #: as long as the tree stands, since the write may have landed on any of them and nothing says
+    #: when.
+    #:
+    #: A write landing in the scope it is *written* in is not one of these. That one happens at a
+    #: point, and `refinery.lib.scripts.ps1.analysis.dataflow.Ps1VariableFlow.unattributable_writes`
+    #: holds it there, which leaves the reads before it answerable. Kept apart from
+    #: `Binding.dynamic_or_qualified`, which says a *known* name is reachable another way; these are
+    #: different reasons and a consumer may be able to live with one and not the other.
     writes_unreadable_names: bool = False
 
 
-def _scope_local_nodes(scope_node: Node) -> Iterator[Node]:
+def scope_local_nodes(scope_node: Node) -> Iterator[Node]:
     """
     Yield every descendant of *scope_node* that belongs to its scope, yielding but not descending
     into a nested `refinery.lib.scripts.ps1.model.Ps1ScriptBlock` — each introduces its own scope,
     so its contents are attributed there instead.
+
+    The same partition the control-flow graphs take, one graph per block plus one for the root, so
+    a layer that asks this per graph asks after each node exactly once.
     """
     stack: list[Node] = list(scope_node.children())
     while stack:
@@ -465,7 +474,7 @@ class Ps1SemanticModel:
         return names
 
     def _populate(self, scope: Scope):
-        for node in _scope_local_nodes(scope.node):
+        for node in scope_local_nodes(scope.node):
             if isinstance(node, Ps1ScriptBlock):
                 child = Scope(kind=self._scriptblock_kind(node), node=node, parent=scope)
                 scope.children.append(child)
@@ -501,9 +510,16 @@ class Ps1SemanticModel:
         afterwards: `Get-Process -OutVariable x` in a script that never writes `$x` any other way is
         the only mention of the name there is, so nothing exists to hang the reference on unless the
         binding is created here.
+
+        An unreadable name landing in the command's own scope is *not* recorded here. That write
+        happens at a point, and a point is what
+        `refinery.lib.scripts.ps1.analysis.dataflow.Ps1VariableFlow.unattributable_writes` holds, so
+        a read before it keeps the value it would have observed anyway. Only a write this cannot
+        place against the reads it may reach — one aimed at the script scope, or at a scope the
+        lexical chain cannot name — is a fact about the scope as a whole.
         """
         unreadable = unreadable_name_target(cmd)
-        if unreadable is not None:
+        if unreadable is not None and unreadable is not Ps1NameTarget.LOCAL:
             self._doubt(unreadable, current)
         for reference in named_references(cmd):
             if reference.role is Ps1NameRole.READS:

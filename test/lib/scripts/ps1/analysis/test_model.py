@@ -441,9 +441,19 @@ class TestPs1NamedReferenceAttribution(TestBase):
         self.assertNotIn(Ps1OccurrenceRole.READ, roles)
         self.assertNotIn(Ps1OccurrenceRole.WRITE_OBSERVING, roles)
 
-    def test_a_computed_name_puts_the_scope_it_writes_in_doubt(self):
-        model = self._model("$x = 'a'\nSet-Variable $n 'b'")
+    def test_a_computed_name_this_cannot_place_puts_the_scope_it_writes_in_doubt(self):
+        """
+        `-Scope Global` reaches the script scope out of any body, at a moment nothing here orders,
+        so every binding of that scope is in doubt for as long as the tree stands.
+
+        A computed name landing in the scope it is *written* in is deliberately not recorded here.
+        That write happens at a point, and `Ps1VariableFlow.unattributable_writes` holds it there,
+        which is what leaves the reads before it answerable.
+        """
+        model = self._model("$x = 'a'\nSet-Variable $n 'b' -Scope Global")
         self.assertTrue(model.script_scope.writes_unreadable_names)
+        model = self._model("$x = 'a'\nSet-Variable $n 'b'")
+        self.assertFalse(model.script_scope.writes_unreadable_names)
 
     def test_a_literal_named_write_leaves_the_scope_out_of_doubt(self):
         model = self._model("$x = 'a'\nSet-Variable y 'b'")
