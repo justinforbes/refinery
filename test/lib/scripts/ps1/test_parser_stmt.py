@@ -693,3 +693,62 @@ class TestPs1ParserStatements(TestBase):
         body = stmt.body
         self.assertIsNotNone(body.param_block)
         self.assertIs(body.param_block.parent, body)
+
+
+class TestPs1TypeLiteralOwnsItsLexerMode(TestBase):
+    """
+    A `catch`, a `trap` and a class declaration each read a type name at a point the lexer reaches
+    in whatever mode the preceding construct left behind. A command leaves argument mode, and there
+    a bare token does not end at `]`, so the type name absorbs its own closing bracket and then
+    every statement after it, up to the end of the script.
+
+    Which mode a `try` body leaves behind is decided by its *last* statement: an expression body
+    leaves expression mode and the read succeeds, which is why the existing typed-catch tests never
+    saw this. Every try body below therefore ends in a command, and every assertion counts the
+    statements that follow the construct, since that is what a swallowed type name consumes.
+    """
+
+    @staticmethod
+    def _parse(source: str) -> Ps1Script:
+        return Ps1Parser(source).parse()
+
+    def test_a_typed_catch_after_a_command_body_keeps_its_type_body_and_successor(self):
+        script = self._parse(
+            "try { Write-Host x } catch [System.Exception] { Start-Process calc }\n"
+            "Write-Host 'keep'")
+        self.assertEqual(len(script.body), 2)
+        stmt = script.body[0]
+        self.assertIsInstance(stmt, Ps1TryCatchFinally)
+        self.assertEqual(stmt.catch_clauses[0].types, ['System.Exception'])
+        self.assertEqual(len(stmt.catch_clauses[0].body.body), 1)
+
+    def test_a_second_typed_catch_after_a_command_body_is_a_clause_of_its_own(self):
+        script = self._parse('try { Get-Process } catch [A] { 1 } catch [B] { 2 }')
+        self.assertEqual(len(script.body), 1)
+        self.assertEqual(
+            [clause.types for clause in script.body[0].catch_clauses], [['A'], ['B']])
+
+    def test_comma_separated_types_after_a_command_body_stay_separate(self):
+        script = self._parse('try { Get-Process } catch [A],[B] { 1 }')
+        self.assertEqual(len(script.body), 1)
+        self.assertEqual([clause.types for clause in script.body[0].catch_clauses], [['A', 'B']])
+
+    def test_a_type_on_its_own_line_after_a_command_body_is_still_the_clause_type(self):
+        script = self._parse("try { Write-Host x }\ncatch\n[A]\n{ Start-Process calc }")
+        self.assertEqual(len(script.body), 1)
+        self.assertEqual([clause.types for clause in script.body[0].catch_clauses], [['A']])
+
+    def test_a_generic_type_after_a_command_body_keeps_its_inner_brackets(self):
+        script = self._parse(
+            'try { Get-Process } catch [System.Collections.Generic.List[int]] { 1 }')
+        self.assertEqual(
+            [clause.types for clause in script.body[0].catch_clauses],
+            [['System.Collections.Generic.List[int]']])
+
+    def test_a_trap_after_a_command_keeps_its_type_body_and_successor(self):
+        script = self._parse("Write-Host a\ntrap [System.Exception] { Start-Process calc }\n$x")
+        self.assertEqual(len(script.body), 3)
+        stmt = script.body[1]
+        self.assertIsInstance(stmt, Ps1TrapStatement)
+        self.assertEqual(stmt.type_name, 'System.Exception')
+        self.assertEqual(len(stmt.body.body), 1)

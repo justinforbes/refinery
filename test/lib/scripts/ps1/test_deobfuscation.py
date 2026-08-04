@@ -78,6 +78,31 @@ class TestPs1ParserModeRescan(TestPs1):
         result = self._deobfuscate('$x = 1 + 2')
         self.assertIn('3', result)
 
+    def test_a_payload_in_a_typed_catch_after_a_command_try_body_survives(self):
+        """
+        The type name is read in whatever mode the try body left behind, and a command leaves
+        argument mode, where a bare token does not end at `]`. The name then swallowed the handler
+        and the rest of the script, so the payload reached no pass at all and the tail of the file
+        came back out as the handler body.
+        """
+        result = self._deobfuscate_iterative(
+            "try { Get-Process } catch [System.Exception] { Start-Process calc }\n"
+            "Write-Host 'keep'")
+        self.assertEqual(result, cleandoc(
+            '''
+            try {
+              Get-Process
+            } catch [System.Exception] {
+              Start-Process calc
+            }
+            Write-Host 'keep'
+            '''
+        ))
+
+    def test_an_empty_typed_catch_after_a_command_try_body_dissolves_alone(self):
+        result = self._deobfuscate_iterative("try { foo =5 } catch [A] {}\nWrite-Host 'keep'")
+        self.assertEqual(result, "Write-Host 'keep'")
+
 
 class TestPs1ClassEnum(TestPs1):
 

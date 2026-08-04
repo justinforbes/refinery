@@ -887,8 +887,23 @@ class Ps1Parser:
         return self._parse_primary_expression()
 
     def _try_parse_type_literal(self) -> Ps1TypeExpression | None:
+        """
+        A type name is read in expression mode no matter which mode the caller left behind: a
+        generic token does not end at `]` in argument mode, so the closing bracket is absorbed into
+        the name and the bracket depth never returns to zero. The caller's mode is stacked rather
+        than overwritten, so a read that settles its own mode does not become the next construct to
+        leak one.
+        """
         if not self._at(Ps1TokenKind.LBRACKET):
             return None
+        self._lexer.push_mode(Ps1LexerMode.EXPRESSION)
+        try:
+            return self._read_type_literal()
+        finally:
+            self._lexer.pop_mode()
+            self._rescan_current()
+
+    def _read_type_literal(self) -> Ps1TypeExpression | None:
         offset = self._current.offset
         self._advance()
         self._skip_newlines()
