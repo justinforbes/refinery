@@ -16,7 +16,7 @@ import io
 from typing import Iterator, TypeGuard
 
 from refinery.lib.scripts import Block, Node
-from refinery.lib.scripts.ps1.data import BUILTIN_VARIABLES, KNOWN_ALIAS
+from refinery.lib.scripts.ps1.data import BUILTIN_VARIABLES, KNOWN_ALIAS, value_parameters
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
@@ -450,6 +450,41 @@ def bound_argument_value(
             if following is not None and following.kind is Ps1CommandArgumentKind.POSITIONAL:
                 return following.value
     return None
+
+
+def free_positional_values(
+    cmd: Ps1CommandInvocation, command: str,
+) -> list[Expression]:
+    """
+    The positional argument values of *cmd* that no named parameter consumed, in order. *command*
+    is the canonical name `resolve_command_name` reports, since which parameters take a value is a
+    fact about the command rather than about the invocation.
+
+    `extract_positional_values` reads the argument list as the parser left it, where a
+    value-taking parameter written without a colon is a switch followed by a positional. Every
+    caller that means *arguments the command binds by position* wants this one instead:
+    `Set-Variable -Scope Global x 5` binds the name `x`, not the name `Global`, and reading the
+    scope as an argument in its own right both misnames the variable and appends the word `Global`
+    to its value.
+    """
+    takes_value = value_parameters(command)
+    result: list[Expression] = []
+    consumed = False
+    for argument in cmd.arguments:
+        if not isinstance(argument, Ps1CommandArgument):
+            continue
+        if argument.kind is Ps1CommandArgumentKind.SWITCH:
+            consumed = any(binds_parameter(argument.name, name) for name in takes_value)
+            continue
+        if argument.kind is Ps1CommandArgumentKind.NAMED:
+            consumed = False
+            continue
+        if consumed:
+            consumed = False
+            continue
+        if argument.value is not None:
+            result.append(argument.value)
+    return result
 
 
 #: Type names that denote a by-reference wrapper. `[Ref]` is the PowerShell shorthand; the framework

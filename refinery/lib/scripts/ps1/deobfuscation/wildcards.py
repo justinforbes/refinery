@@ -16,11 +16,11 @@ from typing import Iterable
 
 from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
 from refinery.lib.scripts.ps1.ast import (
-    extract_first_positional_string,
-    extract_positional_values,
+    free_positional_values,
     get_command_name,
     get_member_name,
     bound_argument_value,
+    resolve_command_name,
     string_value,
     unwrap_parens,
 )
@@ -231,6 +231,40 @@ def _has_valueonly_switch(cmd: Ps1CommandInvocation) -> bool:
     return False
 
 
+#: The `-Scope` arguments a variable reference can express, mapped to the qualifier that expresses
+#: them. `Local` needs none, since an unqualified reference means the scope it stands in. Every
+#: other spelling — `-Scope 1`, which names the *caller's* scope, an unrecognised word, a computed
+#: expression — names a scope no qualifier reaches, and the rewrite is declined rather than
+#: approximated.
+_EXPRESSIBLE_SCOPES: dict[str, Ps1ScopeModifier] = {
+    'global': Ps1ScopeModifier.GLOBAL,
+    'local': Ps1ScopeModifier.NONE,
+    'private': Ps1ScopeModifier.PRIVATE,
+    'script': Ps1ScopeModifier.SCRIPT,
+}
+
+
+def _expressible_scope(
+    node: Ps1CommandInvocation,
+    var_name: str,
+) -> Ps1ScopeModifier | None:
+    """
+    The qualifier the variable reference replacing *node* must carry, or `None` when no reference
+    can stand for the command. A name that already carries a qualifier of its own is declined
+    whenever a `-Scope` argument is present too, since the two would have to be rendered one inside
+    the other.
+    """
+    declared = bound_argument_value(node, 'scope')
+    if declared is None:
+        return Ps1ScopeModifier.NONE
+    if ':' in var_name:
+        return None
+    written = string_value(declared)
+    if written is None:
+        return None
+    return _EXPRESSIBLE_SCOPES.get(written.lower())
+
+
 def _resolve_variable_name(
     pattern: str,
 ) -> str | None:
@@ -374,7 +408,13 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         name_lower = name.lower()
         if name_lower not in _GET_ITEM_COMMANDS and name_lower not in _GET_VARIABLE_COMMANDS:
             return None
-        arg_value = extract_first_positional_string(inner)
+        command = resolve_command_name(inner)
+        if command is None:
+            return None
+        positionals = free_positional_values(inner, command)
+        if not positionals:
+            return None
+        arg_value = string_value(positionals[0])
         if arg_value is None:
             return None
         if name_lower in _GET_ITEM_COMMANDS:
@@ -399,7 +439,10 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
             return None
         if not _has_valueonly_switch(node):
             return None
-        positionals = extract_positional_values(node)
+        command = resolve_command_name(node)
+        if command is None:
+            return None
+        positionals = free_positional_values(node, command)
         if not positionals:
             return None
         arg_value = _variable_name_value(positionals[0])
@@ -408,10 +451,13 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         resolved = _resolve_variable_name(arg_value)
         if resolved is None:
             return None
+        scope = _expressible_scope(node, resolved)
+        if scope is None:
+            return None
         return Ps1Variable(
             offset=node.offset,
             name=resolved,
-            scope=Ps1ScopeModifier.NONE,
+            scope=scope,
         )
 
     def _try_resolve_cmdlet_method(
@@ -480,21 +526,25 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         cmd_name = get_command_name(node)
         if cmd_name is None:
             return None
+        command = resolve_command_name(node)
+        if command is None:
+            return None
         cmd_lower = cmd_name.lower()
         if cmd_lower in _SET_ITEM_COMMANDS:
-            return self._handle_set_item_variable(node)
+            return self._handle_set_item_variable(node, command)
         if cmd_lower in _SET_VARIABLE_COMMANDS:
-            return self._handle_set_variable(node)
+            return self._handle_set_variable(node, command)
         return None
 
     def _handle_set_item_variable(
         self,
         node: Ps1CommandInvocation,
+        command: str,
     ) -> Expression | None:
         """
         Set-Item Variable:/X val1 val2 → $X = val1 + val2
         """
-        positionals = extract_positional_values(node)
+        positionals = free_positional_values(node, command)
         if len(positionals) < 2:
             return None
         path_str = string_value(positionals[0])
@@ -508,17 +558,18 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         if resolved is None:
             return None
         values = positionals[1:]
-        return self._build_assignment(node.offset, resolved, values)
+        return self._build_assignment(node.offset, resolved, values, Ps1ScopeModifier.NONE)
 
     def _handle_set_variable(
         self,
         node: Ps1CommandInvocation,
+        command: str,
     ) -> Expression | None:
         """
         Set-Variable X val or Set-Variable -Name X -Value val → $X = val
         """
         named_value = bound_argument_value(node, 'value')
-        positionals = extract_positional_values(node)
+        positionals = free_positional_values(node, command)
         name_expr = bound_argument_value(node, 'name')
         if name_expr is not None:
             var_name = _variable_name_value(name_expr)
@@ -532,24 +583,28 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         resolved = _resolve_variable_name(var_name)
         if resolved is None:
             return None
+        scope = _expressible_scope(node, resolved)
+        if scope is None:
+            return None
         if named_value is not None:
             values = [named_value]
         elif positionals:
             values = positionals
         else:
             return None
-        return self._build_assignment(node.offset, resolved, values)
+        return self._build_assignment(node.offset, resolved, values, scope)
 
     @staticmethod
     def _build_assignment(
         offset: int,
         var_name: str,
         values: list[Expression],
+        scope: Ps1ScopeModifier,
     ) -> Ps1AssignmentExpression:
         target = Ps1Variable(
             offset=offset,
             name=var_name,
-            scope=Ps1ScopeModifier.NONE,
+            scope=scope,
         )
         if len(values) == 1:
             value = values[0]

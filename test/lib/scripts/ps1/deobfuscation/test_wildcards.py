@@ -224,3 +224,63 @@ class TestPs1WildcardRedirections(TestPs1):
         # refusal that does not put it back leaves that argument naming a node the pass threw away.
         source = "Set-Variable x 'v' > C:\\out.txt"
         self._assertTreeIsIntact(source, source, Ps1WildcardResolution)
+
+
+class TestPs1VariableCommandScope(TestPs1):
+    """
+    Rewriting a variable command into a variable reference has to carry the scope the command names
+    and decline when the language has no way to name it. A `-Scope` argument reaches the parser as a
+    switch followed by a positional, so a reading that takes every positional as an argument both
+    names the wrong variable and appends the scope's own spelling to its value.
+
+    Every expectation is measured on 5.1 — see `temp/ps1/census_measurements.md`.
+    """
+
+    def test_a_scope_the_language_can_name_is_carried_onto_the_reference(self):
+        for scope, rendered in (
+            ('Global', '$global:y'),
+            ('Script', '$script:y'),
+            ('Private', '$private:y'),
+            ('Local', '$y'),
+        ):
+            with self.subTest(scope):
+                self.assertEqual(
+                    self._apply(F"Set-Variable y 'b' -Scope {scope}", Ps1WildcardResolution),
+                    F"{rendered} = 'b'")
+
+    def test_a_scope_no_qualifier_reaches_declines_the_rewrite(self):
+        """
+        Measured: `-Scope 1` writes the *caller's* scope, which no qualifier names. An unrecognised
+        word and a computed scope are the same case, and rewriting any of them to a plain
+        assignment would move the write into the scope the command stands in.
+        """
+        for scope in ('1', 'Foo', '$s'):
+            with self.subTest(scope):
+                self._assertUnchanged(F"Set-Variable y 'b' -Scope {scope}", Ps1WildcardResolution)
+
+    def test_a_name_written_before_the_scope_is_still_the_name(self):
+        self.assertEqual(
+            self._apply("Set-Variable -Scope Global y 'b'", Ps1WildcardResolution),
+            "$global:y = 'b'")
+
+    def test_the_value_of_a_parameter_is_not_part_of_the_value_assigned(self):
+        for source in (
+            "Set-Variable y 'b' -Option ReadOnly",
+            "Set-Variable y 'b' -Description 'd'",
+            "Set-Variable y 'b' -Visibility Public",
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1WildcardResolution), "$y = 'b'")
+
+    def test_a_qualified_name_beside_a_scope_declines_the_rewrite(self):
+        """
+        Measured: `Set-Variable global:y 'b' -Scope Script` leaves both `$global:y` and `$script:y`
+        as they were, so neither qualifier stands for what the command does.
+        """
+        self._assertUnchanged("Set-Variable global:y 'b' -Scope Script", Ps1WildcardResolution)
+
+    def test_a_read_carries_its_scope_and_declines_what_it_cannot_name(self):
+        self.assertEqual(
+            self._apply('Get-Variable -Scope Global y -ValueOnly', Ps1WildcardResolution),
+            '$global:y')
+        self._assertUnchanged('Get-Variable y -ValueOnly -Scope 1', Ps1WildcardResolution)

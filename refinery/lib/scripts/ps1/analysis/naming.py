@@ -29,17 +29,14 @@ import enum
 from dataclasses import dataclass
 from typing import Iterator
 
-from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.ast import (
-    binds_parameter,
     bound_argument_value,
+    free_positional_values,
     resolve_command_name,
     string_value,
 )
 from refinery.lib.scripts.ps1.model import (
-    Ps1CommandArgument,
-    Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1ScopeModifier,
 )
@@ -242,31 +239,9 @@ def _subject_name(cmd: Ps1CommandInvocation, command: str, parameter: str) -> st
     explicit = bound_argument_value(cmd, parameter)
     if explicit is not None:
         return string_value(explicit)
-    for value in _free_positionals(cmd, command):
+    for value in free_positional_values(cmd, command):
         return string_value(value)
     return None
-
-
-def _free_positionals(cmd: Ps1CommandInvocation, command: str) -> Iterator[Node]:
-    """
-    The positional arguments of *cmd* that no named parameter consumed, in order.
-    """
-    takes_value = data.value_parameters(command)
-    consumed = False
-    for argument in cmd.arguments:
-        if not isinstance(argument, Ps1CommandArgument):
-            continue
-        if argument.kind is Ps1CommandArgumentKind.SWITCH:
-            consumed = any(binds_parameter(argument.name, name) for name in takes_value)
-            continue
-        if argument.kind is Ps1CommandArgumentKind.NAMED:
-            consumed = False
-            continue
-        if consumed:
-            consumed = False
-            continue
-        if argument.value is not None:
-            yield argument.value
 
 
 def _declared_target(cmd: Ps1CommandInvocation) -> Ps1NameTarget:

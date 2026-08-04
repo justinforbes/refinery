@@ -5,6 +5,7 @@ from test import TestBase
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.ast import (
     bound_argument_value,
+    free_positional_values,
     in_evaluation_order,
     is_reference_cast,
 )
@@ -148,3 +149,56 @@ class TestPs1BoundArgumentValue(TestBase):
     def test_an_alias_of_a_parameter_binds_it_only_as_its_own_name(self):
         self.assertEqual(self._value('Get-Process -ov p', 'ov'), 'p')
         self.assertIsNone(self._value('Get-Process -ov p', 'outvariable'))
+
+
+class TestPs1FreePositionalValues(TestBase):
+    """
+    Which arguments a command binds by position. The parser has no parameter metadata, so a
+    value-taking parameter written without a colon reaches the tree as a switch followed by a
+    positional, and any consumer that reads the argument list as written takes that value for an
+    argument of its own.
+
+    Measured on 5.1: after `Set-Variable -Scope Global y 'b'` the global `$y` holds `'b'` and no
+    variable named `Global` exists at all — see `temp/ps1/census_measurements.md`.
+    """
+
+    @staticmethod
+    def _command(source: str) -> Ps1CommandInvocation:
+        for node in Ps1Parser(source).parse().walk():
+            if isinstance(node, Ps1CommandInvocation):
+                return node
+        raise AssertionError(F'no command in {source!r}')
+
+    def _values(self, source: str, command: str) -> list[str]:
+        return [
+            value.value for value in free_positional_values(self._command(source), command)
+        ]
+
+    def test_a_value_taking_parameter_does_not_contribute_a_positional(self):
+        for source in (
+            "Set-Variable -Scope Global y 'b'",
+            "Set-Variable y -Scope Global 'b'",
+            "Set-Variable y 'b' -Scope Global",
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._values(source, 'set-variable'), ['y', 'b'])
+
+    def test_a_switch_that_takes_no_value_leaves_the_positionals_alone(self):
+        self.assertEqual(self._values("Set-Variable y 'b' -Force", 'set-variable'), ['y', 'b'])
+
+    def test_the_colon_spelling_of_a_parameter_consumes_nothing_that_follows(self):
+        self.assertEqual(
+            self._values("Set-Variable -Scope:Global y 'b'", 'set-variable'), ['y', 'b'])
+
+    def test_a_parameter_the_command_does_not_have_consumes_nothing(self):
+        """
+        `-Scope` is a parameter of `Set-Variable` and not of `Write-Host`, so the same spelling
+        binds a value on one and stands beside an unrelated positional on the other.
+        """
+        self.assertEqual(
+            self._values("Write-Host -Separator x 'b'", 'write-host'), ['b'])
+        self.assertEqual(
+            self._values("Write-Host -NoNewline x 'b'", 'write-host'), ['x', 'b'])
+
+    def test_an_unknown_command_binds_every_positional(self):
+        self.assertEqual(self._values("Frobnicate -Foo x 'b'", 'frobnicate'), ['x', 'b'])
