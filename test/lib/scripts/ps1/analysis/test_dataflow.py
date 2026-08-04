@@ -431,6 +431,128 @@ class TestPs1UnattributableWrites(TestPs1VariableFlow):
         self.assertEqual(flow.unattributable_writes(flow.flow.graph_of(tree)), ())
         self.assertEqual(self._observed("$x = 'a'; Set-Variable y 'v'; Write-Host $x"), 0)
 
+    def test_a_call_running_unreadable_code_kills_across_it(self):
+        for source in (
+            "$x = 'a'; iex $c; Write-Host $x",
+            "$x = 'a'; . 'stage2.ps1'; Write-Host $x",
+            "$x = 'a'; . $sb; Write-Host $x",
+            "$x = 'a'; . { iex $c }; Write-Host $x",
+            "$x = 'a'; 1..3 | %{ iex $c }; Write-Host $x",
+        ):
+            with self.subTest(source):
+                self.assertIsNone(self._observed(source))
+
+    def test_a_call_opening_a_child_scope_kills_nothing_outside_it(self):
+        for source in (
+            "$x = 'a'; & 'stage2.ps1'; Write-Host $x",
+            "$x = 'a'; & $sb; Write-Host $x",
+            "$x = 'a'; & { iex $c }; Write-Host $x",
+            "$x = 'a'; . { Write-Host 1 }; Write-Host $x",
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._observed(source), 0)
+
+    def test_the_argument_a_call_expands_is_read_before_the_call_runs(self):
+        """
+        The case where a kill in the wrong place does more than lose a fold. `Invoke-Expression $x`
+        reads the payload to run it, so a kill that blocks that read stops the call becoming
+        literal, which stops it expanding, which leaves the kill in place — the loader comes back
+        out as the obfuscator wrote it.
+        """
+        self.assertEqual(self._observed("$x = 'Write-Host hi'; iex $x"), 0)
+        self.assertEqual(self._observed("$x = 'a'; Write-Host $x (iex $c)"), 0)
+
+    def test_an_argument_is_built_before_the_call_however_many_bodies_it_runs(self):
+        """
+        The obfuscated loader's own shape: the payload is decoded by a body inside the argument, and
+        the whole argument is evaluated — iterations and all — before `Invoke-Expression` is called.
+        """
+        self.assertEqual(
+            self._observed("$x = 'a'; iex (1..2 | %{ [char]($_ -bxor $x) })"), 0)
+
+    def test_a_call_a_loop_returns_to_may_have_rewritten_its_own_argument(self):
+        """
+        The floor under the rule above. One visit reads before the call, but the visit before it did
+        not: iteration two's read may observe whatever iteration one's call wrote.
+        """
+        self.assertIsNone(self._observed("$x = 'a'; while ($c) { iex $x }"))
+        self.assertIsNone(self._observed("$x = 'a'; 1..3 | %{ iex $x }"))
+
+    def test_a_read_beside_the_body_that_writes_is_ordered_where_the_body_is_not(self):
+        """
+        A block projected onto a statement stands for the whole body, so a read *within* it is not
+        an argument the block consumes — which order they run in is the block's graph to answer and
+        not this one's. A read that really is an argument beside it still folds.
+        """
+        self.assertIsNone(self._observed("$x = 'a'; . { iex $c; Write-Host $x }"))
+        self.assertIsNone(self._observed("$x = 'a'; . { Write-Host $x; iex $c }"))
+        self.assertEqual(self._observed("$x = 'a'; Write-Host $x (. { iex $c })"), 0)
+        self.assertIsNone(self._observed("$x = 'a'; Write-Host (. { iex $c }) $x"))
+
+    def test_a_read_the_call_cannot_have_reached_yet_is_still_answered(self):
+        self.assertEqual(self._observed("$x = 'a'; Write-Host $x; iex $c"), 0)
+        self.assertEqual(self._observed("$x = 'a'; 1..3 | %{ Write-Host $x }; iex $c"), 0)
+
+    def test_a_read_the_call_may_already_have_reached_is_refused(self):
+        self.assertIsNone(self._observed("$x = 'a'; Write-Host (iex $c) $x"))
+
+    def test_one_statement_may_hold_several_and_the_earliest_is_what_decides(self):
+        """
+        A statement is one node to the graph however many unattributable writes it holds, so a
+        reading that clears the node as soon as *one* of them runs after the read folds across the
+        one that ran before it.
+        """
+        for source in (
+            "$x = 'a'; Write-Host (iex $a) $x (iex $b)",
+            "$x = 'a'; Write-Host (Set-Variable $n 1) $x (iex $b)",
+        ):
+            with self.subTest(source):
+                self.assertIsNone(self._observed(source))
+
+    def test_a_read_projected_onto_the_statement_gets_no_ordering_from_it(self):
+        """
+        A pipeline streams, so the second object reaches the first body only after the first object
+        has reached the second: iteration two's `Write-Host $x` runs after iteration one's `iex`.
+        Reading the order off the projected statement says otherwise, and `CycleModel.repeats` does
+        not correct it, because what repeats is the body and not the pipeline.
+        """
+        self.assertIsNone(self._observed("$x = 'a'; 1..2 | %{ Write-Host $x } | %{ iex $s }"))
+        self.assertIsNone(self._observed("$x = 'a'; . { Write-Host $x; iex $s }"))
+
+    def test_an_ambient_value_is_a_definition_at_the_scripts_entry(self):
+        """
+        A default the engine established before the script ran has no write occurrence, which reads
+        as having no position — but its position is the entry, so a write nobody can attribute is
+        ordered against it exactly as against any other definition.
+        """
+        for source, survives in (
+            ('Write-Host $env:ComSpec', True),
+            ('Write-Host $env:ComSpec; iex $c', True),
+            ('iex $c; Write-Host $env:ComSpec', False),
+            ("; . 'stage2.ps1'; Write-Host $env:ComSpec", False),
+            ("Set-Variable $n 'v'; Write-Host $env:ComSpec", False),
+        ):
+            with self.subTest(source):
+                tree, _, flow = _models(source)
+                read = next(
+                    node for node in _in_source_order(tree)
+                    if isinstance(node, Ps1Variable) and node.name.lower() == 'comspec'
+                )
+                self.assertEqual(flow.ambient_value_survives(read), survives)
+
+    def test_an_ambient_value_is_refused_where_the_doubt_has_no_point(self):
+        for source in (
+            "Set-Variable $n 'v' -Scope Global; Write-Host $env:ComSpec",
+            "$b = { iex $c }; . $b; Write-Host $env:ComSpec",
+        ):
+            with self.subTest(source):
+                tree, _, flow = _models(source)
+                read = next(
+                    node for node in _in_source_order(tree)
+                    if isinstance(node, Ps1Variable) and node.name.lower() == 'comspec'
+                )
+                self.assertFalse(flow.ambient_value_survives(read))
+
     def test_a_write_naming_another_scope_is_not_one_of_the_placed_ones(self):
         """
         A `-Scope Global` write reaches every binding of the script scope, from any body, for as
@@ -445,3 +567,30 @@ class TestPs1UnattributableWrites(TestPs1VariableFlow):
             with self.subTest(source):
                 tree, _, flow = _models(source)
                 self.assertEqual(flow.unattributable_writes(flow.flow.graph_of(tree)), ())
+
+
+class TestPs1UnattributableWriteHoles(TestPs1VariableFlow):
+    """
+    Shapes where a write nobody can attribute still reaches a read this layer answers. Each is a
+    fold this package performs across a write that may have changed the value — recorded so the hole
+    is a stated fact with a test that changes when it closes, rather than an assumption nobody wrote
+    down.
+    """
+
+    def test_a_function_body_running_unreadable_code_is_not_seen_at_its_call_sites(self):
+        """
+        `. f` writes the caller and is recognised, but `f` reaches its body through the call graph,
+        which this layer does not follow. A body is `FUNCTION`/`CHILD`, so nothing projects out of
+        it and the call site carries no kill.
+        """
+        self.assertEqual(
+            self._observed("$x = 'a'; function f { iex $c }; f; Write-Host $x"), 0)
+
+    def test_a_qualified_write_from_inside_a_child_scope_is_not_seen(self):
+        """
+        Measured: `& { iex '$script:probe = "REPLACED"' }` does reach the caller, because the
+        qualifier names the scope outright rather than relying on the block's own. Treating every
+        `&` as a caller-scope write would close it and cost every fold across a call operator.
+        """
+        self.assertEqual(
+            self._observed("""$x = 'a'; & { iex '$script:x = 1' }; Write-Host $x"""), 0)

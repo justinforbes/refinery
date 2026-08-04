@@ -802,13 +802,30 @@ class TestPs1ConstantInliningAcrossNamedWrites(TestPs1):
         self._assertUnchanged(
             "Set-Item Env:ComSpec 'evil.exe'\nWrite-Host $env:ComSpec", Ps1ConstantInlining)
 
-    def test_a_write_whose_name_cannot_be_read_holds_the_whole_scope_in_doubt(self):
+    def test_a_write_whose_name_cannot_be_read_holds_the_scope_from_there_on(self):
         """
         `Set-Variable $n 'b'` may write any name in the scope, `$x` included, so no value in it
-        survives the command.
+        survives the command — and every value before it does, since when the command runs is not
+        in doubt at all.
         """
         self._assertUnchanged(
             "$x = 'a'\nSet-Variable $n 'b'\nWrite-Host $x", Ps1ConstantInlining)
+        self.assertEqual(
+            self._apply(
+                "$x = 'a'\nWrite-Host $x\nSet-Variable $n 'b'", Ps1ConstantInlining),
+            "Write-Host 'a'\nSet-Variable $n 'b'")
+
+    def test_an_unattributable_write_displaces_the_ambient_default_from_there_on(self):
+        """
+        An ambient default is the value the engine established before the script ran — a definition
+        at the script's entry — so a call that may have replaced it is ordered against it like any
+        other write. Suppressing every default for the whole script instead was measured and costs
+        the `$PSHome` arithmetic an obfuscated loader's first stage is built out of.
+        """
+        self._assertUnchanged("iex $c\nWrite-Host $env:ComSpec", Ps1ConstantInlining)
+        self.assertEqual(
+            self._apply("Write-Host $env:ComSpec\niex $c", Ps1ConstantInlining),
+            "Write-Host 'C:\\WINDOWS\\system32\\cmd.exe'\niex $c")
 
     def test_a_named_write_in_a_body_does_not_reach_the_scope_around_it(self):
         """

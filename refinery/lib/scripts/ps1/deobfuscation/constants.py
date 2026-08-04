@@ -336,6 +336,12 @@ class _ConstantTable:
         alone. Any write of it anywhere, and any statement that reaches into its value, replaces the
         default with something this table has no claim on — including a write inside a block, which
         `Ps1SemanticModel` binds locally but `. { }` performs on the caller.
+
+        A write nobody can attribute is *not* collected here, because it is not a fact about the
+        whole script: it lands at a point, and an ambient default is a definition at the script's
+        entry, so the two are ordered like anything else. `Ps1VariableFlow.ambient_value_survives`
+        asks that per read — silencing every default here instead was measured, and it costs the
+        `$PSHome` unpacking that an obfuscated loader's first stage is built out of.
         """
         touched = set(flow.mutated_in_place)
         for node in root.walk():
@@ -400,7 +406,10 @@ class _Inlining:
         """
         binding = self.binding_of(var)
         if binding is None:
-            return self.table.ambient.get(key)
+            value = self.table.ambient.get(key)
+            if value is None or not self.flow.ambient_value_survives(var):
+                return None
+            return value
         write = self.flow.reaching_definition(var)
         if write is None:
             return None

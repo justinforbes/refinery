@@ -79,7 +79,12 @@ import enum
 from typing import Iterator
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
+from refinery.lib.scripts.analysis.cfg import (
+    CfgNode,
+    ControlFlowGraph,
+    ControlFlowModel,
+    distinct,
+)
 from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
@@ -87,14 +92,14 @@ from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, Ps1BlockReac
 from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
     Ps1SemanticModel,
+    Scope,
     binding_key,
     is_mutated_in_place,
     scope_local_nodes,
 )
-from refinery.lib.scripts.ps1.analysis.naming import Ps1NameTarget, unreadable_name_target
+from refinery.lib.scripts.ps1.analysis.opaque import writes_nobody_can_attribute
 from refinery.lib.scripts.ps1.ast import in_evaluation_order
 from refinery.lib.scripts.ps1.model import (
-    Ps1CommandInvocation,
     Ps1ScriptBlock,
     Ps1Variable,
 )
@@ -157,9 +162,10 @@ class Ps1VariableFlow:
         self._unknowns: dict[int, Ps1FlowUnknown] = {}
         self._exits: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]] = {}
         self._kills: dict[tuple[int, str], frozenset[int]] = {}
-        self._unattributable: dict[int, tuple[CfgNode, ...]] = {}
-        self._unattributable_ids: dict[int, frozenset[int]] = {}
+        self._unattributable: dict[int, tuple[tuple[CfgNode, Node], ...]] = {}
+        self._unattributable_ids_by_graph: dict[int, frozenset[int]] = {}
         self._deferred_unattributable: bool | None = None
+        self._any_unattributable: bool | None = None
         self._blocks_by_owner: dict[int, list[Ps1ScriptBlock]] = {}
         self._mutated: frozenset[str] | None = None
 
@@ -192,7 +198,7 @@ class Ps1VariableFlow:
             graph,
             use,
             definitions,
-            self._block_kills(graph, binding) | self._unattributable_kills(graph),
+            self._block_kills(graph, binding) | self._unattributable_kills(graph, read, use),
         )
         if found is None:
             return None
@@ -385,32 +391,149 @@ class Ps1VariableFlow:
         writes that cannot be placed — refuses those reads as well, and refuses them for as long as
         the tree stands.
         """
+        return tuple(distinct(node for node, _ in self._unattributable_pairs(graph)))
+
+    def _unattributable_pairs(
+        self, graph: ControlFlowGraph,
+    ) -> tuple[tuple[CfgNode, Node], ...]:
+        """
+        Each unattributable write of *graph* paired with the node that performs it. One graph node
+        may hold several, and the element is what orders one of them against a read sharing it.
+        """
         found = self._unattributable.get(id(graph))
         if found is None:
             found = self._unattributable[id(graph)] = tuple(self._find_unattributable(graph))
         return found
 
-    def _find_unattributable(self, graph: ControlFlowGraph) -> Iterator[CfgNode]:
+    def _find_unattributable(self, graph: ControlFlowGraph) -> Iterator[tuple[CfgNode, Node]]:
         for node in scope_local_nodes(graph.owner):
             if isinstance(node, Ps1ScriptBlock):
                 if not self.blocks.unattributable_writes_reaching_caller(node):
                     continue
-            elif not (
-                isinstance(node, Ps1CommandInvocation)
-                and unreadable_name_target(node) is Ps1NameTarget.LOCAL
-            ):
+            elif not writes_nobody_can_attribute(node):
                 continue
             placed = self.flow.locate(node)
             if placed is not None and placed[0] is graph:
-                yield placed[1]
+                yield placed[1], node
 
-    def _unattributable_kills(self, graph: ControlFlowGraph) -> frozenset[int]:
-        found = self._unattributable_ids.get(id(graph))
+    def _unattributable_kills(
+        self, graph: ControlFlowGraph, read: Ps1Variable, use: CfgNode,
+    ) -> frozenset[int]:
+        """
+        The unattributable writes of *graph* that may already have run when *read* is evaluated.
+
+        All of them but one: the statement holding the read may hold the write as well, and there
+        the language orders them where the graph cannot. `Invoke-Expression $x` is the shape that
+        matters, and getting it wrong does not merely lose a fold — the read is the payload the call
+        expands, so a kill that blocks it stops the call ever becoming literal, which stops it
+        expanding, which leaves the kill in place. The loader comes back out as the obfuscator
+        wrote it.
+
+        A read *projected* onto this statement out of a body gets no such exclusion, even though the
+        walk would order it: the body may run many times against the one visit the walk describes.
+        `1..2 | %{ Write-Host $x } | %{ iex $s }` streams, so the second object reaches the first
+        body only after the first object has reached the second, and `CycleModel.repeats` does not
+        say so — what repeats is the body, not the pipeline the read was projected onto. So the
+        exclusion is refused wherever the ordering is not the read's own statement's.
+        """
+        kills = self._unattributable_ids(graph)
+        if id(use) not in kills:
+            return kills
+        if any(
+            not self._runs_after(graph, use, read, effect)
+            for node, effect in self._unattributable_pairs(graph) if node is use
+        ):
+            return kills
+        return kills - {id(use)}
+
+    def _unattributable_ids(self, graph: ControlFlowGraph) -> frozenset[int]:
+        found = self._unattributable_ids_by_graph.get(id(graph))
         if found is None:
-            found = self._unattributable_ids[id(graph)] = frozenset(
-                id(node) for node in self.unattributable_writes(graph)
+            found = self._unattributable_ids_by_graph[id(graph)] = frozenset(
+                id(node) for node, _ in self._unattributable_pairs(graph)
             )
         return found
+
+    def _runs_after(
+        self, graph: ControlFlowGraph, use: CfgNode, read: Ps1Variable, effect: Node,
+    ) -> bool:
+        """
+        Whether *effect* runs its unreadable code only once *read* has been evaluated, both of them
+        parts of the one statement *use* stands for.
+
+        **A read the call is given is evaluated to produce its argument**, so it always happens
+        first, however deeply it sits — `Invoke-Expression ($a | %{ [char]($_ -bxor $k) })` reads
+        `$k` inside a body, and the whole argument is built, iterations and all, before the call
+        runs. That is the shape an obfuscated loader is made of, and refusing it does more than lose
+        a fold: the read is the payload, so a kill that blocks it stops the call ever becoming
+        literal, which stops it expanding, which leaves the kill in place.
+
+        **A read inside the body the effect stands for is a different thing entirely.** When the
+        effect is a block projected onto this statement, a read within it is not an argument the
+        block consumes but a statement beside the one that does the writing, and which runs first is
+        the *block's* graph to answer, not this one's. `. { iex $c; Write-Host $x }` would read as
+        safe under the same test, so the test is not applied there and the fold inside a projected
+        body is given up.
+
+        **Anything else is ordered only if this statement is where the read is written.**
+        `refinery.lib.scripts.ps1.ast.in_evaluation_order` describes one visit, and a read projected
+        here out of a body may be evaluated on many: `1..2 | %{ Write-Host $x } | %{ iex $s }`
+        streams, so the second object reaches the first body only after the first object reached the
+        second. `CycleModel.repeats` does not catch that — what repeats is the body, not the
+        pipeline it was projected onto.
+
+        A statement control can return to is refused outright, exactly as in `_stores_after`: the
+        previous visit's effect ran before this visit's read whatever the order within one visit.
+        """
+        if use.element is None or self.cycles.repeats(use.element):
+            return False
+        if not isinstance(effect, Ps1ScriptBlock) and _descends_from(read, effect):
+            return True
+        placed = self.flow.locate(read)
+        if placed is None or placed[0] is not graph:
+            return False
+        for node in in_evaluation_order(use.element):
+            if node is read:
+                return True
+            if node is effect:
+                return False
+        return False
+
+    def ambient_value_survives(self, read: Ps1Variable) -> bool:
+        """
+        Whether a value the engine established *before* the script ran is still what *read*
+        observes.
+
+        An ambient default has no write occurrence to order a read against, which reads as having
+        no position at all — but it does have one: it is a definition at the entry of the script.
+        So the question is the ordinary one, asked from there, and a write nobody can attribute
+        answers it exactly as it answers any other read. `iex $c; Write-Host $env:ComSpec` must not
+        publish the default, and `Write-Host $env:ComSpec; iex $c` must still publish it.
+
+        Refused outright where nothing places the doubt: a scope held in doubt as a whole, an
+        unattributable write in a body whose run time is unknown, and a read this cannot project
+        into the script's own graph.
+        """
+        if self._doubt_without_a_point():
+            return False
+        graph = self.flow.graph_of(self.semantic.root)
+        if graph is None:
+            return False
+        use = self._position_of(read, graph)
+        if use is None:
+            return False
+        kills = self._unattributable_kills(graph, read, use)
+        return not self._between.any_between(graph.entry, use, kills)
+
+    def _doubt_without_a_point(self) -> bool:
+        """
+        Whether the script holds an unattributable write that no node of any graph stands for.
+        """
+        if self._any_unattributable is None:
+            self._any_unattributable = self.deferred_unattributable_writes or any(
+                scope.writes_unreadable_names for scope in _scopes_of(self.semantic.root_scope)
+            )
+        return self._any_unattributable
 
     @property
     def deferred_unattributable_writes(self) -> bool:
@@ -493,6 +616,29 @@ class Ps1VariableFlow:
                     seen.add(id(successor))
                     stack.append(successor)
         return frozenset(seen)
+
+
+def _scopes_of(scope: Scope) -> Iterator[Scope]:
+    """
+    *scope* and every scope nested inside it.
+    """
+    yield scope
+    for child in scope.children:
+        yield from _scopes_of(child)
+
+
+def _descends_from(node: Node, ancestor: Node) -> bool:
+    """
+    Whether *node* sits inside *ancestor*. Asked of a read and the call that runs unreadable code:
+    a read the call is *given* is evaluated to produce the call's argument, so it happens before the
+    call does anything at all.
+    """
+    cursor: Node | None = node
+    while cursor is not None:
+        if cursor is ancestor:
+            return True
+        cursor = cursor.parent
+    return False
 
 
 def build_variable_flow(

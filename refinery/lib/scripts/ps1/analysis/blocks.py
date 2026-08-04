@@ -45,7 +45,7 @@ from typing import Iterator
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
-from refinery.lib.scripts.ps1.analysis.naming import Ps1NameTarget, unreadable_name_target
+from refinery.lib.scripts.ps1.analysis.opaque import writes_nobody_can_attribute
 from refinery.lib.scripts.ps1.ast import resolve_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
@@ -275,10 +275,7 @@ class Ps1BlockModel:
                 if self.unattributable_writes_reaching_caller(node):
                     return True
                 continue
-            if (
-                isinstance(node, Ps1CommandInvocation)
-                and unreadable_name_target(node) is Ps1NameTarget.LOCAL
-            ):
+            if writes_nobody_can_attribute(node):
                 return True
             stack.extend(node.children())
         return False
