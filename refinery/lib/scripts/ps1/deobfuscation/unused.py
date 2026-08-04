@@ -199,7 +199,10 @@ class Ps1UnusedVariableRemoval(Transformer):
         """
         mutations: list[Node] = []
         seen: set[int] = set()
-        for var in binding.writes:
+        for write in binding.writes:
+            var = write.node
+            if not isinstance(var, Ps1Variable):
+                continue
             if var.scope not in (Ps1ScopeModifier.NONE, Ps1ScopeModifier.ENV):
                 continue
             mutation = Ps1UnusedVariableRemoval._mutation_of(var)
@@ -276,10 +279,10 @@ class Ps1UnusedVariableRemoval(Transformer):
         live: set[Binding] = set()
         for binding in bindings:
             for use in binding.uses:
-                mutation = self._mutation_of(use)
+                mutation = self._mutation_of(use.node)
                 if mutation is not None and id(mutation) in dissolving:
                     continue
-                owner = self._covering_owner(use, rhs_owner)
+                owner = self._covering_owner(use.node, rhs_owner)
                 if owner is None or owner is binding:
                     live.add(binding)
                 else:

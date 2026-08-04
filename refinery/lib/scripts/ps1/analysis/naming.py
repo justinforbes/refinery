@@ -148,25 +148,36 @@ def named_references(cmd: Ps1CommandInvocation) -> list[Ps1NamedReference]:
     return found
 
 
-def addresses_unreadable_name(cmd: Ps1CommandInvocation) -> bool:
+def unreadable_name_target(cmd: Ps1CommandInvocation) -> Ps1NameTarget | None:
     """
-    Whether *cmd* writes a variable whose name this cannot read — `Set-Variable $n 'v'`, where the
-    name is computed. The name is unknown, so *every* binding the command could reach is in doubt,
-    which is a fact about the scope rather than about any one binding.
+    Where *cmd* writes a variable whose name this cannot read — `Set-Variable $n 'v'`, where the
+    name is computed — or `None` when it writes no such name. The name is unknown, so *every*
+    binding in the scope it lands in is in doubt, which is a fact about that scope rather than
+    about any one binding.
 
     Only the variable commands are reported. A `Set-Item` whose path is computed might address the
-    `Variable:` drive and might equally be writing a file, and answering `True` for every one of
-    them would put most scripts permanently in doubt; that is left as a known hole rather than paid
-    for everywhere. A reading command is not reported either: not knowing which name was read costs
+    `Variable:` drive and might equally be writing a file, and answering for every one of them would
+    put most scripts permanently in doubt; that is left as a known hole rather than paid for
+    everywhere. A reading command is not reported either: not knowing which name was read costs
     nothing, since a read changes no value.
     """
     command = resolve_command_name(cmd)
     if command is None:
-        return False
+        return None
     role = _VARIABLE_COMMANDS.get(command)
     if role is None or role is Ps1NameRole.READS:
-        return False
-    return _subject_name(cmd, command, 'name') is None
+        return None
+    if _subject_name(cmd, command, 'name') is not None:
+        return None
+    return _declared_target(cmd)
+
+
+def addresses_unreadable_name(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether *cmd* writes a variable whose name this cannot read. `unreadable_name_target` says
+    where.
+    """
+    return unreadable_name_target(cmd) is not None
 
 
 def _subject_references(

@@ -106,6 +106,11 @@ class Ps1FlowUnknown(enum.Flag):
     #: A body that may write this binding runs at a time this layer cannot place — a stored block, a
     #: block handed to a command that may or may not invoke it.
     WRITTEN_BY_DEFERRED_BODY = enum.auto()
+    #: Something in the binding's scope writes a name that cannot be read off the source —
+    #: `Set-Variable $n 'v'` — so a write may have landed on this binding with no occurrence of it
+    #: anywhere. Kept apart from `REACHED_BY_QUALIFIER`, which says a *known* name is reachable
+    #: another way: these are different reasons and a caller may be able to live with one.
+    WRITTEN_BY_UNREADABLE_NAME = enum.auto()
     #: A statement changes the binding's value through a part of it rather than by replacing it —
     #: `$x[0] = 'z'`, `$x.Length = 5`. No occurrence of the name writes it, so every occurrence is in
     #: `reads` and the change is invisible to the ordering above.
@@ -153,14 +158,14 @@ class Ps1VariableFlow:
             return None
         if self.unknowns(binding) is not Ps1FlowUnknown.NONE:
             return None
-        placed = {id(write): self.flow.locate(write) for write in binding.writes}
-        graph = placed[id(binding.writes[0])][0]
+        placed = {id(write.node): self.flow.locate(write.node) for write in binding.writes}
+        graph = placed[id(binding.writes[0].node)][0]
         use = self._position_of(read, graph)
         if use is None:
             return None
         definitions = [
-            (write, placed[id(write)][1]) for write in binding.writes
-            if not self._stores_after(use, read, write)
+            (write.node, placed[id(write.node)][1]) for write in binding.writes
+            if not self._stores_after(use, read, write.node)
         ]
         found = self._between.reaching_definition(
             graph,
@@ -190,7 +195,7 @@ class Ps1VariableFlow:
             found |= Ps1FlowUnknown.REACHED_BY_QUALIFIER
         graphs: set[int] = set()
         for write in binding.writes:
-            placed = self.flow.locate(write)
+            placed = self.flow.locate(write.node)
             if placed is None:
                 found |= Ps1FlowUnknown.UNPLACED_WRITE
                 continue
@@ -199,6 +204,8 @@ class Ps1VariableFlow:
             found |= Ps1FlowUnknown.WRITES_IN_SEVERAL_BODIES
         if self._deferred_body_writes(binding):
             found |= Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY
+        if binding.scope.writes_unreadable_names:
+            found |= Ps1FlowUnknown.WRITTEN_BY_UNREADABLE_NAME
         if binding.name in self.mutated_in_place:
             found |= Ps1FlowUnknown.MUTATED_IN_PLACE
         return found

@@ -100,7 +100,7 @@ class TestPs1UnusedVariableRemoval(TestPs1):
         binding = model.script_scope.bindings['n']
         references = [
             write for write in binding.writes
-            if Ps1UnusedVariableRemoval._mutation_of(write) is None
+            if Ps1UnusedVariableRemoval._mutation_of(write.node) is None
         ]
         self.assertEqual(len(references), 1)
         self.assertEqual(len(Ps1UnusedVariableRemoval._removable_mutations(binding)), 1)
@@ -1398,3 +1398,22 @@ class TestPs1AQualifiedCallKeepsTheNameItResolvesOnto(TestPs1):
             "& 'Microsoft.PowerShell.Core\\Export-ModuleMember' -Function f\n"
             "function f { Write-Host 'P' }")
         self.assertIn('function f', result)
+
+
+class TestPs1UnusedVariableRemovalAndNamedReads(TestPs1):
+    """
+    A binding whose only reader addresses it by name. Nothing in the script reads `$a`, so a pass
+    counting `$`-occurrences alone finds the assignment unread and deletes the value the command
+    goes on to read.
+    """
+
+    def test_an_assignment_read_only_by_name_is_kept(self):
+        self._assertUnchanged("$a = 'x'\nGet-Variable a", Ps1UnusedVariableRemoval)
+
+    def test_an_assignment_nothing_reads_at_all_is_still_removed(self):
+        """
+        The floor under the case above: without the named read the assignment really is dead, so a
+        guard that keeps every assignment would satisfy the first test while doing nothing.
+        """
+        result = self._deobfuscate("$a = 'x'\nWrite-Host done")
+        self.assertNotIn('$a', result)

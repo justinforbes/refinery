@@ -767,3 +767,55 @@ class TestPs1ConstantInliningAroundUnreachableCode(TestPs1):
             "if ($c) {\n  $x = 'a'\n} else {\n  $x = 'b'\n}\nexit\n"
             "while ($true) {\n  Write-Host $x\n}",
             Ps1ConstantInlining)
+
+
+class TestPs1ConstantInliningAcrossNamedWrites(TestPs1):
+    """
+    Commands that address a variable by its *name* rather than through a `$` occurrence. Nothing in
+    the script mentions the variable at the point the value changes, so every layer that reasons
+    about occurrences saw a value that never moved and folded straight across the command.
+
+    Every expectation is what PowerShell 5.1 does, measured — see `temp/ps1/census_measurements.md`.
+    """
+
+    def test_a_read_after_an_out_variable_does_not_observe_the_value_before_it(self):
+        """
+        `Get-Process -OutVariable x` fills `$x` with the process list, so the read that follows sees
+        that and not `calc`.
+        """
+        self._assertUnchanged(
+            "$x = 'calc'\nGet-Process -OutVariable x\nWrite-Host $x", Ps1ConstantInlining)
+
+    def test_a_read_after_an_unbinding_does_not_observe_the_value_before_it(self):
+        """
+        Measured: after `Remove-Variable a` the name is gone and the read is empty, where folding
+        it to `'x'` prints the value the script deliberately removed.
+        """
+        self._assertUnchanged(
+            "$a = 'x'\nRemove-Variable a\nWrite-Host $a", Ps1ConstantInlining)
+
+    def test_an_environment_write_by_name_displaces_the_ambient_default(self):
+        """
+        The ambient table answers `$env:ComSpec` with the system default for a script that never
+        writes it. This one writes it, and by a spelling that contains no `$env:ComSpec` occurrence.
+        """
+        self._assertUnchanged(
+            "Set-Item Env:ComSpec 'evil.exe'\nWrite-Host $env:ComSpec", Ps1ConstantInlining)
+
+    def test_a_write_whose_name_cannot_be_read_holds_the_whole_scope_in_doubt(self):
+        """
+        `Set-Variable $n 'b'` may write any name in the scope, `$x` included, so no value in it
+        survives the command.
+        """
+        self._assertUnchanged(
+            "$x = 'a'\nSet-Variable $n 'b'\nWrite-Host $x", Ps1ConstantInlining)
+
+    def test_a_named_write_in_a_body_does_not_reach_the_scope_around_it(self):
+        """
+        The floor under the case above: a bare `Set-Variable` writes its own scope, so the script's
+        `$x` is untouched by one inside a function and folding it is correct.
+        """
+        self.assertEqual(
+            self._apply(
+                "$x = 'a'\nfunction f { Set-Variable x 'b' }\nWrite-Host $x", Ps1ConstantInlining),
+            "function f {\n  Set-Variable x 'b'\n}\nWrite-Host 'a'")

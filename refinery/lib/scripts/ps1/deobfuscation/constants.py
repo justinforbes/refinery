@@ -20,7 +20,7 @@ from refinery.lib.scripts.ps1.analysis.model import (
     is_assignment_write_target,
     is_substitutable_position,
     is_write_occurrence,
-    observes_previous_value,
+    Ps1OccurrenceRole,
 )
 from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
 from refinery.lib.scripts.ps1.ast import (
@@ -599,14 +599,14 @@ class Ps1ConstantInlining(Transformer):
                 continue
             if self._writes_leave_the_body(state.flow, binding):
                 continue
-            if any(observes_previous_value(write) for write in binding.writes):
+            if any(write.role is Ps1OccurrenceRole.WRITE_OBSERVING for write in binding.writes):
                 continue
             if self.min_inlines_to_prune is not None:
                 if len(replacements) < self.min_inlines_to_prune:
                     continue
             for write in binding.writes:
-                assignment = assignment_of(write)
-                if assignment is None or id(write) not in table.by_write:
+                assignment = assignment_of(write.node)
+                if assignment is None or id(write.node) not in table.by_write:
                     continue
                 statement = self._find_removable_statement(assignment)
                 if statement is not None:

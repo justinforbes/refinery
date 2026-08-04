@@ -36,11 +36,19 @@ from dataclasses import dataclass, field
 from typing import Iterator
 
 from refinery.lib.scripts import Node
+from refinery.lib.scripts.ps1.analysis.naming import (
+    Ps1NamedReference,
+    Ps1NameRole,
+    Ps1NameTarget,
+    named_references,
+    unreadable_name_target,
+)
 from refinery.lib.scripts.ps1.ast import assignment_of, binding_key, is_reference_cast
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
     Ps1CastExpression,
+    Ps1CommandInvocation,
     Ps1ForEachLoop,
     Ps1FunctionDefinition,
     Ps1IndexExpression,
@@ -265,18 +273,38 @@ _QUALIFIED_SCOPES = frozenset({
 
 
 @dataclass(eq=False)
+class Occurrence:
+    """
+    One reference to one binding: the node that makes it, what it does to the value, and the key it
+    was attributed under.
+
+    A *node* rather than a variable, because not every reference is spelled as one. `Set-Variable X`
+    and `Get-Process -OutVariable x` address the name as a string, and the node that makes the
+    reference is the whole command; `Set-Variable -Name a, b` is a single node referring to two
+    keys, which is why the key belongs to the reference and not to the node.
+
+    `eq=False` so that two references alike in every field are still two references, and so that a
+    caller may key a map by identity.
+    """
+    node: Node
+    role: Ps1OccurrenceRole
+    key: str
+
+
+@dataclass(eq=False)
 class Binding:
     """
     A single variable name bound within one scope. `writes` holds every occurrence that writes it
-    (an assignment target, a `++`/`--` operand, a `foreach` variable, a parameter); `reads` holds
-    every occurrence that reads it, including a bare read that fell through from a nested block.
-    `dynamic_or_qualified` marks a binding a scope qualifier or dynamic scope could reach with no
-    occurrence in `reads` — conservatively kept live.
+    (an assignment target, a `++`/`--` operand, a `foreach` variable, a parameter, a `[ref]`, or a
+    command that addresses the name as a string); `reads` holds every occurrence that reads it,
+    including a bare read that fell through from a nested block. `dynamic_or_qualified` marks a
+    binding a scope qualifier or dynamic scope could reach with no occurrence in `reads` —
+    conservatively kept live.
     """
     name: str
     scope: Scope
-    reads: list[Ps1Variable] = field(default_factory=list)
-    writes: list[Ps1Variable] = field(default_factory=list)
+    reads: list[Occurrence] = field(default_factory=list)
+    writes: list[Occurrence] = field(default_factory=list)
     dynamic_or_qualified: bool = False
 
     @property
@@ -287,7 +315,7 @@ class Binding:
         return bool(self.reads)
 
     @property
-    def uses(self) -> list[Ps1Variable]:
+    def uses(self) -> list[Occurrence]:
         """
         Every occurrence that observes the binding's value: its `reads`, and those of its `writes`
         that read what was there in order to write it.
@@ -298,7 +326,10 @@ class Binding:
         asks this rather than `reads`, because asking `reads` is exactly how a store whose only
         reader is a compound assignment came to be deletable.
         """
-        return [*self.reads, *(w for w in self.writes if observes_previous_value(w))]
+        return [
+            *self.reads,
+            *(w for w in self.writes if w.role is Ps1OccurrenceRole.WRITE_OBSERVING),
+        ]
 
     @property
     def is_dead(self) -> bool:
@@ -321,6 +352,12 @@ class Scope:
     parent: Scope | None = None
     children: list[Scope] = field(default_factory=list)
     bindings: dict[str, Binding] = field(default_factory=dict)
+    #: Whether something in this scope writes a name that cannot be read off the source:
+    #: `Set-Variable $n 'v'`, or a write aimed at a scope the lexical chain cannot reach. Every
+    #: binding here is then in doubt, since the write may have landed on any of them. Kept apart
+    #: from `Binding.dynamic_or_qualified`, which says a *known* name is reachable another way;
+    #: these are different reasons and a consumer may be able to live with one and not the other.
+    writes_unreadable_names: bool = False
 
 
 def _scope_local_nodes(scope_node: Node) -> Iterator[Node]:
@@ -336,6 +373,18 @@ def _scope_local_nodes(scope_node: Node) -> Iterator[Node]:
         if isinstance(node, Ps1ScriptBlock):
             continue
         stack.extend(node.children())
+
+
+#: What each `Ps1NameRole` does to a value, in the vocabulary every other occurrence uses. An
+#: appending out-variable reads what is there before it writes, which is exactly what
+#: `Ps1OccurrenceRole.WRITE_OBSERVING` says; unbinding a name replaces whatever it held with nothing
+#: at all, which for the purpose of tracking a value is a replacing write.
+_NAME_ROLES: dict[Ps1NameRole, Ps1OccurrenceRole] = {
+    Ps1NameRole.READS: Ps1OccurrenceRole.READ,
+    Ps1NameRole.WRITES: Ps1OccurrenceRole.WRITE_REPLACING,
+    Ps1NameRole.APPENDS: Ps1OccurrenceRole.WRITE_OBSERVING,
+    Ps1NameRole.UNBINDS: Ps1OccurrenceRole.WRITE_REPLACING,
+}
 
 
 class Ps1SemanticModel:
@@ -426,6 +475,8 @@ class Ps1SemanticModel:
             self._node_scope[id(node)] = scope
             if isinstance(node, Ps1Variable) and declares_binding(node):
                 self._declare(node, scope)
+            elif isinstance(node, Ps1CommandInvocation):
+                self._declare_named(node, scope)
 
     @staticmethod
     def _scriptblock_kind(node: Ps1ScriptBlock) -> ScopeKind:
@@ -440,6 +491,59 @@ class Ps1SemanticModel:
         key = binding_key(var)
         if key not in scope.bindings:
             scope.bindings[key] = Binding(name=key, scope=scope)
+
+    def _declare_named(self, cmd: Ps1CommandInvocation, current: Scope):
+        """
+        Create the bindings a command addresses by string, and record a name it addresses that
+        cannot be read.
+
+        This is why the census is consulted while the model is built rather than applied to it
+        afterwards: `Get-Process -OutVariable x` in a script that never writes `$x` any other way is
+        the only mention of the name there is, so nothing exists to hang the reference on unless the
+        binding is created here.
+        """
+        unreadable = unreadable_name_target(cmd)
+        if unreadable is not None:
+            self._doubt(unreadable, current)
+        for reference in named_references(cmd):
+            if reference.role is Ps1NameRole.READS:
+                continue
+            scope = self._named_scope(reference, current)
+            if scope is None:
+                continue
+            if reference.key not in scope.bindings:
+                scope.bindings[reference.key] = Binding(name=reference.key, scope=scope)
+
+    def _named_scope(self, reference: Ps1NamedReference, current: Scope) -> Scope | None:
+        """
+        The scope a named reference resolves in: the one the command is written in for the measured
+        default, the script scope for an explicitly script- or global-qualified form, and none at
+        all for a target the lexical chain cannot name — `-Scope 1` writes the *caller's* scope,
+        which is not an ancestor of anything here. An unplaceable write is recorded on the scope
+        instead, where it puts every name in doubt rather than the wrong one.
+        """
+        if reference.target is Ps1NameTarget.SCRIPT:
+            return self.root_scope
+        if reference.target is Ps1NameTarget.LOCAL:
+            return current
+        self._doubt(Ps1NameTarget.UNREADABLE, current)
+        return None
+
+    def _doubt(self, target: Ps1NameTarget, current: Scope) -> None:
+        """
+        Record that a write nobody can attribute lands in *target*, so every binding it could reach
+        is in doubt.
+
+        A target the lexical chain cannot name reaches anywhere, and the script scope is the one
+        scope every other can see through, so it is marked as well as the scope holding the command:
+        under-marking here is a fold across a write, which is the direction that corrupts.
+        """
+        if target is Ps1NameTarget.SCRIPT:
+            self.root_scope.writes_unreadable_names = True
+            return
+        current.writes_unreadable_names = True
+        if target is Ps1NameTarget.UNREADABLE:
+            self.root_scope.writes_unreadable_names = True
 
     def _defining_scope(self, var: Ps1Variable, current: Scope) -> Scope | None:
         """
@@ -463,10 +567,13 @@ class Ps1SemanticModel:
 
     def _build_def_use(self):
         for node in self.root.walk():
-            if not isinstance(node, Ps1Variable) or _is_member_declaration(node):
-                continue
             scope = self._node_scope.get(id(node))
             if scope is None:
+                continue
+            if isinstance(node, Ps1CommandInvocation):
+                self._attribute_named(node, scope)
+                continue
+            if not isinstance(node, Ps1Variable) or _is_member_declaration(node):
                 continue
             if is_reference_cast(node.parent):
                 self._attribute_reference(node, scope)
@@ -478,8 +585,7 @@ class Ps1SemanticModel:
     def _attribute_write(self, var: Ps1Variable, scope: Scope):
         binding = self._lookup_write_binding(var, scope)
         if binding is not None:
-            binding.writes.append(var)
-            self._binding_of[id(var)] = binding
+            self._record(binding, var, binding.writes)
 
     def _attribute_reference(self, var: Ps1Variable, scope: Scope):
         """
@@ -497,17 +603,48 @@ class Ps1SemanticModel:
             self._attribute_read(var, scope)
             return
         name = binding_key(var)
-        primary: Binding | None = None
         cursor: Scope | None = scope
         while cursor is not None:
             binding = cursor.bindings.get(name)
             if binding is not None:
-                binding.writes.append(var)
-                if primary is None:
-                    primary = binding
+                self._record(binding, var, binding.writes)
             cursor = cursor.parent
-        if primary is not None:
-            self._binding_of[id(var)] = primary
+
+    def _attribute_named(self, cmd: Ps1CommandInvocation, scope: Scope):
+        """
+        File a command's string-addressed references against the bindings they name.
+
+        A read resolves the way a bare variable read does, up the scope chain, and is recorded on
+        every enclosing binding of the name — `Get-Variable x` inside a body observes whichever `$x`
+        is in reach, and which one that is depends on what ran. A write resolves to the one scope
+        the census placed it in.
+        """
+        for reference in named_references(cmd):
+            role = _NAME_ROLES[reference.role]
+            if reference.role is Ps1NameRole.READS:
+                cursor: Scope | None = scope
+                while cursor is not None:
+                    binding = cursor.bindings.get(reference.key)
+                    if binding is not None:
+                        binding.reads.append(
+                            Occurrence(node=cmd, role=role, key=reference.key))
+                    cursor = cursor.parent
+                continue
+            target = self._named_scope(reference, scope)
+            if target is None:
+                continue
+            binding = target.bindings.get(reference.key)
+            if binding is not None:
+                binding.writes.append(Occurrence(node=cmd, role=role, key=reference.key))
+
+    def _record(self, binding: Binding, var: Ps1Variable, into: list[Occurrence]) -> None:
+        """
+        File one variable occurrence against *binding*, and make it the occurrence's own binding
+        unless an inner scope already claimed it — a bare reference is recorded on every enclosing
+        binding of the name and resolves to the innermost.
+        """
+        into.append(Occurrence(node=var, role=occurrence_role(var), key=binding.name))
+        self._binding_of.setdefault(id(var), binding)
 
     def _lookup_write_binding(self, var: Ps1Variable, scope: Scope) -> Binding | None:
         defining = self._defining_scope(var, scope)
@@ -521,8 +658,7 @@ class Ps1SemanticModel:
         elif var.scope is Ps1ScopeModifier.ENV:
             binding = self.root_scope.bindings.get(binding_key(var))
             if binding is not None:
-                binding.reads.append(var)
-                self._binding_of[id(var)] = binding
+                self._record(binding, var, binding.reads)
         elif var.scope in _QUALIFIED_SCOPES:
             self._attribute_qualified_read(var, scope)
 
@@ -563,17 +699,12 @@ class Ps1SemanticModel:
 
     def _attribute_bare_read(self, var: Ps1Variable, scope: Scope):
         name = var.name.lower()
-        primary: Binding | None = None
         cursor: Scope | None = scope
         while cursor is not None:
             binding = cursor.bindings.get(name)
             if binding is not None:
-                binding.reads.append(var)
-                if primary is None:
-                    primary = binding
+                self._record(binding, var, binding.reads)
             cursor = cursor.parent
-        if primary is not None:
-            self._binding_of[id(var)] = primary
 
 
 def build_semantic_model(root: Ps1Script) -> Ps1SemanticModel:

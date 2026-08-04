@@ -91,8 +91,19 @@ class TestPs1NameCensus(TestBase):
         """
         Measured: `-Scope 1` writes the *caller's* scope, which is not a lexical ancestor of the
         command, so no walk up the scope chain finds it.
+
+        The quoted spelling is the one that matters to the lookup: `-Scope 1` is an integer literal
+        and never reaches a table of scope *names* at all, so only `-Scope '1'` shows whether an
+        unrecognised name falls to the safe side.
         """
-        self.assertEqual(self._refs('Set-Variable x 5 -Scope 1'), [('x', 'WRITES', 'UNREADABLE')])
+        for source in (
+            'Set-Variable x 5 -Scope 1',
+            "Set-Variable x 5 -Scope '1'",
+            'Set-Variable x 5 -Scope Foo',
+            'Set-Variable x 5 -Scope $s',
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._refs(source), [('x', 'WRITES', 'UNREADABLE')])
 
     def test_an_item_command_on_a_name_drive_addresses_that_name(self):
         self.assertEqual(self._refs('Set-Item Variable:x 5'), [('x', 'WRITES', 'LOCAL')])

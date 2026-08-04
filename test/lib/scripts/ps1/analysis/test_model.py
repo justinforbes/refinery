@@ -365,3 +365,94 @@ class TestPs1ReferenceAttribution(TestBase):
         self.assertEqual(len(binding.reads), 0)
         self.assertEqual(len(binding.uses), 1)
         self.assertFalse(binding.is_dead)
+
+
+class TestPs1NamedReferenceAttribution(TestBase):
+    """
+    Where a name addressed as a string lands in the model. A recognizer that identifies
+    `Set-Variable x` while the model files the reference on the wrong binding — or on none — reads
+    as working and corrupts exactly as before, so these assert the binding, its scope and its
+    occurrence counts rather than the recognizer's own answer.
+    """
+
+    @staticmethod
+    def _model(source: str):
+        return build_semantic_model(Ps1Parser(source).parse())
+
+    def test_a_named_write_creates_the_binding_when_nothing_else_mentions_it(self):
+        """
+        `$p` appears nowhere as a variable, so unless the census is consulted while the model is
+        built there is no binding for the reference to be filed against.
+        """
+        model = self._model('Get-Process -OutVariable p')
+        binding = model.script_scope.bindings['p']
+        self.assertEqual(len(binding.writes), 1)
+        self.assertFalse(binding.is_read)
+
+    def test_a_named_write_lands_on_the_binding_the_assignments_use(self):
+        model = self._model("$x = 'calc'\nGet-Process -OutVariable x")
+        binding = model.script_scope.bindings['x']
+        self.assertEqual(len(binding.writes), 2)
+
+    def test_a_named_read_is_a_use_that_keeps_the_binding_alive(self):
+        model = self._model("$a = 'x'\nGet-Variable a")
+        binding = model.script_scope.bindings['a']
+        self.assertEqual(len(binding.reads), 1)
+        self.assertFalse(binding.is_dead)
+
+    def test_an_appending_out_variable_observes_the_previous_value(self):
+        model = self._model("$a = 'x'\nGet-Process -OutVariable +a")
+        binding = model.script_scope.bindings['a']
+        self.assertEqual(len(binding.uses), 1)
+        self.assertFalse(binding.is_dead)
+
+    def test_a_bare_named_write_in_a_body_binds_that_body_and_not_the_script(self):
+        """
+        Measured: `Set-Variable d 'INNER'` inside a function writes the function's own scope. Filing
+        it at the script scope would let a later read of the caller's `$d` see a value the function
+        never gave it.
+        """
+        model = self._model("$d = 'OUTER'\nfunction f { Set-Variable d 'INNER' }")
+        function_scope = model.script_scope.children[0]
+        self.assertIn('d', function_scope.bindings)
+        self.assertEqual(len(function_scope.bindings['d'].writes), 1)
+        self.assertEqual(len(model.script_scope.bindings['d'].writes), 1)
+
+    def test_a_globally_scoped_named_write_binds_the_script_scope(self):
+        model = self._model("function f { Set-Variable d 'V' -Scope Global }")
+        self.assertIn('d', model.script_scope.bindings)
+        self.assertNotIn('d', model.script_scope.children[0].bindings)
+
+    def test_an_environment_item_write_binds_the_key_the_variable_reads_under(self):
+        model = self._model("Set-Item Env:ComSpec 'evil'\nWrite-Host $env:ComSpec")
+        binding = model.script_scope.bindings['env:comspec']
+        self.assertEqual(len(binding.writes), 1)
+        self.assertEqual(len(binding.reads), 1)
+
+    def test_an_unbinding_replaces_the_value_rather_than_observing_it(self):
+        """
+        `Remove-Variable a` does not read `$a`, it removes it. Recording it as an occurrence that
+        observes the value would make the assignment before it look like something the removal still
+        needs, and would keep a store alive that nothing reads.
+        """
+        model = self._model("$a = 'x'\nRemove-Variable a")
+        roles = [write.role for write in model.script_scope.bindings['a'].writes]
+        self.assertIn(Ps1OccurrenceRole.WRITE_REPLACING, roles)
+        self.assertNotIn(Ps1OccurrenceRole.READ, roles)
+        self.assertNotIn(Ps1OccurrenceRole.WRITE_OBSERVING, roles)
+
+    def test_a_computed_name_puts_the_scope_it_writes_in_doubt(self):
+        model = self._model("$x = 'a'\nSet-Variable $n 'b'")
+        self.assertTrue(model.script_scope.writes_unreadable_names)
+
+    def test_a_literal_named_write_leaves_the_scope_out_of_doubt(self):
+        model = self._model("$x = 'a'\nSet-Variable y 'b'")
+        self.assertFalse(model.script_scope.writes_unreadable_names)
+
+    def test_a_scope_the_lexical_chain_cannot_name_puts_the_script_in_doubt(self):
+        """
+        Measured: `-Scope 1` writes the caller's scope, which is not an ancestor of anything here,
+        so no binding can be shown to be safe from it.
+        """
+        model = self._model("function f { Set-Variable x 'b' -Scope 1 }")
+        self.assertTrue(model.script_scope.writes_unreadable_names)
