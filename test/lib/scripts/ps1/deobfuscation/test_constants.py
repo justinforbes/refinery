@@ -533,6 +533,49 @@ class TestPs1ConstantInliningAcrossControlFlow(TestPs1):
             self._apply("$x = 'a'; & { $x = 'b' }; Write-Host $x", Ps1ConstantInlining),
             "& {\n  $x = 'b'\n}\nWrite-Host 'a'")
 
+    def test_a_body_that_writes_its_caller_writes_the_names_it_only_spells_as_strings(self):
+        """
+        Each of these leaves `$x` holding something other than `'a'` — nothing at all after
+        `Remove-Variable` and `Remove-Item`, `'b'` after `Set-Variable`, `$null` after
+        `Clear-Variable` — so folding `'a'` into the read is a corruption. No `$x` occurrence
+        anywhere records the write, which is what let the fold through.
+        """
+        for source in (
+            "$x = 'a'\n. {\n  Remove-Variable x\n}\nWrite-Host $x",
+            "$x = 'a'\n. {\n  Set-Variable x 'b'\n}\nWrite-Host $x",
+            "$x = 'a'\n. {\n  Remove-Item Variable:x\n}\nWrite-Host $x",
+            "$x = 'a'\n1 | ForEach-Object {\n  Clear-Variable x\n}\nWrite-Host $x",
+        ):
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1ConstantInlining)
+
+    def test_a_child_scope_that_writes_a_name_as_a_string_leaves_the_caller_value_standing(self):
+        """
+        The floor under the case above: `&` opens a child scope and a bare `Set-Variable` lands in
+        it, so PowerShell prints `a` and folding it is correct.
+        """
+        self.assertEqual(
+            self._apply("$x = 'a'; & { Set-Variable x 'b' }; Write-Host $x", Ps1ConstantInlining),
+            "& {\n  Set-Variable x 'b'\n}\nWrite-Host 'a'")
+
+    def test_a_body_that_writes_its_caller_still_leaves_names_it_does_not_write_standing(self):
+        """
+        The other floor: declining wherever a variable cmdlet sits in a body that writes its caller
+        passes the case above and folds nothing anywhere.
+        """
+        for source, expected in (
+            (
+                "$x = 'a'; . { Get-Variable x }; Write-Host $x",
+                "$x = 'a'\n. {\n  Get-Variable x\n}\nWrite-Host 'a'",
+            ),
+            (
+                "$x = 'a'; . { Remove-Variable y }; Write-Host $x",
+                ". {\n  Remove-Variable y\n}\nWrite-Host 'a'",
+            ),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
     def test_a_read_inside_a_stored_block_is_not_ordered_against_the_script_holding_it(self):
         """
         `$b` runs where it is invoked, not where it is written, so by the time the block runs `$x` is

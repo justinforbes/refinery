@@ -338,7 +338,7 @@ class Ps1VariableFlow:
             if facts.reach not in (Ps1BlockReach.STORED, Ps1BlockReach.UNKNOWN):
                 continue
             for write in self.blocks.writes_reaching_caller(block):
-                if write.name.lower() == binding.name:
+                if write.key == binding.name:
                     return True
         return False
 
@@ -370,7 +370,7 @@ class Ps1VariableFlow:
         kills: set[int] = set()
         for block in self._blocks_of(graph.owner):
             if not any(
-                write.name.lower() == binding.name
+                write.key == binding.name
                 for write in self.blocks.writes_reaching_caller(block)
             ):
                 continue

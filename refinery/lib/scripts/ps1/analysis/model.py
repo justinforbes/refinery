@@ -388,7 +388,7 @@ def scope_local_nodes(scope_node: Node) -> Iterator[Node]:
 #: appending out-variable reads what is there before it writes, which is exactly what
 #: `Ps1OccurrenceRole.WRITE_OBSERVING` says; unbinding a name replaces whatever it held with nothing
 #: at all, which for the purpose of tracking a value is a replacing write.
-_NAME_ROLES: dict[Ps1NameRole, Ps1OccurrenceRole] = {
+NAME_ROLES: dict[Ps1NameRole, Ps1OccurrenceRole] = {
     Ps1NameRole.READS: Ps1OccurrenceRole.READ,
     Ps1NameRole.WRITES: Ps1OccurrenceRole.WRITE_REPLACING,
     Ps1NameRole.APPENDS: Ps1OccurrenceRole.WRITE_OBSERVING,
@@ -636,7 +636,7 @@ class Ps1SemanticModel:
         the census placed it in.
         """
         for reference in named_references(cmd):
-            role = _NAME_ROLES[reference.role]
+            role = NAME_ROLES[reference.role]
             if reference.role is Ps1NameRole.READS:
                 cursor: Scope | None = scope
                 while cursor is not None:

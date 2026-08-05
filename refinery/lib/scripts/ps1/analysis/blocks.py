@@ -44,9 +44,19 @@ from dataclasses import dataclass
 from typing import Iterator
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
+from refinery.lib.scripts.ps1.analysis.model import (
+    NAME_ROLES,
+    Occurrence,
+    is_write_occurrence,
+    occurrence_role,
+)
+from refinery.lib.scripts.ps1.analysis.naming import (
+    Ps1NameRole,
+    Ps1NameTarget,
+    named_references,
+)
 from refinery.lib.scripts.ps1.analysis.opaque import writes_nobody_can_attribute
-from refinery.lib.scripts.ps1.ast import resolve_command_name
+from refinery.lib.scripts.ps1.ast import binding_key, resolve_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandInvocation,
@@ -156,6 +166,24 @@ def _handed_to_command(block: Ps1ScriptBlock) -> Ps1CommandInvocation | None:
     return None
 
 
+def _named_writes(cmd: Ps1CommandInvocation) -> Iterator[Occurrence]:
+    """
+    The names *cmd* writes as strings into the scope it is written in.
+
+    A read is not one of them: it changes no value, so it is no fact about what the block leaves
+    behind. Neither is a write that names its target scope outright, whose landing place does not
+    depend on where the command sits, nor one aimed at a scope the lexical chain cannot name — for
+    the latter there is no key to report, and `unattributable_writes_reaching_caller` is what
+    carries it.
+    """
+    for reference in named_references(cmd):
+        if reference.role is Ps1NameRole.READS:
+            continue
+        if reference.target is not Ps1NameTarget.LOCAL:
+            continue
+        yield Occurrence(node=cmd, role=NAME_ROLES[reference.role], key=reference.key)
+
+
 def classify_block(block: Ps1ScriptBlock) -> Ps1BlockFacts:
     """
     The facts readable from where *block* sits.
@@ -207,7 +235,7 @@ class Ps1BlockModel:
     def __init__(self, root: Ps1Script):
         self.root = root
         self._facts: dict[int, Ps1BlockFacts] = {}
-        self._caller_writes: dict[int, tuple[Ps1Variable, ...]] = {}
+        self._caller_writes: dict[int, tuple[Occurrence, ...]] = {}
         self._caller_unattributable: dict[int, bool] = {}
 
     def facts(self, block: Ps1ScriptBlock) -> Ps1BlockFacts:
@@ -227,17 +255,24 @@ class Ps1BlockModel:
         """
         return self.facts(block).scope is not Ps1BlockScope.CHILD
 
-    def writes_reaching_caller(self, block: Ps1ScriptBlock) -> tuple[Ps1Variable, ...]:
+    def writes_reaching_caller(self, block: Ps1ScriptBlock) -> tuple[Occurrence, ...]:
         """
-        The bare write occurrences inside *block* that land in the scope of whatever runs it — the
-        ones written directly in its body, and those of any nested block that reaches its own caller
-        in turn. Empty for a proven child scope, since nothing a child scope writes outlives it.
+        The write occurrences inside *block* that land in the scope of whatever runs it — the ones
+        written directly in its body, and those of any nested block that reaches its own caller in
+        turn. Empty for a proven child scope, since nothing a child scope writes outlives it.
+
+        A name addressed as a *string* is a write here exactly as a bare `$x =` is. `Remove-Variable
+        x`, `New-Variable x 'b'` and `Get-Process -OutVariable x` each write the scope they are
+        written in and each contains no occurrence of the name, so a caller reading only the
+        variables of the body sees `. { Remove-Variable x }` touch nothing at all. That the answer
+        is an `Occurrence` rather than a `Ps1Variable` is what lets the two arrive as one kind of
+        thing.
 
         That the recursion stops at a child scope is what makes `& { . { $x = 'b' } }` write nothing
         outside: the inner dot writes the `&` block's scope, and that scope ends with it. Qualified
         writes are left out because a `$script:` or `$global:` write names its scope outright and
         reaches the same binding whichever body it sits in, so it is not a fact about where the block
-        runs.
+        runs — and a `Set-Variable -Scope Global x` is left out for that same reason.
         """
         found = self._caller_writes.get(id(block))
         if found is None:
@@ -280,7 +315,7 @@ class Ps1BlockModel:
             stack.extend(node.children())
         return False
 
-    def _collect_writes(self, block: Ps1ScriptBlock) -> Iterator[Ps1Variable]:
+    def _collect_writes(self, block: Ps1ScriptBlock) -> Iterator[Occurrence]:
         stack: list[Node] = list(block.children())
         while stack:
             node = stack.pop()
@@ -292,7 +327,9 @@ class Ps1BlockModel:
                 and node.scope is Ps1ScopeModifier.NONE
                 and is_write_occurrence(node)
             ):
-                yield node
+                yield Occurrence(node=node, role=occurrence_role(node), key=binding_key(node))
+            elif isinstance(node, Ps1CommandInvocation):
+                yield from _named_writes(node)
             stack.extend(node.children())
 
     def body_site(self, owner: Node) -> tuple[Node, bool] | None:
