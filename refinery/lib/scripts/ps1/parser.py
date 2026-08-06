@@ -132,6 +132,25 @@ _EXPRESSION_START_KINDS = frozenset({
     Ps1TokenKind.COMMA,
 })
 
+#: Operators that spell a whole command name when one stands where a name is expected. Each is
+#: *infix*, so no statement and no argument can begin with one, which is what leaves the spelling
+#: free: measured on 5.1, `..`, `*`, `..\tool.exe`, `/usr/bin/env` and `*.exe` are each resolved
+#: whole, and `%` is the alias of `ForEach-Object`.
+_OPERATOR_COMMAND_NAMES = frozenset({
+    Ps1TokenKind.DOTDOT,
+    Ps1TokenKind.PERCENT,
+    Ps1TokenKind.SLASH,
+    Ps1TokenKind.STAR,
+})
+
+#: Token kinds that open a command when a statement begins with one, read in expression mode.
+_COMMAND_START_KINDS = _OPERATOR_COMMAND_NAMES | {
+    Ps1TokenKind.GENERIC_TOKEN,
+    Ps1TokenKind.GENERIC_EXPAND,
+    Ps1TokenKind.AMPERSAND,
+    Ps1TokenKind.DOT,
+}
+
 _STATEMENT_TERMINATORS = frozenset({
     Ps1TokenKind.NEWLINE,
     Ps1TokenKind.SEMICOLON,
@@ -527,43 +546,8 @@ class Ps1Parser:
 
         return self._parse_pipeline_or_assignment()
 
-    def _absorb_suffix(
-        self,
-        literal: Ps1StringLiteral,
-        separator_kind: Ps1TokenKind,
-        separator: str,
-        *,
-        check_adjacent: bool = False,
-    ) -> tuple[Ps1StringLiteral, bool]:
-        """
-        Try to absorb a `separator + identifier` sequence into `literal`. Returns the (possibly
-        extended) literal and whether anything was absorbed. When `check_adjacent` is `True`,
-        absorption is skipped if there is whitespace between the current literal and the separator
-        token.
-        """
-        absorbed = False
-        while self._at(separator_kind):
-            if check_adjacent and self._current.offset > literal.offset + len(literal.raw):
-                break
-            saved_pos = self._lexer.pos
-            saved_tok = self._current
-            self._advance()
-            if self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
-                suffix = self._advance()
-                literal = Ps1StringLiteral(
-                    offset=literal.offset,
-                    value=literal.value + separator + suffix.value,
-                    raw=literal.raw + separator + suffix.value,
-                )
-                absorbed = True
-            else:
-                self._lexer.pos = saved_pos
-                self._current = saved_tok
-                break
-        return literal, absorbed
-
     def _parse_pipeline_or_assignment(self) -> Statement | None:
-        expr = self._parse_pipeline_expression()
+        expr = self._parse_pipeline_expression(statement_position=True)
         if expr is None:
             if self._at(Ps1TokenKind.EOF, Ps1TokenKind.RBRACE, Ps1TokenKind.RPAREN):
                 return None
@@ -574,9 +558,25 @@ class Ps1Parser:
             )
         return Ps1ExpressionStatement(offset=expr.offset, expression=expr)
 
-    def _parse_pipeline_expression(self) -> Expression | None:
+    def _parse_pipeline_expression(self, *, statement_position: bool = False) -> Expression | None:
+        """
+        Read one pipeline. Whether it opens with a command or with an expression is decided here and
+        nowhere else, which is what keeps the decision out of the hands of whatever was parsed
+        before: the held token is re-scanned in expression mode first, so the kind classified below
+        is a fact about *this* pipeline. That token is only classified and then discarded, which is
+        what makes scanning it speculatively safe — `_parse_command` re-scans in argument mode before
+        it reads a name.
+
+        A keyword kind is a command name only in `statement_position`, where `_parse_statement` has
+        already declined to treat it as one; anywhere else — an assignment right-hand side, a `for`
+        clause, the operand of `return` — the keyword still opens a statement, and taking it for a
+        name loses that statement whole.
+        """
         self._lexer.mode = Ps1LexerMode.EXPRESSION
-        if self._at(Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND, Ps1TokenKind.AMPERSAND, Ps1TokenKind.DOT):
+        self._rescan_current()
+        starts_command = self._current.kind in _COMMAND_START_KINDS or (
+            statement_position and self._current.kind.is_keyword)
+        if starts_command:
             first = self._parse_command()
             if first is None:
                 return None
@@ -611,6 +611,14 @@ class Ps1Parser:
         return expr
 
     def _parse_command(self) -> Expression | None:
+        """
+        Read a command, starting from its name. Argument mode is entered *before* the name rather
+        than after it, so the name arrives as the one token PowerShell resolves: `foo=123`,
+        `C:\\x\\y.exe` and `.\\a.ps1` are each whole, while `. { }` and `. $sb` still split, because
+        argument mode ends a token at a dot that is followed by a space.
+        """
+        self._lexer.mode = Ps1LexerMode.ARGUMENT
+        self._rescan_current()
         offset = self._current.offset
         invocation_operator = ''
         if self._at(Ps1TokenKind.AMPERSAND, Ps1TokenKind.DOT):
@@ -630,7 +638,7 @@ class Ps1Parser:
             name_expr = self._parse_paren_expression()
         elif self._at(Ps1TokenKind.STRING_EXPAND, Ps1TokenKind.STRING_VERBATIM):
             name_expr = self._parse_string()
-        elif self._at(Ps1TokenKind.PERCENT):
+        elif self._current.kind in _OPERATOR_COMMAND_NAMES:
             tok = self._advance()
             name_expr = self._bare_string(tok)
         elif self._current.kind.is_keyword:
@@ -645,15 +653,6 @@ class Ps1Parser:
             self._lexer.mode = Ps1LexerMode.EXPRESSION
             self._rescan_current()
             name_expr = self._parse_primary_postfix(name_expr)
-
-        if isinstance(name_expr, Ps1StringLiteral) and not invocation_operator:
-            absorbed = True
-            while absorbed:
-                name_expr, absorbed = self._absorb_suffix(
-                    name_expr, Ps1TokenKind.DOT, '.', check_adjacent=True)
-                name_expr, dash_absorbed = self._absorb_suffix(
-                    name_expr, Ps1TokenKind.DASH, '-', check_adjacent=True)
-                absorbed = absorbed or dash_absorbed
 
         self._lexer.mode = Ps1LexerMode.ARGUMENT
         self._rescan_current()
@@ -752,11 +751,7 @@ class Ps1Parser:
     def _parse_single_argument_value(self) -> Expression | None:
         if self._at(Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND):
             tok = self._advance()
-            result = self._parse_generic_as_string(tok)
-            if isinstance(result, Ps1StringLiteral):
-                result, _ = self._absorb_suffix(
-                    result, Ps1TokenKind.DOT, '.', check_adjacent=True)
-            return result
+            return self._parse_generic_as_string(tok)
         self._lexer.mode = Ps1LexerMode.EXPRESSION
         if self._current.kind in _EXPRESSION_START_KINDS:
             return self._parse_unary_expression()

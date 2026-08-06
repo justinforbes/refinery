@@ -147,6 +147,21 @@ class TestPs1NameCensus(TestBase):
             with self.subTest(source):
                 self.assertEqual(self._refs(source), [])
 
+    def test_a_qualified_command_name_does_not_consume_the_name_it_writes(self):
+        """
+        A scope or module qualifier belongs to the command name, so the first argument is still the
+        name the command addresses. Both spellings used to arrive with the qualifier and the command
+        split apart, which handed the resolver the *argument* as the command and left the write
+        unattributed.
+        """
+        for source in (
+            'global:sv x 5',
+            'Microsoft.PowerShell.Utility\\Set-Variable x 5',
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._refs(source), [('x', 'WRITES', 'LOCAL')])
+                self.assertFalse(addresses_unreadable_name(self._command(source)))
+
 
 class TestPs1UnreadableNames(TestBase):
     """
@@ -190,31 +205,3 @@ class TestPs1UnreadableNames(TestBase):
         for source in ('Write-Host $n', 'Get-Process', "Set-Item $path 'v'"):
             with self.subTest(source):
                 self.assertFalse(addresses_unreadable_name(self._command(source)))
-
-
-class TestPs1NameCensusKnownHoles(TestBase):
-    """
-    Spellings the recognizer does not see. Each is a *miss* on a deny-side table, so each is a fold
-    this package will still perform across a write — recorded here so the hole is a stated fact with
-    a test that changes when it closes, rather than an assumption nobody wrote down.
-    """
-
-    @staticmethod
-    def _command(source: str) -> Ps1CommandInvocation:
-        for node in Ps1Parser(source).parse().walk():
-            if isinstance(node, Ps1CommandInvocation):
-                return node
-        raise AssertionError(F'no command in {source!r}')
-
-    def test_a_scope_qualified_command_in_statement_position_is_not_seen(self):
-        """
-        `global:sv x 5` parses with the qualifier and the command name apart, and what reaches the
-        resolver is the *argument*. The whole spelling never arrives, so nothing here can recognise
-        it.
-        """
-        self.assertEqual(named_references(self._command('global:sv x 5')), [])
-        self.assertFalse(addresses_unreadable_name(self._command('global:sv x 5')))
-
-    def test_an_unquoted_module_qualified_command_is_not_seen(self):
-        source = 'Microsoft.PowerShell.Utility\\Set-Variable x 5'
-        self.assertEqual(named_references(self._command(source)), [])

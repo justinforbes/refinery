@@ -45,7 +45,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1ScriptBlock,
-    Ps1StringLiteral,
 )
 
 #: Commands that run arbitrary code supplied as data, in the scope of whatever calls them. Resolved
@@ -94,9 +93,8 @@ def runs_unreadable_code(node: Node) -> bool:
 
     `.\\tool.exe` is not a dot-invocation at all. The dot there opens a relative path and the command
     runs as any other external program does, in a scope of its own; PowerShell dot-sources only when
-    the operator stands apart from its target. `_names_a_relative_path` is the spelling that says so,
-    and anything it cannot tell apart stays a dot-invocation, since a missed one folds a value across
-    a write.
+    the operator stands apart from its target. The parser carries that distinction, giving a path no
+    invocation operator at all.
     """
     if not isinstance(node, Ps1CommandInvocation):
         return False
@@ -109,7 +107,6 @@ def runs_unreadable_code(node: Node) -> bool:
         node.invocation_operator == '.'
         and node.name is not None
         and not isinstance(node.name, Ps1ScriptBlock)
-        and not _names_a_relative_path(node)
     )
 
 
@@ -127,20 +124,3 @@ def _binds_switch(node: Ps1CommandInvocation, parameter: str) -> bool:
         if binds_parameter(argument.name, parameter):
             return True
     return False
-
-
-def _names_a_relative_path(node: Ps1CommandInvocation) -> bool:
-    """
-    Whether the dot of *node* opens a relative path rather than standing on its own as the
-    dot-source operator — `.\\tool.exe`, which runs a program, against `. .\\stage2.ps1`, which
-    reads a script into the caller's scope.
-
-    The lexer gives both the same invocation operator, so what tells them apart is that a path
-    leaves no room between the dot and the name and carries the separator it was written with.
-    """
-    name = node.name
-    if not isinstance(name, Ps1StringLiteral):
-        return False
-    if name.offset != node.offset + 1:
-        return False
-    return name.value.startswith(('\\', '/'))

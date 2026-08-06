@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import inspect
+
 from test import TestBase
 
+from refinery.lib.scripts import Block, Statement
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.model import (
+    Expression,
     Ps1ArrayLiteral,
+    Ps1BinaryExpression,
     Ps1BreakStatement,
+    Ps1Code,
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1ContinueStatement,
     Ps1DataSection,
     Ps1DoLoop,
+    Ps1ErrorNode,
     Ps1ExitStatement,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
@@ -33,6 +40,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ThrowStatement,
     Ps1TrapStatement,
     Ps1TryCatchFinally,
+    Ps1TypeExpression,
+    Ps1UnaryExpression,
     Ps1Variable,
     Ps1WhileLoop,
 )
@@ -777,3 +786,337 @@ class TestPs1TypeLiteralOwnsItsLexerMode(TestBase):
         self.assertIsInstance(stmt, Ps1TrapStatement)
         self.assertEqual(stmt.type_name, 'System.Exception')
         self.assertEqual(len(stmt.body.body), 1)
+
+
+_ON_THE_NEXT_LINE = inspect.cleandoc("""
+    Get-Date
+    BODY
+""")
+
+_AFTER_A_PIPELINE = inspect.cleandoc("""
+    Get-Date | Out-Null
+    BODY
+""")
+
+_AFTER_AN_ASSIGNMENT = inspect.cleandoc("""
+    $a = 1
+    BODY
+""")
+
+_STATEMENT_POSITIONS = {
+    'at the start of the script'         : 'BODY',
+    'after a semicolon'                  : 'Get-Date; BODY',
+    'on the next line'                   : _ON_THE_NEXT_LINE,
+    'after a pipeline'                   : _AFTER_A_PIPELINE,
+    'after an assignment'                : _AFTER_AN_ASSIGNMENT,
+    'in a script block'                  : '& { BODY }',
+    'in a dot sourced block'             : '. { BODY }',
+    'in a script block argument'         : 'Invoke-Command -ScriptBlock { BODY }',
+    'in a pipeline block argument'       : '1,2 | ForEach-Object { BODY }',
+    'in an assigned block'               : '$sb = { BODY }',
+    'in a function body'                 : 'function Invoke-Thing { BODY }',
+    'in an if body'                      : 'if ($true) { BODY }',
+    # The measured row spells this condition `Test-Path .`, which the parser reads as two statements
+    # of which the second dot sources its own successor. That defect is a command argument's and not
+    # a statement start's, so the condition here is one that reaches the body it is here to place.
+    'in an if body after a command test' : 'if (Test-Path $p) { BODY }',
+    'in an else body'                    : 'if ($false) { Get-Date } else { BODY }',
+    'in a while body'                    : 'while ($true) { BODY }',
+    'in a for body'                      : 'for ($i = 0; $i -lt 2; $i++) { BODY }',
+    'in a foreach body'                  : 'foreach ($i in 1,2) { BODY }',
+    'in a try body'                      : 'try { BODY } catch { Get-Date }',
+    'in a catch body'                    : 'try { Get-Date } catch { BODY }',
+    'in a finally body'                  : 'try { Get-Date } finally { BODY }',
+    'in a switch case body'              : 'switch (1) { 1 { BODY } }',
+    'after a param declaration'          : '& { param($p) BODY }',
+    'in a block inside a block'          : '& { & { BODY } }',
+    'as a later statement in a block'    : '& { Get-Date | Out-Null; BODY }',
+    'as a later statement in an if body' : 'if ($true) { Get-Date | Out-Null; BODY }',
+}
+
+_PARAM_POSITIONS = {
+    position: _STATEMENT_POSITIONS[position] for position in [
+        'at the start of the script',
+        'in a script block',
+        'in a dot sourced block',
+        'in a script block argument',
+        'in a pipeline block argument',
+        'in an assigned block',
+        'in a function body',
+        'in a block inside a block',
+    ]
+}
+
+
+def _at_every_position(positions: dict[str, str]):
+    """
+    Marks a check for expansion by `_one_test_per_position` into one test per entry of `positions`.
+    """
+    def attach(check):
+        check.positions = positions
+        return check
+    return attach
+
+
+def _one_test_per_position(cls):
+    """
+    Expands every check marked by `_at_every_position` into one test method per position. A check
+    that walks the table itself reports the whole table as a single result, which hides a position
+    that regresses on its own behind the ones that still pass.
+    """
+    for name, check in list(vars(cls).items()):
+        positions = getattr(check, 'positions', None)
+        if positions is None:
+            continue
+        for position, template in positions.items():
+            def test(self, check=check, template=template):
+                check(self, template)
+            test.__name__ = F'test_{name.removeprefix("check_")}_{position.replace(" ", "_")}'
+            setattr(cls, test.__name__, test)
+    return cls
+
+
+@_one_test_per_position
+class TestPs1EveryStatementOwnsItsLexerMode(TestBase):
+    """
+    PowerShell decides once per statement whether it reads a command or an expression, and it never
+    inherits that decision from the statement or the construct before it: 5.1 resolves `foo=123` as
+    a command whose *name* is `foo=123` and increments `$v` for `$v++`, in every position either was
+    measured in. The two modes disagree about where a token ends — in argument mode `$v++` and `1+2`
+    are single barewords and `-join` is a parameter name, in expression mode `foo=123` is an
+    assignment — so a statement read in the wrong mode parses into a well-formed tree of the wrong
+    shape rather than into an error.
+
+    Each check therefore reads the shape the parser produced rather than comparing positions against
+    one another: a parser that is wrong in the same way everywhere satisfies invariance and fails
+    every check here. `_one_test_per_position` runs each check in every position a statement can
+    stand in, as a test of its own.
+
+    Command names that begin with a keyword are excluded. `Exit-PSSession`, `Break-Glass` and
+    `Return-Value` currently parse as an exit, a break and a return; that defect is recorded
+    elsewhere and is not what these tests are about.
+    """
+
+    def _statement_at(self, template: str, body: str) -> Statement:
+        """
+        The statement that `body` becomes once it is substituted into `template`.
+        """
+        source = template.replace('BODY', body)
+        script = Ps1Parser(source).parse()
+        errors = [node.text for node in script.walk() if isinstance(node, Ps1ErrorNode)]
+        self.assertEqual(errors, [], source)
+        start = template.index('BODY')
+        end = start + len(body)
+        for node in script.walk_in_order():
+            if not isinstance(node, (Block, Ps1Code)):
+                continue
+            for statement in node.body:
+                # Statements are visited outermost first, and the scaffolding around the body starts
+                # before it, so the first statement inside the substituted span is the body's own.
+                if start <= statement.offset <= end:
+                    return statement
+        raise AssertionError(F'{body} is no statement of its own in {source}')
+
+    def _expression_at(self, template: str, body: str) -> Expression:
+        statement = self._statement_at(template, body)
+        self.assertIsInstance(statement, Ps1ExpressionStatement)
+        return statement.expression
+
+    def _command_at(self, template: str, body: str) -> Ps1CommandInvocation:
+        expression = self._expression_at(template, body)
+        self.assertIsInstance(expression, Ps1CommandInvocation)
+        return expression
+
+    def _command_name_at(self, template: str, body: str) -> str:
+        command = self._command_at(template, body)
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.invocation_operator, '')
+        return command.name.value
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_postfix_increment_is_an_increment(self, template: str):
+        expr = self._expression_at(template, '$v++')
+        self.assertIsInstance(expr, Ps1UnaryExpression)
+        self.assertEqual(expr.operator, '++')
+        self.assertFalse(expr.prefix)
+        self.assertIsInstance(expr.operand, Ps1Variable)
+        self.assertEqual(expr.operand.name, 'v')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_postfix_decrement_is_a_decrement(self, template: str):
+        expr = self._expression_at(template, '$v--')
+        self.assertIsInstance(expr, Ps1UnaryExpression)
+        self.assertEqual(expr.operator, '--')
+        self.assertFalse(expr.prefix)
+        self.assertIsInstance(expr.operand, Ps1Variable)
+        self.assertEqual(expr.operand.name, 'v')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_prefix_decrement_is_a_decrement(self, template: str):
+        expr = self._expression_at(template, '--$v')
+        self.assertIsInstance(expr, Ps1UnaryExpression)
+        self.assertEqual(expr.operator, '--')
+        self.assertTrue(expr.prefix)
+        self.assertIsInstance(expr.operand, Ps1Variable)
+        self.assertEqual(expr.operand.name, 'v')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_an_exclamation_mark_is_a_negation(self, template: str):
+        expr = self._expression_at(template, '!$v')
+        self.assertIsInstance(expr, Ps1UnaryExpression)
+        self.assertEqual(expr.operator, '!')
+        self.assertTrue(expr.prefix)
+        self.assertIsInstance(expr.operand, Ps1Variable)
+        self.assertEqual(expr.operand.name, 'v')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_leading_not_is_a_negation(self, template: str):
+        expr = self._expression_at(template, '-not $v')
+        self.assertIsInstance(expr, Ps1UnaryExpression)
+        self.assertEqual(expr.operator, '-not')
+        self.assertTrue(expr.prefix)
+        self.assertIsInstance(expr.operand, Ps1Variable)
+        self.assertEqual(expr.operand.name, 'v')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_leading_dash_operator_is_an_operator(self, template: str):
+        expr = self._expression_at(template, '-join $v')
+        self.assertIsInstance(expr, Ps1UnaryExpression)
+        self.assertEqual(expr.operator, '-join')
+        self.assertTrue(expr.prefix)
+        self.assertIsInstance(expr.operand, Ps1Variable)
+        self.assertEqual(expr.operand.name, 'v')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_leading_sum_is_an_addition(self, template: str):
+        expr = self._expression_at(template, '1+2')
+        self.assertIsInstance(expr, Ps1BinaryExpression)
+        self.assertEqual(expr.operator, '+')
+        self.assertIsInstance(expr.left, Ps1IntegerLiteral)
+        self.assertEqual(expr.left.value, 1)
+        self.assertIsInstance(expr.right, Ps1IntegerLiteral)
+        self.assertEqual(expr.right.value, 2)
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_an_equals_sign_belongs_to_the_command_name(self, template: str):
+        command = self._command_at(template, 'foo=123')
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, 'foo=123')
+        self.assertEqual(command.invocation_operator, '')
+        self.assertEqual(command.arguments, [])
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_command_name_holding_an_equals_sign_still_takes_an_argument(self, template: str):
+        command = self._command_at(template, 'foo=123 bar')
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, 'foo=123')
+        self.assertEqual(len(command.arguments), 1)
+        argument = command.arguments[0]
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.POSITIONAL)
+        self.assertIsInstance(argument.value, Ps1StringLiteral)
+        self.assertEqual(argument.value.value, 'bar')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_plus_sign_belongs_to_the_command_name(self, template: str):
+        self.assertEqual(self._command_name_at(template, 'foo+123'), 'foo+123')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_an_unspaced_dash_belongs_to_the_command_name(self, template: str):
+        self.assertEqual(self._command_name_at(template, 'foo-bar'), 'foo-bar')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_spaced_dash_starts_a_switch_instead(self, template: str):
+        command = self._command_at(template, 'foo -bar')
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, 'foo')
+        self.assertEqual(len(command.arguments), 1)
+        argument = command.arguments[0]
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.SWITCH)
+        self.assertEqual(argument.name, '-bar')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_an_absolute_path_is_one_command_name(self, template: str):
+        self.assertEqual(self._command_name_at(template, r'C:\x\y.exe'), r'C:\x\y.exe')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_relative_path_is_a_command_of_its_own_and_not_a_dot_source(self, template: str):
+        self.assertEqual(self._command_name_at(template, r'.\a.ps1'), r'.\a.ps1')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_dot_apart_from_its_target_is_a_dot_source(self, template: str):
+        command = self._command_at(template, r'. .\a.ps1')
+        self.assertEqual(command.invocation_operator, '.')
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, r'.\a.ps1')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_foreach_alias_takes_a_block_as_an_argument(self, template: str):
+        command = self._command_at(template, '% { $_ }')
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, '%')
+        self.assertEqual(len(command.arguments), 1)
+        argument = command.arguments[0]
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.POSITIONAL)
+        self.assertIsInstance(argument.value, Ps1ScriptBlock)
+        self.assertEqual(len(argument.value.body), 1)
+        inner = argument.value.body[0]
+        self.assertIsInstance(inner, Ps1ExpressionStatement)
+        self.assertIsInstance(inner.expression, Ps1Variable)
+        self.assertEqual(inner.expression.name, '_')
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_foreach_alias_keeps_its_switch_beside_the_block(self, template: str):
+        command = self._command_at(template, '% -Begin { 1 }')
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, '%')
+        self.assertEqual(len(command.arguments), 2)
+        switch, block = command.arguments
+        self.assertIsInstance(switch, Ps1CommandArgument)
+        self.assertEqual(switch.kind, Ps1CommandArgumentKind.SWITCH)
+        self.assertEqual(switch.name, '-Begin')
+        self.assertIsInstance(block, Ps1CommandArgument)
+        self.assertEqual(block.kind, Ps1CommandArgumentKind.POSITIONAL)
+        self.assertIsInstance(block.value, Ps1ScriptBlock)
+        self.assertEqual(len(block.value.body), 1)
+        inner = block.value.body[0]
+        self.assertIsInstance(inner, Ps1ExpressionStatement)
+        self.assertIsInstance(inner.expression, Ps1IntegerLiteral)
+        self.assertEqual(inner.expression.value, 1)
+
+    @_at_every_position(_PARAM_POSITIONS)
+    def check_a_typed_parameter_declaration_leaves_the_body_in_expression_mode(self, template: str):
+        code = self._statement_at(template, 'param([int]$v) $v++').parent
+        self.assertIsInstance(code, Ps1Code)
+        self.assertIsNotNone(code.param_block)
+        self.assertEqual(len(code.param_block.parameters), 1)
+        declaration = code.param_block.parameters[0]
+        self.assertEqual(len(declaration.attributes), 1)
+        self.assertIsInstance(declaration.attributes[0], Ps1TypeExpression)
+        self.assertEqual(declaration.attributes[0].name, 'int')
+        self.assertEqual(declaration.variable.name, 'v')
+        self.assertEqual(len(code.body), 1)
+        expr = code.body[0].expression
+        self.assertIsInstance(expr, Ps1UnaryExpression)
+        self.assertEqual(expr.operator, '++')
+        self.assertFalse(expr.prefix)
+        self.assertIsInstance(expr.operand, Ps1Variable)
+        self.assertEqual(expr.operand.name, 'v')
+
+    def test_a_relative_path_and_a_dot_source_of_it_differ_only_in_the_invocation_operator(self):
+        """
+        `.\\a.ps1` runs the script in a scope of its own while `. .\\a.ps1` runs it in the caller's,
+        so reading the first as a dot source invents a write to every variable the caller holds.
+        """
+        program = self._command_at('BODY', r'.\a.ps1')
+        sourced = self._command_at('BODY', r'. .\a.ps1')
+        self.assertEqual(program.invocation_operator, '')
+        self.assertEqual(sourced.invocation_operator, '.')
+        self.assertIsInstance(program.name, Ps1StringLiteral)
+        self.assertIsInstance(sourced.name, Ps1StringLiteral)
+        self.assertEqual(program.name.value, sourced.name.value)
+        self.assertEqual(program.name.value, r'.\a.ps1')
+        self.assertEqual(program.arguments, [])
+        self.assertEqual(sourced.arguments, [])
