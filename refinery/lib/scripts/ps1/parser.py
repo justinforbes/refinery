@@ -1553,15 +1553,12 @@ class Ps1Parser:
 
     def _parse_switch_clause_condition(self) -> Expression | None:
         """
-        Parse a switch clause condition. The reference PowerShell parser uses
-        GetSingleCommandArgument(SwitchCondition) here, which tokenizes in
-        command mode and treats keyword tokens as bare-word string literals.
+        Read one switch clause condition, which is a single command argument and not an expression:
+        the reference reaches it through `GetSingleCommandArgument(SwitchCondition)`, so `Get-Thing`
+        is one name there, as 5.1 reads it, and not a subtraction of `Thing` from `Get`.
         """
-        if self._current.kind.is_keyword:
-            tok = self._advance()
-            return self._bare_string(tok)
-        with self._mode(Ps1LexerMode.EXPRESSION):
-            return self._parse_expression()
+        with self._mode(Ps1LexerMode.ARGUMENT):
+            return self._parse_single_argument_value()
 
     def _parse_switch(self, label: str | None = None) -> Ps1SwitchStatement:
         offset = self._current.offset
