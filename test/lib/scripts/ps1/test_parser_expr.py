@@ -3,7 +3,9 @@ from __future__ import annotations
 from test import TestBase
 
 import itertools
+import unittest
 
+from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
@@ -11,6 +13,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
     Ps1CastExpression,
+    Ps1CommandInvocation,
     Ps1ScopeModifier,
     Ps1ExpandableString,
     Ps1HashLiteral,
@@ -634,3 +637,161 @@ class TestPs1MemberAccessBindsOnlyToWhatItTouches(TestBase):
         runs at all; a member read there is one no execution of it ever performs.
         """
         self.assertEqual(self._member_accesses(self._parse("('a')    .('Length')")), [])
+
+    def test_whitespace_behind_the_dot_does_not_separate_the_member_from_its_object(self):
+        """
+        The rule is about what stands before an operator: 5.1 reads `$a.  Length` as the property
+        that `$a.Length` reads, so the gap behind the dot separates nothing.
+        """
+        self._assertLengthIsAPropertyOfTheVariable('$a.  Length')
+
+    def test_whitespace_behind_the_double_colon_does_not_separate_the_member_from_its_type(self):
+        accesses = self._member_accesses(self._parse('[int]::  MaxValue'))
+        self.assertEqual(len(accesses), 1)
+        access = accesses[0]
+        self.assertIsInstance(access, Ps1MemberAccess)
+        self.assertIsInstance(access.object, Ps1TypeExpression)
+        self.assertEqual(access.object.name, 'int')
+        self.assertEqual(access.member, 'MaxValue')
+        self.assertEqual(access.access, Ps1AccessKind.STATIC)
+
+    def test_a_parenthesis_touching_the_member_calls_it(self):
+        script = self._parse('$a.Length()')
+        self.assertEqual(len(script.body), 1)
+        calls = self._member_accesses(script)
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertIsInstance(call, Ps1InvokeMember)
+        self.assertIsInstance(call.object, Ps1Variable)
+        self.assertEqual(call.object.name, 'a')
+        self.assertEqual(call.member, 'Length')
+        self.assertEqual(call.arguments, [])
+
+    def test_whitespace_before_the_parenthesis_leaves_the_member_a_property_read(self):
+        """
+        5.1 reads `$a.Length ()` as the property `$a.Length` and a parenthesis of its own, so a
+        method call read there invents a call that no execution of the script performs.
+        """
+        self._assertLengthIsAPropertyOfTheVariable('$a.Length ()')
+        script = self._parse('$a.Length ()')
+        self.assertEqual(len(script.body), 2)
+        second = script.body[1]
+        self.assertIsInstance(second, Ps1ExpressionStatement)
+        self.assertIsInstance(second.expression, Ps1ParenExpression)
+
+    def test_whitespace_before_the_parenthesis_of_a_static_call_reads_no_call(self):
+        accesses = self._member_accesses(self._parse("[Convert]::FromBase64String ('AA==')"))
+        self.assertEqual(len(accesses), 1)
+        self.assertIsInstance(accesses[0], Ps1MemberAccess)
+        self.assertEqual(accesses[0].member, 'FromBase64String')
+
+
+class TestPs1ALineContinuationSeparatesTheOperatorFromWhatPrecedesIt(TestBase):
+    """
+    A backtick before a newline is a line continuation and a member operator binds only to what it
+    touches, so a continuation between the two separates them. 5.1 refuses the type expression
+    `[Convert]`, a continuation and `::FromBase64String('AA==')` with a parse error and reads it as
+    two pipelines, the type expression and then a command; `$a`, a continuation and `.Length` as
+    well as `$a`, a continuation and `[0]` read the same way. Written adjacent, all three bind.
+
+    A line continuation is a common obfuscation device, so a parser that folds one away reads a
+    member of an object the script never reaches and resolves a call 5.1 never makes.
+    """
+
+    @staticmethod
+    def _parse(source: str) -> Ps1Script:
+        return Ps1Parser(source).parse()
+
+    @staticmethod
+    def _bindings(script: Ps1Script) -> list[Node]:
+        return [
+            node for node in script.walk()
+            if isinstance(node, (Ps1MemberAccess, Ps1InvokeMember, Ps1IndexExpression))
+        ]
+
+    def _assertTheObjectIsAStatementOfItsOwn(self, script: Ps1Script, expected: type):
+        self.assertGreater(len(script.body), 1)
+        first = script.body[0]
+        self.assertIsInstance(first, Ps1ExpressionStatement)
+        self.assertIsInstance(first.expression, expected)
+        return first.expression
+
+    def test_a_continuation_before_a_static_member_leaves_the_type_expression_alone(self):
+        script = self._parse("[Convert]`\n::FromBase64String('AA==')")
+        self.assertEqual(self._bindings(script), [], 'the continuation bound the member to a type')
+        expression = self._assertTheObjectIsAStatementOfItsOwn(script, Ps1TypeExpression)
+        self.assertEqual(expression.name, 'Convert')
+        words = [node.value for node in script.walk() if isinstance(node, Ps1StringLiteral)]
+        self.assertIn('AA==', words, 'the text behind the continuation was lost')
+
+    def test_a_continuation_before_a_property_leaves_the_variable_alone(self):
+        script = self._parse('$a`\n.Length')
+        self.assertEqual(self._bindings(script), [], 'the continuation bound the member to $a')
+        expression = self._assertTheObjectIsAStatementOfItsOwn(script, Ps1Variable)
+        self.assertEqual(expression.name, 'a')
+        words = [node.value for node in script.walk() if isinstance(node, Ps1StringLiteral)]
+        self.assertTrue(
+            any('Length' in word for word in words), 'the text behind the continuation was lost')
+
+    def test_a_continuation_before_an_index_leaves_the_variable_alone(self):
+        script = self._parse('$a`\n[0]')
+        self.assertEqual(self._bindings(script), [], 'the continuation indexed $a')
+        expression = self._assertTheObjectIsAStatementOfItsOwn(script, Ps1Variable)
+        self.assertEqual(expression.name, 'a')
+
+    def test_a_static_member_touching_its_type_is_a_call(self):
+        script = self._parse("[Convert]::FromBase64String('AA==')")
+        bindings = self._bindings(script)
+        self.assertEqual(len(bindings), 1)
+        call = bindings[0]
+        self.assertIsInstance(call, Ps1InvokeMember)
+        self.assertIsInstance(call.object, Ps1TypeExpression)
+        self.assertEqual(call.object.name, 'Convert')
+        self.assertEqual(call.member, 'FromBase64String')
+
+    def test_a_property_touching_its_variable_is_a_member_access(self):
+        script = self._parse('$a.Length')
+        bindings = self._bindings(script)
+        self.assertEqual(len(bindings), 1)
+        access = bindings[0]
+        self.assertIsInstance(access, Ps1MemberAccess)
+        self.assertIsInstance(access.object, Ps1Variable)
+        self.assertEqual(access.member, 'Length')
+
+    def test_an_index_touching_its_variable_is_an_index_access(self):
+        script = self._parse('$a[0]')
+        bindings = self._bindings(script)
+        self.assertEqual(len(bindings), 1)
+        index = bindings[0]
+        self.assertIsInstance(index, Ps1IndexExpression)
+        self.assertIsInstance(index.object, Ps1Variable)
+        self.assertIsInstance(index.index, Ps1IntegerLiteral)
+        self.assertEqual(index.index.value, 0)
+
+    def test_a_continuation_written_with_a_windows_line_ending_separates_as_well(self):
+        """
+        The scripts this device is found in carry CRLF line endings, so the continuation has to
+        separate there exactly as it does with a bare newline.
+        """
+        for source in [
+            "[Convert]`\r\n::FromBase64String('AA==')",
+            '$a`\r\n.Length',
+            '$a`\r\n[0]',
+        ]:
+            with self.subTest(source=source):
+                script = self._parse(source)
+                self.assertEqual(self._bindings(script), [])
+                self.assertGreater(len(script.body), 1)
+
+    @unittest.expectedFailure
+    def test_a_continuation_leaves_the_static_call_one_pipeline_of_its_own(self):
+        """
+        The tree 5.1 recovers from the parse error holds two pipelines, the type expression and one
+        command that keeps the parenthesis behind it. The parser splits that command into an error
+        node and a parenthesis of its own, which separates an argument from what receives it.
+        """
+        script = self._parse("[Convert]`\n::FromBase64String('AA==')")
+        self.assertEqual(len(script.body), 2)
+        second = script.body[1]
+        self.assertIsInstance(second, Ps1ExpressionStatement)
+        self.assertIsInstance(second.expression, Ps1CommandInvocation)

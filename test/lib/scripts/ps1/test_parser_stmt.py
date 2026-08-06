@@ -1018,6 +1018,94 @@ class TestPs1AnArgumentThatIsNoExpressionLeavesTheTerminator(TestBase):
         self._assertIsCommandNamed(script.body[1], 'Write-Host')
 
 
+class TestPs1ACommaOpeningAnArgumentLeavesTheCommandWhole(TestBase):
+    """
+    A comma cannot open an argument: 5.1 reports `Missing argument in parameter list` for
+    `Start-Process -ArgumentList ,$a -Wait`, and the tree it recovers is still the one command,
+    holding `-ArgumentList`, `$a` and `-Wait`. The comma is dropped and nothing behind it is lost,
+    and `Invoke-Command -ScriptBlock {1} -ArgumentList ,$arr` recovers the same way.
+
+    A reader that gives up the rest of the command at the comma deletes an invocation and the
+    script block it carries, which is everything such a script does.
+    """
+
+    def _command(self, source: str) -> Ps1CommandInvocation:
+        script = Ps1Parser(source).parse()
+        self.assertEqual(len(script.body), 1, source)
+        statement = script.body[0]
+        self.assertIsInstance(statement, Ps1ExpressionStatement)
+        command = statement.expression
+        self.assertIsInstance(command, Ps1CommandInvocation)
+        return command
+
+    def _switch(self, argument: Ps1CommandArgument | Expression, name: str):
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.SWITCH)
+        self.assertEqual(argument.name, name)
+
+    def _positional(self, argument: Ps1CommandArgument | Expression) -> Expression:
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.POSITIONAL)
+        self.assertIsInstance(argument.value, Expression)
+        return argument.value
+
+    def test_a_comma_before_an_argument_keeps_the_switch_behind_it(self):
+        command = self._command('Start-Process -ArgumentList ,$a -Wait')
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, 'Start-Process')
+        self.assertEqual(len(command.arguments), 3)
+        listed, value, wait = command.arguments
+        self._switch(listed, '-ArgumentList')
+        variable = self._positional(value)
+        self.assertIsInstance(variable, Ps1Variable)
+        self.assertEqual(variable.name, 'a')
+        self._switch(wait, '-Wait')
+
+    def test_a_comma_before_the_last_argument_keeps_the_script_block_of_the_command(self):
+        command = self._command('Invoke-Command -ScriptBlock {1} -ArgumentList ,$arr')
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, 'Invoke-Command')
+        self.assertEqual(len(command.arguments), 4)
+        scriptblock, block, listed, value = command.arguments
+        self._switch(scriptblock, '-ScriptBlock')
+        body = self._positional(block)
+        self.assertIsInstance(body, Ps1ScriptBlock)
+        self.assertEqual(len(body.body), 1)
+        statement = body.body[0]
+        self.assertIsInstance(statement, Ps1ExpressionStatement)
+        self.assertIsInstance(statement.expression, Ps1IntegerLiteral)
+        self.assertEqual(statement.expression.value, 1)
+        self._switch(listed, '-ArgumentList')
+        variable = self._positional(value)
+        self.assertIsInstance(variable, Ps1Variable)
+        self.assertEqual(variable.name, 'arr')
+
+    def test_the_comma_is_all_that_the_recovered_command_loses(self):
+        """
+        The recovered tree is the tree of the same command written without the comma: the elements
+        are asserted by shape rather than by identity, because a comma that survives as an element
+        of its own also reads as one command and would pass a count of the elements alone.
+        """
+        def shape(source: str):
+            command = self._command(source)
+            self.assertIsInstance(command.name, Ps1StringLiteral)
+            elements = [command.name.value]
+            for argument in command.arguments:
+                if isinstance(argument, Ps1CommandArgument):
+                    elements.append((argument.kind, argument.name, type(argument.value).__name__))
+                else:
+                    elements.append(type(argument).__name__)
+            return elements
+        self.assertEqual(
+            shape('Start-Process -ArgumentList ,$a -Wait'),
+            shape('Start-Process -ArgumentList $a -Wait'),
+        )
+        self.assertEqual(
+            shape('Invoke-Command -ScriptBlock {1} -ArgumentList ,$arr'),
+            shape('Invoke-Command -ScriptBlock {1} -ArgumentList $arr'),
+        )
+
+
 _ON_THE_NEXT_LINE = inspect.cleandoc("""
     Get-Date
     BODY
@@ -1045,6 +1133,10 @@ _STATEMENT_POSITIONS = {
     'in a pipeline block argument'       : '1,2 | ForEach-Object { BODY }',
     'in an assigned block'               : '$sb = { BODY }',
     'in a function body'                 : 'function Invoke-Thing { BODY }',
+    'in a parameterized function body'   : 'function Invoke-Thing($a) { BODY }',
+    'in a parameterized filter body'     : 'filter Select-Thing($a) { BODY }',
+    'in a class method body'             : 'class Thing { [void] Run() { BODY } }',
+    'in a parameterized class method'    : 'class Thing { [void] Run($a) { BODY } }',
     'in an if body'                      : 'if ($true) { BODY }',
     # The measured row spells this condition `Test-Path .`, which the parser reads as two statements
     # of which the second dot sources its own successor. That defect is a command argument's and not
@@ -1198,6 +1290,12 @@ class TestPs1EveryStatementOwnsItsLexerMode(TestBase):
     the name is varied independently of the keyword, because a parser that only recognizes the
     dashed form reads `Exit-PSSession` as a command and still loses `end.bat` and `process.exe`
     entirely.
+
+    How a body was declared does not change how it is read either: `end.bat`, `process.exe` and
+    `class.ps1` are each one command in a script block, in `function f { }`, in `function f($a)`,
+    in `filter f($a)` and in a class method alike, so each of those declarations is a position of
+    its own here. The forms that carry a parameter list are the ones that can lose their body to
+    the list.
     """
 
     def _statement_at(self, template: str, body: str) -> Statement:
