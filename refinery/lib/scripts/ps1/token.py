@@ -147,6 +147,18 @@ class Ps1TokenKind(enum.Enum):
     def is_assignment(self):
         return self in _ASSIGNMENT_SET
 
+    @property
+    def mode_invariant(self):
+        """
+        Whether the text of a token of this kind reads the same in every
+        `refinery.lib.scripts.ps1.lexer.Ps1LexerMode`. A parser holding one as lookahead may keep it
+        across a mode change, because scanning it again could not produce anything else. A kind
+        earns membership only by being witnessed in the material the invariance test drives: an
+        entry that test cannot reach is a claim nothing checks, and skipping the re-read is worth
+        nothing next to that.
+        """
+        return self in _MODE_INVARIANT_SET
+
 
 _KEYWORDS: dict[str, Ps1TokenKind] = {
     'if'           : Ps1TokenKind.IF,
@@ -190,6 +202,27 @@ _ASSIGNMENT_SET = frozenset((
     Ps1TokenKind.STAR_ASSIGN,
     Ps1TokenKind.SLASH_ASSIGN,
     Ps1TokenKind.PERCENT_ASSIGN,
+))
+
+_MODE_INVARIANT_SET = frozenset((
+    Ps1TokenKind.AMPERSAND,
+    Ps1TokenKind.AT_LBRACE,
+    Ps1TokenKind.AT_LPAREN,
+    Ps1TokenKind.COMMA,
+    Ps1TokenKind.DOLLAR_LPAREN,
+    Ps1TokenKind.EOF,
+    Ps1TokenKind.HSTRING_VERBATIM,
+    Ps1TokenKind.LBRACE,
+    Ps1TokenKind.LBRACKET,
+    Ps1TokenKind.LPAREN,
+    Ps1TokenKind.NEWLINE,
+    Ps1TokenKind.PIPE,
+    Ps1TokenKind.RBRACE,
+    Ps1TokenKind.RBRACKET,
+    Ps1TokenKind.RPAREN,
+    Ps1TokenKind.SEMICOLON,
+    Ps1TokenKind.STRING_EXPAND,
+    Ps1TokenKind.STRING_VERBATIM,
 ))
 
 KEYWORD_SPELLING: dict[str, str] = {

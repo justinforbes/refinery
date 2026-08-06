@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import pathlib
+
+from typing import Generator, NamedTuple
+
 from test import TestBase
 
 from refinery.lib.scripts.ps1.lexer import Ps1Lexer, Ps1LexerMode
-from refinery.lib.scripts.ps1.token import Ps1TokenKind
+from refinery.lib.scripts.ps1.token import Ps1Token, Ps1TokenKind
+
+
+class _Reading(NamedTuple):
+    token: Ps1Token
+    end: int
 
 
 class TestPs1Lexer(TestBase):
@@ -732,3 +741,89 @@ class TestPs1Lexer(TestBase):
         kinds = [t[0] for t in tokens]
         self.assertNotIn(Ps1TokenKind.LABEL, kinds)
         self.assertIn(Ps1TokenKind.DOUBLE_COLON, kinds)
+
+
+class TestPs1LexerModeInvariance(TestBase):
+    """
+    `Ps1TokenKind.mode_invariant` claims that a token of such a kind reads the same way at the same
+    position in either `Ps1LexerMode`. The PowerShell parser keeps such a token as lookahead across
+    a mode change rather than re-reading the source, so a kind that does not belong in the set hands
+    the parser a token the new mode would never have produced, and nothing in the output says so.
+
+    The claim is checked over PowerShell nobody wrote for it: the metadata collector that this
+    project runs on Windows PowerShell 5.1, the project updater, and two PowerShell malware samples,
+    one a fragment-array dropper and one a script padded with roughly a hundred junk statements.
+    """
+
+    _SCRIPTS = (
+        'refinery/run-pwsh.ps1',
+        'update.ps1',
+    )
+
+    _SAMPLES = (
+        'baa48c748d58d0c715fc2b7fbe74610213c070814762a2774cc6d57d4522a73d',
+        '34f5eab91e26c1c2073740ed76af289fdd0df985385d3d198f5be7165d79745f',
+    )
+
+    def _corpus(self) -> dict[str, str]:
+        root = pathlib.Path(__file__).resolve().parents[4]
+        corpus = {name: (root / name).read_text('utf8') for name in self._SCRIPTS}
+        for sha256 in self._SAMPLES:
+            corpus[sha256[:8]] = self.download_sample(sha256).decode('utf8')
+        return corpus
+
+    def _readings(self, source: str) -> Generator[tuple[int, _Reading, _Reading], None, None]:
+        """
+        Every position in `source` that some sequence of scans can reach, in either mode, together
+        with what each mode reads there. The frontier starts at the beginning of the source and
+        grows by the end of every scan, so a position that only one of the two modes can arrive at
+        is visited as well. This is the whole domain a parser can hold lookahead over, and it does
+        not depend on knowing which positions the lexer treats specially.
+        """
+        frontier = [0]
+        visited: set[int] = set()
+        while frontier:
+            position = frontier.pop()
+            if position in visited:
+                continue
+            visited.add(position)
+            readings: dict[Ps1LexerMode, _Reading] = {}
+            for mode in Ps1LexerMode:
+                lexer = Ps1Lexer(source, pos=position, mode=mode)
+                token = lexer.scan()
+                readings[mode] = _Reading(token, lexer.pos)
+                if lexer.pos > position:
+                    frontier.append(lexer.pos)
+            yield (
+                position,
+                readings[Ps1LexerMode.EXPRESSION],
+                readings[Ps1LexerMode.ARGUMENT],
+            )
+
+    def test_mode_invariant_kinds_read_identically_in_the_other_mode(self):
+        violations: list[str] = []
+        invariant_tokens = 0
+        divergences = 0
+        for name, source in self._corpus().items():
+            for position, expression, argument in self._readings(source):
+                if expression == argument:
+                    if expression.token.kind.mode_invariant:
+                        invariant_tokens += 1
+                    continue
+                divergences += 1
+                for reading in (expression, argument):
+                    if not reading.token.kind.mode_invariant:
+                        continue
+                    violations.append(
+                        F'{name}@{position}: {reading.token.kind.name} {reading.token.value!r} is'
+                        F' claimed mode invariant, but EXPRESSION reads {expression.token!r} up to'
+                        F' {expression.end} and ARGUMENT reads {argument.token!r} up to'
+                        F' {argument.end}'
+                    )
+        if violations:
+            self.fail('\n'.join([
+                'tokens of a mode invariant kind that the other mode reads differently:',
+                *violations,
+            ]))
+        self.assertTrue(invariant_tokens, 'the corpus produced no token of a mode invariant kind')
+        self.assertTrue(divergences, 'the corpus never made the two modes read a position apart')

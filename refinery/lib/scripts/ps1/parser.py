@@ -226,16 +226,51 @@ class Ps1Parser:
     def __init__(self, source: str):
         self.source = source
         self._lexer = Ps1Lexer(source)
-        self._current: Ps1Token = Ps1Token(Ps1TokenKind.EOF, '', 0)
+        self._pending: Ps1Token | None = None
         self._disable_comma = False
-        self._advance()
 
-    def _advance(self, mode_hint: Ps1LexerMode | None = None) -> Ps1Token:
-        prev = self._current
-        if mode_hint is not None:
-            self._lexer.mode = mode_hint
-        self._current = self._lexer.scan()
-        return prev
+    @property
+    def _current(self) -> Ps1Token:
+        token = self._pending
+        if token is None:
+            token = self._pending = self._lexer.scan()
+        return token
+
+    def _advance(self) -> Ps1Token:
+        token = self._current
+        self._pending = None
+        return token
+
+    def _resync(self, offset: int):
+        """
+        Rewind to `offset` and drop the lookahead, so that the next read scans the source there
+        again. Nothing is scanned here: the re-read happens when, and only if, a token is asked for.
+        """
+        self._lexer.pos = offset
+        self._pending = None
+
+    def _switch_mode(self, mode: Ps1LexerMode):
+        if mode is self._lexer.mode:
+            return
+        self._lexer.mode = mode
+        token = self._pending
+        if token is not None and not token.kind.mode_invariant:
+            self._resync(token.offset)
+
+    @contextmanager
+    def _mode(self, mode: Ps1LexerMode):
+        """
+        Read the enclosed construct in `mode` and restore the caller's mode afterwards. Changing the
+        mode discards the lookahead, so a token scanned in one mode is never handed to a parse that
+        asked for another. That is the whole of the rule: it lives here rather than in the memory of
+        whoever writes the next call site.
+        """
+        previous = self._lexer.mode
+        self._switch_mode(mode)
+        try:
+            yield
+        finally:
+            self._switch_mode(previous)
 
     def _at(self, *kinds: Ps1TokenKind) -> bool:
         return self._current.kind in kinds
@@ -258,15 +293,6 @@ class Ps1Parser:
         if self._current.kind == kind:
             return self._advance()
         return Ps1Token(kind, '', self._current.offset)
-
-    def _rescan_current(self):
-        """
-        Re-tokenize the current token under the active lexer mode. Used after mode changes
-        (e.g. `pop_mode`) to ensure the lookahead token matches the new mode.
-        """
-        if self._current.offset >= 0:
-            self._lexer.pos = self._current.offset
-            self._advance()
 
     def _skip_newlines(self):
         while self._current.kind == Ps1TokenKind.NEWLINE:
@@ -567,36 +593,33 @@ class Ps1Parser:
         clause, the operand of `return` — the keyword still opens a statement, and taking it for a
         name loses that statement whole.
         """
-        self._lexer.mode = Ps1LexerMode.EXPRESSION
-        self._rescan_current()
-        starts_command = self._current.kind in _COMMAND_START_KINDS or (
-            statement_position and self._current.kind.is_keyword)
-        if starts_command:
-            first = self._parse_command()
-            if first is None:
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            starts_command = self._current.kind in _COMMAND_START_KINDS or (
+                statement_position and self._current.kind.is_keyword)
+            if starts_command:
+                first = self._parse_command()
+                if first is None:
+                    return None
+                return self._parse_pipeline_tail(first)
+            expr = self._parse_expression()
+            if expr is None:
                 return None
-            return self._parse_pipeline_tail(first)
-        expr = self._parse_expression()
-        if expr is None:
-            return None
-        if self._current.kind.is_assignment:
-            op = self._advance()
-            self._skip_newlines()
-            if self._current.kind in _ASSIGNMENT_RHS_STATEMENT_KINDS:
-                rhs = self._parse_statement()
-            else:
-                rhs = self._parse_pipeline_expression()
-            expr = Ps1AssignmentExpression(
-                offset=expr.offset, target=expr, operator=op.value, value=rhs)
-        return self._parse_pipeline_tail(expr)
+            if self._current.kind.is_assignment:
+                op = self._advance()
+                self._skip_newlines()
+                if self._current.kind in _ASSIGNMENT_RHS_STATEMENT_KINDS:
+                    rhs = self._parse_statement()
+                else:
+                    rhs = self._parse_pipeline_expression()
+                expr = Ps1AssignmentExpression(
+                    offset=expr.offset, target=expr, operator=op.value, value=rhs)
+            return self._parse_pipeline_tail(expr)
 
     def _parse_pipeline_tail(self, expr: Expression) -> Expression:
         if self._at(Ps1TokenKind.PIPE):
             elements = [Ps1PipelineElement(offset=expr.offset, expression=expr)]
             while self._eat(Ps1TokenKind.PIPE):
                 self._skip_newlines()
-                self._lexer.mode = Ps1LexerMode.ARGUMENT
-                self._rescan_current()
                 cmd = self._parse_command()
                 if cmd is not None:
                     elements.append(Ps1PipelineElement(offset=cmd.offset, expression=cmd))
@@ -612,105 +635,97 @@ class Ps1Parser:
         `C:\\x\\y.exe` and `.\\a.ps1` are each whole, while `. { }` and `. $sb` still split, because
         argument mode ends a token at a dot that is followed by a space.
         """
-        self._lexer.mode = Ps1LexerMode.ARGUMENT
-        self._rescan_current()
-        offset = self._current.offset
-        invocation_operator = ''
-        if self._at(Ps1TokenKind.AMPERSAND, Ps1TokenKind.DOT):
-            invocation_operator = self._advance(Ps1LexerMode.ARGUMENT).value
-            self._skip_newlines()
+        with self._mode(Ps1LexerMode.ARGUMENT):
+            offset = self._current.offset
+            invocation_operator = ''
+            if self._at(Ps1TokenKind.AMPERSAND, Ps1TokenKind.DOT):
+                invocation_operator = self._advance().value
+                self._skip_newlines()
 
-        name_expr: Expression | None = None
+            name_expr: Expression | None = None
 
-        if self._at(Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND):
-            tok = self._advance()
-            name_expr = self._bare_string(tok)
-        elif self._at(Ps1TokenKind.VARIABLE, Ps1TokenKind.SPLAT_VARIABLE):
-            name_expr = self._parse_variable()
-        elif self._at(Ps1TokenKind.LBRACE):
-            name_expr = self._parse_script_block()
-        elif self._at(Ps1TokenKind.LPAREN):
-            name_expr = self._parse_paren_expression()
-        elif self._at(Ps1TokenKind.STRING_EXPAND, Ps1TokenKind.STRING_VERBATIM):
-            name_expr = self._parse_string()
-        elif self._current.kind in _OPERATOR_COMMAND_NAMES:
-            tok = self._advance()
-            name_expr = self._bare_string(tok)
-        elif self._current.kind.is_keyword:
-            tok = self._advance()
-            name_expr = self._bare_string(tok)
-        else:
-            if invocation_operator:
-                return Ps1CommandInvocation(offset=offset, invocation_operator=invocation_operator)
-            return None
-
-        if invocation_operator and name_expr is not None:
-            self._lexer.mode = Ps1LexerMode.EXPRESSION
-            self._rescan_current()
-            name_expr = self._parse_primary_postfix(name_expr)
-
-        self._lexer.mode = Ps1LexerMode.ARGUMENT
-        self._rescan_current()
-
-        arguments: list[Ps1CommandArgument | Expression] = []
-        redirections: list[Ps1FileRedirection | Ps1MergingRedirection] = []
-        while not self._is_pipeline_terminator():
-            self._lexer.mode = Ps1LexerMode.ARGUMENT
-            self._rescan_current()
-            if self._is_pipeline_terminator():
-                break
-            if self._at(Ps1TokenKind.PARAMETER):
+            if self._at(Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND):
                 tok = self._advance()
-                name = tok.value
-                if name.endswith(':'):
-                    name = name[:-1]
-                    if not self._is_pipeline_terminator():
-                        val = self._parse_argument_value()
-                        arguments.append(Ps1CommandArgument(
-                            offset=tok.offset,
-                            kind=Ps1CommandArgumentKind.NAMED,
-                            name=name,
-                            value=val,
-                        ))
+                name_expr = self._bare_string(tok)
+            elif self._at(Ps1TokenKind.VARIABLE, Ps1TokenKind.SPLAT_VARIABLE):
+                name_expr = self._parse_variable()
+            elif self._at(Ps1TokenKind.LBRACE):
+                name_expr = self._parse_script_block()
+            elif self._at(Ps1TokenKind.LPAREN):
+                name_expr = self._parse_paren_expression()
+            elif self._at(Ps1TokenKind.STRING_EXPAND, Ps1TokenKind.STRING_VERBATIM):
+                name_expr = self._parse_string()
+            elif self._current.kind in _OPERATOR_COMMAND_NAMES:
+                tok = self._advance()
+                name_expr = self._bare_string(tok)
+            elif self._current.kind.is_keyword:
+                tok = self._advance()
+                name_expr = self._bare_string(tok)
+            else:
+                if invocation_operator:
+                    return Ps1CommandInvocation(
+                        offset=offset, invocation_operator=invocation_operator)
+                return None
+
+            if invocation_operator and name_expr is not None:
+                with self._mode(Ps1LexerMode.EXPRESSION):
+                    name_expr = self._parse_primary_postfix(name_expr)
+
+            arguments: list[Ps1CommandArgument | Expression] = []
+            redirections: list[Ps1FileRedirection | Ps1MergingRedirection] = []
+            while not self._is_pipeline_terminator():
+                if self._at(Ps1TokenKind.PARAMETER):
+                    tok = self._advance()
+                    name = tok.value
+                    if name.endswith(':'):
+                        name = name[:-1]
+                        if not self._is_pipeline_terminator():
+                            val = self._parse_argument_value()
+                            arguments.append(Ps1CommandArgument(
+                                offset=tok.offset,
+                                kind=Ps1CommandArgumentKind.NAMED,
+                                name=name,
+                                value=val,
+                            ))
+                        else:
+                            arguments.append(Ps1CommandArgument(
+                                offset=tok.offset,
+                                kind=Ps1CommandArgumentKind.SWITCH,
+                                name=name,
+                            ))
                     else:
                         arguments.append(Ps1CommandArgument(
                             offset=tok.offset,
                             kind=Ps1CommandArgumentKind.SWITCH,
                             name=name,
                         ))
-                else:
+                elif self._at(Ps1TokenKind.REDIRECTION):
+                    tok = self._advance()
+                    redirections.append(self._parse_redirection(tok))
+                elif self._at(Ps1TokenKind.OPERATOR):
+                    tok = self._advance()
                     arguments.append(Ps1CommandArgument(
                         offset=tok.offset,
                         kind=Ps1CommandArgumentKind.SWITCH,
-                        name=name,
+                        name=tok.value,
                     ))
-            elif self._at(Ps1TokenKind.REDIRECTION):
-                tok = self._advance()
-                redirections.append(self._parse_redirection(tok))
-            elif self._at(Ps1TokenKind.OPERATOR):
-                tok = self._advance()
-                arguments.append(Ps1CommandArgument(
-                    offset=tok.offset,
-                    kind=Ps1CommandArgumentKind.SWITCH,
-                    name=tok.value,
-                ))
-            else:
-                val = self._parse_argument_value()
-                if val is None:
-                    break
-                arguments.append(Ps1CommandArgument(
-                    offset=val.offset,
-                    kind=Ps1CommandArgumentKind.POSITIONAL,
-                    value=val,
-                ))
+                else:
+                    val = self._parse_argument_value()
+                    if val is None:
+                        break
+                    arguments.append(Ps1CommandArgument(
+                        offset=val.offset,
+                        kind=Ps1CommandArgumentKind.POSITIONAL,
+                        value=val,
+                    ))
 
-        return Ps1CommandInvocation(
-            offset=offset,
-            name=name_expr,
-            arguments=arguments,
-            invocation_operator=invocation_operator,
-            redirections=redirections,
-        )
+            return Ps1CommandInvocation(
+                offset=offset,
+                name=name_expr,
+                arguments=arguments,
+                invocation_operator=invocation_operator,
+                redirections=redirections,
+            )
 
     def _is_pipeline_terminator(self) -> bool:
         return self._current.kind in _PIPELINE_TERMINATORS
@@ -747,12 +762,12 @@ class Ps1Parser:
         if self._at(Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND):
             tok = self._advance()
             return self._parse_generic_as_string(tok)
-        self._lexer.mode = Ps1LexerMode.EXPRESSION
-        if self._current.kind in _EXPRESSION_START_KINDS:
-            return self._parse_unary_expression()
-        if self._at(Ps1TokenKind.STAR, Ps1TokenKind.SLASH, Ps1TokenKind.PERCENT):
-            tok = self._advance()
-            return self._bare_string(tok)
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            if self._current.kind in _EXPRESSION_START_KINDS:
+                return self._parse_unary_expression()
+            if self._at(Ps1TokenKind.STAR, Ps1TokenKind.SLASH, Ps1TokenKind.PERCENT):
+                tok = self._advance()
+                return self._bare_string(tok)
         return None
 
     def _parse_expression(self) -> Expression | None:
@@ -859,8 +874,6 @@ class Ps1Parser:
                 offset=tok.offset, operator=op.value, operand=operand, prefix=True)
 
         if tok.kind == Ps1TokenKind.LBRACKET:
-            saved_pos = self._lexer.pos
-            saved_tok = self._current
             type_expr = self._try_parse_type_literal()
             if type_expr is not None:
                 if self._at(Ps1TokenKind.DOUBLE_COLON):
@@ -871,8 +884,7 @@ class Ps1Parser:
                         return Ps1CastExpression(
                             offset=tok.offset, type_name=type_expr.name, operand=operand)
                 return self._parse_primary_postfix(type_expr)
-            self._lexer.pos = saved_pos
-            self._current = saved_tok
+            self._resync(tok.offset)
 
         return self._parse_primary_expression()
 
@@ -880,18 +892,12 @@ class Ps1Parser:
         """
         A type name is read in expression mode no matter which mode the caller left behind: a
         generic token does not end at `]` in argument mode, so the closing bracket is absorbed into
-        the name and the bracket depth never returns to zero. The caller's mode is stacked rather
-        than overwritten, so a read that settles its own mode does not become the next construct to
-        leak one.
+        the name and the bracket depth never returns to zero.
         """
         if not self._at(Ps1TokenKind.LBRACKET):
             return None
-        self._lexer.push_mode(Ps1LexerMode.EXPRESSION)
-        try:
+        with self._mode(Ps1LexerMode.EXPRESSION):
             return self._read_type_literal()
-        finally:
-            self._lexer.pop_mode()
-            self._rescan_current()
 
     def _read_type_literal(self) -> Ps1TypeExpression | None:
         offset = self._current.offset
@@ -1292,13 +1298,11 @@ class Ps1Parser:
         offset = self._current.offset
         self._expect(Ps1TokenKind.LPAREN)
         self._skip_newlines()
-        self._lexer.push_mode(Ps1LexerMode.EXPRESSION)
-        with self._comma_mode(disabled=False):
-            expr = self._parse_pipeline_expression()
-        self._skip_newlines()
-        self._expect(Ps1TokenKind.RPAREN)
-        self._lexer.pop_mode()
-        self._rescan_current()
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            with self._comma_mode(disabled=False):
+                expr = self._parse_pipeline_expression()
+            self._skip_newlines()
+            self._expect(Ps1TokenKind.RPAREN)
         return Ps1ParenExpression(offset=offset, expression=expr)
 
     def _parse_delimited_statement_block(
@@ -1309,13 +1313,11 @@ class Ps1Parser:
         offset = self._current.offset
         self._expect(open_kind)
         self._skip_newlines()
-        self._lexer.push_mode(Ps1LexerMode.EXPRESSION)
-        with self._comma_mode(disabled=False):
-            stmts = self._parse_statement_list(until=Ps1TokenKind.RPAREN)
-        self._skip_newlines()
-        self._expect(Ps1TokenKind.RPAREN)
-        self._lexer.pop_mode()
-        self._rescan_current()
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            with self._comma_mode(disabled=False):
+                stmts = self._parse_statement_list(until=Ps1TokenKind.RPAREN)
+            self._skip_newlines()
+            self._expect(Ps1TokenKind.RPAREN)
         return cls(offset=offset, body=stmts)
 
     def _parse_sub_expression(self) -> Expression:
@@ -1540,41 +1542,39 @@ class Ps1Parser:
         if self._current.kind.is_keyword:
             tok = self._advance()
             return self._bare_string(tok)
-        self._lexer.mode = Ps1LexerMode.EXPRESSION
-        return self._parse_expression()
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            return self._parse_expression()
 
     def _parse_switch(self, label: str | None = None) -> Ps1SwitchStatement:
         offset = self._current.offset
         self._expect(Ps1TokenKind.SWITCH)
         self._skip_newlines()
-        self._lexer.mode = Ps1LexerMode.ARGUMENT
-        self._rescan_current()
         regex = False
         wildcard = False
         exact = False
         case_sensitive = False
         file = False
-        while self._at(Ps1TokenKind.PARAMETER):
-            p = self._current.value.lower().lstrip('-').rstrip(':')
-            self._advance()
-            self._skip_newlines()
-            if p == 'regex':
-                regex = True
-            elif p == 'wildcard':
-                wildcard = True
-            elif p == 'exact':
-                exact = True
-            elif p == 'casesensitive':
-                case_sensitive = True
-            elif p == 'file':
-                file = True
-        if file:
-            self._lexer.mode = Ps1LexerMode.ARGUMENT
-            value = self._parse_argument_value()
-            self._skip_newlines()
-        else:
+        value: Expression | None = None
+        with self._mode(Ps1LexerMode.ARGUMENT):
+            while self._at(Ps1TokenKind.PARAMETER):
+                p = self._current.value.lower().lstrip('-').rstrip(':')
+                self._advance()
+                self._skip_newlines()
+                if p == 'regex':
+                    regex = True
+                elif p == 'wildcard':
+                    wildcard = True
+                elif p == 'exact':
+                    exact = True
+                elif p == 'casesensitive':
+                    case_sensitive = True
+                elif p == 'file':
+                    file = True
+            if file:
+                value = self._parse_argument_value()
+        if not file:
             value = self._parse_parenthesized_condition()
-            self._skip_newlines()
+        self._skip_newlines()
         self._expect(Ps1TokenKind.LBRACE)
         self._skip_newlines()
         clauses: list[tuple[Expression | None, Block]] = []
@@ -1656,78 +1656,80 @@ class Ps1Parser:
 
     def _parse_function_definition(self) -> Ps1FunctionDefinition:
         offset = self._current.offset
-        kw = self._advance(Ps1LexerMode.ARGUMENT)
+        kw = self._advance()
         is_filter = kw.kind == Ps1TokenKind.FILTER
-        self._skip_newlines()
         name = ''
-        if self._at(
-            Ps1TokenKind.GENERIC_TOKEN,
-            Ps1TokenKind.VARIABLE,
-        ) or self._current.kind.is_keyword:
-            name = self._advance().value
-        self._lexer.mode = Ps1LexerMode.EXPRESSION
-        self._skip_newlines()
-        if self._at(Ps1TokenKind.LPAREN):
-            self._advance()
+        with self._mode(Ps1LexerMode.ARGUMENT):
             self._skip_newlines()
-            params = self._parse_parameter_list()
+            if self._at(
+                Ps1TokenKind.GENERIC_TOKEN,
+                Ps1TokenKind.VARIABLE,
+            ) or self._current.kind.is_keyword:
+                name = self._advance().value
+        with self._mode(Ps1LexerMode.EXPRESSION):
             self._skip_newlines()
-            self._expect(Ps1TokenKind.RPAREN)
-            self._skip_newlines()
-            self._expect(Ps1TokenKind.LBRACE)
-            self._skip_newlines()
-            script_body = self._parse_script_block_body(expect_close=True)
-            script_body.param_block = Ps1ParamBlock(
-                offset=offset, parameters=params)
-            script_body.param_block.parent = script_body
-            return Ps1FunctionDefinition(
-                offset=offset, name=name, is_filter=is_filter, body=script_body)
-        body = self._parse_script_block()
+            if self._at(Ps1TokenKind.LPAREN):
+                self._advance()
+                self._skip_newlines()
+                params = self._parse_parameter_list()
+                self._skip_newlines()
+                self._expect(Ps1TokenKind.RPAREN)
+                self._skip_newlines()
+                self._expect(Ps1TokenKind.LBRACE)
+                self._skip_newlines()
+                script_body = self._parse_script_block_body(expect_close=True)
+                script_body.param_block = Ps1ParamBlock(
+                    offset=offset, parameters=params)
+                script_body.param_block.parent = script_body
+                return Ps1FunctionDefinition(
+                    offset=offset, name=name, is_filter=is_filter, body=script_body)
+            body = self._parse_script_block()
         return Ps1FunctionDefinition(
             offset=offset, name=name, is_filter=is_filter, body=body)
 
     def _parse_class_definition(self) -> Ps1ClassDefinition:
         offset = self._current.offset
-        self._advance(Ps1LexerMode.ARGUMENT)
-        self._skip_newlines()
+        self._advance()
         name = ''
-        if self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
-            name = self._advance().value
-        self._skip_newlines()
         base_types: list[str] = []
-        if self._eat_colon():
+        with self._mode(Ps1LexerMode.ARGUMENT):
             self._skip_newlines()
-            while not self._at(Ps1TokenKind.LBRACE, Ps1TokenKind.EOF):
-                if self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
-                    base_types.append(self._advance().value)
-                elif self._at(Ps1TokenKind.LBRACKET):
-                    type_lit = self._try_parse_type_literal()
-                    if type_lit is not None:
-                        base_types.append(type_lit.name)
+            if self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
+                name = self._advance().value
+            self._skip_newlines()
+            if self._eat_colon():
+                self._skip_newlines()
+                while not self._at(Ps1TokenKind.LBRACE, Ps1TokenKind.EOF):
+                    if self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
+                        base_types.append(self._advance().value)
+                    elif self._at(Ps1TokenKind.LBRACKET):
+                        type_lit = self._try_parse_type_literal()
+                        if type_lit is not None:
+                            base_types.append(type_lit.name)
+                        else:
+                            break
+                    elif self._eat(Ps1TokenKind.COMMA):
+                        self._skip_newlines()
+                        continue
                     else:
                         break
-                elif self._eat(Ps1TokenKind.COMMA):
                     self._skip_newlines()
-                    continue
+            self._skip_newlines()
+            self._expect(Ps1TokenKind.LBRACE)
+        members: list[Ps1PropertyMember | Ps1MethodMember] = []
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            self._skip_newlines()
+            while not self._at(Ps1TokenKind.RBRACE, Ps1TokenKind.EOF):
+                while self._at(Ps1TokenKind.NEWLINE, Ps1TokenKind.SEMICOLON):
+                    self._advance()
+                if self._at(Ps1TokenKind.RBRACE, Ps1TokenKind.EOF):
+                    break
+                member = self._parse_class_member()
+                if member is not None:
+                    members.append(member)
                 else:
                     break
-                self._skip_newlines()
-        self._skip_newlines()
-        self._expect(Ps1TokenKind.LBRACE)
-        self._lexer.mode = Ps1LexerMode.EXPRESSION
-        self._skip_newlines()
-        members: list[Ps1PropertyMember | Ps1MethodMember] = []
-        while not self._at(Ps1TokenKind.RBRACE, Ps1TokenKind.EOF):
-            while self._at(Ps1TokenKind.NEWLINE, Ps1TokenKind.SEMICOLON):
-                self._advance()
-            if self._at(Ps1TokenKind.RBRACE, Ps1TokenKind.EOF):
-                break
-            member = self._parse_class_member()
-            if member is not None:
-                members.append(member)
-            else:
-                break
-        self._expect(Ps1TokenKind.RBRACE)
+            self._expect(Ps1TokenKind.RBRACE)
         return Ps1ClassDefinition(
             offset=offset,
             name=name,
@@ -1774,7 +1776,6 @@ class Ps1Parser:
             initial_value: Expression | None = None
             if self._eat(Ps1TokenKind.EQUALS):
                 self._skip_newlines()
-                self._lexer.mode = Ps1LexerMode.EXPRESSION
                 initial_value = self._parse_expression()
             while self._at(Ps1TokenKind.NEWLINE, Ps1TokenKind.SEMICOLON):
                 self._advance()
@@ -1791,7 +1792,6 @@ class Ps1Parser:
             or self._current.kind.is_keyword
         ):
             method_name = self._advance().value
-            self._lexer.mode = Ps1LexerMode.EXPRESSION
             self._skip_newlines()
             params: list[Ps1ParameterDeclaration] = []
             if self._at(Ps1TokenKind.LPAREN):
@@ -1825,32 +1825,33 @@ class Ps1Parser:
 
     def _parse_enum_definition(self) -> Ps1EnumDefinition:
         offset = self._current.offset
-        self._advance(Ps1LexerMode.ARGUMENT)
-        self._skip_newlines()
+        self._advance()
         name = ''
-        if self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
-            name = self._advance().value
-        self._skip_newlines()
         base_type = ''
-        if self._eat_colon():
-            self._skip_newlines()
-            if self._at(Ps1TokenKind.LBRACKET):
-                type_lit = self._try_parse_type_literal()
-                if type_lit is not None:
-                    base_type = type_lit.name
-            elif self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
-                base_type = self._advance().value
-            self._skip_newlines()
-        self._expect(Ps1TokenKind.LBRACE)
-        self._skip_newlines()
         members: list[Ps1EnumMember] = []
-        while not self._at(Ps1TokenKind.RBRACE, Ps1TokenKind.EOF):
-            member = self._parse_enum_member()
-            if member is not None:
-                members.append(member)
-            else:
-                break
-        self._expect(Ps1TokenKind.RBRACE)
+        with self._mode(Ps1LexerMode.ARGUMENT):
+            self._skip_newlines()
+            if self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
+                name = self._advance().value
+            self._skip_newlines()
+            if self._eat_colon():
+                self._skip_newlines()
+                if self._at(Ps1TokenKind.LBRACKET):
+                    type_lit = self._try_parse_type_literal()
+                    if type_lit is not None:
+                        base_type = type_lit.name
+                elif self._at(Ps1TokenKind.GENERIC_TOKEN) or self._current.kind.is_keyword:
+                    base_type = self._advance().value
+                self._skip_newlines()
+            self._expect(Ps1TokenKind.LBRACE)
+            self._skip_newlines()
+            while not self._at(Ps1TokenKind.RBRACE, Ps1TokenKind.EOF):
+                member = self._parse_enum_member()
+                if member is not None:
+                    members.append(member)
+                else:
+                    break
+            self._expect(Ps1TokenKind.RBRACE)
         return Ps1EnumDefinition(
             offset=offset,
             name=name,
@@ -1870,12 +1871,12 @@ class Ps1Parser:
             return None
         name = self._advance().value
         value: Expression | None = None
-        self._lexer.mode = Ps1LexerMode.EXPRESSION
-        if self._eat(Ps1TokenKind.EQUALS):
-            self._skip_newlines()
-            value = self._parse_expression()
-        while self._at(Ps1TokenKind.NEWLINE, Ps1TokenKind.SEMICOLON):
-            self._advance()
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            if self._eat(Ps1TokenKind.EQUALS):
+                self._skip_newlines()
+                value = self._parse_expression()
+            while self._at(Ps1TokenKind.NEWLINE, Ps1TokenKind.SEMICOLON):
+                self._advance()
         return Ps1EnumMember(offset=offset, name=name, value=value)
 
     def _parse_script_block_body(self, expect_close: bool = False) -> Ps1ScriptBlock:
@@ -1887,20 +1888,26 @@ class Ps1Parser:
         return Ps1ScriptBlock(offset=offset, **fields)
 
     def _parse_param_block(self) -> Ps1ParamBlock:
+        """
+        A parameter list is read in expression mode no matter which mode the caller left behind: in
+        argument mode a generic token does not end at `=`, so `param($x=1)` reads its default as
+        part of one word and every unspaced default in the language is lost.
+        """
         offset = self._current.offset
         attrs: list[Ps1Attribute] = []
-        while self._at(Ps1TokenKind.LBRACKET):
-            attr = self._parse_attribute()
-            if isinstance(attr, Ps1Attribute):
-                attrs.append(attr)
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            while self._at(Ps1TokenKind.LBRACKET):
+                attr = self._parse_attribute()
+                if isinstance(attr, Ps1Attribute):
+                    attrs.append(attr)
+                self._skip_newlines()
+            self._expect(Ps1TokenKind.PARAM)
             self._skip_newlines()
-        self._expect(Ps1TokenKind.PARAM)
-        self._skip_newlines()
-        self._expect(Ps1TokenKind.LPAREN)
-        self._skip_newlines()
-        params = self._parse_parameter_list()
-        self._skip_newlines()
-        self._expect(Ps1TokenKind.RPAREN)
+            self._expect(Ps1TokenKind.LPAREN)
+            self._skip_newlines()
+            params = self._parse_parameter_list()
+            self._skip_newlines()
+            self._expect(Ps1TokenKind.RPAREN)
         return Ps1ParamBlock(offset=offset, parameters=params, attributes=attrs)
 
     def _parse_parameter_list(self) -> list[Ps1ParameterDeclaration]:
@@ -1943,12 +1950,8 @@ class Ps1Parser:
         it. `& { param([int]$x) $x }` reaches here in argument mode, because the block is an
         argument of the call operator, and swallowed the whole body before this.
         """
-        self._lexer.push_mode(Ps1LexerMode.EXPRESSION)
-        try:
+        with self._mode(Ps1LexerMode.EXPRESSION):
             return self._read_attribute()
-        finally:
-            self._lexer.pop_mode()
-            self._rescan_current()
 
     def _read_attribute(self) -> Ps1Attribute | Ps1TypeExpression:
         offset = self._current.offset
@@ -1982,8 +1985,6 @@ class Ps1Parser:
                     if self._at(Ps1TokenKind.RPAREN):
                         break
                     if self._at(Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND):
-                        saved = self._current
-                        saved_pos = self._lexer.pos
                         key_tok = self._advance()
                         if self._eat(Ps1TokenKind.EQUALS):
                             self._skip_newlines()
@@ -1993,8 +1994,7 @@ class Ps1Parser:
                                 self._skip_newlines()
                                 self._eat(Ps1TokenKind.COMMA)
                                 continue
-                        self._current = saved
-                        self._lexer.pos = saved_pos
+                        self._resync(key_tok.offset)
                     expr = self._parse_expression()
                     if expr is not None:
                         positional.append(expr)
@@ -2046,23 +2046,24 @@ class Ps1Parser:
         self._expect(Ps1TokenKind.DATA)
         self._skip_newlines()
         name = ''
-        if self._at(Ps1TokenKind.GENERIC_TOKEN):
-            name = self._advance(Ps1LexerMode.ARGUMENT).value
-            self._skip_newlines()
         commands: list[Expression] = []
-        if self._at(Ps1TokenKind.PARAMETER):
-            param = self._current.value.lower().lstrip('-').rstrip(':')
-            self._advance()
-            self._skip_newlines()
-            if param == 'supportedcommand':
-                while True:
-                    self._skip_newlines()
-                    arg = self._parse_single_argument_value()
-                    if arg is None:
-                        break
-                    commands.append(arg)
-                    if not self._eat(Ps1TokenKind.COMMA):
-                        break
-        self._lexer.mode = Ps1LexerMode.EXPRESSION
-        body = self._parse_block()
+        with self._mode(Ps1LexerMode.ARGUMENT):
+            if self._at(Ps1TokenKind.GENERIC_TOKEN):
+                name = self._advance().value
+                self._skip_newlines()
+            if self._at(Ps1TokenKind.PARAMETER):
+                param = self._current.value.lower().lstrip('-').rstrip(':')
+                self._advance()
+                self._skip_newlines()
+                if param == 'supportedcommand':
+                    while True:
+                        self._skip_newlines()
+                        arg = self._parse_single_argument_value()
+                        if arg is None:
+                            break
+                        commands.append(arg)
+                        if not self._eat(Ps1TokenKind.COMMA):
+                            break
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            body = self._parse_block()
         return Ps1DataSection(offset=offset, name=name, commands=commands, body=body)

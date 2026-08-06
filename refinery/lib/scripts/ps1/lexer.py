@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 import re
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Generator
 
 from refinery.lib.scripts.ps1.token import (
@@ -167,22 +167,7 @@ _VARIABLE_START_CHARS = '_?{$^'
 class Ps1Lexer:
     source: str
     pos: int = 0
-    mode_stack: list[Ps1LexerMode] = field(default_factory=lambda: [Ps1LexerMode.EXPRESSION])
-
-    @property
-    def mode(self) -> Ps1LexerMode:
-        return self.mode_stack[-1]
-
-    @mode.setter
-    def mode(self, value: Ps1LexerMode):
-        self.mode_stack[-1] = value
-
-    def push_mode(self, mode: Ps1LexerMode):
-        self.mode_stack.append(mode)
-
-    def pop_mode(self):
-        if len(self.mode_stack) > 1:
-            self.mode_stack.pop()
+    mode: Ps1LexerMode = Ps1LexerMode.ARGUMENT
 
     def _at_end(self) -> bool:
         return self.pos >= len(self.source)

@@ -640,7 +640,6 @@ class TestPs1Corruptions(TestPs1):
         self.assertIsInstance(
             arguments[0], Ps1ScriptBlock, 'the block is not an argument of the command')
 
-    @unittest.expectedFailure
     def test_command_name_beginning_with_a_keyword_stays_a_command(self):
         """
         `Exit-PSSession`, `Break-Glass` and `Return-Value` are command names under 5.1: a name runs
@@ -660,7 +659,6 @@ class TestPs1Corruptions(TestPs1):
                 F'{source} did not survive as one command invocation',
             )
 
-    @unittest.expectedFailure
     def test_foreach_object_beginning_a_statement_stays_a_command(self):
         """
         `ForEach-Object { Write-Host 1 }` is a command under 5.1 in every position, and it is what
