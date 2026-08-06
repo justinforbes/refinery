@@ -582,7 +582,6 @@ class TestPs1Corruptions(TestPs1):
             'a dot-source was read as an ordinary call, losing the write it makes into the caller',
         )
 
-    @unittest.expectedFailure
     def test_dot_in_argument_position_is_a_path_and_not_a_dot_source(self):
         """
         A dot where an argument goes is a path under 5.1, not the dot-source operator, which exists

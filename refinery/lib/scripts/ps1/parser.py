@@ -133,24 +133,20 @@ _EXPRESSION_START_KINDS = frozenset({
     Ps1TokenKind.COMMA,
 })
 
-#: Operators that spell a whole command name when one stands where a name is expected. Each is
-#: *infix*, so no statement and no argument can begin with one, which is what leaves the spelling
-#: free: measured on 5.1, `..`, `*`, `..\tool.exe`, `/usr/bin/env` and `*.exe` are each resolved
-#: whole, and `%` is the alias of `ForEach-Object`.
-_OPERATOR_COMMAND_NAMES = frozenset({
+#: Token kinds that open a command where a statement or a pipeline element begins, read in
+#: expression mode. Each of the infix operators here spells a whole command name, because being
+#: infix is what leaves the spelling free: measured on 5.1, `..`, `*`, `..\tool.exe`,
+#: `/usr/bin/env` and `*.exe` are each resolved whole, and `%` is the alias of `ForEach-Object`.
+_COMMAND_START_KINDS = frozenset({
+    Ps1TokenKind.AMPERSAND,
+    Ps1TokenKind.DOT,
     Ps1TokenKind.DOTDOT,
+    Ps1TokenKind.GENERIC_EXPAND,
+    Ps1TokenKind.GENERIC_TOKEN,
     Ps1TokenKind.PERCENT,
     Ps1TokenKind.SLASH,
     Ps1TokenKind.STAR,
 })
-
-#: Token kinds that open a command when a statement begins with one, read in expression mode.
-_COMMAND_START_KINDS = _OPERATOR_COMMAND_NAMES | {
-    Ps1TokenKind.GENERIC_TOKEN,
-    Ps1TokenKind.GENERIC_EXPAND,
-    Ps1TokenKind.AMPERSAND,
-    Ps1TokenKind.DOT,
-}
 
 _STATEMENT_TERMINATORS = frozenset({
     Ps1TokenKind.NEWLINE,
@@ -164,6 +160,16 @@ _STATEMENT_TERMINATORS = frozenset({
 _PIPELINE_TERMINATORS = _STATEMENT_TERMINATORS | {
     Ps1TokenKind.DOUBLE_AMPERSAND,
     Ps1TokenKind.DOUBLE_PIPE,
+}
+
+#: Token kinds that can never stand as a command name or argument, the thirteen the reference
+#: parser refuses at `Parser.cs:6306`. Any other token that is not an expression is read as the
+#: bare word it spells, which is what makes `Copy-Item . dest` three elements of one command.
+_ARGUMENT_FORBIDDEN_KINDS = _PIPELINE_TERMINATORS | {
+    Ps1TokenKind.AMPERSAND,
+    Ps1TokenKind.COMMA,
+    Ps1TokenKind.DECREMENT,
+    Ps1TokenKind.REDIRECTION,
 }
 
 _VARIABLE_FRAG = re.compile(
@@ -667,17 +673,13 @@ class Ps1Parser:
                 name_expr = self._parse_paren_expression()
             elif self._at(Ps1TokenKind.STRING_EXPAND, Ps1TokenKind.STRING_VERBATIM):
                 name_expr = self._parse_string()
-            elif self._current.kind in _OPERATOR_COMMAND_NAMES:
-                tok = self._advance()
-                name_expr = self._bare_string(tok)
-            elif self._current.kind.is_keyword:
-                tok = self._advance()
-                name_expr = self._bare_string(tok)
-            else:
+            elif self._current.kind in _ARGUMENT_FORBIDDEN_KINDS:
                 if invocation_operator:
                     return Ps1CommandInvocation(
                         offset=offset, invocation_operator=invocation_operator)
                 return None
+            else:
+                name_expr = self._bare_string(self._advance())
 
             if invocation_operator and name_expr is not None:
                 with self._mode(Ps1LexerMode.EXPRESSION):
@@ -774,13 +776,14 @@ class Ps1Parser:
         if self._at(Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND):
             tok = self._advance()
             return self._parse_generic_as_string(tok)
+        if self._current.kind in _ARGUMENT_FORBIDDEN_KINDS:
+            return None
         with self._mode(Ps1LexerMode.EXPRESSION):
             if self._current.kind in _EXPRESSION_START_KINDS:
-                return self._parse_unary_expression()
-            if self._at(Ps1TokenKind.STAR, Ps1TokenKind.SLASH, Ps1TokenKind.PERCENT):
-                tok = self._advance()
-                return self._bare_string(tok)
-        return None
+                value = self._parse_unary_expression()
+                if value is not None:
+                    return value
+        return self._bare_string(self._advance())
 
     def _parse_expression(self) -> Expression | None:
         with self._mode(Ps1LexerMode.EXPRESSION):
