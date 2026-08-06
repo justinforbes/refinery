@@ -454,6 +454,16 @@ class Ps1Parser:
         self,
         until: Ps1TokenKind | None = None,
     ) -> dict:
+        """
+        Read the statements a body holds, in argument mode. Every path into a body comes through
+        here — a script, a script block, a function with a parameter list, a class method — so the
+        mode a statement is read in is settled once rather than at each of them, and a body cannot
+        reach the statement list carrying the mode of whatever declared it.
+        """
+        with self._mode(Ps1LexerMode.ARGUMENT):
+            return self._read_code_body(until)
+
+    def _read_code_body(self, until: Ps1TokenKind | None) -> dict:
         self._skip_newlines()
         fields: dict = {}
         if self._might_be_param_block():
@@ -651,9 +661,15 @@ class Ps1Parser:
         A statement that is only an expression is unwrapped again, because an assignment whose value
         is an expression is what the rest of the code reads. An assignment with nothing after it is
         left without a value rather than being given the token that ends it.
+
+        Only a value that could open a statement is read as one. `_parse_statement` differs from the
+        pipeline it falls through to for exactly the keyword and label starts, and every assignment
+        in a chain costs the frames of whichever route it takes.
         """
         if self._is_statement_terminator():
             return None
+        if not (self._current.kind.is_keyword or self._at(Ps1TokenKind.LABEL)):
+            return self._parse_pipeline_expression()
         statement = self._parse_statement()
         if type(statement) is Ps1ExpressionStatement:
             return statement.expression
@@ -751,6 +767,8 @@ class Ps1Parser:
                             kind=Ps1CommandArgumentKind.SWITCH,
                             name=name,
                         ))
+                elif self._at(Ps1TokenKind.COMMA):
+                    self._advance()
                 elif self._at(Ps1TokenKind.REDIRECTION):
                     tok = self._advance()
                     redirections.append(self._parse_redirection(tok))
@@ -1441,7 +1459,7 @@ class Ps1Parser:
     def _parse_script_block(self) -> Ps1ScriptBlock:
         offset = self._current.offset
         self._expect(Ps1TokenKind.LBRACE)
-        with self._mode(Ps1LexerMode.ARGUMENT), self._comma_mode(disabled=False):
+        with self._comma_mode(disabled=False):
             fields = self._parse_code_body(until=Ps1TokenKind.RBRACE)
             self._skip_newlines()
             self._expect(Ps1TokenKind.RBRACE)
@@ -1472,7 +1490,7 @@ class Ps1Parser:
             tok = self._advance()
             member = tok.value
 
-        if self._at(Ps1TokenKind.LPAREN):
+        if self._at(Ps1TokenKind.LPAREN) and self._adjacent():
             self._advance()
             self._skip_newlines()
             args: list[Expression] = []
