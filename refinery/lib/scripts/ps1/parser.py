@@ -226,20 +226,15 @@ class Ps1Parser:
     def __init__(self, source: str):
         self.source = source
         self._lexer = Ps1Lexer(source)
-        self._gen = self._lexer.tokenize()
         self._current: Ps1Token = Ps1Token(Ps1TokenKind.EOF, '', 0)
         self._disable_comma = False
         self._advance()
 
     def _advance(self, mode_hint: Ps1LexerMode | None = None) -> Ps1Token:
         prev = self._current
-        try:
-            if mode_hint is not None:
-                self._current = self._gen.send(mode_hint)
-            else:
-                self._current = next(self._gen)
-        except StopIteration:
-            self._current = Ps1Token(Ps1TokenKind.EOF, '', len(self.source))
+        if mode_hint is not None:
+            self._lexer.mode = mode_hint
+        self._current = self._lexer.scan()
         return prev
 
     def _at(self, *kinds: Ps1TokenKind) -> bool:

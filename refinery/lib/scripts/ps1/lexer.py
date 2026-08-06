@@ -472,39 +472,43 @@ class Ps1Lexer:
         kind = Ps1TokenKind.GENERIC_EXPAND if has_expansion else Ps1TokenKind.GENERIC_TOKEN
         return Ps1Token(kind, src[start:self.pos], start)
 
-    def _emit(self, token: Ps1Token) -> Generator[Ps1Token, Ps1LexerMode | None, None]:
-        mode_hint = yield token
-        if mode_hint is not None:
-            self.mode = mode_hint
-
-    def _emit_keyword_or_token(self, token: Ps1Token) -> Generator[Ps1Token, Ps1LexerMode | None, None]:
+    def _keyword_or_token(self, token: Ps1Token) -> Ps1Token:
         kw = _KEYWORDS.get(token.value.lower())
-        if kw is not None:
-            yield from self._emit(Ps1Token(kw, token.value, token.offset))
-        else:
-            yield from self._emit(token)
+        if kw is None:
+            return token
+        return Ps1Token(kw, token.value, token.offset)
 
-    def tokenize(self) -> Generator[Ps1Token, Ps1LexerMode | None, None]:
+    def tokenize(self) -> Generator[Ps1Token, None, None]:
+        while True:
+            token = self.scan()
+            yield token
+            if token.kind == Ps1TokenKind.EOF:
+                return
+
+    def scan(self) -> Ps1Token:
+        """
+        Read one token at `Ps1Lexer.pos` in the current `Ps1Lexer.mode` and advance past it. The
+        result depends on nothing but the source, the position and the mode, so restoring a position
+        and scanning again re-reads the same text faithfully. That is what allows a caller to hold a
+        single token of lookahead and discard it when the mode changes.
+        """
         src = self.source
         length = len(src)
 
         while True:
             self._skip_whitespace()
             if self._at_end():
-                yield Ps1Token(Ps1TokenKind.EOF, '', self.pos)
-                return
+                return Ps1Token(Ps1TokenKind.EOF, '', self.pos)
 
             start = self.pos
             c = src[self.pos]
 
             if c == '\r' and self.pos + 1 < length and src[self.pos + 1] == '\n':
                 self.pos += 2
-                yield from self._emit(Ps1Token(Ps1TokenKind.NEWLINE, '\r\n', start))
-                continue
+                return Ps1Token(Ps1TokenKind.NEWLINE, '\r\n', start)
             if c == '\n':
                 self.pos += 1
-                yield from self._emit(Ps1Token(Ps1TokenKind.NEWLINE, '\n', start))
-                continue
+                return Ps1Token(Ps1TokenKind.NEWLINE, '\n', start)
 
             c2 = src[self.pos:self.pos + 2]
             if len(c2) == 2:
@@ -523,33 +527,28 @@ class Ps1Lexer:
                 nc = src[self.pos + 1]
                 if nc in SINGLE_QUOTES:
                     text = self._read_here_string(SINGLE_QUOTES)
-                    yield from self._emit(Ps1Token(Ps1TokenKind.HSTRING_VERBATIM, text, start))
-                    continue
+                    return Ps1Token(Ps1TokenKind.HSTRING_VERBATIM, text, start)
                 if nc in DOUBLE_QUOTES:
                     text = self._read_here_string(DOUBLE_QUOTES, expandable=True)
-                    yield from self._emit(Ps1Token(Ps1TokenKind.HSTRING_EXPAND, text, start))
-                    continue
+                    return Ps1Token(Ps1TokenKind.HSTRING_EXPAND, text, start)
 
             if c2 in ('..', '--', '++', '::', '+=', '-=', '*=', '/=', '%=') and self.mode == Ps1LexerMode.ARGUMENT:
                 after = self.pos + 2
                 if after < length and src[after] not in _FORCE_START_NEW_TOKEN:
                     token = self._read_generic_token()
                     if token.value:
-                        yield from self._emit(token)
-                        continue
+                        return token
 
             if c2 in _TWO_CHAR_OPS:
                 self.pos += 2
                 kind = _TWO_CHAR_OPS[c2]
-                yield from self._emit(Ps1Token(kind, c2, start))
-                continue
+                return Ps1Token(kind, c2, start)
 
             if c == ':' and self.pos + 1 < length and (src[self.pos + 1].isalpha() or src[self.pos + 1] == '_'):
                 self.pos += 1
                 while self.pos < length and (src[self.pos].isalnum() or src[self.pos] == '_'):
                     self.pos += 1
-                yield from self._emit(Ps1Token(Ps1TokenKind.LABEL, src[start:self.pos], start))
-                continue
+                return Ps1Token(Ps1TokenKind.LABEL, src[start:self.pos], start)
 
             if c == '$' or (c == '@' and self.pos + 1 < length and src[self.pos + 1] not in '({'):
                 nc = src[self.pos + 1] if self.pos + 1 < length else ''
@@ -560,24 +559,20 @@ class Ps1Lexer:
                         if fc not in _FORCE_START_NEW_TOKEN and fc not in _VARIABLE_STOPS_NO_RESCAN:
                             self.pos = start
                             token = self._read_generic_token()
-                    yield from self._emit(token)
-                    continue
+                    return token
 
             if c in SINGLE_QUOTES:
                 text = self._read_string(SINGLE_QUOTES)
-                yield from self._emit(Ps1Token(Ps1TokenKind.STRING_VERBATIM, text, start))
-                continue
+                return Ps1Token(Ps1TokenKind.STRING_VERBATIM, text, start)
             if c in DOUBLE_QUOTES:
                 text = self._read_string(DOUBLE_QUOTES, expandable=True)
-                yield from self._emit(Ps1Token(Ps1TokenKind.STRING_EXPAND, text, start))
-                continue
+                return Ps1Token(Ps1TokenKind.STRING_EXPAND, text, start)
 
             if c in '123456' and self.pos + 1 < length and src[self.pos + 1] == '>':
                 if self.mode == Ps1LexerMode.ARGUMENT:
                     redir = self._try_redirection()
                     if redir:
-                        yield from self._emit(redir)
-                        continue
+                        return redir
 
             if c.isdigit() or (c == '.' and self.pos + 1 < length and src[self.pos + 1].isdigit()):
                 token = self._read_number()
@@ -589,25 +584,21 @@ class Ps1Lexer:
                         ):
                             self.pos = start
                             token = self._read_generic_token()
-                    yield from self._emit(token)
-                    continue
+                    return token
 
             if c in DASHES:
                 if self.mode == Ps1LexerMode.EXPRESSION:
                     op = self._try_dash_operator()
                     if op:
-                        yield from self._emit(op)
-                        continue
+                        return op
                 elif self.mode == Ps1LexerMode.ARGUMENT:
                     param = self._try_parameter()
                     if param:
-                        yield from self._emit(param)
-                        continue
+                        return param
 
             redir = self._try_redirection()
             if redir:
-                yield from self._emit(redir)
-                continue
+                return redir
 
             if self.mode == Ps1LexerMode.ARGUMENT:
                 if c == '.' and self.pos + 1 < length:
@@ -615,28 +606,24 @@ class Ps1Lexer:
                     if nc not in _FORCE_START_NEW_TOKEN and nc != '$' and nc not in SINGLE_QUOTES and nc not in DOUBLE_QUOTES:
                         token = self._read_generic_token()
                         if token.value:
-                            yield from self._emit(token)
-                            continue
+                            return token
 
             if self.mode == Ps1LexerMode.ARGUMENT and c in '*/%=!+?':
                 if self.pos + 1 < length and src[self.pos + 1] not in _FORCE_START_NEW_TOKEN:
                     token = self._read_generic_token()
                     if token.value:
-                        yield from self._emit(token)
-                        continue
+                        return token
 
             if c in _ONE_CHAR_OPS or c in DASHES:
                 self.pos += 1
                 kind = _ONE_CHAR_OPS.get(c) or Ps1TokenKind.DASH
-                yield from self._emit(Ps1Token(kind, c, start))
-                continue
+                return Ps1Token(kind, c, start)
 
             if self.mode == Ps1LexerMode.ARGUMENT:
                 if c.isalpha() or c == '_' or c == '\\' or c == '`':
                     token = self._read_generic_token()
                     if token.value:
-                        yield from self._emit_keyword_or_token(token)
-                        continue
+                        return self._keyword_or_token(token)
 
             if c.isalpha() or c == '_' or c == '`':
                 token = self._read_identifier()
@@ -649,8 +636,7 @@ class Ps1Lexer:
                         self.pos = start
                         token = self._read_generic_token()
                 if token.value:
-                    yield from self._emit_keyword_or_token(token)
-                    continue
+                    return self._keyword_or_token(token)
 
             self.pos += 1
-            yield from self._emit(Ps1Token(Ps1TokenKind.GENERIC_TOKEN, c, start))
+            return Ps1Token(Ps1TokenKind.GENERIC_TOKEN, c, start)
