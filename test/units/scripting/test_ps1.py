@@ -204,7 +204,11 @@ class TestPs1RealWorldLarge(TestUnitBase):
             B'''{4}{0}{1}{3}'-f'i','n','o','g','r','t','s').iNvokE()'''
         )
         result = data | self.load() | str
-        self.assertEqual(result, "PowerShell -NONiNtErac -NoLogo -NOP -Windows HIDDEn -ExEC BYpasS '-ec'")
+        self.assertEqual(
+            result,
+            "PowerShell -NONiNtErac -NoLogo -NOP -Windows HIDDEn -ExEC BYpasS '-ec'"
+            " . 'tostring'.iNvokE()"
+        )
 
     def test_real_world_02(self):
         data = (

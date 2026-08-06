@@ -172,6 +172,9 @@ _ARGUMENT_FORBIDDEN_KINDS = _PIPELINE_TERMINATORS | {
     Ps1TokenKind.REDIRECTION,
 }
 
+#: A block comment may stand between an expression and a member access; whitespace may not.
+_BLOCK_COMMENT = re.compile(r'<#.*?#>', re.DOTALL)
+
 _VARIABLE_FRAG = re.compile(
     r'\$(?:' + _VARIABLE_PATTERN_CORE + r')',
     re.IGNORECASE,
@@ -224,6 +227,7 @@ class Ps1Parser:
         self.source = source
         self._lexer = Ps1Lexer(source)
         self._pending: Ps1Token | None = None
+        self._previous_end = 0
         self._disable_comma = False
 
     @property
@@ -235,8 +239,22 @@ class Ps1Parser:
 
     def _advance(self) -> Ps1Token:
         token = self._current
+        self._previous_end = self._lexer.pos
         self._pending = None
         return token
+
+    def _adjacent(self) -> bool:
+        """
+        Whether the current token begins where the previous one ended. A member access, an index or
+        a postfix operator binds to what precedes it only when nothing separates the two: `$a.Length`
+        reads a property, where `$a . Length` is two command arguments with a bare dot between them.
+        A block comment does not separate them, which is the one thing the reference lets through.
+        """
+        gap_start = self._previous_end
+        gap_end = self._current.offset
+        if gap_start == gap_end:
+            return True
+        return not _BLOCK_COMMENT.sub('', self.source[gap_start:gap_end])
 
     def _resync(self, offset: int):
         """
@@ -950,7 +968,7 @@ class Ps1Parser:
         return self._parse_primary_postfix(expr)
 
     def _parse_primary_postfix(self, expr: Expression) -> Expression:
-        while True:
+        while self._adjacent():
             if self._at(Ps1TokenKind.DOT, Ps1TokenKind.DOUBLE_COLON):
                 expr = self._parse_member_access(expr)
             elif self._at(Ps1TokenKind.LBRACKET):
