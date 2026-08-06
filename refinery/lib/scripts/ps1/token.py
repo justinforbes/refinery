@@ -214,7 +214,6 @@ _MODE_INVARIANT_SET = frozenset((
     Ps1TokenKind.EOF,
     Ps1TokenKind.HSTRING_VERBATIM,
     Ps1TokenKind.LBRACE,
-    Ps1TokenKind.LBRACKET,
     Ps1TokenKind.LPAREN,
     Ps1TokenKind.NEWLINE,
     Ps1TokenKind.PIPE,
