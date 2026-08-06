@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import unittest
 
+from typing import NamedTuple
+
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
 from refinery.lib.scripts import Expression, Node
@@ -44,13 +46,17 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Exit,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
+    Ps1FileRedirection,
     Ps1ForEachLoop,
+    Ps1InputRedirection,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1Jump,
+    Ps1MergingRedirection,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1RealLiteral,
+    Ps1RedirectionStream,
     Ps1Script,
     Ps1ScopeModifier,
     Ps1ScriptBlock,
@@ -171,6 +177,40 @@ def _static_calls(root: Node, type_name: str, member: str) -> list[Ps1InvokeMemb
         and isinstance(node.member, str)
         and node.member.lower() == member
     ]
+
+
+class _Redirection(NamedTuple):
+    """
+    What one redirection operator does, in a form two trees can be compared by. The operator's own
+    class is part of it, so an operator reported as a different one cannot compare equal to the one
+    that was written.
+    """
+    operator: type
+    streams: tuple[Ps1RedirectionStream, ...]
+    append: bool
+    file: object
+
+
+def _redirections(root: Node) -> list[_Redirection]:
+    """
+    Every redirection operator in `root`, in the order the source spells them.
+    """
+    found: list[_Redirection] = []
+    for node in root.walk_in_order():
+        if isinstance(node, Ps1FileRedirection):
+            target = _literal_value(node.target)
+            found.append(_Redirection(Ps1FileRedirection, (node.stream,), node.append, target))
+        elif isinstance(node, Ps1MergingRedirection):
+            streams = (node.from_stream, node.to_stream)
+            found.append(_Redirection(Ps1MergingRedirection, streams, False, None))
+        elif isinstance(node, Ps1InputRedirection):
+            source = _literal_value(node.source)
+            found.append(_Redirection(Ps1InputRedirection, (), False, source))
+    return found
+
+
+def _file_writes(root: Node) -> list[_Redirection]:
+    return [entry for entry in _redirections(root) if entry.operator is Ps1FileRedirection]
 
 
 def _argument_values(command: Ps1CommandInvocation) -> list[Node]:
@@ -623,6 +663,36 @@ class TestPs1Corruptions(TestPs1):
         )
         self.assertEqual(
             _argument_values(commands[0]), [], 'part of the path was read as an argument')
+
+    def test_reserved_input_operator_is_not_a_file_write(self):
+        """
+        `Get-Content < in.txt > out.txt` does not compile under 5.1, which reports `The '<' operator
+        is reserved for future use`. The operator moves nothing, and the command 5.1 builds keeps
+        its name and its `> out.txt` redirection, so out.txt is the only file the script writes.
+        A write to in.txt is one the script never performs.
+        """
+        writes = _file_writes(self._deobfuscated_tree('Get-Content < in.txt > out.txt'))
+        self.assertEqual(
+            writes,
+            [_Redirection(Ps1FileRedirection, (Ps1RedirectionStream.OUTPUT,), False, 'out.txt')],
+            'the reserved operator reads as a write to the file behind it',
+        )
+
+    def test_reserved_input_operator_neither_gains_nor_loses_a_redirection(self):
+        """
+        The redirections of the re-emitted script have to be the ones the input spells: `<` is
+        reserved under 5.1 and `> out.txt` is the one write, however the script is written down.
+        """
+        for source in (
+            'Get-Content < in.txt > out.txt',
+            'Get-Content < in.txt',
+            'echo a < b',
+        ):
+            self.assertEqual(
+                _redirections(self._deobfuscated_tree(source)),
+                _redirections(Ps1Parser(source).parse()),
+                F'{source} does not redirect what it redirected before it was written back out',
+            )
 
     def test_percent_invokes_foreach_object_with_a_script_block(self):
         """

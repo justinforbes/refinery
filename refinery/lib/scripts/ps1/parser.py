@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 
+from collections.abc import Callable
 from contextlib import contextmanager
 
 from refinery.lib.scripts import Block
@@ -48,6 +49,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1HereString,
     Ps1IfStatement,
     Ps1IndexExpression,
+    Ps1InputRedirection,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1Jump,
@@ -63,6 +65,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1PropertyMember,
     Ps1RangeExpression,
     Ps1RealLiteral,
+    Ps1Redirection,
     Ps1RedirectionStream,
     Ps1ReturnStatement,
     Ps1ScopeModifier,
@@ -110,42 +113,25 @@ _BINARY_PRECEDENCE.update(dict.fromkeys(('-and', '-or', '-xor'), 10))
 _BINARY_PRECEDENCE.update(dict.fromkeys(('-band', '-bor', '-bxor'), 20))
 _BINARY_PRECEDENCE.update(dict.fromkeys(_COMPARISON_OPERATORS, 30))
 
-_EXPRESSION_START_KINDS = frozenset({
-    Ps1TokenKind.INTEGER,
-    Ps1TokenKind.REAL,
-    Ps1TokenKind.STRING_VERBATIM,
-    Ps1TokenKind.STRING_EXPAND,
-    Ps1TokenKind.HSTRING_VERBATIM,
-    Ps1TokenKind.HSTRING_EXPAND,
-    Ps1TokenKind.VARIABLE,
-    Ps1TokenKind.SPLAT_VARIABLE,
-    Ps1TokenKind.LPAREN,
-    Ps1TokenKind.AT_LPAREN,
-    Ps1TokenKind.AT_LBRACE,
-    Ps1TokenKind.DOLLAR_LPAREN,
-    Ps1TokenKind.LBRACE,
-    Ps1TokenKind.LBRACKET,
-    Ps1TokenKind.PLUS,
-    Ps1TokenKind.DASH,
-    Ps1TokenKind.EXCLAIM,
-    Ps1TokenKind.INCREMENT,
-    Ps1TokenKind.DECREMENT,
-    Ps1TokenKind.COMMA,
-})
-
-#: Token kinds that open a command where a statement or a pipeline element begins, read in
-#: expression mode. Each of the infix operators here spells a whole command name, because being
-#: infix is what leaves the spelling free: measured on 5.1, `..`, `*`, `..\tool.exe`,
-#: `/usr/bin/env` and `*.exe` are each resolved whole, and `%` is the alias of `ForEach-Object`.
-_COMMAND_START_KINDS = frozenset({
-    Ps1TokenKind.AMPERSAND,
-    Ps1TokenKind.DOT,
-    Ps1TokenKind.DOTDOT,
+#: The two kinds that spell a bare word. `Ps1Parser._parse_primary_atom` reads one as the string it
+#: spells, because six rules of the grammar reach it holding one: an attribute argument, a class
+#: member initializer, an index, a method argument, an enum member and a parameter default. What
+#: must never take it for an expression is the choice between a command and an expression, because
+#: every command name in the language is spelled this way.
+_BARE_WORD_KINDS = frozenset({
     Ps1TokenKind.GENERIC_EXPAND,
     Ps1TokenKind.GENERIC_TOKEN,
-    Ps1TokenKind.PERCENT,
-    Ps1TokenKind.SLASH,
-    Ps1TokenKind.STAR,
+})
+
+#: The prefix operators `Ps1Parser._parse_unary_expression` reads before it reaches an atom.
+_UNARY_OPERATOR_KINDS = frozenset({
+    Ps1TokenKind.COMMA,
+    Ps1TokenKind.DASH,
+    Ps1TokenKind.DECREMENT,
+    Ps1TokenKind.EXCLAIM,
+    Ps1TokenKind.INCREMENT,
+    Ps1TokenKind.OPERATOR,
+    Ps1TokenKind.PLUS,
 })
 
 _STATEMENT_TERMINATORS = frozenset({
@@ -170,6 +156,7 @@ _ARGUMENT_FORBIDDEN_KINDS = _PIPELINE_TERMINATORS | {
     Ps1TokenKind.COMMA,
     Ps1TokenKind.DECREMENT,
     Ps1TokenKind.REDIRECTION,
+    Ps1TokenKind.REDIRECT_IN,
 }
 
 #: A block comment may stand between an expression and a member access; whitespace may not.
@@ -380,11 +367,40 @@ class Ps1Parser:
             stream = Ps1RedirectionStream.OUTPUT
             rest = op
         append = rest == '>>'
-        target = None
-        if not self._is_pipeline_terminator():
-            target = self._parse_single_argument_value()
         return Ps1FileRedirection(
-            offset=tok.offset, stream=stream, target=target, append=append)
+            offset=tok.offset,
+            stream=stream,
+            target=self._parse_redirection_target(),
+            append=append,
+        )
+
+    def _parse_input_redirection(self, tok: Ps1Token) -> Ps1InputRedirection:
+        """
+        Read a `<` and the file it names. PowerShell reserves the operator, reports it and then goes
+        on reading the command around it, so what this must not do is end the command or turn into
+        the write that `>` spells.
+        """
+        return Ps1InputRedirection(
+            offset=tok.offset, source=self._parse_redirection_target())
+
+    def _parse_redirection_target(self) -> Expression | None:
+        with self._mode(Ps1LexerMode.ARGUMENT):
+            if self._is_pipeline_terminator():
+                return None
+            return self._parse_single_argument_value()
+
+    def _try_parse_redirection(self) -> Ps1Redirection | None:
+        if self._at(Ps1TokenKind.REDIRECTION):
+            return self._parse_redirection(self._advance())
+        if self._at(Ps1TokenKind.REDIRECT_IN):
+            return self._parse_input_redirection(self._advance())
+        return None
+
+    def _parse_redirections(self) -> list[Ps1Redirection]:
+        redirections: list[Ps1Redirection] = []
+        while (redirection := self._try_parse_redirection()) is not None:
+            redirections.append(redirection)
+        return redirections
 
     @staticmethod
     def _skip_quoted_raw(
@@ -612,30 +628,42 @@ class Ps1Parser:
             )
         return Ps1ExpressionStatement(offset=expr.offset, expression=expr)
 
-    def _parse_pipeline_expression(self, *, keyword_names_a_command: bool = False) -> Expression | None:
+    def _starts_command(self, *, keyword_names_a_command: bool) -> bool:
         """
-        Read one pipeline. Whether it opens with a command or with an expression is decided here and
-        nowhere else, which is what keeps the decision out of the hands of whatever was parsed
-        before: the held token is re-scanned in expression mode first, so the kind classified below
-        is a fact about *this* pipeline. That token is only classified and then discarded, which is
-        what makes scanning it speculatively safe — `_parse_command` re-scans in argument mode
-        before it reads a name.
+        Decide whether what comes next is a command or an expression. The token is re-scanned in
+        expression mode first, so the kind classified is a fact about *this* pipeline element rather
+        than about whatever was parsed before it, and it is then discarded again, which is what makes
+        scanning it here safe: `_parse_command` re-scans in argument mode before it reads a name.
+
+        Anything that cannot open an expression opens a command. Asking it in that direction is what
+        keeps the answer tied to the grammar, but it also means a kind nobody thought about becomes a
+        command name, so the kinds that may never be one are named in `_ARGUMENT_FORBIDDEN_KINDS` and
+        `_parse_command` declines them.
 
         A keyword kind spells a command name only where nothing above will read it as a statement:
-        at a statement start, where `_parse_statement` has already declined, and inside `( )`, which
-        holds a pipeline and never a statement. Everywhere else — a `for` clause, the operand of
-        `return` — the keyword still opens a statement, and taking it for a name loses that
-        statement whole.
+        at a statement start, where `_parse_statement` has already declined, inside `( )`, which
+        holds a pipeline and never a statement, and after a `|`. Everywhere else — a `for` clause,
+        the operand of `return` — the keyword still opens a statement, and taking it for a name loses
+        that statement whole.
         """
         with self._mode(Ps1LexerMode.EXPRESSION):
-            starts_command = self._current.kind in _COMMAND_START_KINDS or (
-                keyword_names_a_command and self._current.kind.is_keyword)
-            if starts_command:
-                first = self._parse_command()
-                if first is None:
-                    return None
-                return self._parse_pipeline_tail(first)
-            expr = self._parse_expression()
+            kind = self._current.kind
+        if kind.is_keyword:
+            return keyword_names_a_command
+        return kind not in self._UNARY_START_KINDS
+
+    def _parse_pipeline_expression(self, *, keyword_names_a_command: bool = False) -> Expression | None:
+        """
+        Read one pipeline, starting from whichever of a command and an expression `_starts_command`
+        says it is.
+        """
+        if self._starts_command(keyword_names_a_command=keyword_names_a_command):
+            first = self._parse_command()
+            if first is None:
+                return None
+            return self._parse_pipeline_tail(first)
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            expr = self._parse_binary_expression(0)
             if expr is None:
                 return None
             operator = self._eat_assignment()
@@ -676,27 +704,53 @@ class Ps1Parser:
         return statement
 
     def _parse_pipeline_tail(self, expr: Expression) -> Expression:
-        if self._at(Ps1TokenKind.PIPE):
-            elements = [Ps1PipelineElement(offset=expr.offset, expression=expr)]
-            while self._eat(Ps1TokenKind.PIPE):
-                self._skip_newlines()
-                cmd = self._parse_command()
-                if cmd is not None:
-                    elements.append(Ps1PipelineElement(offset=cmd.offset, expression=cmd))
-            if len(elements) > 1:
-                return Ps1Pipeline(offset=elements[0].offset, elements=elements)
+        if not self._at(Ps1TokenKind.PIPE):
             return expr
+        elements = [Ps1PipelineElement(offset=expr.offset, expression=expr)]
+        while self._eat(Ps1TokenKind.PIPE):
+            self._skip_newlines()
+            element = self._parse_pipeline_element()
+            if element is not None:
+                elements.append(element)
+        if len(elements) > 1:
+            return Ps1Pipeline(offset=elements[0].offset, elements=elements)
         return expr
+
+    def _parse_pipeline_element(self) -> Ps1PipelineElement | None:
+        """
+        Read one element after a `|`. It is classified the way the first element is, so `1 | 2` keeps
+        the `2` as the number it spells; PowerShell reports that an expression may only come first
+        and then reads it anyway, and what an analyst needs back is the expression, not a command
+        named after it.
+
+        A keyword names a command here without exception, because nothing above reads a statement
+        from the middle of a pipeline. Asking with the caller's answer instead would sever
+        `$x = Get-Process | ForEach-Object { }` at the pipe, `ForEach-Object` being the `foreach`
+        keyword to a lexer in expression mode.
+        """
+        if self._starts_command(keyword_names_a_command=True):
+            command = self._parse_command()
+            if command is None:
+                return None
+            return Ps1PipelineElement(offset=command.offset, expression=command)
+        expr = self._parse_expression()
+        if expr is None:
+            return None
+        return Ps1PipelineElement(
+            offset=expr.offset,
+            expression=expr,
+            redirections=self._parse_redirections(),
+        )
 
     def _parse_command_name(self) -> Expression:
         """
         Read a command name from a token that is none of the shapes the caller has already taken. A
         token that begins an expression names the command with the expression it opens, so that
-        `& $(Get-Command ls)`, a here-string and `dir | @{ }` each keep the structure they spell.
+        `& $(Get-Command ls)`, `& @{ }` and a here-string each keep the structure they spell.
         Anything else is the bare word it spells, which is what makes `Copy-Item . dest` three
         elements of one command.
         """
-        if self._current.kind in _EXPRESSION_START_KINDS:
+        if self._current.kind in self._UNARY_START_KINDS:
             with self._mode(Ps1LexerMode.EXPRESSION):
                 name = self._parse_primary_expression()
             if name is not None:
@@ -740,7 +794,7 @@ class Ps1Parser:
                     name_expr = self._parse_primary_postfix(name_expr)
 
             arguments: list[Ps1CommandArgument | Expression] = []
-            redirections: list[Ps1FileRedirection | Ps1MergingRedirection] = []
+            redirections: list[Ps1Redirection] = []
             while not self._is_pipeline_terminator():
                 if self._at(Ps1TokenKind.PARAMETER):
                     tok = self._advance()
@@ -769,9 +823,8 @@ class Ps1Parser:
                         ))
                 elif self._at(Ps1TokenKind.COMMA):
                     self._advance()
-                elif self._at(Ps1TokenKind.REDIRECTION):
-                    tok = self._advance()
-                    redirections.append(self._parse_redirection(tok))
+                elif (redirection := self._try_parse_redirection()) is not None:
+                    redirections.append(redirection)
                 elif self._at(Ps1TokenKind.OPERATOR):
                     tok = self._advance()
                     arguments.append(Ps1CommandArgument(
@@ -835,7 +888,7 @@ class Ps1Parser:
         if self._current.kind in _ARGUMENT_FORBIDDEN_KINDS:
             return None
         with self._mode(Ps1LexerMode.EXPRESSION):
-            if self._current.kind in _EXPRESSION_START_KINDS:
+            if self._current.kind in self._ARGUMENT_PRIMARY_KINDS:
                 value = self._parse_unary_expression()
                 if value is not None:
                     return value
@@ -1041,34 +1094,13 @@ class Ps1Parser:
         return expr
 
     def _parse_primary_atom(self) -> Expression | None:
-        tok = self._current
+        rule = self._ATOM_RULES.get(self._current.kind)
+        if rule is None:
+            return None
+        return rule(self)
 
-        if tok.kind == Ps1TokenKind.INTEGER:
-            return self._parse_integer()
-        if tok.kind == Ps1TokenKind.REAL:
-            return self._parse_real()
-        if tok.kind in (Ps1TokenKind.STRING_VERBATIM, Ps1TokenKind.STRING_EXPAND):
-            return self._parse_string()
-        if tok.kind in (Ps1TokenKind.HSTRING_VERBATIM, Ps1TokenKind.HSTRING_EXPAND):
-            return self._parse_here_string()
-        if tok.kind in (Ps1TokenKind.VARIABLE, Ps1TokenKind.SPLAT_VARIABLE):
-            return self._parse_variable()
-        if tok.kind == Ps1TokenKind.LPAREN:
-            return self._parse_paren_expression()
-        if tok.kind == Ps1TokenKind.DOLLAR_LPAREN:
-            return self._parse_sub_expression()
-        if tok.kind == Ps1TokenKind.AT_LPAREN:
-            return self._parse_array_expression()
-        if tok.kind == Ps1TokenKind.AT_LBRACE:
-            return self._parse_hash_literal()
-        if tok.kind == Ps1TokenKind.LBRACE:
-            return self._parse_script_block()
-        if tok.kind == Ps1TokenKind.LBRACKET:
-            return self._try_parse_type_literal()
-        if tok.kind in (Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND):
-            return self._parse_generic_as_string(self._advance())
-
-        return None
+    def _parse_bare_word(self) -> Expression:
+        return self._parse_generic_as_string(self._advance())
 
     def _parse_integer(self) -> Ps1IntegerLiteral:
         tok = self._advance()
@@ -2157,3 +2189,36 @@ class Ps1Parser:
         with self._mode(Ps1LexerMode.EXPRESSION):
             body = self._parse_block()
         return Ps1DataSection(offset=offset, name=name, commands=commands, body=body)
+
+    #: What a primary expression can begin with, and the rule that reads each one. Every question of
+    #: the form "can an expression start here" is answered from this table rather than from a list
+    #: kept beside it, because a list kept beside it drifts: the two that were here before this
+    #: disagreed with the grammar and with each other.
+    _ATOM_RULES: dict[Ps1TokenKind, Callable[[Ps1Parser], Expression | None]] = {
+        Ps1TokenKind.AT_LBRACE        : _parse_hash_literal,     # noqa
+        Ps1TokenKind.AT_LPAREN        : _parse_array_expression, # noqa
+        Ps1TokenKind.DOLLAR_LPAREN    : _parse_sub_expression,   # noqa
+        Ps1TokenKind.GENERIC_EXPAND   : _parse_bare_word,        # noqa
+        Ps1TokenKind.GENERIC_TOKEN    : _parse_bare_word,        # noqa
+        Ps1TokenKind.HSTRING_EXPAND   : _parse_here_string,      # noqa
+        Ps1TokenKind.HSTRING_VERBATIM : _parse_here_string,      # noqa
+        Ps1TokenKind.INTEGER          : _parse_integer,          # noqa
+        Ps1TokenKind.LBRACE           : _parse_script_block,     # noqa
+        Ps1TokenKind.LBRACKET         : _try_parse_type_literal, # noqa
+        Ps1TokenKind.LPAREN           : _parse_paren_expression, # noqa
+        Ps1TokenKind.REAL             : _parse_real,             # noqa
+        Ps1TokenKind.SPLAT_VARIABLE   : _parse_variable,         # noqa
+        Ps1TokenKind.STRING_EXPAND    : _parse_string,           # noqa
+        Ps1TokenKind.STRING_VERBATIM  : _parse_string,           # noqa
+        Ps1TokenKind.VARIABLE         : _parse_variable,         # noqa
+    }
+
+    #: What `Ps1Parser._parse_unary_expression` can begin with. A pipeline element that does not
+    #: begin with one of these is a command, which is why the bare word has to come out: it is the
+    #: spelling of every command name there is, and honouring it here takes `Get-ChildItem` apart.
+    _UNARY_START_KINDS = (frozenset(_ATOM_RULES) - _BARE_WORD_KINDS) | _UNARY_OPERATOR_KINDS
+
+    #: What a command argument can begin with. Narrower than the above by the one kind that would
+    #: read past the argument it starts: an operator takes the next argument as its operand, so
+    #: `echo a,-not` builds a unary expression with nothing under it.
+    _ARGUMENT_PRIMARY_KINDS = _UNARY_START_KINDS - {Ps1TokenKind.OPERATOR}

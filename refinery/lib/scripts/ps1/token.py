@@ -104,6 +104,7 @@ class Ps1TokenKind(enum.Enum):
     PIPE             = '|'               # noqa
     AMPERSAND        = '&'               # noqa
     REDIRECTION      = 'redirection'     # noqa
+    REDIRECT_IN      = '<'               # noqa
 
     IF               = 'if'              # noqa
     ELSEIF           = 'elseif'          # noqa

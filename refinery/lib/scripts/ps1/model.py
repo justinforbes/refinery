@@ -146,7 +146,7 @@ class Ps1CommandInvocation(Expression):
     name: Expression | None = None
     arguments: list[Ps1CommandArgument | Expression] = field(default_factory=list)
     invocation_operator: str = ''
-    redirections: list[Ps1FileRedirection | Ps1MergingRedirection] = field(default_factory=list)
+    redirections: list[Ps1Redirection] = field(default_factory=list)
 
 
 @dataclass(repr=False, eq=False)
@@ -250,9 +250,23 @@ class Ps1MergingRedirection(Node):
 
 
 @dataclass(repr=False, eq=False)
+class Ps1InputRedirection(Node):
+    """
+    A `<` redirection, which PowerShell reserves and never performs. It names no stream because it
+    moves nothing: it exists so that the command it belongs to keeps the shape it spells rather than
+    losing its name to an operator that reads nothing. The source is kept even though 5.1 discards
+    it, because what is dropped here is what an analyst reads back.
+    """
+    source: Expression | None = None
+
+
+Ps1Redirection = Ps1FileRedirection | Ps1MergingRedirection | Ps1InputRedirection
+
+
+@dataclass(repr=False, eq=False)
 class Ps1PipelineElement(Node):
     expression: Expression | None = None
-    redirections: list[Ps1FileRedirection | Ps1MergingRedirection] = field(default_factory=list)
+    redirections: list[Ps1Redirection] = field(default_factory=list)
 
 
 @dataclass(repr=False, eq=False)

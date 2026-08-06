@@ -783,12 +783,10 @@ class TestPs1ALineContinuationSeparatesTheOperatorFromWhatPrecedesIt(TestBase):
                 self.assertEqual(self._bindings(script), [])
                 self.assertGreater(len(script.body), 1)
 
-    @unittest.expectedFailure
     def test_a_continuation_leaves_the_static_call_one_pipeline_of_its_own(self):
         """
         The tree 5.1 recovers from the parse error holds two pipelines, the type expression and one
-        command that keeps the parenthesis behind it. The parser splits that command into an error
-        node and a parenthesis of its own, which separates an argument from what receives it.
+        command that keeps the parenthesis behind it.
         """
         script = self._parse("[Convert]`\n::FromBase64String('AA==')")
         self.assertEqual(len(script.body), 2)

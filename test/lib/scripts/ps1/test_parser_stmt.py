@@ -31,6 +31,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1HashLiteral,
     Ps1HereString,
     Ps1IfStatement,
+    Ps1InputRedirection,
     Ps1IntegerLiteral,
     Ps1MergingRedirection,
     Ps1ParenExpression,
@@ -722,6 +723,66 @@ class TestPs1ParserStatements(TestBase):
         self.assertEqual(len(cmd.redirections), 1)
         self.assertIsInstance(cmd.redirections[0], Ps1MergingRedirection)
 
+    def test_reserved_input_operator_is_not_an_output_redirection(self):
+        """
+        PowerShell 5.1 reports `The '<' operator is reserved for future use` for `echo a < b` and
+        builds the command `echo a` for it. The operator denotes no write, so nothing it leaves in
+        the tree may read as one.
+        """
+        stmt = self._parse_stmt('echo a < b')
+        self.assertIsInstance(stmt, Ps1ExpressionStatement)
+        cmd = stmt.expression
+        self.assertIsInstance(cmd, Ps1CommandInvocation)
+        self.assertEqual(cmd.name.value, 'echo')
+        self.assertEqual(len(cmd.arguments), 1)
+        argument = cmd.arguments[0]
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertIsInstance(argument.value, Ps1StringLiteral)
+        self.assertEqual(argument.value.value, 'a')
+        self.assertEqual(len(cmd.redirections), 1)
+        redirection = cmd.redirections[0]
+        self.assertIsInstance(redirection, Ps1InputRedirection)
+        self.assertNotIsInstance(redirection, Ps1FileRedirection)
+
+    def test_reserved_input_operator_keeps_the_output_redirection_of_its_command(self):
+        """
+        `Get-Content < in.txt > out.txt` is the same reserved-operator error under 5.1, and the
+        command 5.1 builds for it keeps its name and its `> out.txt` write. The only file this
+        script writes is out.txt.
+        """
+        stmt = self._parse_stmt('Get-Content < in.txt > out.txt')
+        self.assertIsInstance(stmt, Ps1ExpressionStatement)
+        cmd = stmt.expression
+        self.assertIsInstance(cmd, Ps1CommandInvocation)
+        self.assertEqual(cmd.name.value, 'Get-Content')
+        self.assertEqual(cmd.arguments, [])
+        self.assertEqual(len(cmd.redirections), 2)
+        writes = [r for r in cmd.redirections if isinstance(r, Ps1FileRedirection)]
+        reads = [r for r in cmd.redirections if isinstance(r, Ps1InputRedirection)]
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0].stream, Ps1RedirectionStream.OUTPUT)
+        self.assertFalse(writes[0].append)
+        self.assertIsInstance(writes[0].target, Ps1StringLiteral)
+        self.assertEqual(writes[0].target.value, 'out.txt')
+
+    def test_input_operator_without_whitespace_stays_inside_the_argument(self):
+        """
+        5.1 lexes `echo a<b` as `echo` followed by the single bare word `a<b`, with no error and no
+        redirection: a `<` only becomes an operator when whitespace separates it.
+        """
+        stmt = self._parse_stmt('echo a<b')
+        self.assertIsInstance(stmt, Ps1ExpressionStatement)
+        cmd = stmt.expression
+        self.assertIsInstance(cmd, Ps1CommandInvocation)
+        self.assertEqual(cmd.name.value, 'echo')
+        self.assertEqual(cmd.redirections, [])
+        self.assertEqual(len(cmd.arguments), 1)
+        argument = cmd.arguments[0]
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertIsInstance(argument.value, Ps1StringLiteral)
+        self.assertEqual(argument.value.value, 'a<b')
+
     def test_generic_arg_doubled_dquote_escape(self):
         stmt = self._parse_stmt('Write-Host prefix"abc""def"suffix')
         self.assertIsInstance(stmt, Ps1ExpressionStatement)
@@ -911,24 +972,69 @@ class TestPs1ACommandNameKeepsTheStructureItSpells(TestBase):
         self.assertIsInstance(name, Ps1HereString)
         self.assertEqual(name.value, 'notepad')
 
-    def test_a_hash_literal_names_the_command_a_pipeline_reaches(self):
-        script = self._parse('dir | @{ a = 1 }')
+    def test_a_hash_literal_names_the_command_it_is_invoked_as(self):
+        name = self._invoked_name('& @{ a = 1 }')
+        self.assertIsInstance(name, Ps1HashLiteral)
+        self.assertEqual(len(name.pairs), 1)
+        key, value = name.pairs[0]
+        self.assertIsInstance(key, Ps1StringLiteral)
+        self.assertEqual(key.value, 'a')
+        self.assertIsInstance(value, Ps1IntegerLiteral)
+        self.assertEqual(value.value, 1)
+
+
+class TestPs1AnElementAfterAPipeIsReadLikeTheFirstOne(TestBase):
+    """
+    PowerShell reads every pipeline element with the expression rule before it reads a command, not
+    only the first: `dir | @{ a = 1 }` reports that an expression may come first only, and then keeps
+    the hash literal it spells. Reading the elements behind a pipe as commands without exception
+    names a command after every expression that reaches one.
+    """
+
+    def _elements(self, source: str) -> list:
+        script = Ps1Parser(source).parse()
         self.assertEqual(len(script.body), 1)
         statement = script.body[0]
         self.assertIsInstance(statement, Ps1ExpressionStatement)
         pipeline = statement.expression
         self.assertIsInstance(pipeline, Ps1Pipeline)
-        self.assertEqual(len(pipeline.elements), 2)
-        command = pipeline.elements[1].expression
-        self.assertIsInstance(command, Ps1CommandInvocation)
-        self.assertEqual(command.arguments, [])
-        self.assertIsInstance(command.name, Ps1HashLiteral)
-        self.assertEqual(len(command.name.pairs), 1)
-        key, value = command.name.pairs[0]
+        return [element.expression for element in pipeline.elements]
+
+    def test_a_hash_literal_behind_a_pipe_stays_the_hash_literal_it_spells(self):
+        first, second = self._elements('dir | @{ a = 1 }')
+        self.assertIsInstance(first, Ps1CommandInvocation)
+        self.assertIsInstance(second, Ps1HashLiteral)
+        key, value = second.pairs[0]
         self.assertIsInstance(key, Ps1StringLiteral)
         self.assertEqual(key.value, 'a')
         self.assertIsInstance(value, Ps1IntegerLiteral)
         self.assertEqual(value.value, 1)
+
+    def test_a_number_behind_a_pipe_stays_the_number_it_spells(self):
+        first, second = self._elements('1 | 2')
+        self.assertIsInstance(first, Ps1IntegerLiteral)
+        self.assertIsInstance(second, Ps1IntegerLiteral)
+        self.assertEqual(second.value, 2)
+
+    def test_a_keyword_behind_a_pipe_names_the_command_it_spells(self):
+        first, second = self._elements('Get-Process | ForEach-Object { $_ }')
+        self.assertIsInstance(first, Ps1CommandInvocation)
+        self.assertIsInstance(second, Ps1CommandInvocation)
+        self.assertIsInstance(second.name, Ps1StringLiteral)
+        self.assertEqual(second.name.value, 'ForEach-Object')
+
+    def test_an_expression_behind_a_pipe_keeps_the_redirection_behind_it(self):
+        script = Ps1Parser('Get-Process | $x > out.txt').parse()
+        pipeline = script.body[0].expression
+        self.assertIsInstance(pipeline, Ps1Pipeline)
+        element = pipeline.elements[1]
+        self.assertIsInstance(element.expression, Ps1Variable)
+        self.assertEqual(len(element.redirections), 1)
+        redirection = element.redirections[0]
+        self.assertIsInstance(redirection, Ps1FileRedirection)
+        self.assertEqual(redirection.stream, Ps1RedirectionStream.OUTPUT)
+        self.assertIsInstance(redirection.target, Ps1StringLiteral)
+        self.assertEqual(redirection.target.value, 'out.txt')
 
 
 class TestPs1AnArgumentThatIsNoExpressionLeavesTheTerminator(TestBase):

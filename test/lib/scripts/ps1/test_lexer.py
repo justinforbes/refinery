@@ -368,6 +368,34 @@ class TestPs1Lexer(TestBase):
         self.assertEqual(tokens[0], (Ps1TokenKind.INTEGER, '9'))
         self.assertEqual(tokens[1], (Ps1TokenKind.REDIRECTION, '>'))
 
+    def test_reserved_input_operator_is_not_a_redirection_token(self):
+        expected = [
+            (Ps1TokenKind.GENERIC_TOKEN, 'echo'),
+            (Ps1TokenKind.GENERIC_TOKEN, 'a'),
+            (Ps1TokenKind.REDIRECT_IN, '<'),
+            (Ps1TokenKind.GENERIC_TOKEN, 'b'),
+        ]
+        self.assertEqual(self._tokens('echo a < b', mode=Ps1LexerMode.ARGUMENT), expected)
+
+    def test_reserved_input_operator_and_output_redirection_are_separate_tokens(self):
+        expected = [
+            (Ps1TokenKind.GENERIC_TOKEN, 'Get-Content'),
+            (Ps1TokenKind.REDIRECT_IN, '<'),
+            (Ps1TokenKind.GENERIC_TOKEN, 'in.txt'),
+            (Ps1TokenKind.REDIRECTION, '>'),
+            (Ps1TokenKind.GENERIC_TOKEN, 'out.txt'),
+        ]
+        source = 'Get-Content < in.txt > out.txt'
+        self.assertEqual(self._tokens(source, mode=Ps1LexerMode.ARGUMENT), expected)
+
+    def test_input_operator_without_whitespace_does_not_split_a_bare_word(self):
+        tokens = self._tokens('echo a<b', mode=Ps1LexerMode.ARGUMENT)
+        expected = [
+            (Ps1TokenKind.GENERIC_TOKEN, 'echo'),
+            (Ps1TokenKind.GENERIC_TOKEN, 'a<b'),
+        ]
+        self.assertEqual(tokens, expected)
+
     def test_special_variable_dollar_does_not_consume_trailing(self):
         tokens = self._tokens('$$foo')
         self.assertEqual(tokens[0], (Ps1TokenKind.VARIABLE, '$$'))
@@ -449,14 +477,15 @@ class TestPs1Lexer(TestBase):
     def test_input_redirection(self):
         tokens = self._tokens('Get-Content < file.txt', mode=Ps1LexerMode.ARGUMENT)
         kinds = [t[0] for t in tokens]
-        self.assertIn(Ps1TokenKind.REDIRECTION, kinds)
-        redir = next(t for t in tokens if t[0] == Ps1TokenKind.REDIRECTION)
+        self.assertNotIn(Ps1TokenKind.REDIRECTION, kinds)
+        self.assertIn(Ps1TokenKind.REDIRECT_IN, kinds)
+        redir = next(t for t in tokens if t[0] == Ps1TokenKind.REDIRECT_IN)
         self.assertEqual(redir[1], '<')
 
     def test_input_redirection_does_not_break_block_comment(self):
         tokens = self._tokens('<# comment #> $x')
         kinds = [t[0] for t in tokens]
-        self.assertNotIn(Ps1TokenKind.REDIRECTION, kinds)
+        self.assertNotIn(Ps1TokenKind.REDIRECT_IN, kinds)
         self.assertIn(Ps1TokenKind.VARIABLE, kinds)
 
     def test_expandable_string_subexpr_with_here_string_containing_apostrophe_and_paren(self):

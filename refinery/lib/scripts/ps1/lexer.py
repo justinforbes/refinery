@@ -59,6 +59,7 @@ _ONE_CHAR_OPS: dict[str, Ps1TokenKind] = {
     '|' : Ps1TokenKind.PIPE,
     '&' : Ps1TokenKind.AMPERSAND,
     '=' : Ps1TokenKind.EQUALS,
+    '<' : Ps1TokenKind.REDIRECT_IN,
 }
 
 _DASH_OPERATORS: dict[str, str] = {
@@ -136,8 +137,7 @@ _VARIABLE_STOPS_NO_RESCAN = frozenset('.[=')
 
 _REDIRECTION_PATTERN = re.compile(
     r'[1-6*](?:>>|>&[12]|>)'  # explicit stream: 2>&1, 2>>, 2>
-    r'|>>|>&1|>'              # bare: >>, >&1, >
-    r'|<',                    # input
+    r'|>>|>&1|>',             # bare: >>, >&1, >
 )
 
 _INTEGER_PATTERN = re.compile(

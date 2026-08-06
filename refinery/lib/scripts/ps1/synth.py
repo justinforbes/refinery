@@ -40,6 +40,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1HereString,
     Ps1IfStatement,
     Ps1IndexExpression,
+    Ps1InputRedirection,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1Jump,
@@ -414,6 +415,12 @@ class Ps1Synthesizer(Synthesizer):
         if node.target:
             self._write(' ')
             self.visit(node.target)
+
+    def visit_Ps1InputRedirection(self, node: Ps1InputRedirection):
+        self._write('<')
+        if node.source:
+            self._write(' ')
+            self.visit(node.source)
 
     def visit_Ps1MergingRedirection(self, node: Ps1MergingRedirection):
         # A file redirection of the output stream is written bare, but a merge names its source
