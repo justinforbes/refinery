@@ -8,6 +8,12 @@ def guess_language(data: str | bytearray | bytes | memoryview) -> str | None:
     Try to parse the input as JavaScript, PowerShell, and VBA, then return the name of the language
     whose parser produces the fewest error nodes. Returns `None` when no parser can handle more than
     half of the input.
+
+    The count only separates the languages once the input is long enough for them to disagree about
+    it. All three grammars read a script of a few lines without a single error — a `Sub`/`End Sub`
+    block, a `var` declaration and a `Write-Host` call are each accepted by all three — so for a
+    short input nothing but the order of `backends` decides, and PowerShell, the language this tool
+    exists for, is asked first.
     """
     best_name: str | None = None
     best_errors = INF()
