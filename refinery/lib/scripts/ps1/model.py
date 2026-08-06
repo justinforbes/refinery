@@ -168,7 +168,11 @@ class Ps1ArrayExpression(Expression):
 
 @dataclass(repr=False, eq=False)
 class Ps1HashLiteral(Expression):
-    pairs: list[tuple[Expression, Expression]] = field(default_factory=list)
+    """
+    The value of an entry is a whole statement, exactly as it is on the right of an assignment, so
+    `@{ a = if ($c) { 1 } }` keeps the branch it spells rather than losing it.
+    """
+    pairs: list[tuple[Expression, Node]] = field(default_factory=list)
 
 
 @dataclass(repr=False, eq=False)

@@ -162,9 +162,9 @@ _PIPELINE_TERMINATORS = _STATEMENT_TERMINATORS | {
     Ps1TokenKind.DOUBLE_PIPE,
 }
 
-#: Token kinds that can never stand as a command name or argument, the thirteen the reference
-#: parser refuses at `Parser.cs:6306`. Any other token that is not an expression is read as the
-#: bare word it spells, which is what makes `Copy-Item . dest` three elements of one command.
+#: Token kinds that can never stand as a command name or argument. Any other token that is not an
+#: expression is read as the bare word it spells, which is what makes `Copy-Item . dest` three
+#: elements of one command.
 _ARGUMENT_FORBIDDEN_KINDS = _PIPELINE_TERMINATORS | {
     Ps1TokenKind.AMPERSAND,
     Ps1TokenKind.COMMA,
@@ -246,22 +246,30 @@ class Ps1Parser:
     def _adjacent(self) -> bool:
         """
         Whether the current token begins where the previous one ended. A member access, an index or
-        a postfix operator binds to what precedes it only when nothing separates the two: `$a.Length`
-        reads a property, where `$a . Length` is two command arguments with a bare dot between them.
-        A block comment does not separate them, which is the one thing the reference lets through.
+        a postfix operator binds to what precedes it only when nothing separates the two, so that
+        `$a.Length` reads a property where `$a . Length` is two command arguments with a bare dot
+        between them. A block comment does not separate them, which is the one thing 5.1 lets
+        through.
         """
         gap_start = self._previous_end
         gap_end = self._current.offset
         if gap_start == gap_end:
             return True
-        return not _BLOCK_COMMENT.sub('', self.source[gap_start:gap_end])
+        gap = self.source[gap_start:gap_end]
+        if '<#' not in gap:
+            return False
+        return not _BLOCK_COMMENT.sub('', gap)
 
     def _resync(self, offset: int):
         """
         Rewind to `offset` and drop the lookahead, so that the next read scans the source there
         again. Nothing is scanned here: the re-read happens when, and only if, a token is asked for.
+        Where the rewind undoes tokens that were consumed, the end of the last consumed one moves
+        back with it, because `Ps1Parser._adjacent` reads a gap between the two and a gap that runs
+        backwards is not one.
         """
         self._lexer.pos = offset
+        self._previous_end = min(self._previous_end, offset)
         self._pending = None
 
     def _switch_mode(self, mode: Ps1LexerMode):
@@ -316,7 +324,7 @@ class Ps1Parser:
     def _parse_parenthesized_condition(self) -> Expression:
         self._expect(Ps1TokenKind.LPAREN)
         self._skip_newlines()
-        expr = self._parse_pipeline_expression()
+        expr = self._parse_pipeline_expression(keyword_names_a_command=True)
         self._skip_newlines()
         self._expect(Ps1TokenKind.RPAREN)
         if expr is None:
@@ -600,8 +608,8 @@ class Ps1Parser:
         nowhere else, which is what keeps the decision out of the hands of whatever was parsed
         before: the held token is re-scanned in expression mode first, so the kind classified below
         is a fact about *this* pipeline. That token is only classified and then discarded, which is
-        what makes scanning it speculatively safe — `_parse_command` re-scans in argument mode before
-        it reads a name.
+        what makes scanning it speculatively safe — `_parse_command` re-scans in argument mode
+        before it reads a name.
 
         A keyword kind spells a command name only where nothing above will read it as a statement:
         at a statement start, where `_parse_statement` has already declined, and inside `( )`, which
@@ -664,6 +672,21 @@ class Ps1Parser:
             return expr
         return expr
 
+    def _parse_command_name(self) -> Expression:
+        """
+        Read a command name from a token that is none of the shapes the caller has already taken. A
+        token that begins an expression names the command with the expression it opens, so that
+        `& $(Get-Command ls)`, a here-string and `dir | @{ }` each keep the structure they spell.
+        Anything else is the bare word it spells, which is what makes `Copy-Item . dest` three
+        elements of one command.
+        """
+        if self._current.kind in _EXPRESSION_START_KINDS:
+            with self._mode(Ps1LexerMode.EXPRESSION):
+                name = self._parse_primary_expression()
+            if name is not None:
+                return name
+        return self._bare_string(self._advance())
+
     def _parse_command(self) -> Expression | None:
         """
         Read a command, starting from its name. Argument mode is entered *before* the name rather
@@ -680,10 +703,7 @@ class Ps1Parser:
 
             name_expr: Expression | None = None
 
-            if self._at(Ps1TokenKind.GENERIC_TOKEN, Ps1TokenKind.GENERIC_EXPAND):
-                tok = self._advance()
-                name_expr = self._bare_string(tok)
-            elif self._at(Ps1TokenKind.VARIABLE, Ps1TokenKind.SPLAT_VARIABLE):
+            if self._at(Ps1TokenKind.VARIABLE, Ps1TokenKind.SPLAT_VARIABLE):
                 name_expr = self._parse_variable()
             elif self._at(Ps1TokenKind.LBRACE):
                 name_expr = self._parse_script_block()
@@ -697,7 +717,7 @@ class Ps1Parser:
                         offset=offset, invocation_operator=invocation_operator)
                 return None
             else:
-                name_expr = self._bare_string(self._advance())
+                name_expr = self._parse_command_name()
 
             if invocation_operator and name_expr is not None:
                 with self._mode(Ps1LexerMode.EXPRESSION):
@@ -927,19 +947,33 @@ class Ps1Parser:
         A type name is read in expression mode no matter which mode the caller left behind: a
         generic token does not end at `]` in argument mode, so the closing bracket is absorbed into
         the name and the bracket depth never returns to zero.
+
+        The attempt costs nothing when it fails: `Ps1Parser._read_type_literal` gives up part way
+        through a `[` that never closes, and the read is rewound here rather than at each of the
+        callers, so a failure leaves the next read exactly where the bracket was found.
         """
         if not self._at(Ps1TokenKind.LBRACKET):
             return None
+        offset = self._current.offset
         with self._mode(Ps1LexerMode.EXPRESSION):
-            return self._read_type_literal()
+            literal = self._read_type_literal()
+        if literal is None:
+            self._resync(offset)
+        return literal
 
     def _read_type_literal(self) -> Ps1TypeExpression | None:
+        """
+        Read the `[ ]` of a type name, or nothing at all. A bracket that the source never closes is
+        not a type name, so everything that ends a statement or a block ends the attempt as well:
+        the alternative is a name that swallows the brace its block was waiting for, and with it
+        every statement that block still had to give.
+        """
         offset = self._current.offset
         self._advance()
         self._skip_newlines()
         name_parts: list[str] = []
         depth = 1
-        while not self._at(Ps1TokenKind.EOF):
+        while depth > 0:
             if self._at(Ps1TokenKind.RBRACKET):
                 depth -= 1
                 if depth == 0:
@@ -951,7 +985,10 @@ class Ps1Parser:
                 depth += 1
                 name_parts.append('[')
                 self._advance()
-            elif self._at(Ps1TokenKind.NEWLINE, Ps1TokenKind.SEMICOLON):
+            elif (
+                self._at(Ps1TokenKind.NEWLINE, Ps1TokenKind.SEMICOLON, Ps1TokenKind.RBRACE)
+                or self._at(Ps1TokenKind.EOF)
+            ):
                 return None
             else:
                 name_parts.append(self._current.value)
@@ -1571,12 +1608,13 @@ class Ps1Parser:
 
     def _parse_switch_clause_condition(self) -> Expression | None:
         """
-        Read one switch clause condition, which is a single command argument and not an expression:
-        the reference reaches it through `GetSingleCommandArgument(SwitchCondition)`, so `Get-Thing`
-        is one name there, as 5.1 reads it, and not a subtraction of `Thing` from `Get`.
+        Read one switch clause condition, which is a command argument and not an expression, so that
+        `Get-Thing` is one name there, as 5.1 reads it, and not a subtraction of `Thing` from `Get`.
+        A comma still joins several of them into one array, which is how `1,2 { ... }` matches two
+        values with one clause.
         """
         with self._mode(Ps1LexerMode.ARGUMENT):
-            return self._parse_single_argument_value()
+            return self._parse_argument_value()
 
     def _parse_switch(self, label: str | None = None) -> Ps1SwitchStatement:
         offset = self._current.offset
@@ -1877,6 +1915,7 @@ class Ps1Parser:
                     base_type = self._advance().value
                 self._skip_newlines()
             self._expect(Ps1TokenKind.LBRACE)
+        with self._mode(Ps1LexerMode.EXPRESSION):
             self._skip_newlines()
             while not self._at(Ps1TokenKind.RBRACE, Ps1TokenKind.EOF):
                 member = self._parse_enum_member()

@@ -8,6 +8,7 @@ from refinery.lib.scripts import Block, Statement
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.model import (
     Expression,
+    Ps1ArrayExpression,
     Ps1ArrayLiteral,
     Ps1BinaryExpression,
     Ps1BreakStatement,
@@ -18,6 +19,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ContinueStatement,
     Ps1DataSection,
     Ps1DoLoop,
+    Ps1EnumDefinition,
     Ps1ErrorNode,
     Ps1ExitStatement,
     Ps1ExpandableString,
@@ -26,6 +28,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ForEachLoop,
     Ps1ForLoop,
     Ps1FunctionDefinition,
+    Ps1HashLiteral,
+    Ps1HereString,
     Ps1IfStatement,
     Ps1IntegerLiteral,
     Ps1MergingRedirection,
@@ -36,6 +40,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
+    Ps1SubExpression,
     Ps1SwitchStatement,
     Ps1ThrowStatement,
     Ps1TrapStatement,
@@ -142,6 +147,25 @@ class TestPs1ParserStatements(TestBase):
         self.assertIsInstance(condition, Ps1StringLiteral)
         self.assertEqual(condition.value, '*.exe')
 
+    def test_switch_clause_condition_joins_comma_separated_values(self):
+        stmt = self._parse_stmt('switch ($x) { 1,2 { "either" } default { "other" } }')
+        self.assertIsInstance(stmt, Ps1SwitchStatement)
+        self.assertEqual(len(stmt.clauses), 2)
+        condition, _ = stmt.clauses[0]
+        self.assertIsInstance(condition, Ps1ArrayLiteral)
+        for element in condition.elements:
+            self.assertIsInstance(element, Ps1IntegerLiteral)
+        self.assertEqual([element.value for element in condition.elements], [1, 2])
+        self.assertIsNone(stmt.clauses[1][0])
+        bodies = []
+        for _, block in stmt.clauses:
+            self.assertEqual(len(block.body), 1)
+            statement = block.body[0]
+            self.assertIsInstance(statement, Ps1ExpressionStatement)
+            self.assertIsInstance(statement.expression, Ps1StringLiteral)
+            bodies.append(statement.expression.value)
+        self.assertEqual(bodies, ['either', 'other'])
+
     def test_switch_with_flags(self):
         stmt = self._parse_stmt('switch -Regex ($input) { "a*" { "matched" } }')
         self.assertIsInstance(stmt, Ps1SwitchStatement)
@@ -203,6 +227,15 @@ class TestPs1ParserStatements(TestBase):
         stmt = self._parse_stmt('function script:Initialize { }')
         self.assertIsInstance(stmt, Ps1FunctionDefinition)
         self.assertEqual(stmt.name, 'script:Initialize')
+
+    def test_enum_members_hold_their_values_without_spaces_around_the_equals_sign(self):
+        stmt = self._parse_stmt('enum E { A=1; B=2 }')
+        self.assertIsInstance(stmt, Ps1EnumDefinition)
+        self.assertEqual(stmt.name, 'E')
+        self.assertEqual([member.name for member in stmt.members], ['A', 'B'])
+        for member in stmt.members:
+            self.assertIsInstance(member.value, Ps1IntegerLiteral)
+        self.assertEqual([member.value.value for member in stmt.members], [1, 2])
 
     def test_return_statement(self):
         stmt = self._parse_stmt('return 42')
@@ -812,6 +845,179 @@ class TestPs1TypeLiteralOwnsItsLexerMode(TestBase):
         self.assertEqual(len(stmt.body.body), 1)
 
 
+class TestPs1ACommandNameKeepsTheStructureItSpells(TestBase):
+    """
+    A command runs what its name evaluates to, so `& $(Get-Command ls)` runs the command that the
+    sub-expression finds, and `dir | @{ a = 1 }` pipes into the hash literal it spells. A name that
+    collapses into the bare word its opening token spells keeps neither what stands inside it nor
+    the token that closes it, and the closing token is then left over where a statement should be.
+    """
+
+    def _parse(self, source: str) -> Ps1Script:
+        script = Ps1Parser(source).parse()
+        errors = [node.text for node in script.walk() if isinstance(node, Ps1ErrorNode)]
+        self.assertEqual(errors, [], source)
+        return script
+
+    def _invoked_name(self, source: str) -> Expression:
+        """
+        The name of the command that the call operator in `source` invokes.
+        """
+        script = self._parse(source)
+        self.assertEqual(len(script.body), 1)
+        statement = script.body[0]
+        self.assertIsInstance(statement, Ps1ExpressionStatement)
+        command = statement.expression
+        self.assertIsInstance(command, Ps1CommandInvocation)
+        self.assertEqual(command.invocation_operator, '&')
+        self.assertEqual(command.arguments, [])
+        return command.name
+
+    def test_a_sub_expression_names_the_command_it_yields(self):
+        name = self._invoked_name('& $(Get-Command ls)')
+        self.assertIsInstance(name, Ps1SubExpression)
+        self.assertEqual(len(name.body), 1)
+        statement = name.body[0]
+        self.assertIsInstance(statement, Ps1ExpressionStatement)
+        inner = statement.expression
+        self.assertIsInstance(inner, Ps1CommandInvocation)
+        self.assertIsInstance(inner.name, Ps1StringLiteral)
+        self.assertEqual(inner.name.value, 'Get-Command')
+        self.assertEqual(len(inner.arguments), 1)
+        argument = inner.arguments[0]
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.POSITIONAL)
+        self.assertIsInstance(argument.value, Ps1StringLiteral)
+        self.assertEqual(argument.value.value, 'ls')
+
+    def test_an_array_expression_names_the_command_it_yields(self):
+        name = self._invoked_name('& @(1, 2)')
+        self.assertIsInstance(name, Ps1ArrayExpression)
+        self.assertEqual(len(name.body), 1)
+        statement = name.body[0]
+        self.assertIsInstance(statement, Ps1ExpressionStatement)
+        self.assertIsInstance(statement.expression, Ps1ArrayLiteral)
+        elements = statement.expression.elements
+        for element in elements:
+            self.assertIsInstance(element, Ps1IntegerLiteral)
+        self.assertEqual([element.value for element in elements], [1, 2])
+
+    def test_a_here_string_names_the_command_it_spells(self):
+        name = self._invoked_name(inspect.cleandoc("""
+            & @'
+            notepad
+            '@
+        """))
+        self.assertIsInstance(name, Ps1HereString)
+        self.assertEqual(name.value, 'notepad')
+
+    def test_a_hash_literal_names_the_command_a_pipeline_reaches(self):
+        script = self._parse('dir | @{ a = 1 }')
+        self.assertEqual(len(script.body), 1)
+        statement = script.body[0]
+        self.assertIsInstance(statement, Ps1ExpressionStatement)
+        pipeline = statement.expression
+        self.assertIsInstance(pipeline, Ps1Pipeline)
+        self.assertEqual(len(pipeline.elements), 2)
+        command = pipeline.elements[1].expression
+        self.assertIsInstance(command, Ps1CommandInvocation)
+        self.assertEqual(command.arguments, [])
+        self.assertIsInstance(command.name, Ps1HashLiteral)
+        self.assertEqual(len(command.name.pairs), 1)
+        key, value = command.name.pairs[0]
+        self.assertIsInstance(key, Ps1StringLiteral)
+        self.assertEqual(key.value, 'a')
+        self.assertIsInstance(value, Ps1IntegerLiteral)
+        self.assertEqual(value.value, 1)
+
+
+class TestPs1AnArgumentThatIsNoExpressionLeavesTheTerminator(TestBase):
+    """
+    `Write-Host [` prints a bracket: the argument is the word the bracket spells, and the newline or
+    the semicolon behind it still ends the statement. An argument reader that keeps the terminator
+    for itself reads the statement behind it as more of its own arguments, and inside a script block
+    it takes the closing brace along, so the block ends where the script does.
+    """
+
+    @staticmethod
+    def _parse(source: str) -> Ps1Script:
+        return Ps1Parser(source).parse()
+
+    def _command_of(self, statement: Statement) -> Ps1CommandInvocation:
+        self.assertIsInstance(statement, Ps1ExpressionStatement)
+        command = statement.expression
+        self.assertIsInstance(command, Ps1CommandInvocation)
+        return command
+
+    def _assertTheBracketIsTheOnlyArgument(self, statement: Statement):
+        command = self._command_of(statement)
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, 'Write-Host')
+        self.assertEqual(len(command.arguments), 1)
+        argument = command.arguments[0]
+        self.assertIsInstance(argument, Ps1CommandArgument)
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.POSITIONAL)
+        self.assertIsInstance(argument.value, Ps1StringLiteral)
+        self.assertEqual(argument.value.value, '[')
+
+    def _assertIsCommandNamed(self, statement: Statement, name: str):
+        command = self._command_of(statement)
+        self.assertIsInstance(command.name, Ps1StringLiteral)
+        self.assertEqual(command.name.value, name)
+
+    def _block_of(self, statement: Statement) -> Ps1ScriptBlock:
+        command = self._command_of(statement)
+        self.assertEqual(command.invocation_operator, '&')
+        self.assertIsInstance(command.name, Ps1ScriptBlock)
+        return command.name
+
+    def test_a_newline_behind_the_bracket_ends_the_statement(self):
+        script = self._parse(inspect.cleandoc("""
+            Write-Host [
+            Get-Date
+            Write-Host 'keep'
+        """))
+        self.assertEqual(len(script.body), 3)
+        self._assertTheBracketIsTheOnlyArgument(script.body[0])
+        self._assertIsCommandNamed(script.body[1], 'Get-Date')
+        self._assertIsCommandNamed(script.body[2], 'Write-Host')
+
+    def test_a_semicolon_behind_the_bracket_ends_the_statement(self):
+        script = self._parse(inspect.cleandoc("""
+            Write-Host [; Get-Date
+            Write-Host 'keep'
+        """))
+        self.assertEqual(len(script.body), 3)
+        self._assertTheBracketIsTheOnlyArgument(script.body[0])
+        self._assertIsCommandNamed(script.body[1], 'Get-Date')
+        self._assertIsCommandNamed(script.body[2], 'Write-Host')
+
+    def test_a_newline_behind_the_bracket_in_a_block_leaves_the_brace_to_the_block(self):
+        script = self._parse(inspect.cleandoc("""
+            & { Write-Host [
+            Get-Date }
+            Write-Host 'keep'
+        """))
+        self.assertEqual(len(script.body), 2)
+        block = self._block_of(script.body[0])
+        self.assertEqual(len(block.body), 2)
+        self._assertTheBracketIsTheOnlyArgument(block.body[0])
+        self._assertIsCommandNamed(block.body[1], 'Get-Date')
+        self._assertIsCommandNamed(script.body[1], 'Write-Host')
+
+    def test_a_semicolon_behind_the_bracket_in_a_block_leaves_the_brace_to_the_block(self):
+        script = self._parse(inspect.cleandoc("""
+            & { Write-Host [; Get-Date }
+            Write-Host 'keep'
+        """))
+        self.assertEqual(len(script.body), 2)
+        block = self._block_of(script.body[0])
+        self.assertEqual(len(block.body), 2)
+        self._assertTheBracketIsTheOnlyArgument(block.body[0])
+        self._assertIsCommandNamed(block.body[1], 'Get-Date')
+        self._assertIsCommandNamed(script.body[1], 'Write-Host')
+
+
 _ON_THE_NEXT_LINE = inspect.cleandoc("""
     Get-Date
     BODY
@@ -1260,3 +1466,76 @@ class TestPs1EveryStatementOwnsItsLexerMode(TestBase):
         self.assertEqual(program.name.value, r'.\a.ps1')
         self.assertEqual(program.arguments, [])
         self.assertEqual(sourced.arguments, [])
+
+
+_CONDITION_POSITIONS = {
+    'in an if condition'      : 'if (NAME) { Get-Date }',
+    'in an elseif condition'  : 'if ($false) { Get-Date } elseif (NAME) { Get-Date }',
+    'in a while condition'    : 'while (NAME) { Get-Date }',
+    'in a do while condition' : 'do { Get-Date } while (NAME)',
+    'in a do until condition' : 'do { Get-Date } until (NAME)',
+}
+
+
+@_one_test_per_position
+class TestPs1AConditionReadsACommandNameWhole(TestBase):
+    """
+    The parentheses of an `if`, a `while` or a `do` hold a pipeline, and a command name runs to
+    whitespace there exactly as it does at a statement start, so `if (Exit-PSSession) { ... }` tests
+    what that one command returns. A parser that reads the leading keyword as the statement it
+    spells ends the condition at the keyword and reads the rest, the body block included, as
+    something else, which leaves a script that no longer branches on what it was written to test.
+    """
+
+    def _condition_at(self, template: str, name: str) -> Expression:
+        """
+        The condition that `name` becomes once it is substituted into `template`. The body blocks
+        are read here as well, because a condition that ends before its closing parenthesis takes
+        the block behind it along, and a tree that lost its body still holds a condition to return.
+        """
+        source = template.replace('NAME', name)
+        script = Ps1Parser(source).parse()
+        errors = [node.text for node in script.walk() if isinstance(node, Ps1ErrorNode)]
+        self.assertEqual(errors, [], source)
+        self.assertEqual(len(script.body), 1, source)
+        for block in script.walk():
+            if not isinstance(block, Block):
+                continue
+            self.assertEqual(len(block.body), 1, source)
+            statement = block.body[0]
+            self.assertIsInstance(statement, Ps1ExpressionStatement, source)
+            body = statement.expression
+            self.assertIsInstance(body, Ps1CommandInvocation, source)
+            self.assertIsInstance(body.name, Ps1StringLiteral, source)
+            self.assertEqual(body.name.value, 'Get-Date', source)
+        start = template.index('NAME')
+        end = start + len(name)
+        for node in script.walk():
+            if isinstance(node, Ps1IfStatement):
+                conditions = [condition for condition, _ in node.clauses]
+            elif isinstance(node, (Ps1WhileLoop, Ps1DoLoop)):
+                conditions = [node.condition]
+            else:
+                continue
+            for condition in conditions:
+                if condition is not None and start <= condition.offset <= end:
+                    return condition
+        raise AssertionError(F'{name} is no condition of its own in {source}')
+
+    def _assertEveryNameIsOneCommandCondition(self, template: str, names: list[str]):
+        for name in names:
+            with self.subTest(name=name):
+                condition = self._condition_at(template, name)
+                self.assertIsInstance(condition, Ps1CommandInvocation)
+                self.assertIsInstance(condition.name, Ps1StringLiteral)
+                self.assertEqual(condition.name.value, name)
+                self.assertEqual(condition.invocation_operator, '')
+                self.assertEqual(condition.arguments, [])
+
+    @_at_every_position(_CONDITION_POSITIONS)
+    def check_a_keyword_prefixed_name_is_one_command(self, template: str):
+        self._assertEveryNameIsOneCommandCondition(template, _KEYWORD_PREFIXED_NAMES)
+
+    @_at_every_position(_CONDITION_POSITIONS)
+    def check_a_measured_keyword_prefixed_name_is_one_command(self, template: str):
+        self._assertEveryNameIsOneCommandCondition(template, _MEASURED_KEYWORD_PREFIXED_NAMES)
