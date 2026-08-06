@@ -31,6 +31,7 @@ from typing import Iterator
 
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.ast import (
+    argument_text,
     bound_argument_value,
     free_positional_values,
     resolve_command_name,
@@ -235,12 +236,17 @@ def _subject_name(cmd: Ps1CommandInvocation, command: str, parameter: str) -> st
     The positional fallback skips the arguments a preceding value-taking switch consumed, which is
     what tells `Set-Variable -Scope Global x 5` — where the name is `x` — from a reading of the
     argument list that would call it `Global`.
+
+    A name written as a number is a literal like any other and is read through
+    `refinery.lib.scripts.ps1.ast.argument_text`. Reading it with `string_value` answers `None`,
+    which says the name is *computed* and puts every binding in the enclosing scope in doubt over a
+    name that is sitting in the source.
     """
     explicit = bound_argument_value(cmd, parameter)
     if explicit is not None:
-        return string_value(explicit)
+        return argument_text(explicit)
     for value in free_positional_values(cmd, command):
-        return string_value(value)
+        return argument_text(value)
     return None
 
 

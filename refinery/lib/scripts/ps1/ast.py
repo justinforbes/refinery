@@ -30,10 +30,12 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1HereString,
+    Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1ParamBlock,
     Ps1ParenExpression,
+    Ps1RealLiteral,
     Ps1ScopeModifier,
     Ps1ScriptBlock,
     Ps1StringLiteral,
@@ -221,6 +223,21 @@ def string_value(node: Node | None) -> str | None:
         if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
             return string_value(stmt.expression)
     return None
+
+
+def argument_text(node: Node | None) -> str | None:
+    """
+    The text PowerShell reads a command argument as, or `None` for an argument that is not a literal.
+
+    It differs from `string_value` for a number, which is read as the text it is written as and not
+    as the text of the value it denotes. Measured at runtime on 5.1, over every numeric spelling the
+    language has: `Set-Variable 007 v` creates `$007`, `0x10` creates `$0x10`, `1.50` creates
+    `$1.50`, `1e3` creates `$1e3`, `2kb` creates `$2kb` and `10L` creates `$10L`. Reading the value
+    instead names variables the script never mentions and misses the ones it does.
+    """
+    if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
+        return node.raw
+    return string_value(node)
 
 
 def unwrap_parens(node: Node) -> Node:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inspect import cleandoc
+
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
 from refinery.lib.scripts.ps1.deobfuscation import Ps1WildcardResolution
@@ -332,3 +334,70 @@ class TestPs1VariableCommandScope(TestPs1):
         ):
             with self.subTest(source):
                 self.assertEqual(self._apply(source, Ps1WildcardResolution), expected)
+
+
+class TestPs1NumberedVariableNames(TestPs1):
+    """
+    Measured on 5.1 by comparing the variables a line creates against the ones that existed before
+    it ran: `Set-Variable 007 v` creates `007`, `Set-Variable 0x10 v` creates `0x10` and
+    `Set-Variable 1_000 v` creates `1_000`. A number in command-argument position becomes the text
+    it is written as, never the text of the value it denotes — `007` is not `7` and `0x10` is not
+    `16`. Naming the value instead invents a variable the script never mentions and leaves the one
+    it does mention unresolved.
+    """
+
+    def test_a_read_spelled_the_way_the_name_was_written_resolves(self):
+        for written in ('007', '0x10', '1_000'):
+            with self.subTest(written):
+                result = self._deobfuscate(cleandoc(F"""
+                    Set-Variable {written} 'payload'
+                    ${written}
+                """), remove_junk=False)
+                self.assertEqual(result.strip(), "'payload'")
+
+    def test_a_read_spelled_as_the_value_the_number_denotes_does_not_resolve(self):
+        for written, denoted in (('007', '7'), ('0x10', '16'), ('1_000', '1000')):
+            with self.subTest(written):
+                result = self._deobfuscate(cleandoc(F"""
+                    Set-Variable {written} 'payload'
+                    ${denoted}
+                """), remove_junk=False)
+                self.assertEqual(result.strip(), cleandoc(F"""
+                    ${written} = 'payload'
+                    ${denoted}
+                """))
+
+    def test_the_assignment_a_write_becomes_targets_the_text_the_number_was_written_as(self):
+        for source, expected in (
+            ("Set-Variable 007 'v'", "$007 = 'v'"),
+            ("Set-Variable 0x10 'v'", "$0x10 = 'v'"),
+            ("Set-Variable 1_000 'v'", "$1_000 = 'v'"),
+            ("Set-Variable -Name 0x10 -Value 'v'", "$0x10 = 'v'"),
+            ("Set-Item Variable:0x10 'v'", "$0x10 = 'v'"),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1WildcardResolution), expected)
+
+    def test_the_reference_a_read_becomes_names_the_text_the_number_was_written_as(self):
+        for source, expected in (
+            ('Get-Variable 007 -ValueOnly', '$007'),
+            ('Get-Variable 0x10 -ValueOnly', '$0x10'),
+            ('Get-Variable 1_000 -ValueOnly', '$1_000'),
+            ('(Get-Item Variable:0x10).Value', '$0x10'),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1WildcardResolution), expected)
+
+    def test_the_value_property_names_what_the_ValueOnly_spelling_names(self):
+        """
+        `Get-Variable 0x10 -ValueOnly` and `(Get-Variable 0x10).Value` read the same variable, so
+        the two spellings have to agree on which one that is.
+        """
+        self.assertEqual(
+            self._apply('Get-Variable 0x10 -ValueOnly', Ps1WildcardResolution), '$0x10')
+        self.assertEqual(
+            self._apply('(Get-Variable 0x10).Value', Ps1WildcardResolution), '$0x10')
+
+    def test_the_name_property_is_the_text_the_number_was_written_as(self):
+        self.assertEqual(
+            self._apply('(Get-Variable 0x10).Name', Ps1WildcardResolution), "'0x10'")

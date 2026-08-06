@@ -16,6 +16,7 @@ from typing import Iterable
 
 from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
 from refinery.lib.scripts.ps1.ast import (
+    argument_text,
     binds_parameter,
     free_positional_values,
     get_command_name,
@@ -43,7 +44,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1ExpressionStatement,
-    Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1ParenExpression,
@@ -61,18 +61,6 @@ _SET_ITEM_COMMANDS = frozenset({'set-item', 'si'})
 _SET_VARIABLE_COMMANDS = frozenset({'set-variable', 'sv', 'set'})
 _WHERE_OBJECT_ALIASES = frozenset({'?', 'where', 'where-object'})
 _LIKE_OPERATORS = frozenset({'-like', '-ilike', '-clike'})
-
-
-def _variable_name_value(node: Expression) -> str | None:
-    """
-    Extract a variable name from a command argument. PowerShell coerces a number in argument
-    position to the text it is written as, not to the text of the value it denotes: measured on 5.1,
-    `Set-Variable 007 v` creates `$007` and `Set-Variable 0x10 v` creates `$0x10`. Reading the value
-    instead names variables that the script never mentions and misses the ones it does.
-    """
-    if isinstance(node, Ps1IntegerLiteral):
-        return node.raw
-    return string_value(node)
 
 
 def _is_wildcard(pattern: str) -> bool:
@@ -285,14 +273,15 @@ def _subject_argument_value(
     """
     The literal name *cmd* is about, written either as `-Name x` / `-Path x` or as the first
     argument it binds by position, or `None` when it is not a literal this can read. The same
-    reading `refinery.lib.scripts.ps1.analysis.naming` takes, so the two layers agree on which
-    argument a variable command names.
+    reading `refinery.lib.scripts.ps1.analysis.naming` takes, down to
+    `refinery.lib.scripts.ps1.ast.argument_text`, so the two layers agree on which argument a
+    variable command names *and* on what it is called.
     """
     explicit = bound_argument_value(cmd, parameter)
     if explicit is not None:
-        return string_value(explicit)
+        return argument_text(explicit)
     for value in free_positional_values(cmd, command):
-        return string_value(value)
+        return argument_text(value)
     return None
 
 
@@ -510,7 +499,7 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
             if not positionals:
                 return None
             name_expr = positionals[0]
-        arg_value = _variable_name_value(name_expr)
+        arg_value = argument_text(name_expr)
         if arg_value is None:
             return None
         resolved = _resolve_variable_name(arg_value)
@@ -648,9 +637,9 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
         positionals = free_positional_values(node, command)
         name_expr = bound_argument_value(node, 'name')
         if name_expr is not None:
-            var_name = _variable_name_value(name_expr)
+            var_name = argument_text(name_expr)
         elif positionals:
-            var_name = _variable_name_value(positionals[0])
+            var_name = argument_text(positionals[0])
             positionals = positionals[1:]
         else:
             return None
