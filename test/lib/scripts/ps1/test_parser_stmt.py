@@ -118,6 +118,30 @@ class TestPs1ParserStatements(TestBase):
         self.assertEqual(cond.value, 'return')
         self.assertIsNone(stmt.clauses[1][0])
 
+    def test_switch_clause_condition_is_one_command_argument(self):
+        """
+        A clause condition is read the way a command reads its argument, so `Get-Thing` is the one
+        string the clause matches. Read as an expression instead, the dash is a subtraction and the
+        clause matches whatever `Get` minus `Thing` evaluates to.
+        """
+        stmt = self._parse_stmt('switch ($x) { Get-Thing { 1 } Set-Thing { 2 } 1+2 { 3 } }')
+        self.assertIsInstance(stmt, Ps1SwitchStatement)
+        conditions = [condition for condition, _ in stmt.clauses]
+        for condition in conditions:
+            self.assertIsInstance(condition, Ps1StringLiteral)
+        self.assertEqual(
+            [condition.value for condition in conditions], ['Get-Thing', 'Set-Thing', '1+2'])
+        self.assertEqual(
+            [node for node in stmt.walk() if isinstance(node, Ps1BinaryExpression)], [])
+
+    def test_switch_clause_condition_keeps_a_wildcard_whole(self):
+        stmt = self._parse_stmt('switch -Wildcard ($x) { *.exe { 1 } }')
+        self.assertIsInstance(stmt, Ps1SwitchStatement)
+        self.assertEqual(len(stmt.clauses), 1)
+        condition, _ = stmt.clauses[0]
+        self.assertIsInstance(condition, Ps1StringLiteral)
+        self.assertEqual(condition.value, '*.exe')
+
     def test_switch_with_flags(self):
         stmt = self._parse_stmt('switch -Regex ($input) { "a*" { "matched" } }')
         self.assertIsInstance(stmt, Ps1SwitchStatement)
@@ -848,6 +872,77 @@ _PARAM_POSITIONS = {
 }
 
 
+_KEYWORDS = [
+    'begin',
+    'break',
+    'catch',
+    'class',
+    'continue',
+    'data',
+    'define',
+    'do',
+    'dynamicparam',
+    'else',
+    'elseif',
+    'end',
+    'enum',
+    'exit',
+    'filter',
+    'finally',
+    'for',
+    'foreach',
+    'from',
+    'function',
+    'hidden',
+    'if',
+    'in',
+    'inlinescript',
+    'parallel',
+    'param',
+    'process',
+    'return',
+    'sequence',
+    'static',
+    'switch',
+    'throw',
+    'trap',
+    'try',
+    'until',
+    'using',
+    'var',
+    'while',
+    'workflow',
+]
+"""
+The reserved words that `about_Language_Keywords` lists for PowerShell 5.1.
+"""
+
+
+def _one_name_per_keyword(pattern: str) -> list[str]:
+    return [pattern.format(keyword) for keyword in _KEYWORDS]
+
+
+_NAMES_JOINED_BY_A_DASH = _one_name_per_keyword('{}-Object')
+_NAMES_JOINED_BY_A_DOT = _one_name_per_keyword('{}.exe')
+_NAMES_JOINED_BY_A_BACKSLASH = _one_name_per_keyword(R'{}\run.exe')
+_NAMES_JOINED_BY_NOTHING = _one_name_per_keyword('{}er')
+
+_KEYWORD_PREFIXED_NAMES = [
+    *_NAMES_JOINED_BY_A_DASH,
+    *_NAMES_JOINED_BY_A_DOT,
+    *_NAMES_JOINED_BY_A_BACKSLASH,
+    *_NAMES_JOINED_BY_NOTHING,
+]
+
+_MEASURED_KEYWORD_PREFIXED_NAMES = [
+    'Exit-PSSession',
+    'end.bat',
+    'process.exe',
+    'class.ps1',
+    'ForEach-Object',
+]
+
+
 def _at_every_position(positions: dict[str, str]):
     """
     Marks a check for expansion by `_one_test_per_position` into one test per entry of `positions`.
@@ -892,9 +987,11 @@ class TestPs1EveryStatementOwnsItsLexerMode(TestBase):
     every check here. `_one_test_per_position` runs each check in every position a statement can
     stand in, as a test of its own.
 
-    Command names that begin with a keyword are excluded. `Exit-PSSession`, `Break-Glass` and
-    `Return-Value` currently parse as an exit, a break and a return; that defect is recorded
-    elsewhere and is not what these tests are about.
+    A command name runs to whitespace, so a name that merely begins with a keyword is a name and
+    not the statement its first letters spell. The character that joins the keyword to the rest of
+    the name is varied independently of the keyword, because a parser that only recognizes the
+    dashed form reads `Exit-PSSession` as a command and still loses `end.bat` and `process.exe`
+    entirely.
     """
 
     def _statement_at(self, template: str, body: str) -> Statement:
@@ -1085,6 +1182,49 @@ class TestPs1EveryStatementOwnsItsLexerMode(TestBase):
         self.assertIsInstance(inner, Ps1ExpressionStatement)
         self.assertIsInstance(inner.expression, Ps1IntegerLiteral)
         self.assertEqual(inner.expression.value, 1)
+
+    def _assertEveryNameIsOneBareCommand(self, template: str, names: list[str]):
+        for name in names:
+            with self.subTest(name=name):
+                command = self._command_at(template, name)
+                self.assertIsInstance(command.name, Ps1StringLiteral)
+                self.assertEqual(command.name.value, name)
+                self.assertEqual(command.invocation_operator, '')
+                self.assertEqual(command.arguments, [])
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_keyword_joined_to_a_name_by_a_dash_is_a_command_name(self, template: str):
+        self._assertEveryNameIsOneBareCommand(template, _NAMES_JOINED_BY_A_DASH)
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_keyword_joined_to_a_name_by_a_dot_is_a_command_name(self, template: str):
+        self._assertEveryNameIsOneBareCommand(template, _NAMES_JOINED_BY_A_DOT)
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_keyword_joined_to_a_name_by_a_backslash_is_a_command_name(self, template: str):
+        self._assertEveryNameIsOneBareCommand(template, _NAMES_JOINED_BY_A_BACKSLASH)
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_keyword_joined_to_a_name_by_nothing_is_a_command_name(self, template: str):
+        self._assertEveryNameIsOneBareCommand(template, _NAMES_JOINED_BY_NOTHING)
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_measured_keyword_prefixed_name_is_a_command_name(self, template: str):
+        self._assertEveryNameIsOneBareCommand(template, _MEASURED_KEYWORD_PREFIXED_NAMES)
+
+    @_at_every_position(_STATEMENT_POSITIONS)
+    def check_a_keyword_prefixed_name_heads_the_command_the_block_belongs_to(self, template: str):
+        for name in _KEYWORD_PREFIXED_NAMES:
+            with self.subTest(name=name):
+                command = self._command_at(template, F'{name} {{ $_ }}')
+                self.assertIsInstance(command.name, Ps1StringLiteral)
+                self.assertEqual(command.name.value, name)
+                self.assertEqual(command.invocation_operator, '')
+                self.assertEqual(len(command.arguments), 1)
+                argument = command.arguments[0]
+                self.assertIsInstance(argument, Ps1CommandArgument)
+                self.assertEqual(argument.kind, Ps1CommandArgumentKind.POSITIONAL)
+                self.assertIsInstance(argument.value, Ps1ScriptBlock)
 
     @_at_every_position(_PARAM_POSITIONS)
     def check_a_typed_parameter_declaration_leaves_the_body_in_expression_mode(self, template: str):

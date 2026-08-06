@@ -626,18 +626,25 @@ class TestPs1Corruptions(TestPs1):
 
     def test_percent_invokes_foreach_object_with_a_script_block(self):
         """
-        `% { $_ }` is one command under 5.1, named `%`, which `Get-Alias` resolves to
-        ForEach-Object, and the block is its argument. This entry is asked of the tree the tool
-        reads rather than of the one it writes, because what it writes for the alias is
-        `ForEach-Object { ... }`, which the entry below shows it cannot read back.
+        `% { Write-Host 1 }` is one command under 5.1, named `%`, which `Get-Alias` resolves to
+        ForEach-Object, and the block is its argument. The tool writes the alias out in full as
+        `ForEach-Object { ... }`, so this entry is asked of the output: read back as the loop
+        keyword that name begins with, the same block is written again as `foreach ( in -Object)
+        { ... }`, which 5.1 refuses to parse at all.
         """
-        commands = _commands(Ps1Parser('% { $_ }').parse())
+        tree = self._deobfuscated_tree('% { Write-Host 1 }')
+        self.assertFalse(
+            [node for node in tree.walk() if isinstance(node, Ps1ForEachLoop)],
+            'the alias became the loop keyword its expansion begins with',
+        )
+        commands = _invocations(tree, _FOREACH_OBJECT)
         self.assertEqual(len(commands), 1, 'the alias and its block were read as several commands')
-        self.assertEqual(_literal_value(commands[0].name), '%', 'the command name is not the alias')
         arguments = _argument_values(commands[0])
         self.assertEqual(len(arguments), 1, 'the command was left with more than the block')
         self.assertIsInstance(
             arguments[0], Ps1ScriptBlock, 'the block is not an argument of the command')
+        self.assertEqual(
+            _printed_values(tree), {1}, 'the block no longer prints what it was given to print')
 
     def test_command_name_beginning_with_a_keyword_stays_a_command(self):
         """

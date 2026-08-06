@@ -559,3 +559,78 @@ class TestPs1ParserExpressions(TestBase):
         script = Ps1Parser("echo a'b c'd").parse()
         values = [n.value for n in script.walk() if isinstance(n, Ps1StringLiteral)]
         self.assertEqual(values, ['ab cd', 'echo'])
+
+
+class TestPs1MemberAccessBindsOnlyToWhatItTouches(TestBase):
+    """
+    A member access is written with the dot against its object: 5.1 reads `$a.Length` as a property
+    and `$a . Length` as three elements of a command, and it refuses `('a')    .('Length')` outright
+    with `Unexpected token '.'`. A block comment is not whitespace and separates nothing.
+
+    A dot that binds across whitespace turns a script 5.1 refuses to run, or runs as a command, into
+    a property read that looks deliberate, and nothing in the output marks the difference.
+    """
+
+    @staticmethod
+    def _parse(source: str) -> Ps1Script:
+        return Ps1Parser(source).parse()
+
+    @staticmethod
+    def _member_accesses(script: Ps1Script) -> list[Ps1MemberAccess | Ps1InvokeMember]:
+        return [
+            node for node in script.walk()
+            if isinstance(node, (Ps1MemberAccess, Ps1InvokeMember))
+        ]
+
+    def _assertLengthIsAPropertyOfTheVariable(self, source: str):
+        accesses = self._member_accesses(self._parse(source))
+        self.assertEqual(len(accesses), 1, source)
+        access = accesses[0]
+        self.assertIsInstance(access, Ps1MemberAccess)
+        self.assertIsInstance(access.object, Ps1Variable)
+        self.assertEqual(access.object.name, 'a')
+        self.assertEqual(access.member, 'Length')
+
+    def test_a_dot_touching_the_object_and_the_member_is_a_member_access(self):
+        self._assertLengthIsAPropertyOfTheVariable('$a.Length')
+
+    def test_a_block_comment_does_not_separate_the_member_from_its_object(self):
+        self._assertLengthIsAPropertyOfTheVariable('$a<# does this separate? #>.Length')
+
+    def test_a_dot_touching_the_object_and_the_method_is_a_method_call(self):
+        calls = self._member_accesses(self._parse('$a.Substring(1)'))
+        self.assertEqual(len(calls), 1)
+        self.assertIsInstance(calls[0], Ps1InvokeMember)
+        self.assertEqual(calls[0].member, 'Substring')
+
+    def test_whitespace_before_the_dot_leaves_the_member_a_word_of_its_own(self):
+        """
+        `$a . Length` reads no property: `$a` keeps the value it had and `Length` stands on its own.
+        The three elements are asserted rather than the command 5.1 makes of them, because the
+        parser groups them differently, and how a lone dot is grouped is a defect of its own.
+        """
+        script = self._parse('$a . Length')
+        variables = [node.name for node in script.walk() if isinstance(node, Ps1Variable)]
+        words = [node.value for node in script.walk() if isinstance(node, Ps1StringLiteral)]
+        self.assertEqual(
+            self._member_accesses(script), [], 'the spaced dot bound the word to the variable')
+        self.assertEqual(variables, ['a'])
+        self.assertEqual(words, ['Length'])
+
+    def test_whitespace_before_the_dot_of_a_method_call_reads_no_member(self):
+        self.assertEqual(self._member_accesses(self._parse('$a .Substring(1)')), [])
+
+    def test_a_block_comment_does_not_separate_a_computed_member_from_its_object(self):
+        accesses = self._member_accesses(self._parse("('a')<# does this separate? #>.('Length')"))
+        self.assertEqual(len(accesses), 1)
+        access = accesses[0]
+        self.assertIsInstance(access, Ps1MemberAccess)
+        self.assertIsInstance(access.object, Ps1ParenExpression)
+        self.assertIsInstance(access.member, Ps1ParenExpression)
+
+    def test_whitespace_before_a_computed_member_reads_no_member(self):
+        """
+        5.1 refuses `('a')    .('Length')` with `Unexpected token '.'`, so nothing in that script
+        runs at all; a member read there is one no execution of it ever performs.
+        """
+        self.assertEqual(self._member_accesses(self._parse("('a')    .('Length')")), [])
