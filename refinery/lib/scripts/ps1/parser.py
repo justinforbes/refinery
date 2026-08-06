@@ -15,6 +15,7 @@ from refinery.lib.scripts.ps1.lexer import (
 )
 from refinery.lib.scripts.ps1.model import (
     Expression,
+    Node,
     Ps1AccessKind,
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
@@ -171,16 +172,6 @@ _VARIABLE_FRAG = re.compile(
 )
 
 _MERGING_PATTERN = re.compile(r'(\d|\*)?>&(\d)')
-
-_ASSIGNMENT_RHS_STATEMENT_KINDS = frozenset({
-    Ps1TokenKind.IF,
-    Ps1TokenKind.WHILE,
-    Ps1TokenKind.DO,
-    Ps1TokenKind.FOR,
-    Ps1TokenKind.FOREACH,
-    Ps1TokenKind.SWITCH,
-    Ps1TokenKind.TRY,
-})
 
 _MULTIPLIER_SUFFIXES = {
     'kb': 1024,
@@ -568,7 +559,7 @@ class Ps1Parser:
         return self._parse_pipeline_or_assignment()
 
     def _parse_pipeline_or_assignment(self) -> Statement | None:
-        expr = self._parse_pipeline_expression(statement_position=True)
+        expr = self._parse_pipeline_expression(keyword_names_a_command=True)
         if expr is None:
             if self._at(Ps1TokenKind.EOF, Ps1TokenKind.RBRACE, Ps1TokenKind.RPAREN):
                 return None
@@ -579,7 +570,7 @@ class Ps1Parser:
             )
         return Ps1ExpressionStatement(offset=expr.offset, expression=expr)
 
-    def _parse_pipeline_expression(self, *, statement_position: bool = False) -> Expression | None:
+    def _parse_pipeline_expression(self, *, keyword_names_a_command: bool = False) -> Expression | None:
         """
         Read one pipeline. Whether it opens with a command or with an expression is decided here and
         nowhere else, which is what keeps the decision out of the hands of whatever was parsed
@@ -588,14 +579,15 @@ class Ps1Parser:
         what makes scanning it speculatively safe — `_parse_command` re-scans in argument mode before
         it reads a name.
 
-        A keyword kind is a command name only in `statement_position`, where `_parse_statement` has
-        already declined to treat it as one; anywhere else — an assignment right-hand side, a `for`
-        clause, the operand of `return` — the keyword still opens a statement, and taking it for a
-        name loses that statement whole.
+        A keyword kind spells a command name only where nothing above will read it as a statement:
+        at a statement start, where `_parse_statement` has already declined, and inside `( )`, which
+        holds a pipeline and never a statement. Everywhere else — a `for` clause, the operand of
+        `return` — the keyword still opens a statement, and taking it for a name loses that
+        statement whole.
         """
         with self._mode(Ps1LexerMode.EXPRESSION):
             starts_command = self._current.kind in _COMMAND_START_KINDS or (
-                statement_position and self._current.kind.is_keyword)
+                keyword_names_a_command and self._current.kind.is_keyword)
             if starts_command:
                 first = self._parse_command()
                 if first is None:
@@ -604,16 +596,36 @@ class Ps1Parser:
             expr = self._parse_expression()
             if expr is None:
                 return None
-            if self._current.kind.is_assignment:
-                op = self._advance()
-                self._skip_newlines()
-                if self._current.kind in _ASSIGNMENT_RHS_STATEMENT_KINDS:
-                    rhs = self._parse_statement()
-                else:
-                    rhs = self._parse_pipeline_expression()
-                expr = Ps1AssignmentExpression(
-                    offset=expr.offset, target=expr, operator=op.value, value=rhs)
-            return self._parse_pipeline_tail(expr)
+            operator = self._eat_assignment()
+        if operator is not None:
+            self._skip_newlines()
+            expr = Ps1AssignmentExpression(
+                offset=expr.offset,
+                target=expr,
+                operator=operator.value,
+                value=self._parse_assigned_value(),
+            )
+        return self._parse_pipeline_tail(expr)
+
+    def _eat_assignment(self) -> Ps1Token | None:
+        if self._current.kind.is_assignment:
+            return self._advance()
+        return None
+
+    def _parse_assigned_value(self) -> Node | None:
+        """
+        Read what an assignment assigns. It is a whole statement, so `$x = if ($c) { 1 }` and
+        `$x = data { 1 }` are read alike and no list of the keywords worth allowing has to be kept.
+        A statement that is only an expression is unwrapped again, because an assignment whose value
+        is an expression is what the rest of the code reads. An assignment with nothing after it is
+        left without a value rather than being given the token that ends it.
+        """
+        if self._is_statement_terminator():
+            return None
+        statement = self._parse_statement()
+        if type(statement) is Ps1ExpressionStatement:
+            return statement.expression
+        return statement
 
     def _parse_pipeline_tail(self, expr: Expression) -> Expression:
         if self._at(Ps1TokenKind.PIPE):
@@ -771,7 +783,8 @@ class Ps1Parser:
         return None
 
     def _parse_expression(self) -> Expression | None:
-        return self._parse_binary_expression(0)
+        with self._mode(Ps1LexerMode.EXPRESSION):
+            return self._parse_binary_expression(0)
 
     def _current_binary_precedence(self) -> int | None:
         if self._current.kind == Ps1TokenKind.DOTDOT:
@@ -1298,9 +1311,9 @@ class Ps1Parser:
         offset = self._current.offset
         self._expect(Ps1TokenKind.LPAREN)
         self._skip_newlines()
-        with self._mode(Ps1LexerMode.EXPRESSION):
+        with self._mode(Ps1LexerMode.ARGUMENT):
             with self._comma_mode(disabled=False):
-                expr = self._parse_pipeline_expression()
+                expr = self._parse_pipeline_expression(keyword_names_a_command=True)
             self._skip_newlines()
             self._expect(Ps1TokenKind.RPAREN)
         return Ps1ParenExpression(offset=offset, expression=expr)
@@ -1313,7 +1326,7 @@ class Ps1Parser:
         offset = self._current.offset
         self._expect(open_kind)
         self._skip_newlines()
-        with self._mode(Ps1LexerMode.EXPRESSION):
+        with self._mode(Ps1LexerMode.ARGUMENT):
             with self._comma_mode(disabled=False):
                 stmts = self._parse_statement_list(until=Ps1TokenKind.RPAREN)
             self._skip_newlines()
@@ -1349,13 +1362,15 @@ class Ps1Parser:
             self._skip_newlines()
             if self._at(Ps1TokenKind.RBRACE):
                 break
-            key = self._parse_label_or_key()
-            if key is None:
-                break
-            self._skip_newlines()
-            self._expect(Ps1TokenKind.EQUALS)
-            self._skip_newlines()
-            value = self._parse_pipeline_expression()
+            with self._mode(Ps1LexerMode.EXPRESSION):
+                key = self._parse_label_or_key()
+                if key is None:
+                    break
+                self._skip_newlines()
+                self._expect(Ps1TokenKind.EQUALS)
+            with self._mode(Ps1LexerMode.ARGUMENT):
+                self._skip_newlines()
+                value = self._parse_assigned_value()
             if value is None:
                 value = Ps1StringLiteral(offset=self._current.offset, value='', raw='')
             pairs.append((key, value))
@@ -1368,7 +1383,7 @@ class Ps1Parser:
     def _parse_script_block(self) -> Ps1ScriptBlock:
         offset = self._current.offset
         self._expect(Ps1TokenKind.LBRACE)
-        with self._comma_mode(disabled=False):
+        with self._mode(Ps1LexerMode.ARGUMENT), self._comma_mode(disabled=False):
             fields = self._parse_code_body(until=Ps1TokenKind.RBRACE)
             self._skip_newlines()
             self._expect(Ps1TokenKind.RBRACE)
