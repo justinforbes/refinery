@@ -5,6 +5,7 @@ import enum
 from dataclasses import dataclass, field
 
 from refinery.lib.scripts import Expression, Node, Statement
+from refinery.lib.scripts.js.numbers import to_js_number
 
 
 class JsPropertyKind(enum.Enum):
@@ -44,8 +45,18 @@ class JsPrivateIdentifier(Expression):
 
 @dataclass(repr=False, eq=False)
 class JsNumericLiteral(Expression):
-    value: int | float = 0
+    """
+    A Number literal. `value` is the double the source denotes and `raw` is how that source spelled
+    it; the two are independent because a spelling carries information the value does not, such as
+    the base of `0xFF` or the sign of `-0`. Coercion happens here rather than at the call sites so
+    that no construction anywhere can introduce a value JavaScript cannot hold.
+    """
+    value: float = 0.0
     raw: str = '0'
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.value = to_js_number(self.value)
 
 
 @dataclass(repr=False, eq=False)

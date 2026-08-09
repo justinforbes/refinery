@@ -135,14 +135,14 @@ def _extract_constructor_params(method: JsMethodDefinition) -> tuple[int, int]:
         if not isinstance(node, JsAssignmentExpression):
             continue
         if _is_this_member(node.left, 'rounds'):
-            if isinstance(node.right, JsNumericLiteral) and isinstance(node.right.value, int):
-                rounds = node.right.value
+            if isinstance(node.right, JsNumericLiteral) and node.right.value.is_integer():
+                rounds = int(node.right.value)
         elif _is_this_member(node.left, 'masterKey'):
             if not isinstance(node.right, JsCallExpression) or len(node.right.arguments) < 5:
                 continue
             iters_arg = node.right.arguments[2]
-            if isinstance(iters_arg, JsNumericLiteral) and isinstance(iters_arg.value, int):
-                iterations = iters_arg.value
+            if isinstance(iters_arg, JsNumericLiteral) and iters_arg.value.is_integer():
+                iterations = int(iters_arg.value)
     return rounds, iterations
 
 

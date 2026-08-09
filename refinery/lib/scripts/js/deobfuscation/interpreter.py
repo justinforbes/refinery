@@ -10,7 +10,6 @@ import re
 import sys
 import urllib.parse
 
-from decimal import Decimal
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
     from refinery.lib.scripts.js.model import JsFunctionDeclaration as _FuncDecl
     from refinery.lib.scripts.js.model import JsFunctionExpression as _FuncExpr
 
-    Value: TypeAlias = str | int | float | bool | list | dict | _FuncDecl | _FuncExpr | _Arrow | None
+    Value: TypeAlias = str | float | bool | list | dict | _FuncDecl | _FuncExpr | _Arrow | None
     _FuncNode: TypeAlias = _FuncDecl | _FuncExpr | _Arrow
 
 from refinery.lib.scripts import Node
@@ -89,6 +88,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
 )
+from refinery.lib.scripts.js.numbers import js_number_to_string, to_js_number
 
 MAX_ITERATIONS = 100_000
 MAX_STRING_LEN = 1_000_000
@@ -208,21 +208,21 @@ def _to_array_length(value: Value) -> int:
     return length
 
 
-def to_number(value: Value) -> int | float:
+def to_number(value: Value) -> float:
     if isinstance(value, bool):
-        return 1 if value else 0
+        return 1.0 if value else 0.0
     if isinstance(value, (int, float)):
-        return value
+        return to_js_number(value)
     if isinstance(value, str):
         s = value.strip()
         if not s:
-            return 0
+            return 0.0
         if '_' in s:
             return float('nan')
         if s[0] in '+-' and len(s) > 2 and s[1] == '0' and s[2] in 'xXoObB':
             return float('nan')
         try:
-            return int(s, 0)
+            return to_js_number(int(s, 0))
         except ValueError:
             pass
         try:
@@ -230,34 +230,10 @@ def to_number(value: Value) -> int | float:
         except ValueError:
             return float('nan')
     if value is JS_NULL:
-        return 0
+        return 0.0
     if isinstance(value, list):
         return to_number(to_string(value))
     return float('nan')
-
-
-def _js_float_to_string(value: float) -> str:
-    """
-    Format a finite, non-zero float as JavaScript's `Number.prototype.toString` (the ECMA-262
-    Number::toString algorithm) would: this controls the decimal/exponential cutoff (exponential at
-    magnitudes >= 1e21 or < 1e-6) and the exponent format (`1e-7`, not Python's `1e-07`).
-    """
-    neg = value < 0
-    d = Decimal(repr(abs(value)))
-    s = ''.join(str(digit) for digit in d.as_tuple().digits).rstrip('0') or '0'
-    k = len(s)
-    n = d.adjusted() + 1
-    if k <= n <= 21:
-        result = s + '0' * (n - k)
-    elif 0 < n <= 21:
-        result = s[:n] + '.' + s[n:]
-    elif -6 < n <= 0:
-        result = '0.' + '0' * -n + s
-    else:
-        mantissa = s if k == 1 else s[0] + '.' + s[1:]
-        exponent = n - 1
-        result = F"{mantissa}e{'+' if exponent >= 0 else '-'}{abs(exponent)}"
-    return '-' + result if neg else result
 
 
 def to_string(value: Value) -> str:
@@ -269,20 +245,8 @@ def to_string(value: Value) -> str:
         return 'null'
     if isinstance(value, bool):
         return 'true' if value else 'false'
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        if value != value:
-            return 'NaN'
-        if value == float('inf'):
-            return 'Infinity'
-        if value == float('-inf'):
-            return '-Infinity'
-        if value == 0:
-            return '0'
-        if value == int(value) and abs(value) < 1e21:
-            return str(int(value))
-        return _js_float_to_string(value)
+    if isinstance(value, (int, float)):
+        return js_number_to_string(to_js_number(value))
     if isinstance(value, list):
         return ','.join(_array_element_string(v) for v in value)
     return '[object Object]'

@@ -132,18 +132,11 @@ def concat_string(node: Expression | None) -> str | None:
     the result is a property of the syntax alone and needs no fold-admission gate. An array or object
     literal is excluded precisely because its conversion is interceptable, through `Array.prototype.join`
     and `Object.prototype.toString`.
-
-    A numeric literal is admitted only when the value the parser stored still denotes the number the
-    source spells. A JS number is a double, so `9007199254740993` denotes `9007199254740992`, while the
-    parser keeps the exact Python integer; converting that would append digits the program never
-    produces. Round-tripping through `float` is what separates the two cases.
     """
     if isinstance(node, JsStringLiteral):
         return node.value
     ok, value = extract_literal_value(node)
     if not ok or isinstance(value, list):
-        return None
-    if isinstance(value, int) and not isinstance(value, bool) and float(value) != value:
         return None
     return to_string(value)
 
@@ -380,8 +373,6 @@ class JsSimplifications(Transformer):
             elif isinstance(result, bool):
                 return JsBooleanLiteral(value=result)
             elif isinstance(result, (int, float)):
-                if result != result or result == float('inf') or result == float('-inf'):
-                    return None
                 return make_numeric_literal(result)
         if op in ('===', '!==', '==', '!='):
             equal: bool | None = None
@@ -700,11 +691,11 @@ class JsSimplifications(Transformer):
                 idx = node.property.value
                 elements = node.object.elements
                 if (
-                    isinstance(idx, int)
+                    idx.is_integer()
                     and 0 <= idx < len(elements)
                     and all(e is not None and is_literal(e) for e in elements)
                 ):
-                    return elements[idx]
+                    return elements[int(idx)]
             prop_str = string_value(node.property)
             if prop_str is not None and is_valid_identifier(prop_str):
                 node.computed = False
@@ -739,12 +730,7 @@ class JsSimplifications(Transformer):
             if truthy is not None:
                 return JsBooleanLiteral(value=not truthy)
         if op == '-' and isinstance(node.operand, JsNumericLiteral):
-            value = node.operand.value
-            if value == 0 and isinstance(value, int):
-                value = -0.0
-            else:
-                value = -value
-            return make_numeric_literal(value)
+            return make_numeric_literal(-node.operand.value)
         if op == '+' and isinstance(node.operand, JsNumericLiteral):
             return node.operand
         if op == '~' and isinstance(node.operand, JsNumericLiteral):

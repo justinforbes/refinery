@@ -774,7 +774,7 @@ def _eval_checksum(
                 result = js_parse_int(inner.value)
                 if result is None:
                     raise _EvalError
-                return float(result)
+                return result
             if isinstance(inner, JsCallExpression) and isinstance(inner.callee, JsIdentifier):
                 idx, key = _resolve_accessor_call(
                     inner, local_accessors, wrappers, prop_maps,
@@ -785,7 +785,7 @@ def _eval_checksum(
                     decoded = _decode_string(raw, encoding, key)
                     if (result := js_parse_int(decoded)) is None:
                         raise _EvalError
-                    return float(result)
+                    return result
             raise _EvalError
     raise _EvalError
 

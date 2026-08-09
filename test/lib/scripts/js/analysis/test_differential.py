@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from test import TestBase
@@ -7,6 +8,7 @@ from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
     behavior,
     deobfuscate_source,
+    deobfuscate_within,
     host_behavior,
     node_executable,
 )
@@ -2406,114 +2408,200 @@ class TestHostEntrypointPreservation(TestBase):
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestOverPreciseNumericLiterals(TestBase):
+class TestNumericLiteralsAreDoubles(TestBase):
     """
-    Known-failing. A JavaScript number is an IEEE-754 double, but the parser stores an integer literal as an
-    exact Python `int` (`_parse_int_text`, `refinery/lib/scripts/js/parser.py`), so `9007199254740993`
-    survives as itself where the language says it denotes `9007199254740992`. Every fold that then reads
-    `.value` computes in unbounded integer arithmetic and prints digits the program never produces.
+    A JavaScript Number is an IEEE-754 double. Every case here asks whether the tool computes in that
+    domain, and asserts the deobfuscated program *text* rather than only its behavior: a comparison of
+    behavior alone is satisfied by declining to fold, so it cannot tell a correct implementation from
+    one that does nothing at all.
 
-    The rule is per-value, not per-magnitude: `float(value) != value` is exactly the test, and
-    `18014398509481984` is representable while `18014398509481985` is not. The float path is already correct —
-    `1e400` parses to `inf` — so only the integer path is at fault.
-
-    **The fix belongs at the parser, not at the fold sites.** Correcting each consumer would leave the next
-    one to rediscover it; ~222 `.value` reads live in modules that mention `JsNumericLiteral`. The guard to
-    reuse already exists and states this very rule in its docstring: `concat_string` in
-    `refinery/lib/scripts/js/deobfuscation/simplify.py` refuses a literal when `float(value) != value`.
-
-    Deciding what the literal's stored value should become is the design question, and it is not obviously
-    "just call `float`": the synthesizer must keep printing the source spelling where it is faithful, and
-    tests below pin what Node says each case must produce.
+    Node decides what each program means. Every expected value is what a real engine produces, and
+    `_folds_to` re-derives that claim by running both programs, so an expectation that is merely
+    plausible fails as loudly as a wrong fold does.
     """
 
-    def _check(self, source: str):
+    def _folds_to(self, source: str, expected: str):
         deobfuscated = deobfuscate_source(source)
-        self.assertEqual(
-            behavior(source),
-            behavior(deobfuscated),
-            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        self.assertEqual(deobfuscated, expected)
+        self.assertEqual(behavior(deobfuscated), behavior(source))
+
+    def _prints(self, source: str, output: str):
+        """
+        For a case whose correct answer does not determine a spelling. The engine's output is asserted of
+        the input first, which is the oracle, and then required of the deobfuscation, which leaves the
+        tool free either to fold or to decline.
+        """
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    def test_large_integer_a_double_represents_exactly_folds_to_that_integer(self):
+        self._folds_to(
+            'console.log(4503599627370496 * 2);',
+            'console.log(9007199254740992);')
+
+    def test_integer_literal_too_precise_for_a_double_folds_to_the_double_it_denotes(self):
+        """
+        `9007199254740993` has no double of its own and the nearest one is `9007199254740992`, so the
+        digits this program prints are not the digits it was written with.
+        """
+        self._folds_to(
+            'console.log(String(9007199254740993));',
+            "console.log('9007199254740992');")
+
+    def test_two_spellings_of_one_double_are_equal_and_differ_by_zero(self):
+        self._folds_to(
+            'console.log(9007199254740993 === 9007199254740992, 9007199254740993 - 9007199254740992);',
+            'console.log(true, 0);')
+
+    def test_product_of_two_over_precise_literals_folds_to_the_double_product(self):
+        """
+        Each operand denotes `2**53`, so the product denotes `2**106`. Multiplying the written digits
+        exactly gives `81129638414606699710187514626049`, which is a different double.
+        """
+        self._folds_to(
+            'console.log(String(9007199254740993 * 9007199254740993));',
+            "console.log('8.112963841460668e+31');")
+
+    def test_sum_of_exact_operands_whose_result_is_inexact_folds_to_the_double_sum(self):
+        self._folds_to(
+            'console.log(String(9007199254740992 + 1));',
+            "console.log('9007199254740992');")
+
+    def test_arithmetic_that_overflows_the_double_range_still_means_infinity(self):
+        """
+        Both operands are ordinary doubles and only the product leaves the range. Any finite spelling of
+        the result is wrong, and `Infinity` has no literal spelling at all, so this pins the meaning and
+        leaves the tool free to decline.
+        """
+        self._prints('console.log(String(1.7976931348623157e308 * 2));', 'Infinity\n')
+
+    def test_literal_outside_the_double_range_and_its_negation_fold_to_the_infinities(self):
+        self._folds_to(
+            'console.log(String(1e400), String(-1e400));',
+            "console.log('Infinity', '-Infinity');")
+
+    def test_decimal_integer_outside_the_double_range_and_its_negation_fold_to_the_infinities(self):
+        """
+        The same magnitude written in digits rather than with an exponent, which is the spelling an exact
+        integer parse accepts without complaint.
+        """
+        self._folds_to(
+            F'console.log(String({10 ** 400}), String(-{10 ** 400}));',
+            "console.log('Infinity', '-Infinity');")
+
+    def test_negative_zero_survives_a_fold(self):
+        """
+        Negative zero prints as `0` and is `=== 0`, so neither witnesses it. Its reciprocal does:
+        `1 / -0` is `-Infinity` where `1 / 0` is `Infinity`.
+        """
+        self._folds_to('console.log(1 / (0 * -1));', 'console.log(1 / -0);')
+
+    def test_bitwise_operators_coerce_an_over_precise_literal_through_its_double(self):
+        """
+        ToInt32 of `2**53` is `0`, while ToInt32 of the exact integer `2**53 + 1` is `1`. It is the one
+        case here whose wrong answer a reader has no way to recognize by inspection.
+        """
+        self._folds_to(
+            'console.log(9007199254740993 | 0, 9007199254740993 >>> 0);',
+            'console.log(0, 0);')
+
+    def test_every_radix_spells_the_same_over_precise_integer(self):
+        """
+        Each line subtracts `2**53` from `2**53 + 1` written in a different base, and all four differences
+        are zero because the left operand has no double of its own in any spelling.
+        """
+        self._folds_to(
+            inspect.cleandoc("""
+                console.log(0x20000000000001 - 0x20000000000000);
+                console.log(0o400000000000000001 - 0o400000000000000000);
+                console.log(0400000000000000001 - 0400000000000000000);
+                console.log(
+                    0b100000000000000000000000000000000000000000000000000001
+                    - 0b100000000000000000000000000000000000000000000000000000);
+            """),
+            inspect.cleandoc("""
+                console.log(0);
+                console.log(0);
+                console.log(0);
+                console.log(0);
+            """),
         )
 
-    @unittest.expectedFailure
-    def test_decimal_integer_past_the_double_range_is_preserved(self):
-        """
-        Node prints `9007199254740992`; the fold prints `9007199254740993`.
-        """
-        self._check('console.log(String(9007199254740993));')
+    def test_radix_spellings_the_deobfuscator_has_no_reason_to_rewrite_are_left_alone(self):
+        self._folds_to(
+            'console.log(0xFF, 0o17, 0b1010, 017, 1_000, 1 + 1);',
+            'console.log(0xFF, 0o17, 0b1010, 017, 1_000, 2);')
 
-    @unittest.expectedFailure
-    def test_very_large_decimal_integer_is_preserved(self):
-        """
-        Far enough out that Node switches to exponential form: `1.2345678901234568e+29`.
-        """
-        self._check('console.log(String(123456789012345678901234567890));')
+    def test_bigint_arithmetic_is_exact_where_the_same_number_arithmetic_rounds(self):
+        self._folds_to(
+            'console.log(String(9007199254740993n + 1n), String(9007199254740993 + 1));',
+            "console.log(String(9007199254740993n + 1n), '9007199254740992');")
 
-    @unittest.expectedFailure
-    def test_hexadecimal_integer_past_the_double_range_is_preserved(self):
-        """
-        The radix is irrelevant — every branch of `_parse_int_text` returns an exact `int` — so the same
-        defect reaches the hex, octal and binary spellings.
-        """
-        self._check('console.log(String(0x20000000000001));')
+    def test_bigint_beyond_the_double_range_keeps_every_digit(self):
+        self._folds_to(
+            'console.log(String(2n ** 70n), 1 + 1);',
+            'console.log(String(2n ** 70n), 2);')
 
-    @unittest.expectedFailure
-    def test_octal_integer_past_the_double_range_is_preserved(self):
-        self._check('console.log(String(0o400000000000000001));')
+    def test_a_bigint_added_to_a_number_is_not_folded(self):
+        """
+        Mixing the two is a `TypeError` in JavaScript, which is what makes a fold that treats a BigInt as
+        a Number observable rather than merely imprecise.
+        """
+        self._folds_to('console.log(1n + 1);', 'console.log(1n + 1);')
 
-    @unittest.expectedFailure
-    def test_binary_integer_past_the_double_range_is_preserved(self):
-        self._check(
-            'console.log(String(0b100000000000000000000000000000000000000000000000000001));')
+    def test_parse_int_yields_the_double_its_digits_denote(self):
+        self._folds_to(
+            "console.log(String(parseInt('9007199254740993')), String(parseInt('123456789012345678901234567890')));",
+            "console.log('9007199254740992', '1.2345678901234568e+29');")
 
-    @unittest.expectedFailure
-    def test_sum_that_leaves_the_double_range_is_preserved(self):
+    def test_a_folded_number_is_spelled_the_way_javascript_prints_it(self):
         """
-        Both operands are representable; only the result is not. So a fix that merely rounds each literal at
-        parse time is not sufficient — arithmetic on exact ints has to round too.
+        Node prints these three as `1e+21`, `1e-7` and `0.30000000000000004`. A spelling that denotes the
+        same double but is not the one the language produces makes the deobfuscated program harder to
+        read than the one it replaced.
         """
-        self._check('console.log(String(9007199254740992 + 1));')
+        self._folds_to(
+            'console.log(1e21 + 0, 1e-7 + 0, 0.1 + 0.2);',
+            'console.log(1e+21, 1e-7, 0.30000000000000004);')
 
-    @unittest.expectedFailure
-    def test_product_that_leaves_the_double_range_is_preserved(self):
-        self._check('console.log(String(4503599627370496 * 2 + 1));')
+    def test_a_byte_array_keeps_its_grid_and_its_values(self):
+        """
+        The synthesizer lays a long byte array out as a grid of hex bytes, which it decides on from each
+        element's value; folding the index is what shows the gridded values are still the array's own.
+        """
+        self._folds_to(
+            inspect.cleandoc("""
+                var key = [
+                    15, 216, 150, 85, 200, 21, 150, 34, 117, 192, 188, 159, 55, 161, 212,
+                    83, 194, 215, 4, 31, 78, 146, 105, 234, 185, 106, 130, 223, 47, 187
+                ];
+                console.log(key[3 + 4], key.length);
+            """),
+            inspect.cleandoc("""
+                var key = [
+                  0x0F, 0xD8, 0x96, 0x55, 0xC8, 0x15, 0x96, 0x22, 0x75, 0xC0, 0xBC, 0x9F, 0x37, 0xA1, 0xD4,
+                  0x53, 0xC2, 0xD7, 0x04, 0x1F, 0x4E, 0x92, 0x69, 0xEA, 0xB9, 0x6A, 0x82, 0xDF, 0x2F, 0xBB
+                ];
+                console.log(34, key.length);
+            """),
+        )
 
-    @unittest.expectedFailure
-    def test_bitwise_coercion_of_an_over_precise_integer_is_preserved(self):
-        """
-        The starkest case: Node prints `0`, because ToInt32 sees the rounded double, while the fold prints
-        `1` from the exact int. A reader cannot tell this output is wrong by inspection.
-        """
-        self._check('console.log(String(9007199254740993 | 0));')
+    def test_an_array_index_folds_only_when_the_folded_number_is_an_integer(self):
+        self._folds_to(
+            'console.log([10, 20, 30][1 + 1], [10, 20, 30][0.5 + 1]);',
+            'console.log(30, [10, 20, 30][1.5]);')
 
-    @unittest.expectedFailure
-    def test_equality_of_two_integers_that_round_together_is_preserved(self):
+    def test_exponentiation_with_a_large_integer_exponent_terminates(self):
         """
-        `9007199254740993 === 9007199254740992` is `true` in JavaScript, since both denote the same double.
-        The fold compares exact ints and answers `false`.
+        One double operation answers `Infinity`. Raising an exact integer to the same power instead builds
+        a number of half a billion digits, so the property under test is termination and the assertion has
+        to bound it in time rather than wait for an answer.
         """
-        self._check('console.log(String(9007199254740993 === 9007199254740992));')
-
-    def test_integer_at_the_edge_of_the_double_range_still_folds(self):
-        """
-        The control, and the boundary the fix must not move: `2**53` is exactly representable and must keep
-        folding. A fix that refuses every large integer would pass the cases above and fail here.
-        """
-        self._check('console.log(String(9007199254740992));')
-
-    def test_representable_large_integer_still_folds(self):
-        """
-        `2**54` is representable though larger than `2**53`, which is why the test is `float(value) != value`
-        and not a magnitude comparison.
-        """
-        self._check('console.log(String(18014398509481984));')
-
-    def test_float_past_the_double_range_still_folds(self):
-        """
-        Already correct — the float path overflows to `Infinity` as the language requires. Pinned so a parser
-        change aimed at the integer path cannot silently break it.
-        """
-        self._check('console.log(String(1e400));')
+        source = 'console.log(3 ** 1000000000);'
+        deobfuscated = deobfuscate_within(source, seconds=20)
+        if deobfuscated is None:
+            self.fail('the fold did not terminate')
+        self.assertEqual(behavior(deobfuscated), ('Infinity\n', None))
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')

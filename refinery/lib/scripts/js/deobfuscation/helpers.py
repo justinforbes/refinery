@@ -72,6 +72,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
 )
+from refinery.lib.scripts.js.numbers import js_number_to_string, to_js_number
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
 
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_$][a-zA-Z_$0-9]*$')
@@ -295,21 +296,14 @@ def _js_pow(base: int | float, exp: int | float) -> int | float:
             return -inf
         return inf
     is_int_exp = exp not in (inf, -inf) and exp == int(exp)
-    if base < 0 and not is_int_exp:
+    if base < 0 and base != -inf and not is_int_exp:
         return float('nan')
     try:
-        result = base ** exp
+        result = to_js_number(base) ** to_js_number(exp)
     except OverflowError:
         return -inf if (base < 0 and is_int_exp and int(exp) % 2 != 0) else inf
     except (ValueError, ZeroDivisionError):
         return float('nan')
-    if isinstance(result, complex):
-        return float('nan')
-    if isinstance(result, int):
-        try:
-            float(result)
-        except OverflowError:
-            return -inf if result < 0 else inf
     return result
 
 
@@ -320,11 +314,11 @@ BINARY_OPS: dict[str, Callable] = {
     '/'  : _js_div,
     '%'  : _js_mod,
     '**' : _js_pow,
-    '|'  : lambda a, b: _to_int32(a) | _to_int32(b),
-    '&'  : lambda a, b: _to_int32(a) & _to_int32(b),
-    '^'  : lambda a, b: _to_int32(a) ^ _to_int32(b),
-    '<<' : lambda a, b: _to_int32(_to_int32(a) << (_to_int32(b) & 0x1F)),
-    '>>' : lambda a, b: _to_int32(a) >> (_to_int32(b) & 0x1F),
+    '|'  : lambda a, b: float(_to_int32(a) | _to_int32(b)),
+    '&'  : lambda a, b: float(_to_int32(a) & _to_int32(b)),
+    '^'  : lambda a, b: float(_to_int32(a) ^ _to_int32(b)),
+    '<<' : lambda a, b: float(_to_int32(_to_int32(a) << (_to_int32(b) & 0x1F))),
+    '>>' : lambda a, b: float(_to_int32(a) >> (_to_int32(b) & 0x1F)),
 }
 """
 JavaScript's binary operators over two *numbers*. Every entry assumes both operands have already been coerced,
@@ -350,7 +344,7 @@ have no entry in `BINARY_OPS`, whose members are total functions of both operand
 """
 
 
-def eval_binary_op(op: str, left: int | float, right: int | float) -> int | float | bool | None:
+def eval_binary_op(op: str, left: float, right: float) -> float | bool | None:
     """
     Evaluate a JavaScript binary operator on two numeric operands. Returns the result value, or
     `None` when the operator is unknown or the computation overflows/divides by zero. Handles
@@ -366,7 +360,7 @@ def eval_binary_op(op: str, left: int | float, right: int | float) -> int | floa
     if op == '>>>':
         a = _to_uint32(left)
         b = _to_uint32(right) & 0x1F
-        return (a >> b) & 0xFFFFFFFF
+        return float((a >> b) & 0xFFFFFFFF)
     fn = BINARY_OPS.get(op)
     if fn is None:
         return None
@@ -434,23 +428,31 @@ def make_string_literal(value: str) -> JsStringLiteral:
     return JsStringLiteral(value=value, raw=raw)
 
 
-def numeric_value(node: Expression) -> int | float | None:
+def numeric_value(node: Expression) -> float | None:
     if isinstance(node, JsNumericLiteral):
         return node.value
     return None
 
 
-def make_numeric_literal(value: int | float) -> JsNumericLiteral:
-    if isinstance(value, float):
-        if value == 0.0 and str(value).startswith('-'):
-            raw = '-0'
-        elif value == int(value):
-            raw = str(int(value))
-        else:
-            raw = str(value)
-    else:
-        raw = str(value)
-    return JsNumericLiteral(value=value, raw=raw)
+def make_numeric_literal(value: int | float) -> JsNumericLiteral | None:
+    """
+    Spell a Number as a literal, or refuse with `None` when it has none. `NaN` and the infinities are
+    identifiers in JavaScript, not literals, so a caller that can produce them must spell them through
+    `value_to_node`; refusing here is what keeps a fold that overflows from emitting a node whose text
+    does not denote its value.
+
+    The spelling is `Number.prototype.toString` with one deliberate deviation: that algorithm reads
+    the mathematical value, so it prints negative zero as `0`, but a literal `0` denotes *positive*
+    zero and the two are distinguishable — `1 / -0` is `-Infinity`. Negative zero is therefore spelled
+    `-0`, which is a negation applied to a literal rather than a literal, and is the one place where
+    this function's result is not a single token.
+    """
+    value = to_js_number(value)
+    if value != value or value in (float('inf'), float('-inf')):
+        return None
+    if value == 0 and math.copysign(1.0, value) < 0:
+        return JsNumericLiteral(value=value, raw='-0')
+    return JsNumericLiteral(value=value, raw=js_number_to_string(value))
 
 
 def extract_literal_value(node: Node) -> tuple[bool, LiteralValue]:
@@ -501,20 +503,20 @@ def value_to_node(value: object) -> Expression | None:
         return make_string_literal(value)
     if isinstance(value, bool):
         return JsBooleanLiteral(value=value)
-    if isinstance(value, int):
-        if value < 0:
-            return JsUnaryExpression(operator='-', operand=make_numeric_literal(-value))
-        return make_numeric_literal(value)
-    if isinstance(value, float):
-        if value != value:
+    if isinstance(value, (int, float)):
+        number = to_js_number(value)
+        if number != number:
             return JsIdentifier(name='NaN')
-        if value == float('inf'):
+        if number == float('inf'):
             return JsIdentifier(name='Infinity')
-        if value == float('-inf'):
+        if number == float('-inf'):
             return JsUnaryExpression(operator='-', operand=JsIdentifier(name='Infinity'))
-        if value < 0:
-            return JsUnaryExpression(operator='-', operand=make_numeric_literal(-value))
-        return make_numeric_literal(value)
+        if number < 0:
+            magnitude = make_numeric_literal(-number)
+            if magnitude is None:
+                return None
+            return JsUnaryExpression(operator='-', operand=magnitude)
+        return make_numeric_literal(number)
     if isinstance(value, JsBuffer):
         return None
     if isinstance(value, list):
@@ -709,12 +711,16 @@ def is_nullish(node: Node) -> bool:
     return False
 
 
-def js_parse_int(s: str, radix: int = 10) -> int | None:
+def js_parse_int(s: str, radix: int = 10) -> float | None:
     """
     Replicate the semantics of JavaScript's `parseInt(string, radix)`. Strips leading whitespace,
     handles an optional `+`/`-` sign, and for radix 16 skips a leading `0x`/`0X` prefix. Parses
     leading characters valid for the given radix (2-36) and stops at the first invalid one. Returns
     `None` when no valid digits are found (JS would return `NaN`).
+
+    The digits are accumulated exactly and only then coerced, because `parseInt` reads the whole
+    digit string before producing a Number: enough digits and the result is `Infinity`, and a digit
+    string past 2^53 names the nearest double rather than itself.
     """
     if radix == 0:
         radix = 10
@@ -744,7 +750,7 @@ def js_parse_int(s: str, radix: int = 10) -> int | None:
             break
     if not digits:
         return None
-    return sign * int(''.join(digits), radix)
+    return to_js_number(sign * int(''.join(digits), radix))
 
 
 def get_body(node: Node) -> list[Statement] | None:

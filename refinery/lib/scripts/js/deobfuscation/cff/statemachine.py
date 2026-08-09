@@ -169,7 +169,7 @@ class _GeneratorCFFMatch:
         return self.with_redirect_var is not None and len(self.scope_default_props) == 1
 
 
-def _eval_expr(node: Expression, env: _StateEnv) -> int | float | None:
+def _eval_expr(node: Expression, env: _StateEnv) -> float | None:
     """
     Recursively evaluate an arithmetic expression against a variable environment. Returns `None`
     when the expression cannot be resolved.
@@ -212,16 +212,10 @@ def _eval_expr(node: Expression, env: _StateEnv) -> int | float | None:
         result = eval_binary_op(node.operator, lhs, rhs)
         if result is None:
             return None
-        if isinstance(result, bool):
-            return int(result)
-        if isinstance(result, float):
-            try:
-                int_val = int(result)
-            except (OverflowError, ValueError):
-                return None
-            if result == int_val:
-                return int_val
-        return result
+        state = float(result)
+        if state != state or state in (float('inf'), float('-inf')):
+            return None
+        return state
     return None
 
 
@@ -2063,7 +2057,9 @@ def _substitute_in_scope(node: Node, env: _StateEnv) -> None:
         if isinstance(child, (JsFunctionExpression, JsFunctionDeclaration)):
             continue
         if isinstance(child, JsIdentifier) and child.name in env:
-            _replace_in_parent(child, make_numeric_literal(env[child.name]))
+            literal = make_numeric_literal(env[child.name])
+            if literal is not None:
+                _replace_in_parent(child, literal)
         else:
             _substitute_in_scope(child, env)
 

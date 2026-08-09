@@ -1129,14 +1129,14 @@ class TestConcatReassociation(TestJsDeobfuscator):
         """
         self.assertEqual("f(x + 'a' + [1, 2]);", self._simplify("f(x + 'a' + [1, 2]);"))
 
-    def test_imprecise_integer_tail_not_merged(self):
+    def test_imprecise_integer_tail_merged_as_the_double_it_denotes(self):
         """
-        A JS number is a double, so `9007199254740993` denotes `9007199254740992` and appending it yields
-        `...92`. The parser keeps the exact integer, so merging it would emit a digit string the program
-        never produces.
+        A JS number is a double, so `9007199254740993` denotes `9007199254740992` and Node agrees that
+        `'a' + 9007199254740993` is `'a9007199254740992'`. The literal is a primitive like any other and
+        merges; what it must never contribute is the digit string it was written with.
         """
         self.assertEqual(
-            "f(x + 'a' + 9007199254740993);",
+            "f(x + 'a9007199254740992');",
             self._simplify("f(x + 'a' + 9007199254740993);"),
         )
 

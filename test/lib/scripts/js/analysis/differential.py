@@ -20,7 +20,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+
+from pathlib import Path
 
 from refinery.lib.scripts.js.deobfuscation import deobfuscate
 from refinery.lib.scripts.js.parser import JsParser
@@ -52,6 +55,39 @@ def deobfuscate_source(
     ast = JsParser(source).parse()
     deobfuscate(ast, module=module, entrypoints=entrypoints)
     return JsSynthesizer().convert(ast)
+
+
+_DEOBFUSCATE_IN_CHILD = R'''
+import sys
+sys.path.insert(0, sys.argv[1])
+from test.lib.scripts.js.analysis.differential import deobfuscate_source
+sys.stdout.write(deobfuscate_source(sys.argv[2]))
+'''
+
+
+def deobfuscate_within(source: str, seconds: float) -> str | None:
+    """
+    The deobfuscation of *source*, or `None` when it did not finish within *seconds*.
+
+    Termination is a property worth asserting on its own: a fold that computes in unbounded integer
+    arithmetic can run for hours on an expression a double answers in one operation, and that is a
+    defect no comparison of results can express. It runs in a child process because such a computation
+    happens inside a single interpreter opcode, where no timer, signal, or thread can interrupt it —
+    only killing the process can.
+    """
+    root = Path(__file__).resolve().parents[5]
+    try:
+        finished = subprocess.run(
+            [sys.executable, '-c', _DEOBFUSCATE_IN_CHILD, str(root), source],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            timeout=seconds,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    return finished.stdout
 
 
 def _normalize_error(stderr: str) -> str:

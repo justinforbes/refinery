@@ -305,7 +305,7 @@ class JsSynthesizer(Synthesizer):
             return False
         if not all(
             isinstance(element, JsNumericLiteral)
-            and isinstance(element.value, int)
+            and element.value.is_integer()
             and 0 <= element.value <= 0xFF
             for element in elements
         ):
@@ -316,7 +316,7 @@ class JsSynthesizer(Synthesizer):
         for start in range(0, len(elements), _BYTE_GRID_COLUMNS):
             row = elements[start:start + _BYTE_GRID_COLUMNS]
             self._newline()
-            self._write(', '.join(F'0x{element.value:02X}' for element in row))
+            self._write(', '.join(F'0x{int(element.value):02X}' for element in row))
             if start + _BYTE_GRID_COLUMNS < len(elements):
                 self._write(',')
         self._depth -= 1

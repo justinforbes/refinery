@@ -75,15 +75,16 @@ def _extract_truncation(
         if rhs is None:
             continue
         n = numeric_value(rhs)
-        if n is None or not isinstance(n, int) or n < 0:
+        if n is None or not n.is_integer() or n < 0:
             continue
+        length = int(n)
         obj = lhs.object
         if isinstance(obj, JsIdentifier) and obj.name == rest_name:
-            return _TruncationInfo(n, None)
+            return _TruncationInfo(length, None)
         if isinstance(obj, JsMemberExpression):
             chain = member_key(obj)
             if chain is not None:
-                return _TruncationInfo(n, chain)
+                return _TruncationInfo(length, chain)
     return None
 
 
@@ -182,7 +183,7 @@ def _extract_access_key(node: JsMemberExpression) -> str | None:
     if node.computed:
         prop = node.property
         if isinstance(prop, JsNumericLiteral):
-            return str(int(prop.value)) if prop.value == int(prop.value) else None
+            return str(int(prop.value)) if prop.value.is_integer() else None
         if isinstance(prop, JsStringLiteral):
             return prop.value
         if (
@@ -190,7 +191,8 @@ def _extract_access_key(node: JsMemberExpression) -> str | None:
             and prop.operator == '-'
             and isinstance(prop.operand, JsNumericLiteral)
         ):
-            return str(-int(prop.operand.value))
+            negated = prop.operand.value
+            return str(-int(negated)) if negated.is_integer() else None
         return None
     if isinstance(node.property, JsIdentifier):
         if node.property.name == 'length':
