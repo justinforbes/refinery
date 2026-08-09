@@ -701,6 +701,26 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tSystem.Int64',
             'OUT\tSystem.Int64\t2',
         ),
+    '$t = -(2147483648); Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t-2147483648',
+        ),
+    '$t = -(2147483647); Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-2147483647',
+        ),
+    '$t = 1.5kb; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t1536',
+        ),
+    '$t = 0xFFkb; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t261120',
+        ),
     '$t = 1_0; Write-Output $t.GetType().FullName; Write-Output $t':
         ('THROW\tCommandNotFoundException\tSystem.Management.Automation.CommandNotFoundException',),
     '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
@@ -922,6 +942,12 @@ TYPE_DEFECTS: dict[str, str] = {
         _UNPARSEABLE_RECEIVER,
     '$t = 1_0; Write-Output $t.GetType().FullName; Write-Output $t':
         'The lexer reads `_` as a digit separator, which Windows PowerShell 5.1 does not have: 5.1 reads `1_0` as a command name and reports CommandNotFoundException, and we read the integer 10. Both throw, so only the kind of the error tells them apart.',
+    '$t = -(2147483648); Write-Output $t.GetType().FullName; Write-Output $t':
+        'The parentheses are removed, and they were carrying the type. 5.1 reads a `-` adjacent to a numeral as part of the numeral, so `-2147483648` is one literal that fits Int32, while `-(2147483648)` is unary minus over the Int64 literal `2147483648` and stays Int64. A pass that treats a parenthesis around a literal as redundant is deciding a lexical question, and this is the answer it gets wrong.',
+    '$t = 1.5kb; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 0xFFkb; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
     '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
     '$t = 9223372036854775807 + 2; Write-Output $t.GetType().FullName; Write-Output $t':
