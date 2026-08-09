@@ -676,6 +676,33 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tSystem.Int32',
             'OUT\tSystem.Int32\t7',
         ),
+    '$t = 0xFFFFFFFFL; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t4294967295',
+        ),
+    '$t = 1lkb; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t1024',
+        ),
+    '$t = -2147483649; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t-2147483649',
+        ),
+    '$t = 1.5L; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t2',
+        ),
+    '$t = 2.5L; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t2',
+        ),
+    '$t = 1_0; Write-Output $t.GetType().FullName; Write-Output $t':
+        ('THROW\tCommandNotFoundException\tSystem.Management.Automation.CommandNotFoundException',),
     '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
         (
             'OUT\tSystem.String\tSystem.Double',
@@ -889,6 +916,12 @@ TYPE_DEFECTS: dict[str, str] = {
         _UNPARSEABLE_RECEIVER,
     '$t = 007; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
+    '$t = 0xFFFFFFFFL; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 1lkb; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 1_0; Write-Output $t.GetType().FullName; Write-Output $t':
+        'The lexer reads `_` as a digit separator, which Windows PowerShell 5.1 does not have: 5.1 reads `1_0` as a command name and reports CommandNotFoundException, and we read the integer 10. Both throw, so only the kind of the error tells them apart.',
     '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
     '$t = 9223372036854775807 + 2; Write-Output $t.GetType().FullName; Write-Output $t':
