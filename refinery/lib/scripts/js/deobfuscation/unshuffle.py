@@ -35,6 +35,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclaration,
     JsVariableDeclarator,
 )
+from refinery.lib.scripts.js.numbers import exact_integer
 
 
 def _is_push_shift_rotation(func: JsFunctionDeclaration | JsFunctionExpression) -> bool:
@@ -211,8 +212,8 @@ class JsArrayUnshuffle(ScriptLevelTransformer):
                 continue
             if not isinstance(shift_arg, JsNumericLiteral):
                 continue
-            shift = int(shift_arg.value)
-            if shift <= 0 or shift >= len(arr_arg.elements):
+            shift = exact_integer(shift_arg.value)
+            if shift is None or shift <= 0 or shift >= len(arr_arg.elements):
                 continue
             if not _is_all_literal_array(arr_arg):
                 continue

@@ -57,6 +57,7 @@ from refinery.lib.scripts.js.model import (
     JsYieldExpression,
     strip_parens,
 )
+from refinery.lib.scripts.js.numbers import exact_integer
 
 
 def _pattern_identifiers(pattern: Node) -> set[str]:
@@ -557,7 +558,9 @@ class JsConstantInlining(ScopeProcessingTransformer):
         prop = member.property
         if not isinstance(prop, JsNumericLiteral):
             return
-        idx = int(prop.value)
+        idx = exact_integer(prop.value)
+        if idx is None:
+            return
         value = entry.value
         if not isinstance(value, JsArrayExpression):
             return
@@ -908,8 +911,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
             entry = member_arrays.get(key)
             if entry is None:
                 continue
-            idx = int(prop.value)
-            if not (0 <= idx < len(entry.array.elements)):
+            idx = exact_integer(prop.value)
+            if idx is None or not (0 <= idx < len(entry.array.elements)):
                 continue
             element = entry.array.elements[idx]
             if element is None or not is_literal(element):

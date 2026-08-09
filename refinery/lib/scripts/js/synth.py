@@ -78,6 +78,10 @@ from refinery.lib.scripts.js.model import (
     JsYieldExpression,
     Statement,
 )
+from refinery.lib.scripts.js.numbers import (
+    exact_integer,
+    is_negative_zero,
+)
 from refinery.lib.scripts.js.precedence import needs_parens, statement_needs_parens
 
 _WORD_UNARY_OPS = frozenset({'typeof', 'void', 'delete'})
@@ -296,6 +300,10 @@ class JsSynthesizer(Synthesizer):
         the one-element-per-line fallback, so where that fallback does not apply the array is left exactly
         as it was written.
 
+        Negative zero is excluded even though it is an integer in range, because the grid respells each
+        element from its value and `0x00` denotes positive zero: the one Number whose sign this spelling
+        cannot carry is the one Number whose sign is observable without reading it back, through `1 / -0`.
+
         A byte array printed one element per line costs a screen of vertical space to say very little, and
         decimal cannot be aligned: `15` and `216` differ in width, so the reader loses the column structure
         that makes a key or ciphertext block legible. Hex is what buys the alignment, which is why the
@@ -303,21 +311,22 @@ class JsSynthesizer(Synthesizer):
         """
         if len(elements) <= _BYTE_GRID_COLUMNS:
             return False
-        if not all(
-            isinstance(element, JsNumericLiteral)
-            and element.value.is_integer()
-            and 0 <= element.value <= 0xFF
-            for element in elements
-        ):
-            return False
+        byte_values: list[int] = []
+        for element in elements:
+            if not isinstance(element, JsNumericLiteral) or is_negative_zero(element.value):
+                return False
+            byte = exact_integer(element.value)
+            if byte is None or not (0 <= byte <= 0xFF):
+                return False
+            byte_values.append(byte)
         if not self._overflows_inline(elements):
             return False
         self._depth += 1
-        for start in range(0, len(elements), _BYTE_GRID_COLUMNS):
-            row = elements[start:start + _BYTE_GRID_COLUMNS]
+        for start in range(0, len(byte_values), _BYTE_GRID_COLUMNS):
+            row = byte_values[start:start + _BYTE_GRID_COLUMNS]
             self._newline()
-            self._write(', '.join(F'0x{int(element.value):02X}' for element in row))
-            if start + _BYTE_GRID_COLUMNS < len(elements):
+            self._write(', '.join(F'0x{byte:02X}' for byte in row))
+            if start + _BYTE_GRID_COLUMNS < len(byte_values):
                 self._write(',')
         self._depth -= 1
         return True

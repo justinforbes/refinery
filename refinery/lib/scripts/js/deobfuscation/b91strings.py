@@ -37,6 +37,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclaration,
     JsVariableDeclarator,
 )
+from refinery.lib.scripts.js.numbers import exact_integer
 
 
 def _decode_base91(encoded: str, alphabet: str) -> str:
@@ -427,8 +428,8 @@ def _resolve_calls(
         sa = _find_scoped_accessor(node, node.callee.name, accessor_by_scope)
         if sa is None:
             continue
-        idx = int(arg.value)
-        if not (0 <= idx < len(sa.strings)):
+        idx = exact_integer(arg.value)
+        if idx is None or not (0 <= idx < len(sa.strings)):
             continue
         try:
             decoded = _decode_base91(sa.strings[idx], sa.alphabet)

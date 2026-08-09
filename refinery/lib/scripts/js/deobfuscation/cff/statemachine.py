@@ -7,6 +7,8 @@ discriminant. Each case updates the state via relative `+=` assignments.
 """
 from __future__ import annotations
 
+import math
+
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
@@ -213,7 +215,7 @@ def _eval_expr(node: Expression, env: _StateEnv) -> float | None:
         if result is None:
             return None
         state = float(result)
-        if state != state or state in (float('inf'), float('-inf')):
+        if not math.isfinite(state):
             return None
         return state
     return None

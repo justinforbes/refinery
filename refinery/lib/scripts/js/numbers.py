@@ -11,6 +11,8 @@ properties of the language rather than of any one pass over a program.
 """
 from __future__ import annotations
 
+import math
+
 from decimal import Decimal
 
 
@@ -26,11 +28,34 @@ def to_js_number(value: int | float) -> float:
         return float('-inf') if value < 0 else float('inf')
 
 
+def is_negative_zero(value: float) -> bool:
+    """
+    Whether *value* is negative zero. It is the one Number that neither `==` nor `js_number_to_string`
+    can tell from its positive counterpart, so any code that must preserve it has to ask for the sign
+    directly; `1 / -0` is `-Infinity` where `1 / 0` is `Infinity`.
+    """
+    return value == 0 and math.copysign(1.0, value) < 0
+
+
+def exact_integer(value: float) -> int | None:
+    """
+    The integer *value* is, or `None` when it is not one. A consumer that needs a Python `int` — an
+    index, a count, a radix — must ask this rather than call `int` on the Number, because the domain
+    contains `NaN` and the infinities, on which `int` raises rather than answers.
+    """
+    if not math.isfinite(value) or not value.is_integer():
+        return None
+    return int(value)
+
+
 def _significant_digits_to_string(value: float) -> str:
     """
-    Format a finite, non-zero double as the ECMA-262 Number::toString algorithm would. This controls
-    the decimal/exponential cutoff (exponential at magnitudes >= 1e21 or < 1e-6) and the exponent
-    format (`1e-7`, not Python's `1e-07`).
+    Format a finite, non-zero double as the ECMA-262 Number::toString algorithm would. That algorithm
+    is stated over the *shortest* decimal digit string that round-trips to the double, which is what
+    Python's `repr` produces; the exact mathematical value would carry digits past the ones the double
+    determines, and no engine prints those. This also controls the decimal/exponential cutoff
+    (exponential at magnitudes >= 1e21 or < 1e-6) and the exponent format (`1e-7`, not Python's
+    `1e-07`).
     """
     negative = value < 0
     decimal = Decimal(repr(abs(value)))
@@ -55,6 +80,12 @@ def js_number_to_string(value: float) -> str:
     Apply `Number.prototype.toString` to a Number. Total over the domain, including the values that
     have no literal spelling: `NaN`, the infinities, and negative zero, which prints as `0` because
     the algorithm reads the mathematical value and the sign of a zero is not part of it.
+
+    A `repr` that ends in `.0` is already the answer: Python writes a double positionally only below
+    1e17, so such a value is an integer that the shortest round-tripping digits spell in full, which
+    is the same branch of the algorithm `_significant_digits_to_string` would take. Spelling it as
+    `int(value)` instead would be wrong past 2^53, where the double's exact value has more digits
+    than it determines — `2 ** 60` is `1152921504606847000`, not `1152921504606846976`.
     """
     if value != value:
         return 'NaN'
@@ -64,6 +95,7 @@ def js_number_to_string(value: float) -> str:
         return '-Infinity'
     if value == 0:
         return '0'
-    if value.is_integer() and abs(value) < 1e21:
-        return str(int(value))
+    plain = repr(value)
+    if plain.endswith('.0'):
+        return plain[:-2]
     return _significant_digits_to_string(value)

@@ -35,6 +35,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsWhileStatement,
 )
+from refinery.lib.scripts.js.numbers import js_number_to_string
 
 
 def _strip_trailing_flow(stmts: list[Statement]) -> list[Statement]:
@@ -107,7 +108,7 @@ def _match_dispatcher(
         label = string_value(case.test)
         if label is None:
             if isinstance(case.test, JsNumericLiteral):
-                label = str(int(case.test.value))
+                label = js_number_to_string(case.test.value)
             else:
                 return None
         case_map[label] = _strip_trailing_flow(case.body)
@@ -127,7 +128,7 @@ def _extract_order_sequence(node: Node | None) -> list[str] | None:
             if s is not None:
                 result.append(s)
             elif isinstance(el, JsNumericLiteral):
-                result.append(str(int(el.value)))
+                result.append(js_number_to_string(el.value))
             else:
                 return None
         return result

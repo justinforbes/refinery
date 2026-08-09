@@ -2603,6 +2603,164 @@ class TestNumericLiteralsAreDoubles(TestBase):
             self.fail('the fold did not terminate')
         self.assertEqual(behavior(deobfuscated), ('Infinity\n', None))
 
+    def test_an_integral_double_is_spelled_with_the_digits_an_engine_prints(self):
+        """
+        Above `2**53` the exact value of a double and the digits JavaScript prints for it part
+        ways: node prints `2**64` as `18446744073709552000`, while its exact value is
+        `18446744073709551616`. The smaller operands are controls: for them the two readings
+        agree, so nothing about them may change.
+        """
+        self._folds_to(
+            inspect.cleandoc("""
+                console.log(65536 * 65536, 67108864 * 67108864, 4294967296 * 2097152);
+                console.log(4294967296 * 4294967296, 4294967296 * 2147483648, 1e20 + 0);
+            """),
+            inspect.cleandoc("""
+                console.log(4294967296, 4503599627370496, 9007199254740992);
+                console.log(18446744073709552000, 9223372036854776000, 100000000000000000000);
+            """),
+        )
+
+    def test_parse_int_reads_a_base_prefix_only_when_no_radix_contradicts_it(self):
+        """
+        Node: `31 31 0 77 63`. Without a radix `parseInt` honours the `0x` prefix, an explicit
+        radix of 16 accepts it as well, and radix 10 stops the parse at the `x`. A leading zero
+        is not a prefix at all, so `'077'` is seventy-seven unless base 8 is asked for.
+        """
+        self._folds_to(
+            "console.log(parseInt('0x1F'), parseInt('0x1F', 16), parseInt('0x1F', 10),"
+            " parseInt('077'), parseInt('077', 8));",
+            'console.log(31, 31, 0, 77, 63);')
+
+    def test_parse_int_of_a_digit_string_beyond_double_precision_keeps_the_printed_digits(self):
+        """
+        Node prints these two as `11111111111111110000` and `1.111111111111111e+29`. Neither is
+        the digit string it was handed, and the first is not the exact value of its double
+        either — that value is `11111111111111110656`, which JavaScript never prints.
+        """
+        self._folds_to(
+            "console.log(String(parseInt('11111111111111111111')),"
+            " String(parseInt('111111111111111111111111111111')));",
+            "console.log('11111111111111110000', '1.111111111111111e+29');")
+
+    def test_numeric_coercion_declines_a_string_only_python_reads_as_a_number(self):
+        """
+        Node: the first six are all `NaN`. JavaScript spells an infinity exactly `Infinity` and
+        knows no numeric separator inside a string, where Python's own float parser reads `inf`,
+        `infinity` and `1_0` happily. The last two are controls: the spellings JavaScript really
+        does accept.
+        """
+        self._folds_to(
+            "console.log(Number('inf'), Number('infinity'), Number('-inf'), Number('1_0'),"
+            " Math.abs('inf'), Math.round('infinity'), Number('Infinity'), Number('0x1F'));",
+            'console.log(NaN, NaN, NaN, NaN, NaN, NaN, Infinity, 31);')
+
+    def test_an_integer_literal_beyond_the_double_range_is_neither_an_index_nor_a_radix(self):
+        """
+        Node: `undefined 10`. The literal denotes `Infinity`, which indexes no array, and which
+        `parseInt` reads as radix zero and therefore as its default of ten.
+        """
+        self._prints(
+            F"console.log(String([10, 20, 30][{10 ** 400}]), String(parseInt('10', {10 ** 400})));",
+            'undefined 10\n')
+
+    def test_an_integer_literal_beyond_the_double_range_is_not_a_rotation_count(self):
+        """
+        The literal denotes `Infinity`, so the rotation is a loop no engine ever leaves and the
+        program cannot be run. What is left to assert is that the tool hands it back untouched
+        rather than rotating the array by some count of its own.
+        """
+        source = inspect.cleandoc(F"""
+            function rot(arr, n) {{
+              for (var i = 0; i < n; i++) {{
+                arr.push(arr.shift());
+              }}
+              return arr;
+            }}
+            console.log(rot(
+              ['b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'a'],
+              {10 ** 400}
+            ).join(''));
+        """)
+        self.assertEqual(deobfuscate_source(source), source)
+
+    def test_a_folded_negative_number_keeps_the_negation_bound_to_it(self):
+        """
+        A negation binds more loosely than `**`, than a member access and than a call, so a
+        folded negative number needs a parenthesis in each of those positions: `-2 ** e` does
+        not parse at all, `-2[k]` negates the element rather than indexing `-2`, and `-2(k)`
+        calls `2`. The exponent, key and argument are read from `process.argv`, which no fold
+        can know, so the negative number has to survive into the output. Node prints `4`,
+        `string`, `undefined` and `TypeError`.
+        """
+        self._folds_to(
+            inspect.cleandoc("""
+                console.log((0 - 2) ** process.argv.length);
+                console.log(typeof (0 - 2).toString(process.argv.length));
+                console.log(String((0 - 2)[process.argv.length]));
+                try { (0 - 2)(process.argv.length); } catch (e) { console.log(e.constructor.name); }
+            """),
+            inspect.cleandoc("""
+                console.log((-2) ** process.argv.length);
+                console.log(typeof (-2).toString(process.argv.length));
+                console.log(String((-2)[process.argv.length]));
+                try {
+                  (-2)(process.argv.length);
+                } catch (e) {
+                  console.log(e.constructor.name);
+                }
+            """),
+        )
+
+    def test_negative_zero_survives_the_reformatting_of_a_long_array(self):
+        """
+        Node: `true` and `-Infinity`. Negative zero prints as `0` and is `=== 0`, so only
+        `Object.is` and the reciprocal witness it. The index comes from `process.argv` so that
+        the element is fetched from the emitted array at run time rather than folded out of the
+        program.
+        """
+        self._prints(
+            inspect.cleandoc("""
+                var a = [
+                    0 * -1, 216, 150, 85, 200, 21, 150, 34, 117, 192, 188, 159, 55, 161, 212,
+                    83, 194, 215, 4, 31, 78, 146, 105, 234, 185, 106, 130, 223, 47, 187
+                ];
+                console.log(Object.is(a[process.argv.length - 2], -0));
+                console.log(1 / a[process.argv.length - 2]);
+            """),
+            'true\n-Infinity\n',
+        )
+
+    def test_a_negative_base_raised_to_an_infinity_is_what_the_engine_says(self):
+        """
+        Node: `Infinity 0`, then `NaN NaN`, then `0 Infinity`. A magnitude above one and one
+        below it answer opposite ways for the two signs of exponent, and a base of exactly `-1`
+        is `NaN` for either sign — where Python's own power operator answers `1.0`.
+        """
+        self._prints(
+            inspect.cleandoc("""
+                console.log(String(Math.pow(0 - 2, 1e400)), String(Math.pow(0 - 2, -1e400)));
+                console.log(String(Math.pow(0 - 1, 1e400)), String(Math.pow(0 - 1, -1e400)));
+                console.log(String(Math.pow(0 - 0.5, 1e400)), String(Math.pow(0 - 0.5, -1e400)));
+            """),
+            'Infinity 0\nNaN NaN\n0 Infinity\n',
+        )
+
+    def test_rest_parameter_unpacking_of_an_implausible_length_terminates(self):
+        """
+        The `length` truncation of a rest array names how many parameters the function was
+        written with. A count of a million is no parameter list, and the property under test is
+        that deciding so takes bounded time rather than one parameter per counted element.
+        """
+        source = (
+            'var f = function (...s) { s.length = 1000000; return s[0]; };'
+            ' console.log(f(1));'
+        )
+        deobfuscated = deobfuscate_within(source, seconds=20)
+        if deobfuscated is None:
+            self.fail('the rest parameter unpacking did not terminate')
+        self.assertEqual(behavior(deobfuscated), ('1\n', None))
+
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestUnaryOperatorFoldCoverage(TestBase):
@@ -2829,4 +2987,22 @@ class TestUndeclaredHostObservableGlobals(TestBase):
         self._check_host(
             'function help() { return 7; } function handler() { return help(); }',
             calls=('handler',))
+
+
+class TestDeobfuscateWithin(TestBase):
+    """
+    The timeout helper is an oracle in its own right: every test that reads its `None` as "the
+    fold did not terminate" is only as trustworthy as the helper's ability to tell that verdict
+    apart from any other way a child process can fail to hand its answer back.
+    """
+
+    def test_a_deobfuscation_whose_program_is_not_ascii_is_reported_as_finished(self):
+        """
+        The result crosses a process boundary, and the console codec of the machine running the
+        tests has no say in what a JavaScript program may contain. A program those characters
+        cannot be spelled in must come back as itself, not as a timeout and not as a failed
+        child.
+        """
+        source = "console.log('日本語');"
+        self.assertEqual(deobfuscate_within(source, seconds=20), source)
 

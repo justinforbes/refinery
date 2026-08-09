@@ -209,6 +209,11 @@ def _to_array_length(value: Value) -> int:
 
 
 def to_number(value: Value) -> float:
+    """
+    Apply the ECMA-262 ToNumber abstract operation. The string case is not Python's `float`: that
+    function accepts `inf`, `infinity` and `nan`, none of which JavaScript recognizes — `Number('inf')`
+    is `NaN`, and only the exact spelling `Infinity` names an infinity.
+    """
     if isinstance(value, bool):
         return 1.0 if value else 0.0
     if isinstance(value, (int, float)):
@@ -225,6 +230,9 @@ def to_number(value: Value) -> float:
             return to_js_number(int(s, 0))
         except ValueError:
             pass
+        magnitude = s[1:] if s[0] in '+-' else s
+        if magnitude.isalpha() and magnitude != 'Infinity':
+            return float('nan')
         try:
             return float(s)
         except ValueError:
@@ -905,7 +913,7 @@ def _global_parse_int(args: list[Value]) -> Value:
     if not args:
         return float('nan')
     s = to_string(args[0])
-    radix = _to_int(args[1]) if len(args) > 1 else 10
+    radix = _to_int(args[1]) if len(args) > 1 else 0
     result = js_parse_int(s, radix)
     if result is None:
         return float('nan')

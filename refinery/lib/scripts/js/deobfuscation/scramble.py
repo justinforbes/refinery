@@ -41,6 +41,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclaration,
     JsVariableDeclarator,
 )
+from refinery.lib.scripts.js.numbers import exact_integer
 
 _DEFAULT_ROUNDS = 3
 _DEFAULT_ITERATIONS = 200000
@@ -135,14 +136,18 @@ def _extract_constructor_params(method: JsMethodDefinition) -> tuple[int, int]:
         if not isinstance(node, JsAssignmentExpression):
             continue
         if _is_this_member(node.left, 'rounds'):
-            if isinstance(node.right, JsNumericLiteral) and node.right.value.is_integer():
-                rounds = int(node.right.value)
+            if isinstance(node.right, JsNumericLiteral):
+                declared = exact_integer(node.right.value)
+                if declared is not None:
+                    rounds = declared
         elif _is_this_member(node.left, 'masterKey'):
             if not isinstance(node.right, JsCallExpression) or len(node.right.arguments) < 5:
                 continue
             iters_arg = node.right.arguments[2]
-            if isinstance(iters_arg, JsNumericLiteral) and iters_arg.value.is_integer():
-                iterations = int(iters_arg.value)
+            if isinstance(iters_arg, JsNumericLiteral):
+                declared = exact_integer(iters_arg.value)
+                if declared is not None:
+                    iterations = declared
     return rounds, iterations
 
 

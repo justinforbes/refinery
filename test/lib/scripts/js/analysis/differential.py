@@ -61,7 +61,8 @@ _DEOBFUSCATE_IN_CHILD = R'''
 import sys
 sys.path.insert(0, sys.argv[1])
 from test.lib.scripts.js.analysis.differential import deobfuscate_source
-sys.stdout.write(deobfuscate_source(sys.argv[2]))
+source = sys.stdin.buffer.read().decode('utf-8')
+sys.stdout.buffer.write(deobfuscate_source(source).encode('utf-8'))
 '''
 
 
@@ -74,20 +75,27 @@ def deobfuscate_within(source: str, seconds: float) -> str | None:
     defect no comparison of results can express. It runs in a child process because such a computation
     happens inside a single interpreter opcode, where no timer, signal, or thread can interrupt it —
     only killing the process can.
+
+    Both the source and the result cross the process boundary as UTF-8 bytes over a pipe rather than as
+    text through the platform's codec, so that neither a program the console encoding cannot spell nor
+    one longer than a command line may hold is reported as a failure to terminate.
     """
     root = Path(__file__).resolve().parents[5]
+    child = subprocess.Popen(
+        [sys.executable, '-c', _DEOBFUSCATE_IN_CHILD, str(root)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     try:
-        finished = subprocess.run(
-            [sys.executable, '-c', _DEOBFUSCATE_IN_CHILD, str(root), source],
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            timeout=seconds,
-            check=True,
-        )
+        out, err = child.communicate(source.encode('utf-8'), timeout=seconds)
     except subprocess.TimeoutExpired:
+        child.kill()
+        child.communicate()
         return None
-    return finished.stdout
+    if child.returncode != 0:
+        raise ChildProcessError(err.decode('utf-8', 'replace'))
+    return out.decode('utf-8')
 
 
 def _normalize_error(stderr: str) -> str:

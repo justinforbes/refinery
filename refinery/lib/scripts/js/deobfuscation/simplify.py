@@ -77,6 +77,7 @@ from refinery.lib.scripts.js.model import (
     JsUnaryExpression,
     strip_parens,
 )
+from refinery.lib.scripts.js.numbers import exact_integer
 from refinery.lib.scripts.js.precedence import parens_required
 
 _OBJECT_PROTO_PROPERTIES = OBJECT_PROTOTYPE_MEMBERS
@@ -455,12 +456,15 @@ class JsSimplifications(Transformer):
             return None
         if not self.effects.call_is_foldable(node):
             return None
-        radix = 10
+        radix = 0
         if len(node.arguments) >= 2:
             radix_value = numeric_value(node.arguments[1])
             if radix_value is None:
                 return None
-            radix = int(radix_value)
+            resolved = exact_integer(radix_value)
+            if resolved is None:
+                return None
+            radix = resolved
         sv = string_value(node.arguments[0])
         if sv is not None:
             result = js_parse_int(sv, radix)
@@ -688,14 +692,14 @@ class JsSimplifications(Transformer):
                 isinstance(node.object, JsArrayExpression)
                 and isinstance(node.property, JsNumericLiteral)
             ):
-                idx = node.property.value
+                idx = exact_integer(node.property.value)
                 elements = node.object.elements
                 if (
-                    idx.is_integer()
+                    idx is not None
                     and 0 <= idx < len(elements)
                     and all(e is not None and is_literal(e) for e in elements)
                 ):
-                    return elements[int(idx)]
+                    return elements[idx]
             prop_str = string_value(node.property)
             if prop_str is not None and is_valid_identifier(prop_str):
                 node.computed = False

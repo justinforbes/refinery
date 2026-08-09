@@ -72,7 +72,11 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
 )
-from refinery.lib.scripts.js.numbers import js_number_to_string, to_js_number
+from refinery.lib.scripts.js.numbers import (
+    is_negative_zero,
+    js_number_to_string,
+    to_js_number,
+)
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
 
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_$][a-zA-Z_$0-9]*$')
@@ -270,7 +274,7 @@ def _js_mod(a: int | float, b: int | float) -> int | float:
     return math.fmod(a, b)
 
 
-def _js_pow(base: int | float, exp: int | float) -> int | float:
+def _js_pow(base: float, exp: float) -> float:
     """
     Replicate JavaScript exponentiation (`**` / `Math.pow`). JavaScript numbers are IEEE-754 doubles,
     so this diverges from Python in cases that matter: `anything ** 0` is `1` (even `NaN ** 0`); a base
@@ -278,28 +282,31 @@ def _js_pow(base: int | float, exp: int | float) -> int | float:
     non-integer exponent is a complex number in Python (JS: `NaN`); a zero base with a negative
     exponent is `Infinity` (with the sign rule for `-0`); and a magnitude beyond the double range is
     `Infinity`, whereas Python's arbitrary-precision `int ** int` returns an exact bignum.
+
+    An infinite exponent is decided from the base's *magnitude* alone and never from its sign, which
+    is why it is answered before the negative-base rule rather than folded into it: `(-2) ** Infinity`
+    is `Infinity` and `(-0.5) ** Infinity` is `0`, where reading an infinite exponent as a non-integer
+    one would call both `NaN`.
     """
     inf = float('inf')
     if exp == 0:
-        return 1
+        return 1.0
     if base != base or exp != exp:
         return float('nan')
-    if (base == 1 or base == -1) and exp in (inf, -inf):
-        return float('nan')
+    if exp in (inf, -inf):
+        magnitude = abs(base)
+        if magnitude == 1:
+            return float('nan')
+        return inf if (magnitude > 1) == (exp == inf) else 0.0
+    is_int_exp = exp == int(exp)
     if base == 0 and exp < 0:
-        if (
-            exp not in (inf, -inf)
-            and exp == int(exp)
-            and int(exp) % 2 != 0
-            and math.copysign(1.0, base) < 0
-        ):
+        if is_int_exp and int(exp) % 2 != 0 and math.copysign(1.0, base) < 0:
             return -inf
         return inf
-    is_int_exp = exp not in (inf, -inf) and exp == int(exp)
     if base < 0 and base != -inf and not is_int_exp:
         return float('nan')
     try:
-        result = to_js_number(base) ** to_js_number(exp)
+        result = base ** exp
     except OverflowError:
         return -inf if (base < 0 and is_int_exp and int(exp) % 2 != 0) else inf
     except (ValueError, ZeroDivisionError):
@@ -349,7 +356,14 @@ def eval_binary_op(op: str, left: float, right: float) -> float | bool | None:
     Evaluate a JavaScript binary operator on two numeric operands. Returns the result value, or
     `None` when the operator is unknown or the computation overflows/divides by zero. Handles
     arithmetic, bitwise, relational, equality, and the unsigned right shift `>>>`.
+
+    Both operands are coerced here rather than in the individual operators, because this is the single
+    door into `BINARY_OPS` and the coercion is what bounds the work: `3 ** 1000000000` is one double
+    operation answering `Infinity`, while the same expression over Python integers builds a number of
+    half a billion digits and does not return in any useful time.
     """
+    left = to_js_number(left)
+    right = to_js_number(right)
     if op in ('===', '=='):
         return left == right
     if op in ('!==', '!='):
@@ -444,13 +458,14 @@ def make_numeric_literal(value: int | float) -> JsNumericLiteral | None:
     The spelling is `Number.prototype.toString` with one deliberate deviation: that algorithm reads
     the mathematical value, so it prints negative zero as `0`, but a literal `0` denotes *positive*
     zero and the two are distinguishable — `1 / -0` is `-Infinity`. Negative zero is therefore spelled
-    `-0`, which is a negation applied to a literal rather than a literal, and is the one place where
-    this function's result is not a single token.
+    `-0`. That spelling, like the one every other negative value gets, is a negation applied to a
+    literal rather than a literal, so the node binds like the unary operator it starts with; that is a
+    fact about the spelling, and `precedence.py` reads it from the `raw` rather than from the class.
     """
     value = to_js_number(value)
-    if value != value or value in (float('inf'), float('-inf')):
+    if not math.isfinite(value):
         return None
-    if value == 0 and math.copysign(1.0, value) < 0:
+    if is_negative_zero(value):
         return JsNumericLiteral(value=value, raw='-0')
     return JsNumericLiteral(value=value, raw=js_number_to_string(value))
 
@@ -511,12 +526,12 @@ def value_to_node(value: object) -> Expression | None:
             return JsIdentifier(name='Infinity')
         if number == float('-inf'):
             return JsUnaryExpression(operator='-', operand=JsIdentifier(name='Infinity'))
-        if number < 0:
-            magnitude = make_numeric_literal(-number)
-            if magnitude is None:
-                return None
+        magnitude = make_numeric_literal(abs(number))
+        if magnitude is None:
+            return None
+        if number < 0 or is_negative_zero(number):
             return JsUnaryExpression(operator='-', operand=magnitude)
-        return make_numeric_literal(number)
+        return magnitude
     if isinstance(value, JsBuffer):
         return None
     if isinstance(value, list):
@@ -711,21 +726,33 @@ def is_nullish(node: Node) -> bool:
     return False
 
 
-def js_parse_int(s: str, radix: int = 10) -> float | None:
+_MAX_DIGITS_IN_A_DOUBLE = {
+    radix: math.ceil(1024 / math.log2(radix)) for radix in range(2, 37)
+}
+"""
+Per radix, the digit count past which a written-out integer is certainly outside the double range and
+so denotes an infinity. Answering from the count rather than from the value keeps `parseInt` total:
+building the integer first would make it hostage to CPython's limit on converting a long decimal
+string, which raises rather than returning the `Infinity` the language specifies.
+"""
+
+
+def js_parse_int(s: str, radix: int = 0) -> float | None:
     """
     Replicate the semantics of JavaScript's `parseInt(string, radix)`. Strips leading whitespace,
-    handles an optional `+`/`-` sign, and for radix 16 skips a leading `0x`/`0X` prefix. Parses
+    handles an optional `+`/`-` sign, and skips a leading `0x`/`0X` prefix for radix 16. Parses
     leading characters valid for the given radix (2-36) and stops at the first invalid one. Returns
     `None` when no valid digits are found (JS would return `NaN`).
 
-    The digits are accumulated exactly and only then coerced, because `parseInt` reads the whole
-    digit string before producing a Number: enough digits and the result is `Infinity`, and a digit
-    string past 2^53 names the nearest double rather than itself.
+    A radix of `0` is the language's "not supplied" — `parseInt(s)` and `parseInt(s, 0)` are the same
+    call — and it is not a synonym for 10: an unsupplied radix reads a `0x` prefix as selecting base
+    16, so `parseInt('0x1f')` is `31`. A caller that defaults the radix to 10 instead answers `0` for
+    that string, having stopped at the `x`.
+
+    The digits are accumulated exactly and only then coerced, because `parseInt` reads the whole digit
+    string before producing a Number: enough digits and the result is `Infinity`, and a digit string
+    past 2^53 names the nearest double rather than itself.
     """
-    if radix == 0:
-        radix = 10
-    if not (2 <= radix <= 36):
-        return None
     s = s.strip()
     if not s:
         return None
@@ -734,7 +761,12 @@ def js_parse_int(s: str, radix: int = 10) -> float | None:
         if s[0] == '-':
             sign = -1
         s = s[1:]
-    if radix == 16 and len(s) >= 2 and s[0] == '0' and s[1] in 'xX':
+    hex_prefixed = len(s) >= 2 and s[0] == '0' and s[1] in 'xX'
+    if radix == 0:
+        radix = 16 if hex_prefixed else 10
+    if not (2 <= radix <= 36):
+        return None
+    if radix == 16 and hex_prefixed:
         s = s[2:]
     digits: list[str] = []
     for ch in s:
@@ -750,7 +782,10 @@ def js_parse_int(s: str, radix: int = 10) -> float | None:
             break
     if not digits:
         return None
-    return to_js_number(sign * int(''.join(digits), radix))
+    text = ''.join(digits).lstrip('0') or '0'
+    if len(text) > _MAX_DIGITS_IN_A_DOUBLE[radix]:
+        return float('-inf') if sign < 0 else float('inf')
+    return to_js_number(sign * int(text, radix))
 
 
 def get_body(node: Node) -> list[Statement] | None:

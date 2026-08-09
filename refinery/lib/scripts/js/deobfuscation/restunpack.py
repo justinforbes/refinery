@@ -38,6 +38,16 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
 )
+from refinery.lib.scripts.js.numbers import exact_integer
+
+
+_MAX_PARAMETERS = 65535
+"""
+The most formal parameters a function may declare, which is what a truncation length is rewritten
+into. A larger one does not describe this pattern, and taking it at face value would spend the rest
+of the run generating names for parameters no engine would accept: `r.length = 1e300` is a valid
+assignment and its length is an integer.
+"""
 
 
 class _TruncationInfo(NamedTuple):
@@ -75,9 +85,11 @@ def _extract_truncation(
         if rhs is None:
             continue
         n = numeric_value(rhs)
-        if n is None or not n.is_integer() or n < 0:
+        if n is None:
             continue
-        length = int(n)
+        length = exact_integer(n)
+        if length is None or not (0 <= length <= _MAX_PARAMETERS):
+            continue
         obj = lhs.object
         if isinstance(obj, JsIdentifier) and obj.name == rest_name:
             return _TruncationInfo(length, None)
@@ -183,7 +195,8 @@ def _extract_access_key(node: JsMemberExpression) -> str | None:
     if node.computed:
         prop = node.property
         if isinstance(prop, JsNumericLiteral):
-            return str(int(prop.value)) if prop.value.is_integer() else None
+            index = exact_integer(prop.value)
+            return None if index is None else str(index)
         if isinstance(prop, JsStringLiteral):
             return prop.value
         if (
@@ -191,8 +204,8 @@ def _extract_access_key(node: JsMemberExpression) -> str | None:
             and prop.operator == '-'
             and isinstance(prop.operand, JsNumericLiteral)
         ):
-            negated = prop.operand.value
-            return str(-int(negated)) if negated.is_integer() else None
+            index = exact_integer(prop.operand.value)
+            return None if index is None else str(-index)
         return None
     if isinstance(node.property, JsIdentifier):
         if node.property.name == 'length':

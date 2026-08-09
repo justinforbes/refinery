@@ -88,7 +88,18 @@ def _expression_precedence(node: Node) -> int:
         return _CONDITIONAL_PRECEDENCE
     if isinstance(node, (JsUnaryExpression, JsAwaitExpression, JsUpdateExpression)):
         return _UNARY_PRECEDENCE
+    if _is_negated_literal(node):
+        return _UNARY_PRECEDENCE
     return _PRIMARY_PRECEDENCE
+
+
+def _is_negated_literal(node: Node) -> bool:
+    """
+    Whether *node* is a numeric literal spelled as a negation rather than as a single token. Negative
+    zero has no literal form and is written `-0`, so a literal's class does not by itself settle how
+    the node binds; the spelling does, and that is what this reads.
+    """
+    return isinstance(node, JsNumericLiteral) and node.raw.startswith('-')
 
 
 def _leading_sign(node: Node) -> str | None:
@@ -101,6 +112,8 @@ def _leading_sign(node: Node) -> str | None:
         return node.operator
     if isinstance(node, JsUpdateExpression) and node.prefix and node.operator in ('++', '--'):
         return node.operator[0]
+    if _is_negated_literal(node):
+        return '-'
     return None
 
 
@@ -176,6 +189,7 @@ def parens_required(inner: Node, parent: Node | None, paren_node: Node) -> bool:
             and (
                 isinstance(inner, (JsUnaryExpression, JsAwaitExpression))
                 or (isinstance(inner, JsUpdateExpression) and inner.prefix)
+                or _is_negated_literal(inner)
             )
         ):
             return True
@@ -208,7 +222,7 @@ def parens_required(inner: Node, parent: Node | None, paren_node: Node) -> bool:
             if paren_node is not inner and _has_optional_in_spine(inner):
                 return True
             if isinstance(inner, JsNumericLiteral):
-                return not parent.computed
+                return _is_negated_literal(inner) or not parent.computed
             if not isinstance(inner, (
                 JsIdentifier,
                 JsMemberExpression,

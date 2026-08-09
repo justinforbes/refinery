@@ -54,6 +54,7 @@ from refinery.lib.scripts.js.model import (
     JsWhileStatement,
     Statement,
 )
+from refinery.lib.scripts.js.numbers import exact_integer
 
 
 class Encoding(enum.Enum):
@@ -376,7 +377,7 @@ def _resolve_constant(
     property maps, unary negation, and parenthesized expressions. Returns None on failure.
     """
     if isinstance(node, JsNumericLiteral):
-        return int(node.value)
+        return exact_integer(node.value)
     if isinstance(node, JsParenthesizedExpression) and node.expression:
         return _resolve_constant(node.expression, prop_maps)
     if isinstance(node, JsMemberExpression):
