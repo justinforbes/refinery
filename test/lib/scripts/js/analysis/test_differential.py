@@ -3013,68 +3013,69 @@ class TestUnaryOperatorFoldCoverage(TestBase):
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestUndeclaredHostObservableGlobals(TestBase):
-    """
-    Known-failing. Under the script execution model a top-level `var` is a property of the global object, so a
-    host reads it by a name the file never mentions. `836a2c51` closed the case where the analyst *names* the
-    entrypoint; what remains is the file whose host contract is not declared, where reachability computed over
-    the file alone judges the global dead and removes it.
-
-    A `function` declaration survives while `var f = function(){}` does not — the two are removed by different
-    sweeps — so the residue is not "globals are dropped" but a specific asymmetry, pinned below.
-
-    **Why this is a design change and not a guard.** Two attempts failed on measurement, and repeating either
-    is wasted work:
-
-    1. A gate in `_localize_pseudo_globals` proved **inert** — output was identical with and without it,
-       because the later dead-store sweep removes the binding anyway.
-    2. Extending the gate to the store sweep broke **46 tests**. The diagnosis: an obfuscator's decoder string
-       table is read in the original source and becomes unread only *because the pass consumed its reads*, so
-       a gate that inspects the tree at removal time cannot tell it from a global the file never reads.
-
-    That is the crux. Distinguishing "never read" from "no longer read" needs the **input-time read set**,
-    captured before any pass runs and threaded through
-    `refinery.lib.scripts.js.analysis.cache.ModelCache` — which also has to respect that cache's pinning
-    contract, since a fact that *grows* mid-pass is precisely what it forbids.
-
-    Note on the oracle: `host_behavior` indexes `globalThis[name]` and calls it only when it holds a function,
-    so it can observe function-valued globals only. A value-valued global needs its own observation, which is
-    why the cases here are function-valued.
-    """
-
-    def _check_host(self, source: str, *, calls: tuple[str, ...]):
-        """
-        Assert a host observes the same thing before and after, with **no** entrypoints declared — the
-        undeclared contract is the whole point, so passing `entrypoints` here would test `836a2c51` instead.
-        """
-        deobfuscated = deobfuscate_source(source)
+    def assertSameBehavior(self, source: str, *, calls: tuple[str, ...], entrypoints: tuple[str, ...] = ()):
+        deobfuscated = deobfuscate_source(source, entrypoints=entrypoints)
         self.assertEqual(
             host_behavior(source, calls=calls),
             host_behavior(deobfuscated, calls=calls),
             F'deobfuscation changed what a host observes; result was:\n{deobfuscated}',
         )
 
-    @unittest.expectedFailure
-    def test_undeclared_handler_held_by_a_var_survives(self):
-        """
-        Node: `handler=5` before, `handler=undefined` after — the whole file is emitted empty.
-        """
-        self._check_host('var handler = function () { return 5; };', calls=('handler',))
+    def test_handler_held_by_var_01(self):
+        source = 'var handler = function () { return 5; };'
+        self.assertEqual(deobfuscate_source(source), '')
+        self.assertSameBehavior(source, calls=('handler',), entrypoints=('handler',))
+
+    def test_handler_held_by_var_02(self):
+        source = 'var handler = () => 5;'
+        self.assertEqual(deobfuscate_source(source), '')
+        self.assertSameBehavior(source, calls=('handler',), entrypoints=('handler',))
 
     @unittest.expectedFailure
-    def test_undeclared_handler_held_by_an_arrow_survives(self):
-        self._check_host('var handler = () => 5;', calls=('handler',))
+    def test_function_declaration(self):
+        source = 'function handler() { return 5; }'
+        self.assertEqual(deobfuscate_source(source), '')
+        self.assertSameBehavior(source, calls=('handler',), entrypoints=('handler',))
 
-    def test_undeclared_function_declaration_already_survives(self):
-        """
-        The asymmetry that localizes the defect: the declaration form is kept today. A fix must close the
-        `var` form without disturbing this, and comparing the two sweeps is the obvious starting point.
-        """
-        self._check_host('function handler() { return 5; }', calls=('handler',))
+    @unittest.expectedFailure
+    def test_function_and_helper(self):
+        source = 'function help() { console.log("hi!"); return 7; } function handler() { return help(); }'
+        self.assertEqual(deobfuscate_source(source), '')
+        self.assertSameBehavior(source, calls=('help',), entrypoints=('handler',))
 
-    def test_undeclared_declaration_calling_a_helper_already_survives(self):
-        self._check_host(
-            'function help() { return 7; } function handler() { return help(); }',
-            calls=('handler',))
+    def test_unexported_global_folds(self):
+        self.assertEqual(
+            deobfuscate_source('var VERSION = 3; console.log(VERSION);'),
+            'console.log(3);')
+
+    @unittest.expectedFailure
+    def test_exported_global_survives_and_is_not_folded(self):
+        source = 'var VERSION = 3; console.log(VERSION);'
+        self.assertEqual(
+            deobfuscate_source(source, entrypoints=('VERSION',)),
+            'var VERSION = 3;\nconsole.log(VERSION);')
+
+    def test_module_scoped_var_is_removed_even_when_exported(self):
+        """
+        Under the module model a top-level binding is scoped to the module and never becomes a property
+        of the global object — Node reports `typeof globalThis.handler` as `undefined` for this source
+        run as CommonJS — so no host can reach it by name and removing it is sound however it is named.
+        These assertions read the emitted text because `host_behavior` observes the global object, which
+        the binding never joins, and would compare `undefined` against `undefined`.
+        """
+        source = 'var handler = function () { return 5; };'
+        self.assertEqual(deobfuscate_source(source, module=True, entrypoints=('handler',)), '')
+
+    def test_module_scoped_global_still_folds_when_exported(self):
+        source = 'var VERSION = 3; console.log(VERSION);'
+        self.assertEqual(
+            deobfuscate_source(source, module=True, entrypoints=('VERSION',)),
+            'console.log(3);')
+
+    @unittest.expectedFailure
+    def test_module_scoped_dead_function_is_removed_even_when_exported(self):
+        source = 'function handler() { return 5; }'
+        self.assertEqual(deobfuscate_source(source, module=True, entrypoints=('handler',)), '')
 
 
 class TestDeobfuscateWithin(TestBase):
@@ -3093,4 +3094,3 @@ class TestDeobfuscateWithin(TestBase):
         """
         source = "console.log('日本語');"
         self.assertEqual(deobfuscate_within(source, seconds=20), source)
-
