@@ -71,7 +71,7 @@ class Ps1TypeCasts(Transformer):
             result = unwrap_integer(node.operand)
             if result is not None:
                 if lo <= result.value <= hi:
-                    return Ps1IntegerLiteral(value=result.value, raw=str(result.value))
+                    return Ps1IntegerLiteral(raw=str(result.value))
             else:
                 sv = string_value(node.operand) if node.operand else None
                 if sv is not None:
@@ -81,7 +81,7 @@ class Ps1TypeCasts(Transformer):
                     except (ValueError, OverflowError):
                         value = None
                     if value is not None and lo <= value <= hi:
-                        return Ps1IntegerLiteral(value=value, raw=str(value))
+                        return Ps1IntegerLiteral(raw=str(value))
         if tn == 'char':
             result = unwrap_integer(node.operand)
             if result is not None and 0 <= result.value <= 0xFFFF:

@@ -165,7 +165,7 @@ def _compute_regex_match(node: Ps1InvokeMember) -> str | None:
 
 
 def _integer(value: int) -> Ps1IntegerLiteral:
-    return Ps1IntegerLiteral(value=value, raw=str(value))
+    return Ps1IntegerLiteral(raw=str(value))
 
 
 #: The members whose value is decided by the shape of the receiver rather than by anything the
@@ -536,7 +536,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if op == '-bnot':
             n = unwrap_integer(node.operand)
             if n is not None:
-                return Ps1IntegerLiteral(value=~n.value, raw=str(~n.value))
+                return Ps1IntegerLiteral(raw=str(~n.value))
         if op in ('-not', '!'):
             truth = is_truthy(node.operand)
             if truth is not None:
@@ -582,7 +582,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if not is_fault_free(node):
             return None
         return Ps1ArrayLiteral(elements=[
-            Ps1IntegerLiteral(value=v, raw=str(v)) for v in range(a, b + step, step)])
+            Ps1IntegerLiteral(raw=str(v)) for v in range(a, b + step, step)])
 
     def _selected(self, node: Node, selection: _Selection | None) -> Expression | None:
         """
@@ -745,7 +745,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if isinstance(result, bool):
             return Ps1Variable(name='True' if result else 'False')
         if isinstance(result, int):
-            return Ps1IntegerLiteral(value=result, raw=str(result))
+            return Ps1IntegerLiteral(raw=str(result))
         if isinstance(result, list):
             elements: list[Expression] = [make_string_literal(p) for p in result]
             return Ps1ArrayLiteral(elements=elements)
@@ -842,7 +842,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
                 except Exception:
                     return None
                 elements: list[Expression] = [
-                    Ps1IntegerLiteral(value=b, raw=F'0x{b:02X}') for b in decoded
+                    Ps1IntegerLiteral(raw=F'0x{b:02X}') for b in decoded
                 ]
                 array = Ps1ArrayLiteral(elements=elements)
                 return Ps1ArrayExpression(
@@ -863,7 +863,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if len(node.arguments) == 1:
             n = unwrap_integer(node.arguments[0])
             if n is not None and lo <= n.value <= hi:
-                return Ps1IntegerLiteral(value=n.value, raw=str(n.value))
+                return Ps1IntegerLiteral(raw=str(n.value))
             sv = string_value(node.arguments[0])
             if sv is not None:
                 sv = sv.strip()
@@ -872,7 +872,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
                 except (ValueError, OverflowError):
                     return None
                 if lo <= value <= hi:
-                    return Ps1IntegerLiteral(value=value, raw=str(value))
+                    return Ps1IntegerLiteral(raw=str(value))
         elif len(node.arguments) == 2:
             sv = string_value(node.arguments[0])
             base_int = unwrap_integer(node.arguments[1])
@@ -882,7 +882,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
                 except (ValueError, OverflowError):
                     return None
                 if lo <= value <= hi:
-                    return Ps1IntegerLiteral(value=value, raw=str(value))
+                    return Ps1IntegerLiteral(raw=str(value))
         return None
 
     @staticmethod

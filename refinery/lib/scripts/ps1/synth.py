@@ -244,9 +244,7 @@ class Ps1Synthesizer(Synthesizer):
             self._write(node.operator)
             if node.operator.startswith('-') and len(node.operator) > 1:
                 self._write(' ')
-            elif node.operator in ('+', '-') and self._operand_starts_with_sign(node.operand):
-                # Avoid gluing a unary sign onto an operand that itself starts with the same sign,
-                # which would re-lex as the `++`/`--` operator (e.g. `- -5` must not become `--5`).
+            elif node.operator in ('+', '-') and self._fuses_with_a_sign(node.operand):
                 self._write(' ')
             if node.operand:
                 self._emit_operand(node.operand, precedence.UNARY)
@@ -256,11 +254,21 @@ class Ps1Synthesizer(Synthesizer):
             self._write(node.operator)
 
     @staticmethod
-    def _operand_starts_with_sign(operand) -> bool:
+    def _fuses_with_a_sign(node) -> bool:
+        """
+        Whether a `+` or `-` written straight against `node` would join with it into one token. A
+        numeral does whether or not it carries a sign of its own: `- 5` printed as `-5` is one Int32
+        literal where the source had unary minus over an Int32, and the two differ at the width
+        boundary — `- 2147483648` is an Int64 and `-2147483648` an Int32. A numeral that already
+        spells a sign fuses the other way: `- -5` printed as `--5` re-lexes as the decrement
+        operator.
+        """
+        if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
+            return True
         return (
-            isinstance(operand, Ps1UnaryExpression)
-            and operand.prefix
-            and operand.operator[:1] in ('+', '-')
+            isinstance(node, Ps1UnaryExpression)
+            and node.prefix
+            and node.operator[:1] in ('+', '-')
         )
 
     def visit_Ps1TypeExpression(self, node: Ps1TypeExpression):
@@ -335,11 +343,21 @@ class Ps1Synthesizer(Synthesizer):
                 self._emit_argument_value(node.value)
 
     def _emit_argument_value(self, value: Expression):
-        # An argument is read back by the rule that reads one bare, which reaches nothing that an
-        # operator holds together: an operator would reach across the arguments beside this one, a
-        # range re-lexes as a single bare word in argument mode, and a command swallows the rest of
-        # the line. The comma is bracketed too, even though it binds tighter than all of them,
-        # because it is what separates one argument from the next.
+        """
+        An argument is read back by the rule that reads one bare, which reaches nothing that an
+        operator holds together: an operator would reach across the arguments beside this one, a
+        range re-lexes as a single bare word in argument mode, and a command swallows the rest of
+        the line. The comma is bracketed too, even though it binds tighter than all of them,
+        because it is what separates one argument from the next.
+
+        A spelling that begins with a sign is *not* bracketed here, and this slot cannot carry one:
+        5.1 reads a leading `-` in an argument as the start of a parameter name, and a parameter no
+        command declares is handed on as the text it was written as, so `Write-Output -1` passes the
+        String `-1` where `Write-Output (-1)` passes an Int32. The bracket is left off because it
+        would be right for a value a pass folded into this slot and wrong for one the source wrote
+        here — the parser reads an argument-position `-1` as the number, where 5.1 reads it as one
+        bare word. Both halves are one repair and neither may land without the other.
+        """
         self._emit_word(value, precedence.COMMA + 1)
 
     def visit_Ps1AssignmentExpression(self, node: Ps1AssignmentExpression):

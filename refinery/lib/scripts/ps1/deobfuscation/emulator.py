@@ -1489,7 +1489,7 @@ class Ps1FunctionEvaluator(Transformer):
         if isinstance(value, str):
             return make_string_literal(value)
         if isinstance(value, int) and not isinstance(value, bool):
-            return Ps1IntegerLiteral(value=value, raw=str(value))
+            return Ps1IntegerLiteral(raw=str(value))
         return None
 
     @staticmethod

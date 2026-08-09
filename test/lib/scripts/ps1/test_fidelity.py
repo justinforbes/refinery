@@ -39,7 +39,11 @@ from refinery.lib.scripts import (
     owning_list,
 )
 from refinery.lib.scripts.ps1 import model as ps1model
-from refinery.lib.scripts.ps1.model import Ps1ParenExpression
+from refinery.lib.scripts.ps1.model import (
+    Ps1IntegerLiteral,
+    Ps1ParenExpression,
+    Ps1RealLiteral,
+)
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
 
@@ -266,8 +270,90 @@ class TestPs1Fidelity(TestBase):
     def test_every_known_bracket_violation_is_an_input_of_the_corpus(self):
         self.assertEqual(sorted(set(KNOWN_BRACKET_VIOLATIONS) - set(self._corpus())), [])
 
+    def test_the_synthesizer_inverts_the_parser_for_both_readings_of_a_sign(self):
+        """
+        A sign is the one place where a rendering that re-lexes changes a type rather than a shape,
+        and it does so in both directions: `- 5` printed as `-5` is one `Int32` literal where the
+        tree held unary minus over one, and `-2147483648` printed as `- 2147483648` is unary minus
+        over an `Int64` where the tree held an `Int32`. The corpus reaches these only through the
+        files it happens to harvest, so the law is stated for them here as well.
+        """
+        for source in [
+            '$t = -1',
+            '$t = - 1',
+            '$t = +1',
+            '$t = + 1',
+            '$t = -1.5',
+            '$t = - 1.5',
+            '$t = -1kb',
+            '$t = -0xFF',
+            '$t = -2147483648',
+            '$t = - 2147483648',
+            '$t = -(2147483648)',
+            '$t = - -5',
+            '$t = -$x',
+            '$t = 5 * -1',
+            '$t = 1 -2',
+        ]:
+            with self.subTest(source=source):
+                tree = self._parse(source)
+                self.assertTrue(
+                    self._is_faithful(tree), F'not faithful: {self._synth(tree)!r}')
+
     def _truncations(self, source: str):
         for index, node in enumerate(self._parse(source).walk_in_order()):
             for field, items in child_list_fields(node):
                 for size in range(len(items)):
                     yield index, field, size
+
+
+class TestPs1SamenessSeesHowANumeralIsWritten(TestBase):
+    """
+    What the law above compares numerals by. `canonical` is blind to spelling, and the text of a
+    numeral is not spelling but value: `1.5` is a `Double` and `1.5d` a `Decimal`, `0xFF` an `Int32`
+    and `0xFFL` an `Int64`. Were the text compared away, the round trip would hold for a printer
+    that rewrote every numeral into the shortest decimal carrying its magnitude, and each such
+    rewrite changes the .NET type of what runs.
+    """
+
+    @staticmethod
+    def _parse(source: str) -> Node:
+        return Ps1Parser(source).parse()
+
+    @classmethod
+    def _number(cls, source: str) -> float:
+        literal, = (
+            node for node in cls._parse(source).walk()
+            if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral))
+        )
+        return literal.value
+
+    def test_two_spellings_of_one_number_under_two_types_are_two_programs(self):
+        for one, other in (
+            ('$t = 1', '$t = 1L'),
+            ('$t = 1.5', '$t = 1.5d'),
+            ('$t = 0xFF', '$t = 0xFFL'),
+            ('$t = -2147483648', '$t = -2147483648L'),
+        ):
+            with self.subTest(one=one, other=other):
+                self.assertEqual(self._number(one), self._number(other))
+                self.assertNotEqual(canonical(self._parse(one)), canonical(self._parse(other)))
+
+    def test_the_two_readings_of_a_signed_numeral_are_two_programs(self):
+        """
+        `-2147483648` is one literal that fits an `Int32`, where both `- 2147483648` and
+        `-(2147483648)` are unary minus over the `Int64` literal `2147483648`. The space and the
+        bracket are two spellings of the one program, and neither spells the program the sign
+        written against the digits does.
+        """
+        spaced = canonical(self._parse('$t = - 2147483648'))
+        bracketed = canonical(self._parse('$t = -(2147483648)'))
+        glued = canonical(self._parse('$t = -2147483648'))
+        self.assertEqual(spaced, bracketed)
+        self.assertNotEqual(spaced, glued)
+
+    def test_a_numeral_spelled_the_same_way_spells_the_same_program(self):
+        for source in ('$t = 1L', '$t = 1.5d', '$t = 0xFFL', '$t = -2147483648'):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    canonical(self._parse(source)), canonical(self._parse(F'  {source}  ')))

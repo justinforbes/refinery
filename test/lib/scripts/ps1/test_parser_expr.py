@@ -5,6 +5,8 @@ from test import TestBase
 import itertools
 import unittest
 
+from typing import TypeVar
+
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.model import (
@@ -35,6 +37,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Script,
     Ps1ArrayExpression,
 )
+
+_T = TypeVar('_T', bound=Node)
 
 
 class TestPs1ParserExpressions(TestBase):
@@ -152,10 +156,17 @@ class TestPs1ParserExpressions(TestBase):
         self.assertEqual(expr.operator, '-not')
         self.assertTrue(expr.prefix)
 
-    def test_unary_negation(self):
-        expr = self._parse_expr('-5')
-        self.assertIsInstance(expr, Ps1UnaryExpression)
-        self.assertEqual(expr.operator, '-')
+    def test_a_sign_written_against_a_numeral_is_part_of_the_numeral(self):
+        """
+        5.1 lexes `-5` as one `Number` token and `- 5` as `Minus` followed by one, which is what
+        decides a type: `-2147483648` fits an Int32 and `- 2147483648` is an Int64.
+        """
+        glued = self._parse_expr('-5')
+        self.assertIsInstance(glued, Ps1IntegerLiteral)
+        self.assertEqual(glued.raw, '-5')
+        separated = self._parse_expr('- 5')
+        self.assertIsInstance(separated, Ps1UnaryExpression)
+        self.assertEqual(separated.operator, '-')
 
     def test_unary_exclaim(self):
         expr = self._parse_expr('!$x')
@@ -248,7 +259,7 @@ class TestPs1ParserExpressions(TestBase):
         expr = self._parse_expr('@{ -1 = "neg" }')
         self.assertIsInstance(expr, Ps1HashLiteral)
         self.assertEqual(len(expr.pairs), 1)
-        self.assertIsInstance(expr.pairs[0][0], Ps1UnaryExpression)
+        self.assertIsInstance(expr.pairs[0][0], Ps1IntegerLiteral)
 
     def test_hash_literal_real_key(self):
         expr = self._parse_expr('@{ 3.14 = "pi" }')
@@ -793,3 +804,185 @@ class TestPs1ALineContinuationSeparatesTheOperatorFromWhatPrecedesIt(TestBase):
         second = script.body[1]
         self.assertIsInstance(second, Ps1ExpressionStatement)
         self.assertIsInstance(second.expression, Ps1CommandInvocation)
+
+
+class TestPs1ASignBelongsToTheDigitsItTouches(TestBase):
+    """
+    A `+` or `-` written straight against digits is part of the numeral: 5.1 lexes `$t = -1` as one
+    `Number` token and `$t = - 1` as a `Minus` operator followed by one. Which of the two readings
+    applies decides a .NET type, because `-2147483648` is a single literal that fits an `Int32`
+    while `- 2147483648` and `-(2147483648)` are unary minus over the `Int64` literal `2147483648`
+    and stay `Int64`. The same number then answers differently to everything that overflows.
+
+    The other half of the rule is the position the sign stands in. Only where a value may start is a
+    sign read as part of one, so after a complete expression a `-` subtracts however the spacing
+    runs, and only whitespace or a bracket separates a leading sign from the digits behind it.
+    """
+
+    def _assigned(self, source: str, kind: type[_T]) -> _T:
+        """
+        The value *source* assigns to `$t`, which the caller states the shape of: what only one node
+        class carries is worth reading once that class is what came back.
+        """
+        assignment, = (
+            node for node in Ps1Parser(source).parse().walk()
+            if isinstance(node, Ps1AssignmentExpression)
+        )
+        value = assignment.value
+        if not isinstance(value, kind):
+            self.fail(F'{source} assigns a {type(value).__name__}, not a {kind.__name__}')
+        return value
+
+    @staticmethod
+    def _numerals(source: str) -> list[str]:
+        return [
+            node.raw for node in Ps1Parser(source).parse().walk_in_order()
+            if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral))
+        ]
+
+    @staticmethod
+    def _variables(source: str) -> list[str]:
+        return [
+            node.name for node in Ps1Parser(source).parse().walk_in_order()
+            if isinstance(node, Ps1Variable)
+        ]
+
+    @staticmethod
+    def _unary_operators(source: str) -> list[str]:
+        return [
+            node.operator for node in Ps1Parser(source).parse().walk_in_order()
+            if isinstance(node, Ps1UnaryExpression)
+        ]
+
+    def test_a_sign_written_against_the_digits_is_read_as_one_numeral(self):
+        for source, kind, raw in (
+            ('$t = -1', Ps1IntegerLiteral, '-1'),
+            ('$t = -1.5', Ps1RealLiteral, '-1.5'),
+            ('$t = -0xFF', Ps1IntegerLiteral, '-0xFF'),
+            ('$t = -1kb', Ps1RealLiteral, '-1kb'),
+            ('$t = -1L', Ps1IntegerLiteral, '-1L'),
+            ('$t = +1', Ps1IntegerLiteral, '+1'),
+            ('$t = -2147483648', Ps1IntegerLiteral, '-2147483648'),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._assigned(source, kind).raw, raw)
+                self.assertEqual(self._unary_operators(source), [])
+
+    def test_whitespace_between_the_sign_and_the_digits_leaves_an_operator(self):
+        value = self._assigned('$t = - 1', Ps1UnaryExpression)
+        self.assertEqual((value.operator, value.prefix), ('-', True))
+        self.assertIsInstance(value.operand, Ps1IntegerLiteral)
+        self.assertEqual(self._numerals('$t = - 1'), ['1'])
+
+    def test_a_bracket_between_the_sign_and_the_digits_leaves_an_operator(self):
+        value = self._assigned('$t = -(2147483648)', Ps1UnaryExpression)
+        self.assertEqual((value.operator, value.prefix), ('-', True))
+        self.assertIsInstance(value.operand, Ps1ParenExpression)
+        self.assertEqual(self._numerals('$t = -(2147483648)'), ['2147483648'])
+
+    def test_a_sign_that_follows_a_complete_expression_subtracts_however_it_is_spaced(self):
+        for source in ('$t = 1 - 2', '$t = 1 -2', '$t = 1- 2', '$t = 1-2'):
+            with self.subTest(source):
+                self.assertEqual(self._assigned(source, Ps1BinaryExpression).operator, '-')
+                self.assertEqual(self._numerals(source), ['1', '2'])
+
+    def test_a_sign_where_a_value_may_start_is_part_of_the_numeral(self):
+        for source, numerals in (
+            ('$t = 5 * -1', ['5', '-1']),
+            ('$t = @(-1, -2)', ['-1', '-2']),
+            ('$t = (-1)', ['-1']),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._numerals(source), numerals)
+                self.assertEqual(self._unary_operators(source), [])
+
+    def test_a_sign_before_something_that_is_not_digits_is_an_operator(self):
+        value = self._assigned('$t = -$x', Ps1UnaryExpression)
+        self.assertEqual(value.operator, '-')
+        self.assertIsInstance(value.operand, Ps1Variable)
+        self.assertEqual(self._variables('$t = -$x'), ['t', 'x'])
+
+    def test_two_signs_written_together_are_the_decrement_operator(self):
+        """
+        5.1 refuses `$t = --1`, because `--` is one token that decrements what follows it and a
+        literal is not something it can be applied to. Reading the second sign as the numeral's own
+        turns a script the host rejects into the assignment of an `Int32`.
+        """
+        self.assertEqual(self._assigned('$t = --1', Ps1UnaryExpression).operator, '--')
+        self.assertEqual(self._numerals('$t = --1'), ['1'])
+
+
+class TestPs1ANumeralHoldsNothingBesideItsSpelling(TestBase):
+    """
+    `Ps1IntegerLiteral` and `Ps1RealLiteral` hold the text a numeral was written as and derive their
+    `value` from it, so what a node reports can never disagree with what it spells. A number stored
+    beside the text is a second answer to one question, and it is the text that decides the .NET
+    type: `1.5` is a `Double` and `1.5d` a `Decimal`, `0xFF` an `Int32` and `0xFFL` an `Int64`.
+    """
+
+    @staticmethod
+    def _literal(source: str) -> Ps1IntegerLiteral | Ps1RealLiteral:
+        literal, = (
+            node for node in Ps1Parser(source).parse().walk()
+            if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral))
+        )
+        return literal
+
+    def test_the_parser_records_the_spelling_the_source_wrote(self):
+        for source, raw in (
+            ('42', '42'),
+            ('0xDEAD', '0xDEAD'),
+            ('007', '007'),
+            ('0b1010', '0b1010'),
+            ('1L', '1L'),
+            ('1e2', '1e2'),
+            ('1.50', '1.50'),
+            ('1.5d', '1.5d'),
+            ('10lkb', '10lkb'),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._literal(source).raw, raw)
+
+    def test_an_integer_spelling_reports_the_number_it_denotes(self):
+        for raw, value in (
+            ('1', 1),
+            ('1L', 1),
+            ('007', 7),
+            ('0xFF', 255),
+            ('0xFFL', 255),
+            ('0b1010', 10),
+            ('+1', 1),
+            ('-2147483648', -2147483648),
+        ):
+            with self.subTest(raw):
+                self.assertEqual(Ps1IntegerLiteral(raw=raw).value, value)
+
+    def test_a_real_spelling_reports_the_number_it_denotes(self):
+        for raw, value in (
+            ('1.5', 1.5),
+            ('1.5d', 1.5),
+            ('1e2', 100.0),
+            ('1kb', 1024.0),
+            ('-1.5', -1.5),
+        ):
+            with self.subTest(raw):
+                self.assertEqual(Ps1RealLiteral(raw=raw).value, value)
+
+    def test_a_number_cannot_be_stored_beside_the_spelling_it_is_read_from(self):
+        """
+        Written through `setattr` and `**`, because a spelling a type checker rejects is not the
+        claim: what is stated here is that the refusal is the node's own at run time, which is what
+        a caller reaching for the old field would meet.
+        """
+        with self.assertRaises(AttributeError):
+            setattr(self._literal('42'), 'value', 43)
+        with self.assertRaises(TypeError):
+            Ps1IntegerLiteral(**{'raw': '42', 'value': 43})
+        with self.assertRaises(TypeError):
+            Ps1RealLiteral(**{'raw': '1.5', 'value': 2.5})
+
+    def test_the_number_follows_a_spelling_that_is_rewritten(self):
+        literal = Ps1IntegerLiteral(raw='1')
+        self.assertEqual(literal.value, 1)
+        literal.raw = '0x10'
+        self.assertEqual(literal.value, 16)

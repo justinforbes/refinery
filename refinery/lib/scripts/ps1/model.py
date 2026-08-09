@@ -35,6 +35,30 @@ class Ps1AccessKind(enum.Enum):
     STATIC = '::'
 
 
+#: What a numeric literal's multiplier suffix multiplies by, and the whole set of them. The suffix
+#: is part of the numeral rather than an operator on it, so it is read where the digits are.
+MULTIPLIERS = {
+    'kb': 1 << 10,
+    'mb': 1 << 20,
+    'gb': 1 << 30,
+    'tb': 1 << 40,
+    'pb': 1 << 50,
+}
+
+
+def _as_float(text: str) -> float:
+    """
+    The number `text` spells, read first as an integer so that a hexadecimal or binary form is
+    accepted, and `0.0` for text that spells no number at all.
+    """
+    for read in (lambda t: float(int(t, 0)), float):
+        try:
+            return read(text)
+        except (ValueError, OverflowError):
+            continue
+    return 0.0
+
+
 @dataclass(repr=False, eq=False)
 class Ps1Variable(Expression, spelling='braced'):
     name: str = ''
@@ -45,15 +69,51 @@ class Ps1Variable(Expression, spelling='braced'):
 
 
 @dataclass(repr=False, eq=False)
-class Ps1IntegerLiteral(Expression, spelling='raw'):
-    value: int = 0
+class Ps1IntegerLiteral(Expression):
+    """
+    A numeral, held as the text it was written as and nothing else.
+
+    How a number is spelled is *what it is* in PowerShell rather than how it looks: `1.5` is a
+    Double and `1.5d` a Decimal, `0xFF` an Int32 and `0xFFL` an Int64, and the same digits are an
+    Int32, an Int64, a Decimal or a Double depending on how many of them there are. So `raw` is a
+    value field and not a spelling one, and `canonical` compares it — two numerals are the same
+    program when they are written the same way.
+
+    `value` is the magnitude the digits spell, which is weaker than what the numeral denotes: it
+    carries no type, and for a hexadecimal pattern that fills its width it is the unsigned reading
+    rather than the negative .NET value. It is derived rather than stored so that it cannot drift
+    from `raw`, and it exists only until its last caller asks
+    `refinery.lib.scripts.ps1.analysis.values.read` instead, which answers the whole question.
+    """
     raw: str = '0'
+
+    @property
+    def value(self) -> int:
+        text = self.raw.replace('_', '').rstrip('lL')
+        try:
+            if text.lstrip('+-')[:2].lower() in ('0x', '0b'):
+                return int(text, 0)
+            return int(text, 10)
+        except ValueError:
+            return 0
 
 
 @dataclass(repr=False, eq=False)
-class Ps1RealLiteral(Expression, spelling='raw'):
-    value: float = 0.0
+class Ps1RealLiteral(Expression):
+    """
+    A numeral written in a form only a non-integer type can hold — a decimal point, an exponent, a
+    `d` suffix or a multiplier. See `Ps1IntegerLiteral` for why `raw` is the value field and what
+    `value` is weaker than.
+    """
     raw: str = '0.0'
+
+    @property
+    def value(self) -> float:
+        text = self.raw.replace('_', '')
+        for suffix, multiplier in MULTIPLIERS.items():
+            if text.lower().endswith(suffix):
+                return _as_float(text[:-len(suffix)].rstrip('lL')) * multiplier
+        return _as_float(text[:-1] if text[-1:] in ('d', 'D') else text)
 
 
 @dataclass(repr=False, eq=False)

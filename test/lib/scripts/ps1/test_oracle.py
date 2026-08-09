@@ -305,10 +305,10 @@ TABLE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('OUT\tSystem.Management.Automation.CommandTypes\tAlias',),
 }
 
-#: The three defects below are one question asked in three slots: whether the spelling a value is
-#: written as still denotes that value where it is being written. None of them is about what the
-#: unit believes a value to be, so this phase does not retire any of them; they belong to the
-#: synthesizer, which is the only place that knows which slot a node is going into.
+#: The two defects below are one question asked in two slots: whether the spelling a value is
+#: written as still denotes that value where it is being written. Neither is about what the unit
+#: believes a value to be, so this phase does not retire them; they belong to the synthesizer,
+#: which is the only place that knows which slot a node is going into.
 #:
 #: 5.1 reads a digit that starts a token as the start of a number, so a numeric literal cannot
 #: stand as a member-access receiver: `3.ToString()` is a parse error, and in a command argument
@@ -321,23 +321,18 @@ _UNPARSEABLE_RECEIVER = (
     'believes it to be, so this phase does not retire it.'
 )
 
-#: 5.1 reads a `-` written directly against a numeral as part of the numeral, so `-2147483648` is
-#: one literal that fits Int32, while `- 2147483648` and `-(2147483648)` are unary minus over the
-#: Int64 literal `2147483648` and stay Int64. What separates the sign from the digits is therefore
-#: load bearing, and a pass that removes a space or a parenthesis as redundant is answering a
-#: lexical question it did not know it was asking.
-_SEPARATION_CARRIES_THE_TYPE = (
-    'The sign is joined to the numeral, and the separation was carrying the type: 5.1 reads a `-` '
-    'adjacent to a numeral as part of it, so the rewritten script has an Int32 where the original '
-    'had an Int64.'
-)
-
-#: The same `-`, one slot further out, and the one this corpus could not see until its own witness
-#: stopped needing a receiver. In a command argument 5.1 lexes a leading `-` as the start of a
-#: parameter name rather than as a sign, and a parameter no command declares is passed on as the
-#: text it was written as: `Write-Output -1` prints the String `-1` where `Write-Output (-1)` and
-#: `Write-Output 1` print an Int32. Every folded value that happens to come out negative reaches
-#: this, so it is the widest of the three.
+#: In a command argument 5.1 lexes a leading `-` as the start of a parameter name rather than as a
+#: sign, and a parameter no command declares is handed on as the text it was written as:
+#: `Write-Output -1` passes the String `-1` where `Write-Output (-1)` and `Write-Output 1` pass an
+#: Int32. Every folded value that comes out negative reaches this, so it is the wider of the two.
+#:
+#: Its repair has a second half, which is why bracketing the folded value alone would trade one
+#: wrong answer for another. 5.1 lexes an argument-position `-1` as *one* token — `Generic '-1'`,
+#: measured, as it does `-1.5`, `-1kb`, `-1x` and a lone `-` — while our lexer splits it into a
+#: dash and a numeral and the parser reads the number. So a source that wrote `Write-Output -1`
+#: already means the String, and a synthesizer that bracketed every negative numeral would turn
+#: that one into an Int32. The argument slot has to be read as 5.1 reads it before what is written
+#: back into it can be.
 _A_SIGN_IN_AN_ARGUMENT_SLOT = (
     'The value folds to a negative numeral inlined into a command argument without parentheses, '
     'where 5.1 reads the leading `-` as a parameter name and passes the token on as a String. That '
@@ -1038,10 +1033,12 @@ TYPE_DEFECTS: dict[str, str] = {
         _UNPARSEABLE_RECEIVER,
     'Write-Output ((5).PSObject.GetType().FullName)':
         _UNPARSEABLE_RECEIVER,
-    '$t = -(2147483648); Write-Output (,$t); Write-Output $t':
-        _SEPARATION_CARRIES_THE_TYPE,
-    '$t = - 2147483648; Write-Output (,$t); Write-Output $t':
-        _SEPARATION_CARRIES_THE_TYPE,
+    '$t = -2147483648; Write-Output (,$t); Write-Output $t':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
+    '$t = -2147483649; Write-Output (,$t); Write-Output $t':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
+    'Write-Output (-1)':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
     '$t = 0xFFFFFFFF -bxor 0x5A; Write-Output (,$t); Write-Output $t':
         _A_SIGN_IN_AN_ARGUMENT_SLOT,
     '$t = 0xFFFFFFFF + 0; Write-Output (,$t); Write-Output $t':

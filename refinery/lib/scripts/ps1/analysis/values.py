@@ -60,6 +60,7 @@ from refinery.lib.scripts.ps1.data import (
 )
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
+    MULTIPLIERS,
     Expression,
     Ps1AccessKind,
     Ps1ArrayExpression,
@@ -112,11 +113,11 @@ def unwrap_integer(node: Node | None) -> Ps1IntegerLiteral | None:
     if isinstance(node, Ps1IntegerLiteral):
         return node
     if is_builtin_variable(node, {'null'}):
-        return Ps1IntegerLiteral(value=0, raw='0')
+        return Ps1IntegerLiteral(raw='0')
     if isinstance(node, Ps1UnaryExpression) and node.operator == '-':
         inner = unwrap_parens(node.operand) if isinstance(node.operand, Expression) else node.operand
         if isinstance(inner, Ps1IntegerLiteral):
-            return Ps1IntegerLiteral(value=-inner.value, raw=str(-inner.value))
+            return Ps1IntegerLiteral(raw=str(-inner.value))
     return None
 
 
@@ -501,18 +502,6 @@ def type_of(fact: Ps1Fact) -> Ps1TypeName | None:
     return None
 
 
-#: What a numeric multiplier suffix multiplies by, and the whole set of them. Measured, the
-#: multiplier applies to whatever the numeral is and the *result* is then typed by the rule that
-#: numeral's form uses: `1kb` is an Int32 1024, `4gb` an Int64 4294967296, `1lkb` an Int64 1024 and
-#: `1.5kb` a Double 1536.
-_MULTIPLIERS = {
-    'kb': 1 << 10,
-    'mb': 1 << 20,
-    'gb': 1 << 30,
-    'tb': 1 << 40,
-    'pb': 1 << 50,
-}
-
 _DECIMAL_DIGITS = re.compile(r'[0-9]+\Z')
 _REAL_DIGITS = re.compile(r'(?:[0-9]*\.[0-9]+|[0-9]+\.?)(?:e[+-]?[0-9]+)?\Z', re.IGNORECASE)
 _HEX_DIGITS = re.compile(r'[0-9a-f]+\Z', re.IGNORECASE)
@@ -530,13 +519,11 @@ def read(node: Node | None) -> Ps1Fact:
     caller asking what the *source* says never receives an answer that came from evaluating
     something.
 
-    The one exception looks like an operator and is not: a `-` written *directly against* a numeral
-    is part of the numeral, which is measurable rather than stylistic and turns on the whitespace.
-    `-2147483648` is one literal and fits Int32; `- 2147483648` and `-(2147483648)` are both unary
-    minus over the Int64 literal `2147483648` and stay Int64. Only the glued spelling is read here,
-    and it is the source offsets that say which one it is. The other two are an operator over a
-    value and belong to `apply`, so they are refused rather than answered — reaching past the space
-    or the parenthesis to the numeral would report the Int32 that only the third spelling has.
+    A sign is not an exception to that, because the parser has already decided it: a `-` written
+    directly against a numeral is part of the numeral and reaches this inside `raw`, while
+    `- 2147483648` and `-(2147483648)` are unary minus over a literal and are refused here. Reaching
+    past the space or the parenthesis to the numeral would report the Int32 that only the glued
+    spelling has; the other two are an operator over a value and belong to `apply`.
     """
     if node is None:
         return UNKNOWN
@@ -552,29 +539,9 @@ def read(node: Node | None) -> Ps1Fact:
         return Ps1Constant(_BOOLEAN, False)
     if is_builtin_variable(node, {'null'}):
         return NULL
-    if isinstance(node, Ps1UnaryExpression) and node.operator == '-':
-        if _is_signed_numeral(node):
-            return _numeral(F'-{node.operand.raw}')  # type: ignore[union-attr]
-        return UNKNOWN
     if isinstance(node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
         return _array(node)
     return UNKNOWN
-
-
-def _is_signed_numeral(node: Ps1UnaryExpression) -> bool:
-    """
-    Whether this `-` is the sign of the numeral it stands before rather than an operator applied to
-    it. It is the sign exactly when nothing separates the two in the source, which the offsets say:
-    `-2147483648` is one Int32 literal and `- 2147483648` is unary minus over an Int64.
-
-    A node the source did not place — one a fold built — has no offsets to compare and is not read
-    as glued. That refuses rather than misreads, and nothing builds this shape anyway: a rendered
-    negative number carries its sign in its own spelling.
-    """
-    operand = node.operand
-    if not isinstance(operand, (Ps1IntegerLiteral, Ps1RealLiteral)):
-        return False
-    return operand.offset == node.offset + len(node.operator)
 
 
 def _array(node: Ps1ArrayLiteral | Ps1ArrayExpression) -> Ps1Fact:
@@ -610,6 +577,11 @@ def _numeral(raw: str) -> Ps1Fact:
     A spelling no measurement covers is refused. `_` is one: PowerShell 5.1 has no digit separator
     and reads `1_0` as a command name, so a lexer that accepts it must not be allowed to hand the
     domain the number ten.
+
+    A multiplier suffix is what the model already knows it is, and what it does to the *type* is
+    what is measured here: it applies to whatever the numeral is and the result is then typed by
+    the rule that numeral's form uses, so `1kb` is an Int32 1024, `4gb` an Int64 4294967296,
+    `1lkb` an Int64 1024 and `1.5kb` a Double 1536.
     """
     if '_' in raw:
         return UNKNOWN
@@ -620,7 +592,7 @@ def _numeral(raw: str) -> Ps1Fact:
         text = text[1:]
     multiplier = 1
     lowered = text.lower()
-    for suffix, factor in _MULTIPLIERS.items():
+    for suffix, factor in MULTIPLIERS.items():
         if lowered.endswith(suffix):
             multiplier = factor
             text = text[:-len(suffix)]
@@ -1079,8 +1051,8 @@ def render(fact: Ps1Fact) -> Expression | None:
     if suffix is None or not isinstance(fact.payload, (int, decimal.Decimal)):
         return None
     if fact.type == _DECIMAL:
-        return Ps1RealLiteral(value=float(fact.payload), raw=F'{fact.payload}{suffix}')
-    return Ps1IntegerLiteral(value=int(fact.payload), raw=F'{fact.payload}{suffix}')
+        return Ps1RealLiteral(raw=F'{fact.payload}{suffix}')
+    return Ps1IntegerLiteral(raw=F'{fact.payload}{suffix}')
 
 
 def _rendered_double(payload) -> Expression | None:
@@ -1090,4 +1062,4 @@ def _rendered_double(payload) -> Expression | None:
         return None
     if payload == 0.0 and math.copysign(1.0, payload) < 0:
         return None
-    return Ps1RealLiteral(value=payload, raw=repr(payload))
+    return Ps1RealLiteral(raw=repr(payload))

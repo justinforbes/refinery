@@ -169,14 +169,6 @@ _VARIABLE_FRAG = re.compile(
 
 _MERGING_PATTERN = re.compile(r'(\d|\*)?>&(\d)')
 
-_MULTIPLIER_SUFFIXES = {
-    'kb': 1024,
-    'mb': 1024 ** 2,
-    'gb': 1024 ** 3,
-    'tb': 1024 ** 4,
-    'pb': 1024 ** 5,
-}
-
 
 def _normalize_string_delimiters(text: str, width: int) -> str:
     """
@@ -1006,6 +998,9 @@ class Ps1Parser:
 
         if tok.kind in (Ps1TokenKind.PLUS, Ps1TokenKind.DASH):
             op = self._advance()
+            signed = self._parse_signed_numeral(op)
+            if signed is not None:
+                return signed
             self._skip_newlines()
             operand = self._parse_unary_expression()
             return Ps1UnaryExpression(
@@ -1106,47 +1101,33 @@ class Ps1Parser:
     def _parse_bare_word(self) -> Expression:
         return self._parse_generic_as_string(self._advance())
 
-    def _parse_integer(self) -> Ps1IntegerLiteral:
-        tok = self._advance()
-        raw = tok.value
-        text = raw.rstrip('lL').replace('_', '')
-        try:
-            if text[:2].lower() in ('0x', '0b'):
-                value = int(text, 0)
-            else:
-                # Plain decimal: parse with an explicit base so leading zeros (`007`) are accepted
-                # as decimal instead of raising under `int(text, 0)`.
-                value = int(text, 10)
-        except ValueError:
-            value = 0
-        return Ps1IntegerLiteral(offset=tok.offset, value=value, raw=raw)
+    def _parse_signed_numeral(self, sign: Ps1Token) -> Expression | None:
+        """
+        The numeral that `sign` is the sign of, or `None` where it is an operator applied to
+        whatever follows. 5.1 reads a `+` or `-` written directly against digits as part of the
+        numeral, and which of the two it is decides a type: `-2147483648` is one literal that fits
+        an Int32, while `- 2147483648` and `-(2147483648)` are unary minus over the Int64 literal
+        `2147483648` and stay Int64.
 
-    def _parse_real(self) -> Ps1RealLiteral:
+        The other half of the rule is where this is reached from. Only a position at which a value
+        may start parses a unary expression, so a sign that follows a complete one is never offered
+        here: `1 -2` is a subtraction however the spacing runs.
+        """
+        if not self._adjacent():
+            return None
+        if self._at(Ps1TokenKind.INTEGER):
+            return self._parse_integer(sign.value)
+        if self._at(Ps1TokenKind.REAL):
+            return self._parse_real(sign.value)
+        return None
+
+    def _parse_integer(self, sign: str = '') -> Ps1IntegerLiteral:
         tok = self._advance()
-        raw = tok.value
-        text = raw.replace('_', '')
-        value = 0.0
-        for suffix, mult in _MULTIPLIER_SUFFIXES.items():
-            if text.lower().endswith(suffix):
-                text = text[:-len(suffix)].rstrip('lL')
-                try:
-                    value = float(int(text, 0)) * mult
-                except (ValueError, OverflowError):
-                    try:
-                        value = float(text) * mult
-                    except ValueError:
-                        pass
-                break
-        else:
-            for suffix in ('d', 'D'):
-                if text.endswith(suffix):
-                    text = text[:-1]
-                    break
-            try:
-                value = float(text)
-            except ValueError:
-                pass
-        return Ps1RealLiteral(offset=tok.offset, value=value, raw=raw)
+        return Ps1IntegerLiteral(offset=tok.offset - len(sign), raw=F'{sign}{tok.value}')
+
+    def _parse_real(self, sign: str = '') -> Ps1RealLiteral:
+        tok = self._advance()
+        return Ps1RealLiteral(offset=tok.offset - len(sign), raw=F'{sign}{tok.value}')
 
     def _parse_string(self) -> Expression:
         tok = self._advance()

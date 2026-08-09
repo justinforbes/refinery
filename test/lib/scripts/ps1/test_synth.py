@@ -3,7 +3,11 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts import UnspellableNode
-from refinery.lib.scripts.ps1.model import Ps1ArrayLiteral
+from refinery.lib.scripts.ps1.model import (
+    Ps1ArrayLiteral,
+    Ps1IntegerLiteral,
+    Ps1UnaryExpression,
+)
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
 
@@ -180,6 +184,34 @@ class TestPs1Synthesizer(TestBase):
         # as the decrement operator and change the meaning; a separating space is required.
         self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('- -5').parse()), '- -5')
         self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('+ +5').parse()), '+ +5')
+
+    def test_a_sign_the_tree_holds_as_an_operator_is_kept_off_the_numeral(self):
+        """
+        `- 2147483648` is unary minus over an `Int64` literal and `-2147483648` is one `Int32`
+        literal, so a sign printed against the digits behind it changes the type of what runs. The
+        constructed tree is the one a pass builds when it folds a numeral into the slot a
+        parenthesis or a variable used to occupy, where nothing separated the sign from it.
+        """
+        self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('- 5').parse()), '- 5')
+        self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('+ 5').parse()), '+ 5')
+        self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('- 5.5').parse()), '- 5.5')
+        negated = Ps1UnaryExpression(
+            operator='-',
+            operand=Ps1IntegerLiteral(raw='2147483648'),
+            prefix=True,
+        )
+        self.assertEqual(Ps1Synthesizer().convert(negated), '- 2147483648')
+
+    def test_a_sign_the_numeral_itself_spells_stays_against_its_digits(self):
+        # Separating this sign is the same defect in the other direction: `-2147483648` written as
+        # `- 2147483648` is an Int64 where the tree held an Int32.
+        self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('-2147483648').parse()), '-2147483648')
+        self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('-1.5').parse()), '-1.5')
+
+    def test_a_sign_before_something_that_is_not_a_numeral_is_written_against_it(self):
+        self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('-$x').parse()), '-$x')
+        self.assertEqual(
+            Ps1Synthesizer().convert(Ps1Parser('-(2147483648)').parse()), '-(2147483648)')
 
     def test_scoped_braced_variable_keeps_braces_outside(self):
         # `${env:Path}` must re-emit with the braces around the whole `scope:name`, not as

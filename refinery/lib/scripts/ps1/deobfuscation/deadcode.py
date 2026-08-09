@@ -226,7 +226,7 @@ def _resolve_side(
 
 
 def _make_int_literal(value: int) -> Ps1IntegerLiteral:
-    return Ps1IntegerLiteral(value=value, raw=str(value))
+    return Ps1IntegerLiteral(raw=str(value))
 
 
 def _is_counter_variable(node, var_name: str, var_scope: Ps1ScopeModifier) -> bool:
