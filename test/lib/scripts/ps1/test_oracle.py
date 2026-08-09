@@ -310,6 +310,16 @@ TABLE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: member-access receiver: `3.ToString()` is a parse error, and in a command argument every numeric
 #: literal is, `0xFF` and `1kb` and `1.5` alike. The unit inlines a folded value into that slot
 #: without parentheses, so `$n = 5; $n.ToString()` becomes a script PowerShell will not read.
+#: The second thing that re-spells a number into a different type. 5.1 reads a `-` written
+#: directly against a numeral as part of the numeral, so `-2147483648` is one literal that fits
+#: Int32, while `- 2147483648` and `-(2147483648)` are unary minus over the Int64 literal
+#: `2147483648` and stay Int64. What separates the sign from the digits is therefore load
+#: bearing, and a pass that removes a space or a parenthesis as redundant is answering a lexical
+#: question it did not know it was asking.
+_SEPARATION_CARRIES_THE_TYPE = (
+    'The sign is joined to the numeral, and the separation was carrying the type: 5.1 reads a `-` adjacent to a numeral as part of it, so the rewritten script has an Int32 where the original had an Int64.'
+)
+
 _UNPARSEABLE_RECEIVER = (
     'The value is folded to a numeric literal left standing as a member-access receiver without '
     'parentheses, which 5.1 refuses to parse. That is a defect of how a value is spelled rather '
@@ -711,6 +721,16 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tSystem.Int32',
             'OUT\tSystem.Int32\t-2147483647',
         ),
+    '$t = - 2147483648; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t-2147483648',
+        ),
+    '$t = - 2147483647; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-2147483647',
+        ),
     '$t = 1.5kb; Write-Output $t.GetType().FullName; Write-Output $t':
         (
             'OUT\tSystem.String\tSystem.Double',
@@ -721,6 +741,37 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tSystem.Int32',
             'OUT\tSystem.Int32\t261120',
         ),
+    '$t = 10 - $null; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t10',
+        ),
+    '$t = $null + 5; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t5',
+        ),
+    '$t = $null - 5; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-5',
+        ),
+    '$t = 10 - $null + 3; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t13',
+        ),
+    '$t = $null -band 1; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$a = $null; $b = 5; $t = $a * $b; Write-Output ($null -eq $t)':
+        ('OUT\tSystem.Boolean\tTrue',),
+    '$a = $null; $t = $a * 5; Write-Output ($null -eq $t)':
+        ('OUT\tSystem.Boolean\tTrue',),
+    '$t = $null * 1; Write-Output ($null -eq $t)':
+        ('OUT\tSystem.Boolean\tTrue',),
     '$t = 1_0; Write-Output $t.GetType().FullName; Write-Output $t':
         ('THROW\tCommandNotFoundException\tSystem.Management.Automation.CommandNotFoundException',),
     '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
@@ -943,10 +994,28 @@ TYPE_DEFECTS: dict[str, str] = {
     '$t = 1_0; Write-Output $t.GetType().FullName; Write-Output $t':
         'The lexer reads `_` as a digit separator, which Windows PowerShell 5.1 does not have: 5.1 reads `1_0` as a command name and reports CommandNotFoundException, and we read the integer 10. Both throw, so only the kind of the error tells them apart.',
     '$t = -(2147483648); Write-Output $t.GetType().FullName; Write-Output $t':
-        'The parentheses are removed, and they were carrying the type. 5.1 reads a `-` adjacent to a numeral as part of the numeral, so `-2147483648` is one literal that fits Int32, while `-(2147483648)` is unary minus over the Int64 literal `2147483648` and stays Int64. A pass that treats a parenthesis around a literal as redundant is deciding a lexical question, and this is the answer it gets wrong.',
+        _SEPARATION_CARRIES_THE_TYPE,
+    '$t = - 2147483648; Write-Output $t.GetType().FullName; Write-Output $t':
+        _SEPARATION_CARRIES_THE_TYPE,
     '$t = 1.5kb; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
     '$t = 0xFFkb; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = $null + 5; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = $null - 5; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = $null -band 1; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 10 - $null + 3; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 10 - $null; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 10d + 0; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 1kb + 0; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 512MB * 512MB; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
     '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,

@@ -12,17 +12,17 @@ from typing import Iterator, NamedTuple
 from refinery.lib.scripts import Node, reattach
 from refinery.lib.scripts.ps1.analysis.effects import is_fault_free, may_be_dropped
 from refinery.lib.scripts.ps1.analysis.values import (
+    apply,
     collect_byte_array,
     collect_int_arguments,
     is_truthy,
+    read,
+    render,
     unwrap_integer,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.ast import get_body, get_member_name, string_value, unwrap_parens
-from refinery.lib.scripts.ps1.data import (
-    COMPARISON_OPS,
-    ENCODING_MAP,
-)
+from refinery.lib.scripts.ps1.data import ENCODING_MAP
 from refinery.lib.scripts.ps1.deobfuscation.constants import PS1_ENV_CONSTANTS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     WorldAwareTransformer,
@@ -38,10 +38,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     is_pipeline_item,
     is_static_type_call,
     make_string_literal,
-    ps_divide,
-    ps_modulo,
-    ps_shift_left,
-    ps_shift_right,
     unwrap_single_paren,
 )
 from refinery.lib.scripts.ps1.deobfuscation.substitution import (
@@ -66,7 +62,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1MemberAccess,
     Ps1Pipeline,
     Ps1RangeExpression,
-    Ps1RealLiteral,
     Ps1ScopeModifier,
     Ps1ScriptBlock,
     Ps1StringLiteral,
@@ -395,6 +390,17 @@ def _pipeline_output(value: Expression | None) -> Expression | None:
     if isinstance(value, Ps1ArrayLiteral) and len(value.elements) == 1:
         return value.elements[0]
     return value
+
+
+def _folded(outcome) -> Expression | None:
+    """
+    The expression a domain outcome folds to, or `None` where it does not fold. An outcome that may
+    throw is never folded: the script's throw is part of what it does, and replacing it with the
+    value the operation would have had deletes that. Everything else is left to `render`, which is
+    the one place that decides whether a value has a spelling — including `$null`, which is a value
+    an operation can produce and not a sign that it produced nothing.
+    """
+    return None if outcome.may_throw else render(outcome.value)
 
 
 class Ps1ConstantFolding(WorldAwareTransformer):
@@ -923,19 +929,6 @@ class Ps1ConstantFolding(WorldAwareTransformer):
             return None
         return make_string_literal(result)
 
-    _ARITHMETIC_OPS = {
-        '+'     : int.__add__,
-        '-'     : int.__sub__,
-        '*'     : int.__mul__,
-        '/'     : ps_divide,
-        '%'     : ps_modulo,
-        '-band' : int.__and__,
-        '-bor'  : int.__or__,
-        '-bxor' : int.__xor__,
-        '-shl'  : ps_shift_left,
-        '-shr'  : ps_shift_right,
-    }
-
     def visit_Ps1BinaryExpression(self, node: Ps1BinaryExpression):
         self.generic_visit(node)
         op = node.operator.lower()
@@ -955,21 +948,15 @@ class Ps1ConstantFolding(WorldAwareTransformer):
             return self._handle_logical(node, op)
         return self._handle_comparison(node, op) or self._handle_arithmetic(node, op)
 
-    def _handle_arithmetic(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
-        left = unwrap_integer(node.left)
-        right = unwrap_integer(node.right)
-        if left is None or right is None:
-            return None
-        fn = self._ARITHMETIC_OPS.get(op)
-        if fn is None:
-            return None
-        try:
-            result = fn(left.value, right.value)
-        except (ZeroDivisionError, ValueError, OverflowError):
-            return None
-        if isinstance(result, float):
-            return Ps1RealLiteral(value=result, raw=repr(result))
-        return Ps1IntegerLiteral(value=result, raw=str(result))
+    @staticmethod
+    def _handle_arithmetic(node: Ps1BinaryExpression, op: str) -> Expression | None:
+        """
+        Fold an arithmetic, bitwise or shift operator by asking the value domain what it produces.
+        The result is spelled at the type the domain gives it, so a fold cannot quietly change one:
+        `0xFFFFFFFF -bxor 0x5A` is Int32 -91 rather than the 4294967205 an operand read as an
+        unsigned Python integer would give, and `2147483647 + 1` widens to a Double as a host does.
+        """
+        return _folded(apply(op, read(node.left), read(node.right)))
 
     @staticmethod
     def _handle_string_multiply(node: Ps1BinaryExpression) -> Expression | None:
@@ -993,13 +980,9 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         return Ps1Variable(name='True' if result else 'False')
 
     def _handle_comparison(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
-        left = unwrap_integer(node.left)
-        right = unwrap_integer(node.right)
-        if left is not None and right is not None:
-            fn = COMPARISON_OPS.get(op)
-            if fn is None:
-                return None
-            return self._bool_literal(fn(left.value, right.value))
+        compared = _folded(apply(op, read(node.left), read(node.right)))
+        if compared is not None:
+            return compared
         return self._handle_string_equality(node, op)
 
     def _handle_string_equality(self, node: Ps1BinaryExpression, op: str) -> Expression | None:

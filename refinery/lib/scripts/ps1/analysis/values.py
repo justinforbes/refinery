@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import dataclasses
 import decimal
+import math
+import operator as operator_module
 import re
 import typing
 
@@ -50,6 +52,7 @@ from refinery.lib.scripts.ps1.data import (
     TYPE_ARG_COMMANDS,
     VARIABLE_TYPES,
     WMI_COMMANDS,
+    binary_outcome,
     command_output_types,
     resolve_member_type,
     resolve_type,
@@ -378,7 +381,12 @@ _BOOLEAN = _type('System.Boolean')
 _CHAR = _type('System.Char')
 _DECIMAL = _type('System.Decimal')
 _DOUBLE = _type('System.Double')
+_INT16 = _type('System.Int16')
 _INT64 = _type('System.Int64')
+_SBYTE = _type('System.SByte')
+_UINT16 = _type('System.UInt16')
+_UINT32 = _type('System.UInt32')
+_UINT64 = _type('System.UInt64')
 
 #: The widths the numeric ladder is written in terms of. `System.Decimal`'s bound is its documented
 #: maximum rather than a power of two, because its range is not a bit width.
@@ -522,10 +530,13 @@ def read(node: Node | None) -> Ps1Fact:
     caller asking what the *source* says never receives an answer that came from evaluating
     something.
 
-    The one exception looks like an operator and is not: a `-` written directly against a numeral is
-    part of the numeral, which is measurable rather than stylistic. `-2147483648` is one literal and
-    fits Int32, where `-(2147483648)` is unary minus over the Int64 literal `2147483648` and stays
-    Int64. That is why the parenthesis is read here and not peeled: peeling it changes the type.
+    The one exception looks like an operator and is not: a `-` written *directly against* a numeral
+    is part of the numeral, which is measurable rather than stylistic and turns on the whitespace.
+    `-2147483648` is one literal and fits Int32; `- 2147483648` and `-(2147483648)` are both unary
+    minus over the Int64 literal `2147483648` and stay Int64. Only the glued spelling is read here,
+    and it is the source offsets that say which one it is. The other two are an operator over a
+    value and belong to `apply`, so they are refused rather than answered — reaching past the space
+    or the parenthesis to the numeral would report the Int32 that only the third spelling has.
     """
     if node is None:
         return UNKNOWN
@@ -542,12 +553,28 @@ def read(node: Node | None) -> Ps1Fact:
     if is_builtin_variable(node, {'null'}):
         return NULL
     if isinstance(node, Ps1UnaryExpression) and node.operator == '-':
-        if isinstance(node.operand, (Ps1IntegerLiteral, Ps1RealLiteral)):
-            return _numeral(F'-{node.operand.raw}')
+        if _is_signed_numeral(node):
+            return _numeral(F'-{node.operand.raw}')  # type: ignore[union-attr]
         return UNKNOWN
     if isinstance(node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
         return _array(node)
     return UNKNOWN
+
+
+def _is_signed_numeral(node: Ps1UnaryExpression) -> bool:
+    """
+    Whether this `-` is the sign of the numeral it stands before rather than an operator applied to
+    it. It is the sign exactly when nothing separates the two in the source, which the offsets say:
+    `-2147483648` is one Int32 literal and `- 2147483648` is unary minus over an Int64.
+
+    A node the source did not place — one a fold built — has no offsets to compare and is not read
+    as glued. That refuses rather than misreads, and nothing builds this shape anyway: a rendered
+    negative number carries its sign in its own spelling.
+    """
+    operand = node.operand
+    if not isinstance(operand, (Ps1IntegerLiteral, Ps1RealLiteral)):
+        return False
+    return operand.offset == node.offset + len(node.operator)
 
 
 def _array(node: Ps1ArrayLiteral | Ps1ArrayExpression) -> Ps1Fact:
@@ -707,3 +734,360 @@ def _double(value: int | float) -> Ps1Fact:
         return Ps1Constant(_DOUBLE, float(value))
     except OverflowError:
         return UNKNOWN
+
+
+#: The integer types the domain computes in, narrowest first, each with the range it holds. The
+#: order is what `_stamped` walks to decide which of a cell's candidate types a computed value has,
+#: so it is the widening order and not merely a listing.
+_INTEGER_WIDTHS: tuple[tuple[Ps1TypeName, int, int], ...] = (
+    (_BYTE, 0, 0xFF),
+    (_SBYTE, -0x80, 0x7F),
+    (_INT16, -0x8000, 0x7FFF),
+    (_UINT16, 0, 0xFFFF),
+    (_INT32, *_INT32_RANGE),
+    (_UINT32, 0, 0xFFFFFFFF),
+    (_INT64, *_INT64_RANGE),
+    (_UINT64, 0, 0xFFFFFFFFFFFFFFFF),
+)
+
+#: The widths a shift masks its count by, from the *left operand's type* rather than from how large
+#: its value happens to be. Only the two the mask is documented for are here; a shift over a narrower
+#: left operand keeps that operand's type in the grid and is not computed, because what the count is
+#: masked by there was never measured.
+_SHIFT_WIDTHS = {_INT32: 32, _INT64: 64}
+
+#: The grid's row for `$null`, which the capture collected under the one name that is not a type a
+#: value can have.
+_VOID = _type('System.Void')
+
+
+#: What a kernel computes in. A `Decimal` is here because PowerShell has one and Python's is the
+#: only faithful carrier for it; a `bool` because a comparison is an operation like any other.
+_Number = int | float | bool | decimal.Decimal
+
+
+class _Throws(Exception):
+    """
+    Raised by a kernel for an application that PowerShell answers by throwing, so that a throw is
+    reported as one rather than as a refusal. The two are different answers: a throw is knowledge.
+    """
+
+
+def apply(operator: str, left: Ps1Fact, right: Ps1Fact) -> Ps1Outcome:
+    """
+    What `left <operator> right` produces. The *type* comes from the measured grid in
+    `refinery.lib.scripts.ps1.data`, never from a rule written here, and the *value* from a kernel
+    that is checked against it: a computed value whose type is not one the grid recorded for that
+    cell is refused rather than reported, because the grid is what a host did and the kernel is only
+    what we believe.
+
+    A cell that recorded a throw stops the kernel being consulted, unless every way that cell can
+    throw is one the kernel checks for itself — see `_throws_are_modelled`. Without that exception a
+    single throwing pair anywhere in a cell would cost every other pair in it its fold; with it, a
+    throw the kernel cannot see is still never folded past.
+    """
+    cell = binary_outcome(operator, *(_grid_type(left), _grid_type(right)))  # type: ignore[misc]
+    if cell is None:
+        return NOTHING
+    if not cell.may_throw or _throws_are_modelled(operator, left, right):
+        try:
+            computed = _kernel(operator, left, right)
+        except _Throws:
+            return Ps1Outcome(True, UNKNOWN)
+        if computed is not None:
+            stamped = _stamped(computed, cell.types)
+            if stamped is not UNKNOWN:
+                return Ps1Outcome(False, stamped)
+    return _from_cell(cell)
+
+
+def _grid_type(fact: Ps1Fact) -> Ps1TypeName | None:
+    """
+    The type a fact is looked up under in the grid. `$null` has none, and the capture recorded its
+    row under `System.Void` — the one name in the grid that is not a type any value carries.
+    """
+    if fact is NULL:
+        return _VOID
+    return type_of(fact)
+
+
+def _from_cell(cell) -> Ps1Outcome:
+    """
+    What a cell says on its own, with nothing computed from the values. One type and no `$null`
+    among the outcomes is a typed value; `$null` and nothing else is `$null`, which is a value and
+    not an absence — `$null * 5` really is `$null`, and reading that cell as *unknown* would leave a
+    caller to guess where a measurement had already answered. Anything wider is a refusal, because a
+    caller cannot act on a value that might be either of two types.
+    """
+    if not cell.types and cell.may_be_null and not cell.may_throw:
+        return Ps1Outcome(False, NULL)
+    if len(cell.types) == 1 and not cell.may_be_null:
+        return Ps1Outcome(cell.may_throw, Ps1Typed(next(iter(cell.types))))
+    return Ps1Outcome(cell.may_throw, UNKNOWN)
+
+
+def _stamped(value: _Number, candidates: frozenset[Ps1TypeName]) -> Ps1Fact:
+    """
+    The fact a computed value has, given the types the grid recorded for the cell it came out of.
+
+    A `Decimal` and a `Double` are stamped with themselves, and refused where the cell did not
+    record that type: a computed `Decimal` reported as a `Double` would be a value the operation
+    never had.
+
+    An integer is stamped with the one integer candidate that holds it. *One* is the whole rule:
+    where two of them do — a cell such as `SByte + UInt32`, whose outcome set holds both `Int64` and
+    `UInt32` because which one a pair takes depends on the signs — nothing here can say which, and
+    the value is refused rather than guessed. An integer no candidate holds takes `Decimal` or
+    `Double` when the cell recorded one, which is the widening a host performs on overflow and the
+    reason `2147483647 + 1` is a Double.
+    """
+    if isinstance(value, bool):
+        return Ps1Constant(_BOOLEAN, value) if _BOOLEAN in candidates else UNKNOWN
+    if isinstance(value, int):
+        holders = [
+            name for name, low, high in _INTEGER_WIDTHS
+            if name in candidates and low <= value <= high
+        ]
+        if len(holders) == 1:
+            return Ps1Constant(holders[0], value)
+        if holders:
+            return UNKNOWN
+        if _DECIMAL in candidates and -_DECIMAL_MAX <= value <= _DECIMAL_MAX:
+            return Ps1Constant(_DECIMAL, decimal.Decimal(value))
+        return _double(value) if _DOUBLE in candidates else UNKNOWN
+    if isinstance(value, decimal.Decimal):
+        return Ps1Constant(_DECIMAL, value) if _DECIMAL in candidates else UNKNOWN
+    return Ps1Constant(_DOUBLE, value) if _DOUBLE in candidates else UNKNOWN
+
+
+def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
+    """
+    The value an application produces, or `None` where this module computes nothing for it. Only
+    operands that are integers of the domain's own widths are computed: a Decimal, a Double, a
+    String or a collection reaches the grid for its type and stops there, so that no arithmetic here
+    is performed in a Python type that is not what PowerShell was using.
+
+    `$null` computes as the integer zero, which is what a host converts it to in an arithmetic
+    context: `10 - $null` is 10, `$null - 5` is -5 and `$null -band 1` is 0, all measured. It is the
+    grid that decides whether the context is arithmetic at all, so a `$null` reaching an operator
+    that does something else with it never gets here.
+
+    A shift is computed only over an `Int32` or `Int64` left operand, because the count is masked by
+    the *left operand's width* and only those two widths are documented. That the width comes from
+    the type and not from how large the value happens to be is the point: a small value in a wide
+    variable is still shifted at the wide mask.
+
+    A bitwise operator is computed only over integers. PowerShell will bitwise a Double by rounding
+    it first, which is a conversion, and a kernel that reached for Python's operators there would be
+    performing a different one.
+    """
+    if operator in ('-shl', '-shr'):
+        if not _is_domain_integer(left) or not _is_domain_integer(right):
+            return None
+        left_type = type_of(left)
+        width = None if left_type is None else _SHIFT_WIDTHS.get(left_type)
+        if width is None:
+            return None
+        count = _integer_payload(right) & (width - 1)
+        return _shifted(_integer_payload(left), count, width, operator == '-shl')
+    if operator in _BITWISE:
+        if not _is_domain_integer(left) or not _is_domain_integer(right):
+            return None
+        return _BITWISE[operator](_integer_payload(left), _integer_payload(right))
+    operands = _numeric_pair(left, right)
+    if operands is None:
+        return None
+    a, b = operands
+    if operator in _COMPARISONS:
+        return _COMPARISONS[operator](a, b)
+    if operator == '/':
+        if b == 0:
+            raise _Throws
+        if isinstance(a, int) and isinstance(b, int) and a % b == 0:
+            return a // b
+        return _decimal_result(operator_module.truediv(a, b))
+    if operator == '%':
+        if b == 0:
+            raise _Throws
+        if isinstance(a, int) and isinstance(b, int):
+            remainder = abs(a) % abs(b)
+            return -remainder if a < 0 else remainder
+        if isinstance(a, decimal.Decimal) and isinstance(b, decimal.Decimal):
+            return _decimal_result(a % b)
+        return _finite(math.fmod(a, b))
+    arithmetic = _ARITHMETIC.get(operator)
+    return None if arithmetic is None else _decimal_result(arithmetic(a, b))
+
+
+def _numeric_pair(left: Ps1Fact, right: Ps1Fact):
+    """
+    The two payloads as Python numbers that compute in the same way PowerShell's promoted pair does,
+    or `None` where they do not. An integer beside a Decimal computes as a Decimal and an integer
+    beside a Double as a Double, which is what the promotion does; a Decimal beside a Double is
+    refused, because Python will not mix them and choosing one to convert would be performing the
+    promotion rather than reading it.
+    """
+    kinds = []
+    values: list[int | float | decimal.Decimal] = []
+    for fact in (left, right):
+        if _is_domain_integer(fact):
+            kinds.append('i')
+            values.append(_integer_payload(fact))
+            continue
+        if not isinstance(fact, Ps1Constant):
+            return None
+        if fact.type == _DECIMAL and isinstance(fact.payload, decimal.Decimal):
+            kinds.append('m')
+        elif fact.type == _DOUBLE and isinstance(fact.payload, float):
+            kinds.append('f')
+        else:
+            return None
+        values.append(fact.payload)
+    if 'm' in kinds and 'f' in kinds:
+        return None
+    if 'm' in kinds:
+        return decimal.Decimal(values[0]), decimal.Decimal(values[1])
+    if 'f' in kinds:
+        return float(values[0]), float(values[1])
+    return values[0], values[1]
+
+
+def _decimal_result(value: _Number) -> _Number | None:
+    """
+    A computed number, with a `Decimal` that has left the range of a `Decimal` reported as the throw
+    it is. Python carries such a value without complaint; .NET does not have it, so neither does the
+    domain, and calling it a throw is what the host does rather than a refusal.
+    """
+    if isinstance(value, decimal.Decimal) and not -_DECIMAL_MAX <= value <= _DECIMAL_MAX:
+        raise _Throws
+    return _finite(value)
+
+
+def _finite(value: _Number) -> _Number | None:
+    """
+    A computed number, unless it is one no literal spells. An overflow to infinity is a value
+    PowerShell has and this domain deliberately does not carry, because every use of it downstream
+    would have to refuse anyway and a fact that cannot be spelled is worse than no fact.
+    """
+    if isinstance(value, float) and (value != value or value in (INFINITY, -INFINITY)):
+        return None
+    return value
+
+
+def _is_domain_integer(fact: Ps1Fact) -> bool:
+    if fact is NULL:
+        return True
+    return isinstance(fact, Ps1Constant) and isinstance(fact.payload, int) and not isinstance(
+        fact.payload, bool) and any(name == fact.type for name, _, _ in _INTEGER_WIDTHS)
+
+
+def _integer_payload(fact: Ps1Fact) -> int:
+    return 0 if fact is NULL else typing.cast(int, typing.cast(Ps1Constant, fact).payload)
+
+
+def _shifted(value: int, count: int, width: int, left: bool) -> int:
+    """
+    A shift performed in a `width`-bit two's complement register, which is where PowerShell performs
+    it: shifting left out of the register discards the bits rather than growing the number, and
+    shifting right preserves the sign.
+    """
+    if not left:
+        return value >> count
+    span = 1 << width
+    result = (value << count) & (span - 1)
+    return result - span if result >= span >> 1 else result
+
+
+#: The value a computed Double reaches on overflow, which the domain does not carry.
+INFINITY = float('inf')
+
+
+def _throws_are_modelled(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool:
+    """
+    Whether the kernel can see, for these operands, every way the operator throws — so that a cell
+    which recorded a throw somewhere may still be computed here.
+
+    Division and remainder throw for a zero divisor and nothing else, and the divisor is in hand.
+    Addition, subtraction and multiplication throw only where a `Decimal` result leaves the range of
+    a `Decimal`, which `_decimal_result` raises for; over the other numeric types they do not throw
+    at all, and a cell of theirs that recorded one is recording something this does not model.
+    """
+    if operator in ('/', '%'):
+        return True
+    if operator in _ARITHMETIC:
+        return _DECIMAL in (type_of(left), type_of(right))
+    return False
+
+
+_ARITHMETIC = {
+    '+': operator_module.add,
+    '-': operator_module.sub,
+    '*': operator_module.mul,
+}
+
+_BITWISE: dict[str, Callable[[int, int], int]] = {
+    '-band': int.__and__,
+    '-bor': int.__or__,
+    '-bxor': int.__xor__,
+}
+
+_COMPARISONS = {
+    '-eq': operator_module.eq,
+    '-ne': operator_module.ne,
+    '-lt': operator_module.lt,
+    '-le': operator_module.le,
+    '-gt': operator_module.gt,
+    '-ge': operator_module.ge,
+}
+
+
+#: The literal suffix that pins a spelled number to its type, for the types that have one. A type
+#: absent here has no literal spelling at all, and `render` refuses it rather than spelling a number
+#: that would re-read as something else: `[byte] 1` written back as `1` is an Int32.
+_LITERAL_SUFFIX = {_INT32: '', _INT64: 'L', _DECIMAL: 'd'}
+
+
+def render(fact: Ps1Fact) -> Expression | None:
+    """
+    The expression that spells this value, or `None` when nothing spells it. `None` is a **refusal**
+    and never *the value is not constant*: a caller holding a `Ps1Constant` it cannot render has to
+    leave the source alone, because every alternative it might reach for spells a different value.
+
+    What is refused, and why each one is a value and not a gap:
+
+    - A number of a type with no literal suffix. `[uint16] 7` spelled `7` is an Int32, and there is
+      no spelling of a UInt16 literal for it to take instead.
+    - A `Double` that is not finite, and negative zero. `Infinity` and `NaN` have no literal at all
+      — written out they read as command names — and `-0.0` spelled `-0` re-reads as an Int32.
+    - A `Char`, a `String` and a collection, which are not this commit's to spell: a `Char` needs
+      the question of whether a `String` spelling is observationally equivalent where it stands, and
+      a collection needs the empty and one-element forms that change type when written naively.
+
+    A number is spelled with its sign attached to the digits, which is the spelling that keeps its
+    type: `-2147483648` is one literal that fits Int32, and a caller putting the result somewhere a
+    parenthesis would separate the two has changed an Int32 into an Int64.
+    """
+    if fact is NULL:
+        return Ps1Variable(name='Null')
+    if not isinstance(fact, Ps1Constant):
+        return None
+    if fact.type == _BOOLEAN:
+        return Ps1Variable(name='True' if fact.payload else 'False')
+    if fact.type == _DOUBLE:
+        return _rendered_double(fact.payload)
+    suffix = _LITERAL_SUFFIX.get(fact.type)
+    if suffix is None or not isinstance(fact.payload, (int, decimal.Decimal)):
+        return None
+    if fact.type == _DECIMAL:
+        return Ps1RealLiteral(value=float(fact.payload), raw=F'{fact.payload}{suffix}')
+    return Ps1IntegerLiteral(value=int(fact.payload), raw=F'{fact.payload}{suffix}')
+
+
+def _rendered_double(payload) -> Expression | None:
+    if not isinstance(payload, float) or payload != payload or payload in (
+        float('inf'), float('-inf')
+    ):
+        return None
+    if payload == 0.0 and math.copysign(1.0, payload) < 0:
+        return None
+    return Ps1RealLiteral(value=payload, raw=repr(payload))

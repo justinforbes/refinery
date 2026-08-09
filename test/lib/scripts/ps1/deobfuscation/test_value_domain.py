@@ -108,31 +108,24 @@ class TestPs1ConstantsThatAreComputedWrong(TestPs1):
     different value or a different type than the one 5.1 produces.
     """
 
-    @unittest.expectedFailure
     def test_a_hex_literal_filling_thirty_two_bits_is_a_negative_int32(self):
         self.assertEqual(self._deobfuscate('$x = 0xFFFFFFFF + 0'), '$x = -1')
 
-    @unittest.expectedFailure
     def test_a_negative_int32_hex_literal_stays_negative_through_bxor(self):
         self.assertEqual(self._deobfuscate('$x = 0xFFFFFFFF -bxor 0x5A'), '$x = -91')
 
-    @unittest.expectedFailure
     def test_a_hex_literal_filling_sixty_four_bits_is_a_negative_int64(self):
-        self.assertEqual(self._deobfuscate('$x = 0xFFFFFFFFFFFFFFFF + 0'), '$x = -1')
+        self.assertEqual(self._deobfuscate('$x = 0xFFFFFFFFFFFFFFFF + 0'), '$x = -1L')
 
-    @unittest.expectedFailure
     def test_a_kilobyte_suffix_is_an_integer(self):
         self.assertEqual(self._deobfuscate('$x = 1kb + 0'), '$x = 1024')
 
-    @unittest.expectedFailure
     def test_a_long_suffix_survives_arithmetic_as_a_long(self):
         self.assertEqual(self._deobfuscate('$x = 1L + 0'), '$x = 1L')
 
-    @unittest.expectedFailure
     def test_a_decimal_suffix_survives_arithmetic_as_a_decimal(self):
         self.assertEqual(self._deobfuscate('$x = 10d + 0'), '$x = 10d')
 
-    @unittest.expectedFailure
     def test_an_int32_sum_that_overflows_widens_to_a_double(self):
         self.assertEqual(self._deobfuscate('$x = 2147483647 + 1'), '$x = 2147483648.0')
 
