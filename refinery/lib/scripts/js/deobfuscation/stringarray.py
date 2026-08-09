@@ -12,8 +12,9 @@ from __future__ import annotations
 import base64
 import enum
 import functools
+import math
 
-from typing import NamedTuple, Sequence
+from typing import Callable, NamedTuple, Sequence
 
 from refinery.lib.scripts import (
     Node,
@@ -208,7 +209,7 @@ def _find_all_accessor_functions(
                     and assign.right.right is not None
                 ):
                     try:
-                        base_offset = int(_eval_arithmetic(assign.right.right))
+                        base_offset = _as_position(_eval_arithmetic(assign.right.right))
                     except _EvalError:
                         pass
             elif isinstance(s, JsVariableDeclaration):
@@ -268,7 +269,7 @@ def _extract_self_overwriting_offset(
                 and inner_assign.right.right is not None
             ):
                 try:
-                    return int(_eval_arithmetic(inner_assign.right.right))
+                    return _as_position(_eval_arithmetic(inner_assign.right.right))
                 except _EvalError:
                     pass
     return None
@@ -315,7 +316,7 @@ def _find_rotation_iife(
             if not (isinstance(first_arg, JsIdentifier) and first_arg.name == array_fn_name):
                 continue
             try:
-                target = int(_eval_arithmetic(second_arg))
+                target = _as_position(_eval_arithmetic(second_arg))
             except _EvalError:
                 continue
             fn_body = fn.body
@@ -332,6 +333,19 @@ def _find_rotation_iife(
 
 class _EvalError(Exception):
     pass
+
+
+def _as_position(value: float) -> int:
+    """
+    Read an evaluated Number as the whole number a pattern can use — an index, an offset, a rotation
+    target, a checksum — truncated toward zero. `NaN` and the infinities name no position, and `int`
+    raises on them rather than answering, so they are refused the way every other unusable
+    expression in this module is refused: an uncaught `OverflowError` would abort the whole run
+    instead.
+    """
+    if not math.isfinite(value):
+        raise _EvalError
+    return int(value)
 
 
 class AccessorWrapperInfo(NamedTuple):
@@ -387,7 +401,7 @@ def _resolve_constant(
         inner = _resolve_constant(node.operand, prop_maps)
         return -inner if inner is not None else None
     try:
-        return int(_eval_arithmetic(node))
+        return _as_position(_eval_arithmetic(node))
     except _EvalError:
         return None
 
@@ -444,7 +458,7 @@ def _parse_object_props(
                 props[key] = sv
                 continue
         try:
-            props[key] = int(_eval_arithmetic(prop.value))
+            props[key] = _as_position(_eval_arithmetic(prop.value))
         except _EvalError:
             pass
     return props
@@ -770,9 +784,10 @@ def _eval_checksum(
             return fn(lhs, rhs)
     if isinstance(node, JsCallExpression) and isinstance(node.callee, JsIdentifier):
         if node.callee.name == 'parseInt' and len(node.arguments) >= 1:
+            radix = _checksum_radix(node.arguments[1:], recurse)
             inner = node.arguments[0]
             if isinstance(inner, JsStringLiteral):
-                result = js_parse_int(inner.value)
+                result = js_parse_int(inner.value, radix)
                 if result is None:
                     raise _EvalError
                 return result
@@ -784,11 +799,30 @@ def _eval_checksum(
                     raw = strings[i]
                     encoding = encoding_map.get(inner.callee.name, Encoding.NONE)
                     decoded = _decode_string(raw, encoding, key)
-                    if (result := js_parse_int(decoded)) is None:
+                    if (result := js_parse_int(decoded, radix)) is None:
                         raise _EvalError
                     return result
             raise _EvalError
     raise _EvalError
+
+
+def _checksum_radix(
+    rest: Sequence[Node],
+    recurse: Callable[[Node], float],
+) -> int:
+    """
+    The radix a `parseInt` call in a checksum expression names, or `0` for the language's "not
+    supplied". Reading it is what keeps the simulated checksum equal to the one the engine computes:
+    an unsupplied radix takes a `0x` prefix as base 16, so ignoring a written `10` would read
+    `'0x1F'` as `31` where the engine reads `0`. A radix that does not evaluate to an integer is not
+    a checksum this module can simulate.
+    """
+    if not rest:
+        return 0
+    radix = exact_integer(recurse(rest[0]))
+    if radix is None:
+        raise _EvalError
+    return radix
 
 
 def _resolve_accessor_call(
@@ -864,7 +898,7 @@ def _simulate_rotation(
     n = len(array)
     for _ in range(n):
         try:
-            if int(_eval_checksum(
+            if _as_position(_eval_checksum(
                 checksum_node, local_accessors, array, base_offset, encoding_map, wrappers, prop_maps,
             )) == target:
                 return array

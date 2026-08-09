@@ -45,6 +45,16 @@ from refinery.lib.scripts.js.numbers import exact_integer
 
 _DEFAULT_ROUNDS = 3
 _DEFAULT_ITERATIONS = 200000
+_MAX_ROUNDS = 64
+_MAX_ITERATIONS = 1000000
+"""
+The largest round and iteration counts a constructor may declare and still describe this cipher.
+Both are read out of the program and both buy work directly: an iteration count is spent inside a
+single `hashlib.pbkdf2_hmac` call that no timeout in this codebase can interrupt, and a round count
+is a loop per decoded string. A sample naming `1e12` iterations is not configuring Scramble, it is
+asking for a week of hashing, and taking the number at face value is what turns recognizing the
+pattern into that.
+"""
 
 
 class ScrambleCipher:
@@ -126,7 +136,28 @@ def _is_this_member(node: Node | None, name: str) -> bool:
     )
 
 
-def _extract_constructor_params(method: JsMethodDefinition) -> tuple[int, int]:
+def _declared_count(node: Node | None, largest: int) -> int | None:
+    """
+    A repetition count written into the constructor: a positive integer no larger than *largest*, or
+    `None` when what is written there is something else. The lower bound is `hashlib.pbkdf2_hmac`'s
+    own, which rejects a count below one by raising; the upper bound is what keeps the recognition
+    itself bounded, since both counts are spent as work the moment they are believed.
+    """
+    if not isinstance(node, JsNumericLiteral):
+        return None
+    count = exact_integer(node.value)
+    if count is None or not (1 <= count <= largest):
+        return None
+    return count
+
+
+def _extract_constructor_params(method: JsMethodDefinition) -> tuple[int, int] | None:
+    """
+    The round and iteration counts the constructor configures, or `None` when it writes one this
+    pass cannot honour. Refusing is the whole answer there and a default is not: the counts decide
+    the key, so decoding with three rounds a class that declares some other number does not fail
+    loudly, it prints a plausible string that the program never produces.
+    """
     fn = method.value
     rounds = _DEFAULT_ROUNDS
     iterations = _DEFAULT_ITERATIONS
@@ -136,22 +167,21 @@ def _extract_constructor_params(method: JsMethodDefinition) -> tuple[int, int]:
         if not isinstance(node, JsAssignmentExpression):
             continue
         if _is_this_member(node.left, 'rounds'):
-            if isinstance(node.right, JsNumericLiteral):
-                declared = exact_integer(node.right.value)
-                if declared is not None:
-                    rounds = declared
+            declared = _declared_count(node.right, _MAX_ROUNDS)
+            if declared is None:
+                return None
+            rounds = declared
         elif _is_this_member(node.left, 'masterKey'):
             if not isinstance(node.right, JsCallExpression) or len(node.right.arguments) < 5:
                 continue
-            iters_arg = node.right.arguments[2]
-            if isinstance(iters_arg, JsNumericLiteral):
-                declared = exact_integer(iters_arg.value)
-                if declared is not None:
-                    iterations = declared
+            declared = _declared_count(node.right.arguments[2], _MAX_ITERATIONS)
+            if declared is None:
+                return None
+            iterations = declared
     return rounds, iterations
 
 
-def _get_class_params(class_node: JsClassDeclaration) -> tuple[int, int]:
+def _get_class_params(class_node: JsClassDeclaration) -> tuple[int, int] | None:
     if class_node.body is None:
         return _DEFAULT_ROUNDS, _DEFAULT_ITERATIONS
     for method in class_node.body.body:
@@ -252,7 +282,10 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
                 salt = _resolve_string(init.arguments[1], body)
                 if password is None or salt is None:
                     continue
-                rounds, iterations = _get_class_params(class_node)
+                params = _get_class_params(class_node)
+                if params is None:
+                    continue
+                rounds, iterations = params
                 return _InstanceInfo(
                     name=decl.id.name,
                     password=password,

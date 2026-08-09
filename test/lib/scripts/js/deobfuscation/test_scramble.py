@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 
+from test.lib.scripts.js.analysis.differential import deobfuscate_within
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.deobfuscation.scramble import JsScrambleStringDecoder, ScrambleCipher
@@ -134,6 +135,83 @@ class TestScrambleStringDecoder(TestJsDeobfuscator):
             """
         )
         self.assertEqual(self._run_transformer(source, JsScrambleStringDecoder), expected)
+
+    _CIPHER_CLASS = inspect.cleandoc(
+        """
+        class Scramble {
+          constructor(pw, salt) {
+            this.masterKey = pb(pw, salt, ITERATIONS, 32, 'sha256');
+            this.rounds = ROUNDS;
+          }
+          decode(input) {
+            return decrypt(input, this.masterKey, this.rounds);
+          }
+        }
+        var instance = new Scramble('2aaa9053353088d4d49b5bf32f403f2d85b3df97c9a9beedfcdbb1ecc27ba9c6', 'fec5863b88643968ecff0c2c8afecbaf');
+        function decode(x) {
+          return instance.decode(x);
+        }
+        console.log(decode('hJQxp9Pvj3X2QId3C4RuMOe1C4EpuSg2b/8JyqzSWjrQm+VgNNg='));
+        """
+    )
+    """
+    One program in the shape this pass recognizes, with the two repetition counts left open. It is
+    written the way the synthesizer writes it, so a run that recognizes nothing returns it verbatim.
+    """
+
+    def _cipher(self, iterations: str, rounds: str) -> str:
+        return self._CIPHER_CLASS.replace('ITERATIONS', iterations).replace('ROUNDS', rounds)
+
+    def _deobfuscate_bounded(self, source: str) -> str:
+        """
+        The deobfuscation of *source*, run in a child process so that a count spent as work rather
+        than refused fails the test instead of hanging it. Both counts buy work directly: an
+        iteration count inside one `hashlib.pbkdf2_hmac` call that nothing here can interrupt, a
+        round count as a loop per decoded string.
+        """
+        deobfuscated = deobfuscate_within(source, seconds=30)
+        if deobfuscated is None:
+            self.fail('recognizing the cipher did not terminate')
+        return deobfuscated
+
+    def _declines(self, iterations: str, rounds: str):
+        source = self._cipher(iterations, rounds)
+        self.assertEqual(source, self._deobfuscate_bounded(source))
+
+    def test_counts_the_pass_can_honour_decode_the_class(self):
+        """
+        The control the refusals below are read against: the same program with counts this pass can
+        honour is recognized and decoded, so a refusal is a decision about the counts and not the
+        shape.
+        """
+        source = self._cipher('200000', '3')
+        self.assertEqual(
+            "console.log('https://api.github.com');", self._deobfuscate_bounded(source))
+
+    def test_an_iteration_count_past_the_bound_is_not_this_cipher(self):
+        self._declines('1e12', '3')
+
+    def test_a_round_count_past_the_bound_is_not_this_cipher(self):
+        self._declines('200000', '1e12')
+
+    def test_a_zero_iteration_count_is_not_this_cipher(self):
+        """
+        `crypto.pbkdf2Sync` rejects an iteration count below one with a `RangeError`, so a
+        constructor naming zero describes a class no engine builds and a key no derivation
+        produces.
+        """
+        self._declines('0', '3')
+
+    def test_a_zero_round_count_is_not_this_cipher(self):
+        self._declines('200000', '0')
+
+    def test_a_count_that_is_not_a_literal_is_not_this_cipher(self):
+        """
+        The counts decide the key, so a count this pass cannot read is a key it cannot derive.
+        Falling back on a default would not fail loudly; it would print a plausible string that the
+        program never produces.
+        """
+        self._declines('200000', 'n')
 
     def test_global_string_key_alias(self):
         source = inspect.cleandoc(

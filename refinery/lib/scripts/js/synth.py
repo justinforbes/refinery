@@ -78,10 +78,7 @@ from refinery.lib.scripts.js.model import (
     JsYieldExpression,
     Statement,
 )
-from refinery.lib.scripts.js.numbers import (
-    exact_integer,
-    is_negative_zero,
-)
+from refinery.lib.scripts.js.numbers import exact_integer, is_negative_zero
 from refinery.lib.scripts.js.precedence import needs_parens, statement_needs_parens
 
 _WORD_UNARY_OPS = frozenset({'typeof', 'void', 'delete'})
@@ -300,9 +297,10 @@ class JsSynthesizer(Synthesizer):
         the one-element-per-line fallback, so where that fallback does not apply the array is left exactly
         as it was written.
 
-        Negative zero is excluded even though it is an integer in range, because the grid respells each
-        element from its value and `0x00` denotes positive zero: the one Number whose sign this spelling
-        cannot carry is the one Number whose sign is observable without reading it back, through `1 / -0`.
+        Negative zero is excluded even though it is an integer in range, because the grid respells
+        each element from its value and `0x00` denotes positive zero: the one Number whose sign this
+        spelling cannot carry is the one Number whose sign is observable without reading it back,
+        through `1 / -0`.
 
         A byte array printed one element per line costs a screen of vertical space to say very little, and
         decimal cannot be aligned: `15` and `216` differ in width, so the reader loses the column structure

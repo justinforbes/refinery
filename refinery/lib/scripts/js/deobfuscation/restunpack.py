@@ -38,21 +38,26 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
 )
-from refinery.lib.scripts.js.numbers import exact_integer
+from refinery.lib.scripts.js.numbers import exact_integer, js_number_to_string
 
 
 _MAX_PARAMETERS = 65535
 """
-The most formal parameters a function may declare, which is what a truncation length is rewritten
-into. A larger one does not describe this pattern, and taking it at face value would spend the rest
-of the run generating names for parameters no engine would accept: `r.length = 1e300` is a valid
-assignment and its length is an integer.
+The largest truncation length this pass will rewrite into a formal parameter list. A larger one does
+not describe the pattern, and taking it at face value would spend the rest of the run minting names
+for parameters no engine would accept.
+
+The number is not itself an engine limit and should not be read as one: V8 refuses a function of
+more than 65525 formal parameters, so a length between that and this bound is still rewritten into a
+program the engine will not load. Nor is every larger length a runtime error to begin with — a
+non-uint32 length such as `1e300` throws `RangeError`, but any uint32 up to 4294967295 does not.
 """
 
 
 class _TruncationInfo(NamedTuple):
     param_count: int
     stack_chain: str | None
+    length_access: JsMemberExpression
 
 
 class _NestedFrameAccess(Exception):
@@ -67,6 +72,13 @@ def _extract_truncation(
     Find the `.length = N` truncation statement in the function body. Returns the param count
     and the stack chain key (None for simple case where rest param IS the stack). Returns None
     if no truncation pattern is found.
+
+    The object decides which statement is the truncation, and the length is read afterwards: the
+    first write to the length of the rest array or of a resolvable chain is the one this rewrite is
+    about, and a length it cannot read as a parameter count means the rewrite cannot be done.
+    Reading the length first and moving on when it does not answer would let a later, unrelated
+    `.length =` stand in for the real one, and the parameter list would then be built from a count
+    belonging to something else.
     """
     for stmt in stmts:
         if not isinstance(stmt, JsExpressionStatement):
@@ -81,36 +93,41 @@ def _extract_truncation(
             continue
         if not isinstance(lhs.property, JsIdentifier) or lhs.property.name != 'length':
             continue
-        rhs = expr.right
-        if rhs is None:
-            continue
-        n = numeric_value(rhs)
-        if n is None:
-            continue
-        length = exact_integer(n)
-        if length is None or not (0 <= length <= _MAX_PARAMETERS):
-            continue
         obj = lhs.object
         if isinstance(obj, JsIdentifier) and obj.name == rest_name:
-            return _TruncationInfo(length, None)
-        if isinstance(obj, JsMemberExpression):
+            chain = None
+        elif isinstance(obj, JsMemberExpression):
             chain = member_key(obj)
-            if chain is not None:
-                return _TruncationInfo(length, chain)
+            if chain is None:
+                continue
+        else:
+            continue
+        rhs = expr.right
+        n = None if rhs is None else numeric_value(rhs)
+        length = None if n is None else exact_integer(n)
+        if length is None or not (0 <= length <= _MAX_PARAMETERS):
+            return None
+        return _TruncationInfo(length, chain, lhs)
     return None
 
 
 def _collect_accesses_simple(
     body: JsBlockStatement,
     rest_name: str,
+    length_access: JsMemberExpression,
 ) -> dict[str, list[JsMemberExpression]] | None:
     """
     Collect all `restParam[key]` and `restParam.key` accesses in the immediate function body
     (not descending into nested functions). Returns a map from string key to list of AST nodes.
     Returns None if the rest param is used in a way that prevents demasking.
+
+    Only the one `.length` member that *length_access* names is skipped, because it is the one the
+    rewrite removes. Any other mention of the rest array's length is an ordinary read of a binding
+    the rewrite is about to delete, and answering it with a rewritten body would leave a reference
+    to a name that no longer exists.
     """
     accesses: dict[str, list[JsMemberExpression]] = {}
-    if not _walk_collect_simple(body, rest_name, accesses):
+    if not _walk_collect_simple(body, rest_name, accesses, length_access):
         return None
     return accesses
 
@@ -119,6 +136,7 @@ def _walk_collect_simple(
     node: Node,
     rest_name: str,
     accesses: dict[str, list[JsMemberExpression]],
+    length_access: JsMemberExpression,
 ) -> bool:
     for child in node.children():
         if isinstance(child, (JsFunctionExpression, JsFunctionDeclaration)):
@@ -126,11 +144,7 @@ def _walk_collect_simple(
         if isinstance(child, JsMemberExpression):
             obj = child.object
             if isinstance(obj, JsIdentifier) and obj.name == rest_name:
-                if (
-                    not child.computed
-                    and isinstance(child.property, JsIdentifier)
-                    and child.property.name == 'length'
-                ):
+                if child is length_access:
                     continue
                 key = _extract_access_key(child)
                 if key is None:
@@ -142,7 +156,7 @@ def _walk_collect_simple(
             if isinstance(parent, JsMemberExpression) and parent.object is child:
                 continue
             return False
-        if not _walk_collect_simple(child, rest_name, accesses):
+        if not _walk_collect_simple(child, rest_name, accesses, length_access):
             return False
     return True
 
@@ -187,6 +201,18 @@ def _walk_collect_frame(
         _walk_collect_frame(child, stack_chain, accesses, depth)
 
 
+def _numeric_key(value: float) -> str | None:
+    """
+    The property name a Number indexes, or `None` when it names no slot this pass rewrites. The
+    spelling is `Number.prototype.toString` and not `str` of a Python integer, because the two part
+    ways exactly where a double stops determining its own digits: `s[2 ** 60]` reads the property
+    `'1152921504606847000'`, which is not what the exact value spells.
+    """
+    if exact_integer(value) is None:
+        return None
+    return js_number_to_string(value)
+
+
 def _extract_access_key(node: JsMemberExpression) -> str | None:
     """
     Extract the key from a stack access expression. Returns a string representation of the key
@@ -195,8 +221,7 @@ def _extract_access_key(node: JsMemberExpression) -> str | None:
     if node.computed:
         prop = node.property
         if isinstance(prop, JsNumericLiteral):
-            index = exact_integer(prop.value)
-            return None if index is None else str(index)
+            return _numeric_key(prop.value)
         if isinstance(prop, JsStringLiteral):
             return prop.value
         if (
@@ -204,8 +229,7 @@ def _extract_access_key(node: JsMemberExpression) -> str | None:
             and prop.operator == '-'
             and isinstance(prop.operand, JsNumericLiteral)
         ):
-            index = exact_integer(prop.operand.value)
-            return None if index is None else str(-index)
+            return _numeric_key(-prop.operand.value)
         return None
     if isinstance(node.property, JsIdentifier):
         if node.property.name == 'length':
@@ -214,25 +238,48 @@ def _extract_access_key(node: JsMemberExpression) -> str | None:
     return None
 
 
-def _generate_names(param_count: int, keys: set[str]) -> dict[str, str]:
+def _mentioned_names(node: Node) -> set[str]:
     """
-    Generate fresh identifier names for stack keys. Keys with index 0..N-1 get param names,
-    all others get local names.
+    Every identifier name the subtree mentions. A name this pass introduces has to avoid all of them
+    and not only the declared ones: one that matches a local the body declares shadows it, and one
+    that matches a name the body reads from an enclosing scope captures it.
     """
+    return {child.name for child in node.walk() if isinstance(child, JsIdentifier)}
+
+
+def _generate_names(
+    param_count: int,
+    keys: set[str],
+    taken: set[str],
+) -> tuple[dict[str, str], list[str]]:
+    """
+    Fresh identifier names for the stack keys, together with the whole parameter list they are drawn
+    from. A key naming an index below *param_count* is that parameter and takes its name from its
+    position, so that two keys can never land on one name; every other key names a local.
+    """
+    used = set(taken)
+    params: list[str] = []
+    candidate = 0
+    while len(params) < param_count:
+        name = F'p{candidate}'
+        candidate += 1
+        if name not in used:
+            used.add(name)
+            params.append(name)
     mapping: dict[str, str] = {}
-    param_idx = 0
-    local_idx = 0
-    param_keys = set()
-    for i in range(param_count):
-        param_keys.add(str(i))
+    candidate = 0
     for key in sorted(keys, key=_sort_key):
-        if key in param_keys:
-            mapping[key] = F'p{param_idx}'
-            param_idx += 1
-        else:
-            mapping[key] = F'v{local_idx}'
-            local_idx += 1
-    return mapping
+        if key.isdigit() and int(key) < param_count:
+            mapping[key] = params[int(key)]
+            continue
+        while True:
+            name = F'v{candidate}'
+            candidate += 1
+            if name not in used:
+                break
+        used.add(name)
+        mapping[key] = name
+    return mapping, params
 
 
 def _sort_key(key: str) -> tuple[int, int | str]:
@@ -243,31 +290,20 @@ def _sort_key(key: str) -> tuple[int, int | str]:
         return (1, key)
 
 
-def _remove_truncation(body: JsBlockStatement, rest_name: str, stack_chain: str | None) -> None:
+def _remove_truncation(body: JsBlockStatement, length_access: JsMemberExpression) -> None:
     """
-    Remove the `.length = N` truncation statement from the function body.
+    Remove the truncation statement from the function body. It is found by the member node the match
+    recorded rather than by re-running the match: a body may hold more than one `.length =` and only
+    the one that was read as the parameter count may be dropped.
     """
     stmts = body.body
     for i, stmt in enumerate(stmts):
         if not isinstance(stmt, JsExpressionStatement):
             continue
         expr = stmt.expression
-        if not isinstance(expr, JsAssignmentExpression) or expr.operator != '=':
-            continue
-        lhs = expr.left
-        if not isinstance(lhs, JsMemberExpression) or lhs.computed:
-            continue
-        if not isinstance(lhs.property, JsIdentifier) or lhs.property.name != 'length':
-            continue
-        obj = lhs.object
-        if stack_chain is None:
-            if isinstance(obj, JsIdentifier) and obj.name == rest_name:
-                stmts.pop(i)
-                return
-        else:
-            if isinstance(obj, JsMemberExpression) and member_key(obj) == stack_chain:
-                stmts.pop(i)
-                return
+        if isinstance(expr, JsAssignmentExpression) and expr.left is length_access:
+            stmts.pop(i)
+            return
 
 
 class JsRestArrayUnpacking(ScriptLevelTransformer):
@@ -311,9 +347,9 @@ class JsRestArrayUnpacking(ScriptLevelTransformer):
         result = _extract_truncation(fn.body.body, rest_name)
         if result is None:
             return False
-        param_count, stack_chain = result
+        param_count, stack_chain, length_access = result
         if stack_chain is None:
-            accesses = _collect_accesses_simple(fn.body, rest_name)
+            accesses = _collect_accesses_simple(fn.body, rest_name, length_access)
         else:
             accesses = _collect_accesses_frame(fn.body, stack_chain)
         if accesses is None:
@@ -321,20 +357,19 @@ class JsRestArrayUnpacking(ScriptLevelTransformer):
         if param_count > 0 and not any(str(i) in accesses for i in range(param_count)):
             return False
         if not accesses:
-            _remove_truncation(fn.body, rest_name, stack_chain)
+            _remove_truncation(fn.body, length_access)
             fn.params.clear()
             return True
-        mapping = _generate_names(param_count, set(accesses.keys()))
+        taken = _mentioned_names(fn.body)
+        mapping, params = _generate_names(param_count, set(accesses.keys()), taken)
         for key, nodes in accesses.items():
             name = mapping[key]
             for access_node in nodes:
                 replacement = JsIdentifier(name=name)
                 _replace_in_parent(access_node, replacement)
-        _remove_truncation(fn.body, rest_name, stack_chain)
+        _remove_truncation(fn.body, length_access)
         fn.params.clear()
-        for i in range(param_count):
-            key = str(i)
-            name = mapping.get(key, F'p{i}')
+        for name in params:
             fn.params.append(JsIdentifier(name=name))
         if stack_chain is None:
             self._add_local_declarations(fn.body, mapping, param_count)

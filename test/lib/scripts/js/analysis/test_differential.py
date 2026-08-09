@@ -2761,6 +2761,94 @@ class TestNumericLiteralsAreDoubles(TestBase):
             self.fail('the rest parameter unpacking did not terminate')
         self.assertEqual(behavior(deobfuscated), ('1\n', None))
 
+    def test_a_string_that_names_negative_zero_folds_to_negative_zero(self):
+        """
+        Node: `-Infinity true -Infinity true`. `Number('-0')` and `parseInt('-0')` are both negative
+        zero, which prints as `0` and is `=== 0`, so only the reciprocal and `Object.is` witness it.
+        A sign carried through a Python integer is lost, because that type has a single zero.
+        """
+        self._folds_to(
+            "console.log(1 / Number('-0'), Object.is(Number('-0'), -0),"
+            " 1 / parseInt('-0'), Object.is(parseInt('-0'), -0));",
+            'console.log(1 / -0, Object.is(-0, -0), 1 / -0, Object.is(-0, -0));')
+
+    def test_unary_plus_on_a_string_that_names_negative_zero_folds_to_negative_zero(self):
+        """
+        Node: `-Infinity true`. The same coercion reached through the operator rather than through
+        the call.
+        """
+        self._folds_to(
+            "var f = function () { return +'-0'; };"
+            ' console.log(1 / f(), Object.is(f(), -0));',
+            'console.log(1 / -0, Object.is(-0, -0));')
+
+    def test_numeric_coercion_refuses_the_decimal_digits_only_python_reads(self):
+        """
+        Node: `NaN NaN NaN`. The Arabic-Indic, fullwidth and Devanagari digit strings each name one
+        hundred and twenty-three to Python's `int` and `float`. The language's numeric grammar has
+        no digit outside `0` through `9`, so none of them names a number at all.
+        """
+        self._folds_to(
+            R"console.log(Number('\u0661\u0662\u0663'), Number('\uFF11\uFF12\uFF13'),"
+            R" Number('\u0967\u0968\u0969'));",
+            'console.log(NaN, NaN, NaN);')
+
+    def test_numeric_coercion_refuses_the_padding_only_python_strips(self):
+        """
+        Node: `NaN NaN NaN NaN`. `U+001C` through `U+001F` are removed by Python's `str.strip` and
+        are not ECMAScript WhiteSpace, so every string here carries a leading character the grammar
+        does not allow before a digit.
+        """
+        self._folds_to(
+            R"console.log(Number('\u001C5'), Number('\u001D5'), Number('\u001E5'),"
+            R" Number('\u001F5'));",
+            'console.log(NaN, NaN, NaN, NaN);')
+
+    def test_parse_int_refuses_the_padding_only_python_strips(self):
+        """
+        Node: `NaN NaN NaN NaN`. `parseInt` skips leading whitespace and then reads digits, so a
+        leading character that is not whitespace ends the parse before any digit is seen.
+        """
+        self._prints(
+            R"console.log(String(parseInt('\u001C5')), String(parseInt('\u001D5')),"
+            R" String(parseInt('\u001E5')), String(parseInt('\u001F5')));",
+            'NaN NaN NaN NaN\n')
+
+    def test_numeric_coercion_accepts_the_byte_order_mark_as_whitespace(self):
+        """
+        Node: `5 5 5 12`. `U+FEFF` is ECMAScript WhiteSpace and Python's `str.strip` leaves it in
+        place, so it pads a number on either side exactly as a space does.
+        """
+        self._folds_to(
+            R"console.log(Number('\uFEFF5'), Number('5\uFEFF'), parseInt('\uFEFF5'),"
+            R" Number('\uFEFF\uFEFF12\uFEFF'));",
+            'console.log(5, 5, 5, 12);')
+
+    def test_unary_plus_reads_the_padding_and_digits_the_engine_reads(self):
+        """
+        Node: `NaN NaN 5`. The three classes of string above reached through the operator, whose
+        coercion is written once for `Number`, once for `parseInt` and once for `+`.
+        """
+        self._prints(
+            R"var f = function () { return +'\u0661\u0662\u0663'; };"
+            R" var g = function () { return +'\u001C5'; };"
+            R" var h = function () { return +'\uFEFF5'; };"
+            ' console.log(String(f()), String(g()), String(h()));',
+            'NaN NaN 5\n')
+
+    def test_parse_int_reads_its_radix_through_the_signed_32_bit_wrap(self):
+        """
+        Node: `16 10 255`. The radix is coerced with ToInt32, so `2**32 + 16` selects base sixteen,
+        `2**32` selects nothing and leaves the default of ten, and a negative value wraps the same
+        way. Truncating instead names a radix outside 2 to 36, which is `NaN` for every string.
+        """
+        self._folds_to(
+            "var f = function () { return parseInt('10', 4294967312); };"
+            " var g = function () { return parseInt('10', 4294967296); };"
+            " var h = function () { return parseInt('ff', -4294967280); };"
+            ' console.log(f(), g(), h());',
+            'console.log(16, 10, 255);')
+
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestUnaryOperatorFoldCoverage(TestBase):

@@ -1725,3 +1725,47 @@ class TestGeneratorCFFUnflattening(TestJsDeobfuscator):
             }
             """
         ))
+
+    STATE_NAME_IN_PROPERTY_SLOTS_CFF = inspect.cleandoc(
+        """
+        function outer() {
+          function* gen(i, b, scope = {NS: {}}, args) {
+            while (i + b !== 100) {
+              with (scope.RV || scope) {
+                switch (i + b) {
+                  case 10:
+                    scope.RV = scope.NS;
+                    i = 40, b = 0;
+                    break;
+                  case 40:
+                    var o = { i: 1 };
+                    return done = true, [o.i, i, { i }.i, { i: 2 }.i];
+                    break;
+                }
+              }
+            }
+          }
+          var done;
+          var result = gen(5, 5)["next"]()["value"];
+          if (done) { return result; }
+        }
+"""
+    )
+
+    def test_generator_cff_state_value_reaches_only_the_slots_that_read_the_name(self):
+        """
+        The state variable `i` also spells a member property, an object key and a shorthand
+        property. Only the shorthand is a read of the binding, so only it takes the state value and
+        expands to `{i: 40}`; substituting into the other two emits `o.40` and `{40: 2}`, which no
+        engine parses. Original and recovered both return [1, 40, 40, 2] under Node.
+        """
+        result = self._run_transformer(
+            self.STATE_NAME_IN_PROPERTY_SLOTS_CFF, JsGeneratorCFFUnflattening)
+        self.assertEqual(result, inspect.cleandoc(
+            """
+            function outer() {
+              var o = { i: 1 };
+              return [o.i, 40, { i: 40 }.i, { i: 2 }.i];
+            }
+            """
+        ))

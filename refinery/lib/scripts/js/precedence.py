@@ -95,9 +95,9 @@ def _expression_precedence(node: Node) -> int:
 
 def _is_negated_literal(node: Node) -> bool:
     """
-    Whether *node* is a numeric literal spelled as a negation rather than as a single token. Negative
-    zero has no literal form and is written `-0`, so a literal's class does not by itself settle how
-    the node binds; the spelling does, and that is what this reads.
+    Whether *node* is a numeric literal spelled as a negation rather than as a single token.
+    Negative zero has no literal form and is written `-0`, so a literal's class does not by itself
+    settle how the node binds; the spelling does, and that is what this reads.
     """
     return isinstance(node, JsNumericLiteral) and node.raw.startswith('-')
 

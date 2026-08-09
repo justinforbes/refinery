@@ -901,3 +901,48 @@ class TestInterpreterCompoundAssignment(TestJsDeobfuscator):
             """
         )
         self.assertEqual(source, self._evaluate(source))
+
+
+class TestInterpreterNumericCoercion(TestJsDeobfuscator):
+    """
+    ToNumber and `parseInt` over strings, in the places where Python's own number parser and the
+    language disagree about what a string names. Every expected value is what Node prints for the
+    same expression.
+    """
+
+    def test_a_string_that_names_negative_zero_coerces_to_negative_zero(self):
+        self.assertEqual('var x = -0;', self._fold("Number('-0')"))
+        self.assertEqual('var x = -0;', self._fold("+'-0'"))
+        self.assertEqual('var x = -0;', self._fold("parseInt('-0')"))
+        self.assertEqual('var x = -Infinity;', self._fold("1 / Number('-0')"))
+
+    def test_non_ascii_decimal_digits_coerce_to_nan(self):
+        self.assertEqual('var x = NaN;', self._fold(R"Number('\u0661\u0662\u0663')"))
+        self.assertEqual('var x = NaN;', self._fold(R"Number('\uFF11\uFF12\uFF13')"))
+        self.assertEqual('var x = NaN;', self._fold(R"Number('\u0967\u0968\u0969')"))
+        self.assertEqual('var x = NaN;', self._fold(R"+'\u0661\u0662\u0663'"))
+
+    def test_padding_python_strips_and_javascript_does_not_coerces_to_nan(self):
+        self.assertEqual('var x = NaN;', self._fold(R"Number('\u001C5')"))
+        self.assertEqual('var x = NaN;', self._fold(R"Number('\u001D5')"))
+        self.assertEqual('var x = NaN;', self._fold(R"Number('\u001E5')"))
+        self.assertEqual('var x = NaN;', self._fold(R"Number('\u001F5')"))
+        self.assertEqual('var x = NaN;', self._fold(R"+'\u001C5'"))
+        self.assertEqual('var x = NaN;', self._fold(R"parseInt('\u001C5')"))
+
+    def test_the_byte_order_mark_pads_a_number_the_way_a_space_does(self):
+        self.assertEqual('var x = 5;', self._fold(R"Number('\uFEFF5')"))
+        self.assertEqual('var x = 5;', self._fold(R"Number('5\uFEFF')"))
+        self.assertEqual('var x = 5;', self._fold(R"+'\uFEFF5'"))
+        self.assertEqual('var x = 5;', self._fold(R"parseInt('\uFEFF5')"))
+
+    def test_parse_int_reads_its_radix_through_the_signed_32_bit_wrap(self):
+        """
+        The radix is coerced with ToInt32, which wraps rather than saturates: `2**32 + 16` is base
+        sixteen, `2**32` is the language's unsupplied radix and therefore ten, and a negative value
+        lands on the same base its wrap names. Truncating instead names a radix outside 2 to 36,
+        which is `NaN` for every string.
+        """
+        self.assertEqual('var x = 16;', self._fold("parseInt('10', 2 ** 32 + 16)"))
+        self.assertEqual('var x = 10;', self._fold("parseInt('10', 2 ** 32)"))
+        self.assertEqual('var x = 255;', self._fold("parseInt('ff', -(2 ** 32) + 16)"))

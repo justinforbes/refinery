@@ -43,6 +43,28 @@ class TestStringArray(TestJsDeobfuscator):
         result = self._deobfuscate(self._default_preset())
         self.assertEqual("console.log('test string');", result)
 
+    def test_string_array_preset_beside_non_finite_object_property_values(self):
+        """
+        Each property value denotes `Infinity` or `NaN`, and neither names a position in a string
+        array. Refusing such an expression is this pattern's own business; handing it to `int`
+        instead ends the run before the rotation is ever resolved.
+        """
+        source = self._default_preset() + (
+            'var cfg = { limit: 1e400 + 0, ratio: 1e400 * 0, span: 1e308 * 10 };'
+        )
+        self.assertEqual("console.log('test string');", self._deobfuscate(source))
+
+    def test_string_array_preset_beside_non_finite_accessor_call_indices(self):
+        """
+        The same three values as the argument of an accessor call, which is the other place a
+        resolved constant is read as an index into the string array.
+        """
+        source = self._default_preset() + (
+            'function unused() {'
+            ' return _0xe6abe5(1e400 + 0) + _0xe6abe5(1e400 * 0) + _0xe6abe5(1e308 * 10); }'
+        )
+        self.assertEqual("console.log('test string');", self._deobfuscate(source))
+
     def test_string_array_rotation_iife_with_parenthesised_callee(self):
         preset = self._default_preset()
         variant = preset.replace(

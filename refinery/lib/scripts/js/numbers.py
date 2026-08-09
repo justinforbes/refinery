@@ -28,34 +28,57 @@ def to_js_number(value: int | float) -> float:
         return float('-inf') if value < 0 else float('inf')
 
 
+STRING_NUMERIC_TRIM = (
+    '\t\n\v\f\r\x20\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006'
+    '\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+)
+"""
+The characters a string may be padded with and still name a Number: ECMA-262 WhiteSpace, which is
+the space separators together with `U+FEFF`, plus the line terminators. It is spelled out rather
+than left to `str.strip`, whose notion of a space is neither a subset nor a superset of this one:
+Python takes `U+001C` through `U+001F`, which JavaScript does not, and leaves `U+FEFF`, which
+JavaScript takes.
+"""
+
+
 def is_negative_zero(value: float) -> bool:
     """
-    Whether *value* is negative zero. It is the one Number that neither `==` nor `js_number_to_string`
-    can tell from its positive counterpart, so any code that must preserve it has to ask for the sign
-    directly; `1 / -0` is `-Infinity` where `1 / 0` is `Infinity`.
+    Whether *value* is negative zero. It is the one Number that neither `==` nor
+    `js_number_to_string` can tell from its positive counterpart, so any code that must preserve it
+    has to ask for the sign directly; `1 / -0` is `-Infinity` where `1 / 0` is `Infinity`.
     """
     return value == 0 and math.copysign(1.0, value) < 0
 
 
-def exact_integer(value: float) -> int | None:
+def exact_integer(value: int | float) -> int | None:
     """
     The integer *value* is, or `None` when it is not one. A consumer that needs a Python `int` — an
     index, a count, a radix — must ask this rather than call `int` on the Number, because the domain
     contains `NaN` and the infinities, on which `int` raises rather than answers.
     """
-    if not math.isfinite(value) or not value.is_integer():
+    if not math.isfinite(value):
         return None
-    return int(value)
+    integer = int(value)
+    return integer if integer == value else None
+
+
+def apply_sign(magnitude: float, negative: bool) -> float:
+    """
+    The Number of the given *magnitude* carrying the sign that *negative* names. Zero decides how
+    this has to be written: Python's integers have a single zero, so a sign carried through them is
+    lost exactly where JavaScript keeps it, and `Number('-0')` and `parseInt('-0')` are both `-0`.
+    """
+    return math.copysign(magnitude, -1.0 if negative else 1.0)
 
 
 def _significant_digits_to_string(value: float) -> str:
     """
-    Format a finite, non-zero double as the ECMA-262 Number::toString algorithm would. That algorithm
-    is stated over the *shortest* decimal digit string that round-trips to the double, which is what
-    Python's `repr` produces; the exact mathematical value would carry digits past the ones the double
-    determines, and no engine prints those. This also controls the decimal/exponential cutoff
-    (exponential at magnitudes >= 1e21 or < 1e-6) and the exponent format (`1e-7`, not Python's
-    `1e-07`).
+    Format a finite, non-zero double as the ECMA-262 Number::toString algorithm would. That
+    algorithm is stated over the *shortest* decimal digit string that round-trips to the double,
+    which is what Python's `repr` produces; the exact mathematical value would carry digits past the
+    ones the double determines, and no engine prints those. This also controls the
+    decimal/exponential cutoff (exponential at magnitudes >= 1e21 or < 1e-6) and the exponent format
+    (`1e-7`, not Python's `1e-07`).
     """
     negative = value < 0
     decimal = Decimal(repr(abs(value)))
@@ -82,7 +105,7 @@ def js_number_to_string(value: float) -> str:
     the algorithm reads the mathematical value and the sign of a zero is not part of it.
 
     A `repr` that ends in `.0` is already the answer: Python writes a double positionally only below
-    1e17, so such a value is an integer that the shortest round-tripping digits spell in full, which
+    1e16, so such a value is an integer that the shortest round-tripping digits spell in full, which
     is the same branch of the algorithm `_significant_digits_to_string` would take. Spelling it as
     `int(value)` instead would be wrong past 2^53, where the double's exact value has more digits
     than it determines — `2 ** 60` is `1152921504606847000`, not `1152921504606846976`.

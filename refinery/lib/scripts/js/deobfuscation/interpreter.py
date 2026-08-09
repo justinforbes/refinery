@@ -88,7 +88,12 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
 )
-from refinery.lib.scripts.js.numbers import js_number_to_string, to_js_number
+from refinery.lib.scripts.js.numbers import (
+    STRING_NUMERIC_TRIM,
+    apply_sign,
+    js_number_to_string,
+    to_js_number,
+)
 
 MAX_ITERATIONS = 100_000
 MAX_STRING_LEN = 1_000_000
@@ -211,25 +216,34 @@ def _to_array_length(value: Value) -> int:
 def to_number(value: Value) -> float:
     """
     Apply the ECMA-262 ToNumber abstract operation. The string case is not Python's `float`: that
-    function accepts `inf`, `infinity` and `nan`, none of which JavaScript recognizes — `Number('inf')`
-    is `NaN`, and only the exact spelling `Infinity` names an infinity.
+    function reads a wider grammar than JavaScript's StrNumericLiteral, and every place it is wider
+    has to be refused before it is asked. It accepts `inf`, `infinity` and `nan`, where only the
+    exact spelling `Infinity` names an infinity; it accepts a numeric separator; and it accepts any
+    Unicode decimal digit, where the language accepts only `0` through `9` — hence the ASCII test,
+    which is total over the grammar because a StrNumericLiteral has no character outside that range.
+
+    The sign is applied to the magnitude rather than read out of the parsed integer, because a
+    signed zero is a Number that Python's integers cannot hold: `Number('-0')` is `-0`, and `1 / -0`
+    is `-Infinity`.
     """
     if isinstance(value, bool):
         return 1.0 if value else 0.0
     if isinstance(value, (int, float)):
         return to_js_number(value)
     if isinstance(value, str):
-        s = value.strip()
+        s = value.strip(STRING_NUMERIC_TRIM)
         if not s:
             return 0.0
-        if '_' in s:
+        if not s.isascii() or '_' in s:
             return float('nan')
         if s[0] in '+-' and len(s) > 2 and s[1] == '0' and s[2] in 'xXoObB':
             return float('nan')
         try:
-            return to_js_number(int(s, 0))
+            integer = int(s, 0)
         except ValueError:
             pass
+        else:
+            return apply_sign(to_js_number(abs(integer)), s[0] == '-')
         magnitude = s[1:] if s[0] in '+-' else s
         if magnitude.isalpha() and magnitude != 'Infinity':
             return float('nan')
@@ -910,10 +924,15 @@ def _math_log2(args: list[Value]) -> Value:
 
 @_register((None, 'parseInt'))
 def _global_parse_int(args: list[Value]) -> Value:
+    """
+    The radix is read with ToInt32 rather than by truncation, because that is the coercion the
+    specification names and the two disagree outside the int32 range: `parseInt('10', 2 ** 32 + 16)`
+    is `16`, the radix the wrap lands on, and not the `NaN` an out-of-range value would answer.
+    """
     if not args:
         return float('nan')
     s = to_string(args[0])
-    radix = _to_int(args[1]) if len(args) > 1 else 0
+    radix = _to_int32(to_number(args[1])) if len(args) > 1 else 0
     result = js_parse_int(s, radix)
     if result is None:
         return float('nan')

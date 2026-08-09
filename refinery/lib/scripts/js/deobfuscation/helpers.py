@@ -73,6 +73,8 @@ from refinery.lib.scripts.js.model import (
     JsWhileStatement,
 )
 from refinery.lib.scripts.js.numbers import (
+    STRING_NUMERIC_TRIM,
+    apply_sign,
     is_negative_zero,
     js_number_to_string,
     to_js_number,
@@ -274,7 +276,7 @@ def _js_mod(a: int | float, b: int | float) -> int | float:
     return math.fmod(a, b)
 
 
-def _js_pow(base: float, exp: float) -> float:
+def _js_pow(base: int | float, exp: int | float) -> float:
     """
     Replicate JavaScript exponentiation (`**` / `Math.pow`). JavaScript numbers are IEEE-754 doubles,
     so this diverges from Python in cases that matter: `anything ** 0` is `1` (even `NaN ** 0`); a base
@@ -284,10 +286,16 @@ def _js_pow(base: float, exp: float) -> float:
     `Infinity`, whereas Python's arbitrary-precision `int ** int` returns an exact bignum.
 
     An infinite exponent is decided from the base's *magnitude* alone and never from its sign, which
-    is why it is answered before the negative-base rule rather than folded into it: `(-2) ** Infinity`
-    is `Infinity` and `(-0.5) ** Infinity` is `0`, where reading an infinite exponent as a non-integer
-    one would call both `NaN`.
+    is why it is answered before the negative-base rule rather than folded into it. Raising `-2` to
+    `Infinity` is `Infinity` and raising `-0.5` to it is `0`, where reading an infinite exponent as
+    a non-integer one would call both `NaN`.
+
+    Both operands are coerced here and not only at `eval_binary_op`, because this is the one
+    operator that answers an unbounded amount of work when handed Python integers, and it is
+    reachable through `BINARY_OPS` without passing that function.
     """
+    base = to_js_number(base)
+    exp = to_js_number(exp)
     inf = float('inf')
     if exp == 0:
         return 1.0
@@ -357,10 +365,12 @@ def eval_binary_op(op: str, left: float, right: float) -> float | bool | None:
     `None` when the operator is unknown or the computation overflows/divides by zero. Handles
     arithmetic, bitwise, relational, equality, and the unsigned right shift `>>>`.
 
-    Both operands are coerced here rather than in the individual operators, because this is the single
-    door into `BINARY_OPS` and the coercion is what bounds the work: `3 ** 1000000000` is one double
-    operation answering `Infinity`, while the same expression over Python integers builds a number of
-    half a billion digits and does not return in any useful time.
+    Both operands are coerced here so that every operator below sees the Number the caller meant and
+    not whichever Python type happened to carry it. That is a normalization and not the bound on the
+    work: `refinery.lib.scripts.js.deobfuscation.stringarray` reaches `BINARY_OPS` without passing
+    through this function, so the operator that can be asked for unbounded work — `**`, where Python
+    integers build a number of half a billion digits for what a double answers in one operation —
+    coerces for itself as well.
     """
     left = to_js_number(left)
     right = to_js_number(right)
@@ -457,10 +467,11 @@ def make_numeric_literal(value: int | float) -> JsNumericLiteral | None:
 
     The spelling is `Number.prototype.toString` with one deliberate deviation: that algorithm reads
     the mathematical value, so it prints negative zero as `0`, but a literal `0` denotes *positive*
-    zero and the two are distinguishable — `1 / -0` is `-Infinity`. Negative zero is therefore spelled
-    `-0`. That spelling, like the one every other negative value gets, is a negation applied to a
-    literal rather than a literal, so the node binds like the unary operator it starts with; that is a
-    fact about the spelling, and `precedence.py` reads it from the `raw` rather than from the class.
+    zero and the two are distinguishable — `1 / -0` is `-Infinity`. Negative zero is therefore
+    spelled `-0`. That spelling, like the one every other negative value gets, is a negation applied
+    to a literal rather than a literal, so the node binds like the unary operator it starts with.
+    That is a fact about the spelling, which `refinery.lib.scripts.js.precedence` therefore reads
+    from the `raw` rather than from the class.
     """
     value = to_js_number(value)
     if not math.isfinite(value):
@@ -730,10 +741,10 @@ _MAX_DIGITS_IN_A_DOUBLE = {
     radix: math.ceil(1024 / math.log2(radix)) for radix in range(2, 37)
 }
 """
-Per radix, the digit count past which a written-out integer is certainly outside the double range and
-so denotes an infinity. Answering from the count rather than from the value keeps `parseInt` total:
-building the integer first would make it hostage to CPython's limit on converting a long decimal
-string, which raises rather than returning the `Infinity` the language specifies.
+Per radix, the digit count past which a written-out integer is certainly outside the double range
+and so denotes an infinity. Answering from the count rather than from the value keeps `parseInt`
+total: building the integer first would make it hostage to CPython's limit on converting a long
+decimal string, which raises rather than returning the `Infinity` the language specifies.
 """
 
 
@@ -744,22 +755,23 @@ def js_parse_int(s: str, radix: int = 0) -> float | None:
     leading characters valid for the given radix (2-36) and stops at the first invalid one. Returns
     `None` when no valid digits are found (JS would return `NaN`).
 
-    A radix of `0` is the language's "not supplied" — `parseInt(s)` and `parseInt(s, 0)` are the same
-    call — and it is not a synonym for 10: an unsupplied radix reads a `0x` prefix as selecting base
-    16, so `parseInt('0x1f')` is `31`. A caller that defaults the radix to 10 instead answers `0` for
-    that string, having stopped at the `x`.
+    A radix of `0` is the language's "not supplied" — `parseInt(s)` and `parseInt(s, 0)` are the
+    same call — and it is not a synonym for 10: an unsupplied radix reads a `0x` prefix as selecting
+    base 16, so `parseInt('0x1f')` is `31`. A caller that defaults the radix to 10 instead answers
+    `0` for that string, having stopped at the `x`.
 
-    The digits are accumulated exactly and only then coerced, because `parseInt` reads the whole digit
-    string before producing a Number: enough digits and the result is `Infinity`, and a digit string
-    past 2^53 names the nearest double rather than itself.
+    The digits are accumulated exactly and only then coerced, because `parseInt` reads the whole
+    digit string before producing a Number: enough digits and the result is `Infinity`, and a digit
+    string past 2^53 names the nearest double rather than itself. Leading zeros are dropped as they
+    are read and the count is answered as soon as it passes the bound, so a digit string of any
+    length costs what its significant prefix costs rather than what it is.
     """
-    s = s.strip()
+    s = s.strip(STRING_NUMERIC_TRIM)
     if not s:
         return None
-    sign = 1
+    negative = False
     if s[0] in '+-':
-        if s[0] == '-':
-            sign = -1
+        negative = s[0] == '-'
         s = s[1:]
     hex_prefixed = len(s) >= 2 and s[0] == '0' and s[1] in 'xX'
     if radix == 0:
@@ -768,24 +780,26 @@ def js_parse_int(s: str, radix: int = 0) -> float | None:
         return None
     if radix == 16 and hex_prefixed:
         s = s[2:]
+    limit = _MAX_DIGITS_IN_A_DOUBLE[radix]
     digits: list[str] = []
+    scanned = False
     for ch in s:
         if '0' <= ch <= '9':
             if ord(ch) - ord('0') >= radix:
                 break
-            digits.append(ch)
         elif 'a' <= ch <= 'z' or 'A' <= ch <= 'Z':
             if ord(ch.lower()) - ord('a') + 10 >= radix:
                 break
-            digits.append(ch)
         else:
             break
-    if not digits:
+        scanned = True
+        if digits or ch != '0':
+            digits.append(ch)
+        if len(digits) > limit:
+            return apply_sign(float('inf'), negative)
+    if not scanned:
         return None
-    text = ''.join(digits).lstrip('0') or '0'
-    if len(text) > _MAX_DIGITS_IN_A_DOUBLE[radix]:
-        return float('-inf') if sign < 0 else float('inf')
-    return to_js_number(sign * int(text, radix))
+    return apply_sign(to_js_number(int(''.join(digits) or '0', radix)), negative)
 
 
 def get_body(node: Node) -> list[Statement] | None:

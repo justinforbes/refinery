@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
@@ -9,6 +10,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     JS_NULL,
     JsBuffer,
     binding_has_references,
+    js_parse_int,
     make_string_literal,
     value_to_node,
 )
@@ -124,3 +126,58 @@ class TestValueToNode(TestJsDeobfuscator):
 
     def test_refuses_unrepresentable_value(self):
         self.assertIsNone(value_to_node(object()))
+
+
+class TestJsParseInt(TestJsDeobfuscator):
+    """
+    `js_parse_int` is the language's `parseInt` and not Python's `int`: it skips ECMAScript
+    WhiteSpace, reads ASCII digits behind an optional sign, and answers `None` where the language
+    answers `NaN`. Every expected value below is what Node prints for the same call.
+    """
+
+    def _parses(self, text: str, radix: int = 0) -> float:
+        parsed = js_parse_int(text, radix)
+        if parsed is None:
+            self.fail(F'{text!r} was refused')
+        return parsed
+
+    def _sign(self, text: str, radix: int = 0) -> float:
+        return math.copysign(1.0, self._parses(text, radix))
+
+    def test_a_string_that_names_negative_zero_keeps_the_sign_of_its_zero(self):
+        """
+        Negative zero is equal to zero and prints as `0`, so the sign is the only witness of it;
+        in the language it shows as `1 / -0` being `-Infinity`. Python's integers have one zero,
+        which is where a sign read out of the parsed digits rather than applied to the magnitude
+        is lost.
+        """
+        self.assertEqual(0.0, self._parses('-0'))
+        self.assertEqual(-1.0, self._sign('-0'))
+        self.assertEqual(-1.0, self._sign('  -0  '))
+        self.assertEqual(-1.0, self._sign('-0x0', 16))
+        self.assertEqual(1.0, self._sign('0'))
+
+    def test_non_ascii_decimal_digits_name_no_number(self):
+        self.assertIsNone(js_parse_int('\u0661\u0662\u0663'))
+        self.assertIsNone(js_parse_int('\uFF11\uFF12\uFF13'))
+        self.assertIsNone(js_parse_int('\u0967\u0968\u0969'))
+
+    def test_padding_python_strips_and_javascript_does_not_ends_the_parse(self):
+        """
+        `U+001C` through `U+001F` are removed by `str.strip` and are not ECMAScript WhiteSpace. In
+        front of the digits they end the parse before it starts; behind them they are just the
+        first character that is not a digit, which is where `parseInt` stops anyway.
+        """
+        self.assertIsNone(js_parse_int('\u001C5'))
+        self.assertIsNone(js_parse_int('\u001D5'))
+        self.assertIsNone(js_parse_int('\u001E5'))
+        self.assertIsNone(js_parse_int('\u001F5'))
+        self.assertEqual(5.0, self._parses('5\u001C'))
+
+    def test_the_byte_order_mark_pads_a_number_the_way_a_space_does(self):
+        """
+        `U+FEFF` is ECMAScript WhiteSpace and `str.strip` leaves it in place.
+        """
+        self.assertEqual(5.0, self._parses('\uFEFF5'))
+        self.assertEqual(5.0, self._parses('5\uFEFF'))
+        self.assertEqual(18.0, self._parses('\uFEFF\uFEFF12\uFEFF', 16))

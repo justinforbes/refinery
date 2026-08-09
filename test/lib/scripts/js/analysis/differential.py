@@ -66,6 +66,13 @@ sys.stdout.buffer.write(deobfuscate_source(source).encode('utf-8'))
 '''
 
 
+class DeobfuscationFailed(Exception):
+    """
+    The child process running a deobfuscation exited without producing one. It carries the child's
+    standard error, which is where the traceback is.
+    """
+
+
 def deobfuscate_within(source: str, seconds: float) -> str | None:
     """
     The deobfuscation of *source*, or `None` when it did not finish within *seconds*.
@@ -76,25 +83,30 @@ def deobfuscate_within(source: str, seconds: float) -> str | None:
     happens inside a single interpreter opcode, where no timer, signal, or thread can interrupt it —
     only killing the process can.
 
-    Both the source and the result cross the process boundary as UTF-8 bytes over a pipe rather than as
-    text through the platform's codec, so that neither a program the console encoding cannot spell nor
-    one longer than a command line may hold is reported as a failure to terminate.
+    Both the source and the result cross the process boundary as UTF-8 bytes over a pipe rather than
+    as text through the platform's codec, so that a program the console encoding cannot spell is
+    reported as what it is. The child is killed on every way out and not only on the timeout,
+    because the one thing this helper must never do is leave behind the runaway process it exists to
+    bound.
     """
     root = Path(__file__).resolve().parents[5]
-    child = subprocess.Popen(
+    with subprocess.Popen(
         [sys.executable, '-c', _DEOBFUSCATE_IN_CHILD, str(root)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-    )
-    try:
-        out, err = child.communicate(source.encode('utf-8'), timeout=seconds)
-    except subprocess.TimeoutExpired:
-        child.kill()
-        child.communicate()
-        return None
+    ) as child:
+        try:
+            out, err = child.communicate(source.encode('utf-8'), timeout=seconds)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate()
+            return None
+        except BaseException:
+            child.kill()
+            raise
     if child.returncode != 0:
-        raise ChildProcessError(err.decode('utf-8', 'replace'))
+        raise DeobfuscationFailed(err.decode('utf-8', 'replace'))
     return out.decode('utf-8')
 
 
@@ -168,6 +180,8 @@ def behavior(source: str, *, timeout: float = 15.0) -> tuple[str, str | None]:
             [node, path],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=timeout,
         )
     error = None if proc.returncode == 0 else _normalize_error(proc.stderr)
