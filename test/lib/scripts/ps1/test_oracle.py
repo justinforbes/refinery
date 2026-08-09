@@ -97,7 +97,7 @@ DEFECTS: dict[str, str] = {
     'Get-Process | $x > out.txt':
         'The same rule. `ParseInput` reports the error and still returns a tree, which is why a '
         'transcript of one can record a shape for a script 5.1 refuses.',
-    '$t = 0xFFFFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFFFFFFFFFFFFFFFF; Write-Output (,$t); Write-Output $t':
         '5.1 reports NumericConstantTooLarge: a hexadecimal literal is read as the bit pattern of '
         'the smallest signed type that holds it, and seventeen digits fit neither Int32 nor Int64, '
         'so there is no value for it to denote. We read it as an arbitrary-width Python integer '
@@ -305,25 +305,52 @@ TABLE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('OUT\tSystem.Management.Automation.CommandTypes\tAlias',),
 }
 
-#: What the whole `_UNPARSEABLE_RECEIVER` group of `TYPE_DEFECTS` has in common. 5.1 reads a digit
-#: that starts a token as the start of a number, so a numeric literal cannot stand as a
-#: member-access receiver: `3.ToString()` is a parse error, and in a command argument every numeric
-#: literal is, `0xFF` and `1kb` and `1.5` alike. The unit inlines a folded value into that slot
-#: without parentheses, so `$n = 5; $n.ToString()` becomes a script PowerShell will not read.
-#: The second thing that re-spells a number into a different type. 5.1 reads a `-` written
-#: directly against a numeral as part of the numeral, so `-2147483648` is one literal that fits
-#: Int32, while `- 2147483648` and `-(2147483648)` are unary minus over the Int64 literal
-#: `2147483648` and stay Int64. What separates the sign from the digits is therefore load
-#: bearing, and a pass that removes a space or a parenthesis as redundant is answering a lexical
-#: question it did not know it was asking.
-_SEPARATION_CARRIES_THE_TYPE = (
-    'The sign is joined to the numeral, and the separation was carrying the type: 5.1 reads a `-` adjacent to a numeral as part of it, so the rewritten script has an Int32 where the original had an Int64.'
+#: The three defects below are one question asked in three slots: whether the spelling a value is
+#: written as still denotes that value where it is being written. None of them is about what the
+#: unit believes a value to be, so this phase does not retire any of them; they belong to the
+#: synthesizer, which is the only place that knows which slot a node is going into.
+#:
+#: 5.1 reads a digit that starts a token as the start of a number, so a numeric literal cannot
+#: stand as a member-access receiver: `3.ToString()` is a parse error, and in a command argument
+#: every numeric literal is, `0xFF` and `1kb` and `1.5` alike. The unit both inlines a folded value
+#: into that slot without parentheses and removes the parentheses a source wrote there, so
+#: `$n = 5; $n.ToString()` becomes a script PowerShell will not read.
+_UNPARSEABLE_RECEIVER = (
+    'A numeric literal is left standing as a member-access receiver without parentheses, which 5.1 '
+    'refuses to parse. That is a defect of how a value is spelled rather than of what the unit '
+    'believes it to be, so this phase does not retire it.'
 )
 
-_UNPARSEABLE_RECEIVER = (
-    'The value is folded to a numeric literal left standing as a member-access receiver without '
-    'parentheses, which 5.1 refuses to parse. That is a defect of how a value is spelled rather '
-    'than of what the unit believes it to be, so this phase does not retire it.'
+#: 5.1 reads a `-` written directly against a numeral as part of the numeral, so `-2147483648` is
+#: one literal that fits Int32, while `- 2147483648` and `-(2147483648)` are unary minus over the
+#: Int64 literal `2147483648` and stay Int64. What separates the sign from the digits is therefore
+#: load bearing, and a pass that removes a space or a parenthesis as redundant is answering a
+#: lexical question it did not know it was asking.
+_SEPARATION_CARRIES_THE_TYPE = (
+    'The sign is joined to the numeral, and the separation was carrying the type: 5.1 reads a `-` '
+    'adjacent to a numeral as part of it, so the rewritten script has an Int32 where the original '
+    'had an Int64.'
+)
+
+#: The same `-`, one slot further out, and the one this corpus could not see until its own witness
+#: stopped needing a receiver. In a command argument 5.1 lexes a leading `-` as the start of a
+#: parameter name rather than as a sign, and a parameter no command declares is passed on as the
+#: text it was written as: `Write-Output -1` prints the String `-1` where `Write-Output (-1)` and
+#: `Write-Output 1` print an Int32. Every folded value that happens to come out negative reaches
+#: this, so it is the widest of the three.
+_A_SIGN_IN_AN_ARGUMENT_SLOT = (
+    'The value folds to a negative numeral inlined into a command argument without parentheses, '
+    'where 5.1 reads the leading `-` as a parameter name and passes the token on as a String. That '
+    'is a defect of how a value is spelled rather than of what the unit believes it to be, so this '
+    'phase does not retire it.'
+)
+
+#: What every Char row of `TYPE_DEFECTS` that is a method call has in common. A Char is not a
+#: String and carries none of its instance methods, so 5.1 reports MethodNotFound for each; the
+#: fold spells the Char as a one-character String, which has them all.
+_A_CHAR_HAS_NO_STRING_METHODS = (
+    'A Char has no String instance methods and 5.1 reports MethodNotFound. The Char is folded to a '
+    'one-character String, which has them, so a line that throws answers a value instead.'
 )
 
 #: What 5.1 makes of a value's type and of an operation's result, measured. The unit has no place to
@@ -334,9 +361,9 @@ _UNPARSEABLE_RECEIVER = (
 #: Nothing here is a claim about the tool. It is what PowerShell does, and it is pinned so that the
 #: commits which give the unit a type cannot quietly move the target they are measured against.
 TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
-    "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.Object[]',
+            'OUT\tSystem.Object[]\ta b',
             'OUT\tSystem.String\ta',
             'OUT\tSystem.String\tb',
         ),
@@ -347,24 +374,24 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\ta',
             'OUT\tSystem.String\tb',
         ),
-    '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.GetType().FullName':
-        ('OUT\tSystem.String\tSystem.Object[]',),
+    '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output (,$t)':
+        ('OUT\tSystem.Object[]\tA B',),
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
         (
             'OUT\tSystem.Int32\t2',
             'OUT\tSystem.Char\tA',
             'OUT\tSystem.Char\tB',
         ),
-    "$t = 'a-b-c' -split '-' | ForEach-Object { $_ }; Write-Output $t.GetType().FullName":
-        ('OUT\tSystem.String\tSystem.Object[]',),
-    '$t = [char]65; Write-Output $t.GetType().FullName; Write-Output $t':
+    "$t = 'a-b-c' -split '-' | ForEach-Object { $_ }; Write-Output (,$t)":
+        ('OUT\tSystem.Object[]\ta b c',),
+    '$t = [char]65; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Char',
+            'OUT\tSystem.Char\tA',
             'OUT\tSystem.Char\tA',
         ),
-    '$t = [char[]](72, 73); Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = [char[]](72, 73); Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Char[]',
+            'OUT\tSystem.Char[]\tH I',
             'OUT\tSystem.Char\tH',
             'OUT\tSystem.Char\tI',
         ),
@@ -373,19 +400,19 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Boolean\tFalse',
             'OUT\tSystem.Boolean\tTrue',
         ),
-    "$t = 'ABC'[0]; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = 'ABC'[0]; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.Char',
+            'OUT\tSystem.Char\tA',
             'OUT\tSystem.Char\tA',
         ),
-    "$t = [char[]]'ABC'; Write-Output $t.GetType().FullName; Write-Output $t.Count":
+    "$t = [char[]]'ABC'; Write-Output (,$t); Write-Output $t.Count":
         (
-            'OUT\tSystem.String\tSystem.Char[]',
+            'OUT\tSystem.Char[]\tA B C',
             'OUT\tSystem.Int32\t3',
         ),
-    "$t = 'ABC'.ToCharArray(); Write-Output $t.GetType().FullName; Write-Output $t.Count":
+    "$t = 'ABC'.ToCharArray(); Write-Output (,$t); Write-Output $t.Count":
         (
-            'OUT\tSystem.String\tSystem.Char[]',
+            'OUT\tSystem.Char[]\tA B C',
             'OUT\tSystem.Int32\t3',
         ),
     "Write-Output ('x' -replace 'x', [char]65); Write-Output ('x' -replace 'x', 'A')":
@@ -471,44 +498,44 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ),
     '$c = [char]65; foreach ($e in $c) { Write-Output $e }':
         ('OUT\tSystem.Char\tA',),
-    "$t = 'AB'.Count; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = 'AB'.Count; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t1',
             'OUT\tSystem.Int32\t1',
         ),
-    '$t = (5).Count; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = (5).Count; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t1',
             'OUT\tSystem.Int32\t1',
         ),
-    '$t = (5).Length; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = (5).Length; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t1',
             'OUT\tSystem.Int32\t1',
         ),
-    "$t = 1 + 'AB'.Count; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = 1 + 'AB'.Count; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t2',
             'OUT\tSystem.Int32\t2',
         ),
-    '$t = @(1, 2, 3).Rank; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = @(1, 2, 3).Rank; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t1',
             'OUT\tSystem.Int32\t1',
         ),
-    '$t = @(1, 2, 3).Count; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = @(1, 2, 3).Count; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t3',
             'OUT\tSystem.Int32\t3',
         ),
-    '$t = @(1, 2, 3).Length; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = @(1, 2, 3).Length; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t3',
             'OUT\tSystem.Int32\t3',
         ),
-    "$t = 'AB'.Length; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = 'AB'.Length; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t2',
             'OUT\tSystem.Int32\t2',
         ),
     'Write-Output ((5).PSTypeNames)':
@@ -524,510 +551,521 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ),
     'Write-Output ((5).PSObject.GetType().FullName)':
         ('OUT\tSystem.String\tSystem.Management.Automation.PSObject',),
-    '$t = (5).Rank; Write-Output ($null -eq $t)':
-        ('OUT\tSystem.Boolean\tTrue',),
-    "$t = 'AB'.Zqnope; Write-Output ($null -eq $t)":
-        ('OUT\tSystem.Boolean\tTrue',),
-    '$t = (5).Zqnope; Write-Output ($null -eq $t)':
-        ('OUT\tSystem.Boolean\tTrue',),
-    '$t = $null.Count; Write-Output ($null -eq $t); Write-Output $t':
+    '$t = (5).Rank; Write-Output (,$t)':
+        ('OUT\t\t<null>',),
+    "$t = 'AB'.Zqnope; Write-Output (,$t)":
+        ('OUT\t\t<null>',),
+    '$t = (5).Zqnope; Write-Output (,$t)':
+        ('OUT\t\t<null>',),
+    '$t = $null.Count; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Int32\t0',
             'OUT\tSystem.Int32\t0',
         ),
     '$f = New-Object IO.MemoryStream; Write-Output $f.Length.GetType().FullName':
         ('OUT\tSystem.String\tSystem.Int64',),
     '$f = New-Object IO.MemoryStream; $f.Dispose(); Write-Output $f.Length':
         ('OUT\t\t<null>',),
-    '$t = @(); Write-Output $t.GetType().FullName; Write-Output $t.Count':
+    '$t = @(); Write-Output (,$t); Write-Output $t.Count':
         (
-            'OUT\tSystem.String\tSystem.Object[]',
+            'OUT\tSystem.Object[]\t',
             'OUT\tSystem.Int32\t0',
         ),
-    '$t = , 1; Write-Output $t.GetType().FullName; Write-Output $t.Count':
+    '$t = , 1; Write-Output (,$t); Write-Output $t.Count':
         (
-            'OUT\tSystem.String\tSystem.Object[]',
+            'OUT\tSystem.Object[]\t1',
             'OUT\tSystem.Int32\t1',
         ),
-    '$t = 0xFF; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFF; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t255',
             'OUT\tSystem.Int32\t255',
         ),
-    '$t = 0x7FFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0x7FFFFFFF; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t2147483647',
             'OUT\tSystem.Int32\t2147483647',
         ),
-    '$t = 0xFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFFFFFFF; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-1',
             'OUT\tSystem.Int32\t-1',
         ),
-    '$t = 0xFFFFFFFF -bxor 0x5A; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFFFFFFF -bxor 0x5A; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-91',
             'OUT\tSystem.Int32\t-91',
         ),
-    '$t = 0xFFFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFFFFFFFFFFFFFFF; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t-1',
             'OUT\tSystem.Int64\t-1',
         ),
-    '$t = 1kb; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1kb; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t1024',
             'OUT\tSystem.Int32\t1024',
         ),
-    '$t = 1L; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1L; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t1',
             'OUT\tSystem.Int64\t1',
         ),
-    '$t = 10d; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 10d; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Decimal',
+            'OUT\tSystem.Decimal\t10',
             'OUT\tSystem.Decimal\t10',
         ),
-    '$t = 0xFFFFFFFF + 0; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFFFFFFF + 0; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-1',
             'OUT\tSystem.Int32\t-1',
         ),
-    '$t = 0xFFFFFFFFFFFFFFFF + 0; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFFFFFFFFFFFFFFF + 0; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t-1',
             'OUT\tSystem.Int64\t-1',
         ),
-    '$t = 1kb + 0; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1kb + 0; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t1024',
             'OUT\tSystem.Int32\t1024',
         ),
-    '$t = 1L + 0; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1L + 0; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t1',
             'OUT\tSystem.Int64\t1',
         ),
-    '$t = 10d + 0; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 10d + 0; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Decimal',
+            'OUT\tSystem.Decimal\t10',
             'OUT\tSystem.Decimal\t10',
         ),
-    '$t = 2147483648; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 2147483648; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t2147483648',
             'OUT\tSystem.Int64\t2147483648',
         ),
-    '$t = 1.5; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1.5; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t1.5',
             'OUT\tSystem.Double\t1.5',
         ),
-    '$t = 1e3; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1e3; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t1000',
             'OUT\tSystem.Double\t1000',
         ),
-    '$t = 4gb; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 4gb; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t4294967296',
             'OUT\tSystem.Int64\t4294967296',
         ),
-    '$t = 1.5d; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1.5d; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Decimal',
+            'OUT\tSystem.Decimal\t1.5',
             'OUT\tSystem.Decimal\t1.5',
         ),
-    '$t = 10D; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 10D; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Decimal',
+            'OUT\tSystem.Decimal\t10',
             'OUT\tSystem.Decimal\t10',
         ),
-    '$t = 1l; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1l; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t1',
             'OUT\tSystem.Int64\t1',
         ),
-    '$t = 0xFFL; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFL; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t255',
             'OUT\tSystem.Int64\t255',
         ),
-    '$t = 0x100000000; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0x100000000; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t4294967296',
             'OUT\tSystem.Int64\t4294967296',
         ),
-    '$t = 0x7FFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0x7FFFFFFFFFFFFFFF; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t9223372036854775807',
             'OUT\tSystem.Int64\t9223372036854775807',
         ),
-    '$t = 9223372036854775807; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 9223372036854775807; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t9223372036854775807',
             'OUT\tSystem.Int64\t9223372036854775807',
         ),
-    '$t = 9223372036854775808; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 9223372036854775808; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Decimal',
+            'OUT\tSystem.Decimal\t9223372036854775808',
             'OUT\tSystem.Decimal\t9223372036854775808',
         ),
-    '$t = 100000000000000000000000000000000; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 100000000000000000000000000000000; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t1E+32',
             'OUT\tSystem.Double\t1E+32',
         ),
-    '$t = 0xFFFFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFFFFFFFFFFFFFFFF; Write-Output (,$t); Write-Output $t':
         ('THROW\tParseException\tSystem.Management.Automation.MethodInvocationException',),
-    '$t = 007; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 007; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t7',
             'OUT\tSystem.Int32\t7',
         ),
-    '$t = 0xFFFFFFFFL; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFFFFFFFL; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t4294967295',
             'OUT\tSystem.Int64\t4294967295',
         ),
-    '$t = 1lkb; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1lkb; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t1024',
             'OUT\tSystem.Int64\t1024',
         ),
-    '$t = -2147483649; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = -2147483649; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t-2147483649',
             'OUT\tSystem.Int64\t-2147483649',
         ),
-    '$t = 1.5L; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1.5L; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t2',
             'OUT\tSystem.Int64\t2',
         ),
-    '$t = 2.5L; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 2.5L; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t2',
             'OUT\tSystem.Int64\t2',
         ),
-    '$t = -(2147483648); Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = -(2147483648); Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t-2147483648',
             'OUT\tSystem.Int64\t-2147483648',
         ),
-    '$t = -(2147483647); Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = -(2147483647); Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-2147483647',
             'OUT\tSystem.Int32\t-2147483647',
         ),
-    '$t = - 2147483648; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = - 2147483648; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t-2147483648',
             'OUT\tSystem.Int64\t-2147483648',
         ),
-    '$t = - 2147483647; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = - 2147483647; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-2147483647',
             'OUT\tSystem.Int32\t-2147483647',
         ),
-    '$t = 1.5kb; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 1.5kb; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t1536',
             'OUT\tSystem.Double\t1536',
         ),
-    '$t = 0xFFkb; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 0xFFkb; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t261120',
             'OUT\tSystem.Int32\t261120',
         ),
-    '$t = 10 - $null; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 10 - $null; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t10',
             'OUT\tSystem.Int32\t10',
         ),
-    '$t = $null + 5; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = $null + 5; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t5',
             'OUT\tSystem.Int32\t5',
         ),
-    '$t = $null - 5; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = $null - 5; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-5',
             'OUT\tSystem.Int32\t-5',
         ),
-    '$t = 10 - $null + 3; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 10 - $null + 3; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t13',
             'OUT\tSystem.Int32\t13',
         ),
-    '$t = $null -band 1; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = $null -band 1; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t0',
             'OUT\tSystem.Int32\t0',
         ),
-    '$a = $null; $b = 5; $t = $a * $b; Write-Output ($null -eq $t)':
-        ('OUT\tSystem.Boolean\tTrue',),
-    '$a = $null; $t = $a * 5; Write-Output ($null -eq $t)':
-        ('OUT\tSystem.Boolean\tTrue',),
-    '$t = $null * 1; Write-Output ($null -eq $t)':
-        ('OUT\tSystem.Boolean\tTrue',),
-    '$t = 1_0; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$a = $null; $b = 5; $t = $a * $b; Write-Output (,$t)':
+        ('OUT\t\t<null>',),
+    '$a = $null; $t = $a * 5; Write-Output (,$t)':
+        ('OUT\t\t<null>',),
+    '$t = $null * 1; Write-Output (,$t)':
+        ('OUT\t\t<null>',),
+    '$t = 1_0; Write-Output (,$t); Write-Output $t':
         ('THROW\tCommandNotFoundException\tSystem.Management.Automation.CommandNotFoundException',),
-    '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 2147483647 + 1; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t2147483648',
             'OUT\tSystem.Double\t2147483648',
         ),
-    '$t = 512MB * 512MB; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 512MB * 512MB; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t2.88230376151712E+17',
             'OUT\tSystem.Double\t2.88230376151712E+17',
         ),
-    '$t = 9223372036854775807 + 2; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 9223372036854775807 + 2; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t9.22337203685478E+18',
             'OUT\tSystem.Double\t9.22337203685478E+18',
         ),
-    '$t = [decimal]::MaxValue + 1; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = [decimal]::MaxValue + 1; Write-Output (,$t); Write-Output $t':
         ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
-    "$t = 12 + '0xabc'; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = 12 + '0xabc'; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t2760',
             'OUT\tSystem.Int32\t2760',
         ),
-    "$t = 16 + 'file'; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = 16 + 'file'; Write-Output (,$t); Write-Output $t":
         ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
-    "$t = 5 + '5'; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = 5 + '5'; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t10',
             'OUT\tSystem.Int32\t10',
         ),
-    "$t = '5' + 5; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = '5' + 5; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.String',
+            'OUT\tSystem.String\t55',
             'OUT\tSystem.String\t55',
         ),
-    "$t = [int]'0x10'; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = [int]'0x10'; Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t16',
             'OUT\tSystem.Int32\t16',
         ),
-    '$t = -2147483647 - 1; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = -2147483647 - 1; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-2147483648',
             'OUT\tSystem.Int32\t-2147483648',
         ),
-    '$t = -2147483648; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = -2147483648; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t-2147483648',
             'OUT\tSystem.Int32\t-2147483648',
         ),
-    '$t = [int64]::MaxValue * 2; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = [int64]::MaxValue * 2; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t1.84467440737095E+19',
             'OUT\tSystem.Double\t1.84467440737095E+19',
         ),
-    '$t = [double]::PositiveInfinity; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = [double]::PositiveInfinity; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\tInfinity',
             'OUT\tSystem.Double\tInfinity',
         ),
-    '$t = [double]::NaN; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = [double]::NaN; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\tNaN',
             'OUT\tSystem.Double\tNaN',
         ),
-    '$t = 10, 20, 30, 20, 10 -ne 20; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 10, 20, 30, 20, 10 -ne 20; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Object[]',
+            'OUT\tSystem.Object[]\t10 30 10',
             'OUT\tSystem.Int32\t10',
             'OUT\tSystem.Int32\t30',
             'OUT\tSystem.Int32\t10',
         ),
-    '$t = 10, 20, 30 -eq 20; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 10, 20, 30 -eq 20; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Object[]',
+            'OUT\tSystem.Object[]\t20',
             'OUT\tSystem.Int32\t20',
         ),
-    '$t = 10 -ne 20; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = 10 -ne 20; Write-Output (,$t); Write-Output $t':
         (
-            'OUT\tSystem.String\tSystem.Boolean',
+            'OUT\tSystem.Boolean\tTrue',
             'OUT\tSystem.Boolean\tTrue',
         ),
-    "$t = [string]('a', 'b'); Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = [string]('a', 'b'); Write-Output (,$t); Write-Output $t":
         (
-            'OUT\tSystem.String\tSystem.String',
+            'OUT\tSystem.String\ta b',
             'OUT\tSystem.String\ta b',
         ),
     "$OFS = '-'; $t = [string]('a', 'b'); Write-Output $t":
         ('OUT\tSystem.String\ta-b',),
     '$OFS = \'-\'; Write-Output "$(1, 2)"':
         ('OUT\tSystem.String\t1-2',),
+    '$t = ([char]65).ToUpper(); Write-Output (,$t); Write-Output $t':
+        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    "$t = ('A').ToUpper(); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tA',
+            'OUT\tSystem.String\tA',
+        ),
+    '$t = ([char]65).Substring(0); Write-Output (,$t); Write-Output $t':
+        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    "$t = ('A').Substring(0); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tA',
+            'OUT\tSystem.String\tA',
+        ),
+    '$t = ([char]65).ToString(); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\tA',
+            'OUT\tSystem.String\tA',
+        ),
+    '$t = [int][char]48; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t48',
+            'OUT\tSystem.Int32\t48',
+        ),
+    "$t = [int]'0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    "$h = @{}; $h[[char]65] = 1; $t = $h['A']; Write-Output (,$t)":
+        ('OUT\t\t<null>',),
+    "$h = @{}; $h['A'] = 1; $t = $h[[char]65]; Write-Output (,$t)":
+        ('OUT\t\t<null>',),
+    "$t = 1 + '2147483648'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int64\t2147483649',
+            'OUT\tSystem.Int64\t2147483649',
+        ),
+    "$t = 1 + '5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t6',
+            'OUT\tSystem.Int32\t6',
+        ),
+    "$t = [double]'1,5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Double\t15',
+            'OUT\tSystem.Double\t15',
+        ),
+    '$t = -bnot 0xFFFFFFFF; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$t = -bnot 0xFF; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t-256',
+            'OUT\tSystem.Int32\t-256',
+        ),
+    'Write-Output "abc".Length':
+        ('OUT\tSystem.Int32\t3',),
+    "Write-Output 'abc'.Length":
+        ('OUT\tSystem.Int32\t3',),
+    'Write-Output 1':
+        ('OUT\tSystem.Int32\t1',),
+    'Write-Output -1':
+        ('OUT\tSystem.String\t-1',),
+    'Write-Output (-1)':
+        ('OUT\tSystem.Int32\t-1',),
+    'Write-Output -1.5':
+        ('OUT\tSystem.String\t-1.5',),
+    'Write-Output -1L':
+        ('OUT\tSystem.String\t-1L',),
+    '$t = @(@(1, 2)); Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1 2',
+            'OUT\tSystem.Int32\t2',
+        ),
 }
 
 
 #: Rows of `corpus.TYPES` whose deobfuscation does not behave like the row. Held apart from
 #: `BEHAVIOUR_DEFECTS` rather than merged into it, because that table carries one entry per defect
 #: with a host-free twin for each, and these share a handful of root causes: the pipeline collapse,
-#: the `$Null` mint, the Char erasure, and one that is not about types at all.
+#: the Char erasure, and three that are not about types at all.
 #:
-#: That last one is `_UNPARSEABLE_RECEIVER`, and it is the largest group here. It is a defect of how
-#: a value is *spelled* rather than of what the unit believes it to be, so the commits of this phase
-#: do not retire it; it is pinned host-free in
-#: `test.lib.scripts.ps1.deobfuscation.test_value_domain` so that it ratchets where a host is not
-#: available, and it is the reason a type witness cannot be read through the deobfuscated script.
+#: Those three are `_UNPARSEABLE_RECEIVER`, `_SEPARATION_CARRIES_THE_TYPE` and
+#: `_A_SIGN_IN_AN_ARGUMENT_SLOT`, and they are defects of how a value is *spelled* rather than of
+#: what the unit believes it to be, so the commits of this phase do not retire them; they are
+#: pinned host-free in `test.lib.scripts.ps1.deobfuscation.test_value_domain` so that they ratchet
+#: where a host is not available.
 #:
-#: Two entries record something worse than a wrong answer. `'AB'.Count` and `(5).PSObject` are
-#: folded to `$Null`, and the `$Null` then receives a method call, so a script that printed a number
-#: throws instead. A mint that answers wrongly and a mint that stops the script are the same bug and
-#: are not held apart here, but the difference is why the member surface is the first thing the
-#: phase corrects.
+#: Two entries record something worse than a wrong answer. `([char]65).ToUpper()` and
+#: `([char]65).Substring(0)` throw in 5.1 and answer `A` after the fold, and `([char]65) * 3` does
+#: the same: a script that stopped answers, which is the direction that turns a triage note into a
+#: wrong one. The Char erasure is therefore not only a wrong type — it is a wrong value
+#: (`[int][char]48`), a wrong lookup (a Char hashtable key), and a throw that does not happen.
 TYPE_DEFECTS: dict[str, str] = {
-    "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output $t.GetType().FullName; Write-Output $t":
-        'A pipeline builds an Object[]. The emulator collapses a list of one-character stringsinto'
-        'one string, so both the container type and the element count are lost.',
+    "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output (,$t); Write-Output $t":
+        'A pipeline builds an Object[]. The emulator collapses a list of one-character strings '
+        'into one string, so both the container type and the element count are lost.',
     "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output ($t -join '-')":
         'The same collapse, seen through a join: one element means the separator never appears.',
     "$t = @('a', 'b') | ForEach-Object { $_ }; foreach ($e in $t) { Write-Output $e }":
-        'The same collapse, as changed control flow: the loop runs once over one string ratherthan'
-        'twice over two.',
-    '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.GetType().FullName':
+        'The same collapse, as changed control flow: the loop runs once over one string rather '
+        'than twice over two.',
+    '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output (,$t)':
         'The same collapse over Char results, which is the shape a char-building loader writes.',
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
-        'The collapse loses the count, and .Count on the result mints $Null where 5.1 answers 2.',
-    "$t = 'a-b-c' -split '-' | ForEach-Object { $_ }; Write-Output $t.GetType().FullName":
+        'The collapse loses the count: .Count answers 1 where 5.1 answers 2, and the two Char '
+        'elements arrive as one String.',
+    "$t = 'a-b-c' -split '-' | ForEach-Object { $_ }; Write-Output (,$t)":
         'The collapse is not about Char at all: any list of one-character strings falls to it.',
-    '$t = [char]65; Write-Output $t.GetType().FullName; Write-Output $t':
-        'A Char folds to a one-character String, so GetType and -is both answer differently.',
-    '$t = [char[]](72, 73); Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = [char]65; Write-Output (,$t); Write-Output $t':
+        'A Char folds to a one-character String, so the type the value carries is wrong twice.',
+    '$t = [char[]](72, 73); Write-Output (,$t); Write-Output $t':
         'The same erasure for an array of Char, which folds to one String.',
     "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
         'A Char[] is not a String; the fold makes it answer as though it were.',
-    "$t = 'ABC'[0]; Write-Output $t.GetType().FullName; Write-Output $t":
+    "$t = 'ABC'[0]; Write-Output (,$t); Write-Output $t":
         'Indexing a string yields a Char. folding.py:302 produces a String.',
     "Write-Output (1 + [char]65); Write-Output (1 + 'A')":
-        'The left operand decides: Int + Char is Int32 66, and Int + String parses the string as'
-        'anumber. Spelling the Char as a String turns a working line into a throw.',
+        'The left operand decides: Int + Char is Int32 66, and Int + String parses the string as '
+        'a number. Spelling the Char as a String turns a working line into a throw.',
     'Write-Output (([char]65) * 3)':
-        'LangSpec 7.6.2 replicates only where the left operand is a String, so 5.1 throws. Thefold'
-        'spells the Char as a String and answers AAA.',
+        'LangSpec 7.6.2 replicates only where the left operand is a String, so 5.1 throws. The '
+        'fold spells the Char as a String and answers AAA.',
     "Write-Output ([char]65 -is [char]); Write-Output ('A' -is [char])":
         'The fold makes a Char answer False to -is [char].',
     '$c = [char]65; foreach ($e in $c) { Write-Output $e }':
         'The loop variable is a Char in 5.1 and a String after the fold.',
-    "$t = 'AB'.Count; Write-Output $t.GetType().FullName; Write-Output $t":
-        _UNPARSEABLE_RECEIVER,
-    '$t = (5).Count; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = (5).Length; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    "$t = 1 + 'AB'.Count; Write-Output $t.GetType().FullName; Write-Output $t":
-        _UNPARSEABLE_RECEIVER,
-    '$t = @(1, 2, 3).Rank; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = @(1, 2, 3).Count; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = @(1, 2, 3).Length; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    "$t = 'AB'.Length; Write-Output $t.GetType().FullName; Write-Output $t":
-        _UNPARSEABLE_RECEIVER,
+    '$t = ([char]65).ToUpper(); Write-Output (,$t); Write-Output $t':
+        _A_CHAR_HAS_NO_STRING_METHODS,
+    '$t = ([char]65).Substring(0); Write-Output (,$t); Write-Output $t':
+        _A_CHAR_HAS_NO_STRING_METHODS,
+    '$t = [int][char]48; Write-Output (,$t); Write-Output $t':
+        'Casting a Char to Int32 takes its code point, and 5.1 answers 48. The Char is spelled as '
+        "the String '0' first, and casting that parses its digits, so the unit answers 0: the "
+        'erasure changing a value rather than only a type.',
+    "$h = @{}; $h[[char]65] = 1; $t = $h['A']; Write-Output (,$t)":
+        'A Char key and a String key are different keys, so 5.1 finds nothing. The fold spells the '
+        'Char key as a String and the lookup succeeds.',
+    "$h = @{}; $h['A'] = 1; $t = $h[[char]65]; Write-Output (,$t)":
+        'The same, with the Char in the lookup rather than in the key.',
     'Write-Output ((5).PSTypeNames)':
-        'PSTypeNames is added by the PSObject adapter to every object, so Get-Member -Force'
-        'cannotcapture it per type and the mint answers $Null for it.',
+        _UNPARSEABLE_RECEIVER,
     'Write-Output ((5).PSObject.GetType().FullName)':
         _UNPARSEABLE_RECEIVER,
-    '$t = 0xFF; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0x7FFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0xFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0xFFFFFFFF -bxor 0x5A; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0xFFFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1kb; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1L; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 10d; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0xFFFFFFFF + 0; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0xFFFFFFFFFFFFFFFF + 0; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1L + 0; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 2147483648; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1.5; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1e3; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 4gb; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1.5d; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 10D; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1l; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0xFFL; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0x100000000; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0x7FFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 9223372036854775807; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 9223372036854775808; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 100000000000000000000000000000000; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 007; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0xFFFFFFFFL; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1lkb; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1_0; Write-Output $t.GetType().FullName; Write-Output $t':
-        'The lexer reads `_` as a digit separator, which Windows PowerShell 5.1 does not have: 5.1 reads `1_0` as a command name and reports CommandNotFoundException, and we read the integer 10. Both throw, so only the kind of the error tells them apart.',
-    '$t = -(2147483648); Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = -(2147483648); Write-Output (,$t); Write-Output $t':
         _SEPARATION_CARRIES_THE_TYPE,
-    '$t = - 2147483648; Write-Output $t.GetType().FullName; Write-Output $t':
+    '$t = - 2147483648; Write-Output (,$t); Write-Output $t':
         _SEPARATION_CARRIES_THE_TYPE,
-    '$t = 1.5kb; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 0xFFkb; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = $null + 5; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = $null - 5; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = $null -band 1; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 10 - $null + 3; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 10 - $null; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 10d + 0; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 1kb + 0; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 512MB * 512MB; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    '$t = 9223372036854775807 + 2; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
-    "$t = [int]'0x10'; Write-Output $t.GetType().FullName; Write-Output $t":
-        _UNPARSEABLE_RECEIVER,
-    '$t = -2147483647 - 1; Write-Output $t.GetType().FullName; Write-Output $t':
-        _UNPARSEABLE_RECEIVER,
+    '$t = 0xFFFFFFFF -bxor 0x5A; Write-Output (,$t); Write-Output $t':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
+    '$t = 0xFFFFFFFF + 0; Write-Output (,$t); Write-Output $t':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
+    '$t = 0xFFFFFFFFFFFFFFFF + 0; Write-Output (,$t); Write-Output $t':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
+    '$t = $null - 5; Write-Output (,$t); Write-Output $t':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
+    '$t = -2147483647 - 1; Write-Output (,$t); Write-Output $t':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
+    '$t = -bnot 0xFF; Write-Output (,$t); Write-Output $t':
+        _A_SIGN_IN_AN_ARGUMENT_SLOT,
+    '$t = -bnot 0xFFFFFFFF; Write-Output (,$t); Write-Output $t':
+        'The one row here whose value is wrong rather than its spelling. -bnot is not asked of the '
+        'measured grid at all: 5.1 complements the Int32 the hex pattern names, which is -1, and '
+        'answers 0, while the unit complements 4294967295 and answers an Int64.',
+    '$t = 1_0; Write-Output (,$t); Write-Output $t':
+        'The lexer reads `_` as a digit separator, which 5.1 does not have. 5.1 reads `1_0` as a '
+        'command name and reports CommandNotFoundException; the unit reads the integer 10, folds '
+        'the assignment away and writes `1_0` back where a value is expected, which 5.1 cannot '
+        'parse at all.',
     "$OFS = '-'; $t = [string]('a', 'b'); Write-Output $t":
-        'A collection renders to a String separated by $OFS (LangSpec 6.8), which this scriptsets.'
-        'The fold bakes in the default separator.',
+        'A collection renders to a String separated by $OFS (LangSpec 6.8), which this script '
+        'sets. The fold bakes in the default separator.',
 }
 
 #: Which words 5.1 read as a command name, for each script whose corruption entry turns on where a
@@ -1423,13 +1461,15 @@ class TestPs1ValueTypesRestOnMeasuredBeliefs(Ps1OracleTest):
         which is the defect the whole table is about, so it would pass unremarked.
         """
         measured = behaviours([
-            '$t = [char]65; Write-Output $t.GetType().FullName; Write-Output $t',
+            '$t = [char]65; Write-Output (,$t); Write-Output $t',
+            "$t = ('A').ToUpper(); Write-Output (,$t); Write-Output $t",
             "Write-Output ([char]65 -is [char]); Write-Output ('A' -is [char])",
         ])
         self.assertEqual(
-            [measured[0][0], measured[1][0], measured[1][1]],
+            [measured[0][0], measured[1][0], measured[2][0], measured[2][1]],
             [
-                'OUT\tSystem.String\tSystem.Char',
+                'OUT\tSystem.Char\tA',
+                'OUT\tSystem.String\tA',
                 'OUT\tSystem.Boolean\tTrue',
                 'OUT\tSystem.Boolean\tFalse',
             ],
@@ -1441,8 +1481,8 @@ class TestPs1DeobfuscationPreservesValueTypes(Ps1OracleTest):
     """
     The same promise `TestPs1DeobfuscationPreservesBehaviour` checks, over the rows written to make
     a type observable. They are quantified separately and ledgered separately because they share a
-    few root causes rather than being independent defects, and because one of those causes is not
-    about types at all — see `TYPE_DEFECTS`.
+    few root causes rather than being independent defects, and because three of those causes are
+    not about types at all — see `TYPE_DEFECTS`.
     """
 
     def test_the_output_behaves_like_the_row(self):

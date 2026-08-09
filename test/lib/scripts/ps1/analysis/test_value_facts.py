@@ -36,7 +36,7 @@ from refinery.lib.scripts.ps1.model import (
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 _ROW_PATTERN = re.compile(
-    r'\$t = (?P<expression>.+); Write-Output \$t\.GetType\(\)\.FullName; Write-Output \$t'
+    r'\$t = (?P<expression>.+); Write-Output \(,\$t\); Write-Output \$t'
 )
 
 #: What counts as a single numeric literal in a measured row. The selection is textual on purpose:
@@ -71,11 +71,11 @@ _PAYLOADS: dict[str, Callable[[str], int | float | decimal.Decimal]] = {
 def _transcript(expression: str, witness: str = '$t') -> tuple[str, ...]:
     """
     What a 5.1 host printed for the measured row that assigns `expression` to `$t` and then prints
-    the type of `$t` and `witness`. A row this module asks for and the corpus does not hold is a
+    `$t` whole and `witness`. A row this module asks for and the corpus does not hold is a
     `KeyError` naming it: nothing here may run a host, so a case has to be measured in
     `test.lib.scripts.ps1.corpus` before it can be asked about.
     """
-    row = F'$t = {expression}; Write-Output $t.GetType().FullName; Write-Output {witness}'
+    row = F'$t = {expression}; Write-Output (,$t); Write-Output {witness}'
     return TYPE_TRANSCRIPTS[row]
 
 
@@ -95,15 +95,15 @@ def _throws(transcript: tuple[str, ...]) -> bool:
 def _measured(expression: str) -> tuple[str, str]:
     """
     The .NET type and the rendered value a host printed for `expression`. Both witnesses name the
-    type — the first as the text of `GetType().FullName`, the second as the stamp on the value
-    itself — and a row whose two witnesses disagree is not a measurement of one value.
+    type — the first for `$t` wrapped in a one-element array and unrolled back out of it, the
+    second for `$t` written directly — and a row whose two witnesses disagree is not a measurement
+    of one value.
     """
-    named, printed = _transcript(expression)
-    stamp, reported = _printed(named)
+    wrapped, printed = _transcript(expression)
+    stamp, reported = _printed(wrapped)
     carried, rendered = _printed(printed)
-    assert stamp == 'System.String', named
-    assert carried == reported, printed
-    return reported, rendered
+    assert (stamp, reported) == (carried, rendered), (wrapped, printed)
+    return carried, rendered
 
 
 def _measured_fact(expression: str) -> Ps1Fact:
@@ -117,12 +117,11 @@ def _measured_count(expression: str) -> tuple[str, int]:
     `$t.Count` as its second witness, because printing the array itself prints its elements and
     never says how many there are.
     """
-    named, counted = _transcript(expression, '$t.Count')
-    stamp, reported = _printed(named)
+    wrapped, counted = _transcript(expression, '$t.Count')
+    container, _ = _printed(wrapped)
     counter, rendered = _printed(counted)
-    assert stamp == 'System.String', named
     assert counter == 'System.Int32', counted
-    return reported, int(rendered)
+    return container, int(rendered)
 
 
 def _numeral_rows() -> dict[str, tuple[str, ...]]:

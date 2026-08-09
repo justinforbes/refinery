@@ -55,6 +55,63 @@ class TestPs1AnInlinedNumberCarriesAMemberOnlyInParentheses(TestPs1):
         self.assertEqual(self._deobfuscate("$s = 'abc'; $s.ToUpper()"), "'ABC'")
 
 
+class TestPs1AFoldedNegativeNumberInACommandArgumentNeedsParentheses(TestPs1):
+    """
+    Windows PowerShell 5.1 lexes a leading `-` in a command argument as the start of a parameter
+    name rather than as a sign, and hands a parameter that no command declares to the command as
+    the literal text it was written as. `Write-Output 1` writes an Int32 and `Write-Output (-1)`
+    writes an Int32, but `Write-Output -1` writes the String `-1`, as do `-1.5` and `-1L`. A fold
+    whose value is a negative number therefore changes the type the command receives unless the
+    slot it lands in parenthesizes it.
+
+    Each assertion states the minimal faithful repair. The unparenthesized cases are the control
+    that says the parentheses belong to the sign in that slot rather than to folding as such.
+    """
+
+    @unittest.expectedFailure
+    def test_a_hex_literal_folded_to_a_negative_int32_is_parenthesized(self):
+        self.assertEqual(
+            self._deobfuscate('$t = 0xFFFFFFFF + 0; Write-Output $t'),
+            'Write-Output (-1)',
+        )
+
+    @unittest.expectedFailure
+    def test_a_subtraction_folded_to_a_negative_number_is_parenthesized(self):
+        self.assertEqual(self._deobfuscate('$t = 1 - 2; Write-Output $t'), 'Write-Output (-1)')
+
+    @unittest.expectedFailure
+    def test_null_arithmetic_folded_to_a_negative_number_is_parenthesized(self):
+        self.assertEqual(self._deobfuscate('$t = $null - 1; Write-Output $t'), 'Write-Output (-1)')
+
+    @unittest.expectedFailure
+    def test_a_bxor_folded_to_a_negative_number_is_parenthesized(self):
+        self.assertEqual(
+            self._deobfuscate('$t = 0xFFFFFFFF -bxor 0x5A; Write-Output $t'),
+            'Write-Output (-91)',
+        )
+
+    @unittest.expectedFailure
+    def test_a_fold_in_place_keeps_the_parentheses_the_negative_sign_needs(self):
+        self.assertEqual(self._deobfuscate('Write-Output (1 - 2)'), 'Write-Output (-1)')
+
+    @unittest.expectedFailure
+    def test_a_negative_double_is_parenthesized(self):
+        self.assertEqual(self._deobfuscate('$t = 0 - 1.5; Write-Output $t'), 'Write-Output (-1.5)')
+
+    @unittest.expectedFailure
+    def test_a_negative_long_is_parenthesized(self):
+        self.assertEqual(self._deobfuscate('$t = 1L - 2L; Write-Output $t'), 'Write-Output (-1L)')
+
+    def test_a_positive_number_is_not_parenthesized(self):
+        self.assertEqual(self._deobfuscate('$t = 1 + 0; Write-Output $t'), 'Write-Output 1')
+
+    def test_a_positive_hex_literal_is_not_parenthesized(self):
+        self.assertEqual(self._deobfuscate('$t = 0xFF + 0; Write-Output $t'), 'Write-Output 255')
+
+    def test_a_negative_number_assigned_to_a_variable_is_not_parenthesized(self):
+        self.assertEqual(self._deobfuscate('$t = 1 - 2; $x = $t'), '$x = -1')
+
+
 class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
     """
     Every expression here has one answer on 5.1 that never depends on session state, and the tool
