@@ -3,13 +3,12 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts.ps1.analysis.callgraph import build_call_graph
-from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 #: A world with nothing shadowed and nothing imported, so that `is_readable` answers on the rows
 #: this file is about rather than on a world that was open to begin with.
-_CLOSED_WORLD = TypeOracle(world=Ps1TypeWorld(True, frozenset()))
+_CLOSED_WORLD = Ps1TypeWorld(True, frozenset())
 
 
 class TestPs1CallGraphReadability(TestBase):

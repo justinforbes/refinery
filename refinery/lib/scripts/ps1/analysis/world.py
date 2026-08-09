@@ -20,10 +20,10 @@ recall gap: a mutator the list misses leaves the world reading closed, which fir
 deletes the reads that mutator makes effectful. Every name added to it buys correctness, not recall.
 
 This is a leaf model — a one-shot whole-script verdict — cached in
-`refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` and queried through
-`refinery.lib.scripts.ps1.analysis.types.TypeOracle`. `Ps1TypeWorld.world_closed_at` takes the read
-node so a flow-sensitive successor can make the answer depend on where the read sits relative to the
-leaks that reach it; in this phase the node is not yet consulted.
+`refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` and queried directly by the effect layer.
+`Ps1TypeWorld.world_closed_at` takes the read node so a flow-sensitive successor can make the answer
+depend on where the read sits relative to the leaks that reach it; in this phase the node is not yet
+consulted.
 """
 from __future__ import annotations
 
@@ -197,9 +197,13 @@ class Ps1TypeWorld:
     The verdict of `build_closed_world`: whether the running script leaves the type system and
     command table intact. It carries both command-table facts the purity gate needs — the
     whole-world verdict (`world_closed_at`) and the set of command names the script redefines
-    (`command_shadowed`) — so the two cannot drift apart. Held in a
-    `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot and consulted through
-    `refinery.lib.scripts.ps1.analysis.types.TypeOracle`.
+    (`command_shadowed`) — so the two cannot drift apart, and the one question a caller actually
+    asks of the pair (`may_trust_command_name`). Held in a
+    `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot and passed to the effect layer.
+
+    A world nothing was measured over is spelled `Ps1TypeWorld(False, frozenset())` — open, trusting
+    no name — rather than by an absent object, so that "we did not look" and "we looked and it is
+    open" cannot become two verdicts a caller distinguishes.
     """
 
     def __init__(
@@ -258,6 +262,24 @@ class Ps1TypeWorld:
         cannot answer `False` for a name the walk recorded under its canonical key.
         """
         return normalize_command_name(name) in self._shadowed
+
+    def may_trust_command_name(self, name: str, node) -> bool:
+        """
+        Whether the collected metadata still describes what the command `name` runs at `node`, so a
+        site may act on the name — for typing or for purity. Two things stop it describing it, and
+        both are this model's to answer: the script redefines the name where the walk can classify
+        the redefinition, or the world is open at `node`, in which case a dot-sourced file, an
+        imported module, an `iex`, an item cmdlet writing the `function:` provider or an opaque
+        dispatch can bind *any* name to code this tree does not contain. Reading the shadow set
+        alone would trust every name in exactly the scripts able to rebind them, and that set holds
+        only the two spellings the classifier sees.
+
+        Named for the question a caller actually has rather than for the shadow set, because the
+        answer is wider than the set: a reader who takes this for "is it redefined?" and narrows it
+        back to that would reopen a hole that deletes code, and no `_grant` sits in the path to
+        catch it.
+        """
+        return self.world_closed_at(node) and not self.command_shadowed(name)
 
     @property
     def shadowed_names(self) -> frozenset[str]:

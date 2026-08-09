@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer
-from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
+from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
 from refinery.lib.scripts.ps1.ast import get_command_name, get_member_name, unwrap_parens
 from refinery.lib.scripts.ps1.data import (
     CANONICAL_TYPE_NAMES,

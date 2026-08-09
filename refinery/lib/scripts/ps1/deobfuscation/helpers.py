@@ -11,7 +11,7 @@ from typing import Callable, Generator, NamedTuple, TypeGuard
 
 from refinery.lib.scripts import Node, Transformer, set_value
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
-from refinery.lib.scripts.ps1.analysis.types import TypeOracle
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.analysis.values import collect_typed_arguments, unwrap_integer
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
@@ -558,14 +558,14 @@ def apply_string_method(
     raise StringMethodError
 
 
-class OracleAwareTransformer(Transformer):
+class WorldAwareTransformer(Transformer):
     """
-    A transform whose every purity verdict is asked through the run's shared
-    `refinery.lib.scripts.ps1.analysis.types.TypeOracle`, read once at entry from the model cache
-    rather than reconstructed per node. One shared oracle is what keeps two transforms in a run from
+    A transform whose every purity verdict is asked against the run's shared
+    `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld`, read once at entry from the model cache
+    rather than reconstructed per node. One shared world is what keeps two transforms in a run from
     reaching opposite conclusions about the same node, and reading it before this run's own edits can
     only make the answer the more open — and so the more conservative — of the two. See
-    `refinery.lib.scripts.ps1.deobfuscation.unused.Ps1DeadStoreElimination` for why the single oracle
+    `refinery.lib.scripts.ps1.deobfuscation.unused.Ps1DeadStoreElimination` for why the single world
     is load-bearing. Which command a name denotes — the other question a transform must not answer
     privately — is the command model's, read through
     `refinery.lib.scripts.ps1.analysis.commands.Ps1CommandModel`.
@@ -573,7 +573,7 @@ class OracleAwareTransformer(Transformer):
 
     def __init__(self):
         super().__init__()
-        self._oracle: TypeOracle | None = None
+        self._world: Ps1TypeWorld | None = None
         self._entry = False
 
     def visit(self, node: Node):
@@ -581,7 +581,7 @@ class OracleAwareTransformer(Transformer):
             return super().visit(node)
         self._entry = True
         try:
-            self._oracle = model_cache(self, node).oracle
+            self._world = model_cache(self, node).closed_world
             return super().visit(node)
         finally:
             self._entry = False

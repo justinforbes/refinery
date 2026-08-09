@@ -36,7 +36,8 @@ from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
-from refinery.lib.scripts.ps1.analysis.types import TypeOracle
+from refinery.lib.scripts.ps1.analysis.values import candidate_types
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
@@ -568,7 +569,7 @@ def _scriptblock_arguments(cmd: Ps1CommandInvocation) -> list[Ps1ScriptBlock]:
 
 def _arguments_are_pure(
     arguments: Sequence[Expression],
-    oracle: TypeOracle,
+    world: Ps1TypeWorld,
 ) -> bool:
     """
     Whether an argument list is safe to evaluate *and* hands the callee nothing to write back
@@ -576,14 +577,14 @@ def _arguments_are_pure(
     argument is side-effect free to evaluate and still makes the call an out-parameter API.
     """
     return all(
-        not _is_writable_reference(a) and is_side_effect_free(a, oracle)
+        not _is_writable_reference(a) and is_side_effect_free(a, world)
         for a in arguments
     )
 
 
 def _command_arguments_are_pure(
     cmd: Ps1CommandInvocation,
-    oracle: TypeOracle,
+    world: Ps1TypeWorld,
 ) -> bool:
     """
     Whether every non-scriptblock argument of a command is side-effect free. A cmdlet being a pure
@@ -605,7 +606,7 @@ def _command_arguments_are_pure(
             continue
         if isinstance(value, Ps1Variable) and value.splatted:
             return False
-        if _is_writable_reference(value) or not is_side_effect_free(value, oracle):
+        if _is_writable_reference(value) or not is_side_effect_free(value, world):
             return False
     return True
 
@@ -695,7 +696,7 @@ def _runs_only_visible_blocks(cmd: Ps1CommandInvocation) -> bool:
 
 def _command_body_is_pure(
     cmd: Ps1CommandInvocation,
-    oracle: TypeOracle,
+    world: Ps1TypeWorld,
 ) -> bool:
     """
     Check whether all script block arguments of a pipeline cmdlet (ForEach-Object, Where-Object,
@@ -715,7 +716,7 @@ def _command_body_is_pure(
     if not _runs_only_visible_blocks(cmd):
         return False
     return not any(
-        statement_effect(stmt, oracle) is StatementEffect.EFFECT
+        statement_effect(stmt, world) is StatementEffect.EFFECT
         for block in _scriptblock_arguments(cmd)
         for stmt in block.body
     )
@@ -757,40 +758,41 @@ def _reflection_read_is_pure(type_key: Ps1TypeName, member: str) -> bool:
     return False
 
 
-def _member_read_is_pure(obj, member: str, oracle: TypeOracle) -> bool:
+def _member_read_is_pure(obj, member: str, world: Ps1TypeWorld) -> bool:
     """
-    Whether reading the named `member` off `obj` has no side effect, decided over every type the
-    `oracle` says `obj` could carry. The read is pure only when it is pure for *all* of them: a
-    method return or cmdlet output may be one of several types, and a value that could be any of them
-    must be safe whichever it is. An empty candidate set — `obj`'s type is unknown — is never pure,
-    since an unknown object could be a type whose getter runs code.
+    Whether reading the named `member` off `obj` has no side effect, decided over every type
+    `refinery.lib.scripts.ps1.analysis.values.candidate_types` says `obj` could carry. The read is
+    pure only when it is pure for *all* of them: a method return or cmdlet output may be one of
+    several types, and a value that could be any of them must be safe whichever it is. An empty
+    candidate set — `obj`'s type is unknown — is never pure, since an unknown object could be a type
+    whose getter runs code.
     """
-    candidates = oracle.candidate_types(obj)
+    candidates = candidate_types(obj, world)
     return bool(candidates) and all(
         _reflection_read_is_pure(candidate, member) for candidate in candidates
     )
 
 
-def _grant(verdict: bool, node, oracle: TypeOracle) -> bool:
+def _grant(verdict: bool, node, world: Ps1TypeWorld) -> bool:
     """
     A present-member or present-type purity grant, conditioned on the type world being closed at
     `node`. Every branch of `is_side_effect_free` that returns `True` because a member, static
     method or constructor resolves to a known-pure .NET operation routes its verdict through here:
     the grant holds only when no code the script runs could have shadowed that member through the
     Extended Type System or remapped its type name through an accelerator, which is
-    `refinery.lib.scripts.ps1.analysis.types.TypeOracle.world_closed_at`. An oracle built without a
-    world answers `False`, so such a caller keeps the access. An impurity
-    *deny* is never routed through here; it holds unconditionally.
+    `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld.world_closed_at`. An open world answers
+    `False`, so such a caller keeps the access. An impurity *deny* is never routed through here; it
+    holds unconditionally.
     """
-    return verdict and oracle.world_closed_at(node)
+    return verdict and world.world_closed_at(node)
 
 
-def is_side_effect_free(node, oracle: TypeOracle) -> bool:
+def is_side_effect_free(node, world: Ps1TypeWorld) -> bool:
     """
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
-    observable side effects beyond yielding a value. The `oracle` types the object of a member read
-    so the member gate can decide whether the read runs code; without one it resolves only the
-    static surface, and every member read whose object it cannot type stays impure.
+    observable side effects beyond yielding a value. The `world` decides whether a present-member
+    grant may be trusted at all and whether a command name still denotes what the metadata says; an
+    open one grants nothing, so every member read and every named call stays impure.
     """
     if isinstance(node, _LITERAL_EXPRESSIONS):
         return True
@@ -799,7 +801,7 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
     if isinstance(node, Ps1Variable):
         return True
     if isinstance(node, Ps1ParenExpression):
-        return node.expression is None or is_side_effect_free(node.expression, oracle)
+        return node.expression is None or is_side_effect_free(node.expression, world)
     if isinstance(node, Ps1CastExpression):
         # A cast is a conversion the engine performs by calling into the target type, so it is a
         # present-type grant like any other: a remapped accelerator invalidates it, and a name the
@@ -810,15 +812,15 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
         # collected type can still run code (`[xml]$s` parses, and follows external DTDs), which
         # `_PURE_CAST_TYPES` is the eventual answer to. The world is read before either check
         # because it is a stored bool that can only veto, while both checks below walk.
-        if not oracle.world_closed_at(node):
+        if not world.world_closed_at(node):
             return False
         if data.resolve_type(node.type_name) is None:
             return False
-        return is_side_effect_free(node.operand, oracle)
+        return is_side_effect_free(node.operand, world)
     if isinstance(node, Ps1UnaryExpression):
         if node.operator in ('++', '--'):
             return False
-        return is_side_effect_free(node.operand, oracle)
+        return is_side_effect_free(node.operand, world)
     if isinstance(node, Ps1BinaryExpression):
         # The regex operators write the automatic `$Matches`, which the statements after them read;
         # that is a store to shared engine state, not a value the expression merely yields, so the
@@ -826,27 +828,27 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
         # `$Matches[1]` that carries the payload reading an unset variable.
         if node.operator.lower() in _MATCH_OPERATORS:
             return False
-        return is_side_effect_free(node.left, oracle) and is_side_effect_free(node.right, oracle)
+        return is_side_effect_free(node.left, world) and is_side_effect_free(node.right, world)
     if isinstance(node, Ps1RangeExpression):
-        return is_side_effect_free(node.start, oracle) and is_side_effect_free(node.end, oracle)
+        return is_side_effect_free(node.start, world) and is_side_effect_free(node.end, world)
     if isinstance(node, Ps1ArrayLiteral):
-        return all(is_side_effect_free(e, oracle) for e in node.elements)
+        return all(is_side_effect_free(e, world) for e in node.elements)
     if isinstance(node, Ps1HashLiteral):
         return all(
-            is_side_effect_free(key, oracle) and is_side_effect_free(value, oracle)
+            is_side_effect_free(key, world) and is_side_effect_free(value, world)
             for key, value in node.pairs
         )
     if isinstance(node, Ps1ArrayExpression):
         if len(node.body) == 1:
             stmt = node.body[0]
             if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
-                return is_side_effect_free(stmt.expression, oracle)
+                return is_side_effect_free(stmt.expression, world)
         return len(node.body) == 0
     if isinstance(node, Ps1IndexExpression):
         # Indexing selects the `Item` member, so it is the bracket spelling of the member read
         # below and carries the same Extended Type System exposure.
-        pure = is_side_effect_free(node.object, oracle) and is_side_effect_free(node.index, oracle)
-        return _grant(pure, node, oracle)
+        pure = is_side_effect_free(node.object, world) and is_side_effect_free(node.index, world)
+        return _grant(pure, node, world)
     if isinstance(node, Ps1MemberAccess):
         # A read is side-effect free only when the object is pure to evaluate *and* selecting the
         # member runs no code. Returning the object's own purity was the fail-open shape this gate
@@ -855,14 +857,14 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
         # bare (`.Path`) or quoted (`.'Path'`) — names one member the gate can check; a computed
         # member name (`$x.$(...)`) leaves the selected member unknown, so a read through it can
         # never be proven pure however pure the name expression is.
-        if not is_side_effect_free(node.object, oracle):
+        if not is_side_effect_free(node.object, world):
             return False
         member = get_member_name(node.member)
         if member is None:
             return False
-        return _grant(_member_read_is_pure(node.object, member, oracle), node, oracle)
+        return _grant(_member_read_is_pure(node.object, member, world), node, world)
     if isinstance(node, Ps1InvokeMember):
-        if not _arguments_are_pure(node.arguments, oracle):
+        if not _arguments_are_pure(node.arguments, world):
             return False
         if node.access == Ps1AccessKind.STATIC:
             obj = node.object
@@ -883,24 +885,24 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
                         return False
                     if key in _MUTATING_STATIC_METHODS:
                         pure = not any(_denotes_shared_storage(a) for a in node.arguments)
-                        return _grant(pure, node, oracle)
+                        return _grant(pure, node, world)
                     if _writes_through_out_parameter(obj.name, member, node.arguments):
                         return False
                     if type_key in _PURE_STATIC_METHOD_TYPES:
-                        return _grant(True, node, oracle)
+                        return _grant(True, node, world)
                     if key in _PURE_STATIC_METHODS:
-                        return _grant(True, node, oracle)
-        elif is_side_effect_free(node.object, oracle):
+                        return _grant(True, node, world)
+        elif is_side_effect_free(node.object, world):
             member = node.member
             if isinstance(member, str) and member.lower() in _PURE_INSTANCE_METHODS:
-                return _grant(True, node, oracle)
+                return _grant(True, node, world)
         return False
     if isinstance(node, Ps1CommandInvocation):
         if node.redirections:
             return False
         new_object = extract_new_object(node)
         if new_object is not None:
-            if not oracle.may_trust_command_name('new-object', node):
+            if not world.may_trust_command_name('new-object', node):
                 return False
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
@@ -908,7 +910,7 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
                 resolved is not None
                 and resolved.generic_definition in _PURE_STATIC_METHOD_TYPES
             ):
-                return _grant(_arguments_are_pure(ctor_args, oracle), node, oracle)
+                return _grant(_arguments_are_pure(ctor_args, world), node, world)
             return False
         name = get_command_name(node)
         if name is None:
@@ -916,31 +918,31 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
         name = name.lower()
         # A command the script redefines no longer runs what the metadata describes, and neither
         # does any command in a script able to rebind names, so its purity is not the built-in's.
-        if not oracle.may_trust_command_name(name, node):
+        if not world.may_trust_command_name(name, node):
             return False
         # The pipeline set is checked through the same gate rather than after the plain one: three
         # of its four members are in both, so testing the plain set first would make the body check
         # below unreachable for `Where-Object`, `Select-Object` and `Sort-Object`.
         if name not in _PURE_CMDLETS and name not in _PURE_PIPELINE_CMDLETS:
             return False
-        if not _command_arguments_are_pure(node, oracle):
+        if not _command_arguments_are_pure(node, world):
             return False
         # Routed through `_grant` like every other grant, though `may_trust_command_name` above
         # already refuses an open world. The redundancy is the point: this arm would otherwise hold
         # its world check inside a name-trust question, so narrowing that question back to what its
         # name suggests would silently reopen a fail-open hole with nothing in the path to catch it.
         if name in _PURE_PIPELINE_CMDLETS:
-            return _grant(_command_body_is_pure(node, oracle), node, oracle)
-        return _grant(True, node, oracle)
+            return _grant(_command_body_is_pure(node, world), node, world)
+        return _grant(True, node, world)
     if isinstance(node, Ps1Pipeline):
         return all(
             isinstance(el, Ps1PipelineElement)
             and not el.redirections
-            and is_side_effect_free(el.expression, oracle)
+            and is_side_effect_free(el.expression, world)
             for el in node.elements
         )
     if isinstance(node, Ps1ExpandableString):
-        return all(is_side_effect_free(p, oracle) for p in node.parts)
+        return all(is_side_effect_free(p, world) for p in node.parts)
     return False
 
 
@@ -1069,7 +1071,7 @@ def is_fault_free(node) -> bool:
     return False
 
 
-def may_be_dropped(node, oracle: TypeOracle) -> bool:
+def may_be_dropped(node, world: Ps1TypeWorld) -> bool:
     """
     Whether an expression the script evaluates may be deleted without changing what the script does.
 
@@ -1090,7 +1092,7 @@ def may_be_dropped(node, oracle: TypeOracle) -> bool:
     the guard a caller installs is one thing a probe can mutate rather than a pair whose second
     half nothing can be shown to notice.
     """
-    return is_side_effect_free(node, oracle) and is_fault_free(node)
+    return is_side_effect_free(node, world) and is_fault_free(node)
 
 
 def _hash_literal_is_fault_free(node: Ps1HashLiteral) -> bool:
@@ -1175,7 +1177,7 @@ def _is_null_discard(node) -> TypeGuard[Ps1AssignmentExpression]:
     )
 
 
-def statement_effect(stmt, oracle: TypeOracle) -> StatementEffect:
+def statement_effect(stmt, world: Ps1TypeWorld) -> StatementEffect:
     """
     Classify the observable effect of a standalone statement as a `StatementEffect`. This is the one
     shared authority the dead-code and junk-removal passes consult so they never disagree about
@@ -1189,7 +1191,7 @@ def statement_effect(stmt, oracle: TypeOracle) -> StatementEffect:
     if expr is None:
         return StatementEffect.DISCARD
     if _is_void_cast(expr):
-        if is_side_effect_free(expr.operand, oracle):
+        if is_side_effect_free(expr.operand, world):
             return StatementEffect.DISCARD
         return StatementEffect.EFFECT
     if isinstance(expr, Ps1Pipeline):
@@ -1198,24 +1200,24 @@ def statement_effect(stmt, oracle: TypeOracle) -> StatementEffect:
         # `is_side_effect_free(expr)` re-walks the same elements, and because a pipeline cmdlet
         # body re-enters here through `_command_body_is_pure`, that doubling compounds into 2^depth
         # work on the nested `... | ForEach-Object { ... } | Out-Null` shape.
-        prefix_is_pure = _pipeline_prefix_is_pure(expr, oracle)
+        prefix_is_pure = _pipeline_prefix_is_pure(expr, world)
         if prefix_is_pure and (
-            _pipeline_ends_with_out_null(expr, oracle)
-            or _pipeline_ends_with_void_foreach(expr, oracle)
+            _pipeline_ends_with_out_null(expr, world)
+            or _pipeline_ends_with_void_foreach(expr, world)
         ):
             return StatementEffect.DISCARD
         if _pipeline_ends_with_cmdlet(expr, _PURE_PIPELINE_CMDLETS):
             # A pure pipeline cmdlet (`... | Where-Object {...}`) yields a filtered value a caller
             # may consume, so it is kept even though it performs no side effect of its own.
             return StatementEffect.EFFECT
-        if prefix_is_pure and _pipeline_final_is_pure(expr, oracle):
+        if prefix_is_pure and _pipeline_final_is_pure(expr, world):
             return StatementEffect.OUTPUT
         return StatementEffect.EFFECT
     if _is_null_discard(expr):
-        if expr.value is not None and is_side_effect_free(expr.value, oracle):
+        if expr.value is not None and is_side_effect_free(expr.value, world):
             return StatementEffect.DISCARD
         return StatementEffect.EFFECT
-    if is_side_effect_free(expr, oracle):
+    if is_side_effect_free(expr, world):
         return StatementEffect.OUTPUT
     return StatementEffect.EFFECT
 
@@ -1253,7 +1255,7 @@ def _terminal_command(pipeline: Ps1Pipeline, name: str) -> Ps1CommandInvocation 
 
 def _pipeline_ends_with_out_null(
     pipeline: Ps1Pipeline,
-    oracle: TypeOracle,
+    world: Ps1TypeWorld,
 ) -> bool:
     """
     Whether a pipeline is terminated by an `Out-Null` that throws its input away *and* costs nothing
@@ -1262,26 +1264,26 @@ def _pipeline_ends_with_out_null(
     value the pipeline never carried and is not a junk sink.
     """
     out_null = _terminal_command(pipeline, 'out-null')
-    if out_null is None or not oracle.may_trust_command_name('out-null', out_null):
+    if out_null is None or not world.may_trust_command_name('out-null', out_null):
         return False
-    return _command_arguments_are_pure(out_null, oracle)
+    return _command_arguments_are_pure(out_null, world)
 
 
 def _pipeline_prefix_is_pure(
     pipeline: Ps1Pipeline,
-    oracle: TypeOracle,
+    world: Ps1TypeWorld,
 ) -> bool:
     for el in pipeline.elements[:-1]:
         if not isinstance(el, Ps1PipelineElement) or el.redirections:
             return False
-        if not is_side_effect_free(el.expression, oracle):
+        if not is_side_effect_free(el.expression, world):
             return False
     return True
 
 
 def _pipeline_final_is_pure(
     pipeline: Ps1Pipeline,
-    oracle: TypeOracle,
+    world: Ps1TypeWorld,
 ) -> bool:
     """
     Whether the last element of a pipeline is side-effect free. Together with
@@ -1294,13 +1296,13 @@ def _pipeline_final_is_pure(
     return (
         isinstance(last, Ps1PipelineElement)
         and not last.redirections
-        and is_side_effect_free(last.expression, oracle)
+        and is_side_effect_free(last.expression, world)
     )
 
 
 def _pipeline_ends_with_void_foreach(
     pipeline: Ps1Pipeline,
-    oracle: TypeOracle,
+    world: Ps1TypeWorld,
 ) -> bool:
     """
     Detect junk pipelines like `... | ForEach-Object { [Void]$_ }` or
@@ -1320,15 +1322,15 @@ def _pipeline_ends_with_void_foreach(
     the blocks they saw, and a body that was never shown is not among them.
     """
     foreach = _terminal_command(pipeline, 'foreach-object')
-    if foreach is None or not oracle.may_trust_command_name('foreach-object', foreach):
+    if foreach is None or not world.may_trust_command_name('foreach-object', foreach):
         return False
-    if not _command_arguments_are_pure(foreach, oracle):
+    if not _command_arguments_are_pure(foreach, world):
         return False
     if not _runs_only_visible_blocks(foreach):
         return False
     blocks = _scriptblock_arguments(foreach)
     return bool(blocks) and all(
-        statement_effect(stmt, oracle) is StatementEffect.DISCARD
+        statement_effect(stmt, world) is StatementEffect.DISCARD
         for block in blocks
         for stmt in block.body
     )
@@ -1816,7 +1818,7 @@ def pruning_erases_body(node, survivors: Sequence[Node]) -> bool:
 
 def _param_block_is_inert(
     block: Ps1ParamBlock | None,
-    oracle: TypeOracle,
+    world: Ps1TypeWorld,
 ) -> bool:
     """
     Whether a `param( ... )` block runs nothing when the function is called. Declaring a name binds
@@ -1834,12 +1836,12 @@ def _param_block_is_inert(
         return False
     return all(
         not any(isinstance(a, Ps1Attribute) for a in parameter.attributes)
-        and (parameter.default_value is None or is_side_effect_free(parameter.default_value, oracle))
+        and (parameter.default_value is None or is_side_effect_free(parameter.default_value, world))
         for parameter in block.parameters
     )
 
 
-def body_is_inert(node, oracle: TypeOracle) -> bool:
+def body_is_inert(node, world: Ps1TypeWorld) -> bool:
     """
     Whether the body that `node` owns neither emits a value nor performs a side effect: `node` is
     `None`, the body is empty, or every statement in it is a `StatementEffect.DISCARD`. An inert
@@ -1859,6 +1861,6 @@ def body_is_inert(node, oracle: TypeOracle) -> bool:
     body = get_body(node)
     if body is None or get_named_blocks(node):
         return False
-    if not _param_block_is_inert(get_param_block(node), oracle):
+    if not _param_block_is_inert(get_param_block(node), world):
         return False
-    return all(statement_effect(stmt, oracle) is StatementEffect.DISCARD for stmt in body)
+    return all(statement_effect(stmt, world) is StatementEffect.DISCARD for stmt in body)

@@ -21,7 +21,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     unconsumed_statement,
 )
 from refinery.lib.scripts.ps1.analysis.model import Binding, Ps1SemanticModel, Scope
-from refinery.lib.scripts.ps1.analysis.types import TypeOracle
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.ast import (
     assignment_of,
     assignment_target_is_all_variables,
@@ -118,7 +118,7 @@ class Ps1UnusedVariableRemoval(Transformer):
         """
         cache = model_cache(self, node)
         model = cache.model
-        oracle = cache.oracle
+        world = cache.closed_world
         candidates: dict[Binding, list[Node]] = {}
         for binding in model.script_scope.bindings.values():
             if binding.dynamic_or_qualified or binding.name in _PS1_SKIP_VARIABLES:
@@ -136,7 +136,7 @@ class Ps1UnusedVariableRemoval(Transformer):
             for mutation in mutations:
                 if id(mutation) in planned:
                     continue
-                edit = self._plan_mutation(mutation, oracle)
+                edit = self._plan_mutation(mutation, world)
                 if edit is None or id(edit.statement) in claimed:
                     continue
                 replacement = None
@@ -354,7 +354,7 @@ class Ps1UnusedVariableRemoval(Transformer):
         return True
 
     @staticmethod
-    def _plan_mutation(mutation: Node, oracle: TypeOracle) -> _MutationEdit | None:
+    def _plan_mutation(mutation: Node, world: Ps1TypeWorld) -> _MutationEdit | None:
         """
         What this pass intends to do with the statement holding `mutation`, decided without touching
         the tree: the statement to edit, and the right-hand side that has to survive the edit, or
@@ -367,7 +367,7 @@ class Ps1UnusedVariableRemoval(Transformer):
         keep_value = None
         if isinstance(mutation, Ps1AssignmentExpression):
             rhs = mutation.value
-            if rhs is not None and not is_side_effect_free(rhs, oracle):
+            if rhs is not None and not is_side_effect_free(rhs, world):
                 if not _value_is_movable(rhs):
                     return None
                 keep_value = rhs
@@ -403,7 +403,7 @@ class Ps1JunkStatementRemoval(Transformer):
         skipping it over the output question left them standing.
         """
         cache = model_cache(self, node)
-        oracle = cache.oracle
+        world = cache.closed_world
         flow = cache.output_flow
         called = cache.call_graph.reachable_names()
         plans = Ps1RemovalPlans()
@@ -414,15 +414,15 @@ class Ps1JunkStatementRemoval(Transformer):
             path = output_path(parent)
             if path.sink is OutputSink.CAPTURED:
                 continue
-            removable = self._removable_in_body(parent, flow.resolved(path), called, oracle)
+            removable = self._removable_in_body(parent, flow.resolved(path), called, world)
             for statement in body:
                 if statement in removable:
                     plans.propose_in(parent, statement)
         if plans.commit():
             self.mark_changed()
-        self._remove_inert_functions(node, cache.call_graph, oracle)
+        self._remove_inert_functions(node, cache.call_graph, world)
 
-    def _remove_inert_functions(self, node: Node, graph: Ps1CallGraph, oracle: TypeOracle):
+    def _remove_inert_functions(self, node: Node, graph: Ps1CallGraph, world: Ps1TypeWorld):
         """
         Remove top-level functions whose body carries no observable output or side effect together
         with the bare call statements that invoke them. After body pruning, an injected junk function
@@ -482,7 +482,7 @@ class Ps1JunkStatementRemoval(Transformer):
         removable_definitions: set[Node] = set()
         for key in graph.defined_names:
             definitions = graph.definitions(key)
-            if not all(body_is_inert(d.body, oracle) for d in definitions):
+            if not all(body_is_inert(d.body, world) for d in definitions):
                 continue
             removable_here = [d for d in definitions if d.parent is node]
             if not removable_here:
@@ -543,7 +543,7 @@ class Ps1JunkStatementRemoval(Transformer):
         return statements
 
     def _removable_in_body(
-        self, parent: Node, sink: OutputSink, called: frozenset[str], oracle: TypeOracle,
+        self, parent: Node, sink: OutputSink, called: frozenset[str], world: Ps1TypeWorld,
     ) -> set[Node]:
         """
         What this pass would drop from the statement list `parent` owns, where `sink` is the
@@ -576,12 +576,12 @@ class Ps1JunkStatementRemoval(Transformer):
                 # with none here is not unreachable — it is reachable from somewhere unreadable.
                 if (
                     isinstance(parent, Ps1Script)
-                    and oracle.world_closed_at(stmt)
+                    and world.world_closed_at(stmt)
                     and normalize_command_name(stmt.name) not in called
                 ):
                     removable.add(stmt)
                 continue
-            effect = statement_effect(stmt, oracle)
+            effect = statement_effect(stmt, world)
             if effect is StatementEffect.DISCARD:
                 removable.add(stmt)
             elif effect is StatementEffect.OUTPUT and strip_bare_output:
@@ -609,19 +609,19 @@ class Ps1DeadStoreElimination(Transformer):
 
     def __init__(self):
         super().__init__()
-        self._oracle: TypeOracle | None = None
+        self._world: Ps1TypeWorld | None = None
 
     def visit(self, node: Node):
         cache = model_cache(self, node)
         model = cache.model
         # The model is re-read per body, because removing a store changes what the next body's scope
-        # says; the world behind the oracle is not, because it is a whole-script fact and this pass
+        # says; the world is not, because it is a whole-script fact and this pass
         # only removes stores. Re-reading it would rebuild the whole-tree walk after every removal
         # to reach a verdict that can only have become *more* closed, and the captured one — taken
         # before those removals — is the more open, and so more conservative, of the two.
-        if self._oracle is None:
-            self._oracle = cache.oracle
-        oracle = self._oracle
+        if self._world is None:
+            self._world = cache.closed_world
+        world = self._world
         body = get_body(node)
         scope = model.scope_of(node)
         if body is None or scope is None:
@@ -657,7 +657,7 @@ class Ps1DeadStoreElimination(Transformer):
             rhs = stmt.expression
             if isinstance(rhs, Ps1AssignmentExpression):
                 rhs = rhs.value
-            if rhs is None or is_side_effect_free(rhs, oracle):
+            if rhs is None or is_side_effect_free(rhs, world):
                 plan.propose(stmt)
             elif _value_is_movable(rhs):
                 plan.propose(stmt, [store_dropped_to_value(rhs)])

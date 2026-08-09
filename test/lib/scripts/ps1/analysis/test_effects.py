@@ -17,7 +17,6 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     statement_effect,
     unconsumed_statement,
 )
-from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.ast import get_body, get_command_name
 from refinery.lib.scripts.ps1.model import (
@@ -39,13 +38,13 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: its full type reasoning. `TestPs1Purity` asserts type facts (this member read is a plain .NET
 #: property) against it, because Position A makes a present-member grant conditional on the world
 #: being closed; the open-world behaviour it guards is exercised in `TestPs1ClosedWorld`.
-_CLOSED_WORLD = TypeOracle(world=Ps1TypeWorld(True, frozenset()))
+_CLOSED_WORLD = Ps1TypeWorld(True, frozenset())
 
-#: An oracle carrying no world at all, which is what a caller holds before any model has been built.
-#: Every present-member grant is withheld, so a read this module proves pure is still kept. Named
-#: rather than defaulted: a test asserting open-world behaviour has to say so, and the effect layer
-#: no longer lets a call site acquire this answer by omission.
-_NO_WORLD = TypeOracle()
+#: An open world, which is what a caller holds before anything has been measured. Every
+#: present-member grant is withheld, so a read this module proves pure is still kept. Named rather
+#: than defaulted: a test asserting open-world behaviour has to say so, and the effect layer no
+#: longer lets a call site acquire this answer by omission.
+_NO_WORLD = Ps1TypeWorld(False, frozenset())
 
 
 class Ps1EffectsTest(TestBase):
@@ -230,7 +229,7 @@ class TestPs1Purity(Ps1EffectsTest):
         # A cmdlet's [OutputType] is only a lower bound: one that forwards its input emits types it
         # never declares. `Get-Random -InputObject $x` returns an element of $x -- a Process if $x
         # holds processes -- so proving `.Path` pure over its declared numeric outputs would delete
-        # a live ETS getter. The oracle trusts a declaration only for a curated closed set, so a
+        # a live ETS getter. A declaration is trusted only for a curated closed set, so a
         # read on any forwarding command's result is left unresolved and kept.
         for source in (
             '(Get-Random -InputObject $procs).Path',
@@ -468,7 +467,7 @@ class TestPs1MemberGateWorld(Ps1EffectsTest):
     constructor — is trusted only under a closed type world. The type reasoning that proves the read
     inert is the same whether the world is open or closed; what the world decides is whether that
     proof may be acted on, because an Extended Type System mutation the script could run would make
-    the read effectful. Each read below is one the type layer proves pure, withheld under an oracle
+    the read effectful. Each read below is one the type layer proves pure, withheld under a world
     carrying no world and granted only under a closed one.
     """
 
@@ -504,31 +503,31 @@ class TestPs1MemberGateWorld(Ps1EffectsTest):
 class TestPs1CommandShadowing(Ps1EffectsTest):
     """
     A command the script redefines as a function is not the built-in the metadata describes, so —
-    even under a closed type world — the oracle must not type its result and the gate must not grant
+    even under a closed type world — the type layer must not type its result and the gate must not grant
     its purity or read it as a discarding sink. A command the script does not redefine is unaffected.
     """
 
     @staticmethod
-    def _shadowing(*names: str) -> TypeOracle:
-        return TypeOracle(world=Ps1TypeWorld(True, frozenset(names)))
+    def _shadowing(*names: str) -> Ps1TypeWorld:
+        return Ps1TypeWorld(True, frozenset(names))
 
     def test_a_shadowed_commands_read_and_call_are_impure(self):
-        oracle = self._shadowing('get-date', 'new-object')
+        world = self._shadowing('get-date', 'new-object')
         for source in ('(Get-Date).Ticks', 'Get-Date', 'New-Object System.Version'):
             with self.subTest(source):
-                self.assertFalse(is_side_effect_free(self._expression(source), oracle))
+                self.assertFalse(is_side_effect_free(self._expression(source), world))
 
     def test_a_shadowed_pipeline_sink_does_not_discard(self):
-        oracle = self._shadowing('out-null', 'foreach-object')
+        world = self._shadowing('out-null', 'foreach-object')
         for source in ('1 | Out-Null', '1 | ForEach-Object { [Void]$_ }'):
             with self.subTest(source):
                 self.assertIs(
-                    statement_effect(self._statement(source), oracle), StatementEffect.EFFECT)
+                    statement_effect(self._statement(source), world), StatementEffect.EFFECT)
 
     def test_an_unshadowed_command_stays_pure_beside_a_shadowed_one(self):
-        oracle = self._shadowing('get-date')
-        self.assertTrue(is_side_effect_free(self._expression('Get-ChildItem'), oracle))
-        self.assertTrue(is_side_effect_free(self._expression('New-Object System.Version'), oracle))
+        world = self._shadowing('get-date')
+        self.assertTrue(is_side_effect_free(self._expression('Get-ChildItem'), world))
+        self.assertTrue(is_side_effect_free(self._expression('New-Object System.Version'), world))
 
 
 class TestPs1StatementEffect(Ps1EffectsTest):
@@ -737,7 +736,7 @@ class TestPs1EffectInvariant(Ps1EffectsTest):
     agreement. `ForEach-Object { $Null = $_ } -MemberName Delete` was exactly that: `DISCARD` at the
     statement layer, pure at the expression layer, silently deleted, and invisible here.
 
-    A check that would have caught it has to ask an oracle this module does not supply — real
+    A check that would have caught it has to ask a source of truth this module does not supply — real
     PowerShell, or a corpus labelled by hand with what each statement actually does.
     """
 
@@ -1034,10 +1033,10 @@ class TestPs1EmitSafety(Ps1EffectsTest):
 
         source = 'function foreach { Start-Process calc }\n1..3 | foreach { $Null = $_ }'
         tree = self._parse(source)
-        oracle = TypeOracle(world=build_closed_world(tree))
+        world = build_closed_world(tree)
         statement = tree.body[-1]
-        self.assertFalse(effects._pipeline_ends_with_void_foreach(statement.expression, oracle))
-        self.assertIsNot(effects.statement_effect(statement, oracle), StatementEffect.DISCARD)
+        self.assertFalse(effects._pipeline_ends_with_void_foreach(statement.expression, world))
+        self.assertIsNot(effects.statement_effect(statement, world), StatementEffect.DISCARD)
 
     def test_a_named_block_body_is_never_inert(self):
         # The parser fills either `body` or the named blocks, so an advanced function reports an
@@ -1107,7 +1106,7 @@ class TestPs1OpenWorldNameTrust(Ps1EffectsTest):
     """
 
     #: A world nothing was proven to redefine, but in which something can redefine anything.
-    OPEN = TypeOracle(world=Ps1TypeWorld(False, frozenset()))
+    OPEN = Ps1TypeWorld(False, frozenset())
 
     def test_an_open_world_grants_no_command_purity(self):
         for source in ('Get-Date', 'New-Object System.Version', '(Get-Date)'):
@@ -1125,6 +1124,6 @@ class TestPs1OpenWorldNameTrust(Ps1EffectsTest):
                     statement_effect(self._statement(source), self.OPEN), StatementEffect.EFFECT)
 
     def test_an_oracle_without_a_world_withholds_name_trust_too(self):
-        # The two questions the oracle answers must fail in the same direction, or a caller that
+        # The two questions the world answers must fail in the same direction, or a caller that
         # forgets the world gets a member grant refused and a name grant handed to it.
         self.assertFalse(is_side_effect_free(self._expression('Get-Date'), _NO_WORLD))

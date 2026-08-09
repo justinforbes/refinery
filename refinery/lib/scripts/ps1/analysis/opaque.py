@@ -24,8 +24,8 @@ the obfuscator wrote it.
 **The recognition is deny-side.** A spelling this does not resolve is not a call declared harmless;
 it is one whose effect is unknown, so a miss here performs a corruption where a miss in a grant table
 such as `refinery.lib.scripts.ps1.analysis.effects` merely withholds a rewrite. That is also why no
-`refinery.lib.scripts.ps1.analysis.types.TypeOracle` is consulted: a script that shadows `iex` runs
-something else, and something else is opaque too.
+`refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld` is consulted: a script that shadows `iex`
+runs something else, and something else is opaque too.
 
 **Only the scope the code stands in.** Measured on 5.1 (`temp/ps1/census_measurements.md`): `&`
 opens a child scope, so `& 'stage2.ps1'` and `& $sb` leave the caller's `$x` alone, and so does

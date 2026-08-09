@@ -14,7 +14,7 @@ import re
 from fnmatch import translate as fnmatch_translate
 from typing import Iterable
 
-from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
+from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.ast import (
     argument_text,

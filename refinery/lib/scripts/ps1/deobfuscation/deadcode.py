@@ -18,7 +18,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     is_side_effect_free,
     output_sink,
 )
-from refinery.lib.scripts.ps1.analysis.types import TypeOracle
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.analysis.values import is_truthy, unwrap_integer
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
@@ -84,7 +84,7 @@ def _carries_assignment_marker(cmd: Ps1CommandInvocation, name: str) -> bool:
     )
 
 
-def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:
+def _is_injected_noise_bareword(expr: Expression, world: Ps1TypeWorld) -> bool:
     """
     Return `True` when `expr` is a bareword command carrying an assignment marker and no argument
     that does anything — the shape an obfuscator injects to pad a script, which the passes below
@@ -107,13 +107,13 @@ def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:
         return False
     if not isinstance(expr.name, Ps1StringLiteral):
         return False
-    if not oracle.world_closed_at(expr):
+    if not world.world_closed_at(expr):
         return False
     name = expr.name.value
     name_lower = name.lower()
     if not _carries_assignment_marker(expr, name):
         return False
-    if name_lower in KNOWN_CMDLETS or not oracle.may_trust_command_name(name_lower, expr):
+    if name_lower in KNOWN_CMDLETS or not world.may_trust_command_name(name_lower, expr):
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
         return False
@@ -123,7 +123,7 @@ def _is_injected_noise_bareword(expr: Expression, oracle: TypeOracle) -> bool:
         return False
     for arg in expr.arguments:
         value = arg.value if isinstance(arg, Ps1CommandArgument) else arg
-        if value is not None and not is_side_effect_free(value, oracle):
+        if value is not None and not is_side_effect_free(value, world):
             return False
     return True
 
@@ -147,7 +147,7 @@ def _hoisted_initializer(expr: Expression) -> Ps1ExpressionStatement:
     return store_dropped_to_value(expr)
 
 
-def _try_body_survivors(body: list[Statement], oracle: TypeOracle) -> list[Statement] | None:
+def _try_body_survivors(body: list[Statement], world: Ps1TypeWorld) -> list[Statement] | None:
     """
     What a try body leaves behind once its construct is dissolved, or `None` when it cannot be.
 
@@ -161,7 +161,7 @@ def _try_body_survivors(body: list[Statement], oracle: TypeOracle) -> list[State
     The one exception is a bareword `_is_injected_noise_bareword` recognizes as obfuscator padding,
     which is dropped rather than carried. That is a heuristic and it is the reason this returns a
     body that is *believed* inert rather than one proven so; a bareword the script redefines runs
-    that definition and is never such a guess, which is one of the facts `oracle` carries.
+    that definition and is never such a guess, which is one of the facts the `world` carries.
     """
     survivors: list[Statement] = []
     for stmt in body:
@@ -172,7 +172,7 @@ def _try_body_survivors(body: list[Statement], oracle: TypeOracle) -> list[State
         if is_fault_free(stmt.expression):
             survivors.append(stmt)
             continue
-        if _is_injected_noise_bareword(stmt.expression, oracle):
+        if _is_injected_noise_bareword(stmt.expression, world):
             continue
         return None
     return survivors
@@ -386,7 +386,7 @@ class Ps1DeadCodeElimination(Transformer):
     """
 
     def visit(self, node: Node):
-        # The oracle is captured once, not re-read per body: `set_body` below advances the tree
+        # The world is captured once, not re-read per body: `set_body` below advances the tree
         # version, so a per-call-site lookup would rebuild the whole-tree walk after every prune, and
         # could flip the verdict mid-pass. Capturing errs the safe way — this pass only removes or
         # hoists nodes and never introduces a leak, so a stale verdict is always the more open one.
@@ -394,15 +394,15 @@ class Ps1DeadCodeElimination(Transformer):
         # verdict must reflect the current tree, and reading it through the version-aware cache
         # rebuilds only after a body has actually changed.
         cache = model_cache(self, node)
-        oracle = cache.oracle
+        world = cache.closed_world
         for parent in list(node.walk()):
             sink = output_sink(parent)
             if sink is None or sink is OutputSink.CAPTURED:
                 continue
-            if self._prune_body(parent, oracle, cache):
+            if self._prune_body(parent, world, cache):
                 self.mark_changed()
 
-    def _prune_body(self, parent: Node, oracle: TypeOracle, cache: Ps1ModelCache) -> bool:
+    def _prune_body(self, parent: Node, world: Ps1TypeWorld, cache: Ps1ModelCache) -> bool:
         """
         Rewrite each statement of one body into what its condition has already been proved to make
         of it, or leave it alone.
@@ -448,7 +448,7 @@ class Ps1DeadCodeElimination(Transformer):
             ):
                 plan.propose(stmt, [])
                 continue
-            replacement = self._try_prune(stmt, oracle, dominance)
+            replacement = self._try_prune(stmt, world, dominance)
             if replacement is None:
                 continue
             plan.propose(stmt, replacement)
@@ -501,7 +501,7 @@ class Ps1DeadCodeElimination(Transformer):
         return saw_node
 
     def _try_prune(
-        self, stmt: Statement, oracle: TypeOracle, dominance: DominatorModel,
+        self, stmt: Statement, world: Ps1TypeWorld, dominance: DominatorModel,
     ) -> list[Statement] | None:
         if isinstance(stmt, Ps1WhileLoop):
             return self._prune_while(stmt)
@@ -514,9 +514,9 @@ class Ps1DeadCodeElimination(Transformer):
         if isinstance(stmt, Ps1SwitchStatement):
             return self._prune_switch(stmt)
         if isinstance(stmt, Ps1TryCatchFinally):
-            return self._prune_try(stmt, oracle)
+            return self._prune_try(stmt, world)
         if isinstance(stmt, Ps1TrapStatement):
-            return self._prune_trap(stmt, oracle, dominance)
+            return self._prune_trap(stmt, world, dominance)
         return None
 
     @staticmethod
@@ -641,7 +641,7 @@ class Ps1DeadCodeElimination(Transformer):
             return body[0]
         return []
 
-    def _prune_try(self, node: Ps1TryCatchFinally, oracle: TypeOracle) -> list[Statement] | None:
+    def _prune_try(self, node: Ps1TryCatchFinally, world: Ps1TypeWorld) -> list[Statement] | None:
         """
         Resolve a `try`/`catch`/`finally` into what its `try` body leaves behind, followed by the
         `finally` body, which always runs. An empty or absent try body needs no separate case
@@ -663,14 +663,14 @@ class Ps1DeadCodeElimination(Transformer):
             if clause.body is not None and clause.body.body:
                 return None
         try_body = node.try_block.body if node.try_block is not None else []
-        survivors = _try_body_survivors(try_body, oracle)
+        survivors = _try_body_survivors(try_body, world)
         if survivors is None:
             return None
         finally_body = node.finally_block.body if node.finally_block is not None else []
         return survivors + list(finally_body)
 
     def _prune_trap(
-        self, node: Ps1TrapStatement, oracle: TypeOracle, dominance: DominatorModel,
+        self, node: Ps1TrapStatement, world: Ps1TypeWorld, dominance: DominatorModel,
     ) -> list[Statement] | None:
         """
         Remove a `trap` handler whose body produces no observable output and whose scope cannot
@@ -702,7 +702,7 @@ class Ps1DeadCodeElimination(Transformer):
                     return None
                 continue
             if isinstance(stmt, Ps1ExpressionStatement):
-                if stmt.expression is None or is_side_effect_free(stmt.expression, oracle):
+                if stmt.expression is None or is_side_effect_free(stmt.expression, world):
                     continue
             return None
         return []

@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+from test import TestBase
+
+from refinery.lib.scripts.ps1.analysis.values import candidate_types, resolve_expression_type
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.data import resolve_type
+from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement
+from refinery.lib.scripts.ps1.parser import Ps1Parser
+
+
+class Ps1ExpressionTypeTest(TestBase):
+
+    #: The world every script that redefines nothing and runs no opaque code has. Typing questions
+    #: are asked against it because a command name is only trustworthy in a closed world, so an open
+    #: world answers nothing and would test the absence, not the typing.
+    CLOSED = Ps1TypeWorld(True, frozenset())
+
+    @staticmethod
+    def _expr(source: str):
+        statement = Ps1Parser(source).parse().body[0]
+        assert isinstance(statement, Ps1ExpressionStatement)
+        assert statement.expression is not None
+        return statement.expression
+
+
+class TestPs1CandidateTypes(Ps1ExpressionTypeTest):
+    """
+    The candidate set is the primitive the member gate reasons over: a conclusion about a value has
+    to hold for every type the value could carry, so what matters is that a genuinely multi-valued
+    result is reported as such and an unknowable one as the empty set, never as a single guess.
+    """
+
+    def _candidates(self, source: str, world: Ps1TypeWorld | None = None):
+        return candidate_types(self._expr(source), self.CLOSED if world is None else world)
+
+    def test_a_cmdlet_contributes_every_output_type_it_declares(self):
+        # Get-Date carries [OutputType([datetime], [string])]; both are candidates, since which one
+        # a call yields depends on its arguments.
+        self.assertEqual(
+            self._candidates('(Get-Date)'),
+            frozenset({resolve_type('System.DateTime'), resolve_type('System.String')}),
+        )
+
+    def test_an_untrusted_cmdlet_contributes_no_candidates(self):
+        # [OutputType] is only a lower bound: a command that forwards its input emits types it never
+        # declares, so a declaration is trusted only for a curated closed set. Get-Random forwards
+        # -InputObject and Get-Command's declaration is not vouched for, so both are left untyped —
+        # which is what keeps a member read on their result (e.g. (Get-Command X).Name).
+        self.assertEqual(self._candidates('Get-Random'), frozenset())
+        self.assertEqual(self._candidates('Get-Command'), frozenset())
+
+    def test_a_static_call_takes_the_return_its_overloads_agree_on(self):
+        self.assertEqual(
+            self._candidates('[Diagnostics.Process]::GetCurrentProcess()'),
+            frozenset({resolve_type('System.Diagnostics.Process')}),
+        )
+
+    def test_a_static_call_with_disagreeing_overloads_is_empty(self):
+        # Math.Max is overloaded across every numeric type; with no argument typing the return is
+        # not decidable, so nothing is reported rather than one of them picked.
+        self.assertEqual(self._candidates('[Math]::Max(1, 2)'), frozenset())
+
+    def test_a_static_call_surfaces_an_imprecise_supertype_return(self):
+        # Convert.ChangeType is declared to return Object; that supertype is reported as-is.
+        # Narrowing it is not this layer's job — a caller that must not act on a supertype is the
+        # one that neutralises it.
+        self.assertEqual(
+            self._candidates('[Convert]::ChangeType($x, [int])'),
+            frozenset({resolve_type('System.Object')}),
+        )
+
+    def test_an_instance_method_call_is_not_resolved(self):
+        # String.Substring returns a string, but selecting an instance overload needs the receiver
+        # type and argument types; that is deferred, so the call contributes no candidate.
+        self.assertEqual(self._candidates('$s.Substring(0, 2)'), frozenset())
+
+    def test_a_command_without_a_declared_output_is_empty(self):
+        # Write-Host carries no [OutputType]; an undeclared output is unknown, not empty, so nothing
+        # is contributed rather than absence read as "emits nothing".
+        self.assertEqual(self._candidates('Write-Host x'), frozenset())
+
+    def test_single_type_forms_are_delegated_to_the_free_function(self):
+        for source in ("'abc'", '42', 'New-Object Net.WebClient', '[int]', '[datetime]$t'):
+            with self.subTest(source):
+                single = resolve_expression_type(self._expr(source))
+                self.assertIsNotNone(single)
+                self.assertEqual(self._candidates(source), frozenset({single}))
+
+    def test_the_candidate_set_is_a_strict_superset_of_the_free_function(self):
+        # The free function has no arm for a static method call and returns None; the set-valued
+        # view resolves it. This is the widening that keeps it out of the transforms that depend on
+        # the narrower answer.
+        call = self._expr('[Diagnostics.Process]::GetCurrentProcess()')
+        self.assertIsNone(resolve_expression_type(call))
+        self.assertEqual(
+            candidate_types(call, self.CLOSED),
+            frozenset({resolve_type('System.Diagnostics.Process')}),
+        )
+
+    def test_an_untyped_variable_is_empty_without_a_model(self):
+        # No variable typing is supplied here; a bare local resolves to nothing until a model
+        # supplies it. Automatic-variable typing still applies, so this is a plain local.
+        self.assertEqual(self._candidates('$notavariabletype'), frozenset())
+
+    def test_supplied_variable_typing_resolves_a_typed_variable(self):
+        webclient = resolve_type('System.Net.WebClient')
+        assert webclient is not None
+        self.assertEqual(
+            candidate_types(self._expr('$client'), self.CLOSED, {'client': webclient}),
+            frozenset({webclient}),
+        )
+        self.assertEqual(self._candidates('$client'), frozenset())
+
+    def test_an_open_world_contributes_no_command_candidates(self):
+        # A command name means what the metadata says only while nothing can have rebound it, so the
+        # cmdlet whose declaration is trusted in a closed world contributes nothing in an open one.
+        self.assertEqual(self._candidates('(Get-Date)', Ps1TypeWorld(False, frozenset())), frozenset())
+
+
+if __name__ == '__main__':
+    import unittest
+    unittest.main()

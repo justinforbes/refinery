@@ -22,7 +22,6 @@ from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow, build_va
 from refinery.lib.scripts.ps1.analysis.dominance import build_dominance
 from refinery.lib.scripts.ps1.analysis.effects import Ps1OutputFlow, build_output_flow
 from refinery.lib.scripts.ps1.analysis.model import Ps1SemanticModel, build_semantic_model
-from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld, build_closed_world
 from refinery.lib.scripts.ps1.model import Ps1Script
 
@@ -43,7 +42,6 @@ class Ps1ModelCache(ModelCacheBase):
     _SLOTS = (
         '_model',
         '_closed_world',
-        '_oracle',
         '_call_graph',
         '_output_flow',
         '_control_flow',
@@ -57,7 +55,6 @@ class Ps1ModelCache(ModelCacheBase):
     root: Ps1Script
     _model: Ps1SemanticModel | None
     _closed_world: Ps1TypeWorld | None
-    _oracle: TypeOracle | None
     _call_graph: Ps1CallGraph | None
     _output_flow: Ps1OutputFlow | None
     _control_flow: ControlFlowModel | None
@@ -73,17 +70,23 @@ class Ps1ModelCache(ModelCacheBase):
 
     @property
     def closed_world(self) -> Ps1TypeWorld:
+        """
+        Whether this script leaves the .NET type system and the command table intact, and which
+        command names it takes over. `refinery.lib.scripts.ps1.analysis.effects` takes this as the
+        context of every purity verdict, and every verdict in a run must be asked against the same
+        one, or two transforms reach opposite conclusions about the same node.
+        """
         return self._lazy('_closed_world', lambda: build_closed_world(self.root))
 
     @property
     def call_graph(self) -> Ps1CallGraph:
         """
         Which definitions a command name reaches and which invocations reach it, over this root. The
-        `oracle` is a parameter of the build rather than of the queries because the world verdict it
+        `closed_world` is a parameter of the build rather than of the queries because the verdict it
         supplies is one of the reasons the graph declares itself unreadable, and a graph that
         answered that differently per caller would be two graphs.
         """
-        return self._lazy('_call_graph', lambda: build_call_graph(self.root, self.oracle))
+        return self._lazy('_call_graph', lambda: build_call_graph(self.root, self.closed_world))
 
     @property
     def output_flow(self) -> Ps1OutputFlow:
@@ -164,24 +167,6 @@ class Ps1ModelCache(ModelCacheBase):
         """
         return self._lazy('_variable_flow', lambda: build_variable_flow(
             self.model, self.control_flow, self.dominance, self.blocks, self.cycles))
-
-    @property
-    def oracle(self) -> TypeOracle:
-        """
-        The effect layer's context for this script, not a model despite the company it keeps in this
-        class. `refinery.lib.scripts.ps1.analysis.effects` takes a
-        `refinery.lib.scripts.ps1.analysis.types.TypeOracle` as its parameter object, and every
-        purity verdict in a run must be asked through the same one, or two transforms reach opposite
-        conclusions about the same node. Interprocedural purity later adds a real effect model
-        beside this instead of replacing it: that would be a derived fact about the script, where
-        this is the lens such facts are read through.
-
-        This is the *base* oracle. Node-local typing — a pipeline item's type, a variable with one
-        definition — is layered per call site through
-        `refinery.lib.scripts.ps1.analysis.types.TypeOracle.with_variable_types`, so the shared
-        instance never forks.
-        """
-        return self._lazy('_oracle', lambda: TypeOracle(world=self.closed_world))
 
 
 def model_cache(transformer: Transformer, root: Ps1Script) -> Ps1ModelCache:

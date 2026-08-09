@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Mapping, NamedTuple, Sequence
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.ps1.analysis.types import TypeOracle
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_command_name,
@@ -276,7 +276,7 @@ def _collides_with_a_definition(
     return any(name in definitions for name in resolved)
 
 
-def build_call_graph(root: Ps1Script, oracle: TypeOracle) -> Ps1CallGraph:
+def build_call_graph(root: Ps1Script, world: Ps1TypeWorld) -> Ps1CallGraph:
     """
     Walk the whole tree once, recording every function definition, every statically named invocation
     with the function that holds it, and every reason the result is not the whole story.
@@ -292,7 +292,7 @@ def build_call_graph(root: Ps1Script, oracle: TypeOracle) -> Ps1CallGraph:
     call_sites: dict[str, list[Ps1CallSite]] = {}
     qualified: list[str] = []
     retried: dict[str, list[str]] = {}
-    readable = oracle.world_closed_at(root)
+    readable = world.world_closed_at(root)
     exports = False
     for node in root.walk_in_order():
         if isinstance(node, Ps1FunctionDefinition):

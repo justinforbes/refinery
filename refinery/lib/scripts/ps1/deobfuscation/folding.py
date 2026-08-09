@@ -25,7 +25,7 @@ from refinery.lib.scripts.ps1.data import (
 )
 from refinery.lib.scripts.ps1.deobfuscation.constants import PS1_ENV_CONSTANTS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    OracleAwareTransformer,
+    WorldAwareTransformer,
     StringMethodError,
     apply_format_string,
     apply_string_method,
@@ -49,7 +49,7 @@ from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     substitute_list,
     substituted,
 )
-from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
+from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
 from refinery.lib.scripts.ps1.data import MemberLookup, member_record
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -397,7 +397,7 @@ def _pipeline_output(value: Expression | None) -> Expression | None:
     return value
 
 
-class Ps1ConstantFolding(OracleAwareTransformer):
+class Ps1ConstantFolding(WorldAwareTransformer):
 
     def visit_Ps1Pipeline(self, node: Ps1Pipeline):
         if len(node.elements) == 2:
@@ -584,8 +584,8 @@ class Ps1ConstantFolding(OracleAwareTransformer):
         work the script would no longer do; see
         `refinery.lib.scripts.ps1.analysis.effects.may_be_dropped` for what that means.
 
-        The oracle is the one captured at the root by
-        `refinery.lib.scripts.ps1.deobfuscation.helpers.OracleAwareTransformer`. This pass only
+        The world is the one captured at the root by
+        `refinery.lib.scripts.ps1.deobfuscation.helpers.WorldAwareTransformer`. This pass only
         folds, so a verdict taken before its own edits is the more open, and so the more
         conservative, of the two.
 
@@ -596,7 +596,7 @@ class Ps1ConstantFolding(OracleAwareTransformer):
         """
         if selection is None:
             return None
-        if not all(may_be_dropped(part, self._oracle) for part in selection.dropped):
+        if not all(may_be_dropped(part, self._world) for part in selection.dropped):
             reattach(node)
             return None
         return selection.carried
