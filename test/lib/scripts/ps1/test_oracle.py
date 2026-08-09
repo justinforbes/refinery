@@ -97,6 +97,12 @@ DEFECTS: dict[str, str] = {
     'Get-Process | $x > out.txt':
         'The same rule. `ParseInput` reports the error and still returns a tree, which is why a '
         'transcript of one can record a shape for a script 5.1 refuses.',
+    '$t = 0xFFFFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+        '5.1 reports NumericConstantTooLarge: a hexadecimal literal is read as the bit pattern of '
+        'the smallest signed type that holds it, and seventeen digits fit neither Int32 nor Int64, '
+        'so there is no value for it to denote. We read it as an arbitrary-width Python integer '
+        'and accept it, which is the same open-endedness that reads `0xFFFFFFFF` as 4294967295 '
+        'where 5.1 reads -1.',
 }
 
 
@@ -613,6 +619,63 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tSystem.Double',
             'OUT\tSystem.Double\t1000',
         ),
+    '$t = 4gb; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t4294967296',
+        ),
+    '$t = 1.5d; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Decimal',
+            'OUT\tSystem.Decimal\t1.5',
+        ),
+    '$t = 10D; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Decimal',
+            'OUT\tSystem.Decimal\t10',
+        ),
+    '$t = 1l; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t1',
+        ),
+    '$t = 0xFFL; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t255',
+        ),
+    '$t = 0x100000000; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t4294967296',
+        ),
+    '$t = 0x7FFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t9223372036854775807',
+        ),
+    '$t = 9223372036854775807; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int64',
+            'OUT\tSystem.Int64\t9223372036854775807',
+        ),
+    '$t = 9223372036854775808; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Decimal',
+            'OUT\tSystem.Decimal\t9223372036854775808',
+        ),
+    '$t = 100000000000000000000000000000000; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Double',
+            'OUT\tSystem.Double\t1E+32',
+        ),
+    '$t = 0xFFFFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+        ('THROW\tParseException\tSystem.Management.Automation.MethodInvocationException',),
+    '$t = 007; Write-Output $t.GetType().FullName; Write-Output $t':
+        (
+            'OUT\tSystem.String\tSystem.Int32',
+            'OUT\tSystem.Int32\t7',
+        ),
     '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
         (
             'OUT\tSystem.String\tSystem.Double',
@@ -803,6 +866,28 @@ TYPE_DEFECTS: dict[str, str] = {
     '$t = 1.5; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
     '$t = 1e3; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 4gb; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 1.5d; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 10D; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 1l; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 0xFFL; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 0x100000000; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 0x7FFFFFFFFFFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 9223372036854775807; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 9223372036854775808; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 100000000000000000000000000000000; Write-Output $t.GetType().FullName; Write-Output $t':
+        _UNPARSEABLE_RECEIVER,
+    '$t = 007; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
     '$t = 2147483647 + 1; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
