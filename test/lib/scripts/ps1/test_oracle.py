@@ -1025,6 +1025,50 @@ class TestPs1OracleReportsASourceItCannotSend(Ps1OracleTest):
             parse_reports([oversized])
 
 
+class _RecordingUnit:
+    """
+    A stand-in for the `ps1` unit that hands each input straight back and counts how often it was
+    entered. It cannot be entered twice at once any more than the real unit can, but what is asked
+    here is *when* it is entered rather than from where, which needs no threads to answer.
+    """
+
+    def __init__(self):
+        self.entries = 0
+
+    def __ror__(self, data: bytes) -> bytes:
+        self.entries += 1
+        return data
+
+
+class TestPs1RewritingHappensBeforeAnyHostRuns(TestBase):
+    """
+    `behaviours` runs its hosts on a thread pool and calls the rewrite from each of them, and a unit
+    is a generator rather than a function: entered from two threads at once it raises
+    `ValueError: generator already executing`, which a differential reports as a broken host rather
+    than as what it is. `rewritten_by` exists to settle every rewrite before any host starts, so the
+    property to hold is that using the lookup enters the unit no further. No host is started, so
+    this ratchets wherever the tests run.
+    """
+
+    def test_every_rewrite_is_computed_before_the_lookup_is_returned(self):
+        unit = _RecordingUnit()
+        rewritten_by(unit, ['$x = 1', '$y = 2', '$z = 3'])
+        self.assertEqual(unit.entries, 3)
+
+    def test_using_the_lookup_does_not_enter_the_unit(self):
+        unit = _RecordingUnit()
+        rewrite = rewritten_by(unit, ['$x = 1', '$y = 2'])
+        rewrite('$x = 1')
+        rewrite('$y = 2')
+        rewrite('$x = 1')
+        self.assertEqual(unit.entries, 2)
+
+    def test_the_lookup_answers_what_the_unit_made_of_each_snippet(self):
+        unit = _RecordingUnit()
+        rewrite = rewritten_by(unit, ['$x = 1', '$y = 2'])
+        self.assertEqual([rewrite('$x = 1'), rewrite('$y = 2')], ['$x = 1', '$y = 2'])
+
+
 @unittest.skipIf(windows_powershell() is None, 'Windows PowerShell is not available')
 class TestPs1ParserAgreesWithWindowsPowerShell(Ps1OracleTest):
 

@@ -285,5 +285,48 @@ class TestPs1MetadataViews(unittest.TestCase):
         self.assertNotIn('path', data.COMMON_PARAMETERS)
 
 
+class TestPs1TypeIdentity(unittest.TestCase):
+    """
+    `is_type` decides whether two names denote one type, and every gate that acts on a specific type
+    rests on it. It used to compare one lowercased name against another as text, so it recognised
+    only the spellings it happened to be written against; an array suffix it could not express at
+    all, and `[Byte[]]` therefore answered `False` against every spelling of itself.
+    """
+
+    def test_an_accelerator_and_the_full_name_are_one_type(self):
+        self.assertTrue(data.is_type('int', 'System.Int32'))
+        self.assertTrue(data.is_type('System.Int32', 'int'))
+
+    def test_the_prefix_the_name_omits_does_not_change_the_type(self):
+        self.assertTrue(data.is_type('Net.WebClient', 'System.Net.WebClient'))
+
+    def test_case_does_not_change_the_type(self):
+        self.assertTrue(data.is_type('system.CONVERT', 'System.Convert'))
+
+    def test_an_assembly_qualification_does_not_change_the_type(self):
+        self.assertTrue(data.is_type('System.Int32, mscorlib', 'System.Int32'))
+
+    def test_whitespace_inside_the_name_does_not_change_the_type(self):
+        self.assertTrue(data.is_type('System. Text . Encoding', 'System.Text.Encoding'))
+
+    def test_two_spellings_of_an_array_are_one_type(self):
+        self.assertTrue(data.is_type('byte[]', 'System.Byte[]'))
+        self.assertTrue(data.is_type('Byte[]', 'byte[]'))
+
+    def test_an_array_is_not_its_element_type(self):
+        self.assertFalse(data.is_type('byte[]', 'System.Byte'))
+        self.assertFalse(data.is_type('System.Byte', 'byte[]'))
+
+    def test_an_array_of_one_element_type_is_not_an_array_of_another(self):
+        self.assertFalse(data.is_type('byte[]', 'char[]'))
+
+    def test_two_different_types_are_not_one_type(self):
+        self.assertFalse(data.is_type('System.Convert', 'System.Text.Encoding'))
+
+    def test_a_name_that_does_not_resolve_is_not_any_type_including_itself(self):
+        self.assertFalse(data.is_type('NotARealType', 'NotARealType'))
+        self.assertFalse(data.is_type('System.Int32', 'NotARealType'))
+
+
 if __name__ == '__main__':
     unittest.main()
