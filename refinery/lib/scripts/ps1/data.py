@@ -18,6 +18,7 @@ was answered off `Char`.
 from __future__ import annotations
 
 import enum
+import functools
 import gzip
 import json
 import operator
@@ -910,16 +911,40 @@ def binary_outcome(
     return _outcome(_grid_lookup(by_left, left, right))
 
 
-def conversion_outcome(target: str, source: str | Ps1TypeName) -> OperatorOutcome | None:
+def conversion_outcome(
+    target: str | Ps1TypeName,
+    source: str | Ps1TypeName,
+) -> OperatorOutcome | None:
     """
     What casting a value of `source` to `target` was observed to produce, or `None` when the grid
     does not cover the cast. Read the same way as `binary_outcome`.
     """
-    by_source = _OPERATORS['conversions'].get(target.lower())
+    key = _grid_key(target)
+    by_source = None if key is None else _conversions().get(key)
     if by_source is None:
         return None
     key = _grid_key(source)
     return None if key is None else _outcome(by_source.get(key))
+
+
+@functools.cache
+def _conversions() -> dict[str, dict]:
+    """
+    The conversion grid with its target axis keyed the way everything else here is keyed.
+
+    The capture writes that axis as the accelerator a cast is *written* with — `int`, `long`,
+    `single` — because that is what the measuring script wrote, and its source axis as the type a
+    value *reported*. Those are two spellings of one thing, and a caller naming a type would
+    otherwise have to know which axis it was about to index. A target that does not resolve is an
+    error rather than a missing row: it would silently make every cast to that type unknown.
+    """
+    keyed: dict[str, dict] = {}
+    for target, by_source in _OPERATORS['conversions'].items():
+        key = _grid_key(target)
+        if key is None:
+            raise ValueError(F'the conversion grid names a target that is not a type: {target}')
+        keyed[key] = by_source
+    return keyed
 
 
 def _grid_lookup(by_left: dict, left, right) -> list[str] | None:

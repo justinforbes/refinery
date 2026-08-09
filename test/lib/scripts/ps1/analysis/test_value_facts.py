@@ -11,7 +11,7 @@ import inspect
 import re
 import unittest
 
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from test.lib.scripts.ps1.test_oracle import TYPE_TRANSCRIPTS
 
@@ -23,6 +23,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Fact,
     Ps1Outcome,
     Ps1Typed,
+    convert,
     read,
     type_of,
 )
@@ -55,16 +56,37 @@ INT32 = _type('System.Int32')
 STRING = _type('System.String')
 CHAR = _type('System.Char')
 BOOLEAN = _type('System.Boolean')
+DOUBLE = _type('System.Double')
+DECIMAL = _type('System.Decimal')
 OBJECT_ARRAY = _type('System.Object[]')
 
-#: How the Python payload of a fact is spelled for each .NET type a measured numeral carries. A
-#: type no entry covers is a `KeyError` naming it rather than a comparison against a value read the
-#: wrong way round.
-_PAYLOADS: dict[str, Callable[[str], int | float | decimal.Decimal]] = {
+
+def _boolean(rendered: str) -> bool:
+    """
+    The Boolean a host printed. Those two spellings are the only ones it prints, and a third is a
+    `KeyError` rather than a truth value read out of the length of a word.
+    """
+    return {'True': True, 'False': False}[rendered]
+
+
+#: How the Python payload of a fact is spelled for each .NET type a measured row carries. A type no
+#: entry covers is a `KeyError` naming it rather than a comparison against a value read the wrong
+#: way round. A Char and a String are spelled alike on purpose: what tells the two apart is the
+#: `Ps1TypeName` a fact is stamped with, never the Python object it holds.
+_PAYLOADS: dict[str, Callable[[str], int | float | bool | decimal.Decimal | str]] = {
     'System.Int32'   : int,
     'System.Int64'   : int,
     'System.Decimal' : decimal.Decimal,
     'System.Double'  : float,
+    'System.Byte'    : int,
+    'System.SByte'   : int,
+    'System.Int16'   : int,
+    'System.UInt16'  : int,
+    'System.UInt32'  : int,
+    'System.UInt64'  : int,
+    'System.Boolean' : _boolean,
+    'System.Char'    : str,
+    'System.String'  : str,
 }
 
 
@@ -188,6 +210,97 @@ def _elements(fact: Ps1Fact) -> tuple[Ps1Fact, ...]:
     payload = fact.payload
     assert isinstance(payload, tuple), payload
     return payload
+
+
+#: What counts as a cast in a measured row: the type an accelerator names in brackets, and the
+#: operand written against it. The selection is textual for the same reason the numeral one is, and
+#: an operand may not open with a colon, so that a read of a static member — `[double]::NaN` — is
+#: not taken for a value cast to `Double`.
+_CAST = re.compile(r'\[(?P<target>[A-Za-z0-9_]+)\](?P<operand>[^:].*)')
+
+#: A row that measures `-as` instead. `X -as [T]` and `[T]X` are different expressions and the
+#: corpus measures both, so the two have to be told apart before either is read as an expectation.
+_AS = re.compile(r'(?P<operand>.+) -as \[(?P<target>[A-Za-z0-9_]+)\]')
+
+
+class _Cast(NamedTuple):
+    """
+    The two halves of a measured cast, as the row spells them.
+    """
+    target: str
+    operand: str
+
+
+def _rows(pattern: re.Pattern[str]) -> dict[str, _Cast]:
+    matched: dict[str, _Cast] = {}
+    for row in TYPE_TRANSCRIPTS:
+        outer = _ROW_PATTERN.fullmatch(row)
+        if outer is None:
+            continue
+        expression = outer.group('expression')
+        inner = pattern.fullmatch(expression)
+        if inner is not None:
+            matched[expression] = _Cast(inner.group('target'), inner.group('operand'))
+    return matched
+
+
+CAST_ROWS = _rows(_CAST)
+AS_ROWS = _rows(_AS)
+
+#: The measured casts a host answered by throwing, which are therefore the rows that have no value
+#: to be held against.
+THROWN: tuple[str, ...] = tuple(
+    expression for expression in CAST_ROWS if _throws(_transcript(expression))
+)
+
+#: The reason a row is declined for want of an operand rather than for want of a rule: `read`
+#: evaluates nothing, so the inner cast pins no value for the outer one to convert.
+_NO_OPERAND = 'the operand is a cast, and `read` evaluates nothing'
+
+#: The measured casts whose value the domain declines to compute, under the reason `convert`
+#: documents for each. Every row here is one a host printed a value for, so an entry states that
+#: the domain answers less than the host does — deliberately, because the rule that would produce
+#: the value is one no measurement covers, and a .NET rule guessed at is a wrong answer that looks
+#: like a right one.
+DECLINED: dict[str, tuple[str, ...]] = {
+    'a String parses by .NET rules that Python does not share': (
+        "[int]'5'",
+        "[int]' 5 '",
+        "[int]'0'",
+        "[int]'0x10'",
+        "[int]'1e3'",
+        "[double]'1.5'",
+        "[double]'1,5'",
+        "[bool]''",
+        "[bool]'a'",
+    ),
+    'a Double is written by .NET formatting rather than by Python': (
+        '[string]1.5',
+    ),
+    'a collection joins on $OFS, which only a run decides': (
+        "[string]('a', 'b')",
+    ),
+    'a Single is a width nothing here computes in': (
+        '[single]1.5',
+    ),
+    _NO_OPERAND: (
+        '[int][char]65',
+        '[int][char]48',
+    ),
+}
+
+DECLINED_CASTS: tuple[str, ...] = tuple(
+    expression for group in DECLINED.values() for expression in group
+)
+
+
+def _converted(expression: str) -> Ps1Outcome:
+    """
+    What `convert` makes of a measured cast row: the type the row names as its target, applied to
+    the fact `read` makes of the operand it is written against.
+    """
+    row = CAST_ROWS[expression]
+    return convert(_read(row.operand), _type(row.target))
 
 
 class TestPs1MeasuredNumerals(unittest.TestCase):
@@ -378,6 +491,157 @@ class TestPs1ReadOnlyReadsTheSource(unittest.TestCase):
     def test_reading_nothing_at_all_is_unknown(self):
         self.assertEqual(read(None), UNKNOWN)
         self.assertEqual(read(Ps1ParenExpression()), UNKNOWN)
+
+
+class TestPs1MeasuredCasts(unittest.TestCase):
+    """
+    What `[target] value` produces, held against what a 5.1 host printed for the same cast. Each
+    row is answered exactly as the host answered it or declined, and the failure this class exists
+    to catch is the third thing: a value, a type, or an absence of a throw that the host did not
+    produce.
+    """
+
+    def test_every_cast_the_corpus_measures_is_selected(self):
+        self.assertEqual(len(CAST_ROWS), 46, 'a measured cast was added or withdrawn')
+        self.assertEqual(sorted(set(DECLINED_CASTS) - set(CAST_ROWS)), [])
+        self.assertEqual(sorted(set(DECLINED_CASTS) & set(THROWN)), [])
+
+    def test_a_measured_cast_the_domain_pins_is_pinned_to_the_fact_the_host_printed(self):
+        pinned = {
+            expression: _converted(expression)
+            for expression in CAST_ROWS
+            if expression not in THROWN
+            and isinstance(_converted(expression).value, Ps1Constant)
+        }
+        self.assertEqual(
+            pinned,
+            {
+                expression: Ps1Outcome(False, _measured_fact(expression))
+                for expression in pinned
+            },
+        )
+
+    def test_the_measured_casts_whose_value_is_declined_are_exactly_the_documented_ones(self):
+        declined = [
+            expression for expression in CAST_ROWS
+            if expression not in THROWN
+            and not isinstance(_converted(expression).value, Ps1Constant)
+        ]
+        self.assertEqual(sorted(declined), sorted(DECLINED_CASTS))
+
+    def test_a_declined_cast_still_carries_the_type_the_host_reported(self):
+        """
+        A number the domain does not compute is still a value of the type the host stamped it with,
+        and every declined cast whose operand is read has that type in the grid: `[int]'0x10'` is an
+        Int32 whether or not this can say that .NET reads those digits as sixteen.
+        """
+        for expression in sorted(set(DECLINED_CASTS) - set(DECLINED[_NO_OPERAND])):
+            with self.subTest(expression):
+                name, _ = _measured(expression)
+                self.assertEqual(_converted(expression).value, Ps1Typed(_type(name)))
+
+    def test_a_cast_of_an_operand_the_source_does_not_pin_answers_nothing(self):
+        """
+        The host prints 65 for `[int][char]65` and 48 for `[int][char]48`, and `read` evaluates
+        neither inner cast. A cast of a value nothing is known about has no type either: what
+        `[int]` does is decided by what it is given, and over a String it throws.
+        """
+        for expression in DECLINED[_NO_OPERAND]:
+            with self.subTest(expression):
+                self.assertEqual(_converted(expression), NOTHING)
+
+    def test_a_cast_the_host_threw_on_pins_no_value_and_reports_the_throw(self):
+        """
+        5.1 throws rather than wrapping where a value does not fit its target, and rather than
+        yielding zero for a String that spells no number. The last is the cell shape a cast has most
+        often — an Int32, or it throws — and the type it names is not a claim that a value came out.
+        """
+        self.assertEqual(
+            {expression: _converted(expression) for expression in THROWN},
+            {
+                '[byte]300'       : Ps1Outcome(True, UNKNOWN),
+                '[byte]-1'        : Ps1Outcome(True, UNKNOWN),
+                '[int]2147483648' : Ps1Outcome(True, UNKNOWN),
+                '[char]65536'     : Ps1Outcome(True, UNKNOWN),
+                '[char]-1'        : Ps1Outcome(True, UNKNOWN),
+                "[int]'abc'"      : Ps1Outcome(True, Ps1Typed(INT32)),
+            },
+        )
+
+    def test_a_row_that_measures_as_is_not_a_cast_and_is_no_expectation_here(self):
+        """
+        A conversion that cannot be made yields `$null` for `-as` and throws for a cast, measured:
+        the corpus prints `<null>` for `300 -as [byte]` where `[byte]300` throws. An `-as` row read
+        as a cast's expectation would pin `convert` to `$null` for exactly the operands where the
+        two expressions differ.
+        """
+        self.assertEqual(
+            sorted(AS_ROWS), ["'abc' -as [int]", '300 -as [byte]', '5 -as [long]'])
+        self.assertEqual(sorted(set(AS_ROWS) & set(CAST_ROWS)), [])
+        self.assertEqual(_measured('300 -as [byte]'), ('', '<null>'))
+        self.assertEqual(_throws(_transcript('[byte]300')), True)
+
+
+class TestPs1CharConversions(unittest.TestCase):
+    """
+    A Char is the one value no literal spells, so every measured cast over one is a row `convert`
+    has to be asked for directly. It is also the erasure the fact layer exists to undo: 65 and `A`
+    are one Char under two casts, and a Char answered as a one-character String changes what
+    `1 + $t` and `$t * 3` do.
+    """
+
+    def test_a_char_casts_to_the_number_and_to_the_text_the_host_printed(self):
+        """
+        Measured, `[int][char]65` is Int32 65 and `[string][char]65` is `A`.
+        """
+        self.assertEqual(
+            convert(Ps1Constant(CHAR, 'A'), INT32), Ps1Outcome(False, Ps1Constant(INT32, 65)))
+        self.assertEqual(
+            convert(Ps1Constant(CHAR, 'A'), STRING), Ps1Outcome(False, Ps1Constant(STRING, 'A')))
+
+    def test_a_char_reaches_no_target_the_corpus_does_not_measure(self):
+        """
+        The corpus measures a Char cast to Int32 and to String, and to nothing else. What
+        `[bool][char]0` is remains a .NET rule no row records, so the type the grid names is the
+        whole answer and the value is left where the measurement left it.
+        """
+        self.assertEqual(convert(Ps1Constant(CHAR, 'A'), BOOLEAN).value, Ps1Typed(BOOLEAN))
+        self.assertEqual(convert(Ps1Constant(CHAR, 'A'), DOUBLE).value, Ps1Typed(DOUBLE))
+
+
+class TestPs1ConvertRefusals(unittest.TestCase):
+    """
+    A cast reads its type from the grid and its value from a kernel, and the two axes fail apart:
+    where the kernel has no rule the type still stands, and where the grid has no cell there is no
+    answer at all.
+    """
+
+    def test_a_fact_that_is_not_a_value_is_never_converted_into_one(self):
+        """
+        `$null` and a value known only by its type are both looked up in the grid and neither is
+        computed from, so `[int] $null` is an Int32 whose number is unanswered. A fact that names no
+        type at all indexes no cell, and the cast answers nothing.
+        """
+        self.assertEqual(convert(UNKNOWN, INT32), NOTHING)
+        self.assertEqual(convert(Ps1Typed(DOUBLE), INT32).value, Ps1Typed(INT32))
+        self.assertEqual(convert(NULL, INT32).value, Ps1Typed(INT32))
+
+    def test_a_cast_the_grid_does_not_cover_is_refused_rather_than_assumed(self):
+        """
+        The grid holds the targets the capture measured, and `System.DateTime` is not one of them. A
+        cast to a type nothing measured produces no fact: neither the identity nor a nearest rule is
+        an answer that was ever observed.
+        """
+        self.assertEqual(convert(Ps1Constant(INT32, 5), _type('System.DateTime')), NOTHING)
+
+    def test_a_double_is_not_carried_into_a_decimal_by_python(self):
+        """
+        `[decimal]` of a Double converts by the digits the value is written with, where Python's
+        `Decimal` of a `float` carries the binary expansion instead — `Decimal(1.1)` begins
+        1.10000000000000008. Nothing measures the cast, so the type is the answer and the number is
+        not.
+        """
+        self.assertEqual(convert(Ps1Constant(DOUBLE, 1.5), DECIMAL).value, Ps1Typed(DECIMAL))
 
 
 if __name__ == '__main__':

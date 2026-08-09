@@ -54,6 +54,7 @@ from refinery.lib.scripts.ps1.data import (
     WMI_COMMANDS,
     binary_outcome,
     command_output_types,
+    conversion_outcome,
     resolve_member_type,
     resolve_type,
     static_overloads,
@@ -722,6 +723,12 @@ _INTEGER_WIDTHS: tuple[tuple[Ps1TypeName, int, int], ...] = (
     (_UINT64, 0, 0xFFFFFFFFFFFFFFFF),
 )
 
+#: The range each integer type holds, which is what a cast to it is refused outside of. Built from
+#: the same table the widening order is, so the two cannot come apart.
+_INTEGER_RANGE: dict[Ps1TypeName, tuple[int, int]] = {
+    name: (low, high) for name, low, high in _INTEGER_WIDTHS
+}
+
 #: The widths a shift masks its count by, from the *left operand's type* rather than from how large
 #: its value happens to be. Only the two the mask is documented for are here; a shift over a narrower
 #: left operand keeps that operand's type in the grid and is not computed, because what the count is
@@ -734,8 +741,10 @@ _VOID = _type('System.Void')
 
 
 #: What a kernel computes in. A `Decimal` is here because PowerShell has one and Python's is the
-#: only faithful carrier for it; a `bool` because a comparison is an operation like any other.
-_Number = int | float | bool | decimal.Decimal
+#: only faithful carrier for it; a `bool` because a comparison is an operation like any other; a
+#: `str` because a conversion produces one and the `Ps1TypeName` the grid names is what tells a Char
+#: from a one-character String.
+_Number = int | float | bool | decimal.Decimal | str
 
 
 class _Throws(Exception):
@@ -771,6 +780,144 @@ def apply(operator: str, left: Ps1Fact, right: Ps1Fact) -> Ps1Outcome:
             if stamped is not UNKNOWN:
                 return Ps1Outcome(False, stamped)
     return _from_cell(cell)
+
+
+def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
+    """
+    What `[target] fact` produces, read from the measured conversion grid exactly as `apply` reads
+    the binary one: the *type* is what a host was observed to produce and the *value* comes from a
+    kernel checked against it.
+
+    A cast throws where the value does not fit its target — measured, `[byte]300`, `[byte]-1`,
+    `[int]2147483648`, `[char]65536` and `[char]-1` all throw rather than wrapping — and `_cast`
+    raises for exactly that, so a cell that recorded a throw may still be computed where the target
+    is one whose range the kernel checks. For any other target a recorded throw is one nothing here
+    sees, and the cell answers alone.
+
+    A `String` operand is never computed from. .NET parses one by rules Python does not share:
+    measured, `[int]'1e3'` is 1000, `[int]'0x10'` is 16, `[int]' 5 '` is 5 and `[double]'1,5'` is
+    15, while `[int]'abc'` throws. Those reach the grid for their type and stop there.
+    """
+    source = _grid_type(fact)
+    cell = None if source is None else conversion_outcome(target, source)
+    if cell is None:
+        return NOTHING
+    if not cell.may_throw or _cast_throws_are_modelled(target):
+        try:
+            computed = _cast(target, fact)
+        except _Throws:
+            return Ps1Outcome(True, UNKNOWN)
+        if computed is not None:
+            stamped = _stamped(computed, cell.types)
+            if stamped is not UNKNOWN:
+                return Ps1Outcome(False, stamped)
+    return _from_cell(cell)
+
+
+def _cast_throws_are_modelled(target: Ps1TypeName) -> bool:
+    """
+    Whether every way the grid recorded a cast to `target` throwing is one `_cast` checks for
+    itself. A cast to an integer type or to a `Char` throws when the value does not fit, which is
+    the range `_cast` refuses; a cell for any other target that recorded a throw threw for a reason
+    nothing here models.
+    """
+    return target in _INTEGER_RANGE or target == _CHAR
+
+
+def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
+    """
+    The value a cast produces, or `None` where this module computes nothing for it.
+
+    A `Char` is a number to everything that reads one — `[int][char]65` is 65, measured — and it is
+    a value to everything that renders one, `[string][char]65` being `A`. It is *not* fed to the
+    remaining targets, because what those do with a Char has no row: `[bool]` of one is the case
+    that would be invented.
+
+    A real is rounded half to even on its way to an integer, which is what a host does rather than
+    what a truncation would: `[int]1.5` and `[int]2.5` are both 2, `[int]1.4` is 1 and `[int]-1.5`
+    is -2, all measured.
+
+    A `Double` reaches neither `String` nor `Decimal`. Rendering one is .NET's formatting rather
+    than Python's, and widening one to a Decimal through Python would carry the binary expansion of
+    a value the host converts by its decimal digits.
+    """
+    if not isinstance(fact, Ps1Constant):
+        return None
+    if target == _STRING:
+        return _rendered(fact)
+    number = _numeric_source(fact)
+    if number is None:
+        return None
+    if target == _CHAR:
+        rounded = _rounded(number)
+        return None if rounded is None else _character(rounded)
+    if target in _INTEGER_RANGE:
+        rounded = _rounded(number)
+        return None if rounded is None else _within(_INTEGER_RANGE[target], rounded)
+    if fact.type == _CHAR:
+        return None
+    if target == _BOOLEAN:
+        return number != 0
+    if target == _DOUBLE:
+        return float(number)
+    if target == _DECIMAL and not isinstance(number, float):
+        return decimal.Decimal(number)
+    return None
+
+
+def _numeric_source(fact: Ps1Constant) -> int | float | decimal.Decimal | None:
+    """
+    The number a cast reads this value as, or `None` for a value no cast here computes from. The
+    payload is checked against the type the fact carries rather than trusted, because the two are
+    only ever built together here and a mismatch is a defect rather than a case.
+    """
+    payload = fact.payload
+    if fact.type == _BOOLEAN and isinstance(payload, bool):
+        return int(payload)
+    if fact.type in _INTEGER_RANGE and isinstance(payload, int):
+        return payload
+    if fact.type == _CHAR and isinstance(payload, str) and len(payload) == 1:
+        return ord(payload)
+    if fact.type == _DECIMAL and isinstance(payload, decimal.Decimal):
+        return payload
+    if fact.type == _DOUBLE and isinstance(payload, float):
+        return payload
+    return None
+
+
+def _rendered(fact: Ps1Constant) -> str | None:
+    """
+    The text a cast to `String` produces. Measured: `[string]5` is `5`, `[string]$true` is `True`,
+    `[string]10d` is `10` and `[string][char]65` is `A`.
+    """
+    if fact.type in _INTEGER_RANGE or fact.type in (_CHAR, _BOOLEAN, _DECIMAL):
+        return str(fact.payload)
+    return None
+
+
+def _rounded(number: int | float | decimal.Decimal) -> int | None:
+    """
+    The integer a number converts to, half to even, or `None` for one that has no integer at all.
+    """
+    if isinstance(number, int):
+        return number
+    try:
+        return round(number)
+    except (OverflowError, ValueError):
+        return None
+
+
+def _character(code: int) -> str:
+    if not 0 <= code <= 0xFFFF:
+        raise _Throws
+    return chr(code)
+
+
+def _within(bounds: tuple[int, int], value: int) -> int:
+    low, high = bounds
+    if not low <= value <= high:
+        raise _Throws
+    return value
 
 
 def _grid_type(fact: Ps1Fact) -> Ps1TypeName | None:
@@ -829,6 +976,9 @@ def _stamped(value: _Number, candidates: frozenset[Ps1TypeName]) -> Ps1Fact:
         return _double(value) if _DOUBLE in candidates else UNKNOWN
     if isinstance(value, decimal.Decimal):
         return Ps1Constant(_DECIMAL, value) if _DECIMAL in candidates else UNKNOWN
+    if isinstance(value, str):
+        holders = [name for name in (_CHAR, _STRING) if name in candidates]
+        return Ps1Constant(holders[0], value) if len(holders) == 1 else UNKNOWN
     return Ps1Constant(_DOUBLE, value) if _DOUBLE in candidates else UNKNOWN
 
 
