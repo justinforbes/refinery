@@ -46,7 +46,6 @@ from refinery.lib.scripts.ps1.ast import (
     get_param_block,
     is_builtin_variable,
     is_reference_cast,
-    normalize_dotnet_type_name,
     unwrap_parens,
 )
 from refinery.lib.scripts.ps1.model import (
@@ -1154,13 +1153,13 @@ class StatementEffect(enum.Enum):
 
 def _is_void_cast(node) -> TypeGuard[Ps1CastExpression]:
     """
-    Whether a node is a cast to `[Void]`, the discard idiom that throws a value away. The type name
-    is folded through `refinery.lib.scripts.ps1.ast.normalize_dotnet_type_name` so that the
-    `[System.Void]` spelling an obfuscator emits is the same idiom.
+    Whether a node is a cast to `[Void]`, the discard idiom that throws a value away. The name is
+    resolved rather than compared as text, so every spelling of the type — `[System.Void]` among
+    them — is the same idiom.
     """
     return (
         isinstance(node, Ps1CastExpression)
-        and normalize_dotnet_type_name(node.type_name) == 'void'
+        and data.is_type(node.type_name, 'System.Void')
     )
 
 

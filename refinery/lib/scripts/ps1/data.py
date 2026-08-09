@@ -4,11 +4,16 @@ subsystems share: type accelerators and members, command names, aliases and para
 and the small lookup tables built from them. The data is collected by run-pwsh.ps1 on genuine
 Windows PowerShell 5.1 and shipped as the compressed `pwsh-*.json.gz` resources.
 
-Two surfaces live here. The `*` tables (`TYPE_MEMBERS`, `KNOWN_CMDLETS`, ...) are the historical
-views the deobfuscation transforms read today; they reconstruct the shapes those modules expect. The
-functions at the end (`resolve_type`, `canonical_type`, `type_members`, `command`, `member_order`)
-are the query API that later work migrates those consumers onto, and they alone reach the richer
-facts the new format carries — per-overload signatures, member kind, the true Get-Member order.
+Every question about a *type* is asked of the query API at the end — `resolve_type` and the
+functions built on it. `resolve_type` is the only thing that mints a canonical `Ps1TypeName`, and
+every table below is keyed by one, which is what makes two spellings of a type comparable at all:
+`char[]`, `System.Char[]` and `[Char[]]` are one name, and none of them is `System.Char`.
+
+The remaining `*` tables (`KNOWN_CMDLETS`, `CANONICAL_TYPE_NAMES`, ...) are about *commands* and
+*display*, not about type identity. The lowercase-string type views that used to sit beside them —
+`TYPE_MEMBERS`, `PROPERTY_TYPES`, `MEMBER_LOOKUP`, `TYPE_ALIASES` — are gone: they were a second
+vocabulary in which an array suffix could not be written, so every member question about `char[]`
+was answered off `Char`.
 """
 from __future__ import annotations
 
@@ -106,25 +111,6 @@ def _view_members(record: dict) -> dict[str, dict]:
     }
 
 
-TYPE_MEMBERS: dict[str, list[str]] = {}
-
-for _full, _record in _TYPE_TABLE.items():
-    if _record['kind'] == 'enum':
-        _names = sorted(_record['enum_values'] or {})
-    else:
-        _names = sorted(_view_members(_record))
-    TYPE_MEMBERS[_full.lower()] = _names
-
-PROPERTY_TYPES: dict[tuple[str, str], str] = {}
-
-for _full, _record in _TYPE_TABLE.items():
-    if _record['kind'] == 'enum':
-        continue
-    _tl = _full.lower()
-    for _name, _member in _view_members(_record).items():
-        if _member['kind'] == 'property':
-            PROPERTY_TYPES[(_tl, _name.lower())] = _member['type'].lower()
-
 VARIABLE_TYPES: dict[str, str] = {
     _name.lower(): _info['type'].lower()
     for _name, _info in _VARIABLES['variables'].items()
@@ -134,10 +120,6 @@ VARIABLE_TYPES: dict[str, str] = {
 #: generator runs never sees it. It is supplied here, as the previous database did, because it
 #: cannot be collected rather than because it is absent.
 VARIABLE_TYPES.setdefault('pscmdlet', 'system.management.automation.psscriptcmdlet')
-
-TYPE_ALIASES: dict[str, str] = {
-    _alias.lower(): _full.lower() for _alias, _full in _ACCELERATORS.items()
-}
 
 #: The set of type-accelerator spellings, lowercased. An accelerator is already the shortest
 #: readable name for its type, so display normalization leaves it as written rather than expanding
@@ -155,21 +137,12 @@ for _full in _TYPE_TABLE:
     CANONICAL_TYPE_NAMES.setdefault(_full.lower(), _display)
     CANONICAL_TYPE_NAMES.setdefault(_full.lower().removeprefix('system.'), _display)
 
-MEMBER_LOOKUP: dict[str, dict[str, str]] = {}
-
-for _type_lower, _members in TYPE_MEMBERS.items():
-    MEMBER_LOOKUP[_type_lower] = {m.lower(): m for m in _members}
-
 WMI_CLASS_NAMES: dict[str, str] = {}
 
-for _namespace, _classes in _WMI['namespaces'].items():
-    for _cls, _cls_info in _classes.items():
-        _cls_lower = _cls.lower()
-        WMI_CLASS_NAMES.setdefault(_cls_lower, _cls)
-        CANONICAL_TYPE_NAMES.setdefault(_cls_lower, _cls)
-        _lookup = MEMBER_LOOKUP.setdefault(_cls_lower, {})
-        for _prop in _cls_info['properties']:
-            _lookup.setdefault(_prop.lower(), _prop)
+for _classes in _WMI['namespaces'].values():
+    for _cls in _classes:
+        WMI_CLASS_NAMES.setdefault(_cls.lower(), _cls)
+        CANONICAL_TYPE_NAMES.setdefault(_cls.lower(), _cls)
 
 CANONICAL_TYPE_NAMES.setdefault(
     'management.automation.sessionstateinternal',
@@ -177,30 +150,19 @@ CANONICAL_TYPE_NAMES.setdefault(
 )
 
 
-def _resolve_type_name(name: str) -> str | None:
+def is_type(name: str, target: str) -> bool:
     """
-    Resolve a type name (as written in PowerShell) to its canonical lowercase full .NET name.
-    Handles short names like 'String', qualified names like 'Net.WebClient', and full names like
-    'System.Net.WebClient'.
-    """
-    lower = name.lower()
-    if lower in TYPE_MEMBERS:
-        return lower
-    if lower in TYPE_ALIASES:
-        return TYPE_ALIASES[lower]
-    prefixed = F'system.{lower}'
-    if prefixed in TYPE_MEMBERS:
-        return prefixed
-    return None
+    Whether a type name as written in PowerShell source names the same type as `target`. Both sides
+    go through `resolve_type`, so no difference of spelling can make two names for one type answer
+    `False`: an accelerator, an omitted `System.` prefix, a difference of case, whitespace inside the
+    name, an assembly qualification and a generic argument list are all understood.
 
-
-def is_type(name: str, canonical_lower: str) -> bool:
+    This used to compare a lowercased name against a lowercased full name, which meant it saw only
+    the three spellings that transformation happens to produce and answered `False` for the rest —
+    `[Byte[]]` among them, because an array suffix was not part of a name at all.
     """
-    Check whether a type name (as written in PowerShell source) resolves to the given canonical
-    lowercase .NET type name.
-    """
-    resolved = _resolve_type_name(name)
-    return resolved == canonical_lower
+    resolved = resolve_type(name)
+    return resolved is not None and resolved == resolve_type(target)
 
 
 #: The aliases the host binds, and nothing else. An entry here is not a harmless surplus: nothing in
@@ -592,7 +554,7 @@ for _full in _TYPE_TABLE:
 #: deciding about purity must be able to tell a WMI property from a reflected one.
 _WMI_TYPES: dict[str, dict] = {}
 
-for _namespace, _classes in _WMI['namespaces'].items():
+for _classes in _WMI['namespaces'].values():
     for _cls, _cls_info in _classes.items():
         _WMI_TYPES.setdefault(_cls, {
             'kind': 'wmi',

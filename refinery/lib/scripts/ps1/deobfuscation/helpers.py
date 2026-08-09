@@ -16,7 +16,6 @@ from refinery.lib.scripts.ps1.analysis.values import collect_typed_arguments, un
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_member_name,
-    normalize_type_expression,
     string_value,
     unwrap_assignment_target,
 )
@@ -166,7 +165,7 @@ def is_static_type_call(node: Ps1InvokeMember, canonical: str) -> bool:
         return False
     if not isinstance(node.object, Ps1TypeExpression):
         return False
-    return is_type(normalize_type_expression(node.object.name), canonical)
+    return is_type(node.object.name, canonical)
 
 
 def detect_encoding_chain(node: Ps1InvokeMember) -> str | None:
@@ -184,7 +183,7 @@ def detect_encoding_chain(node: Ps1InvokeMember) -> str | None:
         return None
     if not isinstance(obj.object, Ps1TypeExpression):
         return None
-    if not is_type(normalize_type_expression(obj.object.name), 'system.text.encoding'):
+    if not is_type(obj.object.name, 'System.Text.Encoding'):
         return None
     enc_name = get_member_name(obj.member)
     return enc_name
@@ -260,7 +259,7 @@ def is_array_reverse_call(node: Ps1ExpressionStatement) -> Ps1Variable | None:
         return None
     if not isinstance(expr.object, Ps1TypeExpression):
         return None
-    if not is_type(normalize_type_expression(expr.object.name), 'system.array'):
+    if not is_type(expr.object.name, 'System.Array'):
         return None
     member = get_member_name(expr.member)
     if member is None or member.lower() != 'reverse':

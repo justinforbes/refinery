@@ -28,7 +28,6 @@ from refinery.lib.scripts.ps1.ast import (
     get_member_name,
     normalize_command_name,
     normalize_dotnet_type_name,
-    normalize_type_expression,
     standalone_command_statement,
     string_value,
 )
@@ -796,19 +795,19 @@ class _Ps1Interpreter:
     def _eval_static_invoke(self, node: Ps1InvokeMember) -> _Value:
         if not isinstance(node.object, Ps1TypeExpression):
             raise _Ps1InterpreterError
-        type_name = normalize_type_expression(node.object.name)
+        type_name = node.object.name
         member = get_member_name(node.member)
         if member is None:
             raise _Ps1InterpreterError
         name = member.lower()
         args = [self._eval(a) for a in node.arguments]
-        if is_type(type_name, 'system.convert'):
+        if is_type(type_name, 'System.Convert'):
             return self._invoke_convert(name, args)
-        if is_type(type_name, 'system.text.encoding'):
+        if is_type(type_name, 'System.Text.Encoding'):
             return self._invoke_encoding(name, args)
-        if is_type(type_name, 'system.string'):
+        if is_type(type_name, 'System.String'):
             return self._invoke_string_static(name, args)
-        if is_type(type_name, 'system.math'):
+        if is_type(type_name, 'System.Math'):
             return self._invoke_math_static(name, args)
         raise _Ps1InterpreterError
 

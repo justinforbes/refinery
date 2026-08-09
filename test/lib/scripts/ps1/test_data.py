@@ -5,6 +5,10 @@ import unittest
 from refinery.lib.scripts.ps1 import data
 
 
+def _definition_of(resolved) -> str | None:
+    return None if resolved is None else resolved.definition
+
+
 def _definition(name: str) -> str | None:
     """
     The reflection `FullName` of the type a source name resolves to, which is what the collected
@@ -219,17 +223,16 @@ class TestPs1MetadataReader(unittest.TestCase):
 
 class TestPs1MetadataViews(unittest.TestCase):
     """
-    The historical view tables the deobfuscation transforms still read must stay well-formed.
+    The tables the deobfuscation transforms read must stay well-formed.
     """
 
     def test_the_views_are_populated(self):
-        self.assertGreater(len(data.TYPE_MEMBERS), 500)
+        self.assertGreater(len(data.CANONICAL_TYPE_NAMES), 500)
         self.assertGreater(len(data.KNOWN_CMDLETS), 1000)
         self.assertGreater(len(data.ALL_PARAMETER_NAMES), 1000)
 
-    def test_a_type_member_view_is_lowercased_and_canonical(self):
-        members = data.MEMBER_LOOKUP['system.string']
-        self.assertEqual(members['substring'], 'Substring')
+    def test_a_member_is_reported_in_the_casing_the_metadata_records(self):
+        self.assertEqual(data.canonical_member('string', 'substring'), 'Substring')
 
     def test_common_parameters_are_excluded_from_the_parameter_views(self):
         # ALL_PARAMETER_NAMES drives a command-independent casing rewrite; the common parameters
@@ -238,13 +241,20 @@ class TestPs1MetadataViews(unittest.TestCase):
         self.assertNotIn('verbose', data.ALL_PARAMETER_NAMES)
 
     def test_an_enum_view_lists_its_values_not_its_object_methods(self):
-        members = data.TYPE_MEMBERS['system.net.securityprotocoltype']
+        members = data.member_names('Net.SecurityProtocolType')
+        assert members is not None
         self.assertIn('Tls12', members)
         self.assertNotIn('GetType', members)
 
-    def test_property_types_resolve_a_member_result_type(self):
-        self.assertEqual(data.PROPERTY_TYPES[('system.array', 'length')], 'system.int32')
-        self.assertEqual(data.PROPERTY_TYPES[('system.array', 'count')], 'system.int32')
+    def test_a_member_result_type_resolves(self):
+        self.assertEqual(_definition_of(data.resolve_member_type('System.Array', 'Length')),
+                         'System.Int32')
+        self.assertEqual(_definition_of(data.resolve_member_type('System.Array', 'Count')),
+                         'System.Int32')
+
+    def test_an_array_answers_a_member_off_the_array_and_not_off_its_element_type(self):
+        self.assertEqual(_definition_of(data.resolve_member_type('char[]', 'Rank')), 'System.Int32')
+        self.assertIsNone(data.resolve_member_type('char', 'Rank'))
 
     def test_module_provided_cim_aliases_are_present(self):
         # A pristine Get-Alias drops these module short forms; they are supplied so that a sample

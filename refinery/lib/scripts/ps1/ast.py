@@ -21,6 +21,7 @@ from refinery.lib.scripts.ps1.data import (
     KNOWN_ALIAS,
     KNOWN_CMDLETS,
     PROGRAM_NAMES,
+    is_type,
     value_parameters,
 )
 from refinery.lib.scripts.ps1.model import (
@@ -442,12 +443,6 @@ def is_opaque_dispatch(cmd: Ps1CommandInvocation) -> bool:
     return not isinstance(cmd.name, (Ps1StringLiteral, Ps1ScriptBlock))
 
 
-_SCRIPTBLOCK_TYPE_NAMES = frozenset({
-    'scriptblock',
-    'management.automation.scriptblock',
-})
-
-
 def is_scriptblock_create(expr: Expression) -> bool:
     """
     Whether `expr` is a `[scriptblock]::Create(...)` call, which compiles an arbitrary string into a
@@ -458,7 +453,7 @@ def is_scriptblock_create(expr: Expression) -> bool:
         isinstance(expr, Ps1InvokeMember)
         and expr.access is Ps1AccessKind.STATIC
         and isinstance(expr.object, Ps1TypeExpression)
-        and normalize_dotnet_type_name(expr.object.name) in _SCRIPTBLOCK_TYPE_NAMES
+        and is_type(expr.object.name, 'System.Management.Automation.ScriptBlock')
         and isinstance(expr.member, str)
         and expr.member.lower() == 'create'
     )
@@ -637,12 +632,6 @@ def free_positional_values(
 
 #: Type names that denote a by-reference wrapper. `[Ref]` is the PowerShell shorthand; the framework
 #: name it resolves to spells the same thing and appears in obfuscated scripts.
-_REFERENCE_TYPE_NAMES = frozenset({
-    'management.automation.psreference',
-    'ref',
-})
-
-
 def is_reference_cast(expr: Node | None) -> bool:
     """
     Whether `expr` is a `[ref]` cast, which hands the callee a wrapper it can store back through
@@ -651,7 +640,7 @@ def is_reference_cast(expr: Node | None) -> bool:
     """
     return (
         isinstance(expr, Ps1CastExpression)
-        and normalize_dotnet_type_name(expr.type_name) in _REFERENCE_TYPE_NAMES
+        and is_type(expr.type_name, 'System.Management.Automation.PSReference')
     )
 
 

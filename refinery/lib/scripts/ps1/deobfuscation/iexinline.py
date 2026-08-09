@@ -21,7 +21,7 @@ from refinery.lib.scripts.ps1.ast import (
     normalize_dotnet_type_name,
     string_value,
 )
-from refinery.lib.scripts.ps1.data import ENCODING_MAP
+from refinery.lib.scripts.ps1.data import ENCODING_MAP, is_type
 from refinery.lib.scripts.ps1.deobfuscation.helpers import extract_foreach_scriptblock
 from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     substitute,
@@ -172,7 +172,7 @@ def _resolve_encoding(expr: Expression) -> str | None:
         return None
     if not isinstance(expr.object, Ps1TypeExpression):
         return None
-    if normalize_dotnet_type_name(expr.object.name) != 'text.encoding':
+    if not is_type(expr.object.name, 'System.Text.Encoding'):
         return None
     if not isinstance(expr.member, str):
         return None
@@ -230,7 +230,7 @@ def _try_evaluate(
         if (
             expr.access == Ps1AccessKind.STATIC
             and isinstance(expr.object, Ps1TypeExpression)
-            and normalize_dotnet_type_name(expr.object.name) == 'convert'
+            and is_type(expr.object.name, 'System.Convert')
             and isinstance(expr.member, str)
             and expr.member.lower() == 'frombase64string'
             and len(expr.arguments) == 1
