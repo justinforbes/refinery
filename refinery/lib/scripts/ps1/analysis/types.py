@@ -25,15 +25,15 @@ from refinery.lib.scripts.ps1.ast import (
 )
 from refinery.lib.scripts.ps1.data import (
     OBJ_COMMANDS,
-    PROPERTY_TYPES,
     TYPE_ARG_COMMANDS,
     VARIABLE_TYPES,
-    WMI_CLASS_NAMES,
     WMI_COMMANDS,
-    _resolve_type_name,
     command_output_types,
+    resolve_member_type,
+    resolve_type,
     static_overloads,
 )
+from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
@@ -55,40 +55,53 @@ if TYPE_CHECKING:
     from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 
 
+#: The types a literal has, resolved once through the one resolver rather than spelled here. A name
+#: written out as text would be a second vocabulary inside the module whose purpose is to have one.
+_STRING = resolve_type('System.String')
+_INT32 = resolve_type('System.Int32')
+
+#: What an array literal builds. PowerShell collects the elements into an `Object[]` whatever they
+#: are, which is measured rather than assumed: an array of integers and an array of strings both
+#: report `System.Object[]`. The rank is what makes a member read on one resolve against
+#: `System.Array`, which is where an array's members actually live.
+_OBJECT_ARRAY = resolve_type('System.Object[]')
+
+
 def resolve_expression_type(
     expr: Expression,
-    variable_types: dict[str, str] | None = None,
-) -> str | None:
+    variable_types: dict[str, Ps1TypeName] | None = None,
+) -> Ps1TypeName | None:
     """
-    Trace the .NET type of a PowerShell expression by walking member access chains. Returns the
-    lowercase full .NET type name, or `None` if the type cannot be determined.
+    Trace the .NET type of a PowerShell expression by walking member access chains. Returns the one
+    canonical `Ps1TypeName`, or `None` if the type cannot be determined.
     """
     unwrapped = unwrap_parens(expr)
     if not isinstance(unwrapped, Expression):
         return None
     expr = unwrapped
     if isinstance(expr, (Ps1StringLiteral, Ps1HereString)):
-        return 'system.string'
+        return _STRING
     if isinstance(expr, Ps1IntegerLiteral):
-        return 'system.int32'
+        return _INT32
     if isinstance(expr, Ps1ArrayLiteral):
-        return 'system.array'
+        return _OBJECT_ARRAY
     if isinstance(expr, Ps1ArrayExpression):
         if (
             len(expr.body) == 1
             and isinstance(expr.body[0], Ps1ExpressionStatement)
             and isinstance(expr.body[0].expression, Ps1ArrayLiteral)
         ):
-            return 'system.array'
+            return _OBJECT_ARRAY
     if isinstance(expr, Ps1Variable):
         key = expr.name.lower()
         if variable_types and key in variable_types:
             return variable_types[key]
-        return VARIABLE_TYPES.get(key)
+        declared = VARIABLE_TYPES.get(key)
+        return None if declared is None else resolve_type(declared)
     if isinstance(expr, Ps1TypeExpression):
-        return _resolve_type_name(expr.name)
+        return resolve_type(expr.name)
     if isinstance(expr, Ps1CastExpression):
-        return _resolve_type_name(expr.type_name)
+        return resolve_type(expr.type_name)
     if isinstance(expr, Ps1CommandInvocation):
         cmd_name = get_command_name(expr)
         if cmd_name is not None:
@@ -96,13 +109,11 @@ def resolve_expression_type(
             if cmd_lower in OBJ_COMMANDS:
                 type_str = extract_first_positional_string(expr)
                 if type_str is not None:
-                    return _resolve_type_name(type_str)
+                    return resolve_type(type_str)
             elif cmd_lower in WMI_COMMANDS:
                 class_str = extract_first_positional_string(expr)
                 if class_str is not None:
-                    wmi_lower = class_str.lower()
-                    if wmi_lower in WMI_CLASS_NAMES:
-                        return wmi_lower
+                    return resolve_type(class_str)
     if isinstance(expr, Ps1MemberAccess):
         if expr.object is None:
             return None
@@ -112,7 +123,7 @@ def resolve_expression_type(
         member_name = get_member_name(expr.member)
         if member_name is None:
             return None
-        return PROPERTY_TYPES.get((obj_type, member_name.lower()))
+        return resolve_member_type(obj_type, member_name)
     return None
 
 
@@ -149,13 +160,16 @@ class TypeOracle:
 
     def __init__(
         self,
-        variable_types: dict[str, str] | None = None,
+        variable_types: dict[str, Ps1TypeName] | None = None,
         world: Ps1TypeWorld | None = None,
     ):
         self._variable_types = variable_types
         self._world = world
 
-    def with_variable_types(self, variable_types: dict[str, str] | None) -> TypeOracle:
+    def with_variable_types(
+        self,
+        variable_types: dict[str, Ps1TypeName] | None,
+    ) -> TypeOracle:
         """
         This oracle with `variable_types` substituted, carrying the same world. The world is a
         whole-script fact and the typing is not, so a caller holding typing derived for one node
@@ -195,7 +209,7 @@ class TypeOracle:
             return False
         return self._world.world_closed_at(node) and not self._world.command_shadowed(name)
 
-    def resolve(self, expr: Expression) -> str | None:
+    def resolve(self, expr: Expression) -> Ps1TypeName | None:
         """
         The single lowercase .NET type name the expression evaluates to when that is unambiguous,
         else `None`: `candidate_types` collapsed, so a lone candidate is the answer and zero or
@@ -209,7 +223,7 @@ class TypeOracle:
             return next(iter(candidates))
         return None
 
-    def candidate_types(self, expr: Expression) -> frozenset[str]:
+    def candidate_types(self, expr: Expression) -> frozenset[Ps1TypeName]:
         """
         The set of lowercase full .NET type names the expression's value could have, each a key the
         type metadata resolves, or the empty set when the type cannot be determined. A static method
@@ -230,7 +244,10 @@ class TypeOracle:
         single = resolve_expression_type(expr, self._variable_types)
         return frozenset() if single is None else frozenset({single})
 
-    def _static_method_candidates(self, node: Ps1InvokeMember) -> frozenset[str]:
+    def _static_method_candidates(
+        self,
+        node: Ps1InvokeMember,
+    ) -> frozenset[Ps1TypeName]:
         """
         The return type of a `[Type]::Method(...)` call, taken only when every matching static
         overload agrees on it; disagreement or an unrecognized call is the empty set. An instance
@@ -244,13 +261,16 @@ class TypeOracle:
         if not isinstance(obj, Ps1TypeExpression) or not isinstance(member, str):
             return frozenset()
         returns = {
-            overload['returns'].lower()
+            resolve_type(overload['returns'])
             for overload in static_overloads(obj.name, member)
             if overload.get('returns')
         }
-        return frozenset(returns) if len(returns) == 1 else frozenset()
+        if len(returns) != 1:
+            return frozenset()
+        single = next(iter(returns))
+        return frozenset() if single is None else frozenset({single})
 
-    def _command_candidates(self, cmd: Ps1CommandInvocation) -> frozenset[str]:
+    def _command_candidates(self, cmd: Ps1CommandInvocation) -> frozenset[Ps1TypeName]:
         """
         The types a command's result could have: the constructed or queried type for the `New-Object`
         and WMI forms the single-type ladder already knows, otherwise the output types a command
@@ -273,4 +293,7 @@ class TypeOracle:
         if lower not in _CLOSED_OUTPUT_CMDLETS:
             return frozenset()
         declared = command_output_types(name)
-        return declared if declared is not None else frozenset()
+        if declared is None:
+            return frozenset()
+        resolved = {resolve_type(one) for one in declared}
+        return frozenset(one for one in resolved if one is not None)

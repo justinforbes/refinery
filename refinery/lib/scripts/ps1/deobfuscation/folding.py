@@ -49,10 +49,8 @@ from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     substitute_list,
     substituted,
 )
-from refinery.lib.scripts.ps1.deobfuscation.typenames import (
-    is_known_member,
-    resolve_member_type,
-)
+from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
+from refinery.lib.scripts.ps1.data import MemberLookup, member_record
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ArrayExpression,
@@ -171,16 +169,21 @@ def _compute_regex_match(node: Ps1InvokeMember) -> str | None:
         return next(it, '')
 
 
-_INTEGER_RESULT_TYPES = frozenset({
-    'system.int16',
-    'system.int32',
-    'system.int64',
-    'system.uint16',
-    'system.uint32',
-    'system.uint64',
-    'system.byte',
-    'system.sbyte',
-})
+def _integer(value: int) -> Ps1IntegerLiteral:
+    return Ps1IntegerLiteral(value=value, raw=str(value))
+
+
+#: The members whose value is decided by the shape of the receiver rather than by anything the
+#: receiver holds, and what each answers. Dispatch is on the member and never on the type its read
+#: produces: `Rank`, `Length` and `Count` all produce an `Int32`, so a gate that asked only for an
+#: integer result answered `Rank` with the element count — 5.1 says 1, because `Rank` is the number
+#: of dimensions of the array and not the number of things in it.
+#:
+#: Each answer is measured on a 5.1 host; see `TYPE_TRANSCRIPTS` in
+#: `test.lib.scripts.ps1.test_oracle`. The one that reads oddly is `Count` on a string, which is 1
+#: and not the character count: `Count` comes from the object adapter, which counts the value as one
+#: object, while `Length` is the string's own member.
+_SHAPE_MEMBERS = frozenset({'length', 'count', 'rank'})
 
 
 def _foreach_extracts_value(sb: Ps1ScriptBlock) -> bool:
@@ -440,25 +443,43 @@ class Ps1ConstantFolding(OracleAwareTransformer):
         obj = node.object
         if obj is None:
             return None
-        member_type = resolve_member_type(obj, member)
-        if member_type in _INTEGER_RESULT_TYPES:
-            s = string_value(obj)
-            if s is not None:
-                return Ps1IntegerLiteral(value=len(s), raw=str(len(s)))
-            array = unwrap_to_array_literal(obj)
-            if array is not None:
-                return self._selected(node, _Selection(
-                    Ps1IntegerLiteral(value=len(array.elements), raw=str(len(array.elements))),
-                    list(array.elements)))
-        if (
-            string_value(obj) is not None
-            or isinstance(obj, Ps1IntegerLiteral)
-        ):
-            if not is_known_member(obj, member):
-                return Ps1Variable(name='Null')
+        shaped = self._fold_shape_member(node, obj, member)
+        if shaped is not None:
+            return shaped
+        if string_value(obj) is not None or isinstance(obj, Ps1IntegerLiteral):
+            obj_type = resolve_expression_type(obj)
+            if obj_type is not None:
+                record = member_record(obj_type, member)
+                if record is MemberLookup.ABSENT:
+                    return Ps1Variable(name='Null')
         result = self._try_fold_regex_member_access(node, member)
         if result is not None:
             return result
+        return None
+
+    def _fold_shape_member(
+        self,
+        node: Ps1MemberAccess,
+        obj: Expression,
+        member: str,
+    ) -> Expression | None:
+        """
+        Fold a member whose value the receiver's shape decides. The array answers go through
+        `_selected` because folding one discards the elements that built it, and whether that is
+        safe is the selection's question rather than this one's.
+        """
+        name = member.lower()
+        if name not in _SHAPE_MEMBERS:
+            return None
+        text = string_value(obj)
+        if text is not None:
+            return _integer(len(text) if name == 'length' else 1)
+        array = unwrap_to_array_literal(obj)
+        if array is not None:
+            count = 1 if name == 'rank' else len(array.elements)
+            return self._selected(node, _Selection(_integer(count), list(array.elements)))
+        if isinstance(obj, Ps1IntegerLiteral) and name != 'rank':
+            return _integer(1)
         return None
 
     def _try_fold_regex_member_access(

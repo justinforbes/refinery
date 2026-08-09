@@ -724,13 +724,13 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: phase corrects.
 TYPE_DEFECTS: dict[str, str] = {
     "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output $t.GetType().FullName; Write-Output $t":
-        'A pipeline builds an Object[]. The emulator collapses a list of one-character strings'
-        'into one string, so both the container type and the element count are lost.',
+        'A pipeline builds an Object[]. The emulator collapses a list of one-character stringsinto'
+        'one string, so both the container type and the element count are lost.',
     "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output ($t -join '-')":
         'The same collapse, seen through a join: one element means the separator never appears.',
     "$t = @('a', 'b') | ForEach-Object { $_ }; foreach ($e in $t) { Write-Output $e }":
-        'The same collapse, as changed control flow: the loop runs once over one string rather'
-        'than twice over two.',
+        'The same collapse, as changed control flow: the loop runs once over one string ratherthan'
+        'twice over two.',
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.GetType().FullName':
         'The same collapse over Char results, which is the shape a char-building loader writes.',
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
@@ -746,25 +746,21 @@ TYPE_DEFECTS: dict[str, str] = {
     "$t = 'ABC'[0]; Write-Output $t.GetType().FullName; Write-Output $t":
         'Indexing a string yields a Char. folding.py:302 produces a String.',
     "Write-Output (1 + [char]65); Write-Output (1 + 'A')":
-        'The left operand decides: Int + Char is Int32 66, and Int + String parses the string as a'
-        'number. Spelling the Char as a String turns a working line into a throw.',
+        'The left operand decides: Int + Char is Int32 66, and Int + String parses the string as'
+        'anumber. Spelling the Char as a String turns a working line into a throw.',
     'Write-Output (([char]65) * 3)':
-        'LangSpec 7.6.2 replicates only where the left operand is a String, so 5.1 throws. The'
-        'fold spells the Char as a String and answers AAA.',
+        'LangSpec 7.6.2 replicates only where the left operand is a String, so 5.1 throws. Thefold'
+        'spells the Char as a String and answers AAA.',
     "Write-Output ([char]65 -is [char]); Write-Output ('A' -is [char])":
         'The fold makes a Char answer False to -is [char].',
-    "Write-Output (([char]65).Count); Write-Output (('A').Count)":
-        'Count is an engine intrinsic the per-type capture cannot hold, so $Null is minted where'
-        '5.1 answers 1.',
     '$c = [char]65; foreach ($e in $c) { Write-Output $e }':
         'The loop variable is a Char in 5.1 and a String after the fold.',
     "$t = 'AB'.Count; Write-Output $t.GetType().FullName; Write-Output $t":
-        'The minted $Null then receives .GetType(), so the script throws where 5.1 printed'
-        'System.Int32. The mint does not merely answer wrongly, it stops the script.',
+        _UNPARSEABLE_RECEIVER,
     '$t = (5).Count; Write-Output $t.GetType().FullName; Write-Output $t':
-        'The same, on a scalar receiver.',
+        _UNPARSEABLE_RECEIVER,
     '$t = (5).Length; Write-Output $t.GetType().FullName; Write-Output $t':
-        'The same, for Length on a scalar.',
+        _UNPARSEABLE_RECEIVER,
     "$t = 1 + 'AB'.Count; Write-Output $t.GetType().FullName; Write-Output $t":
         _UNPARSEABLE_RECEIVER,
     '$t = @(1, 2, 3).Rank; Write-Output $t.GetType().FullName; Write-Output $t':
@@ -776,13 +772,10 @@ TYPE_DEFECTS: dict[str, str] = {
     "$t = 'AB'.Length; Write-Output $t.GetType().FullName; Write-Output $t":
         _UNPARSEABLE_RECEIVER,
     'Write-Output ((5).PSTypeNames)':
-        'PSTypeNames is added by the PSObject adapter to every object, so Get-Member -Force cannot'
-        'capture it per type and the mint answers $Null for it.',
-    "Write-Output (('AB').PSTypeNames)":
-        'The same, on a String receiver.',
+        'PSTypeNames is added by the PSObject adapter to every object, so Get-Member -Force'
+        'cannotcapture it per type and the mint answers $Null for it.',
     'Write-Output ((5).PSObject.GetType().FullName)':
-        'PSObject is the same kind of intrinsic, and the minted $Null then receives .GetType(), so'
-        'the script throws.',
+        _UNPARSEABLE_RECEIVER,
     '$t = 0xFF; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
     '$t = 0x7FFFFFFF; Write-Output $t.GetType().FullName; Write-Output $t':
@@ -820,8 +813,8 @@ TYPE_DEFECTS: dict[str, str] = {
     '$t = -2147483647 - 1; Write-Output $t.GetType().FullName; Write-Output $t':
         _UNPARSEABLE_RECEIVER,
     "$OFS = '-'; $t = [string]('a', 'b'); Write-Output $t":
-        'A collection renders to a String separated by $OFS (LangSpec 6.8), which this script'
-        'sets. The fold bakes in the default separator.',
+        'A collection renders to a String separated by $OFS (LangSpec 6.8), which this scriptsets.'
+        'The fold bakes in the default separator.',
 }
 
 #: Which words 5.1 read as a command name, for each script whose corruption entry turns on where a

@@ -34,6 +34,7 @@ from typing import Iterator, NamedTuple, Sequence, TypeGuard
 
 from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1 import data
+from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle
 from refinery.lib.scripts.ps1.ast import (
@@ -97,7 +98,7 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 
-def _canonical_type_name(name: str) -> str:
+def _canonical_type_name(name: str) -> Ps1TypeName:
     """
     Resolve a purity allow-list type spelling to the lowercased canonical .NET `FullName` the effect
     checks key on, raising when the collected metadata carries no such type. Building the tables
@@ -113,10 +114,10 @@ def _canonical_type_name(name: str) -> str:
             F'the PowerShell purity allow-list names {name!r}, which the collected metadata does '
             F'not resolve to a type; the data and the allow-list are out of step.'
         )
-    return resolved.lower()
+    return resolved.generic_definition
 
 
-def _canonical_type_set(names: set[str]) -> frozenset[str]:
+def _canonical_type_set(names: set[str]) -> frozenset[Ps1TypeName]:
     """
     A frozenset of canonical type keys built from readable source spellings through
     `_canonical_type_name`. Spellings that name the same type collapse to one entry, retiring the
@@ -126,7 +127,9 @@ def _canonical_type_set(names: set[str]) -> frozenset[str]:
     return frozenset(_canonical_type_name(name) for name in names)
 
 
-def _canonical_method_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, str]]:
+def _canonical_method_set(
+    entries: set[tuple[str, str]],
+) -> frozenset[tuple[Ps1TypeName, str]]:
     """
     A frozenset of `(canonical type key, lowercased member)` pairs, the form the static-method
     checks look up. Only the type half is resolved through the data and floored by it; the member
@@ -139,7 +142,9 @@ def _canonical_method_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str,
     )
 
 
-def _canonical_read_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, str]]:
+def _canonical_read_set(
+    entries: set[tuple[str, str]],
+) -> frozenset[tuple[Ps1TypeName, str]]:
     """
     A frozenset of `(canonical type key, lowercased member)` reads, each floored against the data the
     way `_canonical_type_name` floors a type: the type must resolve, and the member must be collected
@@ -151,7 +156,7 @@ def _canonical_read_set(entries: set[tuple[str, str]]) -> frozenset[tuple[str, s
     as the invoke-side tables, so the per-member effect data a later regeneration adds can replace it
     without rekeying.
     """
-    result: set[tuple[str, str]] = set()
+    result: set[tuple[Ps1TypeName, str]] = set()
     for type_name, member in entries:
         type_key = _canonical_type_name(type_name)
         record = data.member_record(type_key, member)
@@ -191,7 +196,7 @@ def _canonical_command_set(names: set[str]) -> frozenset[str]:
     return frozenset(result)
 
 
-def _canonical_sealed_value_type_set(names: set[str]) -> frozenset[str]:
+def _canonical_sealed_value_type_set(names: set[str]) -> frozenset[Ps1TypeName]:
     """
     A frozenset of canonical type keys like `_canonical_type_set`, additionally floored against the
     shipped `sealed` flag. A type on the pure-read allow-list must be sealed: the whole-surface
@@ -717,7 +722,7 @@ def _command_body_is_pure(
     )
 
 
-def _reflection_read_is_pure(type_key: str, member: str) -> bool:
+def _reflection_read_is_pure(type_key: Ps1TypeName, member: str) -> bool:
     """
     Whether reading `member` off a value of the single .NET type `type_key` runs no code and cannot
     throw. An uncollected type is never pure: nothing is known about its surface, so a getter that
@@ -730,18 +735,26 @@ def _reflection_read_is_pure(type_key: str, member: str) -> bool:
     (`_PURE_READS`). A member the type does not carry reads as `$null` and is pure — but only on a
     sealed value type, because a candidate that is an imprecise supertype would otherwise vouch for a
     read its runtime subtype does carry.
+
+    A member the object adapter supplies (`source == 'engine'`) is read off the adapter rather than
+    off the type, so no getter of the type's own runs. It is granted on the same condition as an
+    absent member and for the same reason: the grant is about this value carrying exactly the
+    surface the metadata describes, which only a sealed type settles.
     """
     record = data.member_record(type_key, member)
+    surface = type_key.generic_definition
     if record is data.MemberLookup.UNCOLLECTED:
         return False
     if record is data.MemberLookup.ABSENT:
-        return type_key in _PURE_READ_TYPES
-    if record['source'] == 'ets':
+        return surface in _PURE_READ_TYPES
+    if record['source'] == 'engine':
+        return surface in _PURE_READ_TYPES
+    if record['source'] in ('ets', 'wmi'):
         return False
     if record['kind'] == 'field' and record.get('static') is False:
         return True
     if record['kind'] in ('field', 'property'):
-        return type_key in _PURE_READ_TYPES or (type_key, member.lower()) in _PURE_READS
+        return surface in _PURE_READ_TYPES or (surface, member.lower()) in _PURE_READS
     return False
 
 
@@ -865,7 +878,7 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
                 # describe resolves to nothing and falls through to impure: the fail-closed default.
                 resolved = data.resolve_type(obj.name)
                 if resolved is not None:
-                    type_key = resolved.lower()
+                    type_key = resolved.generic_definition
                     key = (type_key, member.lower())
                     if key in _IMPURE_STATIC_METHODS:
                         return False
@@ -892,7 +905,10 @@ def is_side_effect_free(node, oracle: TypeOracle) -> bool:
                 return False
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
-            if resolved is not None and resolved.lower() in _PURE_STATIC_METHOD_TYPES:
+            if (
+                resolved is not None
+                and resolved.generic_definition in _PURE_STATIC_METHOD_TYPES
+            ):
                 return _grant(_arguments_are_pure(ctor_args, oracle), node, oracle)
             return False
         name = get_command_name(node)

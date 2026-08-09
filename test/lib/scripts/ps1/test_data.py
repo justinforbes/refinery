@@ -5,6 +5,17 @@ import unittest
 from refinery.lib.scripts.ps1 import data
 
 
+def _definition(name: str) -> str | None:
+    """
+    The reflection `FullName` of the type a source name resolves to, which is what the collected
+    table is keyed by. `resolve_type` answers a `Ps1TypeName`, so the key is read off it rather than
+    compared against a spelling — a name and a spelling of a name are the thing this module exists to
+    keep apart.
+    """
+    resolved = data.resolve_type(name)
+    return None if resolved is None else resolved.definition
+
+
 class TestPs1MetadataReader(unittest.TestCase):
     """
     These exercise the reader against the shipped metadata rather than a fixture: the data is the
@@ -25,7 +36,7 @@ class TestPs1MetadataReader(unittest.TestCase):
             'scriptblock' : 'System.Management.Automation.ScriptBlock',
         }
         for accelerator, full in cases.items():
-            self.assertEqual(data.resolve_type(accelerator), full, accelerator)
+            self.assertEqual(_definition(accelerator), full, accelerator)
 
     def test_a_parser_type_keyword_resolves_although_no_host_reports_it(self):
         # `[ordered]` is understood in a cast position but was never registered as an accelerator,
@@ -33,30 +44,30 @@ class TestPs1MetadataReader(unittest.TestCase):
         # the host is. Leaving it unresolved made the language's most common hashtable idiom
         # unremovable, since a cast is granted purity only when its target type resolves.
         self.assertEqual(
-            data.resolve_type('ordered'), 'System.Collections.Specialized.OrderedDictionary')
+            _definition('ordered'), 'System.Collections.Specialized.OrderedDictionary')
         self.assertNotIn('ordered', data._TYPES['accelerators'])
 
     def test_a_qualified_name_resolves_without_the_system_prefix(self):
-        self.assertEqual(data.resolve_type('Net.WebClient'), 'System.Net.WebClient')
-        self.assertEqual(data.resolve_type('System.Net.WebClient'), 'System.Net.WebClient')
+        self.assertEqual(_definition('Net.WebClient'), 'System.Net.WebClient')
+        self.assertEqual(_definition('System.Net.WebClient'), 'System.Net.WebClient')
 
     def test_a_mixed_case_accelerator_resolves(self):
         # The accelerator table is keyed in the casing PowerShell reports, which is mixed; resolving
         # one has to be case-insensitive or every capital-lettered accelerator silently fails.
         self.assertEqual(
-            data.resolve_type('CimSession'), 'Microsoft.Management.Infrastructure.CimSession')
+            _definition('CimSession'), 'Microsoft.Management.Infrastructure.CimSession')
         self.assertEqual(
-            data.resolve_type('X509Certificate'),
+            _definition('X509Certificate'),
             'System.Security.Cryptography.X509Certificates.X509Certificate',
         )
 
     def test_a_generic_name_resolves_to_its_open_definition(self):
         self.assertEqual(
-            data.resolve_type('Collections.Generic.List[int]'),
+            _definition('Collections.Generic.List[int]'),
             'System.Collections.Generic.List`1',
         )
         self.assertEqual(
-            data.resolve_type('System.Collections.Generic.Dictionary[string, object]'),
+            _definition('System.Collections.Generic.Dictionary[string, object]'),
             'System.Collections.Generic.Dictionary`2',
         )
 

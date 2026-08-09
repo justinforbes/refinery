@@ -4,6 +4,7 @@ from test import TestBase
 
 from refinery.lib.scripts.ps1.analysis.types import TypeOracle, resolve_expression_type
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.data import resolve_type
 from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
@@ -38,7 +39,7 @@ class TestPs1TypeOracleCandidates(Ps1TypeOracleTest):
         # a call yields depends on its arguments.
         self.assertEqual(
             self.oracle.candidate_types(self._expr('(Get-Date)')),
-            frozenset({'system.datetime', 'system.string'}),
+            frozenset({resolve_type('System.DateTime'), resolve_type('System.String')}),
         )
 
     def test_an_untrusted_cmdlet_contributes_no_candidates(self):
@@ -54,7 +55,7 @@ class TestPs1TypeOracleCandidates(Ps1TypeOracleTest):
         # call at all, so this is a return the oracle resolves and resolve_expression_type does not.
         self.assertEqual(
             self.oracle.candidate_types(self._expr('[Diagnostics.Process]::GetCurrentProcess()')),
-            frozenset({'system.diagnostics.process'}),
+            frozenset({resolve_type('System.Diagnostics.Process')}),
         )
 
     def test_a_static_call_with_disagreeing_overloads_is_empty(self):
@@ -68,7 +69,7 @@ class TestPs1TypeOracleCandidates(Ps1TypeOracleTest):
         # one that neutralises it.
         self.assertEqual(
             self.oracle.candidate_types(self._expr('[Convert]::ChangeType($x, [int])')),
-            frozenset({'system.object'}),
+            frozenset({resolve_type('System.Object')}),
         )
 
     def test_an_instance_method_call_is_not_resolved(self):
@@ -97,9 +98,11 @@ class TestPs1TypeOracleCandidates(Ps1TypeOracleTest):
     def test_a_populated_oracle_resolves_a_typed_variable(self):
         # The typing a model supplies is what an empty oracle lacks: given it, the same read the
         # empty oracle cannot type now carries the variable's type.
-        oracle = TypeOracle({'client': 'system.net.webclient'}, self.CLOSED)
+        webclient = resolve_type('System.Net.WebClient')
+        assert webclient is not None
+        oracle = TypeOracle({'client': webclient}, self.CLOSED)
         self.assertEqual(
-            oracle.candidate_types(self._expr('$client')), frozenset({'system.net.webclient'}))
+            oracle.candidate_types(self._expr('$client')), frozenset({webclient}))
         self.assertEqual(self.oracle.candidate_types(self._expr('$client')), frozenset())
 
 
@@ -116,7 +119,7 @@ class TestPs1TypeOracleResolve(Ps1TypeOracleTest):
     def test_a_lone_candidate_is_the_answer(self):
         self.assertEqual(
             self.oracle.resolve(self._expr('[Diagnostics.Process]::GetCurrentProcess()')),
-            'system.diagnostics.process',
+            resolve_type('System.Diagnostics.Process'),
         )
 
     def test_an_ambiguous_or_unknown_expression_is_none(self):
@@ -137,7 +140,7 @@ class TestPs1TypeOracleResolve(Ps1TypeOracleTest):
         # the narrower answer.
         call = self._expr('[Diagnostics.Process]::GetCurrentProcess()')
         self.assertIsNone(resolve_expression_type(call))
-        self.assertEqual(self.oracle.resolve(call), 'system.diagnostics.process')
+        self.assertEqual(self.oracle.resolve(call), resolve_type('System.Diagnostics.Process'))
 
 
 if __name__ == '__main__':

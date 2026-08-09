@@ -268,22 +268,18 @@ class TestPs1MembersTheObjectAdapterAddsToEveryValue(TestPs1):
     element count, and a member that genuinely does not exist reads as `$null`.
     """
 
-    @unittest.expectedFailure
     def test_the_count_of_a_string_is_one(self):
         self.assertEqual(self._deobfuscate("$x = 'AB'.Count"), '$x = 1')
 
-    @unittest.expectedFailure
     def test_the_count_of_a_number_is_one(self):
         self.assertEqual(self._deobfuscate('$x = (5).Count'), '$x = 1')
 
-    @unittest.expectedFailure
     def test_the_length_of_a_number_is_one(self):
         self.assertEqual(self._deobfuscate('$x = (5).Length'), '$x = 1')
 
     def test_the_length_of_a_string_is_its_character_count(self):
         self.assertEqual(self._deobfuscate("$x = 'AB'.Length"), '$x = 2')
 
-    @unittest.expectedFailure
     def test_the_count_of_a_char_is_one(self):
         self.assertEqual(self._deobfuscate('$x = ([char]65).Count'), '$x = 1')
 
@@ -296,7 +292,6 @@ class TestPs1MembersTheObjectAdapterAddsToEveryValue(TestPs1):
     def test_the_length_of_an_array_is_its_element_count(self):
         self.assertEqual(self._deobfuscate('$x = @(1, 2, 3).Length'), '$x = 3')
 
-    @unittest.expectedFailure
     def test_the_rank_of_a_one_dimensional_array_is_one(self):
         self.assertEqual(self._deobfuscate('$x = @(1, 2, 3).Rank'), '$x = 1')
 

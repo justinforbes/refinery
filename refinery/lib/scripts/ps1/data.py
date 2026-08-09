@@ -19,7 +19,7 @@ import operator
 import re
 
 from refinery.lib.resources import datapath
-from refinery.lib.scripts.ps1.dotnet import parse_type_name
+from refinery.lib.scripts.ps1.dotnet import Ps1TypeName, parse_type_name
 
 SCHEMA_VERSION = 1
 
@@ -102,7 +102,7 @@ def _view_members(record: dict) -> dict[str, dict]:
     return {
         name: member
         for name, member in record['members'].items()
-        if member['source'] == 'reflection' and member['kind'] in _VIEW_MEMBER_KINDS
+        if member['source'] in ('reflection', 'wmi') and member['kind'] in _VIEW_MEMBER_KINDS
     }
 
 
@@ -517,23 +517,50 @@ PS1_KNOWN_VARIABLES: dict[str, str] = {
 FORMAT_PATTERN = re.compile(r'\{\{|\}\}|\{(\d+)(?:,(-?\d+))?(?::([^}]+))?\}')
 
 
-def resolve_type(name: str) -> str | None:
+def resolve_type(name: str | Ps1TypeName) -> Ps1TypeName | None:
     """
-    Resolve a .NET type name as written in PowerShell source to the canonical key of the collected
-    type record: the reflection `FullName` of the generic definition, e.g. `System.Int32` for `int`
-    or `System.Collections.Generic.List` `` `1 `` for `[Collections.Generic.List[string]]`. Returns
-    `None` when the name is syntactically not a type or names a type that was not collected.
+    Resolve a .NET type name as written in PowerShell source to the one canonical `Ps1TypeName` the
+    collected metadata is keyed by, or `None` when the name is syntactically not a type or names a
+    type that was not collected. This understands the whole type-name grammar — accelerators, an
+    omitted `System.` prefix, generic arity, arrays — and it is the **only** thing that mints a
+    canonical name, which is what makes a canonical name comparable to another one.
 
-    Unlike `_resolve_type_name`, which the historical views expose in lowercase, this understands the
-    full type-name grammar — accelerators, an omitted `System.` prefix, generic arity, arrays — and
-    returns the collected record's own casing.
+    A parsed name is not canonical: `System.Int32`, `system.int32` and `System.Int32, mscorlib` parse
+    to three unequal, differently hashing tuples, as do the two spellings of a list type. So the
+    result is *rebuilt* rather than returned — the collected record's own casing for the name, the
+    assembly qualification dropped because it does not distinguish a type here, and the arguments
+    resolved in turn. An argument that does not resolve makes the whole name unresolved, since a
+    name is only as understood as its least understood part.
+
+    The array suffixes are carried rather than dropped. `char[]` used to resolve to `System.Char`,
+    so every member question about an array of characters was answered off the element type; what
+    an array's members actually are is `_member_surface`'s question, asked of the name this returns.
     """
-    parsed = parse_type_name(name)
+    parsed = parse_type_name(name) if isinstance(name, str) else name
     if parsed is None:
         return None
+    return _canonical_type_name(parsed)
+
+
+def _canonical_type_name(parsed: Ps1TypeName) -> Ps1TypeName | None:
     for candidate in _definition_candidates(parsed.definition):
-        if candidate in _TYPE_TABLE:
-            return candidate
+        if candidate not in _TYPE_TABLE and candidate not in _WMI_TYPES:
+            continue
+        arguments: list[Ps1TypeName] = []
+        for argument in parsed.arguments:
+            resolved = _canonical_type_name(argument)
+            if resolved is None:
+                return None
+            arguments.append(resolved)
+        base, _, arity = candidate.partition('`')
+        return Ps1TypeName(
+            name=base,
+            arity=int(arity) if arity else 0,
+            arguments=tuple(arguments),
+            ranks=parsed.ranks,
+            pointers=parsed.pointers,
+            byref=parsed.byref,
+        )
     return None
 
 
@@ -554,40 +581,103 @@ for _full in _TYPE_TABLE:
     if _bare != _full.lower():
         _TYPE_LOOKUP.setdefault(_bare, []).append(_full)
 
+#: The WMI classes, shaped like a collected type record so that one resolver answers for them too. A
+#: WMI class is a type a PowerShell expression can have — `Get-WmiObject Win32_Process` yields one —
+#: and before this it was a lowercase string in a namespace of its own, which is one of the type
+#: vocabularies this module exists to have only one of.
+#:
+#: The capture records a class's property *names* and not their types, so each member says so with a
+#: `type` of `None`: a chain through a WMI property stops resolving there, which is the honest
+#: answer rather than a guess. `source` is its own tier for the same reason `engine` is — a caller
+#: deciding about purity must be able to tell a WMI property from a reflected one.
+_WMI_TYPES: dict[str, dict] = {}
 
-def canonical_type(name: str) -> str | None:
+for _namespace, _classes in _WMI['namespaces'].items():
+    for _cls, _cls_info in _classes.items():
+        _WMI_TYPES.setdefault(_cls, {
+            'kind': 'wmi',
+            'sealed': False,
+            'members': {
+                _prop: {'kind': 'property', 'source': 'wmi', 'type': None}
+                for _prop in _cls_info['properties']
+            },
+        })
+
+for _cls in _WMI_TYPES:
+    _TYPE_LOOKUP.setdefault(_cls.lower(), []).append(_cls)
+
+
+def canonical_type(name: str) -> Ps1TypeName | None:
     """
-    The canonical `FullName` of the type a source name refers to, or `None` when it does not resolve
-    to a collected type.
+    The canonical `Ps1TypeName` of the type a source name refers to, or `None` when it does not
+    resolve to a collected type.
     """
     return resolve_type(name)
 
 
-def type_members(name: str) -> dict[str, dict] | None:
+#: Where an array type's members come from. .NET gives every array the surface of `System.Array`
+#: rather than one of its own, so `char[]` answers member questions off this and not off `Char`.
+_ARRAY_SURFACE = 'System.Array'
+
+
+def _type_record(key: str) -> dict | None:
+    """
+    The collected record a canonical definition key names, from either the .NET type capture or the
+    WMI class capture. The two are separate captures of the same thing — what members a value of a
+    type has — so they are read through one accessor and every query below is written once.
+    """
+    record = _TYPE_TABLE.get(key)
+    if record is None:
+        record = _WMI_TYPES.get(key)
+    return record
+
+
+def _member_surface(name: str | Ps1TypeName) -> str | None:
+    """
+    The key of the collected record whose members a value of this type carries, or `None` when the
+    type does not resolve. This is the one place the array rule lives: an array carries the members
+    of `System.Array` whatever it is an array *of*, so every member query — the table, the display
+    order, one record, a property's type, the static overloads — reaches the same surface through
+    here rather than each deciding for itself.
+
+    Sealedness is deliberately not asked here, because it is not a question about the member
+    surface: `System.Array` is not sealed, and every array type is.
+    """
+    resolved = resolve_type(name)
+    if resolved is None:
+        return None
+    if resolved.ranks:
+        return _ARRAY_SURFACE
+    return resolved.definition
+
+
+def type_members(name: str | Ps1TypeName) -> dict[str, dict] | None:
     """
     The full member table of a type, keyed by member name, including the fields and Extended Type
     System members the historical views omit. Each value carries at least `kind` and `source`.
     Returns `None` when the type is not collected.
     """
-    key = resolve_type(name)
+    key = _member_surface(name)
     if key is None:
         return None
-    return _TYPE_TABLE[key]['members']
+    record = _type_record(key)
+    return None if record is None else record['members']
 
 
-def member_order(name: str) -> list[str] | None:
+def member_order(name: str | Ps1TypeName) -> list[str] | None:
     """
     The order `Get-Member` displays a type's members in, as observed on a real instance, or `None`
     when it was not collected for this type. This is the authentic display order, not a synthesis
     from the member table, and is only present for the types the generator has an instance for.
     """
-    key = resolve_type(name)
+    key = _member_surface(name)
     if key is None:
         return None
-    return _TYPE_TABLE[key].get('member_order')
+    record = _type_record(key)
+    return None if record is None else record.get('member_order')
 
 
-def type_is_sealed(name: str) -> bool:
+def type_is_sealed(name: str | Ps1TypeName) -> bool:
     """
     Whether the named type is sealed — no subtype of it exists, so a value of the type carries
     exactly the members reflection reports and nothing a subtype could add. `False` when the type
@@ -595,11 +685,18 @@ def type_is_sealed(name: str) -> bool:
     closed on an unknown type rather than assuming it. The flag is read from the collected metadata,
     which is what retires the hand-asserted sealedness the effect layer's pure-read allow-list used
     to rest on.
+
+    An array type is sealed whatever its element type is — .NET derives no type from one — so it is
+    answered from the array rather than through `_member_surface`, which would answer it off
+    `System.Array` and call it unsealed.
     """
-    key = resolve_type(name)
-    if key is None:
+    resolved = resolve_type(name)
+    if resolved is None:
         return False
-    return bool(_TYPE_TABLE[key].get('sealed'))
+    if resolved.ranks:
+        return True
+    record = _type_record(resolved.definition)
+    return record is not None and bool(record.get('sealed'))
 
 
 class MemberLookup(enum.Enum):
@@ -615,7 +712,44 @@ class MemberLookup(enum.Enum):
     ABSENT = 'absent'
 
 
-def member_record(name: str, member: str) -> dict | MemberLookup:
+#: The members PowerShell's object adapter puts on every value, whatever its type. `Get-Member
+#: -Force` reports them per instance rather than per type, so the capture — which walks types —
+#: cannot hold them, and before this a read of one answered as though the member did not exist.
+#:
+#: Each is measured on a 5.1 host rather than reasoned about; see `TYPE_TRANSCRIPTS` in
+#: `test.lib.scripts.ps1.test_oracle`. `Count` is 1 for a scalar, `PSTypeNames` is the type's own
+#: name followed by its bases, and `PSObject` wraps the value.
+#:
+#: `Length` is deliberately absent even though a scalar answers 1 for it. Every type that carries a
+#: real `Length` has it collected — `System.String`, `System.Array`, `System.IO.FileStream` — so the
+#: tier would never be reached for one; putting it here would only add a way for the *next* type
+#: whose capture is incomplete to have a live getter vouched for. The scalar case is left to the
+#: value domain, which knows what a scalar is.
+#:
+#: `source` is neither `reflection` nor `ets`. Filing these as `ets` would make every read of one
+#: impure and delete nothing that is deleted today; filing them as `reflection` would claim the
+#: capture saw them. They are their own tier so that a gate can decide about them on purpose.
+_ENGINE_MEMBERS: dict[str, dict] = {
+    'count': {'kind': 'property', 'source': 'engine', 'type': 'System.Int32'},
+    'pstypenames': {'kind': 'property', 'source': 'engine', 'type': 'System.String[]'},
+    'psobject': {
+        'kind': 'property',
+        'source': 'engine',
+        'type': 'System.Management.Automation.PSObject',
+    },
+}
+
+
+def engine_member(member: str) -> dict | None:
+    """
+    The record for a member the object adapter adds to every value, or `None` for a name that is not
+    one. Callers consult this only where `member_record` answered `MemberLookup.ABSENT`: a collected
+    record is what the type really carries and is never overridden by this.
+    """
+    return _ENGINE_MEMBERS.get(member.lower())
+
+
+def member_record(name: str | Ps1TypeName, member: str) -> dict | MemberLookup:
     """
     The collected record for a single member of a type, or a `MemberLookup` sentinel explaining why
     there is none. `MemberLookup.UNCOLLECTED` means the type has no member table at all;
@@ -623,6 +757,10 @@ def member_record(name: str, member: str) -> dict | MemberLookup:
     is matched case-insensitively, as PowerShell resolves it, and the first match wins. The record
     carries at least `kind` and `source`, which distinguish a plain reflection property or field from
     a code-running Extended Type System member.
+
+    A member the capture holds wins over `engine_member`, which is why the adapter tier is consulted
+    here on the way out rather than by each caller: a caller that asked the tier first would answer
+    `Count` off it for `System.Array`, which carries a real one.
     """
     members = type_members(name)
     if members is None:
@@ -631,10 +769,75 @@ def member_record(name: str, member: str) -> dict | MemberLookup:
     for stored, record in members.items():
         if stored.lower() == lower:
             return record
+    engine = engine_member(member)
+    if engine is not None:
+        return engine
     return MemberLookup.ABSENT
 
 
-def static_overloads(name: str, member: str) -> list[dict]:
+def view_members(name: str | Ps1TypeName) -> dict[str, dict] | None:
+    """
+    The members of a type that `Get-Member` reports without `-Force`: the reflected methods and
+    properties, and for a WMI class its properties. Fields and Extended Type System members are
+    withheld, as they are from the historical `TYPE_MEMBERS` view this replaces — the difference is
+    that the type is resolved through `resolve_type`, so an array answers off `System.Array` and a
+    spelling that is not already the lowercased `FullName` resolves instead of missing.
+
+    An enum has no members in this sense and its named values stand in for them, which is what the
+    view has always done and what a caller listing what may follow a dot needs.
+    """
+    key = _member_surface(name)
+    if key is None:
+        return None
+    record = _type_record(key)
+    if record is None:
+        return None
+    if record.get('kind') == 'enum':
+        return {value: {'kind': 'property', 'source': 'enum'} for value in record['enum_values'] or {}}
+    return _view_members(record)
+
+
+def member_names(name: str | Ps1TypeName) -> list[str] | None:
+    """
+    The names `view_members` reports, sorted, or `None` when the type does not resolve.
+    """
+    members = view_members(name)
+    return None if members is None else sorted(members)
+
+
+def canonical_member(name: str | Ps1TypeName, member: str) -> str | None:
+    """
+    The casing the metadata records for a member, matched case-insensitively as PowerShell resolves
+    it, or `None` when the type or the member does not resolve.
+    """
+    members = view_members(name)
+    if members is None:
+        return None
+    lower = member.lower()
+    for stored in members:
+        if stored.lower() == lower:
+            return stored
+    return None
+
+
+def resolve_member_type(name: str | Ps1TypeName, member: str) -> Ps1TypeName | None:
+    """
+    The type a property of a type holds, or `None` when the type does not resolve, carries no such
+    member, or the member is not a property. The answer is a canonical `Ps1TypeName`, so a chain of
+    reads composes: what `$x.Prop.Length` resolves to is this asked twice.
+    """
+    record = member_record(name, member)
+    if isinstance(record, MemberLookup):
+        return None
+    if record.get('kind') != 'property':
+        return None
+    declared = record.get('type')
+    if not declared:
+        return None
+    return resolve_type(declared)
+
+
+def static_overloads(name: str | Ps1TypeName, member: str) -> list[dict]:
     """
     The static overloads of a method on a type, each a record carrying its `returns` and its
     `parameters`, where every parameter records its `byref`/`out` direction, its `type` and its

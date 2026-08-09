@@ -15,6 +15,7 @@ from fnmatch import translate as fnmatch_translate
 from typing import Iterable
 
 from refinery.lib.scripts.ps1.analysis.types import resolve_expression_type
+from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.ast import (
     argument_text,
     binds_parameter,
@@ -31,7 +32,7 @@ from refinery.lib.scripts.ps1.data import (
     GET_MEMBER_ALIASES,
     KNOWN_CMDLETS,
     PS1_KNOWN_VARIABLES,
-    TYPE_MEMBERS,
+    member_names,
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
 from refinery.lib.scripts.ps1.deobfuscation.substitution import substituted
@@ -113,7 +114,7 @@ def _is_psobject_member_access(
 
 def _determine_where_object_candidates(
     elements: list,
-    variable_types: dict[str, str] | None = None,
+    variable_types: dict[str, Ps1TypeName] | None = None,
 ) -> Iterable[str] | None:
     """
     Examine the pipeline elements preceding `Where-Object` to determine which candidates the
@@ -160,7 +161,7 @@ def _determine_where_object_candidates(
 def _candidates_from_get_member(
     elements: list,
     gm_element: Ps1PipelineElement,
-    variable_types: dict[str, str] | None = None,
+    variable_types: dict[str, Ps1TypeName] | None = None,
 ) -> list[str] | None:
     """
     For a pipeline like `expr | Get-Member | Where-Object ...`, resolve the type of the expression
@@ -181,14 +182,14 @@ def _candidates_from_get_member(
 
 def _candidates_from_type(
     expr: Expression | None,
-    variable_types: dict[str, str] | None = None,
+    variable_types: dict[str, Ps1TypeName] | None = None,
 ) -> list[str] | None:
     if expr is None:
         return None
     type_name = resolve_expression_type(expr, variable_types)
     if type_name is None:
         return None
-    return TYPE_MEMBERS.get(type_name)
+    return member_names(type_name)
 
 
 def _concat_expressions(exprs: list[Expression]) -> Expression:

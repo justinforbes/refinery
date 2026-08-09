@@ -69,6 +69,19 @@ class Ps1TypeName(NamedTuple):
         return self.name
 
     @property
+    def generic_definition(self) -> Ps1TypeName:
+        """
+        This name with its type arguments dropped, which is the form anything keyed by what a type
+        *has* rather than by what it *is* must use: members belong to the definition and not to any
+        one instantiation, so `List[byte]` and `List[string]` carry the same surface and have to
+        reach it through the same key. `definition` is the same idea as text; this is it as a name,
+        so a table of names can be looked up in without spelling one.
+        """
+        if not self.arguments:
+            return self
+        return self._replace(arguments=())
+
+    @property
     def is_array(self) -> bool:
         return bool(self.ranks)
 

@@ -9,12 +9,13 @@ from refinery.lib.scripts.ps1.ast import get_command_name, get_member_name, unwr
 from refinery.lib.scripts.ps1.data import (
     CANONICAL_TYPE_NAMES,
     GET_MEMBER_ALIASES,
-    MEMBER_LOOKUP,
-    PROPERTY_TYPES,
     TYPE_ACCELERATORS,
-    TYPE_MEMBERS,
-    _resolve_type_name,
+    canonical_member,
+    resolve_type,
+    view_members,
 )
+from refinery.lib.scripts.ps1.data import resolve_member_type as data_member_type
+from refinery.lib.scripts.ps1.dotnet import Ps1TypeName, parse_type_name
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     MutationKind,
     iter_variable_mutations,
@@ -38,17 +39,37 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 
+def _accelerator_spelling(name: str) -> bool:
+    """
+    Whether `name` is written as a type accelerator, with or without array, pointer or reference
+    suffixes. A name the type-name grammar does not understand is judged as written, which is what
+    it was before the suffixes were understood at all.
+    """
+    parsed = parse_type_name(name)
+    if parsed is None:
+        return name.lower() in TYPE_ACCELERATORS
+    return parsed.name.lower() in TYPE_ACCELERATORS
+
+
 def canonical_type_name(name: str) -> str | None:
     """
     Return the canonical PascalCase display name for a .NET type, preserving an explicit `System.`
     prefix if the caller used one. Returns `None` if the type is not in the database, or if the name
     is already a type accelerator: `[ref]`, `[int]` and `[string]` are the readable forms and are
     left untouched, where a verbose `[System.Int32]` still folds to `[Int32]`.
+
+    The array suffixes are carried through rather than looked up, because the display table is keyed
+    by the element type: rendering `byte[]` off its definition alone answers `Byte`, which is a
+    different type, and `New-Object Byte[] $n` became `New-Object Byte $n`.
+
+    An accelerator keeps its spelling through a suffix too. `[byte[]]` is the readable form for the
+    same reason `[byte]` is, and it reached the display table only because the name it was looked up
+    under carried the suffix and the table is keyed without one.
     """
-    if name.lower() in TYPE_ACCELERATORS:
+    if _accelerator_spelling(name):
         return None
-    resolved = _resolve_type_name(name)
-    lower = resolved if resolved is not None else name.lower()
+    resolved = resolve_type(name)
+    lower = resolved.definition.lower() if resolved is not None else name.lower()
     display = CANONICAL_TYPE_NAMES.get(lower)
     if display is None:
         bare = lower.removeprefix('system.')
@@ -60,65 +81,47 @@ def canonical_type_name(name: str) -> str | None:
     display_has_system = display.lower().startswith('system.')
     if has_system and not display_has_system:
         display = F'System.{display}'
+    if resolved is not None and (resolved.ranks or resolved.pointers or resolved.byref):
+        return str(resolved._replace(name=display, arity=0, arguments=()))
     return display
 
 
-def canonical_member_name(type_name_lower: str, member: str) -> str | None:
+def canonical_member_name(type_name: str | Ps1TypeName, member: str) -> str | None:
     """
     Return the canonical PascalCase member name for a known .NET type.
     """
-    lookup = MEMBER_LOOKUP.get(type_name_lower)
-    if lookup is None:
-        return None
-    return lookup.get(member.lower())
+    return canonical_member(type_name, member)
 
 
 def resolve_member_type(
     obj: Expression,
     member: str,
-    variable_types: dict[str, str] | None = None,
-) -> str | None:
+    variable_types: dict[str, Ps1TypeName] | None = None,
+) -> Ps1TypeName | None:
     """
-    Resolve the .NET result type of accessing member on obj. Returns the lowercase full .NET type
-    name (e.g. `'system.int32'`), or `None` if the object type or the member cannot be resolved.
+    Resolve the .NET result type of accessing `member` on `obj`, or `None` if the object type or the
+    member cannot be resolved.
     """
     obj_type = resolve_expression_type(obj, variable_types)
     if obj_type is None:
         return None
-    return PROPERTY_TYPES.get((obj_type, member.lower()))
+    return data_member_type(obj_type, member)
 
 
-def is_known_member(
-    obj: Expression,
-    member: str,
-    variable_types: dict[str, str] | None = None,
-) -> bool:
-    """
-    Return `True` if *member* is a known member (property or method) of the resolved type of obj.
-    """
-    obj_type = resolve_expression_type(obj, variable_types)
-    if obj_type is None:
-        return False
-    lookup = MEMBER_LOOKUP.get(obj_type)
-    if lookup is None:
-        return False
-    return member.lower() in lookup
-
-
-def get_member_order(type_name: str) -> list[str] | None:
+def get_member_order(type_name: str | Ps1TypeName) -> list[str] | None:
     """
     Return the members of a .NET type in PowerShell Get-Member display order: Methods sorted
     alphabetically, then properties sorted alphabetically.
     """
-    members = TYPE_MEMBERS.get(type_name)
+    members = view_members(type_name)
     if members is None:
         return None
     methods = sorted(
-        (m for m in members if (type_name, m.lower()) not in PROPERTY_TYPES),
+        (name for name, m in members.items() if m['kind'] != 'property'),
         key=str.lower,
     )
     properties = sorted(
-        (m for m in members if (type_name, m.lower()) in PROPERTY_TYPES),
+        (name for name, m in members.items() if m['kind'] == 'property'),
         key=str.lower,
     )
     return methods + properties
@@ -142,8 +145,8 @@ def _pipeline_pipes_to_get_member(pipeline: Ps1Pipeline) -> bool:
 
 def _pipeline_source_type(
     pipeline: Ps1Pipeline,
-    variable_types: dict[str, str] | None = None,
-) -> str | None:
+    variable_types: dict[str, Ps1TypeName] | None = None,
+) -> Ps1TypeName | None:
     """
     Determine the .NET type of the expression piped into `Get-Member`. Assumes `Get-Member` is the
     last pipeline element.
@@ -158,7 +161,11 @@ def _pipeline_source_type(
     return resolve_expression_type(source.expression, variable_types)
 
 
-def _resolve_foreach_element_type(iterable: Expression | None) -> str | None:
+#: What `foreach` yields from a string: the string itself, not its characters.
+_STRING = resolve_type('System.String')
+
+
+def _resolve_foreach_element_type(iterable: Expression | None) -> Ps1TypeName | None:
     """
     Determine the .NET type of elements produced by a foreach iterable. For a string, PowerShell
     yields the string itself (not individual chars). For an array literal, if all elements share
@@ -167,7 +174,7 @@ def _resolve_foreach_element_type(iterable: Expression | None) -> str | None:
     if iterable is None:
         return None
     if isinstance(iterable, (Ps1StringLiteral, Ps1HereString)):
-        return 'system.string'
+        return _STRING
     if isinstance(iterable, Ps1ArrayLiteral) and iterable.elements:
         types = set()
         for elem in iterable.elements:
@@ -183,17 +190,17 @@ def _resolve_foreach_element_type(iterable: Expression | None) -> str | None:
     return None
 
 
-def collect_variable_types(root: Node) -> dict[str, str]:
+def collect_variable_types(root: Node) -> dict[str, Ps1TypeName]:
     """
     Scan the AST for single-assignment variables whose RHS has a resolvable .NET type; e.g.
 
         $x = New-Object Net.WebClient
 
-    Returns a mapping from lowercase variable name to canonical .NET type string. Mutations that do
-    not change the variable's type (member/index assignments, ++/--) are not reassignments.
+    Returns a mapping from lowercase variable name to the canonical `Ps1TypeName`. Mutations that
+    do not change the variable's type (member/index assignments, ++/--) are not reassignments.
     """
     assign_counts: dict[str, int] = {}
-    typed_assigns: dict[str, str] = {}
+    typed_assigns: dict[str, Ps1TypeName] = {}
     for var, kind, node in iter_variable_mutations(root):
         if var.scope != Ps1ScopeModifier.NONE:
             continue
@@ -221,7 +228,7 @@ class VariableTypeAwareTransformer(Transformer):
 
     def __init__(self):
         super().__init__()
-        self._variable_types: dict[str, str] | None = None
+        self._variable_types: dict[str, Ps1TypeName] | None = None
 
     def visit(self, node: Node):
         if self._variable_types is None:
