@@ -525,3 +525,49 @@ class TestPs1SlotsThatSwallowASpelling(TestBase):
                 member='FullName',
             ))),
             'Write-Output (0xFF).GetType().FullName')
+
+
+class TestPs1AMemberOperatorPrintsBackAgainstTheValueItBoundTo(TestBase):
+    """
+    A member access, a static member access and an index print against the value they read from, and
+    a member named with digits prints like any other: 5.1 reads `$x.5` as the property `5` of `$x`.
+    What a source was made of can be read off the printed script, because a source read as two
+    statements prints the newline that parts them where one read as a single access prints none.
+    """
+
+    def test_a_value_and_the_operator_written_against_it_come_back_as_they_were_written(self):
+        for source in (
+            '$x.5',
+            '(1).5',
+            "'a'.5",
+            '@(1).5',
+            '1e3.5',
+            '1kb.5',
+            '0xFF.5',
+            '1.5.5',
+            '$x[0].5',
+            '$x.5.6',
+            '$x::5',
+            '$x[5]',
+            "'a'[0]",
+            '1..5',
+            '$x = 1..5',
+            '[int]::MaxValue',
+            '[int].Name',
+            'f $x.5',
+            'f $x[0]',
+            'f $x[-1]',
+            'f $x.',
+        ):
+            with self.subTest(source):
+                self.assertEqual(_written(Ps1Parser(source).parse()), source)
+
+    def test_a_gap_before_the_dot_prints_two_statements_where_a_block_comment_prints_one(self):
+        sources = ('$x .5', '1e3 .5', '$x <# c #>.5', '$x<# c #>.5')
+        printed = {source: _written(Ps1Parser(source).parse()) for source in sources}
+        self.assertEqual(printed, {
+            '$x .5'        : '$x\n.5',
+            '1e3 .5'       : '1e3\n.5',
+            '$x <# c #>.5' : '$x\n.5',
+            '$x<# c #>.5'  : '$x.5',
+        })

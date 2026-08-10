@@ -1076,21 +1076,40 @@ class Ps1Parser:
 
     def _parse_primary_postfix(self, expr: Expression) -> Expression:
         while self._adjacent():
-            if self._at(Ps1TokenKind.DOT, Ps1TokenKind.DOUBLE_COLON):
-                expr = self._parse_member_access(expr)
-            elif self._at(Ps1TokenKind.LBRACKET):
+            access = self._member_access()
+            if access is Ps1TokenKind.LBRACKET:
                 expr = self._parse_index_expression(expr)
-            elif self._at(Ps1TokenKind.INCREMENT):
+            elif access is not None:
+                expr = self._parse_member_access(expr)
+            elif self._at(Ps1TokenKind.INCREMENT, Ps1TokenKind.DECREMENT):
                 op = self._advance()
                 expr = Ps1UnaryExpression(
-                    offset=op.offset, operator='++', operand=expr, prefix=False)
-            elif self._at(Ps1TokenKind.DECREMENT):
-                op = self._advance()
-                expr = Ps1UnaryExpression(
-                    offset=op.offset, operator='--', operand=expr, prefix=False)
+                    offset=op.offset, operator=op.value, operand=expr, prefix=False)
             else:
                 break
         return expr
+
+    def _member_access(self) -> Ps1TokenKind | None:
+        """
+        The kind of member access operator written against the value just read, or `None` where
+        none is. 5.1 asks its tokenizer for this operator rather than for a token, and the two
+        questions have different answers for the same character: a `.` before a digit begins a
+        number where a value may start and names a member where one has just ended, so `$x.5` reads
+        the property `5` and `$x = .5` reads a half. Asking it here is what keeps that difference in
+        one place instead of in every rule that reads a value.
+
+        Whether anything binds at all is `Ps1Parser._adjacent`'s question and has been asked
+        already, so the lookahead is re-read where it began: what is settled here is only which
+        operator, if any, was written there.
+        """
+        offset = self._current.offset
+        self._resync(offset)
+        token = self._lexer.scan_member_access()
+        if token is None:
+            self._resync(offset)
+            return None
+        self._pending = token
+        return token.kind
 
     def _parse_primary_atom(self) -> Expression | None:
         rule = self._ATOM_RULES.get(self._current.kind)
@@ -1531,9 +1550,14 @@ class Ps1Parser:
         return Ps1MemberAccess(offset=obj.offset, object=obj, member=member, access=access)
 
     def _parse_index_expression(self, obj: Expression) -> Expression:
+        """
+        An index, which is an expression wherever the value it indexes was written: `f $x[-1]`
+        passes one argument holding the last element, not a word beginning with a bracket. 5.1
+        reads it the same way, by pushing expression mode for the whole of the index.
+        """
         self._advance()
         self._skip_newlines()
-        with self._comma_mode(disabled=False):
+        with self._mode(Ps1LexerMode.EXPRESSION), self._comma_mode(disabled=False):
             index = self._parse_expression()
         self._skip_newlines()
         self._expect(Ps1TokenKind.RBRACKET)

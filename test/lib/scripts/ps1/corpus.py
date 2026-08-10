@@ -163,6 +163,22 @@ BOUNDARIES: tuple[str, ...] = (
     '$x = -1.5.GetType()',
     '$x = - 1kb.GetType()',
     '$x = - -1kb.GetType()',
+    '$x = 0b1010',
+    '$x = 1_000',
+    '$x = 0xFF_FF',
+    '$x = 1dkb',
+    '$x = 1.5L',
+    '$x = 1k',
+    '$x = 1e3.5',
+    '$x = $y.5',
+    '$x = (1).5',
+    '$x = $y.5.6',
+    '$x = $y[0].5',
+    'f $y.5',
+    'f $y[0]',
+    'f $y[-1]',
+    'f $y.',
+    'f 1e3.5',
 )
 
 #: How a word may be written where a command name is read, and where a value is. This is the

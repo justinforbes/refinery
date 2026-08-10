@@ -134,6 +134,12 @@ _DASH_OPERATORS: dict[str, str] = {
 
 _VARIABLE_STOPS_NO_RESCAN = frozenset('.[=')
 
+_MEMBER_ACCESS_KINDS: dict[str, Ps1TokenKind] = {
+    '.'  : Ps1TokenKind.DOT,
+    '::' : Ps1TokenKind.DOUBLE_COLON,
+    '['  : Ps1TokenKind.LBRACKET,
+}
+
 _REDIRECTION_PATTERN = re.compile(
     r'[1-6*](?:>>|>&[12]|>)'  # explicit stream: 2>&1, 2>>, 2>
     r'|>>|>&1|>',             # bare: >>, >&1, >
@@ -550,6 +556,52 @@ class Ps1Lexer:
             self.pos += 1
         kind = Ps1TokenKind.GENERIC_EXPAND if has_expansion else Ps1TokenKind.GENERIC_TOKEN
         return Ps1Token(kind, src[start:self.pos], start)
+
+    def scan_member_access(self) -> Ps1Token | None:
+        """
+        The member access operator written at `Ps1Lexer.pos`, or `None` where none is. A reader that
+        has just taken a value asks this instead of asking for a token, because one character has
+        two answers: a `.` before a digit begins a number where a value may start and names a member
+        where one has just ended, so `$x.5` reads the property `5` and `$x = .5` reads a half. 5.1
+        draws the line in the same place and by the same means — the operator has a scan of its own
+        there, and that scan never reaches the number scanner.
+
+        Whether anything binds here at all is the caller's question and not this one's: nothing is
+        passed over, so an operator that does not touch what precedes it is simply read at the wrong
+        position.
+
+        Two spellings are refused rather than read. A second dot is the range operator, so `1..5`
+        counts from one rather than reading a member of it. And where a bare word is a value, an
+        access with nothing behind it belongs to the word: `f $x.` passes `$x.` and asks for no
+        member.
+        """
+        spelling = self._member_access_spelling()
+        if spelling is None:
+            return None
+        offset = self.pos
+        self.pos += len(spelling)
+        if spelling != '[' and self.mode is Ps1LexerMode.ARGUMENT and self._nothing_to_reach():
+            self.pos = offset
+            return None
+        return Ps1Token(_MEMBER_ACCESS_KINDS[spelling], spelling, offset)
+
+    def _nothing_to_reach(self) -> bool:
+        """
+        Whether the source at `Ps1Lexer.pos` holds nothing an access could reach. A line ends the
+        statement rather than the token, so it is named here beside the whitespace and the end of
+        the source that `forces_new_token` already answers for.
+        """
+        c = self._peek()
+        return not c or c in '\r\n' or is_whitespace(c)
+
+    def _member_access_spelling(self) -> str | None:
+        if self._peek() == '[':
+            return '['
+        if self._peek() == ':' and self._peek(1) == ':':
+            return '::'
+        if self._peek() == '.' and self._peek(1) != '.':
+            return '.'
+        return None
 
     def _keyword_or_token(self, token: Ps1Token) -> Ps1Token:
         kw = _KEYWORDS.get(token.value.lower())

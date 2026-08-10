@@ -15,6 +15,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
     Ps1CastExpression,
+    Ps1CommandArgument,
     Ps1CommandInvocation,
     Ps1ScopeModifier,
     Ps1ExpandableString,
@@ -37,6 +38,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Script,
     Ps1ArrayExpression,
 )
+from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
 
 _T = TypeVar('_T', bound=Node)
 
@@ -1068,3 +1070,160 @@ class TestPs1ANumeralHoldsNothingBesideItsSpelling(TestBase):
         self.assertEqual(literal.value, 1)
         literal.raw = '0x10'
         self.assertEqual(literal.value, 16)
+
+
+class TestPs1AnOperatorTouchingAValueNamesAMemberOfIt(TestBase):
+    """
+    A `.` written against a value that has just been read names a member of it even where a digit
+    follows: 5.1 reads `$x.5` as the property `5` of `$x`, and reads the same dot in `$x = .5` as
+    the start of a half. Every spelling of a value is a receiver there — a variable, a bracket, a
+    string, an array expression, an index, and a numeral whose own spelling has ended — and the name
+    behind the dot is read whole, which is why `$x.5.6` asks for one member rather than two.
+
+    A member read where 5.1 reads two numbers is a property of an object the script never touches,
+    and two numbers where 5.1 reads a member drop the property the script was written to read;
+    neither shows in the output.
+    """
+
+    @classmethod
+    def _reading(cls, node: Node | None) -> str:
+        """
+        The tree `node` is, written back out with a space around every operator the tree holds. One
+        member named `5.6` and two members named `5` and `6` then come out as different strings,
+        which is the distinction the tables below turn on.
+        """
+        if isinstance(node, Ps1MemberAccess):
+            return F'{cls._reading(node.object)} {node.access.value} {node.member}'
+        if isinstance(node, Ps1IndexExpression):
+            return F'{cls._reading(node.object)} [ {cls._reading(node.index)} ]'
+        if node is None:
+            return '<nothing>'
+        return Ps1Synthesizer().convert(node)
+
+    @classmethod
+    def _reads(cls, source: str) -> str:
+        """
+        What the parser made of `source`. A source read as two statements has no one expression to
+        describe and is written out whole, which prints the newline that parts them.
+        """
+        script = Ps1Parser(source).parse()
+        statement = script.body[0] if len(script.body) == 1 else None
+        if isinstance(statement, Ps1ExpressionStatement):
+            return cls._reading(statement.expression)
+        return Ps1Synthesizer().convert(script)
+
+    @classmethod
+    def _arguments(cls, source: str) -> list[str]:
+        invocation, = (
+            node for node in Ps1Parser(source).parse().walk()
+            if isinstance(node, Ps1CommandInvocation)
+        )
+        return [
+            cls._reading(argument.value if isinstance(argument, Ps1CommandArgument) else argument)
+            for argument in invocation.arguments
+        ]
+
+    def test_a_dot_touching_a_value_names_a_member_of_it_though_a_digit_follows(self):
+        sources = ('$x.5', '(1).5', "'a'.5", '@(1).5', '$x[0].5')
+        self.assertEqual({source: self._reads(source) for source in sources}, {
+            '$x.5'    : '$x . 5',
+            '(1).5'   : '(1) . 5',
+            "'a'.5"   : "'a' . 5",
+            '@(1).5'  : '@(1) . 5',
+            '$x[0].5' : '$x [ 0 ] . 5',
+        })
+
+    def test_a_numeral_whose_spelling_has_ended_is_a_receiver_like_any_other_value(self):
+        sources = ('1e3.5', '1kb.5', '0xFF.5', '1.5.5')
+        self.assertEqual({source: self._reads(source) for source in sources}, {
+            '1e3.5'  : '1e3 . 5',
+            '1kb.5'  : '1kb . 5',
+            '0xFF.5' : '0xFF . 5',
+            '1.5.5'  : '1.5 . 5',
+        })
+
+    def test_the_name_written_behind_the_dot_is_read_whole(self):
+        self.assertEqual(self._reads('$x.5.6'), '$x . 5.6')
+
+    def test_a_gap_before_the_dot_leaves_a_number_and_a_statement_of_its_own(self):
+        sources = ('$x .5', '1e3 .5')
+        self.assertEqual({source: self._reads(source) for source in sources}, {
+            '$x .5'  : '$x\n.5',
+            '1e3 .5' : '1e3\n.5',
+        })
+
+    def test_a_block_comment_stands_between_the_value_and_the_dot_without_parting_them(self):
+        sources = ('$x<# c #>.5', '$x <# c #>.5')
+        self.assertEqual({source: self._reads(source) for source in sources}, {
+            '$x<# c #>.5'  : '$x . 5',
+            '$x <# c #>.5' : '$x\n.5',
+        })
+
+    def test_a_second_dot_counts_from_the_numeral_rather_than_naming_a_member_of_it(self):
+        sources = ('1..5', '$x = 1..5')
+        bindings = {
+            source: [
+                type(node).__name__ for node in Ps1Parser(source).parse().walk()
+                if isinstance(node, (Ps1RangeExpression, Ps1MemberAccess, Ps1InvokeMember))
+            ]
+            for source in sources
+        }
+        self.assertEqual(bindings, dict.fromkeys(sources, ['Ps1RangeExpression']))
+        self.assertEqual({source: self._reads(source) for source in sources}, {
+            '1..5'      : '1..5',
+            '$x = 1..5' : '$x = 1..5',
+        })
+
+    def test_a_double_colon_names_a_static_member_where_a_dot_names_an_instance_one(self):
+        sources = ('$x::5', '[int]::MaxValue', '[int].Name')
+        self.assertEqual({source: self._reads(source) for source in sources}, {
+            '$x::5'           : '$x :: 5',
+            '[int]::MaxValue' : '[int] :: MaxValue',
+            '[int].Name'      : '[int] . Name',
+        })
+
+    def test_an_index_binds_to_the_value_it_was_written_against(self):
+        sources = ('$x[5]', "'a'[0]", '(1,2)[0]')
+        self.assertEqual({source: self._reads(source) for source in sources}, {
+            '$x[5]'    : '$x [ 5 ]',
+            "'a'[0]"   : "'a' [ 0 ]",
+            '(1,2)[0]' : '(1, 2) [ 0 ]',
+        })
+
+    def test_a_command_argument_reads_the_member_and_the_index_written_against_a_value(self):
+        """
+        `f $x[-1]` passes one argument holding the last element rather than a word that begins with
+        a bracket, and the index is read as an expression, where a dash written against digits is
+        the sign of the numeral it touches.
+        """
+        sources = ('f $x.5', 'f $x[0]', 'f $x[-1]', 'f $x .5')
+        self.assertEqual({source: self._arguments(source) for source in sources}, {
+            'f $x.5'   : ['$x . 5'],
+            'f $x[0]'  : ['$x [ 0 ]'],
+            'f $x[-1]' : ['$x [ -1 ]'],
+            'f $x .5'  : ['$x', '.5'],
+        })
+
+    @unittest.expectedFailure
+    def test_an_access_with_nothing_behind_it_belongs_to_the_word_it_was_written_against(self):
+        """
+        `f $x.` passes the one argument `$x.` and names no member of `$x`. What that argument is
+        spelled as in the tree is the parser's own business, so what is stated here is that the
+        script asks for no member and that the argument comes back as it was written.
+        """
+        script = Ps1Parser('f $x.').parse()
+        self.assertEqual(Ps1Synthesizer().convert(script), 'f $x.')
+        self.assertEqual([
+            type(node).__name__ for node in script.walk()
+            if isinstance(node, (Ps1MemberAccess, Ps1InvokeMember))
+        ], [])
+
+    @unittest.expectedFailure
+    def test_an_access_with_nothing_behind_it_does_not_reach_into_the_next_statement(self):
+        """
+        The same defect, in the spelling that makes it change what a script means rather than only
+        what it says: an access that names nothing takes the newline for whitespace and the next
+        pipeline for a member name, so two statements come back as one.
+        """
+        self.assertEqual(
+            Ps1Synthesizer().convert(Ps1Parser('f $x.\ng 1').parse()), 'f $x.\ng 1')

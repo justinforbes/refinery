@@ -1277,3 +1277,114 @@ class TestPs1CharacterClasses(TestBase):
     def test_a_question_mark_and_a_colon_end_neither_a_numeral_nor_a_word(self):
         classified = {c: (forces_new_token_after_number(c), forces_new_token(c)) for c in '?:'}
         self.assertEqual(classified, {'?': (False, False), ':': (False, False)})
+
+
+class TestPs1AMemberOperatorIsScannedWhereTheValueEnded(TestBase):
+    """
+    `Ps1Lexer.scan_member_access` answers the question a reader asks once it has taken a value:
+    which member access operator, if any, is written where that value ended. One character has two
+    answers there, and 5.1 gives both of them: a `.` before a digit opens a number where a value may
+    start and names a member where one has just ended, so `$x.5` reads the property `5` while
+    `$x = .5` reads a half.
+
+    Nothing is passed over to reach the operator. The scan reads the position it is asked about and
+    no other, which is what leaves whether an operator binds at all to the caller: a space or a
+    block comment before the operator is not stepped over here but read as no operator at all.
+    """
+
+    #: One value per spelling a value can end with, because where the value ended is what decides
+    #: whether a dot is left over for a member: a variable, a bracket, a string, and the numerals
+    #: closed by an exponent, a multiplier, a base prefix or a decimal point already spent.
+    _VALUES = ('$x', '(1)', "'a'", '1e3', '1kb', '0xFF', '1.5')
+
+    @staticmethod
+    def _scanned(
+        value: str, written: str, mode: Ps1LexerMode = Ps1LexerMode.EXPRESSION
+    ) -> tuple[tuple[Ps1TokenKind, str, int] | None, int]:
+        """
+        What the scan answers where `value` ends and `written` begins, and where it leaves the
+        lexer. The offset the operator was read at and the position left behind say together that
+        it was read where the value ended and that nothing was passed over to reach it.
+        """
+        lexer = Ps1Lexer(value + written, pos=len(value), mode=mode)
+        token = lexer.scan_member_access()
+        found = None if token is None else (token.kind, token.value, token.offset)
+        return (found, lexer.pos)
+
+    @staticmethod
+    def _general_scan(
+        value: str, written: str, mode: Ps1LexerMode = Ps1LexerMode.EXPRESSION
+    ) -> tuple[Ps1TokenKind, str]:
+        lexer = Ps1Lexer(value + written, pos=len(value), mode=mode)
+        token = next(lexer.tokenize())
+        return (token.kind, token.value)
+
+    def test_a_dot_before_a_digit_names_a_member_where_a_value_has_just_ended(self):
+        self.assertEqual({value: self._scanned(value, '.5') for value in self._VALUES}, {
+            '$x'   : ((Ps1TokenKind.DOT, '.', 2), 3),
+            '(1)'  : ((Ps1TokenKind.DOT, '.', 3), 4),
+            "'a'"  : ((Ps1TokenKind.DOT, '.', 3), 4),
+            '1e3'  : ((Ps1TokenKind.DOT, '.', 3), 4),
+            '1kb'  : ((Ps1TokenKind.DOT, '.', 3), 4),
+            '0xFF' : ((Ps1TokenKind.DOT, '.', 4), 5),
+            '1.5'  : ((Ps1TokenKind.DOT, '.', 3), 4),
+        })
+
+    def test_the_general_scan_reads_a_number_at_every_one_of_those_positions(self):
+        """
+        The two questions differ, which is why the operator has a scan of its own: asked for a token
+        where each of these values ends, the lexer reads the half `.5` that opens a value there.
+        """
+        self.assertEqual(
+            {value: self._general_scan(value, '.5') for value in self._VALUES},
+            dict.fromkeys(self._VALUES, (Ps1TokenKind.REAL, '.5')),
+        )
+
+    def test_each_operator_is_read_by_its_own_spelling(self):
+        expression = {
+            written: self._scanned('$x', written)
+            for written in ('.a', '::a', '[0]')
+        }
+        self.assertEqual(expression, {
+            '.a'  : ((Ps1TokenKind.DOT, '.', 2), 3),
+            '::a' : ((Ps1TokenKind.DOUBLE_COLON, '::', 2), 4),
+            '[0]' : ((Ps1TokenKind.LBRACKET, '[', 2), 3),
+        })
+
+    def test_a_member_and_an_index_are_read_where_a_bare_word_is_a_value_as_well(self):
+        argument = {
+            written: self._scanned('$x', written, Ps1LexerMode.ARGUMENT)
+            for written in ('.a', '[0]')
+        }
+        self.assertEqual(argument, {
+            '.a'  : ((Ps1TokenKind.DOT, '.', 2), 3),
+            '[0]' : ((Ps1TokenKind.LBRACKET, '[', 2), 3),
+        })
+
+    def test_nothing_between_the_value_and_the_operator_is_passed_over(self):
+        self.assertEqual({
+            written: self._scanned('$x', written)
+            for written in ('', ' .5', '<# c #>.5')
+        }, {
+            ''          : (None, 2),
+            ' .5'       : (None, 2),
+            '<# c #>.5' : (None, 2),
+        })
+
+    def test_an_operator_a_gap_stands_before_is_read_where_it_is_written(self):
+        self.assertEqual(self._scanned('$x ', '.5'), ((Ps1TokenKind.DOT, '.', 3), 4))
+        self.assertEqual(self._scanned('$x<# c #>', '.5'), ((Ps1TokenKind.DOT, '.', 9), 10))
+
+    def test_a_second_dot_is_the_range_operator_and_names_no_member(self):
+        self.assertEqual(self._scanned('1', '..5'), (None, 1))
+        self.assertEqual(self._scanned('$x = 1', '..5'), (None, 6))
+
+    def test_an_access_with_nothing_behind_it_is_refused_where_a_bare_word_is_a_value(self):
+        """
+        `f $x.` passes the word `$x.` and asks for no member. In an expression the same text is a
+        member access whose name is missing, which 5.1 reports as an error rather than reading as a
+        word, so the operator is read there.
+        """
+        self.assertEqual(self._scanned('$x', '.', Ps1LexerMode.ARGUMENT), (None, 2))
+        self.assertEqual(
+            self._scanned('$x', '.', Ps1LexerMode.EXPRESSION), ((Ps1TokenKind.DOT, '.', 2), 3))
