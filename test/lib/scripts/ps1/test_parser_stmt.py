@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import unittest
+
+from typing import TypeVar
 
 from test import TestBase
 
@@ -51,6 +54,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
     Ps1WhileLoop,
 )
+
+_T = TypeVar('_T')
 
 
 class TestPs1ParserStatements(TestBase):
@@ -1743,3 +1748,32 @@ class TestPs1AConditionReadsACommandNameWhole(TestBase):
     @_at_every_position(_CONDITION_POSITIONS)
     def check_a_measured_keyword_prefixed_name_is_one_command(self, template: str):
         self._assertEveryNameIsOneCommandCondition(template, _MEASURED_KEYWORD_PREFIXED_NAMES)
+
+
+class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
+    """
+    5.1 makes a `MinusMinus` token here as we do, and then reads it as a parameter of the command it
+    stands in — `Parser.cs:6527`, where the first one becomes a `CommandParameterAst` named `-` and
+    every later one a bare word. We end the command at it instead, so `f -- x` becomes two
+    statements and the second, `-- 'x'`, asks 5.1 to decrement a string literal.
+    """
+
+    def _shaped(self, node: object, kind: type[_T]) -> _T:
+        if not isinstance(node, kind):
+            self.fail(F'expected a {kind.__name__}, not a {type(node).__name__}')
+        return node
+
+    @unittest.expectedFailure
+    def test_a_double_dash_argument_leaves_the_command_whole(self):
+        script = Ps1Parser('f -- x').parse()
+        commands = [node for node in script.walk() if isinstance(node, Ps1CommandInvocation)]
+        self.assertEqual(len(script.body), 1)
+        self.assertEqual(len(commands), 1)
+        command, = commands
+        self.assertEqual(self._shaped(command.name, Ps1StringLiteral).value, 'f')
+        self.assertEqual(len(command.arguments), 2)
+        dashes, word = (self._shaped(a, Ps1CommandArgument) for a in command.arguments)
+        self.assertEqual(dashes.kind, Ps1CommandArgumentKind.SWITCH)
+        self.assertEqual(dashes.name, '--')
+        self.assertEqual(word.kind, Ps1CommandArgumentKind.POSITIONAL)
+        self.assertEqual(self._shaped(word.value, Ps1StringLiteral).value, 'x')
