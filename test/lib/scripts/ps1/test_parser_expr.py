@@ -354,11 +354,6 @@ class TestPs1ParserExpressions(TestBase):
         self.assertIsInstance(expr, Ps1RealLiteral)
         self.assertAlmostEqual(expr.value, 16 * 1024)
 
-    def test_binary_literal_with_multiplier_suffix(self):
-        expr = self._parse_expr('0b1010mb')
-        self.assertIsInstance(expr, Ps1RealLiteral)
-        self.assertAlmostEqual(expr.value, 10 * 1024 ** 2)
-
     def test_hex_literal_with_gb_suffix(self):
         expr = self._parse_expr('0xFFgb')
         self.assertIsInstance(expr, Ps1RealLiteral)
@@ -1022,7 +1017,6 @@ class TestPs1ANumeralHoldsNothingBesideItsSpelling(TestBase):
             ('42', '42'),
             ('0xDEAD', '0xDEAD'),
             ('007', '007'),
-            ('0b1010', '0b1010'),
             ('1L', '1L'),
             ('1e2', '1e2'),
             ('1.50', '1.50'),
@@ -1039,7 +1033,6 @@ class TestPs1ANumeralHoldsNothingBesideItsSpelling(TestBase):
             ('007', 7),
             ('0xFF', 255),
             ('0xFFL', 255),
-            ('0b1010', 10),
             ('+1', 1),
             ('-2147483648', -2147483648),
         ):

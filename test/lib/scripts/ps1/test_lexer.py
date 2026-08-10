@@ -7,7 +7,13 @@ from typing import Generator, NamedTuple
 from test import TestBase
 
 from refinery.lib.scripts.ps1.lexer import Ps1Lexer, Ps1LexerMode, reads_as_one_numeral
-from refinery.lib.scripts.ps1.token import Ps1Token, Ps1TokenKind
+from refinery.lib.scripts.ps1.token import (
+    forces_new_token,
+    forces_new_token_after_number,
+    is_whitespace,
+    Ps1Token,
+    Ps1TokenKind,
+)
 
 
 class _Reading(NamedTuple):
@@ -35,10 +41,6 @@ class TestPs1Lexer(TestBase):
     def test_integer_hex(self):
         tokens = self._tokens('0xFF')
         self.assertEqual(tokens, [(Ps1TokenKind.INTEGER, '0xFF')])
-
-    def test_integer_binary(self):
-        tokens = self._tokens('0b1010')
-        self.assertEqual(tokens, [(Ps1TokenKind.INTEGER, '0b1010')])
 
     def test_integer_long(self):
         tokens = self._tokens('100L')
@@ -291,15 +293,6 @@ class TestPs1Lexer(TestBase):
     def test_hex_integer_with_multiplier_suffix(self):
         for suffix in ('kb', 'mb', 'gb', 'tb', 'pb', 'KB', 'MB', 'GB', 'TB', 'PB'):
             src = F'0x10{suffix}'
-            tokens = self._tokens(src)
-            self.assertEqual(
-                tokens, [(Ps1TokenKind.REAL, src)],
-                F'{src} should be a single REAL token',
-            )
-
-    def test_binary_integer_with_multiplier_suffix(self):
-        for suffix in ('kb', 'mb', 'gb', 'tb', 'pb', 'KB', 'MB', 'GB', 'TB', 'PB'):
-            src = F'0b1010{suffix}'
             tokens = self._tokens(src)
             self.assertEqual(
                 tokens, [(Ps1TokenKind.REAL, src)],
@@ -1082,3 +1075,205 @@ class TestPs1NumeralBoundary(TestBase):
                         for written in ('.GetType()', '::MaxValue', '[0]')
                     ],
                 )
+
+
+_TOKEN_SEPARATORS = {
+    'space'               : ' ',
+    'vertical tab'        : '\v',
+    'form feed'           : '\f',
+    'next line'           : '\u0085',
+    'no-break space'      : '\u00A0',
+    'em space'            : '\u2003',
+    'line separator'      : '\u2028',
+    'paragraph separator' : '\u2029',
+}
+
+_DASH_SPELLINGS = {
+    'hyphen-minus'   : '-',
+    'en dash'        : '\u2013',
+    'em dash'        : '\u2014',
+    'horizontal bar' : '\u2015',
+}
+
+
+def _read_tokens(
+    source: str, mode: Ps1LexerMode = Ps1LexerMode.EXPRESSION
+) -> list[tuple[Ps1TokenKind, str]]:
+    lexer = Ps1Lexer(source, mode=mode)
+    return [
+        (token.kind, token.value)
+        for token in lexer.tokenize()
+        if token.kind is not Ps1TokenKind.EOF
+    ]
+
+
+class TestPs1NumeralSpelling(TestBase):
+    """
+    Which texts Windows PowerShell 5.1 reads as a single `Number` token, and which it reads as a
+    single `Generic` token instead. Every text below is one a 5.1 host was measured on. This
+    vocabulary spells a `Number` as `Ps1TokenKind.INTEGER` or `Ps1TokenKind.REAL`, and a `Generic`
+    as `Ps1TokenKind.GENERIC_TOKEN`.
+    """
+
+    def _reading(self, source: str) -> str:
+        """
+        What 5.1 would call the reading of `source` on its own. A text that reads as anything other
+        than one whole numeral or one whole word is described by its token list, so that a
+        disagreement says what was read rather than only that it differed.
+        """
+        tokens = _read_tokens(source)
+        if len(tokens) == 1 and tokens[0][1] == source:
+            kind = tokens[0][0]
+            if kind is Ps1TokenKind.INTEGER or kind is Ps1TokenKind.REAL:
+                return 'number'
+            if kind is Ps1TokenKind.GENERIC_TOKEN:
+                return 'word'
+        return repr(tokens)
+
+    def _numbers(self, *sources: str):
+        readings = {source: self._reading(source) for source in sources}
+        self.assertEqual(readings, dict.fromkeys(sources, 'number'))
+
+    def _words(self, *sources: str):
+        readings = {source: self._reading(source) for source in sources}
+        self.assertEqual(readings, dict.fromkeys(sources, 'word'))
+
+    def test_a_multiplier_may_follow_a_type_suffix_in_one_numeral(self):
+        self._numbers('1lkb', '1dkb', '1Lkb', '1dmb', '1.5dkb', '1.5Lkb', '0xFFdkb')
+
+    def test_a_type_suffix_closes_a_real_a_hexadecimal_and_an_exponent(self):
+        self._numbers('1.5L', '1.5l', '1.5d', '1.5e2L', '0xFFd', '0xFFL', '1e3d')
+
+    def test_a_multiplier_closes_every_spelling_of_a_numeral(self):
+        self._numbers('1kb', '1pb', '1PB', '1.5kb', '.5kb', '0x1kb', '1e3kb', '1.e1kb')
+
+    def test_a_decimal_point_may_open_or_close_a_numeral(self):
+        self._numbers('.5L', '1.', '1.e1', '3.14')
+
+    def test_a_numeral_with_no_suffix_at_all_reads_as_one_number(self):
+        self._numbers('42', '0xFF', '100L', '0x0000000000000001')
+
+    def test_a_suffix_written_twice_and_an_unfinished_exponent_are_words(self):
+        self._words('1dd', '1LL', '1kbkb', '1kbL', '1e', '1e+', '0x')
+
+    def test_a_multiplier_letter_without_its_b_is_a_word(self):
+        self._words('1P', '1k', '1kx', '1b')
+
+    def test_a_binary_literal_and_a_digit_separator_are_words_on_5_1(self):
+        """
+        Windows PowerShell 5.1 has neither spelling: a binary literal arrived in 7.0 and a digit
+        separator never arrived at all.
+        """
+        self._words('0b1010', '0b', '0b2', '1_000', '0xFF_FF')
+
+    def test_a_binary_literal_stays_a_word_where_an_operand_is_expected(self):
+        """
+        `1 + 0b1010` is a parse error on 5.1, which it could not be if the word were a numeral.
+        """
+        self.assertEqual(_read_tokens('1 + 0b1010'), [
+            (Ps1TokenKind.INTEGER, '1'),
+            (Ps1TokenKind.PLUS, '+'),
+            (Ps1TokenKind.GENERIC_TOKEN, '0b1010'),
+        ])
+
+    def test_a_ternary_operator_character_does_not_end_a_numeral_on_5_1(self):
+        """
+        A `?` and a `:` end a numeral from 7.0 onwards, where a ternary operator may follow one.
+        """
+        self._words('1?', '1:')
+
+    def test_where_a_numeral_ends_differs_between_the_two_lexer_modes(self):
+        expression = {
+            '1+2': [
+                (Ps1TokenKind.INTEGER, '1'),
+                (Ps1TokenKind.PLUS, '+'),
+                (Ps1TokenKind.INTEGER, '2'),
+            ],
+            '3..5': [
+                (Ps1TokenKind.INTEGER, '3'),
+                (Ps1TokenKind.DOTDOT, '..'),
+                (Ps1TokenKind.INTEGER, '5'),
+            ],
+        }
+        argument = {
+            '1+2'  : [(Ps1TokenKind.GENERIC_TOKEN, '1+2')],
+            '3..5' : [(Ps1TokenKind.GENERIC_TOKEN, '3..5')],
+        }
+        self.assertEqual({source: _read_tokens(source) for source in expression}, expression)
+        self.assertEqual(
+            {source: _read_tokens(source, Ps1LexerMode.ARGUMENT) for source in argument},
+            argument,
+        )
+
+
+class TestPs1TokenSeparation(TestBase):
+    """
+    The characters Windows PowerShell 5.1 passes over between two tokens, each measured against
+    what an ASCII space does in the same place, and the two that end a statement instead.
+    """
+
+    def test_every_separator_parts_two_numerals_the_way_a_space_does(self):
+        readings = {name: _read_tokens(F'1{c}2') for name, c in _TOKEN_SEPARATORS.items()}
+        parted = [(Ps1TokenKind.INTEGER, '1'), (Ps1TokenKind.INTEGER, '2')]
+        self.assertEqual(readings, dict.fromkeys(_TOKEN_SEPARATORS, parted))
+
+    def test_every_separator_parts_a_command_from_its_argument(self):
+        readings = {
+            name: _read_tokens(F'f{c}1', Ps1LexerMode.ARGUMENT)
+            for name, c in _TOKEN_SEPARATORS.items()
+        }
+        parted = [(Ps1TokenKind.GENERIC_TOKEN, 'f'), (Ps1TokenKind.INTEGER, '1')]
+        self.assertEqual(readings, dict.fromkeys(_TOKEN_SEPARATORS, parted))
+
+    def test_a_line_ending_ends_the_statement_instead_of_parting_two_tokens(self):
+        endings = ('\n', '\r\n')
+        readings = {end: [kind for kind, _ in _read_tokens(F'1{end}2')] for end in endings}
+        ended = [Ps1TokenKind.INTEGER, Ps1TokenKind.NEWLINE, Ps1TokenKind.INTEGER]
+        self.assertEqual(readings, dict.fromkeys(endings, ended))
+
+    def test_a_dash_ends_a_numeral_in_every_spelling(self):
+        readings = {name: _read_tokens(F'1{dash}2') for name, dash in _DASH_SPELLINGS.items()}
+        expected = {
+            name: [
+                (Ps1TokenKind.INTEGER, '1'),
+                (Ps1TokenKind.DASH, dash),
+                (Ps1TokenKind.INTEGER, '2'),
+            ]
+            for name, dash in _DASH_SPELLINGS.items()
+        }
+        self.assertEqual(readings, expected)
+
+
+class TestPs1CharacterClasses(TestBase):
+    """
+    The three questions `refinery.lib.scripts.ps1.token` answers about a single character: whether
+    it stands between two tokens without being one, whether it ends the token being read, and
+    whether it ends a token that began with a digit.
+    """
+
+    def test_a_character_is_whitespace_exactly_where_a_space_would_stand(self):
+        expected = dict.fromkeys(_TOKEN_SEPARATORS.values(), True)
+        expected.update(dict.fromkeys(('\r', '\n', '-', '\u2013', 'a', '1'), False))
+        self.assertEqual({c: is_whitespace(c) for c in expected}, expected)
+
+    def test_every_separator_ends_the_token_being_read(self):
+        classified = {name: forces_new_token(c) for name, c in _TOKEN_SEPARATORS.items()}
+        self.assertEqual(classified, dict.fromkeys(_TOKEN_SEPARATORS, True))
+
+    def test_the_end_of_the_source_ends_every_token(self):
+        self.assertEqual(forces_new_token(''), True)
+
+    def test_a_line_ending_is_python_whitespace_and_not_powershell_whitespace(self):
+        self.assertEqual([c.isspace() for c in '\r\n'], [True, True])
+        self.assertEqual([is_whitespace(c) for c in '\r\n'], [False, False])
+
+    def test_a_dash_ends_a_numeral_without_ending_a_word(self):
+        classified = {
+            name: (forces_new_token_after_number(dash), forces_new_token(dash))
+            for name, dash in _DASH_SPELLINGS.items()
+        }
+        self.assertEqual(classified, dict.fromkeys(_DASH_SPELLINGS, (True, False)))
+
+    def test_a_question_mark_and_a_colon_end_neither_a_numeral_nor_a_word(self):
+        classified = {c: (forces_new_token_after_number(c), forces_new_token(c)) for c in '?:'}
+        self.assertEqual(classified, {'?': (False, False), ':': (False, False)})

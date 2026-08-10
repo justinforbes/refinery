@@ -212,13 +212,10 @@ REFUSED: tuple[str, ...] = tuple(
 
 #: Measured spellings the host pins to a value that the domain does not answer. `-(2147483648)` is
 #: a unary minus over a parenthesized literal, which 5.1 types by the width of the literal that was
-#: negated rather than by the width the negated value needs, and `1.5L` is a real with a long
-#: suffix, which the lexer does not read as one literal at all.
+#: negated rather than by the width the negated value needs.
 UNANSWERED: tuple[str, ...] = (
     '-(2147483648)',
     '-(2147483647)',
-    '1.5L',
-    '2.5L',
 )
 
 DECIDED: tuple[str, ...] = tuple(
@@ -392,7 +389,7 @@ class TestPs1MeasuredNumerals(unittest.TestCase):
 
     def test_every_numeral_the_corpus_measures_is_selected(self):
         self.assertEqual(
-            len(_NUMERAL_ROWS), 36, 'a measured numeral was added or withdrawn')
+            len(_NUMERAL_ROWS), 38, 'a measured numeral was added or withdrawn')
         self.assertEqual(sorted(REFUSED), ['0xFFFFFFFFFFFFFFFFF', '1_0'])
         self.assertEqual(
             sorted(set(UNANSWERED) - set(MEASURED)), [], 'a spelling named here is not measured')
@@ -429,7 +426,6 @@ class TestPs1MeasuredNumerals(unittest.TestCase):
             with self.subTest(expression):
                 self.assertEqual(_read(expression), MEASURED[expression])
 
-    @unittest.expectedFailure
     def test_a_real_with_a_long_suffix_is_the_rounded_int64_the_host_prints(self):
         """
         5.1 prints Int64 2 for both `1.5L` and `2.5L`, which is the half-to-even rounding of a cast
@@ -453,7 +449,7 @@ class TestPs1MeasuredNumerals(unittest.TestCase):
         collisions = {
             rendered: spellings for rendered, spellings in by_value.items() if len(spellings) > 1
         }
-        self.assertEqual(sorted(collisions), ['-1', '1.5', '1024', '255'])
+        self.assertEqual(sorted(collisions), ['-1', '1', '1.5', '1024', '255'])
         for rendered, spellings in collisions.items():
             with self.subTest(rendered):
                 facts = {_read(expression) for expression in spellings.values()}

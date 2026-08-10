@@ -12,7 +12,9 @@ from refinery.lib.scripts.ps1.token import (
     DASHES,
     DOUBLE_QUOTES,
     SINGLE_QUOTES,
-    WHITESPACE,
+    forces_new_token,
+    forces_new_token_after_number,
+    is_whitespace,
     Ps1Token,
     Ps1TokenKind,
 )
@@ -130,9 +132,6 @@ _DASH_OPERATORS: dict[str, str] = {
     )
 }
 
-_FORCE_START_NEW_TOKEN = frozenset(' \t\r\n|&;,{}()')
-_FORCE_NEW_TOKEN_AFTER_NUMBER = frozenset('!#%*+-./<=>]')
-
 _VARIABLE_STOPS_NO_RESCAN = frozenset('.[=')
 
 _REDIRECTION_PATTERN = re.compile(
@@ -140,19 +139,22 @@ _REDIRECTION_PATTERN = re.compile(
     r'|>>|>&1|>',             # bare: >>, >&1, >
 )
 
-_INTEGER_PATTERN = re.compile(
-    r'0[xX][0-9a-fA-F][0-9a-fA-F_]*(?:l|L)?'
-    r'|0[bB][01][01_]*(?:l|L)?'
-    r'|[0-9][0-9_]*(?:l|L)?',
-)
+_DECIMAL_DIGITS = frozenset('0123456789')
+_HEX_DIGITS = frozenset('0123456789abcdefABCDEF')
+_HEX_MARKER = frozenset('xX')
+_EXPONENT_MARKER = frozenset('eE')
 
-_REAL_PATTERN = re.compile(
-    r'(?:'
-    r'(?:[0-9]*\.[0-9]+|[0-9]+\.)(?:[eE][+-]?[0-9]+)?'
-    r'|[0-9]+[eE][+-]?[0-9]+'
-    r')(?:[dD]|[kKmMgGtTpP][bB])?'
-    r'|[0-9]+(?:\.[0-9]+)?(?:[dD]|[kKmMgGtTpP][bB])',
-)
+#: The letters that name the type a numeral is read as. There are exactly two on 5.1 — an Int64 and
+#: a Decimal — which is why every other width has to be spelled with a cast. The rest of the set
+#: (`y`, `uy`, `s`, `us`, `u`, `ul`) arrived in 6.2 and `n` in 7.0, and none of them may be read
+#: here: `1uy` is the word `1uy` on 5.1, not the byte one.
+_TYPE_SUFFIX = frozenset('lLdD')
+_DECIMAL_SUFFIX = frozenset('dD')
+
+#: The letters that begin a binary multiplier. Each is a prefix and not the whole of one: the `b`
+#: behind it is required, so `1kb` is a number where `1k` is a word.
+_MULTIPLIER_START = frozenset('kKmMgGtTpP')
+_MULTIPLIER_END = frozenset('bB')
 
 _VARIABLE_PATTERN = re.compile(_VARIABLE_PATTERN_CORE, re.IGNORECASE)
 
@@ -172,13 +174,22 @@ class Ps1Lexer:
     def _at_end(self) -> bool:
         return self.pos >= len(self.source)
 
+    def _peek(self, ahead: int = 0) -> str:
+        """
+        The character `ahead` positions past `Ps1Lexer.pos`, or the empty string where the source
+        has ended. Every rule that asks what comes next has to answer for the end of the source
+        too, and this is the one place that answer is given: the character classes in
+        `refinery.lib.scripts.ps1.token` read the empty string as the end and judge it accordingly.
+        """
+        return self.source[self.pos + ahead:self.pos + ahead + 1]
+
     def _skip_whitespace(self) -> bool:
         start = self.pos
         src = self.source
         length = len(src)
         while self.pos < length:
             c = src[self.pos]
-            if c in WHITESPACE:
+            if is_whitespace(c):
                 self.pos += 1
             elif c == '`' and self.pos + 1 < length and src[self.pos + 1] == '\n':
                 self.pos += 2
@@ -317,40 +328,109 @@ class Ps1Lexer:
         kind = Ps1TokenKind.SPLAT_VARIABLE if prefix == '@' else Ps1TokenKind.VARIABLE
         return Ps1Token(kind, self.source[start:self.pos], start)
 
+    def _read_digits(self, digits: frozenset[str]) -> int:
+        start = self.pos
+        while self._peek() in digits:
+            self.pos += 1
+        return self.pos - start
+
+    def _read_exponent(self) -> bool:
+        """
+        Read the power an `e` was written for, and say whether one was there. A sign may stand
+        between the two, and digits must: `1e3` is a thousand and `1e` is the word `1e`.
+        """
+        if self._peek() in ('+', '-'):
+            self.pos += 1
+        return self._read_digits(_DECIMAL_DIGITS) > 0
+
+    def _read_fraction(self) -> bool:
+        """
+        Read what follows a numeral's dot: the digits after it, and the power they may be raised to.
+        No digit is required — `1.` is the number one and `1.e1` is ten — because the dot has
+        already settled that a numeral is being read.
+        """
+        self._read_digits(_DECIMAL_DIGITS)
+        if self._peek() not in _EXPONENT_MARKER:
+            return True
+        self.pos += 1
+        return self._read_exponent()
+
     def _read_number(self) -> Ps1Token | None:
         """
-        The numeral at `Ps1Lexer.pos`, or `None` where none is written there. A trailing dot belongs
-        to the numeral — `3.` is the number three — and is given back only to the range operator, so
-        that `3..5` counts from three while `3.ToString` stays one word. Everything the numeral did
-        not swallow is `Ps1Lexer.scan`'s to judge: a numeral that is followed by anything but a
-        token terminator is not a numeral at all, and is re-read as the word it is part of.
+        The numeral written at `Ps1Lexer.pos`, or `None` where what stands there only looks like
+        one. A digit is written there, or a dot and then a digit; `Ps1Lexer.scan` is what knows
+        that, and nothing else calls this.
+
+        The parts come in 5.1's order and are not alternatives to one another: a base, then a
+        fraction or a power, then a type suffix, then a multiplier. Reading a suffix *or* a
+        multiplier loses `1dkb`, which is a Decimal kilobyte, and `1.5L`, which is an Int64.
+
+        A trailing dot belongs to the numeral — `3.` is the number three — and is given back only to
+        the range operator, so that `3..5` counts from three. A dot after a power belongs to neither:
+        only the plain-decimal branch ever eats one, so `1e3` ends where the dot begins and 5.1 reads
+        what follows as a member.
+
+        Three spellings end here rather than in `Ps1Lexer.scan`, because it is the numeral itself
+        that cannot be one: `0x` names no digits, `1e` raises nothing to a power, and a multiplier
+        with no `b` behind it is part of the word around it, so `1k` is a word where `1kb` is a
+        number. Everything else the numeral did not swallow is `Ps1Lexer.scan`'s to judge.
+
+        The kind reported is which literal the parser builds and not what the numeral is worth:
+        `1kb` is a real to spell and an `Int32` to read, and `refinery.lib.scripts.ps1.analysis
+        .values.read` is what decides the second.
         """
-        src = self.source
-        m = _REAL_PATTERN.match(src, self.pos)
-        if m:
-            text = m.group()
-            end = m.end()
-            if text.endswith('.') and src[end:end + 1] == '.':
-                start = self.pos
-                self.pos = end - 1
-                return Ps1Token(Ps1TokenKind.INTEGER, text[:-1], start)
-            start = self.pos
-            self.pos = end
-            return Ps1Token(Ps1TokenKind.REAL, text, start)
-        m = _INTEGER_PATTERN.match(src, self.pos)
-        if m:
-            start = self.pos
-            self.pos = m.end()
-            if (
-                self.pos + 1 < len(src)
-                and src[self.pos].lower() in 'kmgtp'
-                and src[self.pos + 1].lower() == 'b'
-            ):
-                text = src[start:self.pos + 2]
-                self.pos += 2
-                return Ps1Token(Ps1TokenKind.REAL, text, start)
-            return Ps1Token(Ps1TokenKind.INTEGER, m.group(), start)
-        return None
+        start = self.pos
+        real = False
+        if self._peek() == '.':
+            self.pos += 1
+            if not self._read_fraction():
+                self.pos = start
+                return None
+            real = True
+        elif self._peek() == '0' and self._peek(1) in _HEX_MARKER:
+            self.pos += 2
+            if not self._read_digits(_HEX_DIGITS):
+                self.pos = start
+                return None
+        else:
+            self._read_digits(_DECIMAL_DIGITS)
+            if self._peek() == '.' and self._peek(1) != '.':
+                self.pos += 1
+                if not self._read_fraction():
+                    self.pos = start
+                    return None
+                real = True
+            elif self._peek() in _EXPONENT_MARKER:
+                self.pos += 1
+                if not self._read_exponent():
+                    self.pos = start
+                    return None
+                real = True
+        suffix = self._peek()
+        if suffix in _TYPE_SUFFIX:
+            self.pos += 1
+            real = real or suffix in _DECIMAL_SUFFIX
+        if self._peek() in _MULTIPLIER_START:
+            self.pos += 1
+            if self._peek() not in _MULTIPLIER_END:
+                self.pos = start
+                return None
+            self.pos += 1
+            real = True
+        kind = Ps1TokenKind.REAL if real else Ps1TokenKind.INTEGER
+        return Ps1Token(kind, self.source[start:self.pos], start)
+
+    def _numeral_ends_here(self) -> bool:
+        """
+        Whether the numeral just read really ends where it stopped. Which characters can end one
+        depends on the slot: where an expression is read a numeral ends on an operator too, so `1+2`
+        is three tokens, and where a bare word is a value only a token terminator will do, so `f 1+2`
+        passes the single word `1+2`.
+        """
+        c = self._peek()
+        if forces_new_token(c):
+            return True
+        return self.mode is Ps1LexerMode.EXPRESSION and forces_new_token_after_number(c)
 
     def _try_dash_operator(self) -> Ps1Token | None:
         src = self.source
@@ -465,7 +545,7 @@ class Ps1Lexer:
                         continue
                 self.pos += 1
                 continue
-            if c in _FORCE_START_NEW_TOKEN:
+            if forces_new_token(c):
                 break
             self.pos += 1
         kind = Ps1TokenKind.GENERIC_EXPAND if has_expansion else Ps1TokenKind.GENERIC_TOKEN
@@ -532,8 +612,7 @@ class Ps1Lexer:
                     return Ps1Token(Ps1TokenKind.HSTRING_EXPAND, text, start)
 
             if c2 in ('..', '--', '++', '::', '+=', '-=', '*=', '/=', '%=') and self.mode == Ps1LexerMode.ARGUMENT:
-                after = self.pos + 2
-                if after < length and src[after] not in _FORCE_START_NEW_TOKEN:
+                if not forces_new_token(self._peek(2)):
                     token = self._read_generic_token()
                     if token.value:
                         return token
@@ -553,9 +632,9 @@ class Ps1Lexer:
                 nc = src[self.pos + 1] if self.pos + 1 < length else ''
                 if nc and (nc.isalnum() or nc in _VARIABLE_START_CHARS):
                     token = self._read_variable(c)
-                    if self.mode == Ps1LexerMode.ARGUMENT and self.pos < length:
-                        fc = src[self.pos]
-                        if fc not in _FORCE_START_NEW_TOKEN and fc not in _VARIABLE_STOPS_NO_RESCAN:
+                    if self.mode == Ps1LexerMode.ARGUMENT:
+                        fc = self._peek()
+                        if not forces_new_token(fc) and fc not in _VARIABLE_STOPS_NO_RESCAN:
                             self.pos = start
                             token = self._read_generic_token()
                     return token
@@ -573,17 +652,12 @@ class Ps1Lexer:
                     if redir:
                         return redir
 
-            if c.isdigit() or (c == '.' and self.pos + 1 < length and src[self.pos + 1].isdigit()):
+            if c in _DECIMAL_DIGITS or (c == '.' and self._peek(1) in _DECIMAL_DIGITS):
                 token = self._read_number()
-                if token:
-                    nc = src[self.pos] if self.pos < length else None
-                    if nc is not None and nc not in _FORCE_START_NEW_TOKEN and not nc.isspace():
-                        if self.mode == Ps1LexerMode.ARGUMENT or (
-                            nc not in _FORCE_NEW_TOKEN_AFTER_NUMBER
-                        ):
-                            self.pos = start
-                            token = self._read_generic_token()
+                if token is not None and self._numeral_ends_here():
                     return token
+                self.pos = start
+                return self._read_generic_token()
 
             if c in DASHES:
                 if self.mode == Ps1LexerMode.EXPRESSION:
@@ -598,15 +672,20 @@ class Ps1Lexer:
                 return redir
 
             if self.mode == Ps1LexerMode.ARGUMENT:
-                if c == '.' and self.pos + 1 < length:
-                    nc = src[self.pos + 1]
-                    if nc not in _FORCE_START_NEW_TOKEN and nc != '$' and nc not in SINGLE_QUOTES and nc not in DOUBLE_QUOTES:
+                if c == '.':
+                    nc = self._peek(1)
+                    if (
+                        not forces_new_token(nc)
+                        and nc != '$'
+                        and nc not in SINGLE_QUOTES
+                        and nc not in DOUBLE_QUOTES
+                    ):
                         token = self._read_generic_token()
                         if token.value:
                             return token
 
             if self.mode == Ps1LexerMode.ARGUMENT and c in '*/%=!+?[':
-                if self.pos + 1 < length and src[self.pos + 1] not in _FORCE_START_NEW_TOKEN:
+                if not forces_new_token(self._peek(1)):
                     token = self._read_generic_token()
                     if token.value:
                         return token
@@ -624,7 +703,7 @@ class Ps1Lexer:
 
             if c.isalpha() or c == '_' or c == '`':
                 token = self._read_identifier()
-                if self.pos < length and src[self.pos] not in _FORCE_START_NEW_TOKEN:
+                if not forces_new_token(self._peek()):
                     if self.mode == Ps1LexerMode.ARGUMENT or (
                         src[self.pos] in SINGLE_QUOTES
                         or src[self.pos] in DOUBLE_QUOTES

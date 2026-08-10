@@ -716,6 +716,16 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int64\t1024',
             'OUT\tSystem.Int64\t1024',
         ),
+    '$t = 1dkb; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1024',
+            'OUT\tSystem.Decimal\t1024',
+        ),
+    '$t = 0x0000000000000001; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t1',
+            'OUT\tSystem.Int32\t1',
+        ),
     '$t = -2147483649; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int64\t-2147483649',
@@ -1280,11 +1290,6 @@ TYPE_DEFECTS: dict[str, str] = {
         'which for the Int32 255 is `255`. Substituting the literal writes its source spelling '
         'instead, so the string reads `0xFF`. It is the one place where how a value is written and '
         'what it renders to are different questions, and nothing asks the second one yet.',
-    '$t = 1_0; Write-Output (,$t); Write-Output $t':
-        'The lexer reads `_` as a digit separator, which 5.1 does not have. 5.1 reads `1_0` as a '
-        'command name and reports CommandNotFoundException; the unit reads the integer 10, folds '
-        'the assignment away and writes `1_0` back where a value is expected, which 5.1 cannot '
-        'parse at all.',
     "$OFS = '-'; $t = [string]('a', 'b'); Write-Output $t":
         'A collection renders to a String separated by $OFS (LangSpec 6.8), which this script '
         'sets. The fold bakes in the default separator.',
