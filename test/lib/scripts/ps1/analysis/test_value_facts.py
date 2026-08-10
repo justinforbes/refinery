@@ -96,6 +96,8 @@ INT64 = _type('System.Int64')
 STRING = _type('System.String')
 CHAR = _type('System.Char')
 BYTE = _type('System.Byte')
+SBYTE = _type('System.SByte')
+UINT16 = _type('System.UInt16')
 BOOLEAN = _type('System.Boolean')
 DOUBLE = _type('System.Double')
 DECIMAL = _type('System.Decimal')
@@ -362,16 +364,13 @@ _NO_OPERAND = 'the operand is a cast, and `read` evaluates nothing'
 #: the value is one no measurement covers, and a .NET rule guessed at is a wrong answer that looks
 #: like a right one.
 DECLINED: dict[str, tuple[str, ...]] = {
-    'a String parses by .NET rules that Python does not share': (
-        "[int]'5'",
-        "[int]' 5 '",
-        "[int]'0'",
-        "[int]'0x10'",
+    'a String spelling 5.1 reads by two rules that disagree with each other': (
         "[int]'1e3'",
+        "[int]'1,000'",
+    ),
+    'a String whose target throws for reasons `convert` does not see': (
         "[double]'1.5'",
         "[double]'1,5'",
-        "[bool]''",
-        "[bool]'a'",
     ),
     'a Double is written by .NET formatting rather than by Python': (
         '[string]1.5',
@@ -527,6 +526,10 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     '100000000000000d * 100000000000000d',
     '-2147483647 - 1',
     '10 -ne 20',
+    "'5' + 5",
+    "'a' + $null",
+    "'a' + $true",
+    "'a' + 1.50d",
 )
 
 #: The measured operations whose result a host printed to fewer digits than the value has: 5.1
@@ -1308,7 +1311,7 @@ class TestPs1MeasuredCasts(unittest.TestCase):
     """
 
     def test_every_cast_the_corpus_measures_is_selected(self):
-        self.assertEqual(len(CAST_ROWS), 47, 'a measured cast was added or withdrawn')
+        self.assertEqual(len(CAST_ROWS), 73, 'a measured cast was added or withdrawn')
         self.assertEqual(sorted(set(DECLINED_CASTS) - set(CAST_ROWS)), [])
         self.assertEqual(sorted(set(DECLINED_CASTS) & set(THROWN)), [])
 
@@ -1359,8 +1362,9 @@ class TestPs1MeasuredCasts(unittest.TestCase):
     def test_a_cast_the_host_threw_on_pins_no_value_and_reports_the_throw(self):
         """
         5.1 throws rather than wrapping where a value does not fit its target, and rather than
-        yielding zero for a String that spells no number. The last is the cell shape a cast has most
-        often — an Int32, or it throws — and the type it names is not a claim that a value came out.
+        yielding zero for a String that spells no number. A row where the domain sees the throw for
+        itself names no value at all; one where it declines the spelling keeps the type its cell
+        names — an Int32, or it throws — and that type is not a claim that a value came out.
         """
         self.assertEqual(
             {expression: _converted(expression) for expression in THROWN},
@@ -1370,7 +1374,17 @@ class TestPs1MeasuredCasts(unittest.TestCase):
                 '[int]2147483648' : Ps1Outcome(True, UNKNOWN),
                 '[char]65536'     : Ps1Outcome(True, UNKNOWN),
                 '[char]-1'        : Ps1Outcome(True, UNKNOWN),
+                "[byte]'-1'"      : Ps1Outcome(True, UNKNOWN),
+                "[byte]'0x100'"   : Ps1Outcome(True, UNKNOWN),
+                "[char]'AB'"      : Ps1Outcome(True, UNKNOWN),
+                "[char]''"        : Ps1Outcome(True, UNKNOWN),
                 "[int]'abc'"      : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'   '"      : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'1_0'"      : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'0b1010'"   : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'0o17'"     : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'1kb'"      : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[byte]'1e3'"     : Ps1Outcome(True, Ps1Typed(BYTE)),
             },
         )
 
@@ -1413,6 +1427,109 @@ class TestPs1CharConversions(unittest.TestCase):
         """
         self.assertEqual(convert(Ps1Constant(CHAR, 'A'), BOOLEAN).value, Ps1Typed(BOOLEAN))
         self.assertEqual(convert(Ps1Constant(CHAR, 'A'), DOUBLE).value, Ps1Typed(DOUBLE))
+
+
+class TestPs1CastsThatReadAString(unittest.TestCase):
+    """
+    A String is the one source a cast reads by parsing rather than by arithmetic, and 5.1 parses it
+    by more than one rule. Each question below is asked twice — of the transcript the row was
+    measured in and of the domain — so the two can only agree by both agreeing with the host.
+    """
+
+    def test_a_hexadecimal_string_is_the_bit_pattern_the_target_width_holds(self):
+        """
+        The digits are read at the width of the target rather than at the width the number needs, so
+        the same eight bits are 128 in a Byte and -128 in an SByte.
+        """
+        self.assertEqual(_measured("[byte]'0x80'"), ('System.Byte', '128'))
+        self.assertEqual(_measured("[sbyte]'0x80'"), ('System.SByte', '-128'))
+        self.assertEqual(_measured("[uint16]'0xFFFF'"), ('System.UInt16', '65535'))
+        self.assertEqual(_measured("[int]'0xFFFFFFFF'"), ('System.Int32', '-1'))
+        self.assertEqual(_converted("[byte]'0x80'"), Ps1Outcome(False, Ps1Constant(BYTE, 128)))
+        self.assertEqual(_converted("[sbyte]'0x80'"), Ps1Outcome(False, Ps1Constant(SBYTE, -128)))
+        self.assertEqual(
+            _converted("[uint16]'0xFFFF'"), Ps1Outcome(False, Ps1Constant(UINT16, 65535)))
+        self.assertEqual(
+            _converted("[int]'0xFFFFFFFF'"), Ps1Outcome(False, Ps1Constant(INT32, -1)))
+
+    def test_a_hexadecimal_string_the_target_width_does_not_hold_throws(self):
+        self.assertEqual(_throws(_transcript("[byte]'0x100'")), True)
+        self.assertEqual(_converted("[byte]'0x100'"), Ps1Outcome(True, UNKNOWN))
+
+    def test_a_decimal_string_carries_a_sign_where_a_hexadecimal_one_carries_a_pattern(self):
+        """
+        `[byte]'-1'` throws where `[byte]'0x80'` is 128, so a decimal spelling is a magnitude that
+        has to fit and never a width to be filled.
+        """
+        self.assertEqual(_throws(_transcript("[byte]'-1'")), True)
+        self.assertEqual(_measured("[int]'+7'"), ('System.Int32', '7'))
+        self.assertEqual(_converted("[byte]'-1'"), Ps1Outcome(True, UNKNOWN))
+        self.assertEqual(_converted("[int]'+7'"), Ps1Outcome(False, Ps1Constant(INT32, 7)))
+
+    def test_a_string_spelling_a_half_is_rounded_to_the_even_neighbour(self):
+        """
+        Both rows are exactly halfway and neither rounds upwards: 7.5 is 8 and 2.5 is 2.
+        """
+        self.assertEqual(_measured("[int]'7.5'"), ('System.Int32', '8'))
+        self.assertEqual(_measured("[int]'2.5'"), ('System.Int32', '2'))
+        self.assertEqual(_converted("[int]'7.5'"), Ps1Outcome(False, Ps1Constant(INT32, 8)))
+        self.assertEqual(_converted("[int]'2.5'"), Ps1Outcome(False, Ps1Constant(INT32, 2)))
+
+    def test_the_empty_string_is_a_zero_and_a_string_of_spaces_is_not(self):
+        """
+        Space around a number is stripped and a String of nothing but space is not the empty one:
+        `[int]' 5 '` is 5, `[int]''` is 0, and `[int]'   '` throws.
+        """
+        self.assertEqual(_measured("[int]''"), ('System.Int32', '0'))
+        self.assertEqual(_measured("[int]' 5 '"), ('System.Int32', '5'))
+        self.assertEqual(_throws(_transcript("[int]'   '")), True)
+        self.assertEqual(_converted("[int]''"), Ps1Outcome(False, Ps1Constant(INT32, 0)))
+        self.assertEqual(_converted("[int]' 5 '"), Ps1Outcome(False, Ps1Constant(INT32, 5)))
+        self.assertEqual(_converted("[int]'   '"), Ps1Outcome(True, Ps1Typed(INT32)))
+
+    def test_a_string_is_true_by_holding_characters_rather_than_by_what_they_spell(self):
+        self.assertEqual(_measured("[bool]'0'"), ('System.Boolean', 'True'))
+        self.assertEqual(_measured("[bool]'a'"), ('System.Boolean', 'True'))
+        self.assertEqual(_measured("[bool]''"), ('System.Boolean', 'False'))
+        self.assertEqual(_converted("[bool]'0'"), Ps1Outcome(False, Ps1Constant(BOOLEAN, True)))
+        self.assertEqual(_converted("[bool]'a'"), Ps1Outcome(False, Ps1Constant(BOOLEAN, True)))
+        self.assertEqual(_converted("[bool]''"), Ps1Outcome(False, Ps1Constant(BOOLEAN, False)))
+
+    def test_a_one_character_string_is_that_char_and_every_other_length_throws(self):
+        """
+        The empty String is where the targets part: it is a zero to `[int]` and a throw to `[char]`.
+        """
+        self.assertEqual(_measured("[char]'A'"), ('System.Char', 'A'))
+        self.assertEqual(_throws(_transcript("[char]'AB'")), True)
+        self.assertEqual(_throws(_transcript("[char]''")), True)
+        self.assertEqual(_converted("[char]'A'"), Ps1Outcome(False, Ps1Constant(CHAR, 'A')))
+        self.assertEqual(_converted("[char]'AB'"), Ps1Outcome(True, UNKNOWN))
+        self.assertEqual(_converted("[char]''"), Ps1Outcome(True, UNKNOWN))
+
+    def test_a_cast_to_string_is_the_string_it_was_handed(self):
+        self.assertEqual(_measured("[string]'foo'"), ('System.String', 'foo'))
+        self.assertEqual(
+            _converted("[string]'foo'"), Ps1Outcome(False, Ps1Constant(STRING, 'foo')))
+
+    def test_a_spelling_two_targets_read_apart_is_declined_by_both(self):
+        """
+        Measured, `'1e3'` is 1000 to `[int]` and a throw to `[byte]`, so no one rule reads the
+        exponent and a value computed under either would be the wrong answer under the other.
+        """
+        self.assertEqual(_measured("[int]'1e3'"), ('System.Int32', '1000'))
+        self.assertEqual(_throws(_transcript("[byte]'1e3'")), True)
+        self.assertEqual(_converted("[int]'1e3'"), Ps1Outcome(True, Ps1Typed(INT32)))
+        self.assertEqual(_converted("[byte]'1e3'"), Ps1Outcome(True, Ps1Typed(BYTE)))
+
+    def test_a_spelling_only_python_reads_as_a_number_is_no_number_here(self):
+        """
+        A digit separator and a binary prefix are Python's numerals and not 5.1's: measured, both
+        rows throw, so a module that read them with Python's own parser would answer 10 twice.
+        """
+        self.assertEqual(_throws(_transcript("[int]'1_0'")), True)
+        self.assertEqual(_throws(_transcript("[int]'0b1010'")), True)
+        self.assertEqual(_converted("[int]'1_0'"), Ps1Outcome(True, Ps1Typed(INT32)))
+        self.assertEqual(_converted("[int]'0b1010'"), Ps1Outcome(True, Ps1Typed(INT32)))
 
 
 class TestPs1ConvertRefusals(unittest.TestCase):
@@ -1575,7 +1692,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 32, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 38, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
@@ -1651,6 +1768,90 @@ class TestPs1MeasuredOperators(unittest.TestCase):
                 for expression in ABBREVIATED_OPERATIONS
             },
         )
+
+
+class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
+    """
+    `+` either adds or joins text, and which it does is settled by the operand written on its left.
+    Measured, `[char]65 + 1` is the String `A1` while `1 + [char]65` is the number 66, and `'A' + 1`
+    joins where `1 + 'A'` throws — so the same two values in the other order are a different value
+    of a different type, and one order refuses operands the other accepts.
+    """
+
+    def test_a_char_and_a_number_join_in_one_order_and_not_in_the_other(self):
+        self.assertEqual(
+            TYPE_TRANSCRIPTS["Write-Output ([char]65 + 1); Write-Output ('A' + 1)"][0],
+            'OUT\tSystem.String\tA1',
+        )
+        self.assertEqual(
+            TYPE_TRANSCRIPTS["Write-Output (1 + [char]65); Write-Output (1 + 'A')"][0],
+            'OUT\tSystem.Int32\t66',
+        )
+        self.assertEqual(
+            apply('+', Ps1Constant(CHAR, 'A'), Ps1Constant(INT32, 1)),
+            Ps1Outcome(False, Ps1Constant(STRING, 'A1')),
+        )
+        self.assertEqual(apply('+', Ps1Constant(INT32, 1), Ps1Constant(CHAR, 'A')), NOTHING)
+
+    def test_two_chars_join_into_the_two_character_string_the_host_printed(self):
+        self.assertEqual(
+            TYPE_TRANSCRIPTS["Write-Output ([char]114 + [char]53); Write-Output ('r' + '5')"],
+            ('OUT\tSystem.String\tr5', 'OUT\tSystem.String\tr5'),
+        )
+        self.assertEqual(
+            apply('+', Ps1Constant(CHAR, 'r'), Ps1Constant(CHAR, '5')),
+            Ps1Outcome(False, Ps1Constant(STRING, 'r5')),
+        )
+
+    def test_nothing_but_a_string_or_a_char_on_the_left_is_answered_with_a_join(self):
+        """
+        Measured, `1 + 'A'` throws, `1 + [char]65` is 66 and `5 + '5'` is 10: a number on the left
+        never joins text, whatever stands on the right of it.
+        """
+        joining = {
+            type_of(left)
+            for left in OPERANDS
+            for right in OPERANDS
+            if type_of(apply('+', left, right).value) == STRING
+        }
+        self.assertEqual(
+            sorted(str(one) for one in joining), ['System.Char', 'System.String'])
+
+    def test_what_a_join_appends_is_what_a_cast_of_the_right_operand_to_string_names(self):
+        """
+        Measured, `'a' + $true` is `aTrue` and `[string]$true` is `True`, so a join asks its right
+        operand the question a cast to String asks. `$null` is the one operand where the two are
+        spelled apart: it appends nothing and is no String.
+        """
+        head = Ps1Constant(STRING, 'a')
+        for right in OPERANDS:
+            with self.subTest(repr(right)):
+                joined = apply('+', head, right).value
+                converted = convert(right, STRING).value
+                if right is NULL:
+                    self.assertEqual(joined, head)
+                elif isinstance(converted, Ps1Constant):
+                    self.assertEqual(joined, Ps1Constant(STRING, F'a{converted.payload}'))
+                else:
+                    self.assertEqual(joined, UNKNOWN)
+
+    def test_a_decimal_is_joined_with_the_digits_it_was_written_with(self):
+        """
+        `1.50d` and `1.5d` are one number under two spellings, and the text a join appends is the
+        one that was written: measured, `'a' + 1.50d` is `a1.50`.
+        """
+        self.assertEqual(_measured("'a' + 1.50d"), ('System.String', 'a1.50'))
+        self.assertEqual(_applied("'a' + 1.50d"), Ps1Outcome(False, Ps1Constant(STRING, 'a1.50')))
+
+    def test_a_right_operand_whose_text_only_a_session_settles_is_not_joined(self):
+        """
+        Measured, `'a' + @(1, 2)` is `a1 2` and `'a' + 1.5` is `a1.5`, and neither text is one this
+        module can write: a collection is separated by `$OFS`, and a Double is formatted by .NET.
+        """
+        self.assertEqual(_measured("'a' + @(1, 2)"), ('System.String', 'a1 2'))
+        self.assertEqual(_measured("'a' + 1.5"), ('System.String', 'a1.5'))
+        self.assertEqual(_applied("'a' + @(1, 2)"), NOTHING)
+        self.assertEqual(_applied("'a' + 1.5"), NOTHING)
 
 
 class TestPs1CellsTheWitnessesReach(unittest.TestCase):
@@ -1787,15 +1988,16 @@ class TestPs1CastNamesItsTargetWhereAnOperatorNamesNothing(unittest.TestCase):
 
     def test_an_operator_over_the_same_source_is_left_without_an_answer(self):
         """
-        Measured, `[int]'5'` is Int32 5 and `1 + '5'` is Int32 6. The cast still names the Int32 the
-        host stamped it with, where the operator names nothing: what `+` produces over a String was
-        measured to depend on which string, and `[int]` of one is an Int32 or a throw whichever
-        string it is handed.
+        Measured, `[int]'1e3'` is Int32 1000 and `1 + '1e3'` is Double 1001, so the two read the
+        same String by different rules and reach different types doing it. The cast still names the
+        Int32 the host stamped it with, where the operator names nothing: what `+` produces over a
+        String was measured to depend on which string, and `[int]` of one is an Int32 or a throw
+        whichever string it is handed.
         """
-        self.assertEqual(_measured("[int]'5'"), ('System.Int32', '5'))
-        self.assertEqual(_converted("[int]'5'"), Ps1Outcome(True, Ps1Typed(INT32)))
-        self.assertEqual(_measured("1 + '5'"), ('System.Int32', '6'))
-        self.assertEqual(_applied("1 + '5'"), NOTHING)
+        self.assertEqual(_measured("[int]'1e3'"), ('System.Int32', '1000'))
+        self.assertEqual(_converted("[int]'1e3'"), Ps1Outcome(True, Ps1Typed(INT32)))
+        self.assertEqual(_measured("1 + '1e3'"), ('System.Double', '1001'))
+        self.assertEqual(_applied("1 + '1e3'"), NOTHING)
 
 
 class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
@@ -1820,7 +2022,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in CAST_ROWS
             if _read(CAST_ROWS[expression].operand) is not UNKNOWN
         }
-        self.assertEqual(len(composed), 45)
+        self.assertEqual(len(composed), 71)
         self.assertEqual(
             composed, {expression: _converted(expression) for expression in composed})
 
@@ -1843,7 +2045,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 17)
+        self.assertEqual(len(composed), 21)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -1902,6 +2104,34 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
         self.assertEqual(evaluate(_slot('$s.Length, 1'), {'s': STRING}), NOTHING)
 
 
+class TestPs1EvaluateComposesACastOfAStringWithAJoin(unittest.TestCase):
+    """
+    None of these expressions is a measured row: each writes two measured steps against each other,
+    and what it comes to follows from what a host printed for either. `[int]'0x10'` is Int32 16 and
+    `'5' + 5` is the String `55`, so `'v' + [int]'0x10'` is `v16` and nothing else — while a step
+    the host threw on and a step whose spelling is declined each leave the whole expression with no
+    value, one of them with a throw the domain saw for itself.
+    """
+
+    def test_a_join_over_a_cast_of_a_string_is_the_text_the_two_steps_come_to(self):
+        self.assertEqual(_measured("[int]'0x10'"), ('System.Int32', '16'))
+        self.assertEqual(_measured("'5' + 5"), ('System.String', '55'))
+        self.assertEqual(
+            _evaluated("'v' + [int]'0x10'"), Ps1Outcome(False, Ps1Constant(STRING, 'v16')))
+
+    def test_a_cast_over_a_join_reads_the_text_the_join_produced(self):
+        self.assertEqual(_measured("[int]'5'"), ('System.Int32', '5'))
+        self.assertEqual(_evaluated("[int]('1' + '0')"), Ps1Outcome(False, Ps1Constant(INT32, 10)))
+
+    def test_a_step_the_host_threw_on_leaves_the_join_with_a_throw_and_no_value(self):
+        self.assertEqual(_throws(_transcript("[char]'AB'")), True)
+        self.assertEqual(_evaluated("'x' + [char]'AB'"), Ps1Outcome(True, UNKNOWN))
+
+    def test_a_step_whose_spelling_is_declined_leaves_the_join_with_no_value(self):
+        self.assertEqual(_measured("[int]'1e3'"), ('System.Int32', '1000'))
+        self.assertEqual(_evaluated("'x' + [int]'1e3'"), Ps1Outcome(True, UNKNOWN))
+
+
 class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
     """
     The contract, quantified over the PowerShell the corpus holds rather than over cases chosen
@@ -1915,7 +2145,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 936)
+        self.assertEqual(len(compared), 1041)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -1930,7 +2160,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1033)
+        self.assertEqual(len(compared), 1159)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -1945,7 +2175,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1033)
+        self.assertEqual(len(compared), 1159)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -1956,12 +2186,12 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 561)
+        self.assertEqual(len(STRINGS), 657)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
     def test_the_bytes_the_array_reader_collects_are_the_numbers_the_elements_name(self):
-        self.assertEqual(len(BYTE_ARRAYS), 33)
+        self.assertEqual(len(BYTE_ARRAYS), 35)
         self.assertEqual(
             [row.source for row in BYTE_ARRAYS if list(row.collected) != row.payloads], [])
 
@@ -1970,7 +2200,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 250)
+        self.assertEqual(len(NUMERALS), 253)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -2006,7 +2236,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 128)
+        self.assertEqual(len(consulted), 160)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -2029,7 +2259,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
         weaker to fall back on either: an array shorter than the script builds is a different value.
         """
         named = [row for row in ARRAYS if row.named]
-        self.assertEqual(len(named), 54)
+        self.assertEqual(len(named), 56)
         self.assertEqual([row.source for row in named if not row.elements_named], [])
 
     def test_an_element_that_names_only_a_type_leaves_the_array_unknown(self):
@@ -2056,7 +2286,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 742)
+        self.assertEqual(len(compared), 840)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
@@ -2136,10 +2366,10 @@ class TestPs1EvaluateNamesACastsTarget(unittest.TestCase):
     def test_a_cast_the_host_threw_on_keeps_what_convert_made_of_the_value_in_hand(self):
         """
         The operand of each of these is pinned by the source, so the grid has a row for it and the
-        conversion is settled there rather than by the target: five of them do not fit and name no
-        value at all, which is more than *a Byte or a throw* would have said, and `[int]'abc'` keeps
-        the Int32 its cell names beside the throw. Naming the target is for the other case, where
-        the operand names no type and there is no row to read.
+        conversion is settled there rather than by the target: the ones the domain sees the throw of
+        name no value at all, which is more than *a Byte or a throw* would have said, and the ones
+        whose spelling it declines keep the type their cell names beside the throw. Naming the
+        target is for the other case, where the operand names no type and there is no row to read.
         """
         self.assertEqual(
             {expression: _evaluated(expression) for expression in THROWN},
@@ -2149,7 +2379,17 @@ class TestPs1EvaluateNamesACastsTarget(unittest.TestCase):
                 '[int]2147483648' : Ps1Outcome(True, UNKNOWN),
                 '[char]65536'     : Ps1Outcome(True, UNKNOWN),
                 '[char]-1'        : Ps1Outcome(True, UNKNOWN),
+                "[byte]'-1'"      : Ps1Outcome(True, UNKNOWN),
+                "[byte]'0x100'"   : Ps1Outcome(True, UNKNOWN),
+                "[char]'AB'"      : Ps1Outcome(True, UNKNOWN),
+                "[char]''"        : Ps1Outcome(True, UNKNOWN),
                 "[int]'abc'"      : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'   '"      : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'1_0'"      : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'0b1010'"   : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'0o17'"     : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[int]'1kb'"      : Ps1Outcome(True, Ps1Typed(INT32)),
+                "[byte]'1e3'"     : Ps1Outcome(True, Ps1Typed(BYTE)),
             },
         )
         self.assertEqual(

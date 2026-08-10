@@ -144,12 +144,16 @@ class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
         self.assertEqual(self._deobfuscate("$x = 5 + '5'"), '$x = 10')
 
     @unittest.expectedFailure
-    def test_a_string_plus_a_number_is_concatenation_because_the_left_operand_decides(self):
-        self.assertEqual(self._deobfuscate("$x = '5' + 5"), "$x = '55'")
-
-    @unittest.expectedFailure
     def test_a_number_plus_a_hex_string_parses_the_string_as_a_hex_number(self):
         self.assertEqual(self._deobfuscate("$x = 12 + '0xabc'"), '$x = 2760')
+
+    @unittest.expectedFailure
+    def test_a_string_plus_a_boolean_is_the_text_the_boolean_is_written_as(self):
+        self.assertEqual(self._deobfuscate("$x = 'a' + $true"), "$x = 'aTrue'")
+
+    @unittest.expectedFailure
+    def test_a_string_plus_a_double_is_the_text_the_double_is_written_as(self):
+        self.assertEqual(self._deobfuscate("$x = 'a' + 1.5"), "$x = 'a1.5'")
 
     @unittest.expectedFailure
     def test_an_equality_against_a_collection_filters_it(self):
@@ -217,10 +221,6 @@ class TestPs1ConstantsThatAreComputedWrong(TestPs1):
         self.assertEqual(self._deobfuscate('$x = 1 + [char]65'), '$x = 66')
 
     @unittest.expectedFailure
-    def test_a_char_plus_a_number_is_concatenation(self):
-        self.assertEqual(self._deobfuscate('$x = [char]65 + 1'), "$x = 'A1'")
-
-    @unittest.expectedFailure
     def test_indexing_a_string_yields_a_char(self):
         self.assertEqual(self._deobfuscate("$x = 'ABC'[0] -is [char]"), '$x = $True')
 
@@ -241,6 +241,50 @@ class TestPs1ConstantsThatAreComputedWrong(TestPs1):
         self.assertEqual(self._deobfuscate("$x = 'HI' -is [string]"), '$x = $True')
 
 
+class TestPs1TheLeftOperandOfPlusDecidesWhetherItConcatenates(TestPs1):
+    """
+    5.1 reads `+` by its left operand: a String or a Char on that side joins the text a cast of the
+    right one to String would produce, and a number on that side adds. So the same pair of values
+    written in the two orders is a String one way and a number the other, and one of the two orders
+    throws for operands the other accepts.
+    """
+
+    def test_a_string_plus_a_number_is_concatenation(self):
+        self.assertEqual(self._deobfuscate("$x = '5' + 5"), "$x = '55'")
+
+    def test_a_char_plus_a_number_is_concatenation(self):
+        self.assertEqual(self._deobfuscate('$x = [char]65 + 1'), "$x = 'A1'")
+
+    def test_a_decimal_is_appended_with_the_digits_it_was_written_with(self):
+        self.assertEqual(self._deobfuscate("$x = 'a' + 1.50d"), "$x = 'a1.50'")
+
+    def test_a_cast_of_a_string_that_is_folded_first_is_appended_as_the_number_it_became(self):
+        self.assertEqual(self._deobfuscate("$x = 'v' + [int]'0x10'"), "$x = 'v16'")
+
+
+class TestPs1ACastOfAStringIsReadByTheRulesOfFivePointOne(TestPs1):
+    """
+    A String operand is parsed rather than converted, and 5.1 parses it by rules of its own: `'1_0'`
+    is a numeral to Python's integer parser and none to 5.1, which throws for it, and `[byte]'0x80'`
+    reads the digits at the width of the target, producing a Byte where the same text under `[int]`
+    is an Int32. Where the tool answers one of these it answers a value 5.1 never produces, or
+    produces it under a type 5.1 did not.
+    """
+
+    @unittest.expectedFailure
+    def test_a_digit_separator_is_no_numeral_and_the_cast_throws(self):
+        source = "$x = [int]'1_0'"
+        self.assertEqual(self._deobfuscate(source), source)
+
+    @unittest.expectedFailure
+    def test_a_folded_cast_keeps_the_type_its_target_names(self):
+        self.assertEqual(self._deobfuscate("$x = [byte]'0x80'"), '$x = [byte]128')
+
+    @unittest.expectedFailure
+    def test_a_string_that_fills_the_target_width_is_the_negative_number_it_denotes(self):
+        self.assertEqual(self._deobfuscate("$x = [int]'0xFFFFFFFF'"), '$x = -1')
+
+
 class TestPs1ValuesDecidedBySessionState(TestPs1):
     """
     Rendering a collection as a string separates the elements with the current value of `$OFS`,
@@ -252,6 +296,14 @@ class TestPs1ValuesDecidedBySessionState(TestPs1):
         source = inspect.cleandoc("""
             $OFS = '-'
             $t = [string]('a', 'b')
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_collection_joined_onto_a_string_is_not_folded_because_ofs_separates_it(self):
+        source = inspect.cleandoc("""
+            $OFS = '-'
+            $t = 'a' + @(1, 2)
             Write-Output $t
         """)
         self.assertEqual(self._deobfuscate(source), source)

@@ -328,6 +328,14 @@ _A_CAST_TARGET_IS_ERASED = (
     'literal spelling, so dropping the cast is what loses it.'
 )
 
+#: A string operand is read with Python's own `int(text, 0)`, which knows three spellings 5.1 does
+#: not: a digit separator, a binary prefix and an octal one. Each makes a script that stops answer
+#: instead.
+_PYTHONS_OWN_NUMERALS = (
+    "The string is read with Python's integer parser, which accepts a digit separator and the `0b` "
+    'and `0o` prefixes. 5.1 accepts none of them and throws.'
+)
+
 #: What every Char row of `TYPE_DEFECTS` that is a method call has in common. A Char is not a
 #: String and carries none of its instance methods, so 5.1 reports MethodNotFound for each; the
 #: fold spells the Char as a one-character String, which has them all.
@@ -947,6 +955,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int64\t2147483649',
             'OUT\tSystem.Int64\t2147483649',
         ),
+    "$t = 1 + '1e3'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT	System.Double	1001',
+            'OUT	System.Double	1001',
+        ),
     "$t = 1 + '5'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t6',
@@ -1194,6 +1207,131 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t1000',
             'OUT\tSystem.Int32\t1000',
         ),
+    "$t = [byte]'1e3'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [int]'1_0'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [int]'0b1010'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [int]''; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    "$t = [int]'   '; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [int]'007'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t7',
+            'OUT\tSystem.Int32\t7',
+        ),
+    "$t = [int]'.5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    "$t = [int]'5.'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t5',
+            'OUT\tSystem.Int32\t5',
+        ),
+    "$t = [int]'1,000'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t1000',
+            'OUT\tSystem.Int32\t1000',
+        ),
+    "$t = [int]'1kb'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [int]'0o17'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    '$t = [int]"`t`r5`n"; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t5',
+            'OUT\tSystem.Int32\t5',
+        ),
+    "$t = [int]'+7'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t7',
+            'OUT\tSystem.Int32\t7',
+        ),
+    "$t = [int]'7.5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t8',
+            'OUT\tSystem.Int32\t8',
+        ),
+    "$t = [int]'2.5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    "$t = [byte]'-1'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [byte]'0x80'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Byte\t128',
+            'OUT\tSystem.Byte\t128',
+        ),
+    "$t = [sbyte]'0x80'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.SByte\t-128',
+            'OUT\tSystem.SByte\t-128',
+        ),
+    "$t = [uint16]'0xFFFF'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.UInt16\t65535',
+            'OUT\tSystem.UInt16\t65535',
+        ),
+    "$t = [int]'0xFFFFFFFF'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t-1',
+            'OUT\tSystem.Int32\t-1',
+        ),
+    "$t = [byte]'0x100'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [char]'A'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Char\tA',
+            'OUT\tSystem.Char\tA',
+        ),
+    "$t = [char]'AB'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastParseTargetInvocation\tSystem.Management.Automation.RuntimeException',),
+    "$t = [char]''; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastParseTargetInvocation\tSystem.Management.Automation.RuntimeException',),
+    "$t = [bool]'0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = [string]'foo'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tfoo',
+            'OUT\tSystem.String\tfoo',
+        ),
+    "$t = 'a' + $null; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta',
+            'OUT\tSystem.String\ta',
+        ),
+    "$t = 'a' + $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\taTrue',
+            'OUT\tSystem.String\taTrue',
+        ),
+    "$t = 'a' + 1.50d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta1.50',
+            'OUT\tSystem.String\ta1.50',
+        ),
+    "$t = 'a' + 1.5; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta1.5',
+            'OUT\tSystem.String\ta1.5',
+        ),
+    "$t = 'a' + @(1, 2); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta1 2',
+            'OUT\tSystem.String\ta1 2',
+        ),
     "$t = [double]'1.5'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Double\t1.5',
@@ -1310,6 +1448,16 @@ TYPE_DEFECTS: dict[str, str] = {
     '$t = [long]5; Write-Output (,$t); Write-Output $t':
         'The same erasure where the language does have a literal for the type: `5L` spells the '
         'Int64 that `[long]5` produces, and the fold writes `5`.',
+    "$t = [byte]'0x80'; Write-Output (,$t); Write-Output $t":
+        _A_CAST_TARGET_IS_ERASED,
+    "$t = [uint16]'0xFFFF'; Write-Output (,$t); Write-Output $t":
+        _A_CAST_TARGET_IS_ERASED,
+    "$t = [int]'1_0'; Write-Output (,$t); Write-Output $t":
+        _PYTHONS_OWN_NUMERALS,
+    "$t = [int]'0b1010'; Write-Output (,$t); Write-Output $t":
+        _PYTHONS_OWN_NUMERALS,
+    "$t = [int]'0o17'; Write-Output (,$t); Write-Output $t":
+        _PYTHONS_OWN_NUMERALS,
     '$t = 5 -as [long]; Write-Output (,$t); Write-Output $t':
         'The same erasure reached through `-as`, which is rewritten to a cast and then folded away.',
     "$t = 'abc' -as [int]; Write-Output (,$t); Write-Output $t":

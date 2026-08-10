@@ -932,13 +932,11 @@ def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
     is one whose range the kernel checks. For any other target a recorded throw is one nothing here
     sees, and the cell answers alone.
 
-    A `String` operand is never computed from. .NET parses one by rules Python does not share:
-    measured, `[int]'1e3'` is 1000, `[int]'0x10'` is 16, `[int]' 5 '` is 5 and `[double]'1,5'` is
-    15, while `[int]'abc'` throws. Those reach the grid for their type and stop there.
-
-    A source the witnesses do not span keeps its type and loses the rest, which is `[int]'abc'`
-    still being *an Int32 or a throw* — see `_from_conversion_cell` for why a cast may say that
-    where an operator may not.
+    A `String` operand is read by rules of its own, in `_from_string`, and only the spellings those
+    rules were measured over are computed: .NET parses a String by rules Python does not share, and
+    5.1 has two of them that disagree with each other. Every other spelling reaches the grid for its
+    type and stops there, which is `[int]'abc'` still being *an Int32 or a throw* — see
+    `_from_conversion_cell` for why a cast may say that where an operator may not.
     """
     source = _grid_type(fact)
     cell = None if source is None else conversion_outcome(target, source)
@@ -1098,11 +1096,16 @@ def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
     A `Double` reaches neither `String` nor `Decimal`. Rendering one is .NET's formatting rather
     than Python's, and widening one to a Decimal through Python would carry the binary expansion of
     a value the host converts by its decimal digits.
+
+    A `String` is read by `_from_string`, which is a different oracle from every other source and
+    reaches only the targets whose throws this module already sees.
     """
     if not isinstance(fact, Ps1Constant):
         return None
     if target == _STRING:
         return _rendered(fact)
+    if fact.type == _STRING and isinstance(fact.payload, str):
+        return _from_string(target, fact.payload)
     number = _numeric_source(fact)
     if number is None:
         return None
@@ -1121,6 +1124,80 @@ def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
     if target == _DECIMAL and not isinstance(number, float):
         return decimal.Decimal(number)
     return None
+
+
+#: The whitespace a cast strips off a String before reading a number out of it. Measured: `' 5 '`,
+#: a leading or trailing tab, a carriage return and a newline each convert to 5. A string of nothing
+#: but whitespace is not the empty one — `[int]''` is 0 and `[int]'   '` throws — so this trims a
+#: text that has something in it and never decides what an empty one is.
+_CAST_TRIM = ' \t\r\n'
+
+#: The two spellings a cast reads a number out of a String by, which are not the spellings a numeral
+#: has in source. Measured: a plain decimal with an optional sign and an optional fraction converts
+#: (`[int]'007'` is 7, `[int]'7.5'` is 8, `[int]'.5'` is 0, `[int]'5.'` is 5, `[int]'+7'` is 7), and
+#: a hexadecimal one without a sign converts (`[byte]'0x80'` is 128).
+#:
+#: Everything else this module refuses rather than reads, because the two oracles 5.1 has for a
+#: String disagree and neither is Python's. `[int]'1e3'` is 1000 and `[byte]'1e3'` throws, while
+#: `1 + '1e3'` is the Double 1001; `[int]'1kb'` throws although `'1kb' * 1` is 1024; and
+#: `[int]'1_0'`, `[int]'0b1010'` and `[int]'0o17'` throw where Python's own `int` reads all three.
+_CAST_DECIMAL = re.compile(r'[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)\Z')
+_CAST_HEX = re.compile(r'0[xX][0-9a-fA-F]+\Z')
+
+
+def _from_string(target: Ps1TypeName, text: str) -> _Number | None:
+    """
+    The value a cast of the String `text` to `target` produces, or `None` where this module computes
+    nothing for it.
+
+    The targets are the ones whose every throw `convert` already sees, so that reading a String is
+    not also a claim about what else the cast might do: an integer width and a `Char` throw when the
+    value does not fit, which is checked here, and a `Boolean` does not throw at all. A `Double`,
+    a `Single` or a `Decimal` from a String is left to the grid, which answers *that type or a
+    throw* — the parse that would be needed there accepts an exponent and a thousands separator,
+    and what the host does with one that overflows was not measured.
+
+    A `Boolean` is `False` for the empty String and `True` for every other, `'0'`, `'False'` and
+    `' '` included: it is the length that decides and never the text. A `Char` is the one character
+    a one-character String holds and a throw for every other length, `''` included.
+
+    A number is read at the *target's* width rather than at its own, which is what makes a
+    hexadecimal String a bit pattern: measured, `[byte]'0x80'` is 128 and `[sbyte]'0x80'` is -128,
+    `[uint16]'0xFFFF'` is 65535 and `[int]'0xFFFFFFFF'` is -1, and one digit more than the width
+    holds throws — `[byte]'0x100'` does. A decimal String is not a pattern and keeps its sign, so
+    `[byte]'-1'` throws where `[byte]'0x80'` does not.
+    """
+    if target == _BOOLEAN:
+        return text != ''
+    if target == _CHAR:
+        if len(text) != 1:
+            raise _Throws
+        return text
+    bounds = _INTEGER_RANGE.get(target)
+    if bounds is None:
+        return None
+    if not text:
+        return 0
+    digits = text.strip(_CAST_TRIM)
+    if _CAST_HEX.match(digits):
+        return _pattern_at_width(bounds, int(digits[2:], 16))
+    if not _CAST_DECIMAL.match(digits):
+        return None
+    rounded = _rounded(decimal.Decimal(digits))
+    return None if rounded is None else _within(bounds, rounded)
+
+
+def _pattern_at_width(bounds: tuple[int, int], magnitude: int) -> int:
+    """
+    The value a bit pattern of `magnitude` denotes in a register of the width `bounds` describes,
+    with the sign that width has. A pattern too wide for the register is a throw rather than a
+    truncation.
+    """
+    low, high = bounds
+    span = high + 1 if low == 0 else (high + 1) * 2
+    if magnitude >= span:
+        raise _Throws
+    return magnitude if magnitude <= high else magnitude - span
 
 
 def _numeric_source(fact: Ps1Constant) -> int | float | decimal.Decimal | None:
@@ -1146,8 +1223,20 @@ def _numeric_source(fact: Ps1Constant) -> int | float | decimal.Decimal | None:
 def _rendered(fact: Ps1Constant) -> str | None:
     """
     The text a cast to `String` produces. Measured: `[string]5` is `5`, `[string]$true` is `True`,
-    `[string]10d` is `10` and `[string][char]65` is `A`.
+    `[string]10d` is `10`, `[string]1.50d` keeps its trailing zero and `[string][char]65` is `A`.
+    A String is its own text, which is the identity `[string]'foo'` is.
+
+    It is also the text a *concatenation* contributes the value, which is one question and not two:
+    measured, `'a' + $true` is `aTrue` and `'a' + 1.50d` is `a1.50`, each the same as writing
+    `[string]` against the operand. See `_concatenated`.
+
+    A `Double` and an `Object[]` are absent for the same reason in two shapes: what a host writes is
+    not what this module could compute. `[string]0.5` is `0.5` and `[string]'9223372036854775808'`
+    cast to a Double is `9.22337203685478E+18`, which is .NET's formatting rather than Python's, and
+    a collection is separated by `$OFS`, which lives in the session.
     """
+    if fact.type == _STRING:
+        return fact.payload if isinstance(fact.payload, str) else None
     if fact.type in _INTEGER_RANGE or fact.type in (_CHAR, _BOOLEAN, _DECIMAL):
         return str(fact.payload)
     return None
@@ -1283,10 +1372,12 @@ def _stamped(value: _Number, candidates: frozenset[Ps1TypeName]) -> Ps1Fact:
 
 def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
     """
-    The value an application produces, or `None` where this module computes nothing for it. Only
-    operands that are integers of the domain's own widths are computed: a Decimal, a Double, a
-    String or a collection reaches the grid for its type and stops there, so that no arithmetic here
-    is performed in a Python type that is not what PowerShell was using.
+    The value an application produces, or `None` where this module computes nothing for it. The
+    arithmetic is computed only over operands that are integers of the domain's own widths, or a
+    Decimal or a Double beside one: a String or a collection reaches the grid for its type and stops
+    there, so that no arithmetic here is performed in a Python type that is not what PowerShell was
+    using. The one thing a String does compute is `+`, which over a String or a Char left operand is
+    a concatenation and not arithmetic at all — see `_concatenated`.
 
     `$null` computes as the integer zero, which is what a host converts it to in an arithmetic
     context: `10 - $null` is 10, `$null - 5` is -5 and `$null -band 1` is 0, all measured. It is the
@@ -1315,6 +1406,10 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         if not _is_domain_integer(left) or not _is_domain_integer(right):
             return None
         return _BITWISE[operator](_integer_payload(left), _integer_payload(right))
+    if operator == '+':
+        joined = _concatenated(left, right)
+        if joined is not None:
+            return joined
     operands = _numeric_pair(left, right)
     if operands is None:
         return None
@@ -1355,6 +1450,32 @@ def _divided_by_zero(divisor: _Number) -> _Number | None:
     if isinstance(divisor, float):
         return None
     raise _Throws
+
+
+def _concatenated(left: Ps1Fact, right: Ps1Fact) -> str | None:
+    """
+    The text `+` joins when its *left* operand is a String or a Char, or `None` where this module
+    computes nothing for it. The left operand is what decides: measured, `'a' + 1` is `a1` and
+    `[char]65 + 1` is `A1`, while `1 + 'a'` throws and `1 + [char]65` is the number 66. So a Char is
+    a text on this side of the operator and a number on the other, which is the whole of what makes
+    the Char erasure a wrong *value* rather than only a wrong type.
+
+    The right operand contributes what a cast of it to `String` would, `$null` contributing nothing:
+    `'a' + $null` is `a`, measured. A value `_rendered` refuses is refused here for its own reason —
+    a `Double` because the text is .NET's formatting, an `Object[]` because `$OFS` separates it and
+    lives in the session.
+    """
+    if not isinstance(left, Ps1Constant) or left.type not in (_STRING, _CHAR):
+        return None
+    head = _rendered(left)
+    if head is None:
+        return None
+    if right is NULL:
+        return head
+    if not isinstance(right, Ps1Constant):
+        return None
+    tail = _rendered(right)
+    return None if tail is None else head + tail
 
 
 def _numeric_pair(left: Ps1Fact, right: Ps1Fact):
