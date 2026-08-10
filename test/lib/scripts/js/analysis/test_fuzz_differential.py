@@ -129,3 +129,55 @@ class TestDeobfuscationFuzzSweep(TestBase):
                 F'seed {seed}: deobfuscation changed observable behavior\n'
                 F'--- source ---\n{source}\n--- deobfuscated ---\n{deobfuscated}',
             )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestFuzzSeedsThatStillDiverge(TestBase):
+    """
+    Seeds from beyond the swept range whose program and deobfuscation Node says print different
+    things. What each of them is a symptom of is not known, so nothing here describes a cause or
+    asserts an expected output: Node is the oracle for these exactly as it is for the sweep, and
+    every one of them is a seed the sweep would report were its range wide enough.
+
+    Whether a divergence is a deobfuscator bug at all rests on the program being a sound oracle
+    input, which is a claim about the generator rather than about the tool, so it is asserted on
+    its own below and not inside the recorded cases.
+    """
+
+    seeds = (6805, 17550, 19221)
+
+    def _preserves_behavior(self, seed: int):
+        source = generate(seed)
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(source),
+            behavior(deobfuscated),
+            F'seed {seed}: deobfuscation changed observable behavior\n'
+            F'--- source ---\n{source}\n--- deobfuscated ---\n{deobfuscated}',
+        )
+
+    def test_the_recorded_seeds_are_sound_oracle_inputs(self):
+        for seed in self.seeds:
+            source = generate(seed)
+            first = behavior(source)
+            self.assertIsNone(
+                first[1],
+                F'seed {seed} did not run cleanly in node:\n{source}',
+            )
+            self.assertEqual(
+                first,
+                behavior(source),
+                F'seed {seed} is not deterministic in node:\n{source}',
+            )
+
+    @unittest.expectedFailure
+    def test_seed_6805_prints_what_its_program_prints(self):
+        self._preserves_behavior(6805)
+
+    @unittest.expectedFailure
+    def test_seed_17550_prints_what_its_program_prints(self):
+        self._preserves_behavior(17550)
+
+    @unittest.expectedFailure
+    def test_seed_19221_prints_what_its_program_prints(self):
+        self._preserves_behavior(19221)

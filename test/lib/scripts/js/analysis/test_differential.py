@@ -1889,6 +1889,154 @@ class TestModelBlindFoldRegressions(TestBase):
             " console.log('a-b'.split('-').join('+'));")
 
 
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestBuiltinNameBoundByAnEnclosingParameter(TestBase):
+    """
+    A parameter binds its name for the whole of the function it belongs to, and a nested function
+    is part of that function. A parameter named `parseInt` or `String` is therefore what the name
+    denotes in a nested body exactly as it is in the outer body, and a fold that reads the name as
+    the built-in there computes with a function the program never calls.
+
+    Node decides. Each case names the program a fold that missed the binding would produce and
+    requires Node to print something else for it, so a replacement that answers the call the way
+    the built-in does cannot pass for a proof. The two controls put the same replacement where the
+    tool already resolves it — at the top level, and in the very function the read is written in —
+    so the boundary the defect lives on is recorded next to it.
+    """
+
+    def _shadowed(self, source: str, misfolded: str):
+        self.assertNotEqual(
+            behavior(source),
+            behavior(misfolded),
+            'the program does not discriminate: the replacement answers as the built-in does',
+        )
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(source),
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_a_top_level_binding_shadows_a_called_builtin(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                var parseInt = function (text) { return 'r' + text; };
+                function inner() {
+                  return parseInt('10');
+                }
+                console.log(inner());
+            """),
+            inspect.cleandoc("""
+                var parseInt = function (text) { return 'r' + text; };
+                function inner() {
+                  return 10;
+                }
+                console.log(inner());
+            """),
+        )
+
+    def test_a_parameter_of_the_reading_function_shadows_a_called_builtin(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer(parseInt) {
+                  return parseInt('10');
+                }
+                console.log(outer(function (text) { return 'r' + text; }));
+            """),
+            inspect.cleandoc("""
+                function outer(parseInt) {
+                  return 10;
+                }
+                console.log(outer(function (text) { return 'r' + text; }));
+            """),
+        )
+
+    @unittest.expectedFailure
+    def test_a_parameter_of_an_enclosing_function_shadows_a_called_builtin(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in. The parameter is
+        the only meaning `parseInt` has anywhere inside `outer`, and `inner` is inside `outer`.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer(parseInt) {
+                  function inner() {
+                    return parseInt('10');
+                  }
+                  return inner();
+                }
+                console.log(outer(function (text) { return 'r' + text; }));
+            """),
+            inspect.cleandoc("""
+                function outer(parseInt) {
+                  function inner() {
+                    return 10;
+                  }
+                  return inner();
+                }
+                console.log(outer(function (text) { return 'r' + text; }));
+            """),
+        )
+
+    @unittest.expectedFailure
+    def test_a_parameter_of_an_enclosing_function_shadows_a_called_builtin_constructor(self):
+        """
+        Node: `r7`, and `7` for the program that read the name as the built-in. A constructor
+        called as a function is folded by the same reading of the name.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer(String) {
+                  function inner() {
+                    return String(7);
+                  }
+                  return inner();
+                }
+                console.log(outer(function (value) { return 'r' + value; }));
+            """),
+            inspect.cleandoc("""
+                function outer(String) {
+                  function inner() {
+                    return '7';
+                  }
+                  return inner();
+                }
+                console.log(outer(function (value) { return 'r' + value; }));
+            """),
+        )
+
+    @unittest.expectedFailure
+    def test_both_reads_of_an_enclosing_parameter_denote_it(self):
+        """
+        Node: `r10/r12`, and `10/r12` for the program that read only the nested occurrence as the
+        built-in. One binding, two reads, and the function boundary is the whole difference
+        between them.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer(parseInt) {
+                  function inner() {
+                    return parseInt('10');
+                  }
+                  return inner() + '/' + parseInt('12');
+                }
+                console.log(outer(function (text) { return 'r' + text; }));
+            """),
+            inspect.cleandoc("""
+                function outer(parseInt) {
+                  return 10 + '/' + parseInt('12');
+                }
+                console.log(outer(function (text) { return 'r' + text; }));
+            """),
+        )
+
+
 class TestMemberCalleeChainFolds(TestBase):
     """
     A method-call chain on a literal receiver (`[66, 79].map(f).join('')`) is the decoder shape obfuscators
@@ -4389,6 +4537,72 @@ class TestGuaranteedGlobalNamesAreOrdinaryBindings(TestBase):
             """),
             'NaN',
         )
+
+
+class TestValueNameClobberedThroughTheGlobalObject(TestBase):
+    """
+    The top-level `this` of a script is the global object, so `this.NaN = 5` writes the property
+    that `globalThis.NaN = 5` and a bare `NaN = 5` write, and all three are one clobber written
+    three ways. Where a clobber can land, the name no longer denotes the value the language
+    guarantees, and folding it to that value is wrong.
+
+    The oracle for whether it lands is Windows Script Host's JScript, the engine these programs are
+    deobfuscated for and the one whose scripts this tool is aimed at. There `NaN`, `Infinity` and
+    `undefined` are writable, and the three programs below print `5`, `5` and `number`. It is not
+    run: nothing in this suite executes a JScript engine. Node cannot stand in for it, because Node
+    implements a later language in which those three properties are not writable, so the assignment
+    silently does nothing there and a tool that saw the write and one that did not emit programs
+    Node cannot tell apart.
+
+    Each case therefore asserts the deobfuscation rather than a behavior: a clobber the tool cannot
+    rule out leaves the name standing, and the two controls are the same clobber under the two
+    spellings for which it already does.
+    """
+
+    def _keeps_the_name(self, source: str):
+        self.assertEqual(deobfuscate_source(source), source)
+
+    def test_a_bare_assignment_to_nan_stops_the_fold(self):
+        self._keeps_the_name(inspect.cleandoc("""
+            NaN = 5;
+            console.log(String(NaN));
+        """))
+
+    def test_an_assignment_to_nan_through_global_this_stops_the_fold(self):
+        self._keeps_the_name(inspect.cleandoc("""
+            globalThis.NaN = 5;
+            console.log(String(NaN));
+        """))
+
+    @unittest.expectedFailure
+    def test_an_assignment_to_nan_through_this_stops_the_fold(self):
+        """
+        JScript: `5`. The fold emits `'NaN'`.
+        """
+        self._keeps_the_name(inspect.cleandoc("""
+            this.NaN = 5;
+            console.log(String(NaN));
+        """))
+
+    @unittest.expectedFailure
+    def test_an_assignment_to_infinity_through_this_stops_the_fold(self):
+        """
+        JScript: `5`. The fold emits `'Infinity'`.
+        """
+        self._keeps_the_name(inspect.cleandoc("""
+            this.Infinity = 5;
+            console.log(String(Infinity));
+        """))
+
+    @unittest.expectedFailure
+    def test_an_assignment_to_undefined_through_this_stops_the_fold(self):
+        """
+        JScript: `number`. The fold emits `'undefined'`.
+        """
+        self._keeps_the_name(inspect.cleandoc("""
+            this.undefined = 5;
+            console.log(typeof undefined);
+        """))
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
