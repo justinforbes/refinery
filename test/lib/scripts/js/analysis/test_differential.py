@@ -2037,6 +2037,153 @@ class TestBuiltinNameBoundByAnEnclosingParameter(TestBase):
         )
 
 
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestBuiltinNameBoundByACatchClause(TestBase):
+    """
+    A catch clause binds its name for the block it heads, so a catch binding named `parseInt` is
+    what that name denotes there, and a fold that reads the name as the built-in computes with a
+    function the program never calls. Where a parameter is missed only for a read written inside a
+    nested function, this binding is missed for a read written directly in the block that binds it,
+    which is why it is a class of its own and not another case of the one above.
+
+    Node decides, and each case names the program a fold that missed the binding would produce and
+    requires Node to print something else for it. The control binds the replacement with a `var` in
+    the very same block, so what the block is and where the read sits are held fixed and the binder
+    is the only thing that differs.
+    """
+
+    def _shadowed(self, source: str, misfolded: str):
+        self.assertNotEqual(
+            behavior(source),
+            behavior(misfolded),
+            'the program does not discriminate: the replacement answers as the built-in does',
+        )
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(source),
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_a_var_in_the_catch_block_shadows_a_called_builtin(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer() {
+                  try {
+                    throw 0;
+                  } catch (error) {
+                    var parseInt = function (text) { return 'r' + text; };
+                    return parseInt('10');
+                  }
+                }
+                console.log(outer());
+            """),
+            inspect.cleandoc("""
+                function outer() {
+                  try {
+                    throw 0;
+                  } catch (error) {
+                    var parseInt = function (text) { return 'r' + text; };
+                    return 10;
+                  }
+                }
+                console.log(outer());
+            """),
+        )
+
+    @unittest.expectedFailure
+    def test_a_catch_binding_shadows_a_called_builtin_read_in_its_own_block(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in. The thrown
+        function is the only thing `parseInt` names in the handler.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer() {
+                  try {
+                    throw function (text) { return 'r' + text; };
+                  } catch (parseInt) {
+                    return parseInt('10');
+                  }
+                }
+                console.log(outer());
+            """),
+            inspect.cleandoc("""
+                function outer() {
+                  try {
+                    throw function (text) { return 'r' + text; };
+                  } catch (parseInt) {
+                    return 10;
+                  }
+                }
+                console.log(outer());
+            """),
+        )
+
+    @unittest.expectedFailure
+    def test_a_catch_binding_shadows_a_called_builtin_read_in_a_nested_function(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer() {
+                  try {
+                    throw function (text) { return 'r' + text; };
+                  } catch (parseInt) {
+                    var inner = function () { return parseInt('10'); };
+                    return inner();
+                  }
+                }
+                console.log(outer());
+            """),
+            inspect.cleandoc("""
+                function outer() {
+                  try {
+                    throw function (text) { return 'r' + text; };
+                  } catch (parseInt) {
+                    var inner = function () { return 10; };
+                    return inner();
+                  }
+                }
+                console.log(outer());
+            """),
+        )
+
+    @unittest.expectedFailure
+    def test_a_destructured_catch_binding_shadows_a_called_builtin(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in. A pattern is a
+        second way a catch clause names a binding, and the same pattern in a `var` declaration is
+        read correctly, so it can be missed here on its own.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer() {
+                  try {
+                    throw { parseInt: function (text) { return 'r' + text; } };
+                  } catch ({ parseInt }) {
+                    return parseInt('10');
+                  }
+                }
+                console.log(outer());
+            """),
+            inspect.cleandoc("""
+                function outer() {
+                  try {
+                    throw { parseInt: function (text) { return 'r' + text; } };
+                  } catch ({ parseInt }) {
+                    return 10;
+                  }
+                }
+                console.log(outer());
+            """),
+        )
+
+
 class TestMemberCalleeChainFolds(TestBase):
     """
     A method-call chain on a literal receiver (`[66, 79].map(f).join('')`) is the decoder shape obfuscators
