@@ -912,6 +912,95 @@ class TestPs1ASignBelongsToTheDigitsItTouches(TestBase):
         self.assertEqual(self._numerals('$t = --1'), ['1'])
 
 
+class TestPs1WhatFollowsASignedNumeralBindsToIt(TestBase):
+    """
+    A numeral that carries its own sign is a receiver like any other value, so the member written
+    after it binds to it: 5.1 lexes `$t = -1kb.GetType()` as the number `-1kb`, a dot, and the name
+    behind it. Letting the numeral end the expression instead leaves `.GetType()` to open a
+    statement of its own, and 5.1 refuses that — a line that starts with a dot reads `.GetType` as
+    one word rather than as a member of anything.
+
+    Only some numerals get that far, because where a numeral ends is what decides whether a dot is
+    left over. A decimal integer swallows the dot that joins it to a word, so `-3.GetType` holds no
+    numeral at all; a numeral that ends for any other reason — a base prefix, a decimal point
+    already spent, an exponent, a type suffix, a multiplier — leaves the dot behind for a member.
+    """
+
+    @staticmethod
+    def _assigned(source: str) -> Node | None:
+        assignment, = (
+            node for node in Ps1Parser(source).parse().walk()
+            if isinstance(node, Ps1AssignmentExpression)
+        )
+        return assignment.value
+
+    @staticmethod
+    def _numerals(source: str) -> list[str]:
+        return [
+            node.raw for node in Ps1Parser(source).parse().walk_in_order()
+            if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral))
+        ]
+
+    @classmethod
+    def _reading(cls, node: Node | None) -> str:
+        """
+        The tree `node` is, written back out with a space after every sign the tree holds as an
+        operator. The two readings then come out as different strings — a numeral that spells its
+        own sign as `-1kb`, and unary minus over an unsigned one as `- 1kb` — which is the
+        distinction the tables below turn on.
+        """
+        if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
+            return node.raw
+        if isinstance(node, Ps1InvokeMember):
+            return F'{cls._reading(node.object)}.{node.member}()'
+        if isinstance(node, Ps1MemberAccess):
+            return F'{cls._reading(node.object)}.{node.member}'
+        if isinstance(node, Ps1UnaryExpression) and node.prefix:
+            return F'{node.operator} {cls._reading(node.operand)}'
+        return F'<{type(node).__name__}>'
+
+    def test_a_member_written_against_a_signed_numeral_binds_to_it(self):
+        for source, reading in (
+            ('$t = -0xFF.GetType()', '-0xFF.GetType()'),
+            ('$t = -1.5.GetType()', '-1.5.GetType()'),
+            ('$t = -1e3.GetType()', '-1e3.GetType()'),
+            ('$t = -1L.GetType()', '-1L.GetType()'),
+            ('$t = -1kb.GetType()', '-1kb.GetType()'),
+            ('$t = -.5.GetType()', '-.5.GetType()'),
+            ('$t = +1kb.GetType()', '+1kb.GetType()'),
+            ('$t = -0xFF.Length', '-0xFF.Length'),
+            ('$t = -1kb.ToString().Length', '-1kb.ToString().Length'),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._reading(self._assigned(source)), reading)
+
+    def test_a_sign_the_source_separated_reads_the_whole_receiver_as_its_operand(self):
+        for source, reading in (
+            ('$t = - 1kb.GetType()', '- 1kb.GetType()'),
+            ('$t = + 1kb.GetType()', '+ 1kb.GetType()'),
+            ('$t = - -1kb.GetType()', '- -1kb.GetType()'),
+            ('$t = - 1kb.ToString().Length', '- 1kb.ToString().Length'),
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._reading(self._assigned(source)), reading)
+
+    def test_nothing_written_after_a_signed_numeral_is_left_to_open_a_statement(self):
+        for source in (
+            '$t = -1kb.GetType()',
+            '$t = -0xFF.GetType()',
+            '$t = -1.5.GetType()',
+            '$t = -1kb.ToString().Length',
+            '$t = 5 * -1kb.GetType().Name',
+            'f (-1kb.GetType())',
+        ):
+            with self.subTest(source):
+                self.assertEqual(len(Ps1Parser(source).parse().body), 1)
+
+    def test_a_decimal_integer_takes_the_dot_with_it_and_is_no_longer_a_numeral(self):
+        self.assertEqual(self._numerals('$t = -3.GetType'), [])
+        self.assertEqual(self._numerals('$t = -0xFF.GetType'), ['-0xFF'])
+
+
 class TestPs1ANumeralHoldsNothingBesideItsSpelling(TestBase):
     """
     `Ps1IntegerLiteral` and `Ps1RealLiteral` hold the text a numeral was written as and derive their

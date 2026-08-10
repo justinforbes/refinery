@@ -300,6 +300,34 @@ class TestPs1Fidelity(TestBase):
                 self.assertTrue(
                     self._is_faithful(tree), F'not faithful: {self._synth(tree)!r}')
 
+    def test_the_synthesizer_inverts_the_parser_for_a_sign_in_front_of_a_receiver(self):
+        """
+        A numeral is a receiver like any other value, and the two readings of a sign are then one
+        space apart: `-1kb.GetType()` asks *minus* one kilobyte for its type, `- 1kb.GetType()`
+        negates what one kilobyte answers, and `--1kb.GetType()` is the decrement operator. Which
+        of them is printed cannot be read off the operand node, because the character that decides
+        belongs to a numeral several levels below it.
+        """
+        for source in [
+            '$t = -1kb.GetType()',
+            '$t = - 1kb.GetType()',
+            '$t = - -1kb.GetType()',
+            '$t = -0xFF.GetType()',
+            '$t = - 0xFF.GetType()',
+            '$t = -1.5.GetType()',
+            '$t = -1L.GetType()',
+            '$t = -1e3.GetType()',
+            '$t = -.5.GetType()',
+            '$t = +1kb.GetType()',
+            '$t = -1kb.ToString().Length',
+            '$t = - 1kb.ToString().Length',
+            '$t = 5 * -1kb.GetType().Name',
+        ]:
+            with self.subTest(source=source):
+                tree = self._parse(source)
+                self.assertTrue(
+                    self._is_faithful(tree), F'not faithful: {self._synth(tree)!r}')
+
     def _truncations(self, source: str):
         for index, node in enumerate(self._parse(source).walk_in_order()):
             for field, items in child_list_fields(node):

@@ -5,7 +5,10 @@ from test import TestBase
 from refinery.lib.scripts import UnspellableNode
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayLiteral,
+    Ps1BinaryExpression,
     Ps1IntegerLiteral,
+    Ps1InvokeMember,
+    Ps1RealLiteral,
     Ps1UnaryExpression,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
@@ -212,6 +215,45 @@ class TestPs1Synthesizer(TestBase):
         self.assertEqual(Ps1Synthesizer().convert(Ps1Parser('-$x').parse()), '-$x')
         self.assertEqual(
             Ps1Synthesizer().convert(Ps1Parser('-(2147483648)').parse()), '-(2147483648)')
+
+    def test_a_sign_the_source_wrote_against_a_receiver_stays_against_it(self):
+        self.assertEqual(
+            Ps1Synthesizer().convert(Ps1Parser('-1kb.GetType()').parse()), '-1kb.GetType()')
+        self.assertEqual(
+            Ps1Synthesizer().convert(Ps1Parser('-0xFF.ToString().Length').parse()),
+            '-0xFF.ToString().Length')
+
+    def test_a_sign_the_source_kept_off_a_receiver_is_not_written_against_it(self):
+        """
+        `- 1kb.GetType()` negates what one kilobyte answers, where `-1kb.GetType()` asks *minus* one
+        kilobyte instead, and `- -1kb.GetType()` written as `--1kb.GetType()` is the decrement
+        operator. The operand is a member access in each case, so what decides is the first
+        character its rendering begins with rather than anything the operand node itself is.
+        """
+        self.assertEqual(
+            Ps1Synthesizer().convert(Ps1Parser('- 1kb.GetType()').parse()), '- 1kb.GetType()')
+        self.assertEqual(
+            Ps1Synthesizer().convert(Ps1Parser('+ 1kb.GetType()').parse()), '+ 1kb.GetType()')
+        self.assertEqual(
+            Ps1Synthesizer().convert(Ps1Parser('- -1kb.GetType()').parse()), '- -1kb.GetType()')
+        negated = Ps1UnaryExpression(
+            operator='-',
+            operand=Ps1InvokeMember(object=Ps1RealLiteral(raw='1kb'), member='GetType'),
+            prefix=True,
+        )
+        self.assertEqual(Ps1Synthesizer().convert(negated), '- 1kb.GetType()')
+
+    def test_a_bracket_the_operand_needs_survives_the_sign_deciding_on_a_space(self):
+        negated = Ps1UnaryExpression(
+            operator='-',
+            operand=Ps1BinaryExpression(
+                left=Ps1IntegerLiteral(raw='1'),
+                operator='+',
+                right=Ps1IntegerLiteral(raw='2'),
+            ),
+            prefix=True,
+        )
+        self.assertEqual(Ps1Synthesizer().convert(negated), '-(1 + 2)')
 
     def test_scoped_braced_variable_keeps_braces_outside(self):
         # `${env:Path}` must re-emit with the braces around the whole `scope:name`, not as

@@ -1000,7 +1000,7 @@ class Ps1Parser:
             op = self._advance()
             signed = self._parse_signed_numeral(op)
             if signed is not None:
-                return signed
+                return self._parse_primary_postfix(signed)
             self._skip_newlines()
             operand = self._parse_unary_expression()
             return Ps1UnaryExpression(

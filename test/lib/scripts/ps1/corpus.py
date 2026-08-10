@@ -118,6 +118,12 @@ PROBES: tuple[str, ...] = (
 #: Each spelling that ends a numeral for a reason other than the dot is asked separately —
 #: hexadecimal, real, exponent, type suffix, multiplier — and the same words are asked again in an
 #: argument slot, where none of them reads a member and the numeral is one word with what follows.
+#:
+#: A sign is asked of the same boundary, because a numeral that carries one is a receiver like any
+#: other value and the whole of what follows binds to it: `-1kb.GetType()` reads the member of
+#: minus one kilobyte, `- 1kb.GetType()` negates what one kilobyte answers, and `--1kb.GetType()`
+#: is the decrement operator. The three differ only in where a space stands, and no two of them are
+#: the same program.
 BOUNDARIES: tuple[str, ...] = (
     'f -1',
     'f -1.5',
@@ -152,6 +158,11 @@ BOUNDARIES: tuple[str, ...] = (
     '$x = 1kb.GetType()',
     '$x = 1e3.GetType()',
     '$x = 1L.GetType()',
+    '$x = -1kb.GetType()',
+    '$x = -0xFF.GetType()',
+    '$x = -1.5.GetType()',
+    '$x = - 1kb.GetType()',
+    '$x = - -1kb.GetType()',
 )
 
 #: How a word may be written where a command name is read, and where a value is. This is the

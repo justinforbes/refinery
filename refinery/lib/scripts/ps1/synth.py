@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import io
 
+from collections.abc import Callable
+
 from refinery.lib.scripts import Block, Node, Synthesizer
 from refinery.lib.scripts.ps1 import precedence
 from refinery.lib.scripts.ps1.model import (
@@ -73,6 +75,26 @@ from refinery.lib.scripts.ps1.model import (
     Ps1WhileLoop,
 )
 from refinery.lib.scripts.ps1.token import BACKTICK_ENCODE, KEYWORD_SPELLING
+
+
+def _fuses_with_a_sign(spelling: str) -> bool:
+    """
+    Whether a `+` or `-` written straight against `spelling` would join with it into one token.
+    A numeral does: `- 5` printed as `-5` is one Int32 literal where the source had unary minus over
+    an Int32, and the two differ at the width boundary — `- 2147483648` is an Int64 and
+    `-2147483648` an Int32. A spelling that already begins with a sign fuses the other way, since
+    `- -5` printed as `--5` re-lexes as the decrement operator.
+
+    The question is asked of the text rather than of the node, because the leading character is what
+    decides and it can belong to a node several levels down: `- 1kb.GetType()` is a member of one
+    kilobyte, and printed as `-1kb.GetType()` it becomes a member of *minus* one kilobyte instead.
+    """
+    head = spelling[:1]
+    if head in ('+', '-'):
+        return True
+    if head == '.':
+        return spelling[1:2].isdigit()
+    return head.isdigit()
 
 
 class Ps1Synthesizer(Synthesizer):
@@ -240,36 +262,19 @@ class Ps1Synthesizer(Synthesizer):
                 self._emit_operand(right, power + 1)
 
     def visit_Ps1UnaryExpression(self, node: Ps1UnaryExpression):
-        if node.prefix:
+        operand = node.operand
+        if not node.prefix:
+            if operand is not None:
+                self._emit_operand(operand, precedence.UNARY)
             self._write(node.operator)
-            if node.operator.startswith('-') and len(node.operator) > 1:
-                self._write(' ')
-            elif node.operator in ('+', '-') and self._fuses_with_a_sign(node.operand):
-                self._write(' ')
-            if node.operand:
-                self._emit_operand(node.operand, precedence.UNARY)
-        else:
-            if node.operand:
-                self._emit_operand(node.operand, precedence.UNARY)
-            self._write(node.operator)
-
-    @staticmethod
-    def _fuses_with_a_sign(node) -> bool:
-        """
-        Whether a `+` or `-` written straight against `node` would join with it into one token. A
-        numeral does whether or not it carries a sign of its own: `- 5` printed as `-5` is one Int32
-        literal where the source had unary minus over an Int32, and the two differ at the width
-        boundary — `- 2147483648` is an Int64 and `-2147483648` an Int32. A numeral that already
-        spells a sign fuses the other way: `- -5` printed as `--5` re-lexes as the decrement
-        operator.
-        """
-        if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
-            return True
-        return (
-            isinstance(node, Ps1UnaryExpression)
-            and node.prefix
-            and node.operator[:1] in ('+', '-')
-        )
+            return
+        spelling = '' if operand is None else self._operand_to_string(operand, precedence.UNARY)
+        self._write(node.operator)
+        if node.operator.startswith('-') and len(node.operator) > 1:
+            self._write(' ')
+        elif node.operator in ('+', '-') and _fuses_with_a_sign(spelling):
+            self._write(' ')
+        self._write(spelling)
 
     def visit_Ps1TypeExpression(self, node: Ps1TypeExpression):
         self._write(F'[{node.name}]')
@@ -471,14 +476,29 @@ class Ps1Synthesizer(Synthesizer):
         if node.end:
             self._emit_operand(node.end, precedence.RANGE + 1)
 
-    def _render_to_string(self, node: Node) -> str:
+    def _captured(self, emit: Callable[[], object]) -> str:
+        """
+        What `emit` writes, handed back instead of written. The emission itself is the real one and
+        runs once, so whatever it does to the arming a slot set is done exactly as it would be.
+        """
         saved = self._parts
         self._parts = io.StringIO()
         try:
-            self.visit(node)
+            emit()
             return self._parts.getvalue()
         finally:
             self._parts = saved
+
+    def _render_to_string(self, node: Node) -> str:
+        return self._captured(lambda: self.visit(node))
+
+    def _operand_to_string(self, node: Expression, minimum: int) -> str:
+        """
+        What `_emit_operand` would write for `node`, including any bracket it decides on. A slot
+        that has to know what its content begins with cannot ask the tree: the answer is the first
+        character of a rendering, which no single node holds.
+        """
+        return self._captured(lambda: self._emit_operand(node, minimum))
 
     def visit_Ps1Attribute(self, node: Ps1Attribute):
         # The argument list is written even when it is empty, because it is what distinguishes an
