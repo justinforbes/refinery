@@ -557,9 +557,8 @@ class TestPs1AHexadecimalLiteralIsNegativeWhereverItsNumberIsRead(TestPs1):
             self._apply('$x = @(10, 20, 30)[0xFFFFFFFF]', Ps1ConstantFolding), '$x = 30')
 
     def test_an_index_into_a_string_counts_from_the_end(self):
-        # 5.1 selects a Char here, which the fold spells as a one-character String; what this pins
-        # is which character was selected.
-        self.assertEqual(self._apply("$x = 'ABCDE'[0xFFFFFFFF]", Ps1ConstantFolding), "$x = 'E'")
+        self.assertEqual(
+            self._apply("$x = 'ABCDE'[0xFFFFFFFF]", Ps1ConstantFolding), '$x = [char]69')
 
     def test_a_conversion_reads_its_argument_as_the_negative_number(self):
         self.assertEqual(
@@ -707,8 +706,7 @@ class TestPs1ConvertFolding(TestPs1):
         self.assertIn('255', result)
 
     def test_tochar(self):
-        result = self._deobfuscate('[Convert]::ToChar(65)')
-        self.assertIn('A', result)
+        self.assertEqual(self._deobfuscate('[Convert]::ToChar(65)'), '[char]65')
 
     def test_toint32_octal_base(self):
         result = self._deobfuscate("[Convert]::ToInt32('77', 8)")
@@ -718,13 +716,10 @@ class TestPs1ConvertFolding(TestPs1):
 class TestPs1NegativeIndexFolding(TestPs1):
 
     def test_string_negative_one(self):
-        result = self._deobfuscate("'hello'[-1]")
-        self.assertIn('o', result)
-        self.assertNotIn('-1', result)
+        self.assertEqual(self._deobfuscate("'hello'[-1]"), '[char]111')
 
     def test_string_negative_two(self):
-        result = self._deobfuscate("'ABCDE'[-2]")
-        self.assertIn('D', result)
+        self.assertEqual(self._deobfuscate("'ABCDE'[-2]"), '[char]68')
 
     def test_array_negative_one(self):
         result = self._deobfuscate('@(10, 20, 30)[-1]')
@@ -980,7 +975,7 @@ class TestPs1SelectionKeepsWhatBuildingTheContainerDid(TestPs1):
         # A string is a value and not a container of expressions, so the characters this does not
         # select are not work the folded script stops doing and no gate applies to them. The array
         # of the same shape one line up is refused.
-        self.assertEqual(self._apply("$r = 'abc'[0]", Ps1ConstantFolding), "$r = 'a'")
+        self.assertEqual(self._apply("$r = 'abc'[0]", Ps1ConstantFolding), '$r = [char]97')
 
 
 class TestPs1ConstantInliningSelectsOnlyFromConstants(TestPs1):
@@ -1064,7 +1059,9 @@ class TestPs1CountingAnArrayKeepsWhatBuildingItDid(TestPs1):
     def test_a_repeated_index_into_a_string_still_folds(self):
         # A character is built fresh per index out of a value that was never a node, so nothing is
         # shared and the shape obfuscators actually write keeps working.
-        self.assertEqual(self._apply("$r = 'abc'[0, 0, 1]", Ps1ConstantFolding), "$r = 'a', 'a', 'b'")
+        self.assertEqual(
+            self._apply("$r = 'abc'[0, 0, 1]", Ps1ConstantFolding),
+            '$r = [char]97, [char]97, [char]98')
 
 
 class TestPs1ArrayReverseIsAppliedWhereItIsWritten(TestPs1):
@@ -1101,3 +1098,356 @@ class TestPs1ArrayReverseIsAppliedWhereItIsWritten(TestPs1):
         # 5.1 leaves `3 2 9`: the write lands before the reversal, so it moves to the far end.
         source = '$x = 1, 2, 3\n$x[0] = 9\n[Array]::Reverse($x)\nWrite-Output $x'
         self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1AMethodFoldsOnlyWhereItsReceiverCarriesTheOverload(TestPs1):
+    """
+    5.1 looks an instance method up on the receiver's own .NET type. `System.Char` carries a
+    `ToUpper`, but every overload of it is static, so `([char]65).ToUpper()` reports
+    `MethodNotFound` and stops the script; `Substring` belongs to `System.String` and is not on a
+    Char at all. `ToString` is the one no-argument instance overload a Char does carry.
+    """
+
+    def test_upper_casing_a_char_is_not_folded(self):
+        self._assertUnchanged('$x = ([char]65).ToUpper()', Ps1ConstantFolding)
+
+    def test_lower_casing_a_char_is_not_folded(self):
+        self._assertUnchanged('$x = ([char]97).ToLower()', Ps1ConstantFolding)
+
+    def test_a_substring_of_a_char_is_not_folded(self):
+        self._assertUnchanged('$x = ([char]65).Substring(0)', Ps1ConstantFolding)
+
+    def test_a_call_with_no_overload_of_that_arity_is_not_folded(self):
+        self._assertUnchanged("$x = 'abc'.Substring(0, 1, 2)", Ps1ConstantFolding)
+
+    def test_a_char_written_by_its_own_to_string_is_the_one_character_string(self):
+        self.assertEqual(self._apply('$x = ([char]65).ToString()', Ps1ConstantFolding), "$x = 'A'")
+
+    def test_upper_casing_a_string_is_still_folded(self):
+        self.assertEqual(self._apply("$x = 'abc'.ToUpper()", Ps1ConstantFolding), "$x = 'ABC'")
+
+
+class TestPs1WritingAValueWithItsOwnToStringIsNotTheStringCast(TestPs1):
+    """
+    `ToString()` writes a value the way the host's culture does and `[string]` does not. Measured on
+    a host whose decimal separator is a comma, `(1.50d).ToString()` is `1,50` where `[string]1.50d`
+    is `1.50`, and `(1.5).ToString()` is `1,5`. What the script produces there depends on where it
+    runs, so only a value of a type that carries no culture can be written out.
+    """
+
+    def test_a_decimal_written_by_its_own_to_string_is_not_folded(self):
+        # A second point cannot continue a numeral, so 5.1 reads the member access here and
+        # `1.50d.ToString()` runs where `5.ToString()` is a parse error.
+        source = '$x = 1.50d.ToString()'
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_double_written_by_its_own_to_string_is_not_folded(self):
+        source = '$x = 1.5.ToString()'
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_string_cast_of_the_same_decimal_keeps_the_digits_it_was_written_with(self):
+        self.assertEqual(self._deobfuscate('$x = [string]1.50d'), "$x = '1.50'")
+
+    def test_an_integer_written_by_its_own_to_string_is_the_digits_it_spells(self):
+        self.assertEqual(self._apply('$x = (5).ToString()', Ps1ConstantFolding), "$x = '5'")
+
+    def test_a_long_written_by_its_own_to_string_is_the_digits_it_spells(self):
+        self.assertEqual(self._apply('$x = (5L).ToString()', Ps1ConstantFolding), "$x = '5'")
+
+    def test_a_byte_written_by_its_own_to_string_is_the_digits_it_spells(self):
+        self.assertEqual(self._apply('$x = ([byte]5).ToString()', Ps1ConstantFolding), "$x = '5'")
+
+    def test_a_boolean_written_by_its_own_to_string_is_the_word_it_renders_as(self):
+        self.assertEqual(self._apply('$x = $true.ToString()', Ps1ConstantFolding), "$x = 'True'")
+
+    def test_a_string_written_by_its_own_to_string_is_that_string(self):
+        self.assertEqual(self._apply("$x = 'abc'.ToString()", Ps1ConstantFolding), "$x = 'abc'")
+
+
+class TestPs1AMethodConvertsItsArgumentToTheParameterItBinds(TestPs1):
+    """
+    An argument reaches a method as the parameter's declared type. Measured,
+    `'abc'.Substring([char]1)` is `bc`: the Char binds to an `Int32` and arrives as its code point,
+    where the character it writes is a control character and no offset at all. A String that binds
+    to a `char[]` arrives as its characters, so `'a,b;c'.Split(',;')` is three parts and not two.
+    """
+
+    def test_a_char_argument_bound_to_an_offset_arrives_as_its_code_point(self):
+        self.assertEqual(
+            self._apply("$x = 'abc'.Substring([char]1)", Ps1ConstantFolding), "$x = 'bc'")
+
+    def test_a_string_argument_bound_to_a_character_array_arrives_as_its_characters(self):
+        self.assertEqual(
+            self._apply("$x = 'a,b;c'.Split(',;')", Ps1ConstantFolding), "$x = 'a', 'b', 'c'")
+
+    def test_a_char_argument_bound_to_a_character_array_arrives_as_one_separator(self):
+        self.assertEqual(
+            self._apply("$x = 'abc'.Split([char]98)", Ps1ConstantFolding), "$x = 'a', 'c'")
+
+
+class TestPs1AnOperatorConvertsEveryOperandToText(TestPs1):
+    """
+    Where a method binds a parameter, an operator converts, and `-replace`, `-split` and `-join`
+    convert to String. Measured, `'x' -replace 'x', [char]65` is `A`, `('a', 'b') -join 5` is `a5b`,
+    `-join (72, 105)` is `72105`, `'a,b' -split [char]44` splits at the comma,
+    `[char]65 -replace 'A', 'B'` is `B` and `$true -replace 'T', 'X'` is `Xrue`.
+    """
+
+    def test_a_char_replacement_contributes_its_character(self):
+        self.assertEqual(
+            self._apply("$x = 'x' -replace 'x', [char]65", Ps1ConstantFolding), "$x = 'A'")
+
+    def test_a_number_between_two_strings_is_joined_as_its_digits(self):
+        self.assertEqual(
+            self._apply("$x = ('a', 'b') -join 5", Ps1ConstantFolding), "$x = 'a5b'")
+
+    def test_joining_numbers_writes_the_digits_of_each_of_them(self):
+        self.assertEqual(self._apply('$x = -join (72, 105)', Ps1ConstantFolding), "$x = '72105'")
+
+    def test_a_char_separator_splits_at_the_character_it_holds(self):
+        self.assertEqual(
+            self._apply("$x = 'a,b' -split [char]44", Ps1ConstantFolding), "$x = 'a', 'b'")
+
+    def test_a_char_on_the_left_of_a_replacement_is_the_text_it_writes(self):
+        self.assertEqual(
+            self._apply("$x = [char]65 -replace 'A', 'B'", Ps1ConstantFolding), "$x = 'B'")
+
+    def test_a_boolean_on_the_left_of_a_replacement_is_the_word_it_renders_as(self):
+        self.assertEqual(
+            self._apply("$x = $true -replace 'T', 'X'", Ps1ConstantFolding), "$x = 'Xrue'")
+
+
+class TestPs1ATextOnlyOperandIsWrittenAsTheTextItContributes(TestPs1):
+    """
+    `-match`, `-like`, `-replace`, `-split` and `-join` read every operand as the text it converts
+    to, so a constant operand of one of them says the same thing written as that text even where
+    the operator itself cannot be folded: `$x -match [char]12499` and `$x -match 'ビ'` are one
+    question.
+
+    `-eq` and `-f` are not of that kind. A comparison is decided by the type of its left operand,
+    `[char]65 -eq 65` being True where `'A' -eq 65` is a different question, and what an operand
+    contributes to a format is decided by the specifier, `'{0:X}' -f 65` being `41` where
+    `'{0:X}' -f '65'` is `65`.
+    """
+
+    def test_a_char_pattern_is_written_as_the_character_it_matches(self):
+        self.assertEqual(
+            self._apply('$x -match [char]12499', Ps1ConstantFolding), "$x -match 'ビ'")
+
+    def test_a_char_wildcard_is_written_as_the_character_it_matches(self):
+        self.assertEqual(self._apply('$x -like [char]65', Ps1ConstantFolding), "$x -like 'A'")
+
+    def test_a_char_replacement_pair_is_written_as_the_characters_it_replaces(self):
+        self.assertEqual(
+            self._apply('$x -replace [char]65, [char]66', Ps1ConstantFolding),
+            "$x -replace 'A', 'B'",
+        )
+
+    def test_a_char_separator_is_written_as_the_character_it_splits_at(self):
+        self.assertEqual(self._apply('$x -split [char]44', Ps1ConstantFolding), "$x -split ','")
+
+    def test_a_char_separator_is_written_as_the_character_it_joins_with(self):
+        self.assertEqual(self._apply('$x -join [char]44', Ps1ConstantFolding), "$x -join ','")
+
+    def test_a_boolean_pattern_is_written_as_the_word_it_renders_as(self):
+        self.assertEqual(self._apply('$x -match $true', Ps1ConstantFolding), "$x -match 'True'")
+
+    def test_the_case_sensitive_and_negated_spellings_are_written_the_same_way(self):
+        self.assertEqual(self._apply('$x -cmatch [char]65', Ps1ConstantFolding), "$x -cmatch 'A'")
+        self.assertEqual(
+            self._apply('$x -notmatch [char]65', Ps1ConstantFolding), "$x -notmatch 'A'")
+        self.assertEqual(
+            self._apply("$x -ireplace [char]65, 'B'", Ps1ConstantFolding), "$x -ireplace 'A', 'B'")
+
+    def test_a_char_compared_for_equality_is_left_the_char_it_is(self):
+        self._assertUnchanged('$x -eq [char]65', Ps1ConstantFolding)
+
+    def test_a_number_handed_to_a_format_is_left_the_number_it_is(self):
+        self._assertUnchanged('$fmt -f 65', Ps1ConstantFolding)
+
+
+class TestPs1AHashTableKeyIsFoundByItsValueAndItsType(TestPs1):
+    """
+    Measured, `@{ a = 1 }[[char]97]` is `$null` where `@{ a = 1 }['A']` is 1: two Strings hash
+    without regard to case and a Char is no String at all. A number carries its width the same way,
+    `@{ 1 = 'x' }['1']` and `@{ 1 = 'x' }[1L]` both being `$null` where `@{ 1 = 'x' }[1]` is `x`.
+    """
+
+    def test_a_string_key_is_found_by_a_string_of_another_case(self):
+        self.assertEqual(self._apply("$x = @{ a = 1 }['A']", Ps1ConstantFolding), '$x = 1')
+
+    def test_a_string_key_is_not_found_by_a_char(self):
+        expected = inspect.cleandoc("""
+            $x = @{
+              a = 1
+            }[[char]97]
+        """)
+        self.assertEqual(self._apply('$x = @{ a = 1 }[[char]97]', Ps1ConstantFolding), expected)
+
+    def test_a_number_key_is_found_by_the_same_number(self):
+        self.assertEqual(self._apply("$x = @{ 1 = 'x' }[1]", Ps1ConstantFolding), "$x = 'x'")
+
+    def test_a_number_key_is_not_found_by_the_text_of_its_digits(self):
+        expected = inspect.cleandoc("""
+            $x = @{
+              1 = 'x'
+            }['1']
+        """)
+        self.assertEqual(self._apply("$x = @{ 1 = 'x' }['1']", Ps1ConstantFolding), expected)
+
+    def test_a_number_key_is_not_found_by_the_same_number_of_another_width(self):
+        expected = inspect.cleandoc("""
+            $x = @{
+              1 = 'x'
+            }[1L]
+        """)
+        self.assertEqual(self._apply("$x = @{ 1 = 'x' }[1L]", Ps1ConstantFolding), expected)
+
+
+class TestPs1ConvertReadsAStringByRulesOfItsOwn(TestPs1):
+    """
+    `[Convert]::ToInt32` is neither the cast nor Python's own parser. Measured, it throws for
+    `'0x10'` where `[int]'0x10'` is 16, and it throws for `'1_0'`, `'0b1010'`, `'7.5'`, `'1e3'`,
+    `'1,000'` and for the empty string, each of which one of the other two reads. What it does read
+    is a whole decimal number, with a sign and with whitespace around it if either is there.
+    """
+
+    def test_a_hexadecimal_prefix_is_no_decimal_number(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('0x10')", Ps1ConstantFolding)
+
+    def test_the_cast_of_that_same_text_is_the_number_its_digits_denote(self):
+        self.assertEqual(self._deobfuscate("$x = [int]'0x10'"), '$x = 16')
+
+    def test_a_digit_separator_is_no_decimal_number(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('1_0')", Ps1ConstantFolding)
+
+    def test_a_binary_prefix_is_no_decimal_number(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('0b1010')", Ps1ConstantFolding)
+
+    def test_a_fraction_is_no_whole_number(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('7.5')", Ps1ConstantFolding)
+
+    def test_an_exponent_is_no_whole_number(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('1e3')", Ps1ConstantFolding)
+
+    def test_a_group_separator_is_no_decimal_number(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('1,000')", Ps1ConstantFolding)
+
+    def test_the_empty_string_is_no_number_at_all(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('')", Ps1ConstantFolding)
+
+    def test_whitespace_around_the_digits_is_read_over(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32(' 5 ')", Ps1ConstantFolding), '$x = 5')
+
+    def test_a_leading_plus_is_a_sign(self):
+        self.assertEqual(self._apply("$x = [Convert]::ToInt32('+7')", Ps1ConstantFolding), '$x = 7')
+
+    def test_a_leading_minus_is_a_sign(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32('-5')", Ps1ConstantFolding), '$x = -5')
+
+    def test_leading_zeroes_are_read_over(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32('007')", Ps1ConstantFolding), '$x = 7')
+
+
+class TestPs1ConvertWithABaseReadsABitPatternAtTheTargetsWidth(TestPs1):
+    """
+    With a base other than ten the digits are a bit pattern that fills the target the method names.
+    Measured, `[Convert]::ToInt32('FFFFFFFF', 16)` is -1, `[Convert]::ToInt32('80000000', 16)` is
+    -2147483648 and `[Convert]::ToByte('FF', 16)` is the Byte 255. A sign is refused there, and so
+    is whitespace, and a `0x` prefix is read by base sixteen and by no other.
+    """
+
+    def test_digits_filling_the_int32_width_are_the_negative_number_they_denote(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32('FFFFFFFF', 16)", Ps1ConstantFolding), '$x = -1')
+
+    def test_digits_filling_the_sign_bit_are_the_smallest_int32(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32('80000000', 16)", Ps1ConstantFolding),
+            '$x = -2147483648',
+        )
+
+    def test_the_target_the_method_names_is_the_type_of_the_answer(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToByte('FF', 16)", Ps1ConstantFolding), '$x = [byte]255')
+
+    def test_an_octal_base_reads_the_digits_as_powers_of_eight(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32('017', 8)", Ps1ConstantFolding), '$x = 15')
+
+    def test_a_binary_base_reads_the_digits_as_powers_of_two(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32('1010', 2)", Ps1ConstantFolding), '$x = 10')
+
+    def test_a_sign_is_no_part_of_a_bit_pattern(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('-10', 16)", Ps1ConstantFolding)
+
+    def test_whitespace_is_no_part_of_a_bit_pattern(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32(' 5 ', 16)", Ps1ConstantFolding)
+
+    def test_a_hexadecimal_prefix_is_read_by_the_base_that_spells_it(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32('0x10', 16)", Ps1ConstantFolding), '$x = 16')
+
+    def test_a_hexadecimal_prefix_is_no_part_of_an_octal_number(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('0x10', 8)", Ps1ConstantFolding)
+
+
+class TestPs1ConvertOfEverythingButAStringIsTheCast(TestPs1):
+    """
+    Only a String reaches `[Convert]` through a parser of its own. Every other source is converted
+    the way the cast to the same target converts it, so a real is rounded half to even and the
+    absent value is zero, and the answer carries the type the method's name promised.
+    """
+
+    def test_a_real_reaches_an_integer_target_by_rounding_half_to_even(self):
+        self.assertEqual(self._apply('$x = [Convert]::ToInt32(1.5)', Ps1ConstantFolding), '$x = 2')
+        self.assertEqual(self._apply('$x = [Convert]::ToInt32(2.5)', Ps1ConstantFolding), '$x = 2')
+
+    def test_the_absent_value_reaches_an_integer_target_as_zero(self):
+        self.assertEqual(
+            self._apply('$x = [Convert]::ToInt32($null)', Ps1ConstantFolding), '$x = 0')
+
+    def test_a_number_reaches_a_wider_target_as_a_value_of_that_width(self):
+        self.assertEqual(self._apply('$x = [Convert]::ToInt64(5)', Ps1ConstantFolding), '$x = 5L')
+
+
+class TestPs1AChainOfAppendsIsNotReassociated(TestPs1):
+    """
+    `+` is left-associative and its left operand decides what it does, so the two groupings are not
+    the same program: measured with `$x = @(1)`, `($x + 'a') + 'b'` holds three elements where
+    `$x + 'ab'` holds two. Joining the two constants is only sound where the left operand is known,
+    which a variable the script pins nothing about is not.
+    """
+
+    def test_a_chain_of_appends_to_an_unknown_left_operand_is_left_alone(self):
+        self._assertUnchanged("$y = $x + 'a' + 'b'", Ps1ConstantFolding)
+
+    def test_a_chain_of_appends_to_a_literal_collection_keeps_every_element(self):
+        self.assertEqual(self._apply("$y = ,1 + 'a' + 'b'", Ps1ConstantFolding), "$y = 1, 'a', 'b'")
+
+    def test_a_chain_of_appends_to_a_literal_string_is_the_text_of_all_three(self):
+        self.assertEqual(self._apply("$y = 'a' + 'b' + 'c'", Ps1ConstantFolding), "$y = 'abc'")
+
+
+class TestPs1AppendingToALiteralCollectionKeepsWhatWasAppended(TestPs1):
+    """
+    Measured, `1, 2 + [char]65` is a three-element array whose last element is a `System.Char`: the
+    comma binds tighter than the `+`, and an element that arrived as a Char is not one a later read
+    of the array finds as a String. `@(1, 2) + [char]65` is that same array.
+    """
+
+    def test_a_char_appended_to_a_literal_collection_is_still_a_char(self):
+        self.assertEqual(
+            self._apply('$x = 1, 2 + [char]65', Ps1ConstantFolding), '$x = 1, 2, [char]65')
+
+    def test_a_string_appended_to_a_literal_collection_is_still_a_string(self):
+        self.assertEqual(self._apply("$x = 1, 2 + 'A'", Ps1ConstantFolding), "$x = 1, 2, 'A'")
+
+    @unittest.expectedFailure
+    def test_a_char_appended_through_the_array_operator_is_still_a_char(self):
+        self.assertEqual(
+            self._apply('$x = @(1, 2) + [char]65', Ps1ConstantFolding), '$x = 1, 2, [char]65')

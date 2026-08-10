@@ -370,9 +370,9 @@ TABLES: tuple[str, ...] = (
 )
 
 
-#: What a value's type is and what an operation produces, measured rather than assumed. The unit has
-#: no place to keep a type — a Char and a one-character String are the same object to it — so every
-#: belief about one was written by us, which is the condition these exist to end.
+#: What a value's type is and what an operation produces, measured rather than assumed. The unit
+#: had no place to keep a type — a Char and a one-character String were the same object to it — so
+#: every belief about one was written by us, which is the condition these exist to end.
 #:
 #: Two witnesses per entry, because one is not enough to see the question. `Write-Output (,$t)`
 #: names the container and `Write-Output $t` unrolls it, so that the transcript's own type column

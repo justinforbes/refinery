@@ -135,47 +135,60 @@ def unwrap_to_array_literal(node: Node) -> Ps1ArrayLiteral | None:
     return None
 
 
-def collect_typed_arguments(
-    node: Expression, extract: Callable[[Expression], _T | None],
-) -> list[_T] | None:
-    if isinstance(node, Ps1ArrayLiteral):
-        result: list[_T] = []
-        for elem in node.elements:
-            value = extract(elem)
-            if value is None:
-                return None
-            result.append(value)
-        return result
-    value = extract(node)
-    if value is not None:
-        return [value]
-    return None
+def collect_facts(node: Node | None) -> list[Ps1Fact] | None:
+    """
+    The values an expression names, as facts, or `None` where it names anything else. A scalar is a
+    list of one, which is what a caller reading a command's or an operator's operand wants:
+    PowerShell hands one value and a collection of one to the same place.
+
+    This is the only place the elements of a collection are taken apart, and every caller that wants
+    something *of* each of them — an integer, a text, a number-or-text — asks the element that
+    question itself. A collector per question would each have to state again which spellings build a
+    collection, and `read` already knows: `@(1, 2)`, `(1, 2)`, `1, 2` and a cast over any of them
+    are one answer here.
+    """
+    fact = read(node)
+    if isinstance(fact, Ps1Constant) and fact.type == _OBJECT_ARRAY:
+        payload = fact.payload
+        return None if not isinstance(payload, tuple) else list(payload)
+    return None if fact is UNKNOWN else [fact]
 
 
 def collect_integers(node: Node | None) -> list[int] | None:
     """
-    The integers an expression names, as a list, or `None` where it names anything else. A scalar is
-    a list of one, which is what a caller reading a command's arguments wants: PowerShell passes one
-    value and a collection of one to the same parameter.
+    The integers an expression names, as a list, or `None` where it names anything else.
 
     What counts as an integer is `integer_of`, so a numeral whose spelling makes it something else
     is not one and neither is a `$null`: the old reader here answered the *magnitude* of a
     hexadecimal pattern, so `0xFFFFFFFF` reached its callers as 4294967295 where the value is -1.
     """
-    fact = read(node)
-    elements = fact.payload if isinstance(fact, Ps1Constant) and fact.type == _OBJECT_ARRAY else None
-    if elements is None:
-        single = integer_of(fact)
-        return None if single is None else [single]
-    if not isinstance(elements, tuple):
+    return _each(collect_facts(node), integer_of)
+
+
+def collect_texts(node: Node | None) -> list[str] | None:
+    """
+    The texts an expression's values contribute where PowerShell coerces each of them to a String,
+    or `None` where one of them names no text. See `coerced_text` for what that coercion is and
+    which operators perform it.
+    """
+    return _each(collect_facts(node), coerced_text)
+
+
+def _each(facts: list[Ps1Fact] | None, of: Callable[[Ps1Fact], _T | None]) -> list[_T] | None:
+    """
+    What each of `facts` answers to `of`, or `None` where any one of them answers nothing. One
+    element the caller cannot read makes the whole collection unreadable: a shorter list than the
+    script builds is a different value, and there is nothing to stand in for the element dropped.
+    """
+    if facts is None:
         return None
-    numbers: list[int] = []
-    for element in elements:
-        number = integer_of(element)
-        if number is None:
+    answers: list[_T] = []
+    for fact in facts:
+        answer = of(fact)
+        if answer is None:
             return None
-        numbers.append(number)
-    return numbers
+        answers.append(answer)
+    return answers
 
 
 def collect_byte_array(node: Expression) -> bytes | None:
@@ -574,6 +587,26 @@ def text_of(fact: Ps1Fact) -> str | None:
     if isinstance(fact, Ps1Constant) and fact.type == _STRING and isinstance(fact.payload, str):
         return fact.payload
     return None
+
+
+def coerced_text(fact: Ps1Fact) -> str | None:
+    """
+    The text a value contributes where PowerShell coerces it to a String, or `None` where this
+    module names none. It is `convert` to a `String` and nothing else, which is what makes it a
+    different question from `text_of`: that one asks what a value *is*, this asks what it *becomes*,
+    and a Char answers `None` to the first and its character to the second.
+
+    Every string operator coerces this way and uniformly, measured over `-replace`, `-split`,
+    `-join`, `-f` and `-match` and over both of their operands: `'x' -replace 'x', $true` is `True`,
+    `-replace 'x', 1.50d` is `1.50`, `('a','b') -join 5` is `a5b`, `-join (72, 105)` is `72105`,
+    `[char]65 -replace 'A', 'B'` is `B` and `$true -replace 'T', 'X'` is `Xrue`.
+
+    A *method* does not coerce this way and must not ask this: it converts each argument to the
+    parameter's declared type, and the two disagree — `'abc'.Substring([char]1)` is `bc`, where the
+    Char becomes the number one and its text would be a control character that throws.
+    """
+    outcome = convert(fact, _STRING)
+    return None if outcome.may_throw else text_of(outcome.value)
 
 
 _DECIMAL_DIGITS = re.compile(r'[0-9]+\Z')
@@ -1863,10 +1896,11 @@ def _rendered_double(payload) -> Expression | None:
 def make_string_literal(value: str) -> Ps1StringLiteral | Ps1HereString:
     """
     The literal that spells `value` as a `String`, for a caller that holds a bare Python `str` and
-    no fact. It is `render`'s String arm, and it is also the last place in the unit where a value is
-    spelled without its type having been named: a `str` reaching here may have been a `Char`, and
-    written out through here it becomes a one-character String, which is what the ledger's Char rows
-    are. Each pass loses this call as it starts carrying a `Ps1Fact` instead.
+    no fact. It is `render`'s String arm, and it is the last place in the unit where a value is
+    spelled without its type having been named — a `str` reaching here becomes a String whatever it
+    was, which is what the ledger's Char rows were. Each caller loses this as it starts carrying a
+    `Ps1Fact` instead; what is left is the emulation of a .NET method that really does produce a
+    String, and a text this module computed itself.
 
     A here-string is chosen for multi-line text because it needs no escaping, and only where the
     text cannot close it early: a line beginning `'@` inside the value would end the string there

@@ -7,15 +7,19 @@ import base64
 import codecs
 import re
 
-from typing import Iterator, NamedTuple
+from typing import Iterator, NamedTuple, TypeGuard
 
-from refinery.lib.scripts import Node, reattach
+from refinery.lib.scripts import Node, canonical, reattach
 from refinery.lib.scripts.ps1.analysis.effects import is_fault_free, may_be_dropped
 from refinery.lib.scripts.ps1.analysis.values import (
+    Ps1Constant,
+    Ps1Fact,
     apply,
     apply_unary,
+    coerced_text,
     collect_byte_array,
     collect_integers,
+    collect_texts,
     convert,
     integer_at,
     integer_of,
@@ -25,10 +29,11 @@ from refinery.lib.scripts.ps1.analysis.values import (
     read,
     render,
     text_of,
+    type_of,
     unwrap_to_array_literal,
 )
-from refinery.lib.scripts.ps1.ast import get_body, get_member_name, string_value, unwrap_parens
-from refinery.lib.scripts.ps1.data import ENCODING_MAP, named_type
+from refinery.lib.scripts.ps1.ast import get_body, get_member_name, unwrap_parens
+from refinery.lib.scripts.ps1.data import ENCODING_MAP, instance_overloads, named_type, resolve_type
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.deobfuscation.constants import PS1_ENV_CONSTANTS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
@@ -37,7 +42,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     apply_format_string,
     apply_string_method,
     collect_format_arguments,
-    collect_string_arguments,
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
@@ -51,7 +55,6 @@ from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     substitute_list,
     substituted,
 )
-from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
 from refinery.lib.scripts.ps1.data import MemberLookup, member_record
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -94,6 +97,47 @@ _RIGHT_TO_LEFT = 64
 _MAX_STRING_EXPAND = 0x1000
 _MAX_RANGES_EXPAND = 15
 
+_CHAR = named_type('System.Char')
+_INT32 = named_type('System.Int32')
+_STRING = named_type('System.String')
+
+#: The operators that read every operand as the text `[string]` of it produces, so that a constant
+#: operand may be written as that text without changing what the operator does. Measured on both
+#: sides of each: `'abc' -match [char]98` and `[char]98 -match 'b'` are both True, `[char]120
+#: -replace 'x', 'y'` and `'x' -replace [char]120, 'y'` are both `y`, `[char]44 -split ','` is two
+#: elements and `('a','b') -join [char]45` is `a-b`.
+#:
+#: `-f` is deliberately absent although a Char under it does contribute its text: what an operand
+#: contributes there is decided by the format specifier, and `'{0:X}' -f 65` is `41` where the text
+#: of the same operand is `65`. A comparison is absent for a stronger reason — `-eq` is decided by
+#: its *left* operand's type, so `[char]65 -eq 65` and `'A' -eq 65` are not the same question.
+_TEXT_OPERATORS = frozenset({
+    '-match', '-cmatch', '-imatch', '-notmatch', '-cnotmatch', '-inotmatch',
+    '-like', '-clike', '-ilike', '-notlike', '-cnotlike', '-inotlike',
+    '-replace', '-creplace', '-ireplace',
+    '-split', '-csplit', '-isplit',
+    '-join',
+})
+
+#: The types whose `ToString()` writes the same text `[string]` of the value does. Measured on a
+#: host whose culture writes a decimal comma: `(1.50d).ToString()` is `1,50` where `[string]1.50d`
+#: is `1.50`, and `(1.5).ToString()` is `1,5`. `ToString()` reads the *current* culture and a cast
+#: does not, so only the types that carry no culture at all may be answered from one — a Char, a
+#: Boolean and the integer widths, each measured to agree, and a String, which is its own text.
+_CULTURE_FREE_TEXT = frozenset({
+    _CHAR,
+    _INT32,
+    _STRING,
+    named_type('System.Boolean'),
+    named_type('System.Byte'),
+    named_type('System.Int16'),
+    named_type('System.Int64'),
+    named_type('System.SByte'),
+    named_type('System.UInt16'),
+    named_type('System.UInt32'),
+    named_type('System.UInt64'),
+})
+
 #: The whitespace `[Convert]::To<integer>(string)` strips, measured as `' 5 '` converting to 5. Only
 #: the one-argument form strips anything: `[Convert]::ToInt32(' 5 ', 16)` throws.
 _CONVERT_TRIM = ' \t\r\n'
@@ -117,16 +161,21 @@ def _is_static_regex_call(node: Ps1InvokeMember) -> bool:
     return is_static_type_call(node, 'system.text.regularexpressions.regex')
 
 
-def _parse_regex_options(node: Expression) -> tuple[int, bool] | None:
+def _parse_regex_options(fact: Ps1Fact) -> tuple[int, bool] | None:
     """
-    Parse a RegexOptions argument (string or integer) into Python re flags
-    and a right_to_left boolean.
+    The Python `re` flags and the right-to-left switch a `RegexOptions` argument names, or `None`
+    for one this does not recognize.
+
+    The two spellings the enum accepts are its member names and its bit values, and neither is a
+    text a value merely coerces to: a Char that renders as `m` names no option, and the number a
+    flag is spelled with is the value rather than the digits — so the integer is read as the number
+    its spelling names and not as the magnitude `0xFFFFFFFF` would give.
     """
-    sv = string_value(node)
-    if sv is not None:
+    text = text_of(fact)
+    if text is not None:
         flags = 0
         right_to_left = False
-        for part in sv.split(','):
+        for part in text.split(','):
             key = part.strip().lower()
             if not key:
                 continue
@@ -138,15 +187,14 @@ def _parse_regex_options(node: Expression) -> tuple[int, bool] | None:
                 return None
             flags |= flag
         return flags, right_to_left
-    if isinstance(node, Ps1IntegerLiteral):
-        value = node.value
-        right_to_left = bool(value & _RIGHT_TO_LEFT)
-        flags = 0
-        for bit, flag in _REGEX_OPTION_INT.items():
-            if value & bit:
-                flags |= flag
-        return flags, right_to_left
-    return None
+    value = integer_of(fact)
+    if value is None:
+        return None
+    flags = 0
+    for bit, flag in _REGEX_OPTION_INT.items():
+        if value & bit:
+            flags |= flag
+    return flags, bool(value & _RIGHT_TO_LEFT)
 
 
 def _iter_regex_matches(node: Ps1InvokeMember) -> Iterator[str] | None:
@@ -159,12 +207,12 @@ def _iter_regex_matches(node: Ps1InvokeMember) -> Iterator[str] | None:
     """
     if len(node.arguments) not in (2, 3):
         return None
-    input = string_value(node.arguments[0])
-    pattern = string_value(node.arguments[1])
+    input = coerced_text(read(node.arguments[0]))
+    pattern = coerced_text(read(node.arguments[1]))
     if input is None or pattern is None:
         return None
     if len(node.arguments) == 3:
-        if (options := _parse_regex_options(node.arguments[2])) is None:
+        if (options := _parse_regex_options(read(node.arguments[2]))) is None:
             return None
         flags, right_to_left = options
     else:
@@ -255,7 +303,7 @@ def _variable_raw(var: Ps1Variable) -> str:
     return F'{prefix}{{{var.name}}}'
 
 
-def _is_string_typed_variable(node: Expression | None) -> bool:
+def _is_string_typed_variable(node: Expression | None) -> TypeGuard[Ps1Variable]:
     """
     Return `True` only for a variable whose value is provably a string, so that folding a `+`
     concatenation into an expandable string cannot change array/number `+` semantics. Environment
@@ -318,21 +366,31 @@ class _Selection(NamedTuple):
     dropped: list[Expression]
 
 
+def _character(text: str, index: int) -> Expression | None:
+    """
+    The character at `index`, spelled as the `Char` it is. Measured: `'ABC'[0]` reports
+    `System.Char` and `('abc'[0]) + 'x'` is `ax`, where a one-character String there would have made
+    the same `+` a numeric addition on the other side of the operator.
+    """
+    if not -len(text) <= index < len(text):
+        return None
+    return render(Ps1Constant(_CHAR, text[index]))
+
+
 def _index_into_string(s: str, indices: int | list[int]) -> _Selection | None:
     """
     A string is a value and not a container of expressions, so a character selected out of one
     leaves no evaluation behind, whatever the index.
     """
-    n = len(s)
     if isinstance(indices, int):
-        if -n <= indices < n:
-            return _Selection(make_string_literal(s[indices]), [])
-        return None
+        one = _character(s, indices)
+        return None if one is None else _Selection(one, [])
     selected: list[Expression] = []
     for i in indices:
-        if not (-n <= i < n):
+        element = _character(s, i)
+        if element is None:
             return None
-        selected.append(make_string_literal(s[i]))
+        selected.append(element)
     return _Selection(Ps1ArrayLiteral(elements=selected), [])
 
 
@@ -384,13 +442,11 @@ def _lookup_hashtable(ht: Ps1HashLiteral, index: Expression) -> _Selection | Non
     telling that spelling apart from a plain name here would be a second rule about which parts of
     a literal are evaluated — where the whole literal plainly is.
     """
-    key = string_value(index)
-    if key is None:
+    key = read(index)
+    if not isinstance(key, Ps1Constant):
         return None
-    lower = key.lower()
     for pair_key, pair_value in ht.pairs:
-        k = string_value(pair_key)
-        if k is not None and k.lower() == lower:
+        if _same_key(key, read(pair_key)):
             return _Selection(pair_value, [
                 part
                 for other_key, other_value in ht.pairs
@@ -398,6 +454,20 @@ def _lookup_hashtable(ht: Ps1HashLiteral, index: Expression) -> _Selection | Non
                 if part is not pair_value
             ])
     return None
+
+
+def _same_key(one: Ps1Fact, other: Ps1Fact) -> bool:
+    """
+    Whether two values are the same hash table key. A key carries its type: measured,
+    `@{ a = 1 }[[char]97]` and `@{ 1 = 'x' }['1']` each find nothing, and so does `$h[1L]` for a key
+    written `1`, so a Char, a String and each integer width are different keys holding the same
+    characters or the same number. Two Strings are the one case that is not identity — `@{ a = 1
+    }['A']` is 1, because PowerShell hashes a String key case-insensitively.
+    """
+    one_text, other_text = text_of(one), text_of(other)
+    if one_text is not None and other_text is not None:
+        return one_text.lower() == other_text.lower()
+    return isinstance(one, Ps1Constant) and one == other
 
 
 def _pipeline_output(value: Expression | None) -> Expression | None:
@@ -411,6 +481,94 @@ def _pipeline_output(value: Expression | None) -> Expression | None:
     if isinstance(value, Ps1ArrayLiteral) and len(value.elements) == 1:
         return value.elements[0]
     return value
+
+
+def _method_arguments(
+    owner: Ps1TypeName, member: str, nodes: list[Expression],
+) -> list[str | int] | None:
+    """
+    The arguments an instance call contributes to the emulated method, or `None` where the call may
+    not be folded at all — a member the receiver's type carries no non-static overload of, an arity
+    no overload has, or an argument whose value this cannot decide.
+
+    **A method does not coerce its arguments the way an operator does.** An operator turns every
+    operand into the text `[string]` of it produces; a method converts each argument to the
+    *declared* type of the parameter it binds to, and the two disagree — measured,
+    `'abc'.Substring([char]1)` is `bc`, where the Char converts to the number one, and its text
+    would be a control character that throws.
+
+    Which of the two an argument takes is read off the collected parameter types rather than
+    guessed: a position every candidate overload declares an `Int32` for takes the number, and one
+    none of them does takes the text. A position the candidates disagree about is refused, because
+    which overload 5.1 binds is a question this does not answer.
+    """
+    positions = [
+        parameters for overload in instance_overloads(owner, member)
+        if len(parameters := overload.get('parameters') or ()) == len(nodes)
+    ]
+    if not positions:
+        return None
+    arguments: list[str | int] = []
+    for index, argument in enumerate(nodes):
+        declared = {resolve_type(parameters[index]['type']) for parameters in positions}
+        value = _argument_value(read(argument), declared)
+        if value is None:
+            return None
+        arguments.append(value)
+    return arguments
+
+
+def _argument_value(fact: Ps1Fact, declared: set[Ps1TypeName | None]) -> str | int | None:
+    """
+    What one argument contributes, given the parameter types the candidate overloads declare for its
+    position.
+
+    An `Int32` parameter takes the number the argument converts to. Anything else takes its text,
+    and only from a value that already is a String or a Char: a `Char[]` parameter is satisfied by a
+    String's own characters, which is what makes `'a,b;c'.Split(',;')` three parts, and by a Char,
+    which makes `'abc'.Split([char]98)` two. An *integer* there is not the digits — measured,
+    `'a9b'.Split(57)` splits on the character 57 is the code of — so it is refused rather than read
+    as a text it never becomes.
+    """
+    if declared == {_INT32}:
+        outcome = convert(fact, _INT32)
+        return None if outcome.may_throw else integer_of(outcome.value)
+    if _INT32 in declared or type_of(fact) not in (_STRING, _CHAR):
+        return None
+    return coerced_text(fact)
+
+
+def _value_to_string(receiver: Ps1Fact, member: str, arguments: list[str | int]) -> Expression | None:
+    """
+    A method on a receiver that is not a String, of which exactly one is folded: `ToString()` with
+    no argument, and only for a value whose text carries no culture.
+
+    `ToString()` is *not* `[string]` in general. Measured on a host whose culture writes a decimal
+    comma, `(1.50d).ToString()` is `1,50` where `[string]1.50d` is `1.50` — the method reads the
+    current culture and the cast does not. `_CULTURE_FREE_TEXT` is the set where the two were
+    measured to agree, so this answers from `coerced_text` only there.
+    """
+    if member != 'tostring' or arguments:
+        return None
+    if type_of(receiver) not in _CULTURE_FREE_TEXT:
+        return None
+    text = coerced_text(receiver)
+    return None if text is None else make_string_literal(text)
+
+
+def _as_text(operand: Expression | None) -> Expression | None:
+    """
+    An operand written as the text it contributes, or `None` where it names none or already is that
+    text. `refinery.lib.scripts.canonical` is what decides *already*: a rewrite of a tree into an
+    equal one is a rewrite that never converges.
+    """
+    if operand is None:
+        return None
+    text = coerced_text(read(operand))
+    if text is None:
+        return None
+    spelled = make_string_literal(text)
+    return None if canonical(spelled) == canonical(operand) else spelled
 
 
 def _folded(outcome) -> Expression | None:
@@ -473,12 +631,9 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         shaped = self._fold_shape_member(node, obj, member)
         if shaped is not None:
             return shaped
-        if string_value(obj) is not None or isinstance(obj, Ps1IntegerLiteral):
-            obj_type = resolve_expression_type(obj)
-            if obj_type is not None:
-                record = member_record(obj_type, member)
-                if record is MemberLookup.ABSENT:
-                    return Ps1Variable(name='Null')
+        owner = type_of(read(obj))
+        if owner is not None and member_record(owner, member) is MemberLookup.ABSENT:
+            return Ps1Variable(name='Null')
         result = self._try_fold_regex_member_access(node, member)
         if result is not None:
             return result
@@ -494,20 +649,28 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         Fold a member whose value the receiver's shape decides. The array answers go through
         `_selected` because folding one discards the elements that built it, and whether that is
         safe is the selection's question rather than this one's.
+
+        A scalar answers 1 to both `Length` and `Count` whatever it is, which is PowerShell's object
+        adapter and not the type's own surface — `System.Char` carries neither member, and
+        `([char]65).Length` is 1 all the same. So the receiver is read as a *value* rather than
+        matched by spelling: `$null` is not one, and its `Count` is 0.
+
+        A collection is a scalar to neither, and the array arm is the only one that answers for one:
+        a spelling this cannot take apart into element nodes — `@()`, `@(@(1, 2))` — names a
+        collection all the same, and answering 1 for it is the count of a value that is not there.
         """
         name = member.lower()
         if name not in _SHAPE_MEMBERS:
             return None
-        text = string_value(obj)
-        if text is not None:
-            return _integer(len(text) if name == 'length' else 1)
         array = unwrap_to_array_literal(obj)
         if array is not None:
             count = 1 if name == 'rank' else len(array.elements)
             return self._selected(node, _Selection(_integer(count), list(array.elements)))
-        if isinstance(obj, Ps1IntegerLiteral) and name != 'rank':
-            return _integer(1)
-        return None
+        fact = read(obj)
+        if name == 'rank' or not isinstance(fact, Ps1Constant) or isinstance(fact.payload, tuple):
+            return None
+        text = text_of(fact)
+        return _integer(len(text) if name == 'length' and text is not None else 1)
 
     def _try_fold_regex_member_access(
         self, node: Ps1MemberAccess, member: str,
@@ -566,25 +729,11 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         operand = node.operand
         if operand is None:
             return None
-        scalar = string_value(operand)
-        if scalar is not None:
-            return make_string_literal(scalar)
         result = self._try_join_regex_matches(operand)
         if result is not None:
             return result
-        array = unwrap_to_array_literal(operand)
-        if array is None:
-            if isinstance(operand, Ps1ArrayExpression) and len(operand.body) == 1:
-                stmt = operand.body[0]
-                if isinstance(stmt, Ps1ExpressionStatement):
-                    sv = string_value(stmt.expression) if stmt.expression else None
-                    if sv is not None:
-                        return make_string_literal(sv)
-            return None
-        args = collect_string_arguments(array)
-        if args is None:
-            return None
-        return make_string_literal(''.join(args))
+        parts = collect_texts(operand)
+        return None if parts is None else make_string_literal(''.join(parts))
 
     def visit_Ps1RangeExpression(self, node: Ps1RangeExpression):
         self.generic_visit(node)
@@ -635,7 +784,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         indices = _resolve_index_values(node.index)
         if indices is None:
             return None
-        obj_str = string_value(node.object)
+        obj_str = text_of(read(node.object))
         if obj_str is not None:
             return self._selected(node, _index_into_string(obj_str, indices))
         array = unwrap_to_array_literal(node.object)
@@ -688,7 +837,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
                     literal = inner.expression
                     return self._reversed(node, substitute_list(
                         literal, 'elements', literal.elements[::-1]))
-            sv = string_value(value)
+            sv = text_of(read(value))
             if sv is not None:
                 return self._reversed(node, substitute_field(
                     expr, 'value', make_string_literal(sv[::-1])))
@@ -742,21 +891,27 @@ class Ps1ConstantFolding(WorldAwareTransformer):
     def _try_fold_instance_method(
         node: Ps1InvokeMember, lower: str,
     ) -> Expression | None:
-        obj_str = string_value(node.object) if node.object else None
-        if obj_str is None:
+        """
+        A method called on a constant receiver, which folds only where the receiver's type really
+        carries it.
+
+        The gate is the collected member surface and not the shape of the value: `System.Char` has a
+        `ToUpper` whose every overload is static, so `([char]65).ToUpper()` reports `MethodNotFound`
+        on 5.1 while `[char]::ToUpper('a')` answers — and a receiver that used to reach here spelled
+        as a one-character String had every String method instead of none of them.
+        """
+        receiver = read(node.object)
+        owner = type_of(receiver)
+        if owner is None:
             return None
-        coerced: list[str | int] = []
-        for arg in node.arguments:
-            sv = string_value(arg)
-            if sv is not None:
-                coerced.append(sv)
-                continue
-            if isinstance(arg, Ps1IntegerLiteral):
-                coerced.append(arg.value)
-                continue
+        arguments = _method_arguments(owner, lower, node.arguments)
+        if arguments is None:
             return None
+        text = text_of(receiver)
+        if text is None:
+            return _value_to_string(receiver, lower, arguments)
         try:
-            result = apply_string_method(obj_str, lower, coerced)
+            result = apply_string_method(text, lower, arguments)
         except StringMethodError:
             return None
         if isinstance(result, str):
@@ -778,12 +933,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         encoding_name = detect_encoding_chain(node)
         if encoding_name is not None:
             if len(node.arguments) == 1:
-                arg = unwrap_single_paren(node.arguments[0])
-                if isinstance(arg, Ps1ArrayExpression) and len(arg.body) == 1:
-                    stmt = arg.body[0]
-                    if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression:
-                        arg = stmt.expression
-                int_values = collect_integers(arg)
+                int_values = collect_integers(unwrap_single_paren(node.arguments[0]))
                 if int_values is not None:
                     try:
                         raw_bytes = bytearray(int_values)
@@ -804,27 +954,25 @@ class Ps1ConstantFolding(WorldAwareTransformer):
             if lower == 'concat' and len(node.arguments) >= 1:
                 parts: list[str] = []
                 for arg in node.arguments:
-                    if (sv := string_value(arg)) is None:
+                    if (sv := coerced_text(read(arg))) is None:
                         break
                     parts.append(sv)
                 else:
                     return make_string_literal(''.join(parts))
             if lower == 'join' and len(node.arguments) >= 2:
-                separator = string_value(node.arguments[0])
+                separator = coerced_text(read(node.arguments[0]))
                 if separator is not None:
                     joined: list[str] = []
                     for arg in node.arguments[1:]:
-                        if (sv := string_value(arg)) is None:
+                        if (sv := coerced_text(read(arg))) is None:
                             break
                         joined.append(sv)
                     else:
                         return make_string_literal(separator.join(joined))
                     if len(node.arguments) == 2:
-                        array = unwrap_to_array_literal(node.arguments[1])
-                        if array is not None:
-                            args = collect_string_arguments(array)
-                            if args is not None:
-                                return make_string_literal(separator.join(args))
+                        args = collect_texts(node.arguments[1])
+                        if args is not None:
+                            return make_string_literal(separator.join(args))
         if _is_static_regex_call(node) and lower == 'replace':
             return self._handle_regex_replace(node)
         if is_static_type_call(node, 'system.bitconverter') and lower == 'tostring':
@@ -833,7 +981,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
             is_static_type_call(node, 'system.environment')
             and lower == 'getenvironmentvariable'
             and len(na := node.arguments) == 1
-            and (_en := string_value(na[0])) is not None
+            and (_en := coerced_text(read(na[0]))) is not None
             and (_ev := PS1_ENV_CONSTANTS.get(_en.lower())) is not None
         ):
             return make_string_literal(_ev)
@@ -857,7 +1005,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         self, node: Ps1InvokeMember, lower: str,
     ) -> Expression | None:
         if lower == 'frombase64string' and len(node.arguments) == 1:
-            b64_str = string_value(node.arguments[0])
+            b64_str = coerced_text(read(node.arguments[0]))
             if b64_str is not None:
                 try:
                     decoded = base64.b64decode(b64_str)
@@ -873,10 +1021,22 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if target is not None:
             return self._fold_convert_int(node, target)
         if lower == 'tochar':
-            n = integer_of(read(node.arguments[0])) if len(node.arguments) == 1 else None
-            if n is not None and 0 <= n <= 0xFFFF:
-                return make_string_literal(chr(n))
+            return self._fold_convert_char(node)
         return None
+
+    @staticmethod
+    def _fold_convert_char(node: Ps1InvokeMember) -> Expression | None:
+        """
+        `[Convert]::ToChar(n)`, which produces a Char and is *not* the cast to one: measured,
+        `[Convert]::ToChar(1.5)` throws where `[char]1.5` rounds, because .NET defines no conversion
+        from a Double to a Char. So only an integer is read, and only inside the range.
+        """
+        if len(node.arguments) != 1:
+            return None
+        code = integer_of(read(node.arguments[0]))
+        if code is None or not 0 <= code <= 0xFFFF:
+            return None
+        return render(Ps1Constant(_CHAR, chr(code)))
 
     @staticmethod
     def _fold_convert_int(node: Ps1InvokeMember, target: Ps1TypeName) -> Expression | None:
@@ -949,14 +1109,14 @@ class Ps1ConstantFolding(WorldAwareTransformer):
     def _handle_regex_replace(self, node: Ps1InvokeMember) -> Expression | None:
         if len(node.arguments) not in (3, 4):
             return None
-        input_str = string_value(node.arguments[0])
-        pattern_str = string_value(node.arguments[1])
-        replacement_str = string_value(node.arguments[2])
+        input_str = coerced_text(read(node.arguments[0]))
+        pattern_str = coerced_text(read(node.arguments[1]))
+        replacement_str = coerced_text(read(node.arguments[2]))
         if input_str is None or pattern_str is None or replacement_str is None:
             return None
         flags = 0
         if len(node.arguments) == 4:
-            opts = _parse_regex_options(node.arguments[3])
+            opts = _parse_regex_options(read(node.arguments[3]))
             if opts is None:
                 return None
             flags, _ = opts
@@ -969,10 +1129,13 @@ class Ps1ConstantFolding(WorldAwareTransformer):
     def visit_Ps1BinaryExpression(self, node: Ps1BinaryExpression):
         self.generic_visit(node)
         op = node.operator.lower()
+        return self._folded_operator(node, op) or self._spelled_as_text(node, op)
+
+    def _folded_operator(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
         if op == '-f':
             return self._handle_format(node)
         if op == '+':
-            return self._handle_concat(node) or self._handle_arithmetic(node, op)
+            return self._handle_arithmetic(node, op) or self._handle_concat(node)
         if op == '*':
             return self._handle_string_multiply(node) or self._handle_arithmetic(node, op)
         if op == '-join':
@@ -984,6 +1147,34 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if op in ('-and', '-or', '-xor'):
             return self._handle_logical(node, op)
         return self._handle_comparison(node, op) or self._handle_arithmetic(node, op)
+
+    def _spelled_as_text(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
+        """
+        Every constant operand of a text-only operator, written as the text it contributes.
+
+        This runs only where the operator itself declined to fold, which means one of its operands
+        is not constant. The others still stand as whatever they were written or folded to, and for
+        a Char that spelling is `[char]12499` where what the operator reads is the character — so
+        `-Match [char]12499` becomes `-Match 'ビ'`, which is the same operation said in the form
+        that shows what it does. See `_TEXT_OPERATORS` for which operators read an operand this way
+        and what was measured to establish it.
+        """
+        if op not in _TEXT_OPERATORS:
+            return None
+        changed = False
+        for field in ('left', 'right'):
+            spelled = _as_text(getattr(node, field))
+            if spelled is not None and substitute_field(node, field, spelled):
+                changed = True
+        right = node.right
+        if isinstance(right, Ps1ArrayLiteral):
+            elements = [_as_text(element) or element for element in right.elements]
+            if any(new is not old for new, old in zip(elements, right.elements)):
+                changed = substitute_list(right, 'elements', elements) or changed
+        if not changed:
+            return None
+        self.mark_changed()
+        return node
 
     @staticmethod
     def _handle_arithmetic(node: Ps1BinaryExpression, op: str) -> Expression | None:
@@ -1006,7 +1197,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         turns a script that stopped into one that carries on — and it only became reachable once
         the count was read as the number its spelling names.
         """
-        s = string_value(node.left) if node.left else None
+        s = text_of(read(node.left))
         count = integer_of(read(node.right))
         if s is None or count is None or count < 0:
             return None
@@ -1036,8 +1227,8 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         base = op[2:] if op[:2] in ('-c', '-i') else op[1:]
         if base not in ('eq', 'ne'):
             return None
-        left = string_value(node.left)
-        right = string_value(node.right)
+        left = text_of(read(node.left))
+        right = text_of(read(node.right))
         if left is None or right is None:
             return None
         if op.startswith('-c'):
@@ -1063,7 +1254,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         return self._bool_literal(result)
 
     def _handle_format(self, node: Ps1BinaryExpression) -> Expression | None:
-        fmt_str = string_value(node.left) if node.left else None
+        fmt_str = text_of(read(node.left))
         if fmt_str is None or node.right is None:
             return None
         args = collect_format_arguments(node.right)
@@ -1075,65 +1266,73 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         return make_string_literal(result)
 
     def _handle_concat(self, node: Ps1BinaryExpression) -> Expression | None:
-        left_str = string_value(node.left) if node.left else None
-        right_str = string_value(node.right) if node.right else None
-        if left_str is not None and right_str is not None:
-            return make_string_literal(left_str + right_str)
-        if right_str is not None and isinstance(node.left, Ps1BinaryExpression):
-            if node.left.operator == '+':
-                inner_right_str = string_value(node.left.right) if node.left.right else None
-                if inner_right_str is not None:
-                    nl = make_string_literal(inner_right_str + right_str)
-                    nl.parent = node.left
-                    node.left.right = nl
-                    return node.left
-        if right_str is not None and isinstance(node.left, Ps1ArrayLiteral):
-            elements = list(node.left.elements)
-            elements.append(make_string_literal(right_str))
-            return Ps1ArrayLiteral(elements=elements)
+        """
+        What `+` does that the value domain does not answer: appending to a literal collection, and
+        rewriting a concatenation with an unknown operand into an expandable string.
+
+        Two constants are not here at all — the domain answers them exactly, `apply` is asked first,
+        and the branch that stood here answered `'a' + $null` with the expandable `"a${Null}"` where
+        the value is the String `a`.
+
+        Re-associating a chain is gone with it. `($x + 'a') + 'b'` was rewritten to `$x + 'ab'`,
+        which is a different value wherever `$x` is not a String: measured, `@(1) + 'a' + 'b'` is a
+        three-element array and `@(1) + 'ab'` a two-element one. It only ever fired for an inner
+        left operand the domain cannot read, which is exactly the case it is wrong for.
+        """
+        appended = self._appended_to_array(node)
+        if appended is not None:
+            return appended
         is_inner_concat = (
             isinstance(node.parent, Ps1BinaryExpression)
             and node.parent.operator == '+'
             and node.parent.left is node
         )
-        if not is_inner_concat:
-            # `'literal' + $var` is always string concatenation (the string-typed left operand
-            # governs `+`), so it is safe to fold into an expandable string. `$var + 'literal'`
-            # depends on $var's runtime type (array append / numeric add), so only fold it when the
-            # variable is provably a string.
-            if isinstance(node.right, Ps1Variable) and left_str is not None:
-                return _variable_string_to_expandable(node.right, left_str, var_first=False)
-            if _is_string_typed_variable(node.left) and right_str is not None:
-                return _variable_string_to_expandable(node.left, right_str, var_first=True)
+        if is_inner_concat:
+            return None
+        # `'literal' + $var` is always string concatenation (the string-typed left operand governs
+        # `+`), so it is safe to fold into an expandable string. `$var + 'literal'` depends on
+        # $var's runtime type (array append / numeric add), so only fold it when the variable is
+        # provably a string.
+        left, right = node.left, node.right
+        left_str = text_of(read(left))
+        if isinstance(right, Ps1Variable) and left_str is not None:
+            return _variable_string_to_expandable(right, left_str, var_first=False)
+        right_str = text_of(read(right))
+        if _is_string_typed_variable(left) and right_str is not None:
+            return _variable_string_to_expandable(left, right_str, var_first=True)
         return None
 
+    @staticmethod
+    def _appended_to_array(node: Ps1BinaryExpression) -> Expression | None:
+        """
+        A constant appended to a literal collection, which keeps the value's own type rather than
+        its text: measured, `@(1, 2) + [char]65` is a three-element array whose last element reports
+        `System.Char`.
+        """
+        if not isinstance(node.left, Ps1ArrayLiteral) or node.right is None:
+            return None
+        appended = render(read(node.right))
+        if appended is None:
+            return None
+        return Ps1ArrayLiteral(elements=[*node.left.elements, appended])
+
     def _handle_binary_join(self, node: Ps1BinaryExpression) -> Expression | None:
-        separator = string_value(node.right) if node.right else None
-        if separator is None or node.left is None:
+        separator = coerced_text(read(node.right))
+        if separator is None:
             return None
-        # Binary -Join on a scalar string is a no-op.
-        scalar = string_value(node.left)
-        if scalar is not None:
-            return make_string_literal(scalar)
-        array = unwrap_to_array_literal(node.left)
-        if array is None:
-            return None
-        args = collect_string_arguments(array)
-        if args is None:
-            return None
-        return make_string_literal(separator.join(args))
+        parts = collect_texts(node.left)
+        return None if parts is None else make_string_literal(separator.join(parts))
 
     def _handle_binary_replace(
         self, node: Ps1BinaryExpression, op: str,
     ) -> Expression | None:
-        haystack = string_value(node.left) if node.left else None
+        haystack = coerced_text(read(node.left))
         if haystack is None or node.right is None:
             return None
-        if isinstance(node.right, Ps1ArrayLiteral) and len(node.right.elements) == 2:
-            needle_str = string_value(node.right.elements[0])
-            insert_str = string_value(node.right.elements[1])
-        else:
+        if not isinstance(node.right, Ps1ArrayLiteral) or len(node.right.elements) != 2:
             return None
+        needle_str = coerced_text(read(node.right.elements[0]))
+        insert_str = coerced_text(read(node.right.elements[1]))
         if needle_str is None or insert_str is None:
             return None
         flags = re.IGNORECASE if op != '-creplace' else 0
@@ -1146,23 +1345,13 @@ class Ps1ConstantFolding(WorldAwareTransformer):
     def _handle_binary_split(
         self, node: Ps1BinaryExpression, op: str,
     ) -> Expression | None:
-        if node.right is None or node.left is None:
-            return None
-        pattern_str = string_value(node.right)
+        pattern_str = coerced_text(read(node.right))
         if pattern_str is None:
             return None
+        inputs = collect_texts(node.left)
+        if inputs is None:
+            return None
         flags = re.IGNORECASE if op != '-csplit' else 0
-        left_str = string_value(node.left)
-        if left_str is not None:
-            inputs = [left_str]
-        else:
-            array = unwrap_to_array_literal(node.left)
-            if array is None:
-                return None
-            inputs_opt = collect_string_arguments(array)
-            if inputs_opt is None:
-                return None
-            inputs = inputs_opt
         try:
             parts: list[str] = []
             for s in inputs:

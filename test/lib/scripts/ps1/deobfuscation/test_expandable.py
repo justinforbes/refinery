@@ -37,9 +37,10 @@ class TestPs1ExpandableExtra(TestPs1):
         result = self._deobfuscate("$env:temp + '\\foo.exe'")
         self.assertIn('"${env:Temp}\\foo.exe"', result)
 
-    def test_expandable_string_value_subexpr_kept(self):
-        result = self._deobfuscate('''"prefix$( 1 + 2 )suffix"''', remove_junk=False)
-        self.assertIn('prefix$(', result)
+    def test_a_value_producing_subexpression_is_written_into_the_string_and_not_dropped(self):
+        self.assertEqual(
+            self._deobfuscate('''"prefix$( 1 + 2 )suffix"''', remove_junk=False),
+            "'prefix3suffix'")
 
     def test_expandable_command_subexpr_not_dropped(self):
         # A command inside an interpolating string contributes its output, so the hoist leaves it.

@@ -13,10 +13,10 @@ from refinery.lib.scripts import Node, Transformer, set_value
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.analysis.values import (
-    collect_typed_arguments,
+    coerced_text,
+    collect_facts,
     integer_of,
     make_string_literal,
-    read,
 )
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
@@ -91,21 +91,27 @@ def store_dropped_to_value(rhs: Expression) -> Ps1ExpressionStatement:
     return Ps1ExpressionStatement(expression=discard)
 
 
-def collect_string_arguments(node: Expression) -> list[str] | None:
-    return collect_typed_arguments(node, string_value)
-
-
-def extract_format_argument(node: Expression) -> str | int | None:
-    """
-    Extract a format-string argument value: integers are returned as `int` so that numeric format
-    specifiers (`X`, `D`, etc.) can be applied; everything else is returned as `str`.
-    """
-    number = integer_of(read(node))
-    return string_value(node) if number is None else number
-
-
 def collect_format_arguments(node: Expression) -> list[str | int] | None:
-    return collect_typed_arguments(node, extract_format_argument)
+    """
+    The values a `-f` operator's right-hand side hands to the format string, each as the number it
+    names or else as the text it coerces to. The number is what a numeric specifier needs — `'{0:X}'
+    -f 255` is `FF` and the digits of the text would not be — and everything else contributes what
+    `[string]` of it produces, which is what every other string operator does with an operand.
+    """
+    facts = collect_facts(node)
+    if facts is None:
+        return None
+    arguments: list[str | int] = []
+    for fact in facts:
+        number = integer_of(fact)
+        if number is not None:
+            arguments.append(number)
+            continue
+        text = coerced_text(fact)
+        if text is None:
+            return None
+        arguments.append(text)
+    return arguments
 
 
 def unwrap_single_paren(node: Expression) -> Expression:

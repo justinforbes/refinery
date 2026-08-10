@@ -333,9 +333,9 @@ class TestPs1ReassignedVariableInlining(TestPs1):
         self.assertIn('$s', result)
 
     def test_seal_point_rhs_inlined(self):
-        result = self._deobfuscate("$x = 39\n$x = [char]($x)\nWrite-Host $x")
-        self.assertNotIn('$x', result)
-        self.assertIn("'", result)
+        self.assertEqual(
+            self._deobfuscate("$x = 39\n$x = [char]($x)\nWrite-Host $x"),
+            'Write-Host ([char]39)')
 
     def test_seal_point_string_rhs_inlined(self):
         result = self._deobfuscate(
@@ -879,3 +879,19 @@ class TestPs1ConstantInliningAcrossNamedWrites(TestPs1):
             self._apply(
                 "$x = 'a'\nfunction f { Set-Variable x 'b' }\nWrite-Host $x", Ps1ConstantInlining),
             "function f {\n  Set-Variable x 'b'\n}\nWrite-Host 'a'")
+
+
+class TestPs1AConstantInterpolatesAsTheTextItRendersTo(TestPs1):
+    """
+    An expandable string writes what a variable renders to and not the way the source wrote it.
+    Measured, `$s = 0xFF; "$s"` is the String `255`, and `$c = [char]65; "$c"` is `A`.
+    """
+
+    def test_a_hexadecimal_numeral_interpolates_as_the_decimal_digits_it_renders_to(self):
+        self.assertEqual(self._deobfuscate_iterative('$s = 0xFF; $t = "$s"'), "$t = '255'")
+
+    def test_a_char_interpolates_as_the_character_it_holds(self):
+        self.assertEqual(self._deobfuscate_iterative('$c = [char]65; $t = "$c"'), "$t = 'A'")
+
+    def test_a_number_interpolated_beside_a_text_is_the_text_of_both(self):
+        self.assertEqual(self._deobfuscate_iterative('$s = 0xFF; $t = "v$s"'), "$t = 'v255'")

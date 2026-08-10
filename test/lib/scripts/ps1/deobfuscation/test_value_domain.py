@@ -19,16 +19,16 @@ class TestPs1AnInlinedNumberCarriesAMemberOnlyInParentheses(TestPs1):
     """
 
     def test_a_method_called_on_an_inlined_number_parenthesizes_the_receiver(self):
-        self.assertEqual(self._deobfuscate('$n = 5; $n.ToString()'), '(5).ToString()')
+        self.assertEqual(self._deobfuscate('$n = 5; $n.GetType()'), '(5).GetType()')
 
     def test_an_inlined_number_in_a_command_argument_parenthesizes_the_receiver(self):
         self.assertEqual(
-            self._deobfuscate('$n = 5; Write-Output $n.ToString()'),
-            'Write-Output (5).ToString()',
+            self._deobfuscate('$n = 5; Write-Output $n.GetType()'),
+            'Write-Output (5).GetType()',
         )
 
     def test_a_number_that_was_itself_folded_parenthesizes_the_receiver(self):
-        self.assertEqual(self._deobfuscate('$n = 1 + 2; $n.ToString()'), '(3).ToString()')
+        self.assertEqual(self._deobfuscate('$n = 1 + 2; $n.GetType()'), '(3).GetType()')
 
     def test_an_inlined_number_with_a_method_argument_parenthesizes_the_receiver(self):
         self.assertEqual(self._deobfuscate('$n = 5; $n.ToString("X")'), '(5).ToString("X")')
@@ -147,7 +147,6 @@ class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
     def test_a_number_plus_a_hex_string_parses_the_string_as_a_hex_number(self):
         self.assertEqual(self._deobfuscate("$x = 12 + '0xabc'"), '$x = 2760')
 
-    @unittest.expectedFailure
     def test_a_string_plus_a_boolean_is_the_text_the_boolean_is_written_as(self):
         self.assertEqual(self._deobfuscate("$x = 'a' + $true"), "$x = 'aTrue'")
 
@@ -211,7 +210,6 @@ class TestPs1ConstantsThatAreComputedWrong(TestPs1):
     def test_an_int32_sum_that_overflows_widens_to_a_double(self):
         self.assertEqual(self._deobfuscate('$x = 2147483647 + 1'), '$x = 2147483648.0')
 
-    @unittest.expectedFailure
     def test_a_char_cannot_be_replicated_because_replication_needs_a_string(self):
         source = '$x = ([char]65) * 3'
         self.assertEqual(self._deobfuscate(source), source)
@@ -438,3 +436,67 @@ class TestPs1MembersTheObjectAdapterAddsToEveryValue(TestPs1):
     def test_the_psobject_of_a_number_has_no_constant_spelling(self):
         source = '$x = (5).PSObject'
         self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1ACharacterOfAStringIsACharAndNotAString(TestPs1):
+    """
+    Measured, `'ABC'[0]` is a `System.Char`: it answers `-is [char]` with True, and reading several
+    offsets at once produces a collection of Chars. A Char is a text on the left of a `+` and the
+    number of its code point on the right, so `'ABC'[0] + 1` is the String `A1`.
+    """
+
+    def test_a_character_taken_out_of_a_string_is_written_as_a_char(self):
+        self.assertEqual(self._deobfuscate("$x = 'ABC'[0]"), '$x = [char]65')
+
+    def test_several_characters_taken_out_of_a_string_are_each_written_as_a_char(self):
+        self.assertEqual(self._deobfuscate("$x = 'abc'[0, 1]"), '$x = [char]97, [char]98')
+
+    def test_a_character_of_a_string_is_a_text_on_the_left_of_a_plus(self):
+        self.assertEqual(self._deobfuscate_iterative("$x = 'ABC'[0] + 1"), "$x = 'A1'")
+
+    def test_a_character_of_a_string_is_no_string_to_replicate(self):
+        # A cast binds tighter than a replication, so `[char]65 * 3` is the refusal that
+        # `([char]65) * 3` is, and neither is the `AAA` a one-character String would produce.
+        self.assertEqual(self._deobfuscate_iterative("$x = 'ABC'[0] * 3"), '$x = [char]65 * 3')
+
+
+class TestPs1ANumberOnTheLeftOfACharIsNeverJoinedToItsText(TestPs1):
+    """
+    5.1 reads `+` by its left operand, so `1 + [char]65` adds the code point and is the Int32 66.
+    Computing it is not required of the tool; the one answer that is wrong is the String `1A` that
+    reading the Char as a one-character String on the right would produce.
+    """
+
+    def test_a_number_plus_a_char_is_the_sum_or_nothing_at_all(self):
+        source = '$x = 1 + [char]65'
+        self.assertIn(self._deobfuscate(source), (source, '$x = 66'))
+
+
+class TestPs1CountingACollectionSpelledSeveralWays(TestPs1):
+    """
+    `Count` and `Length` answer how many elements a value holds, and what decides is the value
+    rather than the spelling it was built with. Measured, `@(@(1, 2))` and `@((1, 2))` each hold two
+    elements because the array operator unrolls what it is handed, while `,(1, 2)` holds the one
+    collection the comma operator wrapped around the pair.
+
+    The tool answers every one of those spellings but the two that put a collection inside `@(...)`,
+    which it declines rather than answering as the scalar they are not.
+    """
+
+    @unittest.expectedFailure
+    def test_the_count_of_an_array_operator_around_an_array_is_the_inner_element_count(self):
+        self.assertEqual(self._deobfuscate('$x = @(@(1, 2)).Count'), '$x = 2')
+
+    @unittest.expectedFailure
+    def test_the_count_of_an_array_operator_around_a_comma_list_is_the_element_count(self):
+        self.assertEqual(self._deobfuscate('$x = @((1, 2)).Count'), '$x = 2')
+
+    @unittest.expectedFailure
+    def test_the_length_of_an_array_operator_around_an_array_is_the_inner_element_count(self):
+        self.assertEqual(self._deobfuscate('$x = @(@(1, 2)).Length'), '$x = 2')
+
+    def test_the_count_of_a_bracket_around_a_comma_list_is_the_element_count(self):
+        self.assertEqual(self._deobfuscate('$x = ((1, 2)).Count'), '$x = 2')
+
+    def test_the_count_of_a_collection_the_comma_operator_wrapped_is_one(self):
+        self.assertEqual(self._deobfuscate('$x = (,(1, 2)).Count'), '$x = 1')

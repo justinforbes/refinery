@@ -820,10 +820,28 @@ def static_overloads(name: str | Ps1TypeName, member: str) -> list[dict]:
     The static overloads of a method on a type, each a record carrying its `returns` and its
     `parameters`, where every parameter records its `byref`/`out` direction, its `type` and its
     `position`. Returns an empty list when the type is not collected or carries no static method of
-    that name. The member is matched case-insensitively, as PowerShell resolves it, and instance
-    overloads are excluded: a caller asks this to reason about a `[Type]::Member(...)` call, whose
-    reachable surface is the static one. A non-method member that case-collides with the method name
-    is skipped, not taken as the answer, so a real static method behind it is still found.
+    that name. A caller asks this to reason about a `[Type]::Member(...)` call, whose reachable
+    surface is the static one.
+    """
+    return _overloads(name, member, static=True)
+
+
+def instance_overloads(name: str | Ps1TypeName, member: str) -> list[dict]:
+    """
+    The overloads of a method that a *value* of the type carries, in the same shape
+    `static_overloads` returns. Returns an empty list when the type is not collected or carries no
+    instance method of that name, which is what says a call on a value of it cannot be made at all:
+    `System.Char` has a `ToUpper`, every overload of it is static, and `([char]65).ToUpper()`
+    reports `MethodNotFound` on 5.1 while `[char]::ToUpper('a')` answers.
+    """
+    return _overloads(name, member, static=False)
+
+
+def _overloads(name: str | Ps1TypeName, member: str, *, static: bool) -> list[dict]:
+    """
+    One side of a method's collected surface. The member is matched case-insensitively, as
+    PowerShell resolves it, and the first match wins. A non-method member that case-collides with
+    the method name is skipped, not taken as the answer, so a real method behind it is still found.
     """
     members = type_members(name)
     if members is None:
@@ -833,7 +851,10 @@ def static_overloads(name: str | Ps1TypeName, member: str) -> list[dict]:
             continue
         if record.get('kind') != 'method':
             continue
-        return [overload for overload in record.get('overloads') or () if overload.get('static')]
+        return [
+            overload for overload in record.get('overloads') or ()
+            if bool(overload.get('static')) is static
+        ]
     return []
 
 

@@ -23,6 +23,8 @@ from refinery.lib.scripts.ps1.analysis.model import (
     Ps1OccurrenceRole,
 )
 from refinery.lib.scripts.ps1.analysis.values import (
+    UNKNOWN,
+    coerced_text,
     integer_of,
     make_string_literal,
     read,
@@ -31,7 +33,6 @@ from refinery.lib.scripts.ps1.analysis.values import (
 from refinery.lib.scripts.ps1.ast import (
     assignment_of,
     assignment_target_variables,
-    is_builtin_variable,
     unwrap_parens,
 )
 from refinery.lib.scripts.ps1.data import PS1_KNOWN_VARIABLES
@@ -50,17 +51,16 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ClassDefinition,
     Ps1DoLoop,
     Ps1EnumDefinition,
+    Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1ForLoop,
     Ps1FunctionDefinition,
     Ps1HereString,
     Ps1IfStatement,
     Ps1IndexExpression,
-    Ps1IntegerLiteral,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1PipelineElement,
-    Ps1RealLiteral,
     Ps1ScopeModifier,
     Ps1ScriptBlock,
     Ps1StringLiteral,
@@ -189,36 +189,25 @@ def _candidate_key(var: Ps1Variable) -> str | None:
 
 def _constant_value_key(node: Node) -> tuple | None:
     """
-    Return a hashable key representing the constant value of a node, or `None`
-    if the node is not constant. Two constant nodes with the same key are
-    guaranteed to represent the same value.
+    A hashable key for the constant value of a node, or `None` where the node names no value. Two
+    nodes with the same key name the same value, which is what the inliner needs in order to know
+    that re-assigning a variable to what it already holds changes nothing.
+
+    The value comes from the domain and not from the spelling, so a Char is one — `[char]39` names
+    the apostrophe and is a constant this may carry, where a reader that matched literals by their
+    node class saw a cast and stopped. `Ps1Fact` is already the key: it carries the type beside the
+    payload, so a Char and the one-character String that holds the same character are different
+    keys, which is the whole point of asking the domain rather than the node.
+
+    A type literal is not a value the domain names — `[int]` as a value is a `System.RuntimeType` —
+    and it is keyed here by the name it writes, because the inliner only ever compares one of these
+    against another.
     """
     node = unwrap_parens(node)
-    if isinstance(node, Ps1IntegerLiteral):
-        return ('int', node.value)
-    if isinstance(node, Ps1RealLiteral):
-        return ('real', node.value)
-    if isinstance(node, Ps1StringLiteral):
-        return ('str', node.value)
-    if isinstance(node, Ps1HereString):
-        return ('str', node.value)
     if isinstance(node, Ps1TypeExpression):
         return ('type', node.name)
-    if is_builtin_variable(node):
-        return ('var', node.name.lower())
-    if isinstance(node, Ps1ArrayLiteral):
-        keys = []
-        for e in node.elements:
-            k = _constant_value_key(e)
-            if k is None:
-                return None
-            keys.append(k)
-        return ('array', tuple(keys))
-    if isinstance(node, Ps1ArrayExpression):
-        inner = unwrap_to_array_literal(node)
-        if inner is not None:
-            return _constant_value_key(inner)
-    return None
+    fact = read(node)
+    return None if fact is UNKNOWN else ('value', fact)
 
 
 def _get_array_literal(node: Node) -> Ps1ArrayLiteral | None:
@@ -235,19 +224,44 @@ def _clone_constant(node: Node) -> Expression:
     """
     Create a fresh copy of a constant value node without following parent references. This avoids
     the catastrophic cost of `copy.deepcopy` which traverses the entire AST through parents.
+
+    What is copied is the *spelling* and not the value, deliberately: a numeral the source wrote in
+    a command argument keeps its own text there — `Write-Host 1.10` prints `1.10` and
+    `notepad.exe 0x10` receives `0x10` — so an inliner that spelled the value afresh would change
+    what a command is handed. `@(...)` around a bare list is the one thing normalized away, because
+    the parenthesis this adds is what the value needs where it lands.
     """
     unwrapped = unwrap_parens(node)
     if isinstance(unwrapped, Ps1ArrayExpression):
-        inner = unwrap_to_array_literal(unwrapped)
-        if inner is None:
-            raise TypeError(F'cannot clone {type(unwrapped).__name__}')
-        unwrapped = inner
+        unwrapped = unwrap_to_array_literal(unwrapped) or unwrapped
     if not isinstance(unwrapped, Expression):
         raise TypeError(F'cannot clone {type(unwrapped).__name__}')
     clone = _clone_node(unwrapped)
     if isinstance(clone, Ps1ArrayLiteral) and len(clone.elements) > 1:
         return Ps1ParenExpression(expression=clone)
     return clone
+
+
+def _interpolated(value: Expression) -> Expression | None:
+    """
+    What a value contributes where it is interpolated into an expandable string, which is the text
+    it renders to and not the way it was written.
+
+    This is the one place where how a value is spelled and what it renders to are different
+    questions, and installing the spelling answered the wrong one: measured, `$s = 0xFF; "$s"` is
+    the String `255` on 5.1 where the literal written in reads `0xFF`, and `$c = [char]65; "$c"` is
+    `A` where the cast reads as itself. `coerced_text` is that second question, and a value it names
+    no text for is left alone rather than written down some other way.
+
+    A here-string is refused because a part is not a standalone literal: the synthesizer writes a
+    part's characters into the surrounding quotes, so a spelling that carries its own delimiters has
+    nowhere to put them.
+    """
+    text = coerced_text(read(value))
+    if text is None:
+        return None
+    literal = make_string_literal(text)
+    return literal if isinstance(literal, Ps1StringLiteral) else None
 
 
 def _walk_outer_scope(root: Node):
@@ -577,7 +591,12 @@ class Ps1ConstantInlining(Transformer):
         const_value = state.value_at(node, key)
         if const_value is None:
             return
-        replacement = _clone_constant(const_value)
+        if isinstance(node.parent, Ps1ExpandableString):
+            replacement = _interpolated(const_value)
+        else:
+            replacement = _clone_constant(const_value)
+        if replacement is None:
+            return
         if substitute(node, replacement):
             self.mark_changed()
             state.installed(node, replacement)

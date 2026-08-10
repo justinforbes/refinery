@@ -310,18 +310,11 @@ TABLE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('OUT\tSystem.Management.Automation.CommandTypes\tAlias',),
 }
 
-#: What every Char row of `TYPE_DEFECTS` that is a method call has in common. A Char is not a
-#: String and carries none of its instance methods, so 5.1 reports MethodNotFound for each; the
-#: fold spells the Char as a one-character String, which has them all.
-_A_CHAR_HAS_NO_STRING_METHODS = (
-    'A Char has no String instance methods and 5.1 reports MethodNotFound. The Char is folded to a '
-    'one-character String, which has them, so a line that throws answers a value instead.'
-)
-
-#: What 5.1 makes of a value's type and of an operation's result, measured. The unit has no place to
-#: keep a type — a Char and a one-character String are the same object to it — so every belief about
-#: one was written by us, and this is the table that ends that. Read the rule in `corpus.TYPES`
-#: before adding an entry: two witnesses, and `Write-Host` may not be either of them.
+#: What 5.1 makes of a value's type and of an operation's result, measured. The unit had no place
+#: to keep a type — a Char and a one-character String were the same object to it — so every belief
+#: about one was written by us, and this is the table that ends that. Read the rule in
+#: `corpus.TYPES` before adding an entry: two witnesses, and `Write-Host` may not be either of
+#: them.
 #:
 #: Nothing here is a claim about the tool. It is what PowerShell does, and it is pinned so that the
 #: commits which give the unit a type cannot quietly move the target they are measured against.
@@ -1494,56 +1487,13 @@ TYPE_DEFECTS: dict[str, str] = {
         'elements arrive as one String.',
     "$t = 'a-b-c' -split '-' | ForEach-Object { $_ }; Write-Output (,$t)":
         'The collapse is not about Char at all: any list of one-character strings falls to it.',
-    '$t = [char]65; Write-Output (,$t); Write-Output $t':
-        'A Char folds to a one-character String, so the type the value carries is wrong twice.',
     '$t = [char[]](72, 73); Write-Output (,$t); Write-Output $t':
         'The same erasure for an array of Char, which folds to one String.',
     "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
         'A Char[] is not a String; the fold makes it answer as though it were.',
-    "$t = 'ABC'[0]; Write-Output (,$t); Write-Output $t":
-        'Indexing a string yields a Char. folding.py:302 produces a String.',
-    "Write-Output (1 + [char]65); Write-Output (1 + 'A')":
-        'The left operand decides: Int + Char is Int32 66, and Int + String parses the string as '
-        'a number. Spelling the Char as a String turns a working line into a throw.',
-    'Write-Output (([char]65) * 3)':
-        'LangSpec 7.6.2 replicates only where the left operand is a String, so 5.1 throws. The '
-        'fold spells the Char as a String and answers AAA.',
-    "Write-Output ([char]65 -is [char]); Write-Output ('A' -is [char])":
-        'The fold makes a Char answer False to -is [char].',
-    '$c = [char]65; foreach ($e in $c) { Write-Output $e }':
-        'The loop variable is a Char in 5.1 and a String after the fold.',
-    '$t = ([char]65).ToUpper(); Write-Output (,$t); Write-Output $t':
-        _A_CHAR_HAS_NO_STRING_METHODS,
-    '$t = ([char]65).Substring(0); Write-Output (,$t); Write-Output $t':
-        _A_CHAR_HAS_NO_STRING_METHODS,
-    '$t = [int][char]48; Write-Output (,$t); Write-Output $t':
-        'Casting a Char to Int32 takes its code point, and 5.1 answers 48. The Char is spelled as '
-        "the String '0' first, and casting that parses its digits, so the unit answers 0: the "
-        'erasure changing a value rather than only a type.',
-    "$h = @{}; $h[[char]65] = 1; $t = $h['A']; Write-Output (,$t)":
-        'A Char key and a String key are different keys, so 5.1 finds nothing. The fold spells the '
-        'Char key as a String and the lookup succeeds.',
-    "$h = @{}; $h['A'] = 1; $t = $h[[char]65]; Write-Output (,$t)":
-        'The same, with the Char in the lookup rather than in the key.',
-    '$s = 0xFF; $t = "$s"; Write-Output (,$t); Write-Output $t':
-        'A variable inside an expandable string contributes the value it holds rendered as text, '
-        'which for the Int32 255 is `255`. Substituting the literal writes its source spelling '
-        'instead, so the string reads `0xFF`. It is the one place where how a value is written and '
-        'what it renders to are different questions, and nothing asks the second one yet.',
     "$OFS = '-'; $t = [string]('a', 'b'); Write-Output $t":
         'A collection renders to a String separated by $OFS (LangSpec 6.8), which this script '
         'sets. The fold bakes in the default separator.',
-    '$t = [char]0; Write-Output (,$t); Write-Output $t':
-        'A cast to Char folds to a one-character String, so the type is lost at the point it was '
-        'being asked for.',
-    '$t = [char]65535; Write-Output (,$t); Write-Output $t':
-        'The same erasure at the top of the Char range.',
-    '$t = [int][char]65; Write-Output (,$t); Write-Output $t':
-        'The inner Char is spelled as a String, and 5.1 answers 65 for a Char cast to Int32 while '
-        "`[int]'A'` throws. The erasure turns a value into a throw.",
-    '$t = [Convert]::ToChar(65); Write-Output (,$t); Write-Output $t':
-        'The call produces a Char and the fold writes a one-character String, which is the same '
-        'erasure a cast to Char takes and retires with it.',
 }
 
 #: Which words 5.1 read as a command name, for each script whose corruption entry turns on where a

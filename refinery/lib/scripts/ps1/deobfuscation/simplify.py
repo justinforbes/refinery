@@ -6,10 +6,8 @@ from __future__ import annotations
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.commands import CommandKind, Ps1CommandModel
-from refinery.lib.scripts.ps1.ast import (
-    get_command_name,
-    string_value,
-)
+from refinery.lib.scripts.ps1.analysis.values import coerced_text, read
+from refinery.lib.scripts.ps1.ast import get_command_name
 from refinery.lib.scripts.ps1.data import (
     ALL_PARAMETER_NAMES,
     KNOWN_PS_OPERATORS,
@@ -137,6 +135,15 @@ class Ps1Simplifications(Transformer):
         return None
 
     def visit_Ps1ExpandableString(self, node: Ps1ExpandableString):
+        """
+        An expandable string every part of which is a constant, written as the plain string it
+        produces.
+
+        What a subexpression contributes is what the value it holds *renders* to and not the way it
+        was written — measured, `"$(0xFF)"` is `255` and `"$([char]65)"` is `A` — which is the same
+        question `refinery.lib.scripts.ps1.deobfuscation.constants` answers for a variable
+        substituted into one of these.
+        """
         self.generic_visit(node)
         parts: list[str] = []
         for p in node.parts:
@@ -146,7 +153,7 @@ class Ps1Simplifications(Transformer):
             if isinstance(p, Ps1SubExpression) and len(p.body) == 1:
                 stmt = p.body[0]
                 if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
-                    sv = string_value(stmt.expression)
+                    sv = coerced_text(read(stmt.expression))
                     if sv is not None:
                         parts.append(sv)
                         continue

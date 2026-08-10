@@ -12,12 +12,10 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 class TestPs1CharIntFolding(TestPs1):
 
     def test_char_int_literal(self):
-        result = self._deobfuscate('[Char][int]83')
-        self.assertEqual(result.strip(), "'S'")
+        self.assertEqual(self._deobfuscate('[Char][int]83'), '[char]83')
 
     def test_char_literal_regression(self):
-        result = self._deobfuscate('[Char]65')
-        self.assertEqual(result.strip(), "'A'")
+        self.assertEqual(self._deobfuscate('[Char]65'), '[char]65')
 
     def test_char_int_concat(self):
         result = self._deobfuscate_iterative('([Char][int]72 + [Char][int]105)')
@@ -67,14 +65,10 @@ class TestPs1CharIntFolding(TestPs1):
 class TestPs1TypeCastExtra(TestPs1):
 
     def test_typecast_char(self):
-        data = '[char]120'
-        result = self._deobfuscate(data)
-        self.assertIn('x', result)
+        self.assertEqual(self._deobfuscate('[char]120'), '[char]120')
 
     def test_typecast_char_hex(self):
-        data = '[char]0x41'
-        result = self._deobfuscate(data)
-        self.assertIn('A', result)
+        self.assertEqual(self._deobfuscate('[char]0x41'), '[char]65')
 
     def test_a_string_cast_of_a_string_literal_is_that_literal(self):
         self.assertEqual(self._apply('$x = [string]"foo"', Ps1TypeCasts), "$x = 'foo'")
@@ -85,9 +79,7 @@ class TestPs1TypeCastExtra(TestPs1):
         self.assertIn('Hello', result)
 
     def test_as_char_cast(self):
-        result = self._deobfuscate('(45 -As [Char])')
-        self.assertIn("'-'", result)
-        self.assertNotIn('-As', result)
+        self.assertEqual(self._deobfuscate('(45 -As [Char])'), '([char]45)')
 
     def test_a_type_cast_of_a_type_name_is_the_type_literal_naming_it(self):
         self.assertEqual(self._apply("$x = [Type]'Convert'", Ps1TypeCasts), '$x = [Convert]')
@@ -99,7 +91,7 @@ class TestPs1TypeCastExtra(TestPs1):
         )
 
     def test_char_cast_in_bmp_folds(self):
-        self.assertEqual("'A'", self._apply('[char]65', Ps1TypeCasts))
+        self.assertEqual('[char]65', self._apply('[char]65', Ps1TypeCasts))
 
     def test_char_zero_is_nul_character(self):
         # [char]0 is a NUL character, not an empty string: 'a'+[char]0+'b' is the 3-character
@@ -382,3 +374,38 @@ class TestPs1ACastAlreadySpellingItsOwnValueIsNotRewritten(TestPs1):
         written = self._apply("$x = [sbyte]'0x80'", Ps1TypeCasts)
         self.assertEqual(written, '$x = [sbyte]-128')
         self.assertFalse(self._reports_a_change(written))
+
+    def test_a_char_cast_of_the_value_it_already_spells_reports_no_change(self):
+        self.assertFalse(self._reports_a_change('$x = [char]65'))
+
+    def test_what_the_pass_writes_for_a_char_of_a_string_is_a_fixed_point_of_the_pass(self):
+        written = self._apply("$x = [char]'A'", Ps1TypeCasts)
+        self.assertEqual(written, '$x = [char]65')
+        self.assertFalse(self._reports_a_change(written))
+
+
+class TestPs1ACharIsCarriedAsACharAndWrittenAsACast(TestPs1):
+    """
+    Measured, `[char]65` is a `System.Char` and `'A'` a `System.String`: the two answer `-is [char]`
+    differently, and `[char]65 + 1` is the String `A1` where `1 + [char]65` is the Int32 66. 5.1
+    spells no literal for a Char, so the cast is its spelling and a cast that already is one is
+    written back as one rather than as the one-character string it prints as.
+    """
+
+    def test_a_char_cast_of_a_one_character_string_is_written_as_the_code_point(self):
+        self.assertEqual(self._apply("$x = [char]'A'", Ps1TypeCasts), '$x = [char]65')
+
+    def test_a_char_cast_of_a_numeral_is_the_cast_it_already_is(self):
+        self.assertEqual(self._apply('$x = [char]65', Ps1TypeCasts), '$x = [char]65')
+
+    def test_a_char_cast_of_a_string_of_two_characters_is_left_standing(self):
+        self._assertUnchanged("$x = [char]'AB'", Ps1TypeCasts)
+
+    def test_a_char_cast_of_the_empty_string_is_left_standing(self):
+        self._assertUnchanged("$x = [char]''", Ps1TypeCasts)
+
+    def test_a_string_cast_of_a_char_is_the_one_character_string(self):
+        self.assertEqual(self._apply('$x = [string][char]65', Ps1TypeCasts), "$x = 'A'")
+
+    def test_an_int_cast_of_a_char_is_the_code_point_of_its_character(self):
+        self.assertEqual(self._deobfuscate("$x = [int][char]'A'"), '$x = 65')

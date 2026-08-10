@@ -8,19 +8,16 @@ import string
 from refinery.lib.scripts import Transformer, canonical
 from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Outcome,
+    collect_facts,
     collect_integers,
     convert,
-    integer_of,
     make_string_literal,
     read,
     render,
     text_of,
 )
 from refinery.lib.scripts.ps1.data import named_type, resolve_type
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    collect_string_arguments,
-    unwrap_single_paren,
-)
+from refinery.lib.scripts.ps1.deobfuscation.helpers import unwrap_single_paren
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1BinaryExpression,
@@ -28,10 +25,9 @@ from refinery.lib.scripts.ps1.model import (
     Ps1TypeExpression,
 )
 
-#: The four targets this pass treats as something other than a value conversion: one that names a
-#: type rather than producing a value of one, one whose value the rest of the unit cannot read
-#: back, and two whose answer the conversion grid does not carry. See the arm each belongs to.
-_CHAR = named_type('System.Char')
+#: The three targets this pass treats as something other than a value conversion: one that names a
+#: type rather than producing a value of one, and two whose answer the conversion grid does not
+#: carry, because it was captured over scalar targets only. See the arm each belongs to.
 _TYPE = named_type('System.Type')
 _STRING = named_type('System.String')
 _CHAR_ARRAY = named_type('char[]')
@@ -55,9 +51,10 @@ class Ps1TypeCasts(Transformer):
     folds neither of them — so an `-as` this cannot answer is left standing rather than turned into
     the cast that stops the script.
 
-    Two arms are still read syntactically, and each is a ledgered defect that retires with the
-    reader it uses rather than here: `[char[]]` of a list of numbers, and `[string]` of a
-    collection. Both belong to the string half of the folding pass.
+    Two arms are still read syntactically, and each is a ledgered defect rather than a fold that
+    could be asked of the domain: `[char[]]` of a list of numbers, and `[string]` of a collection.
+    The conversion grid was captured over scalar targets only, so there is no cell to read for
+    either, and both retire with the capture that adds the column.
 
     Every question here is asked of one step. The operand has already been visited, so `read` names
     whatever it came to and `convert` answers the cast over that; `evaluate` would walk the operand
@@ -80,40 +77,12 @@ class Ps1TypeCasts(Transformer):
         target = resolve_type(node.type_name)
         if target is None:
             return None
-        if target == _CHAR:
-            return self._one_character_string(node)
         return (
             self._named_type(node, target)
             or _spelled(node, convert(read(node.operand), target))
             or self._joined_collection(node, target)
             or self._characters(node, target)
         )
-
-    @staticmethod
-    def _one_character_string(node: Ps1CastExpression) -> Expression | None:
-        """
-        `[char]` of a number, spelled as the one-character String that is not the value 5.1
-        produces. The domain answers this exactly and this does not ask it, which is deliberate and
-        is the one place the migration stops short.
-
-        A Char is what the *rest* of the unit cannot read. `render` writes one as `[char]65`,
-        because that is the only spelling the language has for it, and every pass that recognizes a
-        constant by `refinery.lib.scripts.ps1.ast.string_value` goes blind the moment a Char stops
-        being a String: a method call on one, a `-replace` argument, a `-match` operand and the
-        constant inliner each stop folding, which is five real samples that stop resolving. So the
-        erasure outlives this commit by exactly as long as those readers do, and it goes with them
-        in the commit that puts the string and member half of the folding pass onto the domain —
-        which is where the ledger has always said the Char rows retire.
-
-        Half of it cannot go early. Asking the domain here for the cases it already answers — a
-        `[char]` of a String, which it converts exactly — would spell the result `[char]65`, and
-        this arm would erase *that* on the next pass. `[char]'A'` is left alone today and would
-        become a wrong answer; the arm is all of one piece and moves whole.
-        """
-        number = integer_of(read(node.operand))
-        if number is None or not 0 <= number <= 0xFFFF:
-            return None
-        return make_string_literal(chr(number))
 
     @staticmethod
     def _named_type(node: Ps1CastExpression, target) -> Expression | None:
@@ -134,14 +103,24 @@ class Ps1TypeCasts(Transformer):
         `[string]` of a collection, which is a ledgered defect rather than a fold: 5.1 separates the
         elements with `$OFS`, which lives in the session and not in the script, so the text written
         here is only right for a run that left the separator alone. The domain refuses it for that
-        reason and this does not, which is why it is still here and why it goes with
-        `collect_string_arguments`.
+        reason and this does not, which is why it is still here.
+
+        Only a collection of Strings is read, which is what it always read and is deliberately not
+        widened: what each element contributes is the same question `coerced_text` answers, but
+        answering it for a number or a Char would put more values through the separator this is
+        already wrong about.
         """
         if target != _STRING or node.operand is None:
             return None
-        parts = collect_string_arguments(unwrap_single_paren(node.operand))
-        if parts is None or len(parts) < 2:
+        facts = collect_facts(unwrap_single_paren(node.operand))
+        if facts is None or len(facts) < 2:
             return None
+        parts: list[str] = []
+        for fact in facts:
+            text = text_of(fact)
+            if text is None:
+                return None
+            parts.append(text)
         return make_string_literal(' '.join(parts))
 
     @staticmethod
