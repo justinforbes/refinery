@@ -92,30 +92,30 @@ class TestInterpreterValueSemantics(TestJsDeobfuscator):
 
     def test_pow_negative_base_fractional_exponent_is_nan(self):
         # Python returns a complex number for (-8) ** 0.5; JavaScript returns NaN.
-        self.assertEqual('var x = NaN;', self._fold('(-8) ** 0.5'))
+        self.assertEqual('var x = 0 / 0;', self._fold('(-8) ** 0.5'))
 
     def test_math_pow_zero_base_negative_exponent_is_infinity(self):
-        self.assertEqual('var x = Infinity;', self._fold('Math.pow(0, -1)'))
+        self.assertEqual('var x = 1e999;', self._fold('Math.pow(0, -1)'))
 
     def test_pow_negative_base_integer_exponent(self):
         self.assertEqual('var x = -8;', self._fold('(-2) ** 3'))
 
     def test_pow_overflowing_magnitude_is_infinity(self):
         # JS numbers are doubles, so a result beyond the double range is Infinity, not a Python bignum.
-        self.assertEqual('var x = Infinity;', self._fold('2 ** 1024'))
+        self.assertEqual('var x = 1e999;', self._fold('2 ** 1024'))
 
     def test_pow_overflowing_negative_magnitude_is_negative_infinity(self):
-        self.assertEqual('var x = -Infinity;', self._fold('(-10) ** 999'))
+        self.assertEqual('var x = -1e999;', self._fold('(-10) ** 999'))
 
     def test_pow_one_to_infinity_is_nan(self):
-        self.assertEqual('var x = NaN;', self._fold('1 ** Infinity'))
+        self.assertEqual('var x = 0 / 0;', self._fold('1 ** Infinity'))
 
     def test_math_pow_one_to_infinity_is_nan(self):
-        self.assertEqual('var x = NaN;', self._fold('Math.pow(1, Infinity)'))
+        self.assertEqual('var x = 0 / 0;', self._fold('Math.pow(1, Infinity)'))
 
     def test_undefined_plus_number_is_nan(self):
         # undefined coerces to NaN, null coerces to 0 — the two must stay distinct.
-        self.assertEqual('var x = NaN;', self._fold('undefined + 1'))
+        self.assertEqual('var x = 0 / 0;', self._fold('undefined + 1'))
 
     def test_null_plus_number_coerces_to_zero(self):
         self.assertEqual('var x = 1;', self._fold('null + 1'))
@@ -230,7 +230,7 @@ class TestInterpreterValueSemantics(TestJsDeobfuscator):
         self.assertEqual("var x = '1e-8';", self._fold('String(1e-8)'))
 
     def test_number_of_signed_hex_is_nan(self):
-        self.assertEqual('var x = NaN;', self._fold("Number('-0x1F')"))
+        self.assertEqual('var x = 0 / 0;', self._fold("Number('-0x1F')"))
 
     def test_var_redeclaration_without_initializer_preserves_binding(self):
         # A bare `var k;` is a no-op when `k` is already bound; it must not reset the parameter.
@@ -246,40 +246,40 @@ class TestInterpreterValueSemantics(TestJsDeobfuscator):
         self.assertEqual("var x = 'KEY';", self._evaluate(source))
 
     def test_division_by_negative_zero_is_negative_infinity(self):
-        self.assertEqual('var x = -Infinity;', self._fold('1 / -0'))
+        self.assertEqual('var x = -1e999;', self._fold('1 / -0'))
 
     def test_division_of_negative_by_negative_zero_is_positive_infinity(self):
-        self.assertEqual('var x = Infinity;', self._fold('-1 / -0'))
+        self.assertEqual('var x = 1e999;', self._fold('-1 / -0'))
 
     def test_math_round_negative_zero_observable_through_division(self):
-        self.assertEqual('var x = -Infinity;', self._fold('1 / Math.round(-0.4)'))
+        self.assertEqual('var x = -1e999;', self._fold('1 / Math.round(-0.4)'))
 
     def test_math_round_largest_value_below_half_rounds_down(self):
         self.assertEqual('var x = 0;', self._fold('Math.round(0.49999999999999994)'))
 
     def test_math_max_selects_positive_over_negative_zero(self):
-        self.assertEqual('var x = Infinity;', self._fold('1 / Math.max(-0, 0)'))
+        self.assertEqual('var x = 1e999;', self._fold('1 / Math.max(-0, 0)'))
 
     def test_math_min_selects_negative_over_positive_zero(self):
-        self.assertEqual('var x = -Infinity;', self._fold('1 / Math.min(-0, 0)'))
+        self.assertEqual('var x = -1e999;', self._fold('1 / Math.min(-0, 0)'))
 
     def test_math_max_keeps_negative_zero_when_all_operands_negative_zero(self):
-        self.assertEqual('var x = -Infinity;', self._fold('1 / Math.max(-0, -0)'))
+        self.assertEqual('var x = -1e999;', self._fold('1 / Math.max(-0, -0)'))
 
     def test_math_abs_of_no_argument_is_nan(self):
-        self.assertEqual('var x = NaN;', self._fold('Math.abs()'))
+        self.assertEqual('var x = 0 / 0;', self._fold('Math.abs()'))
 
     def test_math_sqrt_of_no_argument_is_nan(self):
-        self.assertEqual('var x = NaN;', self._fold('Math.sqrt()'))
+        self.assertEqual('var x = 0 / 0;', self._fold('Math.sqrt()'))
 
     def test_math_sign_of_no_argument_is_nan(self):
-        self.assertEqual('var x = NaN;', self._fold('Math.sign()'))
+        self.assertEqual('var x = 0 / 0;', self._fold('Math.sign()'))
 
     def test_math_floor_of_no_argument_is_nan(self):
-        self.assertEqual('var x = NaN;', self._fold('Math.floor()'))
+        self.assertEqual('var x = 0 / 0;', self._fold('Math.floor()'))
 
     def test_math_log_of_no_argument_is_nan(self):
-        self.assertEqual('var x = NaN;', self._fold('Math.log()'))
+        self.assertEqual('var x = 0 / 0;', self._fold('Math.log()'))
 
 
 class TestInterpreterMethodValueSemantics(TestJsDeobfuscator):
@@ -736,7 +736,7 @@ class TestInterpreterCompoundAssignment(TestJsDeobfuscator):
         is not an `InterpreterError` and so escaped every refusal path and crashed the unit. The canonical
         operator table has always answered this correctly; the compound path simply did not consult it.
         """
-        self.assertEqual('var r = NaN;', self._target('var t = Infinity; t %= 5; return t;'))
+        self.assertEqual('var r = 0 / 0;', self._target('var t = Infinity; t %= 5; return t;'))
 
     def test_modulo_assign_infinite_divisor_keeps_dividend(self):
         self.assertEqual('var r = 5;', self._target('var t = 5; t %= Infinity; return t;'))
@@ -745,13 +745,13 @@ class TestInterpreterCompoundAssignment(TestJsDeobfuscator):
         """
         A zero divisor is not an error in JavaScript. Refusing here contradicted `t = t % 0`, which folds.
         """
-        self.assertEqual('var r = NaN;', self._target('var t = 5; t %= 0; return t;'))
+        self.assertEqual('var r = 0 / 0;', self._target('var t = 5; t %= 0; return t;'))
 
     def test_divide_assign_by_zero_is_infinity(self):
-        self.assertEqual('var r = Infinity;', self._target('var t = 5; t /= 0; return t;'))
+        self.assertEqual('var r = 1e999;', self._target('var t = 5; t /= 0; return t;'))
 
     def test_divide_assign_by_negative_zero_is_negative_infinity(self):
-        self.assertEqual('var r = -Infinity;', self._target('var t = 5; t /= -0; return t;'))
+        self.assertEqual('var r = -1e999;', self._target('var t = 5; t /= -0; return t;'))
 
     def test_multiply_assign_preserves_negative_zero(self):
         """
@@ -914,21 +914,21 @@ class TestInterpreterNumericCoercion(TestJsDeobfuscator):
         self.assertEqual('var x = -0;', self._fold("Number('-0')"))
         self.assertEqual('var x = -0;', self._fold("+'-0'"))
         self.assertEqual('var x = -0;', self._fold("parseInt('-0')"))
-        self.assertEqual('var x = -Infinity;', self._fold("1 / Number('-0')"))
+        self.assertEqual('var x = -1e999;', self._fold("1 / Number('-0')"))
 
     def test_non_ascii_decimal_digits_coerce_to_nan(self):
-        self.assertEqual('var x = NaN;', self._fold(R"Number('\u0661\u0662\u0663')"))
-        self.assertEqual('var x = NaN;', self._fold(R"Number('\uFF11\uFF12\uFF13')"))
-        self.assertEqual('var x = NaN;', self._fold(R"Number('\u0967\u0968\u0969')"))
-        self.assertEqual('var x = NaN;', self._fold(R"+'\u0661\u0662\u0663'"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"Number('\u0661\u0662\u0663')"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"Number('\uFF11\uFF12\uFF13')"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"Number('\u0967\u0968\u0969')"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"+'\u0661\u0662\u0663'"))
 
     def test_padding_python_strips_and_javascript_does_not_coerces_to_nan(self):
-        self.assertEqual('var x = NaN;', self._fold(R"Number('\u001C5')"))
-        self.assertEqual('var x = NaN;', self._fold(R"Number('\u001D5')"))
-        self.assertEqual('var x = NaN;', self._fold(R"Number('\u001E5')"))
-        self.assertEqual('var x = NaN;', self._fold(R"Number('\u001F5')"))
-        self.assertEqual('var x = NaN;', self._fold(R"+'\u001C5'"))
-        self.assertEqual('var x = NaN;', self._fold(R"parseInt('\u001C5')"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"Number('\u001C5')"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"Number('\u001D5')"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"Number('\u001E5')"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"Number('\u001F5')"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"+'\u001C5'"))
+        self.assertEqual('var x = 0 / 0;', self._fold(R"parseInt('\u001C5')"))
 
     def test_the_byte_order_mark_pads_a_number_the_way_a_space_does(self):
         self.assertEqual('var x = 5;', self._fold(R"Number('\uFEFF5')"))

@@ -206,6 +206,12 @@ class TestConstantPoolIntegration(TestJsDeobfuscator):
 class TestRegressionBugs(TestJsDeobfuscator):
 
     def test_dispatcher_sparse_payload_preserves_arity(self):
+        """
+        The hole in the sparse payload must survive to the destructuring function, where it binds the
+        second parameter and leaves `'third'` in the third. String elements keep that observable once
+        the call folds to its result: concatenation spells out the slot each element landed in, where
+        a sum of numbers would be `NaN` no matter where the hole went.
+        """
         source = inspect.cleandoc(
             """
             var c = Object["create"](null);
@@ -224,16 +230,13 @@ class TestRegressionBugs(TestJsDeobfuscator):
               if (rtype === "wrapF") { return { "wk": output }; }
               else { return output; }
             }
-            console.log((p = [1, , 3], d("f1")));
+            console.log((p = ["first", , "third"], d("f1")));
             """
         )
         result = self._deobfuscate(source)
         self.assertEqual(result, inspect.cleandoc(
             """
-            function f1(a, b, c) {
-              return a + b + c;
-            }
-            console.log(f1(1, undefined, 3));
+            console.log('firstundefinedthird');
             """
         ))
 

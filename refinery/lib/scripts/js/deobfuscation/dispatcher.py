@@ -18,6 +18,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
     access_key,
     binding_has_references,
+    make_undefined_expression,
     property_key,
     remove_declarator,
 )
@@ -447,7 +448,7 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         if key not in extracted:
             return
         args = [
-            JsIdentifier(name='undefined') if e is None else e
+            make_undefined_expression() if e is None else e
             for e in assign.right.elements
         ]
         replacement = JsCallExpression(

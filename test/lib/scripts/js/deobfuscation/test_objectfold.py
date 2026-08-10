@@ -408,14 +408,14 @@ class TestObjectFold(TestJsDeobfuscator):
             inspect.cleandoc(
                 """
                 x('hello');
-                y(undefined);
+                y(void 0);
                 """
             ),
             self._objectfold(source),
         )
 
     def test_absent_non_inherited_key_folds_to_undefined(self):
-        self.assertEqual('SINK(undefined);', self._objectfold('var o = { a: 1 }; SINK(o.b);'))
+        self.assertEqual('SINK(void 0);', self._objectfold('var o = { a: 1 }; SINK(o.b);'))
 
     def test_inherited_member_access_not_folded(self):
         source = inspect.cleandoc(

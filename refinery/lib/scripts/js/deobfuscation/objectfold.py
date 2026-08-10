@@ -25,6 +25,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     OBJECT_PROTOTYPE_MEMBERS,
     ScopeProcessingTransformer,
     access_key,
+    make_undefined_expression,
     property_key,
     references_receiver_this,
     remove_declarator,
@@ -398,7 +399,7 @@ class JsObjectFold(ScopeProcessingTransformer):
                 if key in OBJECT_PROTOTYPE_MEMBERS:
                     can_remove = False
                     continue
-                _replace_in_parent(member, JsIdentifier(name='undefined'))
+                _replace_in_parent(member, make_undefined_expression())
                 changed = True
                 continue
             value = prop_map[key]

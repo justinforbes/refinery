@@ -249,7 +249,7 @@ class TestBasicSimplifications(TestJsDeobfuscator):
         self.assertEqual("'$bc';", self._simplify("'abc'.replace('a', '$$');"))
 
     def test_math_max_with_nan_string(self):
-        self.assertEqual("NaN;", self._simplify("Math.max(5, 'abc');"))
+        self.assertEqual("0 / 0;", self._simplify("Math.max(5, 'abc');"))
 
     def test_number_empty_array(self):
         self.assertEqual("0;", self._simplify("Number([]);"))
@@ -258,7 +258,7 @@ class TestBasicSimplifications(TestJsDeobfuscator):
         self.assertEqual("5;", self._simplify("Number([5]);"))
 
     def test_number_underscore_string_is_nan(self):
-        self.assertEqual("NaN;", self._simplify("Number('1_000');"))
+        self.assertEqual("0 / 0;", self._simplify("Number('1_000');"))
 
     def test_no_fold_json_parse_infinity(self):
         self.assertEqual("JSON.parse('Infinity');", self._simplify("JSON.parse('Infinity');"))

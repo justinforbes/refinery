@@ -1266,7 +1266,7 @@ class TestFunctionEvaluator(TestJsDeobfuscator):
             """
         )
         result = self._evaluate(source)
-        self.assertEqual('var r = NaN;', result)
+        self.assertEqual('var r = 0 / 0;', result)
 
     def test_math_round_nan_returns_nan(self):
         source = inspect.cleandoc(
@@ -1276,7 +1276,7 @@ class TestFunctionEvaluator(TestJsDeobfuscator):
             """
         )
         result = self._evaluate(source)
-        self.assertEqual('var r = NaN;', result)
+        self.assertEqual('var r = 0 / 0;', result)
 
     def test_property_key_not_substituted(self):
         source = inspect.cleandoc(
@@ -1369,7 +1369,7 @@ class TestFunctionEvaluator(TestJsDeobfuscator):
             """
         )
         result = self._evaluate(source)
-        self.assertEqual('var r = Infinity;', result)
+        self.assertEqual('var r = 1e999;', result)
 
     def test_math_trunc_infinity(self):
         source = inspect.cleandoc(
@@ -1379,7 +1379,7 @@ class TestFunctionEvaluator(TestJsDeobfuscator):
             """
         )
         result = self._evaluate(source)
-        self.assertEqual('var r = Infinity;', result)
+        self.assertEqual('var r = 1e999;', result)
 
     def test_buffer_from_base64url(self):
         source = inspect.cleandoc(

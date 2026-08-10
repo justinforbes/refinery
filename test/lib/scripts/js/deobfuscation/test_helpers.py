@@ -80,9 +80,9 @@ class TestValueToNode(TestJsDeobfuscator):
         self.assertEqual('void 0', self._render(None))
 
     def test_renders_special_numbers(self):
-        self.assertEqual('NaN', self._render(float('nan')))
-        self.assertEqual('Infinity', self._render(float('inf')))
-        self.assertEqual('-Infinity', self._render(float('-inf')))
+        self.assertEqual('0 / 0', self._render(float('nan')))
+        self.assertEqual('1e999', self._render(float('inf')))
+        self.assertEqual('-1e999', self._render(float('-inf')))
         self.assertEqual('-0', self._render(-0.0))
 
     def test_renders_containers(self):

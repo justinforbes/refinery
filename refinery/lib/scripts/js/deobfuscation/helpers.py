@@ -667,6 +667,43 @@ def make_numeric_literal(value: int | float) -> JsNumericLiteral | None:
     return JsNumericLiteral(value=value, raw=js_number_to_string(value))
 
 
+def make_undefined_expression() -> JsUnaryExpression:
+    """
+    The expression that spells `undefined`. That value has no literal, and the global name that
+    denotes it is an ordinary binding which any scope may rebind, so it is written as an operator
+    applied to a literal instead: `void 0` denotes it wherever it stands.
+    """
+    return JsUnaryExpression(operator='void', operand=JsNumericLiteral(value=0, raw='0'))
+
+
+def make_nan_expression() -> JsBinaryExpression:
+    """
+    The expression that spells `NaN`, which has no literal either, for the same reason and by the
+    same means: `0 / 0`.
+    """
+    return JsBinaryExpression(
+        operator='/',
+        left=JsNumericLiteral(value=0, raw='0'),
+        right=JsNumericLiteral(value=0, raw='0'),
+    )
+
+
+def denotes_nan(node: Node) -> bool:
+    """
+    Whether *node* is the expression `make_nan_expression` builds. A zero literal divided by a zero
+    literal is `NaN` however either zero happens to be written, so the test reads the two values
+    rather than the text.
+    """
+    return (
+        isinstance(node, JsBinaryExpression)
+        and node.operator == '/'
+        and isinstance(node.left, JsNumericLiteral)
+        and isinstance(node.right, JsNumericLiteral)
+        and node.left.value == 0
+        and node.right.value == 0
+    )
+
+
 def extract_literal_value(node: Node) -> tuple[bool, LiteralValue]:
     """
     Extract a Python value from a literal AST node. Returns `(True, value)` on success or
@@ -697,14 +734,8 @@ def extract_literal_value(node: Node) -> tuple[bool, LiteralValue]:
             return True, node.operand.value
         if node.operator == '!' and isinstance(node.operand, JsNumericLiteral):
             return True, not bool(node.operand.value)
-    if isinstance(node, JsBinaryExpression) and node.operator == '/':
-        if (
-            isinstance(node.left, JsNumericLiteral)
-            and isinstance(node.right, JsNumericLiteral)
-            and node.left.value == 0
-            and node.right.value == 0
-        ):
-            return True, float('nan')
+    if denotes_nan(node):
+        return True, float('nan')
     if isinstance(node, JsArrayExpression):
         items: list[LiteralValue] = []
         for el in node.elements:
@@ -725,12 +756,16 @@ def value_to_node(value: object) -> Expression | None:
     expression in place — whereas rendering an approximation silently changes what the program means,
     so every case here either round-trips exactly or returns `None`.
 
-    A finite number is spelled by `make_numeric_literal` whatever its sign, so that a negative one is a
-    single literal carrying its sign in the `raw` and not a negation applied to its magnitude. Those
-    two nodes synthesize to the same text, which is what let the second spelling go unnoticed, but only
-    the first is a `JsNumericLiteral`: the fold that reads an operand with `numeric_value` sees a number
-    in one and nothing in the other. The values with no literal spelling at all — `NaN`, the infinities
-    and `undefined` — are the only ones this returns a compound node for.
+    A number is spelled by `make_numeric_literal` whatever its sign, so that a negative one is a single
+    literal carrying its sign in the `raw` and not a negation applied to its magnitude. Those two nodes
+    synthesize to the same text, which is what let the second spelling go unnoticed, but only the first
+    is a `JsNumericLiteral`: the fold that reads an operand with `numeric_value` sees a number in one
+    and nothing in the other.
+
+    `NaN` and `undefined` are the only values this returns a compound node for, because they are the
+    only ones no literal denotes. Neither is spelled with the global name that names it. Those names
+    are ordinary bindings, and this function does not know the scope it is writing into: a fold that
+    happens under `function (NaN) { … }` would otherwise emit text meaning the parameter.
     """
     if isinstance(value, str):
         return make_string_literal(value)
@@ -739,11 +774,7 @@ def value_to_node(value: object) -> Expression | None:
     if isinstance(value, (int, float)):
         number = to_js_number(value)
         if number != number:
-            return JsIdentifier(name='NaN')
-        if number == float('inf'):
-            return JsIdentifier(name='Infinity')
-        if number == float('-inf'):
-            return JsUnaryExpression(operator='-', operand=JsIdentifier(name='Infinity'))
+            return make_nan_expression()
         return make_numeric_literal(number)
     if isinstance(value, JsBuffer):
         return None
@@ -772,14 +803,17 @@ def value_to_node(value: object) -> Expression | None:
     if value is JS_NULL:
         return JsNullLiteral()
     if value is None:
-        return JsUnaryExpression(
-            operator='void',
-            operand=JsNumericLiteral(value=0, raw='0'),
-        )
+        return make_undefined_expression()
     return None
 
 
 def is_literal(node: Node) -> bool:
+    """
+    Whether *node* is a constant expression whose value the tree carries in full — the test a pass
+    applies before cloning it to another position. `void 0` and `0 / 0` count for the same reason
+    `extract_literal_value` reads them: they are what `undefined` and `NaN` have instead of a
+    literal, and an operator applied to literals is as constant as a literal is.
+    """
     if isinstance(node, (JsStringLiteral, JsNumericLiteral, JsBooleanLiteral, JsNullLiteral)):
         return True
     if isinstance(node, JsUnaryExpression):
@@ -787,7 +821,7 @@ def is_literal(node: Node) -> bool:
             return True
         if node.operator == '-' and isinstance(node.operand, JsNumericLiteral):
             return True
-    return False
+    return denotes_nan(node)
 
 
 def member_key(node: JsMemberExpression) -> str | None:

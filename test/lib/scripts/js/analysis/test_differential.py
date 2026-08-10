@@ -2853,7 +2853,7 @@ class TestNumericLiteralsAreDoubles(TestBase):
         self._folds_to(
             "console.log(Number('inf'), Number('infinity'), Number('-inf'), Number('1_0'),"
             " Math.abs('inf'), Math.round('infinity'), Number('Infinity'), Number('0x1F'));",
-            'console.log(NaN, NaN, NaN, NaN, NaN, NaN, Infinity, 31);')
+            'console.log(0 / 0, 0 / 0, 0 / 0, 0 / 0, 0 / 0, 0 / 0, 1e999, 31);')
 
     def test_an_integer_literal_beyond_the_double_range_is_neither_an_index_nor_a_radix(self):
         """
@@ -2991,7 +2991,7 @@ class TestNumericLiteralsAreDoubles(TestBase):
         self._folds_to(
             R"console.log(Number('\u0661\u0662\u0663'), Number('\uFF11\uFF12\uFF13'),"
             R" Number('\u0967\u0968\u0969'));",
-            'console.log(NaN, NaN, NaN);')
+            'console.log(0 / 0, 0 / 0, 0 / 0);')
 
     def test_numeric_coercion_refuses_the_padding_only_python_strips(self):
         """
@@ -3002,7 +3002,7 @@ class TestNumericLiteralsAreDoubles(TestBase):
         self._folds_to(
             R"console.log(Number('\u001C5'), Number('\u001D5'), Number('\u001E5'),"
             R" Number('\u001F5'));",
-            'console.log(NaN, NaN, NaN, NaN);')
+            'console.log(0 / 0, 0 / 0, 0 / 0, 0 / 0);')
 
     def test_parse_int_refuses_the_padding_only_python_strips(self):
         """
@@ -3075,7 +3075,7 @@ class TestParseFloatGrammar(TestBase):
         self._prints(source, '3.14 42 2.5 0 1 1.2 NaN NaN\n')
         self.assertEqual(
             deobfuscate_source(source),
-            'console.log(3.14, 42, 2.5, 0, 1, 1.2, NaN, NaN);')
+            'console.log(3.14, 42, 2.5, 0, 1, 1.2, 0 / 0, 0 / 0);')
 
     @unittest.expectedFailure
     def test_an_exponent_belongs_to_the_literal_parse_float_reads(self):
