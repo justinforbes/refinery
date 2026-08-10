@@ -73,6 +73,11 @@ DEFECTS: dict[str, str] = {
     '$a.Length ()':
         '5.1 reports UnexpectedToken and ExpectedExpression. We read a property access followed '
         'by an empty parenthesis.',
+    '$x = 3.ToString()':
+        'The same empty parenthesis, reached by the boundary rule rather than by a property '
+        'access: a numeral swallows the dot that touches it, so 5.1 and we both read the command '
+        '`3.ToString` and hand it `()` — and only 5.1 refuses the empty bracket. `3.ToString(1)` '
+        'is accepted by both, which is what says the divergence is the bracket and not the word.',
     'foo (a, b)':
         '5.1 reads `a` as a command name inside the bracket and then reports MissingArgument at '
         'the comma. We read an array of two bare words.',
@@ -310,33 +315,35 @@ TABLE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: believes a value to be, so this phase does not retire them; they belong to the synthesizer,
 #: which is the only place that knows which slot a node is going into.
 #:
-#: 5.1 reads a digit that starts a token as the start of a number, so a numeric literal cannot
-#: stand as a member-access receiver: `3.ToString()` is a parse error, and in a command argument
-#: every numeric literal is, `0xFF` and `1kb` and `1.5` alike. The unit both inlines a folded value
-#: into that slot without parentheses and removes the parentheses a source wrote there, so
-#: `$n = 5; $n.ToString()` becomes a script PowerShell will not read.
+#: A decimal numeral swallows the dot that touches it, so it cannot stand as a member-access
+#: receiver: `3.ToString` is the one word `3.ToString`, and 5.1 reads a command by that name rather
+#: than a call on three. A numeral that ended for some other reason is unaffected — `0xFF.GetType()`
+#: and `1.5.GetType()` both read the member — and in a command argument no numeral may be a receiver
+#: at all. The unit both inlines a folded value into that slot without parentheses and removes the
+#: parentheses a source wrote there, so `$n = 5; $n.ToString()` becomes a script PowerShell will not
+#: read. Since A3a our lexer reads all of this as 5.1 does, which is what makes the defect visible
+#: here rather than hidden behind a tree only we can build.
 _UNPARSEABLE_RECEIVER = (
     'A numeric literal is left standing as a member-access receiver without parentheses, which 5.1 '
     'refuses to parse. That is a defect of how a value is spelled rather than of what the unit '
     'believes it to be, so this phase does not retire it.'
 )
 
-#: In a command argument 5.1 lexes a leading `-` as the start of a parameter name rather than as a
-#: sign, and a parameter no command declares is handed on as the text it was written as:
+#: In a command argument a leading `-` is not a sign. No binder is consulted and no parameter is
+#: matched: 5.1 lets a sign join a numeral only where its expression rule asked for one, which it
+#: never does for an argument, so the dash falls to the generic scan and `-1` arrives as one word.
 #: `Write-Output -1` passes the String `-1` where `Write-Output (-1)` and `Write-Output 1` pass an
 #: Int32. Every folded value that comes out negative reaches this, so it is the wider of the two.
 #:
-#: Its repair has a second half, which is why bracketing the folded value alone would trade one
-#: wrong answer for another. 5.1 lexes an argument-position `-1` as *one* token — `Generic '-1'`,
-#: measured, as it does `-1.5`, `-1kb`, `-1x` and a lone `-` — while our lexer splits it into a
-#: dash and a numeral and the parser reads the number. So a source that wrote `Write-Output -1`
-#: already means the String, and a synthesizer that bracketed every negative numeral would turn
-#: that one into an Int32. The argument slot has to be read as 5.1 reads it before what is written
-#: back into it can be.
+#: Its repair had a precondition, which is why bracketing the folded value alone would once have
+#: traded one wrong answer for another: a source that writes `Write-Output -1` already means the
+#: String, and a synthesizer that bracketed every negative numeral would have turned that one into
+#: an Int32. A3a settled it — the argument slot is now read as 5.1 reads it — so what remains is
+#: only what the synthesizer writes back into it.
 _A_SIGN_IN_AN_ARGUMENT_SLOT = (
     'The value folds to a negative numeral inlined into a command argument without parentheses, '
-    'where 5.1 reads the leading `-` as a parameter name and passes the token on as a String. That '
-    'is a defect of how a value is spelled rather than of what the unit believes it to be, so this '
+    'where 5.1 reads the dash as part of the word and passes the token on as a String. That is a '
+    'defect of how a value is spelled rather than of what the unit believes it to be, so this '
     'phase does not retire it.'
 )
 

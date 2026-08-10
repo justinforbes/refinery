@@ -351,12 +351,12 @@ class Ps1Synthesizer(Synthesizer):
         because it is what separates one argument from the next.
 
         A spelling that begins with a sign is *not* bracketed here, and this slot cannot carry one:
-        5.1 reads a leading `-` in an argument as the start of a parameter name, and a parameter no
-        command declares is handed on as the text it was written as, so `Write-Output -1` passes the
-        String `-1` where `Write-Output (-1)` passes an Int32. The bracket is left off because it
-        would be right for a value a pass folded into this slot and wrong for one the source wrote
-        here — the parser reads an argument-position `-1` as the number, where 5.1 reads it as one
-        bare word. Both halves are one repair and neither may land without the other.
+        a leading `-` in an argument never signs a numeral, so `Write-Output -1` passes the String
+        `-1` where `Write-Output (-1)` passes an Int32. The bracket is still left off because this
+        method cannot tell the two apart — a value a pass folded into this slot needs it, and a word
+        the source wrote here is changed by it. What it waits on is a node that knows which of the
+        two it is; the lexer half of the repair has landed, so a numeral reaching here is one a pass
+        put here.
         """
         self._emit_word(value, precedence.COMMA + 1)
 

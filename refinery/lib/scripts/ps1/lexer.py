@@ -318,20 +318,22 @@ class Ps1Lexer:
         return Ps1Token(kind, self.source[start:self.pos], start)
 
     def _read_number(self) -> Ps1Token | None:
+        """
+        The numeral at `Ps1Lexer.pos`, or `None` where none is written there. A trailing dot belongs
+        to the numeral — `3.` is the number three — and is given back only to the range operator, so
+        that `3..5` counts from three while `3.ToString` stays one word. Everything the numeral did
+        not swallow is `Ps1Lexer.scan`'s to judge: a numeral that is followed by anything but a
+        token terminator is not a numeral at all, and is re-read as the word it is part of.
+        """
         src = self.source
         m = _REAL_PATTERN.match(src, self.pos)
         if m:
             text = m.group()
             end = m.end()
-            if text.endswith('.') and end < len(src):
-                nc = src[end]
-                if nc == '.' or nc.isalpha() or nc in '_$@{':
-                    text = text[:-1]
-                    end -= 1
-                    if text and text.replace('_', '').isdigit():
-                        start = self.pos
-                        self.pos = end
-                        return Ps1Token(Ps1TokenKind.INTEGER, text, start)
+            if text.endswith('.') and src[end:end + 1] == '.':
+                start = self.pos
+                self.pos = end - 1
+                return Ps1Token(Ps1TokenKind.INTEGER, text[:-1], start)
             start = self.pos
             self.pos = end
             return Ps1Token(Ps1TokenKind.REAL, text, start)
@@ -390,6 +392,18 @@ class Ps1Lexer:
                 break
             self.pos += 1
         return Ps1Token(Ps1TokenKind.PARAMETER, src[start:self.pos], start)
+
+    def _read_argument_dash(self) -> Ps1Token:
+        """
+        The token a dash begins in argument mode. A dash touching a letter, `_` or `?` names a
+        parameter; a dash touching anything else is part of the word around it, so `f -1` passes the
+        string `-1` rather than the number, and `f -` passes the word `-`.
+
+        No binder is consulted: 5.1 lets a sign join a numeral only where its expression rule asked
+        for one, which it never does for an argument, so the dash falls to the same generic scan
+        every other unrecognized character does.
+        """
+        return self._try_parameter() or self._read_generic_token()
 
     def _try_redirection(self) -> Ps1Token | None:
         m = _REDIRECTION_PATTERN.match(self.source, self.pos)
@@ -577,9 +591,7 @@ class Ps1Lexer:
                     if op:
                         return op
                 elif self.mode == Ps1LexerMode.ARGUMENT:
-                    param = self._try_parameter()
-                    if param:
-                        return param
+                    return self._read_argument_dash()
 
             redir = self._try_redirection()
             if redir:

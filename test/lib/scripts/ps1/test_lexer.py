@@ -424,17 +424,78 @@ class TestPs1Lexer(TestBase):
         self.assertEqual(tokens[0], (Ps1TokenKind.VARIABLE, '$x'))
         self.assertEqual(tokens[1], (Ps1TokenKind.DOUBLE_COLON, '::'))
 
-    def test_integer_dot_identifier_not_consumed_as_real(self):
+    def test_a_decimal_integer_swallows_the_dot_that_joins_it_to_a_word(self):
         tokens = self._tokens('7.ToString')
-        self.assertEqual(tokens[0], (Ps1TokenKind.INTEGER, '7'))
-        self.assertEqual(tokens[1], (Ps1TokenKind.DOT, '.'))
-        self.assertEqual(tokens[2], (Ps1TokenKind.GENERIC_TOKEN, 'ToString'))
+        self.assertEqual(tokens, [(Ps1TokenKind.GENERIC_TOKEN, '7.ToString')])
 
-    def test_integer_dot_variable_not_consumed_as_real(self):
+    def test_a_decimal_integer_swallows_the_dot_that_joins_it_to_a_variable(self):
         tokens = self._tokens('7.$method')
-        self.assertEqual(tokens[0], (Ps1TokenKind.INTEGER, '7'))
-        self.assertEqual(tokens[1], (Ps1TokenKind.DOT, '.'))
-        self.assertEqual(tokens[2], (Ps1TokenKind.VARIABLE, '$method'))
+        self.assertEqual(tokens, [(Ps1TokenKind.GENERIC_EXPAND, '7.$method')])
+
+    def test_a_numeral_that_ended_before_the_dot_reads_a_member_access(self):
+        for numeral, kind in (
+            ('0xFF', Ps1TokenKind.INTEGER),
+            ('1L', Ps1TokenKind.INTEGER),
+            ('3.5', Ps1TokenKind.REAL),
+            ('1e3', Ps1TokenKind.REAL),
+            ('1kb', Ps1TokenKind.REAL),
+            ('1d', Ps1TokenKind.REAL),
+        ):
+            with self.subTest(numeral=numeral):
+                self.assertEqual(self._tokens(F'{numeral}.ToString'), [
+                    (kind, numeral),
+                    (Ps1TokenKind.DOT, '.'),
+                    (Ps1TokenKind.GENERIC_TOKEN, 'ToString'),
+                ])
+
+    def test_a_numeral_gives_a_trailing_dot_back_only_to_the_range_operator(self):
+        self.assertEqual(self._tokens('3...5'), [
+            (Ps1TokenKind.INTEGER, '3'),
+            (Ps1TokenKind.DOTDOT, '..'),
+            (Ps1TokenKind.REAL, '.5'),
+        ])
+
+    def test_a_numeral_touching_a_character_that_starts_no_token_is_that_word(self):
+        for source in ('1x', '3.5x', '1e3x', "3'a'", '3"a"', '3:a', '3@y', '0xFF[0]'):
+            with self.subTest(source=source):
+                self.assertEqual(self._tokens(source), [(Ps1TokenKind.GENERIC_TOKEN, source)])
+
+    def test_a_numeral_ends_where_the_next_character_starts_its_own_token(self):
+        for source, tail in (
+            ('3+1', [(Ps1TokenKind.PLUS, '+'), (Ps1TokenKind.INTEGER, '1')]),
+            ('3-4', [(Ps1TokenKind.DASH, '-'), (Ps1TokenKind.INTEGER, '4')]),
+            ('3%2', [(Ps1TokenKind.PERCENT, '%'), (Ps1TokenKind.INTEGER, '2')]),
+            ('3/2', [(Ps1TokenKind.SLASH, '/'), (Ps1TokenKind.INTEGER, '2')]),
+            ('3;', [(Ps1TokenKind.SEMICOLON, ';')]),
+            ('3)', [(Ps1TokenKind.RPAREN, ')')]),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self._tokens(source), [(Ps1TokenKind.INTEGER, '3'), *tail])
+
+    def test_a_closing_bracket_ends_a_numeral_where_an_opening_one_does_not(self):
+        self.assertEqual(self._tokens('3]'), [
+            (Ps1TokenKind.INTEGER, '3'),
+            (Ps1TokenKind.RBRACKET, ']'),
+        ])
+        self.assertEqual(self._tokens('3[0]'), [(Ps1TokenKind.GENERIC_TOKEN, '3[0]')])
+
+    def test_a_numeral_standing_alone_in_an_argument_is_still_a_numeral(self):
+        for source, kind in (
+            ('3', Ps1TokenKind.INTEGER),
+            ('3.', Ps1TokenKind.REAL),
+            ('3.5', Ps1TokenKind.REAL),
+            ('0xFF', Ps1TokenKind.INTEGER),
+            ('1kb', Ps1TokenKind.REAL),
+        ):
+            with self.subTest(source=source):
+                tokens = self._tokens(source, mode=Ps1LexerMode.ARGUMENT)
+                self.assertEqual(tokens, [(kind, source)])
+
+    def test_a_numeral_touching_anything_in_an_argument_is_one_word(self):
+        for source in ('3.ToString', '0xFF.GetType', '3.5.GetType', '1kb.GetType', '3..5', '3[0]'):
+            with self.subTest(source=source):
+                tokens = self._tokens(source, mode=Ps1LexerMode.ARGUMENT)
+                self.assertEqual(tokens, [(Ps1TokenKind.GENERIC_TOKEN, source)])
 
     def test_trailing_dot_number_preserved_before_whitespace(self):
         tokens = self._tokens('7. ')
@@ -645,6 +706,69 @@ class TestPs1Lexer(TestBase):
         tokens = self._tokens('-no-pager', mode=Ps1LexerMode.ARGUMENT)
         self.assertEqual(len(tokens), 1)
         self.assertEqual(tokens[0], (Ps1TokenKind.PARAMETER, '-no-pager'))
+
+    def test_a_dash_argument_names_a_parameter_before_a_letter_underscore_or_question_mark(self):
+        for source in ('-Recurse', '-_1', '-?'):
+            with self.subTest(source=source):
+                tokens = self._tokens(source, mode=Ps1LexerMode.ARGUMENT)
+                self.assertEqual(tokens, [(Ps1TokenKind.PARAMETER, source)])
+
+    def test_a_dash_argument_before_anything_else_is_part_of_the_word_around_it(self):
+        for source, kind in (
+            ('-1', Ps1TokenKind.GENERIC_TOKEN),
+            ('-1.5', Ps1TokenKind.GENERIC_TOKEN),
+            ('-.5', Ps1TokenKind.GENERIC_TOKEN),
+            ('-0xFF', Ps1TokenKind.GENERIC_TOKEN),
+            ('-1L', Ps1TokenKind.GENERIC_TOKEN),
+            ('-1e3', Ps1TokenKind.GENERIC_TOKEN),
+            ('-1d', Ps1TokenKind.GENERIC_TOKEN),
+            ('-1kb', Ps1TokenKind.GENERIC_TOKEN),
+            ('-1x', Ps1TokenKind.GENERIC_TOKEN),
+            ('--1', Ps1TokenKind.GENERIC_TOKEN),
+            ("-'a'", Ps1TokenKind.GENERIC_TOKEN),
+            ('-', Ps1TokenKind.GENERIC_TOKEN),
+            ('-$x', Ps1TokenKind.GENERIC_EXPAND),
+        ):
+            with self.subTest(source=source):
+                tokens = self._tokens(source, mode=Ps1LexerMode.ARGUMENT)
+                self.assertEqual(tokens, [(kind, source)])
+
+    def test_a_dash_argument_followed_by_a_space_is_the_word_dash_on_its_own(self):
+        tokens = self._tokens('- x', mode=Ps1LexerMode.ARGUMENT)
+        self.assertEqual(tokens, [
+            (Ps1TokenKind.GENERIC_TOKEN, '-'),
+            (Ps1TokenKind.GENERIC_TOKEN, 'x'),
+        ])
+
+    def test_a_dash_argument_is_a_word_wherever_an_argument_may_stand(self):
+        self.assertEqual(self._tokens('-1,2', mode=Ps1LexerMode.ARGUMENT), [
+            (Ps1TokenKind.GENERIC_TOKEN, '-1'),
+            (Ps1TokenKind.COMMA, ','),
+            (Ps1TokenKind.INTEGER, '2'),
+        ])
+        self.assertEqual(self._tokens('1,-2', mode=Ps1LexerMode.ARGUMENT), [
+            (Ps1TokenKind.INTEGER, '1'),
+            (Ps1TokenKind.COMMA, ','),
+            (Ps1TokenKind.GENERIC_TOKEN, '-2'),
+        ])
+        self.assertEqual(self._tokens('-Name -2', mode=Ps1LexerMode.ARGUMENT), [
+            (Ps1TokenKind.PARAMETER, '-Name'),
+            (Ps1TokenKind.GENERIC_TOKEN, '-2'),
+        ])
+
+    def test_a_dash_joins_a_numeral_into_a_word_only_in_an_argument(self):
+        """
+        The sign is left for `refinery.lib.scripts.ps1.parser.Ps1Parser._parse_signed_numeral` to
+        bind, which is what keeps the numeral a numeral where an argument has none at all.
+        """
+        self.assertEqual(
+            self._tokens('-1', mode=Ps1LexerMode.ARGUMENT),
+            [(Ps1TokenKind.GENERIC_TOKEN, '-1')],
+        )
+        self.assertEqual(
+            self._tokens('-1', mode=Ps1LexerMode.EXPRESSION),
+            [(Ps1TokenKind.DASH, '-'), (Ps1TokenKind.INTEGER, '1')],
+        )
 
     def test_number_followed_by_variable_in_argument_mode(self):
         """

@@ -106,6 +106,54 @@ PROBES: tuple[str, ...] = (
     '$x = ,1',
 )
 
+#: Where one token ends and the next begins. 5.1 decides this from the character after a token
+#: rather than from the grammar, so a construct that is plainly an expression in one slot is one
+#: word in another, and no amount of reasoning about what a script *means* finds the boundary.
+#:
+#: Two subjects, and the second is the reason the first cannot be repaired alone. A dash in an
+#: argument slot never signs a numeral, so `f -1` passes the string; and a numeral swallows a
+#: trailing dot, so `3.ToString` is one word while `3..5` counts from three and `0xFF.GetType()`
+#: reads the member.
+#:
+#: Each spelling that ends a numeral for a reason other than the dot is asked separately —
+#: hexadecimal, real, exponent, type suffix, multiplier — and the same words are asked again in an
+#: argument slot, where none of them reads a member and the numeral is one word with what follows.
+BOUNDARIES: tuple[str, ...] = (
+    'f -1',
+    'f -1.5',
+    'f -.5',
+    'f -1kb',
+    'f -0xFF',
+    'f -1x',
+    'f -1L',
+    'f -1e3',
+    'f -',
+    'f - x',
+    'f -$x',
+    'f --1',
+    'f -Recurse',
+    'f -_1',
+    'f -?',
+    'f 1,-2',
+    'f -Name -2',
+    'f @(-2)',
+    'f (1,-2)',
+    'f 3.',
+    'f 3..5',
+    'f 0xFF.GetType',
+    '$x = -1',
+    '$x = 3.ToString()',
+    '$x = 3.GetType',
+    '$x = 3..5',
+    '$x = 3...5',
+    '$x = 3[0]',
+    '$x = 3.5.ToString()',
+    '$x = 0xFF.GetType()',
+    '$x = 1kb.GetType()',
+    '$x = 1e3.GetType()',
+    '$x = 1L.GetType()',
+)
+
 #: How a word may be written where a command name is read, and where a value is. This is the
 #: question M1 stalled on — whether a bare word keeps its spelling when it moves into a slot that
 #: reads a pipeline — and 5.1 answers it in the token stream rather than the tree.
@@ -557,6 +605,7 @@ def oracle_corpus() -> tuple[str, ...]:
     for source in (
         *SNIPPETS.values(),
         *PROBES,
+        *BOUNDARIES,
         *SPELLINGS,
         *_EXECUTABLE,
         *NAMES,
