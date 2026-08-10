@@ -637,22 +637,31 @@ def numeric_value(node: Expression) -> float | None:
 
 def make_numeric_literal(value: int | float) -> JsNumericLiteral | None:
     """
-    Spell a Number as a literal, or refuse with `None` when it has none. `NaN` and the infinities are
-    identifiers in JavaScript, not literals, so a caller that can produce them must spell them through
-    `value_to_node`; refusing here is what keeps a fold that overflows from emitting a node whose text
-    does not denote its value.
+    Spell a Number as a literal, or refuse with `None` when it has none. `NaN` is the only Number
+    without one, and a caller that can produce it must spell it through `value_to_node`.
 
-    The spelling is `Number.prototype.toString` with one deliberate deviation: that algorithm reads
-    the mathematical value, so it prints negative zero as `0`, but a literal `0` denotes *positive*
-    zero and the two are distinguishable — `1 / -0` is `-Infinity`. Negative zero is therefore
-    spelled `-0`. That spelling, like the one every other negative value gets, is a negation applied
-    to a literal rather than a literal, so the node binds like the unary operator it starts with.
-    That is a fact about the spelling, which `refinery.lib.scripts.js.precedence` therefore reads
-    from the `raw` rather than from the class.
+    The infinities do have one. ECMA-262 defines the mathematical value of a decimal literal and then
+    rounds it to the nearest Number, and a value too large to round to a finite one rounds to the
+    infinity — so `1e999` is a numeric literal denoting `+Infinity` exactly as `1` is one denoting
+    one. That matters because the alternative spelling, the identifier `Infinity`, is an ordinary
+    global binding that the program being deobfuscated may have rebound, whereas a literal denotes
+    its value in every scope.
+
+    The spelling is otherwise `Number.prototype.toString`, with one deliberate deviation: that
+    algorithm reads the mathematical value, so it prints negative zero as `0`, but a literal `0`
+    denotes *positive* zero and the two are distinguishable — `1 / -0` is `-Infinity`. Negative zero
+    is therefore spelled `-0`. That spelling, like `-1e999` and the one every other negative value
+    gets, is a negation applied to a literal rather than a literal, so the node binds like the unary
+    operator it starts with. That is a fact about the spelling, which
+    `refinery.lib.scripts.js.precedence` therefore reads from the `raw` rather than from the class.
     """
     value = to_js_number(value)
-    if not math.isfinite(value):
+    if value != value:
         return None
+    if value == float('inf'):
+        return JsNumericLiteral(value=value, raw='1e999')
+    if value == float('-inf'):
+        return JsNumericLiteral(value=value, raw='-1e999')
     if is_negative_zero(value):
         return JsNumericLiteral(value=value, raw='-0')
     return JsNumericLiteral(value=value, raw=js_number_to_string(value))
@@ -662,8 +671,14 @@ def extract_literal_value(node: Node) -> tuple[bool, LiteralValue]:
     """
     Extract a Python value from a literal AST node. Returns `(True, value)` on success or
     `(False, None)` when the node is not a recognized literal form. Handles string, numeric,
-    boolean, null literals, `void expr`, negative numerics, `!0`/`!1`, and array expressions
-    where all elements are themselves literals.
+    boolean, null literals, `void expr`, negative numerics, `!0`/`!1`, `0 / 0`, and array
+    expressions where all elements are themselves literals.
+
+    The two forms that are operator expressions rather than literals, `void 0` and `0 / 0`, are here
+    because they are what `undefined` and `NaN` have instead of a literal: an expression built from
+    an operator, which no scope can rebind, rather than from one of the global names, which any
+    scope can. Recognizing them is what lets those two values survive a round trip through the tree,
+    and this must stay paired with `value_to_node`, its declared inverse.
     """
     if isinstance(node, JsStringLiteral):
         return True, node.value
@@ -682,6 +697,14 @@ def extract_literal_value(node: Node) -> tuple[bool, LiteralValue]:
             return True, node.operand.value
         if node.operator == '!' and isinstance(node.operand, JsNumericLiteral):
             return True, not bool(node.operand.value)
+    if isinstance(node, JsBinaryExpression) and node.operator == '/':
+        if (
+            isinstance(node.left, JsNumericLiteral)
+            and isinstance(node.right, JsNumericLiteral)
+            and node.left.value == 0
+            and node.right.value == 0
+        ):
+            return True, float('nan')
     if isinstance(node, JsArrayExpression):
         items: list[LiteralValue] = []
         for el in node.elements:

@@ -2694,7 +2694,7 @@ class TestNumericLiteralsAreDoubles(TestBase):
         Negative zero prints as `0` and is `=== 0`, so neither witnesses it. Its reciprocal does:
         `1 / -0` is `-Infinity` where `1 / 0` is `Infinity`.
         """
-        self._folds_to('console.log(1 / (0 * -1));', 'console.log(1 / -0);')
+        self._folds_to('console.log(1 / (0 * -1));', 'console.log(-1e999);')
 
     def test_bitwise_operators_coerce_an_over_precise_literal_through_its_double(self):
         """
@@ -2970,7 +2970,7 @@ class TestNumericLiteralsAreDoubles(TestBase):
         self._folds_to(
             "console.log(1 / Number('-0'), Object.is(Number('-0'), -0),"
             " 1 / parseInt('-0'), Object.is(parseInt('-0'), -0));",
-            'console.log(1 / -0, Object.is(-0, -0), 1 / -0, Object.is(-0, -0));')
+            'console.log(-1e999, Object.is(-0, -0), -1e999, Object.is(-0, -0));')
 
     def test_unary_plus_on_a_string_that_names_negative_zero_folds_to_negative_zero(self):
         """
@@ -2980,7 +2980,7 @@ class TestNumericLiteralsAreDoubles(TestBase):
         self._folds_to(
             "var f = function () { return +'-0'; };"
             ' console.log(1 / f(), Object.is(f(), -0));',
-            'console.log(1 / -0, Object.is(-0, -0));')
+            'console.log(-1e999, Object.is(-0, -0));')
 
     def test_numeric_coercion_refuses_the_decimal_digits_only_python_reads(self):
         """

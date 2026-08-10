@@ -46,8 +46,11 @@ class TestBasicSimplifications(TestJsDeobfuscator):
     def test_arithmetic_unsigned_right_shift(self):
         self.assertEqual('4294967295;', self._simplify('(-1) >>> 0;'))
 
-    def test_arithmetic_division_by_zero_unchanged(self):
-        self.assertEqual('1 / 0;', self._simplify('1 / 0;'))
+    def test_arithmetic_division_by_zero(self):
+        self.assertEqual('1e999;', self._simplify('1 / 0;'))
+
+    def test_arithmetic_zero_divided_by_zero_unchanged(self):
+        self.assertEqual('0 / 0;', self._simplify('0 / 0;'))
 
     def test_tuple_all_literals(self):
         self.assertEqual("'c';", self._simplify("'a', 'b', 'c';"))

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import inspect
 import math
+import struct
+import unittest
 
+from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.analysis.model import build_semantic_model
@@ -10,10 +13,13 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     JS_NULL,
     JsBuffer,
     binding_has_references,
+    extract_literal_value,
     js_parse_int,
+    make_numeric_literal,
     make_string_literal,
     value_to_node,
 )
+from refinery.lib.scripts.js.model import JsExpressionStatement
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
@@ -181,3 +187,165 @@ class TestJsParseInt(TestJsDeobfuscator):
         self.assertEqual(5.0, self._parses('\uFEFF5'))
         self.assertEqual(5.0, self._parses('5\uFEFF'))
         self.assertEqual(18.0, self._parses('\uFEFF\uFEFF12\uFEFF', 16))
+
+
+JS_NUMBERS = [
+    0.0,
+    -0.0,
+    1.0,
+    -1.0,
+    42.0,
+    -42.0,
+    0.1,
+    0.30000000000000004,
+    -1.5,
+    4.35,
+    0.3333333333333333,
+    9007199254740992.0,
+    9007199254740994.0,
+    1152921504606846976.0,
+    1e16,
+    1.2345678901234568e17,
+    1e20,
+    9.999999999999999e20,
+    1e21,
+    -1e21,
+    1.2345678901234568e29,
+    1e-6,
+    1e-7,
+    1.5e-7,
+    2.220446049250313e-16,
+    2.2250738585072014e-308,
+    1e-323,
+    5e-324,
+    -5e-324,
+    1.7976931348623157e308,
+    float('inf'),
+    float('-inf'),
+]
+"""
+A sample of the JavaScript Number domain, weighted towards the members whose spelling is least
+obvious: the two zeros, which nothing but their sign tells apart; the integers past 2^53, where a
+double has fewer digits than its exact value; both boundaries where the language switches between
+positional and exponential notation, and the one where Python switches at a different magnitude; the
+smallest subnormals; and the infinities, which no arithmetic but a decimal literal reaches by
+rounding.
+"""
+
+NUMBER_BITS_IN_NODE = inspect.cleandoc("""
+    const view = new DataView(new ArrayBuffer(8));
+    function bits(x) {
+      view.setFloat64(0, x);
+      return view.getBigUint64(0).toString(16).padStart(16, '0');
+    }
+""")
+
+
+class TestNumericLiteralRoundTrip(TestJsDeobfuscator):
+    """
+    `make_numeric_literal` writes a Number as source text and `extract_literal_value` reads source
+    text back into a value; the module declares the two inverses of each other. Whether they are is
+    decided by what the text means, and neither of them may answer that: every spelling below goes
+    to Node, which reports the 64 bits of the Number it read, and through `JsParser`, so that the
+    reader is handed the tree the text really produces rather than the one the writer built.
+    """
+
+    def _bits(self, value: float) -> str:
+        return struct.pack('>d', value).hex()
+
+    def _spelling(self, value: int | float) -> str:
+        node = make_numeric_literal(value)
+        if node is None:
+            self.fail(F'{value!r} was refused a spelling')
+        return JsSynthesizer().convert(node)
+
+    def _spellings(self) -> list[tuple[float, str]]:
+        return [(value, self._spelling(value)) for value in JS_NUMBERS]
+
+    def _node_reads(self, expressions: list[str]) -> list[str]:
+        """
+        The 64 bits of the Number Node reads from each of *expressions*, as hexadecimal. A bit
+        pattern is the whole Number and nothing besides it, which is what makes it the thing to
+        compare: it separates the two zeros, and it is not a printed form, so no spelling is ever
+        measured against a reading of itself.
+        """
+        script = [NUMBER_BITS_IN_NODE]
+        script.extend(F'console.log(bits({expression}));' for expression in expressions)
+        output, error = behavior('\n'.join(script))
+        self.assertIsNone(error, 'node.js refused the spellings')
+        lines = output.split()
+        self.assertEqual(len(expressions), len(lines))
+        return lines
+
+    def _reader_reads(self, text: str) -> str:
+        script = JsParser(F'{text};').parse()
+        statement = script.body[0]
+        if not isinstance(statement, JsExpressionStatement) or statement.expression is None:
+            self.fail(F'{text!r} did not parse as a single expression')
+        recognized, value = extract_literal_value(statement.expression)
+        if not recognized or not isinstance(value, float):
+            return F'refused: {value!r}'
+        return self._bits(value)
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_every_spelling_denotes_the_number_it_was_asked_to_spell(self):
+        spelled = self._spellings()
+        reads = self._node_reads([F'({text})' for _, text in spelled])
+        self.assertEqual(
+            {text: self._bits(value) for value, text in spelled},
+            {text: read for (_, text), read in zip(spelled, reads)},
+        )
+
+    def test_every_spelling_reads_back_as_the_number_it_was_asked_to_spell(self):
+        spelled = self._spellings()
+        self.assertEqual(
+            {text: self._bits(value) for value, text in spelled},
+            {text: self._reader_reads(text) for _, text in spelled},
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_every_spelling_denotes_the_same_number_where_the_value_names_are_rebound(self):
+        """
+        `NaN`, `Infinity` and `undefined` are ordinary identifiers that any scope may bind to
+        something else, so a spelling that reached a Number through one of those names would mean
+        whatever the scope supplies. A literal denotes its value in every scope, which is what this
+        asks of each spelling by reading it inside a function that binds all three to other numbers.
+        """
+        spelled = self._spellings()
+        reads = self._node_reads([
+            F'(function (NaN, Infinity, undefined) {{ return ({text}); }})(1, 2, 3)'
+            for _, text in spelled
+        ])
+        self.assertEqual(
+            {text: self._bits(value) for value, text in spelled},
+            {text: read for (_, text), read in zip(spelled, reads)},
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_an_integer_is_spelled_as_the_number_its_own_digits_denote(self):
+        """
+        A Python integer is not a Number, and what it names is what its digits round to: past 2^53 a
+        different integer, and past the double range an infinity. Those digits are themselves a
+        JavaScript numeric literal, so what Node reads from them is what the spelling has to agree
+        with, without a Python-side Number entering the comparison at all.
+        """
+        integers = [
+            2 ** 53 + 1,
+            2 ** 60,
+            -(2 ** 60),
+            10 ** 400,
+            -(10 ** 400),
+        ]
+        digits = self._node_reads([F'({integer})' for integer in integers])
+        spellings = self._node_reads([F'({self._spelling(integer)})' for integer in integers])
+        self.assertEqual(
+            {str(integer): read for integer, read in zip(integers, digits)},
+            {str(integer): read for integer, read in zip(integers, spellings)},
+        )
+
+    def test_the_one_number_with_no_literal_is_refused(self):
+        """
+        Every other Number has a literal that denotes it, the infinities included. NaN has none, so
+        the writer answers nothing rather than a spelling that would mean something else.
+        """
+        self.assertIsNone(make_numeric_literal(float('nan')))
