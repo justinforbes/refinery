@@ -13,13 +13,14 @@ from refinery.lib.scripts import Node, reattach
 from refinery.lib.scripts.ps1.analysis.effects import is_fault_free, may_be_dropped
 from refinery.lib.scripts.ps1.analysis.values import (
     apply,
+    apply_unary,
     collect_byte_array,
-    collect_int_arguments,
+    collect_integers,
+    integer_of,
     is_truthy,
     make_string_literal,
     read,
     render,
-    unwrap_integer,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.ast import get_body, get_member_name, string_value, unwrap_parens
@@ -263,19 +264,16 @@ def _variable_string_to_expandable(
 
 
 def _resolve_index_values(index: Expression) -> int | list[int] | None:
-    n = unwrap_integer(index)
-    if n is not None:
-        return n.value
+    """
+    The index or indices an expression names. A scalar and a collection are told apart because a
+    read at one index yields the element and a read at several yields a collection of them, so the
+    two are different values rather than one of length one.
+    """
+    single = integer_of(read(index))
+    if single is not None:
+        return single
     array = unwrap_to_array_literal(index)
-    if array is not None:
-        result: list[int] = []
-        for elem in array.elements:
-            n = unwrap_integer(elem)
-            if n is None:
-                return None
-            result.append(n.value)
-        return result
-    return None
+    return None if array is None else collect_integers(array)
 
 
 class _Selection(NamedTuple):
@@ -534,9 +532,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if op == '-join':
             return self._handle_unary_join(node)
         if op == '-bnot':
-            n = unwrap_integer(node.operand)
-            if n is not None:
-                return Ps1IntegerLiteral(raw=str(~n.value))
+            return _folded(apply_unary(op, read(node.operand)))
         if op in ('-not', '!'):
             truth = is_truthy(node.operand)
             if truth is not None:
@@ -571,11 +567,11 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         self.generic_visit(node)
         if isinstance(node.parent, Ps1RangeExpression):
             return None
-        lower = unwrap_integer(node.start)
-        upper = unwrap_integer(node.end)
-        if lower is None or upper is None:
+        a = integer_of(read(node.start))
+        b = integer_of(read(node.end))
+        if a is None or b is None:
             return None
-        step = 1 if (b := upper.value) >= (a := lower.value) else -1
+        step = 1 if b >= a else -1
         count = abs(b - a) + 1
         if count > _MAX_RANGES_EXPAND:
             return None
@@ -764,7 +760,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
                     stmt = arg.body[0]
                     if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression:
                         arg = stmt.expression
-                int_values = collect_int_arguments(arg)
+                int_values = collect_integers(arg)
                 if int_values is not None:
                     try:
                         raw_bytes = bytearray(int_values)
@@ -851,9 +847,9 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if bounds is not None:
             return self._fold_convert_int(node, bounds)
         if lower == 'tochar':
-            n = unwrap_integer(node.arguments[0]) if len(node.arguments) == 1 else None
-            if n is not None and 0 <= n.value <= 0xFFFF:
-                return make_string_literal(chr(n.value))
+            n = integer_of(read(node.arguments[0])) if len(node.arguments) == 1 else None
+            if n is not None and 0 <= n <= 0xFFFF:
+                return make_string_literal(chr(n))
         return None
 
     def _fold_convert_int(
@@ -861,9 +857,9 @@ class Ps1ConstantFolding(WorldAwareTransformer):
     ) -> Expression | None:
         lo, hi = bounds
         if len(node.arguments) == 1:
-            n = unwrap_integer(node.arguments[0])
-            if n is not None and lo <= n.value <= hi:
-                return Ps1IntegerLiteral(raw=str(n.value))
+            n = integer_of(read(node.arguments[0]))
+            if n is not None and lo <= n <= hi:
+                return Ps1IntegerLiteral(raw=str(n))
             sv = string_value(node.arguments[0])
             if sv is not None:
                 sv = sv.strip()
@@ -875,10 +871,10 @@ class Ps1ConstantFolding(WorldAwareTransformer):
                     return Ps1IntegerLiteral(raw=str(value))
         elif len(node.arguments) == 2:
             sv = string_value(node.arguments[0])
-            base_int = unwrap_integer(node.arguments[1])
-            if sv is not None and base_int is not None and base_int.value in (2, 8, 10, 16):
+            base_int = integer_of(read(node.arguments[1]))
+            if sv is not None and base_int in (2, 8, 10, 16):
                 try:
-                    value = int(sv, base_int.value)
+                    value = int(sv, base_int)
                 except (ValueError, OverflowError):
                     return None
                 if lo <= value <= hi:
@@ -895,15 +891,15 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         offset = 0
         length = len(data)
         if len(node.arguments) >= 2:
-            n = unwrap_integer(node.arguments[1])
+            n = integer_of(read(node.arguments[1]))
             if n is None:
                 return None
-            offset = n.value
+            offset = n
         if len(node.arguments) >= 3:
-            n = unwrap_integer(node.arguments[2])
+            n = integer_of(read(node.arguments[2]))
             if n is None:
                 return None
-            length = n.value
+            length = n
         if offset < 0 or length < 0 or offset + length > len(data):
             return None
         segment = data[offset:offset + length]
@@ -960,14 +956,19 @@ class Ps1ConstantFolding(WorldAwareTransformer):
 
     @staticmethod
     def _handle_string_multiply(node: Ps1BinaryExpression) -> Expression | None:
-        # PowerShell `*` is governed by the left operand: only `string * int` repeats the string.
+        """
+        Replication, which `*` performs when its *left* operand is a String and nothing else.
+
+        A negative count is a throw and not an empty string. Measured: `'ab' * -1` terminates the
+        script with an `ArgumentOutOfRangeException`, and so does `'ab' * 0xFFFFFFFF`, whose count
+        is the Int32 -1. Clamping it to zero answered `''` for both, which is the direction that
+        turns a script that stopped into one that carries on — and it only became reachable once
+        the count was read as the number its spelling names.
+        """
         s = string_value(node.left) if node.left else None
-        n = unwrap_integer(node.right)
-        if s is None or n is None:
+        count = integer_of(read(node.right))
+        if s is None or count is None or count < 0:
             return None
-        count = n.value
-        if count < 0:
-            count = 0
         if len(s) * count > _MAX_STRING_EXPAND:
             return None
         return make_string_literal(s * count)

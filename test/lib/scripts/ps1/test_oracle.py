@@ -954,6 +954,60 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t-256',
             'OUT\tSystem.Int32\t-256',
         ),
+    '$t = -bnot [byte]5; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t-6',
+            'OUT\tSystem.Int32\t-6',
+        ),
+    '$t = -bnot [uint32]7; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.UInt32\t4294967288',
+            'OUT\tSystem.UInt32\t4294967288',
+        ),
+    '$t = -bnot 1L; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int64\t-2',
+            'OUT\tSystem.Int64\t-2',
+        ),
+    '$t = -bnot 1.5; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t-3',
+            'OUT\tSystem.Int32\t-3',
+        ),
+    '$t = -bnot $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t-1',
+            'OUT\tSystem.Int32\t-1',
+        ),
+    "$t = -bnot '5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t-6',
+            'OUT\tSystem.Int32\t-6',
+        ),
+    "$t = -bnot 'abc'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    '$t = -bnot [char]65; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t-66',
+            'OUT\tSystem.Int32\t-66',
+        ),
+    '$t = -bnot $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t-2',
+            'OUT\tSystem.Int32\t-2',
+        ),
+    '$t = -bnot 10d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t-11',
+            'OUT\tSystem.Int32\t-11',
+        ),
+    '$t = -bnot 3000000000.0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.UInt32\t1294967295',
+            'OUT\tSystem.UInt32\t1294967295',
+        ),
+    "$t = 'ab' * 0xFFFFFFFF; Write-Output (,$t); Write-Output $t":
+        ('THROW\tSystem.ArgumentOutOfRangeException\tSystem.ArgumentOutOfRangeException',),
     'Write-Output "abc".Length':
         ('OUT\tSystem.Int32\t3',),
     "Write-Output 'abc'.Length":
@@ -1413,10 +1467,6 @@ TYPE_DEFECTS: dict[str, str] = {
         'Char key as a String and the lookup succeeds.',
     "$h = @{}; $h['A'] = 1; $t = $h[[char]65]; Write-Output (,$t)":
         'The same, with the Char in the lookup rather than in the key.',
-    '$t = -bnot 0xFFFFFFFF; Write-Output (,$t); Write-Output $t':
-        'The one row here whose value is wrong rather than its spelling. -bnot is not asked of the '
-        'measured grid at all: 5.1 complements the Int32 the hex pattern names, which is -1, and '
-        'answers 0, while the unit complements 4294967295 and answers an Int64.',
     '$s = 0xFF; $t = "$s"; Write-Output (,$t); Write-Output $t':
         'A variable inside an expandable string contributes the value it holds rendered as text, '
         'which for the Int32 255 is `255`. Substituting the literal writes its source spelling '
@@ -1430,8 +1480,6 @@ TYPE_DEFECTS: dict[str, str] = {
         'being asked for.',
     '$t = [char]65535; Write-Output (,$t); Write-Output $t':
         'The same erasure at the top of the Char range.',
-    '$t = [char]$null; Write-Output (,$t); Write-Output $t':
-        'The same erasure over the absent value, which a cast to Char makes the NUL character of.',
     '$t = [int][char]65; Write-Output (,$t); Write-Output $t':
         'The inner Char is spelled as a String, and 5.1 answers 65 for a Char cast to Int32 while '
         "`[int]'A'` throws. The erasure turns a value into a throw.",

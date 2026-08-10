@@ -8,13 +8,13 @@ import string
 from refinery.lib.scripts import Transformer, canonical
 from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Outcome,
-    collect_int_arguments,
+    collect_integers,
     convert,
+    integer_of,
     make_string_literal,
     read,
     render,
     text_of,
-    unwrap_integer,
 )
 from refinery.lib.scripts.ps1.data import named_type, resolve_type
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
@@ -110,10 +110,10 @@ class Ps1TypeCasts(Transformer):
         this arm would erase *that* on the next pass. `[char]'A'` is left alone today and would
         become a wrong answer; the arm is all of one piece and moves whole.
         """
-        number = unwrap_integer(node.operand)
-        if number is None or not 0 <= number.value <= 0xFFFF:
+        number = integer_of(read(node.operand))
+        if number is None or not 0 <= number <= 0xFFFF:
             return None
-        return make_string_literal(chr(number.value))
+        return make_string_literal(chr(number))
 
     @staticmethod
     def _named_type(node: Ps1CastExpression, target) -> Expression | None:
@@ -151,11 +151,11 @@ class Ps1TypeCasts(Transformer):
         `Char[]` and this writes a String, so the container type and the element type are both lost.
         The conversion grid was captured over scalar targets only, so the domain has no cell to read
         for an array one and cannot answer it at all; the capture that adds the column retires this
-        with `collect_int_arguments`.
+        with `collect_integers`.
         """
         if target != _CHAR_ARRAY or node.operand is None:
             return None
-        numbers = collect_int_arguments(unwrap_single_paren(node.operand))
+        numbers = collect_integers(unwrap_single_paren(node.operand))
         if numbers is None:
             return None
         try:

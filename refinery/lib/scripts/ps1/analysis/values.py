@@ -120,22 +120,6 @@ def is_truthy(node: Node | None) -> bool | None:
     return None
 
 
-def unwrap_integer(node: Node | None) -> Ps1IntegerLiteral | None:
-    """
-    Peel parentheses and unary negation to extract an integer literal, or return `None`.
-    """
-    node = unwrap_parens(node) if isinstance(node, Expression) else node
-    if isinstance(node, Ps1IntegerLiteral):
-        return node
-    if is_builtin_variable(node, {'null'}):
-        return Ps1IntegerLiteral(raw='0')
-    if isinstance(node, Ps1UnaryExpression) and node.operator == '-':
-        inner = unwrap_parens(node.operand) if isinstance(node.operand, Expression) else node.operand
-        if isinstance(inner, Ps1IntegerLiteral):
-            return Ps1IntegerLiteral(raw=str(-inner.value))
-    return None
-
-
 def unwrap_to_array_literal(node: Node) -> Ps1ArrayLiteral | None:
     """
     Unwrap parentheses and array expressions to find an inner
@@ -168,43 +152,42 @@ def collect_typed_arguments(
     return None
 
 
-def extract_int(node: Expression) -> int | None:
-    return node.value if isinstance(node, Ps1IntegerLiteral) else None
+def collect_integers(node: Node | None) -> list[int] | None:
+    """
+    The integers an expression names, as a list, or `None` where it names anything else. A scalar is
+    a list of one, which is what a caller reading a command's arguments wants: PowerShell passes one
+    value and a collection of one to the same parameter.
 
-
-def collect_int_arguments(node: Expression) -> list[int] | None:
-    if isinstance(node, Ps1ParenExpression) and node.expression is not None:
-        return collect_int_arguments(node.expression)
-    return collect_typed_arguments(node, extract_int)
+    What counts as an integer is `integer_of`, so a numeral whose spelling makes it something else
+    is not one and neither is a `$null`: the old reader here answered the *magnitude* of a
+    hexadecimal pattern, so `0xFFFFFFFF` reached its callers as 4294967295 where the value is -1.
+    """
+    fact = read(node)
+    elements = fact.payload if isinstance(fact, Ps1Constant) and fact.type == _OBJECT_ARRAY else None
+    if elements is None:
+        single = integer_of(fact)
+        return None if single is None else [single]
+    if not isinstance(elements, tuple):
+        return None
+    numbers: list[int] = []
+    for element in elements:
+        number = integer_of(element)
+        if number is None:
+            return None
+        numbers.append(number)
+    return numbers
 
 
 def collect_byte_array(node: Expression) -> bytes | None:
     """
-    Extract an integer array from `node` and convert to `bytes`. Handles
-    `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral`,
-    `refinery.lib.scripts.ps1.model.Ps1ArrayExpression`, and parenthesized wrappers.
+    The bytes an expression names, or `None` where it names something that is not a list of them.
+    A number outside a byte is not one, which is a refusal rather than a truncation.
     """
-    array = unwrap_to_array_literal(node)
-    if array is not None:
-        node = array
-    elif isinstance(node, Ps1ArrayExpression):
-        items: list[int] = []
-        for stmt in node.body:
-            if not isinstance(stmt, Ps1ExpressionStatement) or stmt.expression is None:
-                return None
-            value = extract_int(stmt.expression)
-            if value is None:
-                return None
-            items.append(value)
-        try:
-            return bytes(items)
-        except (ValueError, OverflowError):
-            return None
-    values = collect_int_arguments(node)
-    if values is None:
+    numbers = collect_integers(node)
+    if numbers is None:
         return None
     try:
-        return bytes(values)
+        return bytes(numbers)
     except (ValueError, OverflowError):
         return None
 
@@ -528,6 +511,21 @@ def type_of(fact: Ps1Fact) -> Ps1TypeName | None:
     if isinstance(fact, (Ps1Typed, Ps1Constant)):
         return fact.type
     return None
+
+
+def integer_of(fact: Ps1Fact) -> int | None:
+    """
+    The integer a fact names, or `None` for a fact that names anything else. This is what a caller
+    holding a fact asks instead of reaching for the payload, and what it refuses is the point: a
+    `Boolean` carries a Python `int` and is not one, a `$null` is an absent value rather than a
+    zero, and a `Double` or a `Decimal` that happens to be whole is still not an integer here — a
+    caller that wants the number one of those *converts* to is asking `convert`, which is where the
+    rounding rule lives.
+    """
+    if not isinstance(fact, Ps1Constant) or fact.type not in _INTEGER_RANGE:
+        return None
+    payload = fact.payload
+    return None if isinstance(payload, bool) or not isinstance(payload, int) else payload
 
 
 def text_of(fact: Ps1Fact) -> str | None:
@@ -961,6 +959,70 @@ def apply(operator: str, left: Ps1Fact, right: Ps1Fact) -> Ps1Outcome:
             if stamped is not UNKNOWN:
                 return Ps1Outcome(False, stamped)
     return _from_binary_cell(cell, _spans(left, right))
+
+
+#: What `-bnot` complements at, keyed by the type of the operand it is given. The complement happens
+#: at a width and keeps that width's type, and an operand that *has* an integer width keeps it,
+#: floored at `Int32`: measured, `-bnot [byte]5` is the Int32 -6, `-bnot [uint32]7` the UInt32
+#: 4294967288 and `-bnot 1L` the Int64 -2.
+#:
+#: **For an operand with no integer width of its own this is a floor and not the rule.** A `Char`, a
+#: `Double`, a `Single`, a `Decimal`, a `String`, a `Boolean` and `$null` are converted first, and
+#: 5.1 picks the width from the *value*: `-bnot 7.0` is the Int32 -8, but `-bnot 3000000000.0` is
+#: the **UInt32** 1294967295 and `-bnot 5000000000.0` the Int64 -5000000001, each the narrowest
+#: width that holds the number. Naming `Int32` here is safe because it is the narrowest rung: a
+#: value that does not fit one makes `convert` throw and `apply_unary` refuse, so what the floor
+#: costs is a fold and never an answer. Completing it is scheduled; see the plan.
+#:
+#: A type absent here is one nothing measured a width for. A collection is not missing but refused:
+#: `-bnot @(1, 2)` throws, and so does `-bnot 'abc'`, which is the conversion throwing rather than
+#: the operator.
+_BNOT_WIDTH: dict[Ps1TypeName, Ps1TypeName] = {
+    _BOOLEAN: _INT32,
+    _BYTE: _INT32,
+    _CHAR: _INT32,
+    _DECIMAL: _INT32,
+    _DOUBLE: _INT32,
+    _INT16: _INT32,
+    _INT32: _INT32,
+    _INT64: _INT64,
+    _SBYTE: _INT32,
+    _STRING: _INT32,
+    _UINT16: _INT32,
+    _UINT32: _UINT32,
+    _UINT64: _UINT64,
+    _VOID: _INT32,
+}
+
+
+def apply_unary(operator: str, operand: Ps1Fact) -> Ps1Outcome:
+    """
+    What `<operator> operand` produces, for the one unary operator that produces a number.
+
+    It is not read from the measured grid, because the capture is over binary applications only; the
+    table it reads instead is `_BNOT_WIDTH`, measured the same way and for the same reason. What
+    makes that safe where a rule written out usually is not: the *value* is a complement at a width
+    the operand converts to, and the conversion is `convert`, so the only thing stated here is which
+    width — which is exactly what was measured.
+
+    `-not` is absent because it is not this question: it negates a truth value, which `convert` to
+    a `Boolean` already answers. Unary minus is absent because the parser puts a sign written
+    against a numeral inside the numeral, so what would reach here is `- 5` with a space, and what
+    that does to a value nothing measured.
+    """
+    if operator.lower() != '-bnot':
+        return NOTHING
+    source = _grid_type(operand)
+    width = None if source is None else _BNOT_WIDTH.get(source)
+    if width is None:
+        return NOTHING
+    converted = convert(operand, width)
+    number = integer_of(converted.value)
+    if converted.may_throw or number is None:
+        return NOTHING
+    low, high = _INTEGER_RANGE[width]
+    complement = ~number
+    return Ps1Outcome(False, Ps1Constant(width, complement % (high + 1) if low == 0 else complement))
 
 
 def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:

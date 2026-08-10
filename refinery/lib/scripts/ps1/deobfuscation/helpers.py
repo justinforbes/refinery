@@ -14,8 +14,9 @@ from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.analysis.values import (
     collect_typed_arguments,
+    integer_of,
     make_string_literal,
-    unwrap_integer,
+    read,
 )
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
@@ -99,10 +100,8 @@ def extract_format_argument(node: Expression) -> str | int | None:
     Extract a format-string argument value: integers are returned as `int` so that numeric format
     specifiers (`X`, `D`, etc.) can be applied; everything else is returned as `str`.
     """
-    result = unwrap_integer(node)
-    if result is not None:
-        return result.value
-    return string_value(node)
+    number = integer_of(read(node))
+    return string_value(node) if number is None else number
 
 
 def collect_format_arguments(node: Expression) -> list[str | int] | None:

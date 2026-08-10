@@ -23,7 +23,9 @@ from refinery.lib.scripts.ps1.analysis.model import (
     Ps1OccurrenceRole,
 )
 from refinery.lib.scripts.ps1.analysis.values import (
+    integer_of,
     make_string_literal,
+    read,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.ast import (
@@ -474,14 +476,14 @@ class Ps1ConstantInlining(Transformer):
                 key = _candidate_key(var)
                 if key is None or key not in table.values or node.index is None:
                     continue
-                if isinstance(node.index, Ps1IntegerLiteral):
+                idx = integer_of(read(node.index))
+                if idx is not None:
                     array = array_literals[key]
                     if array is None:
                         continue
-                    idx = node.index.value
                     if not 0 <= idx < len(array.elements):
                         continue
-                    ref_len = 1 + len(var.name) + 1 + len(node.index.raw) + 1
+                    ref_len = 1 + len(var.name) + 1 + len(synth.convert(node.index)) + 1
                     cache_key = (key, idx)
                     if cache_key not in elem_lengths:
                         elem_lengths[cache_key] = len(synth.convert(array.elements[idx]))
@@ -543,7 +545,8 @@ class Ps1ConstantInlining(Transformer):
         const_value = state.value_at(var, key)
         if const_value is None:
             return
-        if not isinstance(node.index, Ps1IntegerLiteral):
+        idx = integer_of(read(node.index))
+        if idx is None:
             if key in state.blocked or not isinstance(const_value, Ps1StringLiteral):
                 return
             replacement = _clone_constant(const_value)
@@ -551,7 +554,6 @@ class Ps1ConstantInlining(Transformer):
                 self.mark_changed()
                 state.installed(var, replacement)
             return
-        idx = node.index.value
         if isinstance(const_value, Ps1StringLiteral):
             text = const_value.value
             if not 0 <= idx < len(text):

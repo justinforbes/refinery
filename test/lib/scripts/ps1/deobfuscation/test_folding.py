@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -469,14 +470,11 @@ class TestPs1RangeExpressionFolding(TestPs1):
 class TestPs1UnaryOperatorFolding(TestPs1):
 
     def test_bnot_integer(self):
-        result = self._deobfuscate('-bnot 0')
-        self.assertIn('-1', result)
-        self.assertNotIn('bnot', result.lower())
+        self.assertEqual(self._apply('$x = -bnot 0', Ps1ConstantFolding), '$x = -1')
 
     def test_bnot_hex(self):
-        result = self._deobfuscate('-bnot 0xFF00')
-        self.assertNotIn('bnot', result.lower())
-        self.assertNotIn('0xFF00', result)
+        # `0xFF00` fills neither width, so it is the Int32 65280 and its complement is -65281.
+        self.assertEqual(self._apply('$x = -bnot 0xFF00', Ps1ConstantFolding), '$x = -65281')
 
     def test_not_zero(self):
         result = self._deobfuscate('-not 0')
@@ -493,6 +491,199 @@ class TestPs1UnaryOperatorFolding(TestPs1):
     def test_bang_false(self):
         result = self._deobfuscate('!$False')
         self.assertIn('$True', result)
+
+
+class TestPs1ComplementIsFoldedAtTheWidthItsOperandTakes(TestPs1):
+    """
+    5.1 converts the operand of `-bnot` and complements the bits at the width the conversion
+    reached, which is not the operand's own type. Measured, `-bnot [byte]5` and `-bnot [char]65` are
+    Int32 -6 and -66, `-bnot 1L` is Int64 -2, and `-bnot [uint32]7` is UInt32 4294967288 — the same
+    bits as -8 and not the same number. So the value that comes back carries a type as much as a
+    number, and the emitted literal has to spell both.
+    """
+
+    def test_a_narrow_integer_operand_widens_to_an_int32(self):
+        self.assertEqual(self._apply('$x = -bnot [byte]5', Ps1ConstantFolding), '$x = -6')
+
+    def test_a_long_operand_stays_a_long(self):
+        self.assertEqual(self._apply('$x = -bnot 1L', Ps1ConstantFolding), '$x = -2L')
+
+    def test_an_unsigned_operand_keeps_its_unsigned_width(self):
+        self.assertEqual(
+            self._apply('$x = -bnot [uint32]7', Ps1ConstantFolding), '$x = [uint32]4294967288')
+
+    def test_an_operand_5_1_converts_to_a_number_is_complemented_at_the_number(self):
+        # Measured: `[int]$null` is 0, `[int]$true` is 1, `[int]'5'` is 5, `[int][char]65` is 65,
+        # `[int]1.5` is 2 and `[int]10d` is 10, and each complement below is that number's.
+        self.assertEqual(self._apply('$x = -bnot $null', Ps1ConstantFolding), '$x = -1')
+        self.assertEqual(self._apply('$x = -bnot $true', Ps1ConstantFolding), '$x = -2')
+        self.assertEqual(self._apply("$x = -bnot '5'", Ps1ConstantFolding), '$x = -6')
+        self.assertEqual(self._apply('$x = -bnot [char]65', Ps1ConstantFolding), '$x = -66')
+        self.assertEqual(self._apply('$x = -bnot 1.5', Ps1ConstantFolding), '$x = -3')
+        self.assertEqual(self._apply('$x = -bnot 10d', Ps1ConstantFolding), '$x = -11')
+
+    def test_a_complement_folded_to_a_negative_number_in_an_argument_is_parenthesized(self):
+        self.assertEqual(
+            self._deobfuscate('$t = -bnot 0xFF00; Write-Output $t'), 'Write-Output (-65281)')
+
+    def test_a_string_that_spells_no_number_is_left_where_it_stands(self):
+        # Measured, `-bnot 'abc'` throws where `-bnot '5'` is -6.
+        self._assertUnchanged("$x = -bnot 'abc'", Ps1ConstantFolding)
+
+    def test_a_real_whose_width_no_measurement_covers_is_left_where_it_stands(self):
+        """
+        Measured, `-bnot 1.5` is an Int32 -3 and `-bnot 3000000000.0` is a UInt32 1294967295: the
+        width follows the magnitude, so an answer keyed on the operand being a Double would be
+        -3000000001 under a type 5.1 never produced here.
+        """
+        self._assertUnchanged('$x = -bnot 3000000000.0', Ps1ConstantFolding)
+
+
+class TestPs1AHexadecimalLiteralIsNegativeWhereverItsNumberIsRead(TestPs1):
+    """
+    `0xFFFFFFFF` is the Int32 -1 on 5.1 and not the magnitude its eight digits spell, measured. Each
+    site below reads a number out of a literal, so each is a place where the same eight digits are
+    one script under the value and a different script under the digits — and where reading the
+    digits would have been off by 4294967296.
+
+    Each assertion pairs the answer 5.1 gives for -1 at that site with the site itself.
+    """
+
+    def test_a_range_counts_from_the_negative_number_the_bound_names(self):
+        self.assertEqual(self._apply('$x = 0xFFFFFFFF..1', Ps1ConstantFolding), '$x = -1, 0, 1')
+
+    def test_an_index_into_an_array_counts_from_the_end(self):
+        self.assertEqual(
+            self._apply('$x = @(10, 20, 30)[0xFFFFFFFF]', Ps1ConstantFolding), '$x = 30')
+
+    def test_an_index_into_a_string_counts_from_the_end(self):
+        # 5.1 selects a Char here, which the fold spells as a one-character String; what this pins
+        # is which character was selected.
+        self.assertEqual(self._apply("$x = 'ABCDE'[0xFFFFFFFF]", Ps1ConstantFolding), "$x = 'E'")
+
+    def test_a_conversion_reads_its_argument_as_the_negative_number(self):
+        self.assertEqual(
+            self._apply('$x = [Convert]::ToInt32(0xFFFFFFFF)', Ps1ConstantFolding), '$x = -1')
+
+    def test_a_conversion_reads_its_base_as_the_number_the_literal_names(self):
+        self.assertEqual(
+            self._apply("$x = [Convert]::ToInt32('7f', 0x10)", Ps1ConstantFolding), '$x = 127')
+
+    def test_a_byte_offset_is_read_as_the_number_the_literal_names(self):
+        self.assertEqual(
+            self._apply(
+                '$x = [BitConverter]::ToString(@(0x41, 0x42, 0x43, 0x44), 0x1, 2)',
+                Ps1ConstantFolding),
+            "$x = '42-43'",
+        )
+
+    def test_a_repeat_count_is_read_as_the_number_the_literal_names(self):
+        self.assertEqual(self._apply("$x = 'ab' * 0x3", Ps1ConstantFolding), "$x = 'ababab'")
+
+    def test_a_format_argument_is_formatted_as_the_negative_number_it_is(self):
+        """
+        The two spellings below name the same eight digits and print differently: .NET writes the
+        Int32 -1 as `-001` under `D3` and the Int64 4294967295 as its ten digits, which is what the
+        magnitude reading of `0xFFFFFFFF` would have produced.
+        """
+        self.assertEqual(
+            self._apply("$x = '{0:D3}' -f 0xFFFFFFFF", Ps1ConstantFolding), "$x = '-001'")
+        self.assertEqual(
+            self._apply("$x = '{0:D3}' -f 4294967295", Ps1ConstantFolding), "$x = '4294967295'")
+
+    def test_a_loop_whose_bound_is_the_negative_number_never_runs(self):
+        """
+        `0 -lt 0xFFFFFFFF` is `0 -lt -1`, which is false, so the body never runs and the whole
+        script is the initializer. Written in decimal the same eight digits are a positive Int64 and
+        the loop runs, which is why the two are asserted together.
+        """
+        self.assertEqual(
+            self._deobfuscate('for ($i = 0; $i -lt 0xFFFFFFFF; $i++) { Write-Output 1 }'),
+            '$i = 0',
+        )
+        self.assertEqual(
+            self._deobfuscate('for ($i = 0; $i -lt 4294967295; $i++) { Write-Output 1 }'),
+            inspect.cleandoc("""
+                for ($i = 0; $i -LT 4294967295; $i++) {
+                  Write-Output 1
+                }
+            """),
+        )
+
+
+class TestPs1AnIntegerSiteDeclinesWhereFivePointOneThrows(TestPs1):
+    """
+    A negative number reaches these sites as an argument 5.1 refuses: a Char has no code point -1,
+    a conversion has no base -16, an array offset of -1 is out of range, and a Byte cannot hold -1 —
+    measured, `[byte]-1` throws. Each expression therefore terminates the script where it stands,
+    and there is no value for a fold to put in its place.
+    """
+
+    def test_a_character_code_no_char_holds_is_not_folded(self):
+        self._assertUnchanged('$x = [Convert]::ToChar(0xFFFFFFFF)', Ps1ConstantFolding)
+
+    def test_a_conversion_base_no_conversion_accepts_is_not_folded(self):
+        # `0xFFFFFFF0` is the Int32 -16, which is not base 16 and is no base at all.
+        self._assertUnchanged("$x = [Convert]::ToInt32('11', 0xFFFFFFF0)", Ps1ConstantFolding)
+
+    def test_a_number_no_byte_holds_is_not_folded_into_a_byte_array(self):
+        self._assertUnchanged('$x = [BitConverter]::ToString(@(0xFFFFFFFF))', Ps1ConstantFolding)
+
+    def test_an_offset_outside_the_array_is_not_folded(self):
+        self._assertUnchanged(
+            '$x = [BitConverter]::ToString(@(0x41, 0x42, 0x43, 0x44), 0xFFFFFFFF, 2)',
+            Ps1ConstantFolding,
+        )
+
+
+class TestPs1AValueThatIsNoIntegerIsNotReadAsOne(TestPs1):
+    """
+    5.1 reaches a number from each of these by converting, and the conversion has a rule of its own:
+    measured, `[int]1.5` is 2 and `[int]2.5` is 2, so it rounds half to even rather than truncating,
+    and `[int]'5'` parses text. None of that is what the value *is*, so a site reading an integer
+    declines and leaves the expression alone.
+
+    What each assertion rules out is the other answer: a repeat count truncated from 1.5 to 1 would
+    emit `'ab'` where 5.1 writes `abab`, and an index truncated from 1.5 to 1 would select 20 where
+    5.1 selects 30.
+    """
+
+    def test_a_real_repeat_count_is_not_truncated_to_a_whole_one(self):
+        self._assertUnchanged("$x = 'ab' * 1.5", Ps1ConstantFolding)
+
+    def test_a_real_index_is_not_truncated_to_a_whole_one(self):
+        self._assertUnchanged('$x = @(10, 20, 30)[1.5]', Ps1ConstantFolding)
+
+    def test_a_real_byte_is_not_truncated_to_a_whole_one(self):
+        self._assertUnchanged('$x = [BitConverter]::ToString(@(1.5))', Ps1ConstantFolding)
+
+    def test_a_real_conversion_base_is_not_truncated_to_a_whole_one(self):
+        self._assertUnchanged("$x = [Convert]::ToInt32('41', 16.0)", Ps1ConstantFolding)
+
+    def test_a_repeat_count_of_a_type_that_holds_no_width_is_left_alone(self):
+        # 5.1 writes '', `ab` and `ababab` for these three, so declining costs those three folds
+        # and is the only answer that cannot invent a fourth.
+        self._assertUnchanged("$x = 'ab' * $null", Ps1ConstantFolding)
+        self._assertUnchanged("$x = 'ab' * $true", Ps1ConstantFolding)
+        self._assertUnchanged("$x = 'ab' * '3'", Ps1ConstantFolding)
+
+
+class TestPs1ReplicatingAStringANegativeNumberOfTimes(TestPs1):
+    """
+    Measured, `'ab' * 0xFFFFFFFF` throws `System.ArgumentOutOfRangeException` and the script writes
+    nothing: 5.1 replicates a string zero or more times and refuses a negative count outright. A
+    fold that answered the empty string would produce a value the input never had, so a `catch`
+    around the line would run in the input and not in the output.
+    """
+
+    def test_a_negative_repeat_count_leaves_the_replication_where_it_stands(self):
+        self._assertUnchanged("$x = 'ab' * 0xFFFFFFFF", Ps1ConstantFolding)
+
+    def test_a_negative_repeat_count_written_in_decimal_is_no_different(self):
+        self._assertUnchanged("$x = 'ab' * -1", Ps1ConstantFolding)
+
+    def test_a_zero_repeat_count_is_the_empty_string_and_not_a_refusal(self):
+        self.assertEqual(self._apply("$x = 'ab' * 0", Ps1ConstantFolding), "$x = ''")
 
 
 class TestPs1ConvertFolding(TestPs1):

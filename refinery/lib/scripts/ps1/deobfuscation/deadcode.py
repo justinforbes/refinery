@@ -19,7 +19,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     output_sink,
 )
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
-from refinery.lib.scripts.ps1.analysis.values import is_truthy, unwrap_integer
+from refinery.lib.scripts.ps1.analysis.values import integer_of, is_truthy, read
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
@@ -190,7 +190,7 @@ def _evaluate_for_condition(node: Ps1ForLoop) -> bool | None:
         return None
     if not isinstance(init.target, Ps1Variable):
         return None
-    init_val = unwrap_integer(init.value)
+    init_val = integer_of(read(init.value))
     if init_val is None:
         return None
     if not isinstance(cond, Ps1BinaryExpression):
@@ -200,8 +200,8 @@ def _evaluate_for_condition(node: Ps1ForLoop) -> bool | None:
         return None
     var_name = init.target.name.lower()
     var_scope = init.target.scope
-    left_val = _resolve_side(cond.left, var_name, var_scope, init_val.value)
-    right_val = _resolve_side(cond.right, var_name, var_scope, init_val.value)
+    left_val = _resolve_side(cond.left, var_name, var_scope, init_val)
+    right_val = _resolve_side(cond.right, var_name, var_scope, init_val)
     if left_val is None or right_val is None:
         return None
     return bool(op_fn(left_val, right_val))
@@ -221,8 +221,7 @@ def _resolve_side(
         and node.scope == var_scope
     ):
         return init_val
-    result = unwrap_integer(node)
-    return result.value if result is not None else None
+    return integer_of(read(node))
 
 
 def _make_int_literal(value: int) -> Ps1IntegerLiteral:
@@ -251,10 +250,10 @@ def _counter_delta(iterator, var_name: str, var_scope: Ps1ScopeModifier) -> int 
     if isinstance(iterator, Ps1AssignmentExpression) and iterator.operator in ('+=', '-='):
         if not _is_counter_variable(iterator.target, var_name, var_scope):
             return None
-        step = unwrap_integer(iterator.value)
+        step = integer_of(read(iterator.value))
         if step is None:
             return None
-        delta = step.value if iterator.operator == '+=' else -step.value
+        delta = step if iterator.operator == '+=' else -step
         return delta or None
     return None
 
@@ -271,13 +270,13 @@ def _counter_condition(cond, var_name: str, var_scope: Ps1ScopeModifier):
     op_fn = COMPARISON_OPS.get(cond.operator.lower())
     if op_fn is None:
         return None
-    left_int = unwrap_integer(cond.left)
-    right_int = unwrap_integer(cond.right)
+    left_int = integer_of(read(cond.left))
+    right_int = integer_of(read(cond.right))
     if _is_counter_variable(cond.left, var_name, var_scope) and right_int is not None:
-        bound = right_int.value
+        bound = right_int
         return (lambda value: bool(op_fn(value, bound))), bound
     if _is_counter_variable(cond.right, var_name, var_scope) and left_int is not None:
-        bound = left_int.value
+        bound = left_int
         return (lambda value: bool(op_fn(bound, value))), bound
     return None
 
@@ -297,7 +296,7 @@ def _simulate_empty_for_terminal(node: Ps1ForLoop) -> tuple[Ps1Variable, int] | 
         return None
     if not isinstance(init.target, Ps1Variable):
         return None
-    init_int = unwrap_integer(init.value)
+    init_int = integer_of(read(init.value))
     if init_int is None:
         return None
     variable = init.target
@@ -315,8 +314,8 @@ def _simulate_empty_for_terminal(node: Ps1ForLoop) -> tuple[Ps1Variable, int] | 
     # the condition never turns false (a wrong-direction step), so the loop is infinite and left
     # intact. The absolute cap prevents pathological samples (e.g. bound = 2 billion) from hanging
     # the pass.
-    cap = min(abs(bound - init_int.value) // abs(delta) + 2, 100_000)
-    value = init_int.value
+    cap = min(abs(bound - init_int) // abs(delta) + 2, 100_000)
+    value = init_int
     iterations = 0
     while predicate(value):
         value += delta

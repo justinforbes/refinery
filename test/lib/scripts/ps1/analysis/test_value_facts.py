@@ -1,8 +1,11 @@
 """
 What `refinery.lib.scripts.ps1.analysis.values.read` makes of an expression, what
-`refinery.lib.scripts.ps1.analysis.values.evaluate` makes of a whole one, and what
-`refinery.lib.scripts.ps1.analysis.values.render` writes a value back as, each held against what a
-real Windows PowerShell 5.1 host made of the same expression. No host is run from here: the
+`refinery.lib.scripts.ps1.analysis.values.evaluate` makes of a whole one, what
+`refinery.lib.scripts.ps1.analysis.values.apply_unary` makes of a complement, what
+`refinery.lib.scripts.ps1.analysis.values.integer_of` and
+`refinery.lib.scripts.ps1.analysis.values.collect_integers` hand a caller that wants a number, and
+what `refinery.lib.scripts.ps1.analysis.values.render` writes a value back as, each held against
+what a real Windows PowerShell 5.1 host made of the same expression. No host is run from here: the
 measurements are the ones already taken and checked in, and this module reads them as data, so the
 expectations below are the host's rather than ours.
 """
@@ -37,17 +40,18 @@ from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Outcome,
     Ps1Typed,
     apply,
+    apply_unary,
     candidate_types,
     collect_byte_array,
+    collect_integers,
     convert,
     evaluate,
-    extract_int,
+    integer_of,
     make_string_literal,
     read,
     render,
     resolve_expression_type,
     type_of,
-    unwrap_integer,
 )
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.ast import in_evaluation_order, string_value
@@ -68,9 +72,11 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CastExpression,
     Ps1ExpressionStatement,
     Ps1HereString,
+    Ps1IntegerLiteral,
     Ps1ParenExpression,
     Ps1StringLiteral,
     Ps1TypeExpression,
+    Ps1UnaryExpression,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
@@ -98,6 +104,7 @@ CHAR = _type('System.Char')
 BYTE = _type('System.Byte')
 SBYTE = _type('System.SByte')
 UINT16 = _type('System.UInt16')
+UINT32 = _type('System.UInt32')
 BOOLEAN = _type('System.Boolean')
 DOUBLE = _type('System.Double')
 DECIMAL = _type('System.Decimal')
@@ -404,6 +411,24 @@ COLLECTION_SHAPES: tuple[str, ...] = (
     '@(@(1, 2), 3)',
 )
 
+#: The .NET types whose values are integers. This is a fact about the framework rather than about
+#: the code under test: each of these is a whole number held in a fixed number of bits, and every
+#: other type a measured row carries is either a number that is not one — a `System.Double` or a
+#: `System.Decimal` — or not a number at all. What makes the distinction load-bearing is that 5.1
+#: reaches a number from any of them, so a caller wanting one from a `System.Boolean` or a
+#: `System.String` is asking for a *conversion*, which is a rule of its own with a rounding and a
+#: parsing question in it.
+INTEGER_TYPES: frozenset[str] = frozenset((
+    'System.Byte',
+    'System.SByte',
+    'System.Int16',
+    'System.UInt16',
+    'System.Int32',
+    'System.UInt32',
+    'System.Int64',
+    'System.UInt64',
+))
+
 #: The measured casts whose target is a type 5.1 spells no literal for. Each expression is
 #: therefore the only way a value of that type can be written back into a script, and the host
 #: stamped the row with the type and the value that spelling produces.
@@ -485,15 +510,20 @@ def _measured_operation(expression: str) -> tuple[str, str]:
     return _printed(OPERATION_ROWS[expression][0])
 
 
-def _measured_operation_fact(expression: str) -> Ps1Fact:
+def _witnessed_fact(measured: tuple[str, str]) -> Ps1Fact:
     """
-    The fact a host printed for a measured operation. A row that reports no type and `<null>` is
-    `$null`, which is a value the operation produced rather than a sign that it produced none.
+    The fact a host printed, from the type and the text one of its witnesses carried. A witness that
+    reports no type and `<null>` is `$null`, which is a value the expression produced rather than a
+    sign that it produced none.
     """
-    name, rendered = _measured_operation(expression)
+    name, rendered = measured
     if (name, rendered) == ('', '<null>'):
         return NULL
     return Ps1Constant(_type(name), _PAYLOADS[name](rendered))
+
+
+def _measured_operation_fact(expression: str) -> Ps1Fact:
+    return _witnessed_fact(_measured_operation(expression))
 
 
 def _applied(expression: str) -> Ps1Outcome:
@@ -531,6 +561,77 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     "'a' + $true",
     "'a' + 1.50d",
 )
+
+
+def _complement(expression: str) -> Ps1UnaryExpression | None:
+    """
+    The complement a measured expression applies, or `None` where it applies none. Selected by the
+    parse and by the operator, because a measured row that writes a unary minus — `- 2147483648`,
+    with the space that keeps the sign out of the numeral — is a different question.
+    """
+    statement = Ps1Parser(F'$t = {expression}').parse().body[0]
+    if not isinstance(statement, Ps1ExpressionStatement):
+        return None
+    assignment = statement.expression
+    if not isinstance(assignment, Ps1AssignmentExpression):
+        return None
+    applied = assignment.value
+    if not isinstance(applied, Ps1UnaryExpression) or applied.operator.lower() != '-bnot':
+        return None
+    return applied
+
+
+def _complement_rows() -> dict[str, tuple[str, ...]]:
+    rows: dict[str, tuple[str, ...]] = {}
+    for row, transcript in TYPE_TRANSCRIPTS.items():
+        match = _OPERATION_ROW.fullmatch(row)
+        if match is None:
+            continue
+        expression = match.group('expression')
+        if _complement(expression) is not None:
+            rows[expression] = transcript
+    return rows
+
+
+#: Every measured complement, keyed by the expression the row writes it in.
+COMPLEMENT_ROWS: dict[str, tuple[str, ...]] = _complement_rows()
+
+#: The measured complements a 5.1 host answered by throwing.
+THROWN_COMPLEMENTS: tuple[str, ...] = tuple(
+    expression for expression, transcript in COMPLEMENT_ROWS.items() if _throws(transcript)
+)
+
+
+def _complemented(expression: str) -> Ps1Outcome:
+    """
+    What `apply_unary` makes of a measured complement, asked exactly as
+    `refinery.lib.scripts.ps1.deobfuscation.folding` asks it: the operator the row spells, over the
+    fact `read` makes of the operand it stands before.
+    """
+    applied = _complement(expression)
+    assert applied is not None, expression
+    return apply_unary(applied.operator, read(applied.operand))
+
+
+def _complement_operand(expression: str) -> Expression | None:
+    """
+    The operand a measured complement stands before.
+    """
+    applied = _complement(expression)
+    assert applied is not None, expression
+    return applied.operand
+
+
+def _measured_complement(expression: str) -> tuple[str, str]:
+    """
+    The .NET type and the rendered value a host printed for a measured complement.
+    """
+    return _printed(COMPLEMENT_ROWS[expression][0])
+
+
+def _measured_complement_fact(expression: str) -> Ps1Fact:
+    return _witnessed_fact(_measured_complement(expression))
+
 
 #: The measured operations whose result a host printed to fewer digits than the value has: 5.1
 #: writes a Double as fifteen significant figures, and `512MB * 512MB` is 2 to the 58th exactly.
@@ -707,12 +808,23 @@ class _Numeral(NamedTuple):
     named: Ps1Constant
 
 
+def _numeral_node(expression: str) -> Ps1IntegerLiteral:
+    """
+    The numeral node a spelling parses to, for the assertions that hold the number a *node* reports
+    against the value the domain names. The node's own reading is weaker on purpose — see
+    `refinery.lib.scripts.ps1.model.Ps1IntegerLiteral`.
+    """
+    node = _slot(expression)
+    assert isinstance(node, Ps1IntegerLiteral), expression
+    return node
+
+
 def _corpus_numerals() -> tuple[_Numeral, ...]:
     numerals: list[_Numeral] = []
     for site in SITES:
-        literal = unwrap_integer(site.node)
-        fact = evaluate(site.node).value
-        if literal is None or not isinstance(fact, Ps1Constant):
+        literal = site.node
+        fact = evaluate(literal).value
+        if not isinstance(literal, Ps1IntegerLiteral) or not isinstance(fact, Ps1Constant):
             continue
         numerals.append(_Numeral(literal.raw, literal.value, fact))
     return tuple(numerals)
@@ -1012,6 +1124,172 @@ class TestPs1FactLattice(unittest.TestCase):
     def test_a_fact_is_a_value_so_one_read_twice_is_one_fact(self):
         self.assertEqual(_read('0xFF'), _read('0xFF'))
         self.assertEqual(len({_read('0xFF'), _read('0xFF'), _read('0xFFL')}), 2)
+
+
+class TestPs1WhatCountsAsAnInteger(unittest.TestCase):
+    """
+    The number a caller wanting an integer is handed. Every site that used to take one off a literal
+    node asks here instead, so a value this answered wrongly would be an index, a repeat count, a
+    range bound, a format argument, a conversion base and a loop bound all at once.
+
+    Two things settle it, and both are the host's: the type it stamped the value with, and the
+    digits it printed. A type outside `INTEGER_TYPES` is a value 5.1 reaches a number *from*, by a
+    conversion with a rounding or a parsing rule in it, and never a number this may hand back.
+    """
+
+    def _integer_rows(self) -> dict[str, Ps1Fact]:
+        """
+        Every measured value whose spelling the domain reads: the numerals, and the casts that are
+        the only way to write a value of a type no literal spells.
+        """
+        rows = {expression: MEASURED[expression] for expression in DECIDED}
+        rows.update({
+            expression: _measured_fact(expression) for expression in CAST_SPELLINGS
+        })
+        return rows
+
+    def test_a_measured_value_the_host_stamped_an_integer_type_is_the_number_it_printed(self):
+        rows = {
+            expression: fact for expression, fact in self._integer_rows().items()
+            if str(type_of(fact)) in INTEGER_TYPES
+        }
+        self.assertEqual(len(rows), 29)
+        self.assertEqual(
+            {expression: integer_of(fact) for expression, fact in rows.items()},
+            {expression: int(_measured(expression)[1]) for expression in rows},
+        )
+
+    def test_a_measured_value_of_any_other_type_names_no_integer(self):
+        others = {
+            expression: fact for expression, fact in self._integer_rows().items()
+            if str(type_of(fact)) not in INTEGER_TYPES
+        }
+        self.assertEqual(
+            sorted({str(type_of(fact)) for fact in others.values()}),
+            ['System.Char', 'System.Decimal', 'System.Double'],
+        )
+        self.assertEqual(
+            {expression: integer_of(fact) for expression, fact in others.items()},
+            {expression: None for expression in others},
+        )
+
+    def test_a_hexadecimal_numeral_that_fills_its_width_is_the_negative_number_it_names(self):
+        """
+        The whole point of asking the domain: the digits of `0xFFFFFFFF` spell 4294967295 and the
+        value is -1, so a caller reading the digits and a caller reading the value differ by
+        4294967296 at every site that takes an integer.
+        """
+        self.assertEqual(_measured('0xFFFFFFFF'), ('System.Int32', '-1'))
+        self.assertEqual(_measured('0xFFFFFFFFFFFFFFFF'), ('System.Int64', '-1'))
+        self.assertEqual(_measured('0xFF'), ('System.Int32', '255'))
+        self.assertEqual(integer_of(MEASURED['0xFFFFFFFF']), -1)
+        self.assertEqual(integer_of(MEASURED['0xFFFFFFFFFFFFFFFF']), -1)
+        self.assertEqual(integer_of(MEASURED['0xFF']), 255)
+        self.assertEqual(_numeral_node('0xFFFFFFFF').value, 0xFFFFFFFF)
+
+    def test_a_value_5_1_only_converts_to_a_number_is_not_read_as_one(self):
+        """
+        Each of these reaches a number on 5.1 and is not one: measured, `[int]$null` is 0,
+        `[int]$true` is 1, `[int]'5'` is 5, `[int][char]65` is 65, `[int]1.5` is 2 and `[int]10d`
+        is 10. Two of those round rather than truncate and one parses text, so a caller that read
+        the payload of any of them would be picking a conversion rule of its own.
+        """
+        self.assertEqual(
+            {
+                cast: _measured(cast) for cast in (
+                    '[int]$null',
+                    '[int]$true',
+                    "[int]'5'",
+                    '[int][char]65',
+                    '[int]1.5',
+                    '[int]10d',
+                )
+            },
+            {
+                '[int]$null'    : ('System.Int32', '0'),
+                '[int]$true'    : ('System.Int32', '1'),
+                "[int]'5'"      : ('System.Int32', '5'),
+                '[int][char]65' : ('System.Int32', '65'),
+                '[int]1.5'      : ('System.Int32', '2'),
+                '[int]10d'      : ('System.Int32', '10'),
+            },
+        )
+        operands = (
+            '$null',
+            '$true',
+            "'5'",
+            '[char]65',
+            '1.5',
+            '10d',
+        )
+        self.assertEqual(
+            {expression: integer_of(_read(expression)) for expression in operands},
+            {expression: None for expression in operands},
+        )
+
+    def test_a_fact_that_names_no_value_names_no_integer(self):
+        self.assertIsNone(integer_of(UNKNOWN))
+        self.assertIsNone(integer_of(Ps1Typed(INT32)))
+
+
+class TestPs1CollectedIntegers(unittest.TestCase):
+    """
+    The integers a caller reading a command's arguments gets. A scalar is a list of one, because
+    PowerShell binds one value and a collection of one to the same parameter; an array is what its
+    elements name; and one element that is no integer refuses the whole list rather than being
+    dropped from it, since a list shorter than the script wrote is a different argument.
+    """
+
+    def test_a_scalar_is_a_list_of_one_and_an_array_is_its_elements(self):
+        self.assertEqual(
+            {
+                expression: collect_integers(_slot(expression)) for expression in (
+                    '0xFF',
+                    '[byte]5',
+                    '@()',
+                    '@(1, 2)',
+                    '1, 2',
+                    '@(1kb)',
+                )
+            },
+            {
+                '0xFF'     : [255],
+                '[byte]5'  : [5],
+                '@()'      : [],
+                '@(1, 2)'  : [1, 2],
+                '1, 2'     : [1, 2],
+                '@(1kb)'   : [1024],
+            },
+        )
+
+    def test_an_element_that_fills_its_width_is_collected_as_the_negative_it_is(self):
+        self.assertEqual(_measured('0xFFFFFFFF'), ('System.Int32', '-1'))
+        self.assertEqual(collect_integers(_slot('@(0xFFFFFFFF, 2)')), [-1, 2])
+
+    def test_one_element_that_is_no_integer_refuses_the_whole_list(self):
+        for expression in (
+            '@(1, 1.5)',
+            "@(1, '2')",
+            '@(1, $null)',
+            '@(1, $true)',
+            '@(1, [char]65)',
+            '@(1, 10d)',
+            '@(1, $x)',
+        ):
+            with self.subTest(expression):
+                self.assertIsNone(collect_integers(_slot(expression)))
+
+    def test_a_number_no_byte_holds_is_no_byte_array(self):
+        """
+        Measured, `[byte]-1` and `[byte]300` both throw rather than wrapping, so a list holding
+        either is not one 5.1 would bind to a byte array — and `0xFFFFFFFF` is exactly the first of
+        those, written in a way that looks like the second.
+        """
+        self.assertEqual(_throws(_transcript('[byte]-1')), True)
+        self.assertEqual(_throws(_transcript('[byte]300')), True)
+        self.assertEqual(collect_byte_array(_slot('@(0x41, 0xFF)')), b'A\xff')
+        self.assertIsNone(collect_byte_array(_slot('@(0x41, 0xFFFFFFFF)')))
+        self.assertIsNone(collect_byte_array(_slot('@(0x41, 300)')))
 
 
 class TestPs1Outcome(unittest.TestCase):
@@ -1696,11 +1974,13 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 38, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 39, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
-            sorted(THROWN_OPERATIONS), ["16 + 'file'", '[decimal]::MaxValue + 1'])
+            sorted(THROWN_OPERATIONS),
+            ["'ab' * 0xFFFFFFFF", "16 + 'file'", '[decimal]::MaxValue + 1'],
+        )
 
     def test_a_measured_operation_the_domain_pins_is_pinned_to_the_fact_the_host_printed(self):
         self.assertEqual(
@@ -1772,6 +2052,182 @@ class TestPs1MeasuredOperators(unittest.TestCase):
                 for expression in ABBREVIATED_OPERATIONS
             },
         )
+
+
+class TestPs1MeasuredComplement(unittest.TestCase):
+    """
+    What `-bnot operand` produces, held against what a 5.1 host printed for the same expression.
+    The width the bits are complemented at is not the operand's own type: measured, a Byte, a Char,
+    a Boolean and a Decimal all complement to an Int32, an Int64 to an Int64 and a UInt32 to a
+    UInt32. So the answer cannot be the complement of whatever number the operand's node reported,
+    and the two questions the domain has to keep apart are which width and which number.
+    """
+
+    def test_every_measured_complement_is_selected(self):
+        self.assertEqual(
+            len(COMPLEMENT_ROWS), 13, 'a measured complement was added or withdrawn')
+        self.assertEqual(sorted(THROWN_COMPLEMENTS), ["-bnot 'abc'"])
+
+    def test_a_measured_complement_the_domain_pins_is_pinned_to_the_fact_the_host_printed(self):
+        pinned = {
+            expression: _complemented(expression)
+            for expression in COMPLEMENT_ROWS
+            if isinstance(_complemented(expression).value, Ps1Constant)
+        }
+        self.assertEqual(
+            pinned,
+            {
+                expression: Ps1Outcome(False, _measured_complement_fact(expression))
+                for expression in pinned
+            },
+        )
+
+    def test_the_measured_complements_the_domain_leaves_unpinned_are_two(self):
+        self.assertEqual(
+            sorted(
+                expression for expression in COMPLEMENT_ROWS
+                if not isinstance(_complemented(expression).value, Ps1Constant)
+            ),
+            ["-bnot 'abc'", '-bnot 3000000000.0'],
+        )
+
+    def test_a_hexadecimal_operand_that_fills_its_width_is_complemented_as_the_negative_it_is(self):
+        """
+        `0xFFFFFFFF` is the Int32 -1 and its complement is 0, where the complement of the magnitude
+        those digits spell would be -4294967296. The two are the same eight digits, so only the
+        spelling rule tells them apart.
+        """
+        self.assertEqual(_measured('0xFFFFFFFF'), ('System.Int32', '-1'))
+        self.assertEqual(_measured_complement('-bnot 0xFFFFFFFF'), ('System.Int32', '0'))
+        self.assertEqual(_measured_complement('-bnot 0xFF'), ('System.Int32', '-256'))
+        self.assertEqual(
+            _complemented('-bnot 0xFFFFFFFF'), Ps1Outcome(False, Ps1Constant(INT32, 0)))
+        self.assertEqual(_complemented('-bnot 0xFF'), Ps1Outcome(False, Ps1Constant(INT32, -256)))
+
+    def test_a_narrow_operand_widens_where_a_wide_one_keeps_its_width(self):
+        """
+        Measured, the complement of a Byte 5 is an Int32 and not a Byte, the complement of an Int64
+        is an Int64, and the complement of a UInt32 is a UInt32 — which is where the unsigned width
+        shows, since 4294967288 is the same bits as -8 and not the same number.
+        """
+        self.assertEqual(_measured_complement('-bnot [byte]5'), ('System.Int32', '-6'))
+        self.assertEqual(_measured_complement('-bnot 1L'), ('System.Int64', '-2'))
+        self.assertEqual(
+            _measured_complement('-bnot [uint32]7'), ('System.UInt32', '4294967288'))
+        self.assertEqual(_complemented('-bnot [byte]5'), Ps1Outcome(False, Ps1Constant(INT32, -6)))
+        self.assertEqual(_complemented('-bnot 1L'), Ps1Outcome(False, Ps1Constant(INT64, -2)))
+        self.assertEqual(
+            _complemented('-bnot [uint32]7'),
+            Ps1Outcome(False, Ps1Constant(UINT32, 4294967288)),
+        )
+
+    def test_an_operand_that_is_no_integer_is_complemented_at_what_converting_it_reaches(self):
+        """
+        None of these is a number of a width, and each still has one answer: measured, `[int]1.5`
+        is 2 and `-bnot 1.5` is -3, `[int]$null` is 0 and `-bnot $null` is -1, `[int]'5'` is 5 and
+        `-bnot '5'` is -6, `[int][char]65` is 65 and `-bnot [char]65` is -66. The conversion is what
+        the operator is defined over, so the domain has to convert rather than refuse.
+        """
+        self.assertEqual(
+            {
+                expression: (_measured(cast), _measured_complement(expression))
+                for expression, cast in (
+                    ('-bnot 1.5', '[int]1.5'),
+                    ('-bnot $null', '[int]$null'),
+                    ("-bnot '5'", "[int]'5'"),
+                    ('-bnot [char]65', '[int][char]65'),
+                    ('-bnot $true', '[int]$true'),
+                )
+            },
+            {
+                '-bnot 1.5'      : (('System.Int32', '2'), ('System.Int32', '-3')),
+                '-bnot $null'    : (('System.Int32', '0'), ('System.Int32', '-1')),
+                "-bnot '5'"      : (('System.Int32', '5'), ('System.Int32', '-6')),
+                '-bnot [char]65' : (('System.Int32', '65'), ('System.Int32', '-66')),
+                '-bnot $true'    : (('System.Int32', '1'), ('System.Int32', '-2')),
+            },
+        )
+        self.assertEqual(
+            {
+                expression: _complemented(expression)
+                for expression in (
+                    '-bnot 1.5',
+                    '-bnot $null',
+                    "-bnot '5'",
+                    '-bnot [char]65',
+                    '-bnot $true',
+                )
+            },
+            {
+                '-bnot 1.5'      : Ps1Outcome(False, Ps1Constant(INT32, -3)),
+                '-bnot $null'    : Ps1Outcome(False, Ps1Constant(INT32, -1)),
+                "-bnot '5'"      : Ps1Outcome(False, Ps1Constant(INT32, -6)),
+                '-bnot [char]65' : Ps1Outcome(False, Ps1Constant(INT32, -66)),
+                '-bnot $true'    : Ps1Outcome(False, Ps1Constant(INT32, -2)),
+            },
+        )
+
+    def test_the_width_a_real_complements_at_follows_its_value_and_not_its_type(self):
+        """
+        Measured, `-bnot 1.5` is an Int32 and `-bnot 3000000000.0` a UInt32, both over a Double. So
+        the width is settled by the magnitude, and a rule keyed on the operand's type alone would
+        answer the second one -3000000001 under a type the host never printed. The domain has no
+        rule for that width and names nothing, which costs a fold and states nothing false.
+        """
+        self.assertEqual(_measured_complement('-bnot 1.5'), ('System.Int32', '-3'))
+        self.assertEqual(
+            _measured_complement('-bnot 3000000000.0'), ('System.UInt32', '1294967295'))
+        self.assertEqual(_complemented('-bnot 1.5'), Ps1Outcome(False, Ps1Constant(INT32, -3)))
+        self.assertEqual(_complemented('-bnot 3000000000.0'), NOTHING)
+
+    def test_a_complement_the_host_threw_on_names_no_value_and_reports_the_throw(self):
+        """
+        Measured, `-bnot 'abc'` throws where `-bnot '5'` is -6, so what a String complements to is
+        decided by whether the conversion succeeds and never by the length of the text.
+        """
+        self.assertEqual(
+            {expression: _complemented(expression) for expression in THROWN_COMPLEMENTS},
+            {expression: Ps1Outcome(True, UNKNOWN) for expression in THROWN_COMPLEMENTS},
+        )
+        self.assertEqual(_throws(_transcript("[int]'abc'")), True)
+
+    def test_no_measured_complement_is_answered_with_a_type_the_host_did_not_print(self):
+        named = {
+            expression: type_of(_complemented(expression).value)
+            for expression in COMPLEMENT_ROWS
+            if type_of(_complemented(expression).value) is not None
+        }
+        self.assertEqual(
+            named,
+            {
+                expression: _type(_measured_complement(expression)[0])
+                for expression in named
+            },
+        )
+
+    def test_an_operand_nothing_is_known_about_leaves_both_axes_unclaimed(self):
+        for operand in (UNKNOWN, Ps1Typed(INT32), Ps1Typed(DOUBLE), Ps1Typed(STRING)):
+            with self.subTest(repr(operand)):
+                self.assertEqual(apply_unary('-bnot', operand), Ps1Outcome(True, UNKNOWN))
+
+    def test_a_measured_complement_is_answered_the_same_however_its_operator_is_cased(self):
+        self.assertEqual(
+            {
+                expression: apply_unary('-BNOT', read(_complement_operand(expression)))
+                for expression in COMPLEMENT_ROWS
+            },
+            {expression: _complemented(expression) for expression in COMPLEMENT_ROWS},
+        )
+
+    def test_an_operator_this_does_not_answer_is_refused_rather_than_complemented(self):
+        """
+        `-not` negates a truth value and `-` subtracts from zero, so an answer here for either would
+        be the complement handed to an expression that does not take one: measured, `-bnot 0xFF` is
+        -256 while `-not 0xFF` is `$False`.
+        """
+        for operator in ('-not', '!', '-', '+', '-bxor', '-join'):
+            with self.subTest(operator):
+                self.assertEqual(apply_unary(operator, MEASURED['0xFF']), NOTHING)
 
 
 class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
@@ -2149,7 +2605,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 1105)
+        self.assertEqual(len(compared), 1145)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2164,7 +2620,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1171)
+        self.assertEqual(len(compared), 1210)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2179,7 +2635,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1171)
+        self.assertEqual(len(compared), 1210)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2190,12 +2646,12 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 665)
+        self.assertEqual(len(STRINGS), 692)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
     def test_the_bytes_the_array_reader_collects_are_the_numbers_the_elements_name(self):
-        self.assertEqual(len(BYTE_ARRAYS), 35)
+        self.assertEqual(len(BYTE_ARRAYS), 37)
         self.assertEqual(
             [row.source for row in BYTE_ARRAYS if list(row.collected) != row.payloads], [])
 
@@ -2204,13 +2660,13 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 253)
+        self.assertEqual(len(NUMERALS), 247)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
         )
         self.assertEqual(
-            [extract_int(_slot(expression)) for expression in MISREAD_SPELLINGS],
+            [_numeral_node(expression).value for expression in MISREAD_SPELLINGS],
             [0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 10 ** 32],
         )
         self.assertEqual(
@@ -2240,7 +2696,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 164)
+        self.assertEqual(len(consulted), 168)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -2290,7 +2746,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 852)
+        self.assertEqual(len(compared), 900)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 

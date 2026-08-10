@@ -36,7 +36,7 @@ from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
-from refinery.lib.scripts.ps1.analysis.values import candidate_types
+from refinery.lib.scripts.ps1.analysis.values import candidate_types, integer_of, read
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
@@ -980,23 +980,23 @@ def _is_numeric_constant(node) -> bool:
 
 def _signed_integer_value(node) -> int | None:
     """
-    The value of an integer literal read through parentheses and any number of unary signs, or
-    `None` when `node` is not one.
+    The integer an expression names, read through any number of unary signs, or `None` when it
+    names something else.
 
-    The signs are *applied* rather than walked past, which is the difference between an endpoint and
-    its magnitude: `-2147483648` parses as unary minus over the literal `2147483648`, so discarding
-    the sign weighs a value the source never names and rejects the narrowest `Int32` there is.
+    The value is asked of the domain and not of the node, because a node reports the digits it was
+    written with rather than the number they denote: `0xFFFFFFFF` is the Int32 -1 and reading it as
+    4294967295 rejected a two-element range as one that might exhaust memory.
+
+    A sign is *applied* rather than walked past, for the spelling that still has one of its own —
+    the parser puts a sign written against a numeral inside the numeral, so what reaches here is
+    `- 5` with a space, and discarding that sign weighs a value the source never names.
     """
-    if isinstance(node, Ps1IntegerLiteral):
-        return node.value
-    if isinstance(node, Ps1ParenExpression):
-        return _signed_integer_value(node.expression)
     if isinstance(node, Ps1UnaryExpression) and node.operator in ('+', '-'):
         value = _signed_integer_value(node.operand)
         if value is None:
             return None
         return -value if node.operator == '-' else value
-    return None
+    return integer_of(read(node))
 
 
 def _range_is_fault_free(node: Ps1RangeExpression) -> bool:
