@@ -20,6 +20,11 @@ Throwing is a separate axis, which is why an operation answers a `Ps1Outcome` ra
 element could only answer that it knows nothing. `may_throw` is `False` only where this module
 claims an operation cannot throw; not knowing is `Ps1Outcome(True, UNKNOWN)`.
 
+`read` is what the source pins an expression to, `convert` a cast, `apply` an operator and `render`
+the way back, and each of those answers about one step. `evaluate` is the composition over a whole
+expression and the entry a caller with a tree wants: it refuses wherever a step does, and it never
+answers something a step would have answered differently.
+
 The type side has two views over one engine. `resolve_expression_type` is the single-type core: one
 expression, one `refinery.lib.scripts.ps1.dotnet.Ps1TypeName` or `None`. `candidate_types` is the
 set-valued view the effect layer reasons over, and it is a strict superset — it additionally
@@ -31,6 +36,7 @@ from __future__ import annotations
 
 import dataclasses
 import decimal
+import functools
 import math
 import operator as operator_module
 import re
@@ -55,6 +61,7 @@ from refinery.lib.scripts.ps1.data import (
     binary_outcome,
     command_output_types,
     conversion_outcome,
+    operand_witnesses,
     resolve_member_type,
     resolve_type,
     static_overloads,
@@ -66,6 +73,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
+    Ps1BinaryExpression,
     Ps1CastExpression,
     Ps1CommandInvocation,
     Ps1ExpressionStatement,
@@ -213,7 +221,9 @@ def _type(name: str) -> Ps1TypeName:
     return resolved
 
 
-#: The types a literal has.
+#: The type every string literal has, and the narrowest one a numeral can. A numeral's is decided by
+#: its spelling and so is read rather than named here; `_INT32` is where the numeric ladder starts
+#: and what a shift is masked at, not what an integer literal is.
 _STRING = _type('System.String')
 _INT32 = _type('System.Int32')
 
@@ -231,6 +241,11 @@ def resolve_expression_type(
     """
     Trace the .NET type of a PowerShell expression by walking member access chains. Returns the one
     canonical `Ps1TypeName`, or `None` if the type cannot be determined.
+
+    A numeral is asked of `read` rather than answered here, because how wide a numeral is written
+    decides its type and only the spelling knows: `1L` is an Int64, `2147483648` is an Int64,
+    `9223372036854775808` is a Decimal and `1e32` a Double, every one of them measured. Answering
+    `System.Int32` for all of them resolved a member against a type the value did not have.
     """
     unwrapped = unwrap_parens(expr)
     if not isinstance(unwrapped, Expression):
@@ -238,8 +253,8 @@ def resolve_expression_type(
     expr = unwrapped
     if isinstance(expr, (Ps1StringLiteral, Ps1HereString)):
         return _STRING
-    if isinstance(expr, Ps1IntegerLiteral):
-        return _INT32
+    if isinstance(expr, (Ps1IntegerLiteral, Ps1RealLiteral)):
+        return type_of(read(expr))
     if isinstance(expr, Ps1ArrayLiteral):
         return _OBJECT_ARRAY
     if isinstance(expr, Ps1ArrayExpression):
@@ -557,15 +572,31 @@ def read(node: Node | None) -> Ps1Fact:
     if is_builtin_variable(node, {'null'}):
         return NULL
     if isinstance(node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
-        return _array(node)
+        return _array(node, _pinned).value
     return UNKNOWN
 
 
-def _array(node: Ps1ArrayLiteral | Ps1ArrayExpression) -> Ps1Fact:
+def _pinned(node: Node | None) -> Ps1Outcome:
     """
-    An array literal as a fact whose payload is the facts of its elements. One element this module
-    cannot read makes the whole array unknown: a caller reasoning about the array would otherwise be
-    handed a shorter one than the script builds.
+    What the source pins an expression to, as an outcome. Reading a literal cannot throw, so this
+    says that it cannot — but only where a value was read at all. A fact of `UNKNOWN` is the
+    refusal, and a refusal claims nothing on either axis.
+    """
+    fact = read(node)
+    return NOTHING if fact is UNKNOWN else Ps1Outcome(False, fact)
+
+
+def _array(
+    node: Ps1ArrayLiteral | Ps1ArrayExpression,
+    of: Callable[[Expression], Ps1Outcome],
+) -> Ps1Outcome:
+    """
+    An array whose value's payload is the facts of its elements. `of` is how one element is
+    answered, which is what lets `read` build an array out of literals and `evaluate` build one out
+    of anything: the two spellings below differ in the same way whatever an element is worth, so
+    they are described once. One element the caller cannot answer makes the whole array unknown —
+    a caller reasoning about it would otherwise be handed a shorter array than the script builds —
+    and one that may throw makes the array one that may throw, because building it is what runs it.
 
     The two spellings do not build the same array from the same parts, which is measured rather than
     assumed. The comma operator takes each operand whole, so `(1, 2), 3` is two elements and the
@@ -575,26 +606,44 @@ def _array(node: Ps1ArrayLiteral | Ps1ArrayExpression) -> Ps1Fact:
     the statement produced, and not again to what was inside it.
     """
     if isinstance(node, Ps1ArrayLiteral):
-        return _collected(read(element) for element in node.elements)
-    facts: list[Ps1Fact] = []
+        return _collected(of(element) for element in node.elements)
+    outcomes: list[Ps1Outcome] = []
     for statement in node.body:
         if not isinstance(statement, Ps1ExpressionStatement) or statement.expression is None:
-            return UNKNOWN
-        fact = read(statement.expression)
-        if isinstance(fact, Ps1Constant) and fact.type == _OBJECT_ARRAY and isinstance(
-            fact.payload, tuple
+            return NOTHING
+        outcome = of(statement.expression)
+        inner = outcome.value
+        if isinstance(inner, Ps1Constant) and inner.type == _OBJECT_ARRAY and isinstance(
+            inner.payload, tuple
         ):
-            facts.extend(fact.payload)
+            outcomes.extend(Ps1Outcome(outcome.may_throw, one) for one in inner.payload)
         else:
-            facts.append(fact)
-    return _collected(facts)
+            outcomes.append(outcome)
+    return _collected(outcomes)
 
 
-def _collected(facts: typing.Iterable[Ps1Fact]) -> Ps1Fact:
-    gathered = tuple(facts)
-    if any(fact is UNKNOWN for fact in gathered):
-        return UNKNOWN
-    return Ps1Constant(_OBJECT_ARRAY, gathered)
+def _collected(outcomes: typing.Iterable[Ps1Outcome]) -> Ps1Outcome:
+    """
+    The collection its elements came to. Every one of them has to *be* a value, `$null` included:
+    an element that carries only a type leaves the collection unknown rather than making a
+    `Ps1Constant` whose payload is not one. `([int]'abc'), 1` is what that would be — an Int32 or a
+    throw beside the number one, in a fact that says it is exactly this value.
+    """
+    gathered = tuple(outcomes)
+    if not all(_is_value(outcome.value) for outcome in gathered):
+        return NOTHING
+    return Ps1Outcome(
+        any(outcome.may_throw for outcome in gathered),
+        Ps1Constant(_OBJECT_ARRAY, tuple(outcome.value for outcome in gathered)),
+    )
+
+
+def _is_value(fact: Ps1Fact) -> bool:
+    """
+    Whether a fact names a value rather than a bound on one. `$null` is one: it is what an absent
+    value *is*, not the absence of knowledge about it.
+    """
+    return fact is NULL or isinstance(fact, Ps1Constant)
 
 
 def _numeral(raw: str) -> Ps1Fact:
@@ -767,6 +816,14 @@ _SHIFT_WIDTHS = {_INT32: 32, _INT64: 64}
 #: value can have.
 _VOID = _type('System.Void')
 
+#: Every type the grid has a row for, which is what a whole column of it is read over. A name the
+#: resolver does not know is dropped rather than raised on: it would mean the capture covers a type
+#: the collected tables do not, and reading one column short is a weaker answer where refusing to
+#: import is no answer at all.
+_GRID_TYPES = frozenset(
+    resolved for resolved in map(resolve_type, operand_witnesses()) if resolved is not None
+)
+
 #: The operand types whose witnesses reach every outcome a cell over them has.
 #:
 #: A capture is a *lower* bound: it records what some values did. Reading a cell as *what this
@@ -841,7 +898,13 @@ def apply(operator: str, left: Ps1Fact, right: Ps1Fact) -> Ps1Outcome:
     refuse, because which promotion a pair takes is settled by their types, so the one thing their
     values decide is overflow, and an overflowed value leaves every candidate rather than landing in
     the wrong one.
+
+    The operator is folded to lower case once, here, because PowerShell's are case-insensitive and
+    a caller holding one out of a script holds whatever case was written. Doing it at the grid
+    lookup alone left `-BAND` finding its cell and missing the kernel, which is a fold lost to a
+    spelling.
     """
+    operator = operator.lower()
     cell = binary_outcome(operator, *(_grid_type(left), _grid_type(right)))  # type: ignore[misc]
     if cell is None:
         return NOTHING
@@ -891,6 +954,122 @@ def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
             if stamped is not UNKNOWN:
                 return Ps1Outcome(False, stamped)
     return _from_conversion_cell(cell, _spans(fact))
+
+
+def evaluate(
+    node: Node | None,
+    variable_types: dict[str, Ps1TypeName] | None = None,
+) -> Ps1Outcome:
+    """
+    What this expression produces. It is the module's one recursion and the only entry a caller
+    holding a *tree* needs: `read`, `convert` and `apply` each answer about one step, and a consumer
+    that walked the tree itself would be deciding at every node what is decided here once. A literal
+    is `read`, a parenthesis is its inner, an array is its elements, a cast is `convert` over its
+    operand, an operator is `apply` over both of its, and everything else carries whatever type the
+    static surface names for it.
+
+    It refuses far more than it answers, and that is the contract rather than a shortfall: for an
+    expression another reader in this module can answer, this agrees with that reader or names
+    nothing — never a third thing.
+
+    A throw travels up. An operand that may throw makes the expression consuming it one that may
+    throw, whatever the operation does with the value, and so does not knowing what the operand
+    does, because `Ps1Outcome` reads its two fields in one direction.
+
+    A type literal is refused rather than answered, which is the one place this deliberately says
+    less than `resolve_expression_type`. That function answers `[int]` with `System.Int32` because
+    what asks it is a member lookup, and the type a literal *names* is what a lookup needs; the
+    value one *is* is a `System.RuntimeType`, and no measurement here covers it.
+
+    A unary operator is refused by having no arm, which is not an omission: `apply` has no unary
+    counterpart, and reading `- $x` as `0 - $x` would answer from a composition where nothing was
+    measured. A sign written against a numeral is not this case — the parser puts it in the
+    numeral's own spelling, so `-1` is a literal and reaches `read`.
+
+    `variable_types` is what the caller has typed, exactly as `resolve_expression_type` takes it.
+    Nothing here invents a variable's value, so a variable the caller has not typed names nothing.
+    """
+    literal = read(node)
+    if literal is not UNKNOWN:
+        return Ps1Outcome(False, literal)
+    if isinstance(node, Ps1ParenExpression):
+        return evaluate(node.expression, variable_types)
+    if isinstance(node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
+        return _array(node, lambda element: evaluate(element, variable_types))
+    if isinstance(node, Ps1CastExpression):
+        return _evaluated_cast(node, variable_types)
+    if isinstance(node, Ps1BinaryExpression):
+        return _evaluated_binary(node, variable_types)
+    if isinstance(node, Ps1TypeExpression) or not isinstance(node, Expression):
+        return NOTHING
+    named = resolve_expression_type(node, variable_types)
+    return NOTHING if named is None else Ps1Outcome(True, Ps1Typed(named))
+
+
+def _evaluated_cast(
+    node: Ps1CastExpression,
+    variable_types: dict[str, Ps1TypeName] | None,
+) -> Ps1Outcome:
+    """
+    A cast, which is `convert` over whatever its operand evaluates to.
+
+    An operand that names no type at all is the one case `convert` cannot be asked about, because
+    the grid it reads is indexed by the source's type and there is no row to look in. Only there
+    does the cast answer on its own, and what it answers is its target — naming one is what a cast
+    does, so `[int] $s` is an Int32 or it throws whatever `$s` holds. Which targets that is true of
+    is read off the grid rather than assumed; see `_cast_names`.
+
+    Anywhere else `convert` has the last word, including where it names no value: `[byte] 300`
+    throws for the value in hand, which is a stronger thing to know than *a Byte or a throw*, and
+    reaching for the target there would trade it away.
+    """
+    target = resolve_type(node.type_name)
+    if target is None:
+        return NOTHING
+    operand = evaluate(node.operand, variable_types)
+    if operand.value is not UNKNOWN:
+        converted = convert(operand.value, target)
+        return Ps1Outcome(operand.may_throw or converted.may_throw, converted.value)
+    named = _cast_names(target)
+    return NOTHING if named is None else Ps1Outcome(True, named)
+
+
+def _evaluated_binary(
+    node: Ps1BinaryExpression,
+    variable_types: dict[str, Ps1TypeName] | None,
+) -> Ps1Outcome:
+    """
+    An operator, which is `apply` over both of its operands. A short-circuiting operator needs no
+    exception here: `-and`, `-or` and `-xor` were never measured, so the grid holds no cell for any
+    of them and `apply` refuses before the question of whether the right operand ran can arise.
+    """
+    left = evaluate(node.left, variable_types)
+    right = evaluate(node.right, variable_types)
+    applied = apply(node.operator, left.value, right.value)
+    return Ps1Outcome(
+        left.may_throw or right.may_throw or applied.may_throw, applied.value)
+
+
+@functools.cache
+def _cast_names(target: Ps1TypeName) -> Ps1Fact | None:
+    """
+    The type a cast to `target` produces whatever it is given, or `None` where it does not always
+    produce one. A cast is the one operation whose result type is settled by what was written rather
+    than by what the operand held, which makes this the only thing the domain can say about a value
+    it knows nothing about — and it is read off the grid's whole column rather than assumed, because
+    `[array] $null` is `$null`, measured, so `[array]` is the one target a value passes through
+    untouched and therefore the one that names no type.
+
+    A source row that only ever threw contributes no type and contradicts none: `[char] @(1, 2)`
+    throws, and `[char] $x` is a Char or a throw all the same.
+    """
+    named: set[Ps1TypeName] = set()
+    for source in _GRID_TYPES:
+        cell = conversion_outcome(target, source)
+        if cell is None or cell.may_be_null:
+            return None
+        named |= cell.types
+    return Ps1Typed(next(iter(named))) if len(named) == 1 else None
 
 
 def _cast_throws_are_modelled(target: Ps1TypeName) -> bool:

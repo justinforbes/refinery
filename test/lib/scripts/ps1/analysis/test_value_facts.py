@@ -1,12 +1,14 @@
 """
-What `refinery.lib.scripts.ps1.analysis.values.read` makes of an expression and what
-`refinery.lib.scripts.ps1.analysis.values.render` writes a value back as, both held against what a
+What `refinery.lib.scripts.ps1.analysis.values.read` makes of an expression, what
+`refinery.lib.scripts.ps1.analysis.values.evaluate` makes of a whole one, and what
+`refinery.lib.scripts.ps1.analysis.values.render` writes a value back as, each held against what a
 real Windows PowerShell 5.1 host made of the same expression. No host is run from here: the
 measurements are the ones already taken and checked in, and this module reads them as data, so the
 expectations below are the host's rather than ours.
 """
 from __future__ import annotations
 
+import dataclasses
 import decimal
 import inspect
 import re
@@ -14,7 +16,15 @@ import unittest
 
 from typing import Callable, NamedTuple
 
-from test.lib.scripts.ps1.corpus import GRID_WITNESS_GAPS, GRID_WITNESSES
+from test.lib.scripts.ps1.corpus import (
+    BOUNDARIES,
+    GRID_WITNESS_GAPS,
+    GRID_WITNESSES,
+    PROBES,
+    SNIPPETS,
+    SPELLINGS,
+    TYPES,
+)
 from test.lib.scripts.ps1.test_oracle import TYPE_TRANSCRIPTS
 
 from refinery.lib.scripts.ps1.analysis.values import (
@@ -27,12 +37,20 @@ from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Outcome,
     Ps1Typed,
     apply,
+    candidate_types,
+    collect_byte_array,
     convert,
+    evaluate,
+    extract_int,
     make_string_literal,
     read,
     render,
+    resolve_expression_type,
     type_of,
+    unwrap_integer,
 )
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.ast import in_evaluation_order, string_value
 from refinery.lib.scripts.ps1.data import (
     OperatorOutcome,
     binary_outcome,
@@ -42,12 +60,17 @@ from refinery.lib.scripts.ps1.data import (
 )
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
+    Expression,
+    Ps1ArrayExpression,
+    Ps1ArrayLiteral,
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
+    Ps1CastExpression,
     Ps1ExpressionStatement,
     Ps1HereString,
     Ps1ParenExpression,
     Ps1StringLiteral,
+    Ps1TypeExpression,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
@@ -72,6 +95,7 @@ INT32 = _type('System.Int32')
 INT64 = _type('System.Int64')
 STRING = _type('System.String')
 CHAR = _type('System.Char')
+BYTE = _type('System.Byte')
 BOOLEAN = _type('System.Boolean')
 DOUBLE = _type('System.Double')
 DECIMAL = _type('System.Decimal')
@@ -232,16 +256,33 @@ DECIDED: tuple[str, ...] = tuple(
 )
 
 
-def _read(expression: str) -> Ps1Fact:
+def _slot(expression: str) -> Expression:
     """
-    The fact `read` answers for the right hand side of `$t = <expression>`, which is the slot every
-    measured row puts its expression in.
+    The right hand side of `$t = <expression>`, which is the slot every measured row puts its
+    expression in.
     """
     statement = Ps1Parser(F'$t = {expression}').parse().body[0]
     assert isinstance(statement, Ps1ExpressionStatement)
     assignment = statement.expression
     assert isinstance(assignment, Ps1AssignmentExpression)
-    return read(assignment.value)
+    value = assignment.value
+    assert isinstance(value, Expression), expression
+    return value
+
+
+def _read(expression: str) -> Ps1Fact:
+    """
+    The fact `read` answers for a measured row's expression.
+    """
+    return read(_slot(expression))
+
+
+def _evaluated(expression: str) -> Ps1Outcome:
+    """
+    The outcome `evaluate` answers for a measured row's expression, which is the one call a caller
+    holding the whole tree of it makes.
+    """
+    return evaluate(_slot(expression))
 
 
 def _elements(fact: Ps1Fact) -> tuple[Ps1Fact, ...]:
@@ -610,6 +651,259 @@ ZERO_DIVISIONS: tuple[tuple[Ps1TypeName, Ps1Fact, Ps1Fact], ...] = (
     (DECIMAL, Ps1Constant(DECIMAL, decimal.Decimal(5)), Ps1Constant(DECIMAL, decimal.Decimal(0))),
     (DOUBLE, Ps1Constant(DOUBLE, 1.5), Ps1Constant(DOUBLE, 0.0)),
 )
+
+
+#: Every corpus table that holds PowerShell expressions, deduplicated and in a stable order. What
+#: `evaluate` promises is a claim about every expression a script can contain, so the questions
+#: about it below are asked of the population these tables are rather than of cases picked here: a
+#: contract that only survives the examples its author thought of is not the contract.
+CORPUS_SOURCES: tuple[str, ...] = tuple(dict.fromkeys((
+    *TYPES,
+    *BOUNDARIES,
+    *SNIPPETS.values(),
+    *PROBES,
+    *SPELLINGS,
+)))
+
+
+class _Site(NamedTuple):
+    """
+    One expression the corpus contains, carrying the source it stands in so that a disagreement is
+    reported as the script it was found in rather than as a node with no context.
+    """
+    source: str
+    node: Expression
+
+
+def _corpus_sites() -> tuple[_Site, ...]:
+    sites: list[_Site] = []
+    for source in CORPUS_SOURCES:
+        for node in in_evaluation_order(Ps1Parser(source).parse()):
+            if isinstance(node, Expression):
+                sites.append(_Site(source, node))
+    return tuple(sites)
+
+
+#: Every expression the corpus writes, which is the population the agreements below quantify over.
+SITES: tuple[_Site, ...] = _corpus_sites()
+
+#: The world a typing question is asked in. It is closed, so that a command name still denotes what
+#: the collected metadata says: an open world types nothing at all, and an agreement over it would
+#: hold because neither side answers rather than because they answer alike.
+CLOSED_WORLD = Ps1TypeWorld(True, frozenset())
+
+
+class _Numeral(NamedTuple):
+    """
+    A corpus site where the literal node reports a number of its own and `evaluate` names a value:
+    the spelling as it was written, the number the node reports for it, and the fact the domain
+    names.
+    """
+    raw: str
+    reported: int
+    named: Ps1Constant
+
+
+def _corpus_numerals() -> tuple[_Numeral, ...]:
+    numerals: list[_Numeral] = []
+    for site in SITES:
+        literal = unwrap_integer(site.node)
+        fact = evaluate(site.node).value
+        if literal is None or not isinstance(fact, Ps1Constant):
+            continue
+        numerals.append(_Numeral(literal.raw, literal.value, fact))
+    return tuple(numerals)
+
+
+NUMERALS: tuple[_Numeral, ...] = _corpus_numerals()
+
+#: The corpus spellings whose literal node reports a number 5.1 did not print for them. A
+#: hexadecimal literal that fills its width names a bit pattern rather than a magnitude, and a
+#: decimal too wide for any integer type is a Double: the node reads the digits, and `MEASURED`
+#: holds what a host made of the same ones.
+MISREAD_SPELLINGS: tuple[str, ...] = (
+    '0xFFFFFFFF',
+    '0xFFFFFFFFFFFFFFFF',
+    '100000000000000000000000000000000',
+)
+
+#: Every target the shipped conversion grid holds a column for, written out rather than read off
+#: the resource so that a column added or withdrawn fails here instead of quietly changing what a
+#: cast of a value nothing is known about is answered with.
+CONVERSION_TARGETS: tuple[str, ...] = (
+    'array',
+    'bool',
+    'byte',
+    'char',
+    'decimal',
+    'double',
+    'int',
+    'int16',
+    'long',
+    'sbyte',
+    'single',
+    'string',
+    'uint16',
+    'uint32',
+    'uint64',
+)
+
+
+def _operator_of(expression: str) -> str:
+    """
+    The operator a measured operation writes, in the case the row spells it.
+    """
+    applied = _application(expression)
+    assert applied is not None, expression
+    return applied.operator
+
+
+def _cased(expression: str, case: Callable[[str], str]) -> Ps1Outcome:
+    """
+    What `evaluate` answers for a measured operation whose operator is written in `case`. The case
+    is changed on the parsed operator rather than in the source text, so that nothing else about the
+    row can change along with it.
+    """
+    applied = _application(expression)
+    assert applied is not None, expression
+    return evaluate(dataclasses.replace(applied, operator=case(applied.operator)))
+
+
+def _element_payloads(fact: Ps1Fact) -> list[object]:
+    """
+    What each element of an array fact holds. An element that names no value stands for itself, so
+    that comparing the list against collected bytes fails on it rather than passing it over.
+    """
+    return [one.payload if isinstance(one, Ps1Constant) else one for one in _elements(fact)]
+
+
+class _Collected(NamedTuple):
+    """
+    A corpus site the byte-array reader answers for and `evaluate` names an array at: the bytes the
+    reader collected out of it, and what each element of that array holds.
+    """
+    source: str
+    collected: bytes
+    payloads: list[object]
+
+
+def _corpus_byte_arrays() -> tuple[_Collected, ...]:
+    rows: list[_Collected] = []
+    for site in SITES:
+        collected = collect_byte_array(site.node)
+        fact = evaluate(site.node).value
+        if collected is None or not isinstance(fact, Ps1Constant):
+            continue
+        if not isinstance(fact.payload, tuple):
+            continue
+        rows.append(_Collected(site.source, collected, _element_payloads(fact)))
+    return tuple(rows)
+
+
+BYTE_ARRAYS: tuple[_Collected, ...] = _corpus_byte_arrays()
+
+
+def _names_a_value(fact: Ps1Fact) -> bool:
+    """
+    Whether a fact names a value rather than a bound on one. `$null` is one: it is what an absent
+    value *is*, and not the absence of knowledge about it.
+    """
+    return fact is NULL or isinstance(fact, Ps1Constant)
+
+
+class _Step(NamedTuple):
+    """
+    A corpus cast or operator, with what the one-step reader answers over the facts its operands
+    come to and what the whole expression is answered with. `consultable` is whether the step could
+    be asked at all: `convert` and `apply` both read a grid indexed by the operand's type, and an
+    operand that names no type indexes no row in it.
+    """
+    source: str
+    kind: str
+    consultable: bool
+    step: Ps1Outcome
+    answered: Ps1Outcome
+
+
+def _corpus_steps() -> tuple[_Step, ...]:
+    steps: list[_Step] = []
+    for site in SITES:
+        node = site.node
+        if isinstance(node, Ps1CastExpression):
+            target = resolve_type(node.type_name)
+            if target is None:
+                continue
+            operand = evaluate(node.operand)
+            steps.append(_Step(
+                site.source,
+                'cast',
+                operand.value is not UNKNOWN,
+                convert(operand.value, target),
+                evaluate(node),
+            ))
+        elif isinstance(node, Ps1BinaryExpression):
+            left = evaluate(node.left)
+            right = evaluate(node.right)
+            steps.append(_Step(
+                site.source,
+                'operator',
+                UNKNOWN not in (left.value, right.value),
+                apply(node.operator, left.value, right.value),
+                evaluate(node),
+            ))
+    return tuple(steps)
+
+
+STEPS: tuple[_Step, ...] = _corpus_steps()
+
+
+class _Array(NamedTuple):
+    """
+    A corpus array and what `evaluate` makes of it: whether the array names a value, and whether
+    every element it holds does.
+    """
+    source: str
+    named: bool
+    elements_named: bool
+
+
+def _corpus_arrays() -> tuple[_Array, ...]:
+    arrays: list[_Array] = []
+    for site in SITES:
+        if not isinstance(site.node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
+            continue
+        fact = evaluate(site.node).value
+        payload = fact.payload if isinstance(fact, Ps1Constant) else None
+        elements = payload if isinstance(payload, tuple) else ()
+        arrays.append(
+            _Array(site.source, _names_a_value(fact), all(_names_a_value(one) for one in elements)))
+    return tuple(arrays)
+
+
+ARRAYS: tuple[_Array, ...] = _corpus_arrays()
+
+
+class _Spelled(NamedTuple):
+    """
+    A corpus site the tree's string reader answers a text for and `evaluate` names a fact at.
+    """
+    source: str
+    text: str
+    named: Ps1Fact
+
+
+def _corpus_strings() -> tuple[_Spelled, ...]:
+    rows: list[_Spelled] = []
+    for site in SITES:
+        text = string_value(site.node)
+        fact = evaluate(site.node).value
+        if text is None or fact is UNKNOWN:
+            continue
+        rows.append(_Spelled(site.source, text, fact))
+    return tuple(rows)
+
+
+STRINGS: tuple[_Spelled, ...] = _corpus_strings()
 
 
 class TestPs1MeasuredNumerals(unittest.TestCase):
@@ -1502,6 +1796,487 @@ class TestPs1CastNamesItsTargetWhereAnOperatorNamesNothing(unittest.TestCase):
         self.assertEqual(_converted("[int]'5'"), Ps1Outcome(True, Ps1Typed(INT32)))
         self.assertEqual(_measured("1 + '5'"), ('System.Int32', '6'))
         self.assertEqual(_applied("1 + '5'"), NOTHING)
+
+
+class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
+    """
+    `read`, `convert` and `apply` each answer about one step, and `evaluate` is those put together
+    over a whole expression: a literal is what the source pins, a cast is a conversion of what its
+    operand comes to, an operator an application over both of its, an array its elements and a
+    parenthesis its inner. What that buys a caller is measured rather than described — the rows
+    whose operand is itself an expression are exactly the ones a single step has nothing to say
+    about, and they are answered here with the value a 5.1 host printed.
+    """
+
+    def test_a_literal_evaluates_to_the_fact_the_host_printed_for_it(self):
+        self.assertEqual(
+            {expression: _evaluated(expression) for expression in DECIDED},
+            {expression: Ps1Outcome(False, MEASURED[expression]) for expression in DECIDED},
+        )
+
+    def test_a_measured_cast_is_answered_as_the_single_step_answers_it(self):
+        composed = {
+            expression: _evaluated(expression)
+            for expression in CAST_ROWS
+            if _read(CAST_ROWS[expression].operand) is not UNKNOWN
+        }
+        self.assertEqual(len(composed), 45)
+        self.assertEqual(
+            composed, {expression: _converted(expression) for expression in composed})
+
+    def test_a_cast_of_a_cast_is_the_value_the_host_printed_where_one_step_pins_none(self):
+        self.assertEqual(
+            {expression: _converted(expression) for expression in DECLINED[_NO_OPERAND]},
+            {expression: NOTHING for expression in DECLINED[_NO_OPERAND]},
+        )
+        self.assertEqual(
+            {expression: _evaluated(expression) for expression in DECLINED[_NO_OPERAND]},
+            {
+                expression: Ps1Outcome(False, _measured_fact(expression))
+                for expression in DECLINED[_NO_OPERAND]
+            },
+        )
+
+    def test_a_measured_operation_is_answered_as_the_single_step_answers_it(self):
+        composed = {
+            expression: _evaluated(expression)
+            for expression in OPERATION_ROWS
+            if _applied(expression) != NOTHING
+        }
+        self.assertEqual(len(composed), 17)
+        self.assertEqual(
+            composed, {expression: _applied(expression) for expression in composed})
+
+    def test_an_operation_over_an_operation_is_the_value_the_host_printed(self):
+        self.assertEqual(_applied('10 - $null + 3'), NOTHING)
+        self.assertEqual(
+            _evaluated('10 - $null + 3'),
+            Ps1Outcome(False, _measured_operation_fact('10 - $null + 3')),
+        )
+
+    def test_a_parenthesis_is_worth_what_it_encloses(self):
+        self.assertEqual(_read('([int]1.5)'), UNKNOWN)
+        self.assertEqual(
+            _evaluated('([int]1.5)'), Ps1Outcome(False, _measured_fact('[int]1.5')))
+        self.assertEqual(_evaluated('(([int]1.5))'), _evaluated('([int]1.5)'))
+
+    def test_an_array_holds_what_each_of_its_elements_comes_to(self):
+        self.assertEqual(_read('[int]1.5, 007'), UNKNOWN)
+        self.assertEqual(
+            _evaluated('[int]1.5, 007'),
+            Ps1Outcome(
+                False,
+                Ps1Constant(OBJECT_ARRAY, (_measured_fact('[int]1.5'), MEASURED['007'])),
+            ),
+        )
+
+    def test_the_typing_a_caller_supplies_reaches_every_operand_recursed_into(self):
+        """
+        5.1 prints an Int32 for `'AB'.Length`, and the grid records one for an Int32 `-band` an
+        Int32. Nothing in these sources types `$s`, so the typing the caller passed in is the only
+        way any of them is answered at all: through a parenthesis and through either side of an
+        operator, since a step that dropped it would answer for one operand and not for the next.
+
+        An array is where it reaches and nothing is named all the same, which is not a gap in the
+        threading: a typing yields a bound on a value and never a value, and an array is a value
+        only where every element is one.
+        """
+        self.assertEqual(_measured("'AB'.Length"), ('System.Int32', '2'))
+        self.assertEqual(_cell('-band', INT32, INT32).single_type, INT32)
+        reached = (
+            '$s.Length',
+            '(($s.Length))',
+            '$s.Length -band $s.Length',
+        )
+        self.assertEqual(
+            {expression: _evaluated(expression) for expression in reached},
+            {expression: NOTHING for expression in reached},
+        )
+        self.assertEqual(
+            {
+                expression: evaluate(_slot(expression), {'s': STRING})
+                for expression in reached
+            },
+            {expression: Ps1Outcome(True, Ps1Typed(INT32)) for expression in reached},
+        )
+        self.assertEqual(evaluate(_slot('$s.Length, 1'), {'s': STRING}), NOTHING)
+
+
+class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
+    """
+    The contract, quantified over the PowerShell the corpus holds rather than over cases chosen
+    here: for an expression another reader in this code base answers, `evaluate` answers the same
+    thing or names nothing at all. Refusing is always allowed; a third answer never is, because two
+    readers of one script that disagree make the pass consulting both unsound whichever is right.
+
+    Each question below counts the expressions it compared, so that a reader which stopped
+    answering fails here instead of leaving its agreement to hold over nothing.
+    """
+
+    def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
+        compared = [site for site in SITES if read(site.node) is not UNKNOWN]
+        self.assertEqual(len(compared), 936)
+        self.assertEqual(
+            [
+                site.source for site in compared
+                if evaluate(site.node) != Ps1Outcome(False, read(site.node))
+            ],
+            [],
+        )
+
+    def test_no_expression_carries_one_type_here_and_another_in_the_single_type_reader(self):
+        compared = [
+            site for site in SITES
+            if resolve_expression_type(site.node) is not None
+            and type_of(evaluate(site.node).value) is not None
+        ]
+        self.assertEqual(len(compared), 1033)
+        self.assertEqual(
+            [
+                site.source for site in compared
+                if resolve_expression_type(site.node) != type_of(evaluate(site.node).value)
+            ],
+            [],
+        )
+
+    def test_a_type_named_here_is_one_the_candidate_set_holds(self):
+        compared = [
+            site for site in SITES
+            if candidate_types(site.node, CLOSED_WORLD)
+            and type_of(evaluate(site.node).value) is not None
+        ]
+        self.assertEqual(len(compared), 1033)
+        self.assertEqual(
+            [
+                site.source for site in compared
+                if type_of(evaluate(site.node).value)
+                not in candidate_types(site.node, CLOSED_WORLD)
+            ],
+            [],
+        )
+
+    def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
+        self.assertEqual(len(STRINGS), 561)
+        self.assertEqual(
+            [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
+
+    def test_the_bytes_the_array_reader_collects_are_the_numbers_the_elements_name(self):
+        self.assertEqual(len(BYTE_ARRAYS), 33)
+        self.assertEqual(
+            [row.source for row in BYTE_ARRAYS if list(row.collected) != row.payloads], [])
+
+    def test_a_literal_node_and_the_domain_read_one_spelling_as_one_number(self):
+        """
+        The two come apart only where 5.1 does: the node reads the digits it was written with, and
+        the host printed something else for exactly three of the corpus spellings.
+        """
+        self.assertEqual(len(NUMERALS), 250)
+        self.assertEqual(
+            sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
+            sorted(MISREAD_SPELLINGS),
+        )
+        self.assertEqual(
+            [extract_int(_slot(expression)) for expression in MISREAD_SPELLINGS],
+            [0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 10 ** 32],
+        )
+        self.assertEqual(
+            {expression: _evaluated(expression) for expression in MISREAD_SPELLINGS},
+            {
+                expression: Ps1Outcome(False, MEASURED[expression])
+                for expression in MISREAD_SPELLINGS
+            },
+        )
+
+    def test_a_node_that_is_not_an_expression_names_nothing(self):
+        statement = Ps1Parser('if ($a) { 1 }').parse().body[0]
+        self.assertEqual(evaluate(statement), NOTHING)
+        self.assertEqual(evaluate(None), NOTHING)
+
+
+class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
+    """
+    A composition may refuse where its parts answer, and may not answer where they refuse. So for
+    every cast and every operator the corpus writes, the fact the whole expression is answered with
+    is the fact the one-step reader named over what its operands came to.
+
+    The one exception is a step that cannot be asked at all: `convert` and `apply` both read a grid
+    indexed by the operand's type, and an operand that names no type indexes no row in it. There a
+    cast still names its target, which is a bound on a value and never one.
+    """
+
+    def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
+        consulted = [step for step in STEPS if step.consultable]
+        self.assertEqual(len(consulted), 128)
+        self.assertEqual(
+            [step.source for step in consulted if step.answered.value != step.step.value], [])
+
+    def test_only_a_cast_names_anything_where_its_step_cannot_be_consulted(self):
+        unconsulted = [step for step in STEPS if not step.consultable]
+        self.assertEqual(len(unconsulted), 17)
+        self.assertEqual(
+            [step.source for step in unconsulted if _names_a_value(step.answered.value)], [])
+        self.assertEqual(
+            sorted({
+                step.kind for step in unconsulted if step.answered.value is not UNKNOWN
+            }),
+            ['cast'],
+        )
+
+    def test_an_array_names_a_value_only_where_every_element_is_one(self):
+        """
+        A `Ps1Constant` says the value is exactly this, so a collection that named one while holding
+        an element that names only a type would be claiming what it does not have. There is nothing
+        weaker to fall back on either: an array shorter than the script builds is a different value.
+        """
+        named = [row for row in ARRAYS if row.named]
+        self.assertEqual(len(named), 54)
+        self.assertEqual([row.source for row in named if not row.elements_named], [])
+
+    def test_an_element_that_names_only_a_type_leaves_the_array_unknown(self):
+        self.assertEqual(_evaluated("[int]'abc'"), Ps1Outcome(True, Ps1Typed(INT32)))
+        self.assertEqual(_evaluated("([int]'abc'), 1"), NOTHING)
+        self.assertEqual(
+            _evaluated('$null, 1'),
+            Ps1Outcome(False, Ps1Constant(OBJECT_ARRAY, (NULL, Ps1Constant(INT32, 1)))),
+        )
+
+
+class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
+    """
+    An operand that may throw makes the expression consuming it one that may throw, whatever the
+    operation does with the value: the expression is what a script runs, and producing the operand
+    is part of running it. So does an operand nothing is known about, because `Ps1Outcome` reads its
+    two fields in one direction and not knowing is not a claim of safety.
+    """
+
+    def test_no_expression_is_cleared_of_a_throw_one_it_consumes_may_take(self):
+        compared = [
+            (site, child)
+            for site in SITES
+            for child in site.node.children()
+            if isinstance(child, Expression) and evaluate(child).may_throw
+        ]
+        self.assertEqual(len(compared), 742)
+        self.assertEqual(
+            [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
+
+    def test_an_operand_the_host_threw_on_makes_the_operation_one_that_may_throw(self):
+        """
+        5.1 throws for `[int]'abc'`, and neither operation below can throw over the fact that cast
+        leaves behind: the grid records one type and no throw for an Int32 `-band` an Int32 and for
+        a `[string]` of an Int32. What may throw is the expression, which is what runs.
+        """
+        self.assertEqual(_throws(_transcript("[int]'abc'")), True)
+        thrown = _evaluated("[int]'abc'")
+        self.assertEqual(thrown, Ps1Outcome(True, Ps1Typed(INT32)))
+        self.assertEqual(
+            apply('-band', thrown.value, Ps1Constant(INT32, 1)), Ps1Outcome(False, Ps1Typed(INT32)))
+        self.assertEqual(_evaluated("[int]'abc' -band 1"), Ps1Outcome(True, Ps1Typed(INT32)))
+        self.assertEqual(convert(thrown.value, STRING), Ps1Outcome(False, Ps1Typed(STRING)))
+        self.assertEqual(_evaluated("[string]([int]'abc')"), Ps1Outcome(True, Ps1Typed(STRING)))
+
+    def test_an_operand_nothing_is_known_about_leaves_the_expression_able_to_throw(self):
+        for expression in ('$x -band 1', '1 -band $x', '[int]$x', '$x, 1', '($x)'):
+            with self.subTest(expression):
+                self.assertEqual(_evaluated(expression).may_throw, True)
+
+    def test_an_answer_that_names_no_value_never_claims_it_cannot_throw(self):
+        self.assertEqual(
+            [site.source for site in SITES if evaluate(site.node) == Ps1Outcome(False, UNKNOWN)],
+            [],
+        )
+
+
+class TestPs1EvaluateNamesACastsTarget(unittest.TestCase):
+    """
+    A cast names its target whatever it is handed, because naming one is what a cast is: `[int] $x`
+    is an Int32 or it throws. The one target that does not is read off the grid rather than assumed
+    — `[array]` is the only column the capture recorded a value passing through as `$null`, so it is
+    the only one that names no type.
+    """
+
+    def test_the_grid_holds_a_column_over_every_source_for_every_target_named_here(self):
+        self.assertEqual(
+            {
+                target: [
+                    source for source in GRID_WITNESSES
+                    if conversion_outcome(target, source) is None
+                ]
+                for target in CONVERSION_TARGETS
+            },
+            {target: [] for target in CONVERSION_TARGETS},
+        )
+        self.assertEqual(
+            sorted({row.target for row in CAST_ROWS.values()} - set(CONVERSION_TARGETS)), [])
+
+    def test_the_one_target_a_value_passes_through_names_no_type(self):
+        passing = [
+            target for target in CONVERSION_TARGETS
+            if any(_cast_cell(target, source).may_be_null for source in GRID_WITNESSES)
+        ]
+        self.assertEqual(passing, ['array'])
+        self.assertEqual(_evaluated('[array]$x'), NOTHING)
+        self.assertEqual(_evaluated('[array]$null'), Ps1Outcome(False, NULL))
+
+    def test_every_other_target_is_named_over_a_value_nothing_is_known_about(self):
+        named = {
+            target: _evaluated(F'[{target}]$x')
+            for target in CONVERSION_TARGETS
+            if target != 'array'
+        }
+        self.assertEqual(
+            named,
+            {target: Ps1Outcome(True, Ps1Typed(_type(target))) for target in named},
+        )
+
+    def test_a_target_the_grid_never_measured_names_nothing(self):
+        self.assertIsNone(conversion_outcome('datetime', 'System.Int32'))
+        self.assertEqual(_evaluated('[datetime]$x'), NOTHING)
+
+    def test_a_cast_the_host_threw_on_keeps_what_convert_made_of_the_value_in_hand(self):
+        """
+        The operand of each of these is pinned by the source, so the grid has a row for it and the
+        conversion is settled there rather than by the target: five of them do not fit and name no
+        value at all, which is more than *a Byte or a throw* would have said, and `[int]'abc'` keeps
+        the Int32 its cell names beside the throw. Naming the target is for the other case, where
+        the operand names no type and there is no row to read.
+        """
+        self.assertEqual(
+            {expression: _evaluated(expression) for expression in THROWN},
+            {
+                '[byte]300'       : Ps1Outcome(True, UNKNOWN),
+                '[byte]-1'        : Ps1Outcome(True, UNKNOWN),
+                '[int]2147483648' : Ps1Outcome(True, UNKNOWN),
+                '[char]65536'     : Ps1Outcome(True, UNKNOWN),
+                '[char]-1'        : Ps1Outcome(True, UNKNOWN),
+                "[int]'abc'"      : Ps1Outcome(True, Ps1Typed(INT32)),
+            },
+        )
+        self.assertEqual(
+            {expression: _evaluated(expression) for expression in THROWN},
+            {expression: _converted(expression) for expression in THROWN},
+        )
+        self.assertEqual(_evaluated('[byte]$x'), Ps1Outcome(True, Ps1Typed(BYTE)))
+
+
+class TestPs1EvaluateRefusesATypeLiteral(unittest.TestCase):
+    """
+    `[int]` written as a value is not an Int32. `resolve_expression_type` answers `System.Int32` for
+    it because what asks that function is a member lookup, and the type a literal *names* is what a
+    lookup needs; the value one *is* is a `System.RuntimeType`, which no measurement here covers.
+    This is the one place `evaluate` deliberately says less than the other reader.
+    """
+
+    def test_every_type_literal_the_corpus_writes_is_refused_here_and_typed_there(self):
+        literals = [site for site in SITES if isinstance(site.node, Ps1TypeExpression)]
+        self.assertEqual(len(literals), 17)
+        self.assertEqual([site.source for site in literals if evaluate(site.node) != NOTHING], [])
+        self.assertEqual(
+            [site.source for site in literals if resolve_expression_type(site.node) is None], [])
+
+    def test_a_type_literal_is_not_a_value_of_the_type_it_names(self):
+        for source, name in (
+            ('[int]', 'System.Int32'),
+            ('[string]', 'System.String'),
+            ('[byte]', 'System.Byte'),
+        ):
+            with self.subTest(source):
+                self.assertEqual(_evaluated(source), NOTHING)
+                self.assertEqual(resolve_expression_type(_slot(source)), _type(name))
+
+    def test_an_operator_that_consumes_a_type_literal_is_refused_with_it(self):
+        """
+        `-as` takes one as its right operand, and a conversion that cannot be made yields `$null`
+        there where a cast throws: measured, `300 -as [byte]` is `$null` and `[byte]300` throws. A
+        Byte answered here would be the cast's answer given to a different expression.
+        """
+        self.assertEqual(_measured('300 -as [byte]'), ('', '<null>'))
+        self.assertEqual(
+            {expression: _evaluated(expression) for expression in AS_ROWS},
+            {expression: NOTHING for expression in AS_ROWS},
+        )
+
+
+class TestPs1NumeralTypesAreReadFromTheSpelling(unittest.TestCase):
+    """
+    How wide a numeral is written decides its type and only the spelling knows: `1L` is an Int64,
+    `2147483648` an Int64, `9223372036854775808` a Decimal and `1e3` a Double, every one of them
+    measured. `resolve_expression_type` is what a member read on such a literal resolves against, so
+    a numeral answered `System.Int32` there resolved the read against a type the value never had.
+    """
+
+    def test_a_measured_numeral_is_typed_by_the_type_the_host_stamped_it_with(self):
+        self.assertEqual(
+            {expression: resolve_expression_type(_slot(expression)) for expression in DECIDED},
+            {expression: type_of(MEASURED[expression]) for expression in DECIDED},
+        )
+
+    def test_a_numeral_no_int32_holds_is_not_typed_as_one(self):
+        wider = (
+            '1L',
+            '2147483648',
+            '9223372036854775808',
+            '1e3',
+            '100000000000000000000000000000000',
+        )
+        self.assertEqual(
+            sorted({_measured(expression)[0] for expression in wider}),
+            ['System.Decimal', 'System.Double', 'System.Int64'],
+        )
+        self.assertEqual(
+            {
+                expression: str(resolve_expression_type(_slot(expression)))
+                for expression in wider
+            },
+            {expression: _measured(expression)[0] for expression in wider},
+        )
+
+    def test_a_spelling_the_domain_will_not_read_is_typed_by_nobody(self):
+        for expression in REFUSED + UNANSWERED:
+            with self.subTest(expression):
+                self.assertIsNone(resolve_expression_type(_slot(expression)))
+
+
+class TestPs1OperatorCaseDoesNotChangeTheAnswer(unittest.TestCase):
+    """
+    PowerShell's operators are case-insensitive, and a caller holds whatever case the script wrote.
+    The fact a measured row is answered with is the host's, so it has to be the answer for either
+    spelling of the same operator: a fold lost to a capital letter is a fold lost.
+    """
+
+    def test_a_measured_operation_is_answered_the_same_in_either_case(self):
+        lettered = [
+            expression for expression in OPERATION_ROWS
+            if any(character.isalpha() for character in _operator_of(expression))
+        ]
+        self.assertEqual(len(lettered), 8)
+        self.assertEqual(
+            {expression: _cased(expression, str.upper) for expression in lettered},
+            {expression: _cased(expression, str.lower) for expression in lettered},
+        )
+
+    def test_a_pinned_operation_is_pinned_however_its_operator_is_cased(self):
+        pinned = [
+            expression for expression in PINNED_OPERATIONS
+            if any(character.isalpha() for character in _operator_of(expression))
+        ]
+        self.assertEqual(
+            {expression: _cased(expression, str.upper) for expression in pinned},
+            {
+                expression: Ps1Outcome(False, _measured_operation_fact(expression))
+                for expression in pinned
+            },
+        )
+
+    def test_the_grid_answers_alike_however_an_operator_is_cased(self):
+        for operator in GRID_OPERATORS:
+            if not any(character.isalpha() for character in operator):
+                continue
+            for left in OPERANDS:
+                for right in OPERANDS:
+                    with self.subTest(F'{left!r} {operator} {right!r}'):
+                        self.assertEqual(
+                            apply(operator.upper(), left, right), apply(operator, left, right))
 
 
 if __name__ == '__main__':
