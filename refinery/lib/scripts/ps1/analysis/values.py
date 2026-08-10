@@ -80,8 +80,13 @@ from refinery.lib.scripts.ps1.model import (
     Ps1UnaryExpression,
     Ps1Variable,
 )
+from refinery.lib.scripts.ps1.token import BACKTICK_ENCODE
 
 _T = TypeVar('_T')
+
+#: The characters a literal cannot carry verbatim, which is every one the backtick table escapes
+#: except the newline: a newline is what a here-string exists to hold.
+_NONPRINT_CONTROL = frozenset(BACKTICK_ENCODE) - {'\n'}
 
 
 def is_truthy(node: Node | None) -> bool | None:
@@ -550,23 +555,35 @@ def _array(node: Ps1ArrayLiteral | Ps1ArrayExpression) -> Ps1Fact:
     An array literal as a fact whose payload is the facts of its elements. One element this module
     cannot read makes the whole array unknown: a caller reasoning about the array would otherwise be
     handed a shorter one than the script builds.
+
+    The two spellings do not build the same array from the same parts, which is measured rather than
+    assumed. The comma operator takes each operand whole, so `(1, 2), 3` is two elements and the
+    first of them is an array. `@()` collects what a pipeline hands it and a pipeline unrolls a
+    collection one level on the way, so `@(@(1, 2))` and `@((1, 2))` are each *two* elements rather
+    than one holding two, while `@(@(1, 2), 3)` is two — the unrolling happens once, to the value
+    the statement produced, and not again to what was inside it.
     """
-    elements: list[Expression] = []
     if isinstance(node, Ps1ArrayLiteral):
-        elements.extend(node.elements)
-    else:
-        for statement in node.body:
-            if not isinstance(statement, Ps1ExpressionStatement) or statement.expression is None:
-                return UNKNOWN
-            inner = statement.expression
-            if isinstance(inner, Ps1ArrayLiteral):
-                elements.extend(inner.elements)
-            else:
-                elements.append(inner)
-    facts = tuple(read(element) for element in elements)
-    if any(fact is UNKNOWN for fact in facts):
+        return _collected(read(element) for element in node.elements)
+    facts: list[Ps1Fact] = []
+    for statement in node.body:
+        if not isinstance(statement, Ps1ExpressionStatement) or statement.expression is None:
+            return UNKNOWN
+        fact = read(statement.expression)
+        if isinstance(fact, Ps1Constant) and fact.type == _OBJECT_ARRAY and isinstance(
+            fact.payload, tuple
+        ):
+            facts.extend(fact.payload)
+        else:
+            facts.append(fact)
+    return _collected(facts)
+
+
+def _collected(facts: typing.Iterable[Ps1Fact]) -> Ps1Fact:
+    gathered = tuple(facts)
+    if any(fact is UNKNOWN for fact in gathered):
         return UNKNOWN
-    return Ps1Constant(_OBJECT_ARRAY, facts)
+    return Ps1Constant(_OBJECT_ARRAY, gathered)
 
 
 def _numeral(raw: str) -> Ps1Fact:
@@ -1163,53 +1180,142 @@ _COMPARISONS = {
 }
 
 
-#: The literal suffix that pins a spelled number to its type, for the types that have one. A type
-#: absent here has no literal spelling at all, and `render` refuses it rather than spelling a number
-#: that would re-read as something else: `[byte] 1` written back as `1` is an Int32.
+#: The literal suffix that pins a spelled number to its type, for the types that have one. The set
+#: is the whole of what 5.1 has: `l` names an Int64 and `d` a Decimal, and the rest of the suffixes
+#: a reader may expect — `y`, `uy`, `s`, `us`, `u`, `ul`, `n` — arrived in 6.2 and 7.0.
 _LITERAL_SUFFIX = {_INT32: '', _INT64: 'L', _DECIMAL: 'd'}
+
+#: The cast a value is written under where the language spells no literal of its type. Each is
+#: measured: `[byte] 5` is a Byte, `[sbyte] -5` an SByte, `[uint64] 18446744073709551615` a UInt64
+#: and `[char] 65` the Char `A`. A decimal numeral is the operand every one of them converts from
+#: without loss, including the values above `Int64`, which reach the cast as a Decimal literal.
+#:
+#: `System.Single` is absent because the domain names no constant of it: no literal spells one,
+#: no width row holds one and nothing stamps one, so a value that would need this entry cannot
+#: be built.
+_CAST_SPELLING = {
+    _BYTE: 'byte',
+    _SBYTE: 'sbyte',
+    _INT16: 'int16',
+    _UINT16: 'uint16',
+    _UINT32: 'uint32',
+    _UINT64: 'uint64',
+}
 
 
 def render(fact: Ps1Fact) -> Expression | None:
     """
-    The expression that spells this value, or `None` when nothing spells it. `None` is a **refusal**
-    and never *the value is not constant*: a caller holding a `Ps1Constant` it cannot render has to
-    leave the source alone, because every alternative it might reach for spells a different value.
+    The expression that spells this value. **A value always has one**: a literal where the language
+    has a literal of its type, and the cast of one where it does not, so that a caller holding a
+    `Ps1Constant` never has to choose between leaving the source alone and spelling something else.
 
-    What is refused, and why each one is a value and not a gap:
-
-    - A number of a type with no literal suffix. `[uint16] 7` spelled `7` is an Int32, and there is
-      no spelling of a UInt16 literal for it to take instead.
-    - A `Double` that is not finite, and negative zero. `Infinity` and `NaN` have no literal at all
-      — written out they read as command names — and `-0.0` spelled `-0` re-reads as an Int32.
-    - A `Char`, a `String` and a collection, which are not this commit's to spell: a `Char` needs
-      the question of whether a `String` spelling is observationally equivalent where it stands, and
-      a collection needs the empty and one-element forms that change type when written naively.
+    `None` is therefore not a refusal to spell a value: it is the answer for a fact that *names*
+    no value. `UNKNOWN` and `Ps1Typed` are the two, and beside them stand a payload that does not
+    carry its own type, which is a malformed fact rather than a value, and a `Double` that is not
+    finite. Infinity and NaN have no literal and no cast that reaches them, and the domain does
+    not carry one either — `_finite` refuses a computed one — so that last refusal is unreachable
+    rather than a gap.
 
     A number is spelled with its sign attached to the digits, which is the spelling that keeps its
     type: `-2147483648` is one literal that fits Int32, and a caller putting the result somewhere a
-    parenthesis would separate the two has changed an Int32 into an Int64.
+    parenthesis would separate the two has changed an Int32 into an Int64. Where a *slot* reads that
+    spelling as something else — a command argument reads a leading dash as part of a word, and a
+    cast written bare there is one word too — it is the slot that brackets it, in
+    `refinery.lib.scripts.ps1.synth`, because only the slot knows what stands beside it.
     """
     if fact is NULL:
         return Ps1Variable(name='Null')
     if not isinstance(fact, Ps1Constant):
         return None
+    payload = fact.payload
     if fact.type == _BOOLEAN:
-        return Ps1Variable(name='True' if fact.payload else 'False')
+        return Ps1Variable(name='True' if payload else 'False')
+    if fact.type == _STRING:
+        return make_string_literal(payload) if isinstance(payload, str) else None
+    if fact.type == _CHAR:
+        return _rendered_character(payload)
+    if fact.type == _OBJECT_ARRAY:
+        return _rendered_array(payload) if isinstance(payload, tuple) else None
     if fact.type == _DOUBLE:
-        return _rendered_double(fact.payload)
-    suffix = _LITERAL_SUFFIX.get(fact.type)
-    if suffix is None or not isinstance(fact.payload, (int, decimal.Decimal)):
+        return _rendered_double(payload)
+    if isinstance(payload, bool) or not isinstance(payload, (int, decimal.Decimal)):
         return None
-    if fact.type == _DECIMAL:
-        return Ps1RealLiteral(raw=F'{fact.payload}{suffix}')
-    return Ps1IntegerLiteral(raw=F'{fact.payload}{suffix}')
+    suffix = _LITERAL_SUFFIX.get(fact.type)
+    if suffix is not None:
+        if fact.type == _DECIMAL:
+            return Ps1RealLiteral(raw=F'{payload}{suffix}')
+        return Ps1IntegerLiteral(raw=F'{payload}{suffix}')
+    target = _CAST_SPELLING.get(fact.type)
+    if target is None:
+        return None
+    return Ps1CastExpression(type_name=target, operand=Ps1IntegerLiteral(raw=str(payload)))
+
+
+def _rendered_character(payload) -> Expression | None:
+    """
+    A `Char`, written as the cast of its code point. The one-character String that carries the same
+    payload is a different value and not a shorter spelling of this one: measured, the two differ in
+    the type they report, in what `-is [char]` answers, in which String methods they have and in
+    what `[int]` makes of them.
+    """
+    if not isinstance(payload, str) or len(payload) != 1:
+        return None
+    return Ps1CastExpression(type_name='char', operand=Ps1IntegerLiteral(raw=str(ord(payload))))
+
+
+def _rendered_array(elements: tuple[Ps1Fact, ...]) -> Expression | None:
+    """
+    A collection, spelled by the comma operator that builds exactly it. `@()` is the empty form
+    and nothing else, because it collects what a pipeline unrolls rather than what was written:
+    measured, `@(@(1, 2))` is a two-element array where `,(1, 2)` is a one-element array holding
+    one, and `(1, 2), 3` is the two-element array with an array in it.
+
+    One element that names no value refuses the whole collection: a shorter array than the script
+    builds is a different value, and there is no element to stand in for the one that was dropped.
+    """
+    if not elements:
+        return Ps1ArrayExpression(body=[])
+    spelled: list[Expression] = []
+    for element in elements:
+        one = render(element)
+        if one is None:
+            return None
+        spelled.append(one)
+    return Ps1ArrayLiteral(elements=spelled)
 
 
 def _rendered_double(payload) -> Expression | None:
-    if not isinstance(payload, float) or payload != payload or payload in (
-        float('inf'), float('-inf')
-    ):
-        return None
-    if payload == 0.0 and math.copysign(1.0, payload) < 0:
+    if not isinstance(payload, float) or payload != payload or payload in (INFINITY, -INFINITY):
         return None
     return Ps1RealLiteral(raw=repr(payload))
+
+
+def make_string_literal(value: str) -> Ps1StringLiteral | Ps1HereString:
+    """
+    The literal that spells `value` as a `String`, for a caller that holds a bare Python `str` and
+    no fact. It is `render`'s String arm, and it is also the last place in the unit where a value is
+    spelled without its type having been named: a `str` reaching here may have been a `Char`, and
+    written out through here it becomes a one-character String, which is what the ledger's Char rows
+    are. Each pass loses this call as it starts carrying a `Ps1Fact` instead.
+
+    A here-string is chosen for multi-line text because it needs no escaping, and only where the
+    text cannot close it early: a line beginning `'@` inside the value would end the string there
+    and let the rest of it be read as script.
+    """
+    has_newline = '\n' in value
+    has_nonprint = any(c in value for c in _NONPRINT_CONTROL)
+    herestring_safe = not value.startswith("'@") and "\n'@" not in value
+    if has_newline and not has_nonprint and herestring_safe:
+        return Ps1HereString(value=value, raw=F"@'\n{value}\n'@")
+    if has_nonprint or has_newline:
+        escaped = value.replace('`', '``').replace('"', '`"').replace('$', '`$')
+        for ch, esc in BACKTICK_ENCODE.items():
+            escaped = escaped.replace(ch, esc)
+        return Ps1StringLiteral(value=value, raw=F'"{escaped}"')
+    if "'" not in value:
+        raw = F"'{value}'"
+    elif '"' not in value and '$' not in value and '`' not in value:
+        raw = F'"{value}"'
+    else:
+        raw = "'" + value.replace("'", "''") + "'"
+    return Ps1StringLiteral(value=value, raw=raw)

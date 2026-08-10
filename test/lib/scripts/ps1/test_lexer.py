@@ -6,7 +6,7 @@ from typing import Generator, NamedTuple
 
 from test import TestBase
 
-from refinery.lib.scripts.ps1.lexer import Ps1Lexer, Ps1LexerMode
+from refinery.lib.scripts.ps1.lexer import Ps1Lexer, Ps1LexerMode, reads_as_one_numeral
 from refinery.lib.scripts.ps1.token import Ps1Token, Ps1TokenKind
 
 
@@ -980,3 +980,105 @@ class TestPs1LexerModeInvariance(TestBase):
             ]))
         self.assertTrue(invariant_tokens, 'the corpus produced no token of a mode invariant kind')
         self.assertTrue(divergences, 'the corpus never made the two modes read a position apart')
+
+
+class TestPs1NumeralBoundary(TestBase):
+    """
+    Whether a numeral written as one spelling is still that numeral once the text behind it is
+    written straight against it. Every row is one a 5.1 host was measured on: a `Number` token
+    where the numeral survived, and a single `Generic` token where the whole thing became one word.
+    """
+
+    def _reads(self, table: dict[tuple[str, str], bool], mode: Ps1LexerMode):
+        return {row: reads_as_one_numeral(*row, mode) for row in table}
+
+    def test_a_dot_reads_the_member_of_every_numeral_that_ends_before_it(self):
+        """
+        `3.` opens a real number, so `3.ToString()` is the one word `3.ToString` and 5.1 rejects
+        the script. A numeral whose spelling has already ended keeps the dot for the member.
+        """
+        table = {
+            ('3', '.ToString()')    : False,
+            ('0xFF', '.GetType()')  : True,
+            ('1.5', '.GetType()')   : True,
+            ('1kb', '.GetType()')   : True,
+            ('1L', '.GetType()')    : True,
+            ('1e3', '.GetType()')   : True,
+            ('10d', '.GetType()')   : True,
+        }
+        self.assertEqual(self._reads(table, Ps1LexerMode.EXPRESSION), table)
+
+    def test_no_numeral_survives_an_index_bracket_or_a_static_member(self):
+        """
+        Neither a bracket nor a colon ends a numeral, so every one of these is a single word
+        whatever the numeral was spelled as.
+        """
+        table = {
+            ('3', '[0]')            : False,
+            ('0xFF', '[0]')         : False,
+            ('1.5', '[0]')          : False,
+            ('1kb', '[0]')          : False,
+            ('3', '::ToString')     : False,
+            ('0xFF', '::MaxValue')  : False,
+        }
+        self.assertEqual(self._reads(table, Ps1LexerMode.EXPRESSION), table)
+
+    def test_a_sign_joins_the_numeral_and_the_rule_then_applies_to_the_whole_of_it(self):
+        """
+        Measured, `-1kb.GetType()` reads the member of minus one kilobyte where `-1.GetType()` is
+        the one word `-1.GetType`.
+        """
+        table = {
+            ('-1', '.GetType()')    : False,
+            ('-1kb', '.GetType()')  : True,
+        }
+        self.assertEqual(self._reads(table, Ps1LexerMode.EXPRESSION), table)
+
+    def test_a_sign_is_read_where_an_expression_is_and_never_where_a_bare_word_is_a_value(self):
+        for spelling in ('-1', '+1', '-0.0', '-1.5', '-1L', '-1kb'):
+            with self.subTest(spelling):
+                self.assertEqual(
+                    reads_as_one_numeral(spelling, '', Ps1LexerMode.EXPRESSION), True)
+                self.assertEqual(
+                    reads_as_one_numeral(spelling, '', Ps1LexerMode.ARGUMENT), False)
+
+    def test_a_bare_numeral_standing_alone_in_an_argument_is_still_that_numeral(self):
+        table = {
+            ('1', '')       : True,
+            ('1.5', '')     : True,
+            ('.5', '')      : True,
+            ('0xFF', '')    : True,
+            ('1kb', '')     : True,
+            ('10d', '')     : True,
+            ('1e3', '')     : True,
+            ('1E+28d', '')  : True,
+        }
+        self.assertEqual(self._reads(table, Ps1LexerMode.ARGUMENT), table)
+
+    def test_a_numeral_an_argument_writes_anything_against_is_one_word(self):
+        table = {
+            ('3', '.ToString()')    : False,
+            ('1.5', '.GetType()')   : False,
+            ('1kb', '.GetType()')   : False,
+            ('0xFF', '.GetType()')  : False,
+        }
+        self.assertEqual(self._reads(table, Ps1LexerMode.ARGUMENT), table)
+
+    def test_what_decides_is_the_character_the_numeral_is_touched_by(self):
+        """
+        A member access is written as `.` or `::` and an index as `[`, which is the whole of what
+        the writer has when it asks. An answer that depended on the rest of the member chain would
+        make a slot unable to decide about its receiver until it had written everything behind it.
+        """
+        for spelling in ('3', '0xFF', '1.5', '1kb', '1L', '1e3', '10d', '-1', '-1kb'):
+            with self.subTest(spelling):
+                self.assertEqual(
+                    [
+                        reads_as_one_numeral(spelling, access, Ps1LexerMode.EXPRESSION)
+                        for access in ('.', '::', '[')
+                    ],
+                    [
+                        reads_as_one_numeral(spelling, written, Ps1LexerMode.EXPRESSION)
+                        for written in ('.GetType()', '::MaxValue', '[0]')
+                    ],
+                )

@@ -16,6 +16,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     collect_byte_array,
     collect_int_arguments,
     is_truthy,
+    make_string_literal,
     read,
     render,
     unwrap_integer,
@@ -37,7 +38,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     is_array_reverse_call,
     is_pipeline_item,
     is_static_type_call,
-    make_string_literal,
     unwrap_single_paren,
 )
 from refinery.lib.scripts.ps1.deobfuscation.substitution import (

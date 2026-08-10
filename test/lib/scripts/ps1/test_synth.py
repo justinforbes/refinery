@@ -2,17 +2,58 @@ from __future__ import annotations
 
 from test import TestBase
 
-from refinery.lib.scripts import UnspellableNode
+from refinery.lib.scripts import Node, UnspellableNode
 from refinery.lib.scripts.ps1.model import (
+    Expression,
+    Ps1AccessKind,
     Ps1ArrayLiteral,
+    Ps1AssignmentExpression,
     Ps1BinaryExpression,
+    Ps1CastExpression,
+    Ps1CommandArgument,
+    Ps1CommandInvocation,
+    Ps1ExpressionStatement,
+    Ps1IndexExpression,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
+    Ps1MemberAccess,
     Ps1RealLiteral,
+    Ps1StringLiteral,
+    Ps1TypeExpression,
     Ps1UnaryExpression,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
+
+
+def _written(node: Node) -> str:
+    return Ps1Synthesizer().convert(node)
+
+
+def _numeral(spelling: str) -> Expression:
+    """
+    The literal node the parser builds for a numeral written as `spelling`, taken from the one slot
+    that reads a whole numeral with its sign: the right hand side of an assignment.
+    """
+    statement, = Ps1Parser(F'$t = {spelling}').parse().body
+    assert isinstance(statement, Ps1ExpressionStatement)
+    assignment = statement.expression
+    assert isinstance(assignment, Ps1AssignmentExpression)
+    value = assignment.value
+    assert isinstance(value, Expression), spelling
+    return value
+
+
+def _write_output(value: Expression) -> Ps1CommandInvocation:
+    """
+    `Write-Output` with `value` as its one positional argument, built rather than parsed: every
+    spelling this slot has to bracket is one no source can put here, because 5.1 reads each of them
+    as a word instead.
+    """
+    return Ps1CommandInvocation(
+        name=Ps1StringLiteral(value='Write-Output', raw='Write-Output'),
+        arguments=[Ps1CommandArgument(value=value)],
+    )
 
 
 class TestPs1Synthesizer(TestBase):
@@ -329,3 +370,158 @@ class TestPs1Synthesizer(TestBase):
         self.assertRaises(
             UnspellableNode,
             Ps1Synthesizer().convert, Ps1ArrayLiteral(elements=[]))
+
+
+class TestPs1SlotsThatSwallowASpelling(TestBase):
+    """
+    A spelling that is legal on its own can be read as something else by the slot it lands in, and
+    the synthesizer may never write one that is. Two slots do it, both measured on 5.1: a command
+    argument, where a leading sign or a bracketed type name belongs to the word rather than to the
+    value, and a member, static-member or index receiver, where a numeral runs on into the access
+    written behind it.
+    """
+
+    def test_a_source_that_already_writes_a_legal_spelling_comes_back_unchanged(self):
+        for source in (
+            '-1kb.GetType()',
+            '- 1kb.GetType()',
+            '0xFF.GetType()',
+            '1.5.GetType()',
+            '1L.GetType()',
+            '1e3.GetType()',
+            '10d.GetType()',
+            "'abc'.ToUpper()",
+            'Write-Output 1',
+            'Write-Output -1',
+            'Write-Output 0xFF',
+            'Write-Output 1kb',
+            'Write-Output "abc".Length',
+            'Write-Output (-1)',
+            'Write-Output ([byte]5)',
+        ):
+            with self.subTest(source):
+                self.assertEqual(_written(Ps1Parser(source).parse()), source)
+
+    def test_a_member_receiver_is_bracketed_exactly_where_the_dot_would_join_it(self):
+        """
+        `3.` opens a real number, so `3.GetType()` is the one word `3.GetType` and 5.1 rejects the
+        script; a numeral whose spelling has already ended keeps the dot for the member. A sign
+        belongs to the numeral it is written against, which is why `-1` behaves as `1` does and
+        `-1kb` as `1kb` does.
+        """
+        written = {
+            spelling: _written(Ps1InvokeMember(object=_numeral(spelling), member='GetType'))
+            for spelling in ('3', '0xFF', '1.5', '1kb', '1L', '1e3', '10d', '-1', '-1kb')
+        }
+        self.assertEqual(written, {
+            '3'    : '(3).GetType()',
+            '0xFF' : '0xFF.GetType()',
+            '1.5'  : '1.5.GetType()',
+            '1kb'  : '1kb.GetType()',
+            '1L'   : '1L.GetType()',
+            '1e3'  : '1e3.GetType()',
+            '10d'  : '10d.GetType()',
+            '-1'   : '(-1).GetType()',
+            '-1kb' : '-1kb.GetType()',
+        })
+
+    def test_a_static_member_or_index_receiver_is_bracketed_whatever_the_numeral_is(self):
+        """
+        Neither a bracket nor a colon ends a numeral, so `3[0]`, `0xFF[0]` and `0xFF::MaxValue` are
+        each one word on 5.1 however the numeral was spelled.
+        """
+        static = {
+            spelling: _written(Ps1MemberAccess(
+                object=_numeral(spelling),
+                member='MaxValue',
+                access=Ps1AccessKind.STATIC,
+            ))
+            for spelling in ('3', '0xFF', '1.5', '1kb')
+        }
+        indexed = {
+            spelling: _written(Ps1IndexExpression(
+                object=_numeral(spelling),
+                index=Ps1IntegerLiteral(raw='0'),
+            ))
+            for spelling in ('3', '0xFF', '1.5', '1kb')
+        }
+        self.assertEqual(static, {
+            '3'    : '(3)::MaxValue',
+            '0xFF' : '(0xFF)::MaxValue',
+            '1.5'  : '(1.5)::MaxValue',
+            '1kb'  : '(1kb)::MaxValue',
+        })
+        self.assertEqual(indexed, {
+            '3'    : '(3)[0]',
+            '0xFF' : '(0xFF)[0]',
+            '1.5'  : '(1.5)[0]',
+            '1kb'  : '(1kb)[0]',
+        })
+
+    def test_a_bracketed_receiver_is_written_straight_against_the_access_that_reads_it(self):
+        # `(3) .ToString()` is a parse error on 5.1, so the bracket a receiver needs may never
+        # bring a separating space with it.
+        for written in (
+            _written(Ps1InvokeMember(object=_numeral('3'), member='ToString')),
+            _written(Ps1MemberAccess(object=_numeral('3'), member='MaxValue')),
+            _written(Ps1MemberAccess(
+                object=_numeral('3'),
+                member='MaxValue',
+                access=Ps1AccessKind.STATIC,
+            )),
+            _written(Ps1IndexExpression(object=_numeral('3'), index=Ps1IntegerLiteral(raw='0'))),
+        ):
+            with self.subTest(written):
+                self.assertEqual(written[:3], '(3)')
+                self.assertEqual(' ' in written, False)
+
+    def test_a_numeral_a_command_argument_would_read_as_a_word_is_bracketed(self):
+        """
+        `Write-Output 1` passes an Int32 and `Write-Output (-1)` passes an Int32, but
+        `Write-Output -1` passes the String `-1`, and `+1`, `-1.5`, `-1L` and `-0.0` are words the
+        same way. A positive numeral is the control that says the bracket belongs to the sign in
+        this slot rather than to numerals as such.
+        """
+        written = {
+            spelling: _written(_write_output(_numeral(spelling)))
+            for spelling in ('1', '0xFF', '1kb', '10d', '1e3', '-1', '+1', '-1.5', '-1L', '-0.0')
+        }
+        self.assertEqual(written, {
+            '1'    : 'Write-Output 1',
+            '0xFF' : 'Write-Output 0xFF',
+            '1kb'  : 'Write-Output 1kb',
+            '10d'  : 'Write-Output 10d',
+            '1e3'  : 'Write-Output 1e3',
+            '-1'   : 'Write-Output (-1)',
+            '+1'   : 'Write-Output (+1)',
+            '-1.5' : 'Write-Output (-1.5)',
+            '-1L'  : 'Write-Output (-1L)',
+            '-0.0' : 'Write-Output (-0.0)',
+        })
+
+    def test_a_cast_in_a_command_argument_is_bracketed(self):
+        # `f [byte]5` lexes as the single word `[byte]5` where `f ([byte]5)` is the cast, so the
+        # bracket is what makes the argument the Byte the tree holds.
+        cast = Ps1CastExpression(type_name='byte', operand=Ps1IntegerLiteral(raw='5'))
+        self.assertEqual(_written(_write_output(cast)), 'Write-Output ([byte]5)')
+        self.assertEqual(
+            _written(_write_output(Ps1TypeExpression(name='byte'))), 'Write-Output ([byte])')
+
+    def test_a_receiver_inside_a_command_argument_is_still_read_in_command_mode(self):
+        """
+        An argument goes on being lexed as one until something opens a new slot, so a numeral
+        several levels under it is still in the argument's text. The same member access therefore
+        needs a bracket in `Write-Output` that it does not need on its own.
+        """
+        self.assertEqual(
+            _written(Ps1InvokeMember(object=_numeral('0xFF'), member='GetType')),
+            '0xFF.GetType()')
+        self.assertEqual(
+            _written(_write_output(Ps1InvokeMember(object=_numeral('0xFF'), member='GetType'))),
+            'Write-Output (0xFF).GetType()')
+        self.assertEqual(
+            _written(_write_output(Ps1MemberAccess(
+                object=Ps1InvokeMember(object=_numeral('0xFF'), member='GetType'),
+                member='FullName',
+            ))),
+            'Write-Output (0xFF).GetType().FullName')

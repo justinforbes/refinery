@@ -3,12 +3,14 @@ AST-to-source synthesizer for PowerShell.
 """
 from __future__ import annotations
 
+import contextlib
 import io
 
 from collections.abc import Callable
 
 from refinery.lib.scripts import Block, Node, Synthesizer
 from refinery.lib.scripts.ps1 import precedence
+from refinery.lib.scripts.ps1.lexer import Ps1LexerMode, reads_as_one_numeral
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ArrayExpression,
@@ -97,23 +99,42 @@ def _fuses_with_a_sign(spelling: str) -> bool:
     return head.isdigit()
 
 
+def _numeral_spelling(node: Expression) -> str | None:
+    """
+    How a numeral is written, or `None` for a node that is not one. This is the only kind of leaf
+    whose spelling can be swallowed by what stands beside it, because it is the only one that ends
+    where the next character says it does rather than at a delimiter of its own.
+    """
+    if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
+        return node.raw
+    return None
+
+
 class Ps1Synthesizer(Synthesizer):
     """
-    Two things decide how a node is written, and both are properties of the slot it goes into
+    Three things decide how a node is written, and all three are properties of the slot it goes into
     rather than of the node. How tightly the slot binds decides whether a bracket is needed, and
     `refinery.lib.scripts.ps1.precedence` is that scale. Whether the slot reads a bare word as a
-    value decides how a leaf is spelled, and that is the flag below.
+    value decides how a leaf is spelled, and that is `_word_slot`. How the text will be lexed back
+    decides where a spelling runs on into what touches it, and that is `_mode`.
 
     A word with no quotes means a value where a command's name and arguments are read, and begins a
     command everywhere else. So `foo a, b` may keep its words while `foo (a, b)` may not — the
     bracket makes `a` a command name, and 5.1 then rejects the whole line. The parser's `raw` is
     only true of the slot it was read from, which is why replaying it is not enough.
+
+    The arming and the mode are close relatives and are not the same thing. The arming is spent on
+    one node, because only the leaf standing in the slot is spelled by it; the mode holds until a
+    delimiter is written, because 5.1 goes on lexing a command's arguments in command mode until
+    something opens a new one. `Write-Output $t.GetType()` is where they part: the member access
+    takes the arming, and the numeral several levels under it is still in the argument's text.
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._word_slot_ahead = False
         self._word_slot = False
+        self._mode = Ps1LexerMode.EXPRESSION
 
     def visit(self, node: Node) -> Node | None:
         """
@@ -124,19 +145,34 @@ class Ps1Synthesizer(Synthesizer):
         self._word_slot, self._word_slot_ahead = self._word_slot_ahead, False
         return super().visit(node)
 
+    @contextlib.contextmanager
+    def _reading(self, mode: Ps1LexerMode):
+        """
+        Write what follows as text that will be lexed in `mode`, and put back the mode that was
+        running when it is done.
+        """
+        saved, self._mode = self._mode, mode
+        try:
+            yield
+        finally:
+            self._mode = saved
+
     def _emit_word(self, node: Expression, minimum: int):
         """
-        Write `node` into a slot that reads a bare word as a value.
+        Write `node` into a slot that reads a bare word as a value, which is the slot 5.1 lexes in
+        command mode.
         """
         self._word_slot_ahead = True
-        self._emit_operand(node, minimum)
+        with self._reading(Ps1LexerMode.ARGUMENT):
+            self._emit_operand(node, minimum)
 
     def _emit_block(self, block: Block):
         self._write('{')
         self._depth += 1
         for stmt in block.body:
             self._newline()
-            self.visit(stmt)
+            with self._reading(Ps1LexerMode.EXPRESSION):
+                self.visit(stmt)
         self._depth -= 1
         if block.body:
             self._newline()
@@ -146,7 +182,8 @@ class Ps1Synthesizer(Synthesizer):
         for i, stmt in enumerate(stmts):
             if i > 0:
                 self._newline()
-            self.visit(stmt)
+            with self._reading(Ps1LexerMode.EXPRESSION):
+                self.visit(stmt)
 
     @staticmethod
     def _variable_scope_prefix(node: Ps1Variable) -> str:
@@ -164,6 +201,14 @@ class Ps1Synthesizer(Synthesizer):
         self._write(F'{prefix}{body}')
 
     def visit_Ps1IntegerLiteral(self, node: Ps1IntegerLiteral):
+        """
+        A numeral is written exactly as it is spelled, and a numeral the source spelled is never
+        re-spelled. Where it stands in a command argument the text itself is passed on: 5.1 wraps a
+        literal argument so that `PSObject.TokenText` keeps what was written, and the receiving
+        command reads that back — `Write-Host 1.10` prints `1.10` and `notepad.exe 0x10` receives
+        `0x10` rather than `16`. Holding only `raw` is what makes that true by construction, and a
+        pass that normalized one would break it here without anything noticing.
+        """
         self._write(node.raw)
 
     def visit_Ps1RealLiteral(self, node: Ps1RealLiteral):
@@ -227,14 +272,21 @@ class Ps1Synthesizer(Synthesizer):
         only thing standing between `Binary(Binary(1, '+', 2), '*', 3)` and `1 + 2 * 3`.
         """
         if precedence.needs_brackets(node, minimum):
-            # What stands inside a bracket is read as a pipeline, so the slot the bracket creates
-            # is never one that reads a bare word as a value, whatever the slot outside it was.
-            self._word_slot_ahead = False
-            self._write('(')
-            self.visit(node)
-            self._write(')')
+            self._emit_bracketed(node)
         else:
             self.visit(node)
+
+    def _emit_bracketed(self, node: Expression):
+        """
+        Write `node` inside a bracket. What stands inside one is read as a pipeline, so the slot the
+        bracket creates is never one that reads a bare word as a value, whatever the slot outside it
+        was, and the text in it is lexed as an expression however it got here.
+        """
+        self._word_slot_ahead = False
+        self._write('(')
+        with self._reading(Ps1LexerMode.EXPRESSION):
+            self.visit(node)
+        self._write(')')
 
     def visit_Ps1BinaryExpression(self, node: Ps1BinaryExpression):
         # The left spine is walked rather than recursed through, because a folded concatenation is
@@ -284,12 +336,28 @@ class Ps1Synthesizer(Synthesizer):
         if node.operand:
             self._emit_operand(node.operand, precedence.UNARY)
 
+    def _emit_receiver(self, node: Expression, access: str):
+        """
+        Write `node` as the thing `access` reads from. The receiver has to be a primary expression:
+        `.` and `::` bind tighter than anything written with an operator, so `(Get-Variable Y).Tls`
+        printed bare would read the member off the last argument of the command rather than off its
+        result.
+
+        A numeral needs more than that, because it does not end where the tree says it does: `3` in
+        front of `.ToString` is the one word `3.ToString`, and in front of `[0]` or `::MaxValue`
+        every numeral is, since neither bracket nor colon ends one. The lexer is asked, so that what
+        is written here and what reads it back are the same rule. No space is ever written before
+        the access instead: `(3) .ToString()` is a parse error, measured.
+        """
+        raw = _numeral_spelling(node)
+        if raw is not None and not reads_as_one_numeral(raw, access, self._mode):
+            self._emit_bracketed(node)
+        else:
+            self._emit_operand(node, precedence.ATOM)
+
     def _emit_member_prefix(self, node: Ps1MemberAccess | Ps1InvokeMember):
         if node.object:
-            # The receiver has to be a primary expression: `.` and `::` bind tighter than anything
-            # written with an operator, so `(Get-Variable Y).Tls` printed bare would read the
-            # member off the last argument of the command rather than off its result.
-            self._emit_operand(node.object, precedence.ATOM)
+            self._emit_receiver(node.object, node.access.value)
         self._write(node.access.value)
         if isinstance(node.member, Expression):
             self.visit(node.member)
@@ -301,24 +369,26 @@ class Ps1Synthesizer(Synthesizer):
 
     def visit_Ps1IndexExpression(self, node: Ps1IndexExpression):
         if node.object:
-            self._emit_operand(node.object, precedence.ATOM)
+            self._emit_receiver(node.object, '[')
         self._write('[')
         if node.index:
-            self.visit(node.index)
+            with self._reading(Ps1LexerMode.EXPRESSION):
+                self.visit(node.index)
         self._write(']')
 
     def visit_Ps1InvokeMember(self, node: Ps1InvokeMember):
         self._emit_member_prefix(node)
         self._write('(')
-        for i, arg in enumerate(node.arguments):
-            if i > 0:
-                self._write(', ')
-            if precedence.needs_brackets_between_delimiters(arg):
-                self._write('(')
-                self.visit(arg)
-                self._write(')')
-            else:
-                self.visit(arg)
+        with self._reading(Ps1LexerMode.EXPRESSION):
+            for i, arg in enumerate(node.arguments):
+                if i > 0:
+                    self._write(', ')
+                if precedence.needs_brackets_between_delimiters(arg):
+                    self._write('(')
+                    self.visit(arg)
+                    self._write(')')
+                else:
+                    self.visit(arg)
         self._write(')')
 
     def visit_Ps1CommandInvocation(self, node: Ps1CommandInvocation):
@@ -355,15 +425,25 @@ class Ps1Synthesizer(Synthesizer):
         the line. The comma is bracketed too, even though it binds tighter than all of them,
         because it is what separates one argument from the next.
 
-        A spelling that begins with a sign is *not* bracketed here, and this slot cannot carry one:
-        a leading `-` in an argument never signs a numeral, so `Write-Output -1` passes the String
-        `-1` where `Write-Output (-1)` passes an Int32. The bracket is still left off because this
-        method cannot tell the two apart — a value a pass folded into this slot needs it, and a word
-        the source wrote here is changed by it. What it waits on is a node that knows which of the
-        two it is; the lexer half of the repair has landed, so a numeral reaching here is one a pass
-        put here.
+        Two spellings survive the precedence scale and are still read as something else here, and
+        both are bracketed. A numeral whose spelling this slot does not end where the tree does is
+        one: `Write-Output -1` passes the String `-1` where `Write-Output (-1)` passes an Int32, and
+        `f +1` and `f -0.0` are words the same way. A cast is the other, measured: `f [byte] 5` is
+        the one word `[byte]5`.
+
+        Neither bracket can change what a source wrote, because neither spelling can reach here from
+        one. A3a made the lexer read both the way 5.1 does — a dash or a bracket in an argument
+        begins a word — so a numeral or a cast standing in this slot is one a pass put here, and
+        bracketing it is what makes it mean what the pass meant.
         """
-        self._emit_word(value, precedence.COMMA + 1)
+        raw = _numeral_spelling(value)
+        misread = isinstance(value, (Ps1CastExpression, Ps1TypeExpression)) or (
+            raw is not None and not reads_as_one_numeral(raw, '', Ps1LexerMode.ARGUMENT)
+        )
+        if misread:
+            self._emit_bracketed(value)
+        else:
+            self._emit_word(value, precedence.COMMA + 1)
 
     def visit_Ps1AssignmentExpression(self, node: Ps1AssignmentExpression):
         if node.target:
@@ -409,7 +489,8 @@ class Ps1Synthesizer(Synthesizer):
                 # one entry, not a call to `Name`.
                 self._emit_word(key, precedence.COMMA + 1)
                 self._write(' = ')
-                self.visit(value)
+                with self._reading(Ps1LexerMode.EXPRESSION):
+                    self.visit(value)
             self._depth -= 1
             self._newline()
         self._write('}')
@@ -422,7 +503,8 @@ class Ps1Synthesizer(Synthesizer):
     def visit_Ps1ParenExpression(self, node: Ps1ParenExpression):
         self._write('(')
         if node.expression:
-            self.visit(node.expression)
+            with self._reading(Ps1LexerMode.EXPRESSION):
+                self.visit(node.expression)
         self._write(')')
 
     def _emit_script_body(self, node: Ps1Code, *, newline_after: bool):

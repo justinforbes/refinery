@@ -1,5 +1,6 @@
 """
-What `refinery.lib.scripts.ps1.analysis.values.read` makes of an expression, held against what a
+What `refinery.lib.scripts.ps1.analysis.values.read` makes of an expression and what
+`refinery.lib.scripts.ps1.analysis.values.render` writes a value back as, both held against what a
 real Windows PowerShell 5.1 host made of the same expression. No host is run from here: the
 measurements are the ones already taken and checked in, and this module reads them as data, so the
 expectations below are the host's rather than ours.
@@ -16,6 +17,7 @@ from typing import Callable, NamedTuple
 from test.lib.scripts.ps1.test_oracle import TYPE_TRANSCRIPTS
 
 from refinery.lib.scripts.ps1.analysis.values import (
+    INFINITY,
     NOTHING,
     NULL,
     UNKNOWN,
@@ -24,7 +26,9 @@ from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Outcome,
     Ps1Typed,
     convert,
+    make_string_literal,
     read,
+    render,
     type_of,
 )
 from refinery.lib.scripts.ps1.data import resolve_type
@@ -32,9 +36,12 @@ from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1ExpressionStatement,
+    Ps1HereString,
     Ps1ParenExpression,
+    Ps1StringLiteral,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
+from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
 
 _ROW_PATTERN = re.compile(
     r'\$t = (?P<expression>.+); Write-Output \(,\$t\); Write-Output \$t'
@@ -43,7 +50,7 @@ _ROW_PATTERN = re.compile(
 #: What counts as a single numeric literal in a measured row. The selection is textual on purpose:
 #: it has to be independent of the parser it is used to test, or a lexer that stopped reading a
 #: spelling would quietly withdraw the row that measures it instead of failing on it.
-_NUMERAL = re.compile(r'[-+]?\(?[0-9][0-9a-zA-Z_.]*\)?')
+_NUMERAL = re.compile(r'[-+]?\(?[0-9][0-9a-zA-Z_.+-]*\)?')
 
 
 def _type(name: str) -> Ps1TypeName:
@@ -53,6 +60,7 @@ def _type(name: str) -> Ps1TypeName:
 
 
 INT32 = _type('System.Int32')
+INT64 = _type('System.Int64')
 STRING = _type('System.String')
 CHAR = _type('System.Char')
 BOOLEAN = _type('System.Boolean')
@@ -146,6 +154,34 @@ def _measured_count(expression: str) -> tuple[str, int]:
     return container, int(rendered)
 
 
+def _measured_shape(expression: str) -> tuple[Ps1TypeName, int]:
+    container, count = _measured_count(expression)
+    return _type(container), count
+
+
+def _measured_rendering(expression: str) -> tuple[str, str]:
+    """
+    The container type a host stamped a collection with and the text it wrote the collection as.
+    Writing one writes its elements, so this is the witness that says what they are: an element
+    that is itself a collection is written as `System.Object[]` rather than as its contents.
+    """
+    wrapped, _ = _transcript(expression, '$t.Count')
+    return _printed(wrapped)
+
+
+def _measured_elements(expression: str) -> tuple[Ps1Fact, ...]:
+    """
+    The facts a host printed for the elements of a collection. Writing a collection out unrolls it,
+    so every line after the first witness is one element under the type it carried.
+    """
+    transcript = _transcript(expression)
+    elements: list[Ps1Fact] = []
+    for line in transcript[1:]:
+        name, rendered = _printed(line)
+        elements.append(Ps1Constant(_type(name), _PAYLOADS[name](rendered)))
+    return tuple(elements)
+
+
 def _numeral_rows() -> dict[str, tuple[str, ...]]:
     rows: dict[str, tuple[str, ...]] = {}
     for row, transcript in TYPE_TRANSCRIPTS.items():
@@ -210,6 +246,22 @@ def _elements(fact: Ps1Fact) -> tuple[Ps1Fact, ...]:
     payload = fact.payload
     assert isinstance(payload, tuple), payload
     return payload
+
+
+def _read_shape(expression: str) -> tuple[Ps1TypeName | None, int]:
+    fact = _read(expression)
+    return type_of(fact), len(_elements(fact))
+
+
+def _spelled(fact: Ps1Fact) -> str:
+    """
+    The source text a fact is written back as, which is what a caller putting the value into a
+    script emits. A fact that names a value always has one, so nothing to write is a broken
+    contract here rather than a case to be handled.
+    """
+    node = render(fact)
+    assert node is not None, fact
+    return Ps1Synthesizer().convert(node)
 
 
 #: What counts as a cast in a measured row: the type an accelerator names in brackets, and the
@@ -293,6 +345,35 @@ DECLINED_CASTS: tuple[str, ...] = tuple(
     expression for group in DECLINED.values() for expression in group
 )
 
+#: Every measured way a script spells a collection, each of which the corpus counts the elements
+#: of. Both operators are here on the same parts, because the point of measuring them is that they
+#: build different arrays out of them.
+COLLECTION_SHAPES: tuple[str, ...] = (
+    '@()',
+    ', 1',
+    ',(1, 2)',
+    '(1, 2), 3',
+    '@(@(1, 2))',
+    '@((1, 2))',
+    '@(@(1, 2), 3)',
+)
+
+#: The measured casts whose target is a type 5.1 spells no literal for. Each expression is
+#: therefore the only way a value of that type can be written back into a script, and the host
+#: stamped the row with the type and the value that spelling produces.
+CAST_SPELLINGS: tuple[str, ...] = (
+    '[byte]5',
+    '[sbyte]-5',
+    '[int16]7',
+    '[uint16]7',
+    '[uint32]7',
+    '[uint64]7',
+    '[uint64]18446744073709551615',
+    '[char]0',
+    '[char]65',
+    '[char]65535',
+)
+
 
 def _converted(expression: str) -> Ps1Outcome:
     """
@@ -311,7 +392,7 @@ class TestPs1MeasuredNumerals(unittest.TestCase):
 
     def test_every_numeral_the_corpus_measures_is_selected(self):
         self.assertEqual(
-            len(_NUMERAL_ROWS), 33, 'a measured numeral was added or withdrawn')
+            len(_NUMERAL_ROWS), 36, 'a measured numeral was added or withdrawn')
         self.assertEqual(sorted(REFUSED), ['0xFFFFFFFFFFFFFFFFF', '1_0'])
         self.assertEqual(
             sorted(set(UNANSWERED) - set(MEASURED)), [], 'a spelling named here is not measured')
@@ -445,17 +526,221 @@ class TestPs1LiteralFacts(unittest.TestCase):
         self.assertEqual(_read('((1kb))'), MEASURED['1kb'])
 
 
+class TestPs1StringSpelling(unittest.TestCase):
+
+    def test_multiline_string_emitted_as_here_string(self):
+        node = make_string_literal('line1\nline2')
+        self.assertIsInstance(node, Ps1HereString)
+        self.assertEqual(node.value, 'line1\nline2')
+        self.assertIn("@'\n", node.raw)
+        node2 = make_string_literal('no newlines')
+        self.assertIsInstance(node2, Ps1StringLiteral)
+
+    def test_make_string_literal_avoids_herestring_breakout(self):
+        # A value with a line beginning with the here-string terminator `'@` must not be emitted as
+        # a here-string, or it would close the string early; a safe multi-line value still may.
+        unsafe = make_string_literal("a\n'@\nb")
+        self.assertNotIsInstance(unsafe, Ps1HereString)
+        safe = make_string_literal('a\nb')
+        self.assertIsInstance(safe, Ps1HereString)
+
+
+class TestPs1ValueSpelling(unittest.TestCase):
+    """
+    What `render` writes a fact back as. A value always has a spelling — a literal where 5.1 has
+    one for its type, the cast of a decimal numeral where it does not — so a caller holding a
+    value never has to choose between leaving the source alone and writing something else.
+    Nothing to write is therefore reserved for a fact that names no value.
+    """
+
+    def test_only_a_fact_that_names_no_value_is_left_unwritten(self):
+        self.assertIsNone(render(UNKNOWN))
+        self.assertIsNone(render(Ps1Typed(INT32)))
+        self.assertIsNone(render(Ps1Typed(OBJECT_ARRAY)))
+        self.assertEqual(_spelled(NULL), '$Null')
+        self.assertEqual(_read('$Null'), NULL)
+
+    def test_a_fact_written_and_read_back_is_the_fact_it_was(self):
+        facts = [MEASURED[expression] for expression in DECIDED]
+        facts.extend(_read(spelling) for spelling in COLLECTION_SHAPES)
+        facts.extend(_read(spelling) for spelling in (
+            "'abc'",
+            "''",
+            '$True',
+            '$False',
+            '$Null',
+            "'a', 1",
+        ))
+        for fact in facts:
+            with self.subTest(repr(fact)):
+                self.assertEqual(_read(_spelled(fact)), fact)
+
+    def test_a_spelling_read_and_written_back_is_the_spelling_it_was(self):
+        for spelling in (
+            "'abc'",
+            '255',
+            '-1',
+            '1024L',
+            '10d',
+            '1.5',
+            '$True',
+            '$False',
+            '$Null',
+            '@()',
+            "'a', 1",
+            ',(1, 2)',
+        ):
+            with self.subTest(spelling):
+                self.assertEqual(_spelled(_read(spelling)), spelling)
+
+    def test_a_numeral_carries_the_suffix_that_pins_its_type_and_no_other(self):
+        """
+        5.1 has two numeric literal suffixes: `L` names an Int64 and `d` a Decimal. An integer
+        numeral written without one is an Int32 and a real without one a Double, so those two are
+        written bare.
+        """
+        self.assertEqual(_spelled(Ps1Constant(INT32, 7)), '7')
+        self.assertEqual(_spelled(Ps1Constant(INT64, 1)), '1L')
+        self.assertEqual(_spelled(Ps1Constant(DECIMAL, decimal.Decimal(10))), '10d')
+        self.assertEqual(_spelled(Ps1Constant(DOUBLE, 1.5)), '1.5')
+        self.assertEqual(
+            [MEASURED['007'], MEASURED['1L'], MEASURED['10d'], MEASURED['1.5']],
+            [
+                Ps1Constant(INT32, 7),
+                Ps1Constant(INT64, 1),
+                Ps1Constant(DECIMAL, decimal.Decimal(10)),
+                Ps1Constant(DOUBLE, 1.5),
+            ],
+        )
+
+    def test_a_value_of_a_type_no_literal_spells_is_written_as_the_cast_the_host_measured(self):
+        self.assertEqual(sorted(set(CAST_SPELLINGS) - set(CAST_ROWS)), [])
+        self.assertEqual(
+            {expression: _spelled(_measured_fact(expression)) for expression in CAST_SPELLINGS},
+            {expression: expression for expression in CAST_SPELLINGS},
+        )
+
+    def test_the_cast_a_value_is_written_as_has_no_read_twin(self):
+        """
+        `read` answers what the source pins and evaluates nothing, so it does not read a cast back
+        and there is no round trip to hold this arm to. What says the spelling is right is the
+        host, which stamped `[byte]5` a Byte 5.
+        """
+        for expression in CAST_SPELLINGS:
+            with self.subTest(expression):
+                self.assertEqual(_read(expression), UNKNOWN)
+        self.assertEqual(_measured('[byte]5'), ('System.Byte', '5'))
+
+    def test_a_char_and_a_one_character_string_are_not_written_alike(self):
+        """
+        Measured, `[char]65` is a Char and `'A'` a String: the two answer `-is [char]` differently,
+        carry different methods and reach different numbers under `[int]`. One spelling for both
+        would erase that at the one point where a value re-enters a script.
+        """
+        self.assertEqual(_measured('[char]65'), ('System.Char', 'A'))
+        self.assertEqual(_spelled(Ps1Constant(CHAR, 'A')), '[char]65')
+        self.assertEqual(_spelled(Ps1Constant(STRING, 'A')), "'A'")
+        self.assertEqual(_read("'A'"), Ps1Constant(STRING, 'A'))
+
+    def test_the_boolean_values_are_written_as_the_variables_that_hold_them(self):
+        self.assertEqual(_spelled(Ps1Constant(BOOLEAN, True)), '$True')
+        self.assertEqual(_spelled(Ps1Constant(BOOLEAN, False)), '$False')
+
+    def test_a_double_that_no_literal_and_no_cast_reaches_is_left_unwritten(self):
+        for payload in (INFINITY, -INFINITY, float('nan')):
+            with self.subTest(payload):
+                self.assertIsNone(render(Ps1Constant(DOUBLE, payload)))
+        self.assertEqual(_spelled(MEASURED['100000000000000000000000000000000']), '1e+32')
+
+    def test_a_collection_holds_each_element_under_the_type_the_host_printed_for_it(self):
+        fact = _read("'a', 1")
+        self.assertEqual(_elements(fact), _measured_elements("'a', 1"))
+        self.assertEqual(_spelled(fact), "'a', 1")
+
+    def test_the_array_operator_writes_the_empty_collection_and_no_other(self):
+        """
+        `@(...)` unrolls the collection it is handed, so writing a one-element collection with it
+        would hand back what was inside instead: measured, `,(1, 2)` holds one element and
+        `@((1, 2))` holds two. The comma operator is what writes every non-empty collection.
+        """
+        self.assertEqual(_measured_count('@()'), ('System.Object[]', 0))
+        self.assertEqual(_measured_count(',(1, 2)'), ('System.Object[]', 1))
+        self.assertEqual(_measured_count('@((1, 2))'), ('System.Object[]', 2))
+        self.assertEqual(_spelled(_read('@()')), '@()')
+        self.assertEqual(_spelled(_read(',(1, 2)')), ',(1, 2)')
+        self.assertNotEqual(_read(',(1, 2)'), _read('@((1, 2))'))
+
+    def test_a_collection_is_written_by_what_it_holds_and_not_by_how_it_was_spelled(self):
+        """
+        `@(@(1, 2))` and `@((1, 2))` are both the two-element collection `1, 2`, and `@(@(1, 2), 3)`
+        is the two-element one whose first element is a collection. Each is written back as what it
+        holds, which is a different spelling from the one it was read from and the same value.
+        """
+        self.assertEqual(_spelled(_read('@(@(1, 2))')), '1, 2')
+        self.assertEqual(_spelled(_read('@((1, 2))')), '1, 2')
+        self.assertEqual(_spelled(_read('@(@(1, 2), 3)')), '(1, 2), 3')
+        for expression in ('@(@(1, 2))', '@((1, 2))', '@(@(1, 2), 3)'):
+            with self.subTest(expression):
+                self.assertEqual(
+                    _read_shape(_spelled(_read(expression))), _measured_shape(expression))
+
+    def test_a_collection_holding_a_value_with_no_spelling_is_not_written_shorter(self):
+        self.assertIsNone(render(Ps1Constant(OBJECT_ARRAY, (Ps1Constant(INT32, 1), UNKNOWN))))
+        self.assertEqual(_spelled(Ps1Constant(OBJECT_ARRAY, (Ps1Constant(INT32, 1),))), ',1')
+
+    def test_a_string_value_is_written_as_a_literal_that_reads_back_as_it(self):
+        for value in ('abc', '', "it's", 'a"b', 'a`b', 'a$b', 'a\nb', 'a\tb', "a\n'@\nb"):
+            with self.subTest(value):
+                self.assertEqual(
+                    _read(_spelled(Ps1Constant(STRING, value))), Ps1Constant(STRING, value))
+
+
 class TestPs1ArrayFacts(unittest.TestCase):
+    """
+    The two ways of writing a collection do not build the same array out of the same parts. The
+    comma operator takes each operand whole; `@(...)` collects what a pipeline hands it, and a
+    pipeline unrolls a collection one level on the way. Every expectation here is the length a 5.1
+    host counted.
+    """
 
     def test_a_measured_array_shape_reads_as_an_object_array_of_the_measured_length(self):
-        for expression in ('@()', ', 1'):
-            with self.subTest(expression):
-                container, count = _measured_count(expression)
-                fact = _read(expression)
-                self.assertEqual(
-                    (type_of(fact), len(_elements(fact))),
-                    (_type(container), count),
-                )
+        self.assertEqual(
+            {expression: _read_shape(expression) for expression in COLLECTION_SHAPES},
+            {expression: _measured_shape(expression) for expression in COLLECTION_SHAPES},
+        )
+
+    def test_the_comma_operator_takes_its_operand_whole_where_the_array_operator_unrolls_it(self):
+        """
+        Measured, `,(1, 2)` counts one element and `@((1, 2))` counts two out of the same parts, so
+        the collection `@(...)` was handed is not the one it built. Reading the two alike would let
+        a caller lose or gain a level of nesting without anything in the answer saying so.
+        """
+        self.assertEqual(_measured_count(',(1, 2)'), ('System.Object[]', 1))
+        self.assertEqual(_measured_count('@((1, 2))'), ('System.Object[]', 2))
+        self.assertNotEqual(_read(',(1, 2)'), _read('@((1, 2))'))
+        self.assertEqual(_read(',(1, 2)'), Ps1Constant(OBJECT_ARRAY, (_read('1, 2'),)))
+        self.assertEqual(_read('@((1, 2))'), _read('1, 2'))
+
+    def test_the_array_operator_unrolls_the_value_a_statement_produced_and_not_what_was_in_it(self):
+        """
+        `@(@(1, 2), 3)` and `(1, 2), 3` are written by the host alike — two elements, the first of
+        them an `Object[]` — so the unrolling happened once, to the collection the statement
+        produced, and did not reach into the collection that was inside it.
+        """
+        self.assertEqual(
+            _measured_rendering('@(@(1, 2), 3)'), ('System.Object[]', 'System.Object[] 3'))
+        self.assertEqual(
+            _measured_rendering('(1, 2), 3'), _measured_rendering('@(@(1, 2), 3)'))
+        self.assertEqual(_read('@(@(1, 2), 3)'), _read('(1, 2), 3'))
+        self.assertEqual(
+            [type_of(element) for element in _elements(_read('@(@(1, 2), 3)'))],
+            [OBJECT_ARRAY, INT32],
+        )
+
+    def test_a_collection_the_array_operator_unrolled_holds_what_was_inside_it(self):
+        self.assertEqual(_measured_count('@(@(1, 2))'), ('System.Object[]', 2))
+        self.assertEqual(_read('@(@(1, 2))'), _read('1, 2'))
+        self.assertEqual(_read('@(@(1, 2))'), _read('@((1, 2))'))
 
     def test_an_array_literal_carries_the_fact_of_each_element(self):
         self.assertEqual(
@@ -502,7 +787,7 @@ class TestPs1MeasuredCasts(unittest.TestCase):
     """
 
     def test_every_cast_the_corpus_measures_is_selected(self):
-        self.assertEqual(len(CAST_ROWS), 46, 'a measured cast was added or withdrawn')
+        self.assertEqual(len(CAST_ROWS), 47, 'a measured cast was added or withdrawn')
         self.assertEqual(sorted(set(DECLINED_CASTS) - set(CAST_ROWS)), [])
         self.assertEqual(sorted(set(DECLINED_CASTS) & set(THROWN)), [])
 

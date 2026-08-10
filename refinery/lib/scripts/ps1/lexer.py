@@ -637,3 +637,32 @@ class Ps1Lexer:
 
             self.pos += 1
             return Ps1Token(Ps1TokenKind.GENERIC_TOKEN, c, start)
+
+
+def reads_as_one_numeral(spelling: str, following: str, mode: Ps1LexerMode) -> bool:
+    """
+    Whether a numeral written as `spelling` is still read as that numeral once `following` is
+    written straight against it. A numeral ends where the character after it says it does, so the
+    same digits are a number in one place and part of a word in another: `3` before `.ToString` is
+    the word `3.ToString`, `0xFF` before it is the number and a member read, and `3` before `[0]`
+    or `::MaxValue` is a word again because neither bracket nor colon ends a numeral.
+
+    The question is put to the lexer rather than restated here, so that a slot deciding whether the
+    value it holds needs a bracket and the reader that would read it back cannot come apart. That
+    also makes it the one thing to fix when the lexer is wrong: a repair reaches the writer for
+    free.
+
+    A sign is the one thing asked around the lexer rather than of it. Where an expression is read, a
+    `+` or `-` written straight against a numeral is part of it — 5.1 raises `AllowSignedNumbers`
+    for exactly that position — and the rest of the rule then applies to the whole of it:
+    measured, `-1kb.GetType()` reads the member of minus one kilobyte while `-1.GetType` is one
+    word. Where a bare word is a value no sign is ever taken, so the spelling is asked about as
+    it was written.
+    """
+    signed = mode is Ps1LexerMode.EXPRESSION and spelling[:1] in ('+', '-')
+    numeral = spelling[1:] if signed else spelling
+    lexer = Ps1Lexer(F'{numeral}{following}', mode=mode)
+    token = lexer.scan()
+    if token.kind not in (Ps1TokenKind.INTEGER, Ps1TokenKind.REAL):
+        return False
+    return lexer.pos == len(numeral)

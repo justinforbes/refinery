@@ -310,43 +310,6 @@ TABLE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('OUT\tSystem.Management.Automation.CommandTypes\tAlias',),
 }
 
-#: The two defects below are one question asked in two slots: whether the spelling a value is
-#: written as still denotes that value where it is being written. Neither is about what the unit
-#: believes a value to be, so this phase does not retire them; they belong to the synthesizer,
-#: which is the only place that knows which slot a node is going into.
-#:
-#: A decimal numeral swallows the dot that touches it, so it cannot stand as a member-access
-#: receiver: `3.ToString` is the one word `3.ToString`, and 5.1 reads a command by that name rather
-#: than a call on three. A numeral that ended for some other reason is unaffected — `0xFF.GetType()`
-#: and `1.5.GetType()` both read the member — and in a command argument no numeral may be a receiver
-#: at all. The unit both inlines a folded value into that slot without parentheses and removes the
-#: parentheses a source wrote there, so `$n = 5; $n.ToString()` becomes a script PowerShell will not
-#: read. Since A3a our lexer reads all of this as 5.1 does, which is what makes the defect visible
-#: here rather than hidden behind a tree only we can build.
-_UNPARSEABLE_RECEIVER = (
-    'A numeric literal is left standing as a member-access receiver without parentheses, which 5.1 '
-    'refuses to parse. That is a defect of how a value is spelled rather than of what the unit '
-    'believes it to be, so this phase does not retire it.'
-)
-
-#: In a command argument a leading `-` is not a sign. No binder is consulted and no parameter is
-#: matched: 5.1 lets a sign join a numeral only where its expression rule asked for one, which it
-#: never does for an argument, so the dash falls to the generic scan and `-1` arrives as one word.
-#: `Write-Output -1` passes the String `-1` where `Write-Output (-1)` and `Write-Output 1` pass an
-#: Int32. Every folded value that comes out negative reaches this, so it is the wider of the two.
-#:
-#: Its repair had a precondition, which is why bracketing the folded value alone would once have
-#: traded one wrong answer for another: a source that writes `Write-Output -1` already means the
-#: String, and a synthesizer that bracketed every negative numeral would have turned that one into
-#: an Int32. A3a settled it — the argument slot is now read as 5.1 reads it — so what remains is
-#: only what the synthesizer writes back into it.
-_A_SIGN_IN_AN_ARGUMENT_SLOT = (
-    'The value folds to a negative numeral inlined into a command argument without parentheses, '
-    'where 5.1 reads the dash as part of the word and passes the token on as a String. That is a '
-    'defect of how a value is spelled rather than of what the unit believes it to be, so this '
-    'phase does not retire it.'
-)
-
 #: `X -as [T]` and `[T]X` are not the same expression, measured: a conversion that cannot be made
 #: yields `$null` for `-as` and throws for a cast. `'abc' -as [int]` is `$null` and `[int]'abc'`
 #: throws; `300 -as [byte]` is `$null` and `[byte]300` throws. `typecast.py:44` rewrites the one
@@ -601,6 +564,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t255',
             'OUT\tSystem.Int32\t255',
         ),
+    '$s = 0xFF; $t = "$s"; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t255',
+            'OUT\tSystem.String\t255',
+        ),
     '$t = 0x7FFFFFFF; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t2147483647',
@@ -670,6 +638,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         (
             'OUT\tSystem.Double\t1.5',
             'OUT\tSystem.Double\t1.5',
+        ),
+    '$t = -0.0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t0',
+            'OUT\tSystem.Double\t0',
         ),
     '$t = 1e3; Write-Output (,$t); Write-Output $t':
         (
@@ -838,6 +811,21 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ),
     '$t = [decimal]::MaxValue + 1; Write-Output (,$t); Write-Output $t':
         ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
+    '$t = 100000000000000d * 100000000000000d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t10000000000000000000000000000',
+            'OUT\tSystem.Decimal\t10000000000000000000000000000',
+        ),
+    '$t = 10000000000000000000000000000d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t10000000000000000000000000000',
+            'OUT\tSystem.Decimal\t10000000000000000000000000000',
+        ),
+    '$t = 1E+28d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t10000000000000000000000000000',
+            'OUT\tSystem.Decimal\t10000000000000000000000000000',
+        ),
     "$t = 12 + '0xabc'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t2760',
@@ -988,6 +976,32 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Object[]\t1 2',
             'OUT\tSystem.Int32\t2',
         ),
+    '$t = @((1, 2)); Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1 2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    '$t = @(@(1, 2), 3); Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\tSystem.Object[] 3',
+            'OUT\tSystem.Int32\t2',
+        ),
+    '$t = ,(1, 2); Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\tSystem.Object[]',
+            'OUT\tSystem.Int32\t1',
+        ),
+    '$t = (1, 2), 3; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\tSystem.Object[] 3',
+            'OUT\tSystem.Int32\t2',
+        ),
+    "$t = 'a', 1; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Object[]\ta 1',
+            'OUT\tSystem.String\ta',
+            'OUT\tSystem.Int32\t1',
+        ),
     '$t = [int]5; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t5',
@@ -1031,6 +1045,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         (
             'OUT\tSystem.UInt64\t7',
             'OUT\tSystem.UInt64\t7',
+        ),
+    '$t = [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.UInt64\t18446744073709551615',
+            'OUT\tSystem.UInt64\t18446744073709551615',
         ),
     '$t = [int]2147483648; Write-Output (,$t); Write-Output $t':
         ('THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',),
@@ -1191,13 +1210,14 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: Rows of `corpus.TYPES` whose deobfuscation does not behave like the row. Held apart from
 #: `BEHAVIOUR_DEFECTS` rather than merged into it, because that table carries one entry per defect
 #: with a host-free twin for each, and these share a handful of root causes: the pipeline collapse,
-#: the Char erasure, and three that are not about types at all.
+#: the Char erasure, and the cast whose target the fold drops.
 #:
-#: Those three are `_UNPARSEABLE_RECEIVER`, `_SEPARATION_CARRIES_THE_TYPE` and
-#: `_A_SIGN_IN_AN_ARGUMENT_SLOT`, and they are defects of how a value is *spelled* rather than of
-#: what the unit believes it to be, so the commits of this phase do not retire them; they are
-#: pinned host-free in `test.lib.scripts.ps1.deobfuscation.test_value_domain` so that they ratchet
-#: where a host is not available.
+#: The three that were about how a value is *spelled* rather than what it is have all gone. A
+#: numeral standing as a member receiver and a folded numeral inlined into a command argument were
+#: the last two, and the slot that writes them is what settled both: the synthesizer asks the lexer
+#: whether the spelling it is about to write is still read as the value it holds, and brackets it
+#: where it is not. Their host-free twins in
+#: `test.lib.scripts.ps1.deobfuscation.test_value_domain` are what ratchets them now.
 #:
 #: Two entries record something worse than a wrong answer. `([char]65).ToUpper()` and
 #: `([char]65).Substring(0)` throw in 5.1 and answer `A` after the fold, and `([char]65) * 3` does
@@ -1251,32 +1271,15 @@ TYPE_DEFECTS: dict[str, str] = {
         'Char key as a String and the lookup succeeds.',
     "$h = @{}; $h['A'] = 1; $t = $h[[char]65]; Write-Output (,$t)":
         'The same, with the Char in the lookup rather than in the key.',
-    'Write-Output ((5).PSTypeNames)':
-        _UNPARSEABLE_RECEIVER,
-    'Write-Output ((5).PSObject.GetType().FullName)':
-        _UNPARSEABLE_RECEIVER,
-    '$t = -2147483648; Write-Output (,$t); Write-Output $t':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
-    '$t = -2147483649; Write-Output (,$t); Write-Output $t':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
-    'Write-Output (-1)':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
-    '$t = 0xFFFFFFFF -bxor 0x5A; Write-Output (,$t); Write-Output $t':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
-    '$t = 0xFFFFFFFF + 0; Write-Output (,$t); Write-Output $t':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
-    '$t = 0xFFFFFFFFFFFFFFFF + 0; Write-Output (,$t); Write-Output $t':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
-    '$t = $null - 5; Write-Output (,$t); Write-Output $t':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
-    '$t = -2147483647 - 1; Write-Output (,$t); Write-Output $t':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
-    '$t = -bnot 0xFF; Write-Output (,$t); Write-Output $t':
-        _A_SIGN_IN_AN_ARGUMENT_SLOT,
     '$t = -bnot 0xFFFFFFFF; Write-Output (,$t); Write-Output $t':
         'The one row here whose value is wrong rather than its spelling. -bnot is not asked of the '
         'measured grid at all: 5.1 complements the Int32 the hex pattern names, which is -1, and '
         'answers 0, while the unit complements 4294967295 and answers an Int64.',
+    '$s = 0xFF; $t = "$s"; Write-Output (,$t); Write-Output $t':
+        'A variable inside an expandable string contributes the value it holds rendered as text, '
+        'which for the Int32 255 is `255`. Substituting the literal writes its source spelling '
+        'instead, so the string reads `0xFF`. It is the one place where how a value is written and '
+        'what it renders to are different questions, and nothing asks the second one yet.',
     '$t = 1_0; Write-Output (,$t); Write-Output $t':
         'The lexer reads `_` as a digit separator, which 5.1 does not have. 5.1 reads `1_0` as a '
         'command name and reports CommandNotFoundException; the unit reads the integer 10, folds '
@@ -1296,6 +1299,8 @@ TYPE_DEFECTS: dict[str, str] = {
     '$t = [uint32]7; Write-Output (,$t); Write-Output $t':
         _A_CAST_TARGET_IS_ERASED,
     '$t = [uint64]7; Write-Output (,$t); Write-Output $t':
+        _A_CAST_TARGET_IS_ERASED,
+    '$t = [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
         _A_CAST_TARGET_IS_ERASED,
     '$t = [long]5; Write-Output (,$t); Write-Output $t':
         'The same erasure where the language does have a literal for the type: `5L` spells the '

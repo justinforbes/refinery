@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
-from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
+from refinery.lib.scripts.ps1.analysis.values import make_string_literal
 from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     carried_redirections,
     may_substitute,

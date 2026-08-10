@@ -12,7 +12,11 @@ from typing import Callable, Generator, NamedTuple, TypeGuard
 from refinery.lib.scripts import Node, Transformer, set_value
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
-from refinery.lib.scripts.ps1.analysis.values import collect_typed_arguments, unwrap_integer
+from refinery.lib.scripts.ps1.analysis.values import (
+    collect_typed_arguments,
+    make_string_literal,
+    unwrap_integer,
+)
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_member_name,
@@ -45,7 +49,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1UnaryExpression,
     Ps1Variable,
 )
-from refinery.lib.scripts.ps1.token import BACKTICK_ENCODE
 
 
 class MutationKind(enum.Enum):
@@ -60,9 +63,6 @@ class VariableMutation(NamedTuple):
     variable: Ps1Variable
     kind: MutationKind
     node: Node
-
-
-NONPRINT_CONTROL = frozenset(BACKTICK_ENCODE) - {'\n'}
 
 
 def store_dropped_to_value(rhs: Expression) -> Ps1ExpressionStatement:
@@ -88,30 +88,6 @@ def store_dropped_to_value(rhs: Expression) -> Ps1ExpressionStatement:
     discard = Ps1AssignmentExpression(
         target=Ps1Variable(name='Null'), operator='=', value=rhs)
     return Ps1ExpressionStatement(expression=discard)
-
-
-def make_string_literal(value: str) -> Ps1StringLiteral | Ps1HereString:
-    has_newline = '\n' in value
-    has_nonprint = any(c in value for c in NONPRINT_CONTROL)
-    # A single-quoted here-string is closed by a line that begins with `'@`; emitting a value that
-    # contains such a line verbatim would terminate the string early and corrupt the script.
-    herestring_safe = not value.startswith("'@") and "\n'@" not in value
-    if has_newline and not has_nonprint and herestring_safe:
-        raw = F"@'\n{value}\n'@"
-        return Ps1HereString(value=value, raw=raw)
-    if has_nonprint or has_newline:
-        escaped = value.replace('`', '``').replace('"', '`"').replace('$', '`$')
-        for ch, esc in BACKTICK_ENCODE.items():
-            escaped = escaped.replace(ch, esc)
-        raw = F'"{escaped}"'
-        return Ps1StringLiteral(value=value, raw=raw)
-    if "'" not in value:
-        raw = F"'{value}'"
-    elif '"' not in value and '$' not in value and '`' not in value:
-        raw = F'"{value}"'
-    else:
-        raw = "'" + value.replace("'", "''") + "'"
-    return Ps1StringLiteral(value=value, raw=raw)
 
 
 def collect_string_arguments(node: Expression) -> list[str] | None:

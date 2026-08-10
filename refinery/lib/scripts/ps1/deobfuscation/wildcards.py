@@ -34,7 +34,7 @@ from refinery.lib.scripts.ps1.data import (
     PS1_KNOWN_VARIABLES,
     member_names,
 )
-from refinery.lib.scripts.ps1.deobfuscation.helpers import make_string_literal
+from refinery.lib.scripts.ps1.analysis.values import make_string_literal
 from refinery.lib.scripts.ps1.deobfuscation.substitution import substituted
 from refinery.lib.scripts.ps1.deobfuscation.typenames import VariableTypeAwareTransformer
 from refinery.lib.scripts.ps1.model import (

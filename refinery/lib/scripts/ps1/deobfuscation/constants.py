@@ -22,7 +22,10 @@ from refinery.lib.scripts.ps1.analysis.model import (
     is_write_occurrence,
     Ps1OccurrenceRole,
 )
-from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
+from refinery.lib.scripts.ps1.analysis.values import (
+    make_string_literal,
+    unwrap_to_array_literal,
+)
 from refinery.lib.scripts.ps1.ast import (
     assignment_of,
     assignment_target_variables,
@@ -33,7 +36,6 @@ from refinery.lib.scripts.ps1.data import PS1_KNOWN_VARIABLES
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     is_array_reverse_call,
     iter_variable_mutations,
-    make_string_literal,
 )
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlans
 from refinery.lib.scripts.ps1.deobfuscation.substitution import substitute, substitute_field

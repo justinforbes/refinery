@@ -22,7 +22,10 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     opens_a_redirection_target,
     takes_output_away,
 )
-from refinery.lib.scripts.ps1.analysis.values import unwrap_to_array_literal
+from refinery.lib.scripts.ps1.analysis.values import (
+    make_string_literal,
+    unwrap_to_array_literal,
+)
 from refinery.lib.scripts.ps1.ast import (
     get_command_name,
     get_member_name,
@@ -43,7 +46,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
-    make_string_literal,
     ps_divide,
     ps_modulo,
     ps_shift_left,

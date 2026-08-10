@@ -18,33 +18,27 @@ class TestPs1AnInlinedNumberCarriesAMemberOnlyInParentheses(TestPs1):
     access away would be correct too and would rewrite these.
     """
 
-    @unittest.expectedFailure
     def test_a_method_called_on_an_inlined_number_parenthesizes_the_receiver(self):
         self.assertEqual(self._deobfuscate('$n = 5; $n.ToString()'), '(5).ToString()')
 
-    @unittest.expectedFailure
     def test_an_inlined_number_in_a_command_argument_parenthesizes_the_receiver(self):
         self.assertEqual(
             self._deobfuscate('$n = 5; Write-Output $n.ToString()'),
             'Write-Output (5).ToString()',
         )
 
-    @unittest.expectedFailure
     def test_a_number_that_was_itself_folded_parenthesizes_the_receiver(self):
         self.assertEqual(self._deobfuscate('$n = 1 + 2; $n.ToString()'), '(3).ToString()')
 
-    @unittest.expectedFailure
     def test_an_inlined_number_with_a_method_argument_parenthesizes_the_receiver(self):
         self.assertEqual(self._deobfuscate('$n = 5; $n.ToString("X")'), '(5).ToString("X")')
 
-    @unittest.expectedFailure
     def test_an_inlined_hex_literal_in_a_command_argument_parenthesizes_the_receiver(self):
         self.assertEqual(
             self._deobfuscate('$t = 0xFF; Write-Output $t.GetType().FullName'),
             'Write-Output (0xFF).GetType().FullName',
         )
 
-    @unittest.expectedFailure
     def test_an_inlined_suffixed_literal_in_a_command_argument_parenthesizes_the_receiver(self):
         self.assertEqual(
             self._deobfuscate('$t = 1kb; Write-Output $t.GetType().FullName'),
@@ -57,48 +51,42 @@ class TestPs1AnInlinedNumberCarriesAMemberOnlyInParentheses(TestPs1):
 
 class TestPs1AFoldedNegativeNumberInACommandArgumentNeedsParentheses(TestPs1):
     """
-    Windows PowerShell 5.1 lexes a leading `-` in a command argument as the start of a parameter
-    name rather than as a sign, and hands a parameter that no command declares to the command as
-    the literal text it was written as. `Write-Output 1` writes an Int32 and `Write-Output (-1)`
-    writes an Int32, but `Write-Output -1` writes the String `-1`, as do `-1.5` and `-1L`. A fold
-    whose value is a negative number therefore changes the type the command receives unless the
-    slot it lands in parenthesizes it.
+    Windows PowerShell 5.1 never reads a leading `-` in a command argument as a sign. No binder is
+    consulted and no parameter is matched: a sign joins a numeral only where the expression rule
+    asked for one, which it never does for an argument, so the dash falls to the generic scan and
+    the word around it is what the command receives. `Write-Output 1` writes an Int32 and
+    `Write-Output (-1)` writes an Int32, but `Write-Output -1` writes the String `-1`, as do `-1.5`
+    and `-1L`. A fold whose value is a negative number therefore changes the type the command
+    receives unless the slot it lands in parenthesizes it.
 
     Each assertion states the minimal faithful repair. The unparenthesized cases are the control
     that says the parentheses belong to the sign in that slot rather than to folding as such.
     """
 
-    @unittest.expectedFailure
     def test_a_hex_literal_folded_to_a_negative_int32_is_parenthesized(self):
         self.assertEqual(
             self._deobfuscate('$t = 0xFFFFFFFF + 0; Write-Output $t'),
             'Write-Output (-1)',
         )
 
-    @unittest.expectedFailure
     def test_a_subtraction_folded_to_a_negative_number_is_parenthesized(self):
         self.assertEqual(self._deobfuscate('$t = 1 - 2; Write-Output $t'), 'Write-Output (-1)')
 
-    @unittest.expectedFailure
     def test_null_arithmetic_folded_to_a_negative_number_is_parenthesized(self):
         self.assertEqual(self._deobfuscate('$t = $null - 1; Write-Output $t'), 'Write-Output (-1)')
 
-    @unittest.expectedFailure
     def test_a_bxor_folded_to_a_negative_number_is_parenthesized(self):
         self.assertEqual(
             self._deobfuscate('$t = 0xFFFFFFFF -bxor 0x5A; Write-Output $t'),
             'Write-Output (-91)',
         )
 
-    @unittest.expectedFailure
     def test_a_fold_in_place_keeps_the_parentheses_the_negative_sign_needs(self):
         self.assertEqual(self._deobfuscate('Write-Output (1 - 2)'), 'Write-Output (-1)')
 
-    @unittest.expectedFailure
     def test_a_negative_double_is_parenthesized(self):
         self.assertEqual(self._deobfuscate('$t = 0 - 1.5; Write-Output $t'), 'Write-Output (-1.5)')
 
-    @unittest.expectedFailure
     def test_a_negative_long_is_parenthesized(self):
         self.assertEqual(self._deobfuscate('$t = 1L - 2L; Write-Output $t'), 'Write-Output (-1L)')
 
@@ -110,6 +98,39 @@ class TestPs1AFoldedNegativeNumberInACommandArgumentNeedsParentheses(TestPs1):
 
     def test_a_negative_number_assigned_to_a_variable_is_not_parenthesized(self):
         self.assertEqual(self._deobfuscate('$t = 1 - 2; $x = $t'), '$x = -1')
+
+    def test_a_dash_argument_the_source_wrote_is_left_the_word_it_already_is(self):
+        # These already pass the Strings `-1` and `+1`. Bracketing either would hand the command
+        # the number the source never passed, which is the same defect in the other direction.
+        self.assertEqual(self._deobfuscate('Write-Output -1'), 'Write-Output -1')
+        self.assertEqual(self._deobfuscate('Write-Output +1'), 'Write-Output +1')
+
+
+class TestPs1ACommandArgumentIsReadInCommandModeAllTheWayDown(TestPs1):
+    """
+    5.1 goes on lexing a command's arguments in command mode until something opens a new slot, so a
+    numeral several levels under an argument is still in that argument's text and is read there.
+    The same receiver therefore needs parentheses in one place and not in another, and a bracket
+    written inside the argument puts the expression reading back.
+    """
+
+    def test_a_receiver_in_an_expression_statement_needs_no_parentheses(self):
+        self.assertEqual(self._deobfuscate('$t = 0xFF; $t.GetType()'), '0xFF.GetType()')
+
+    def test_a_receiver_on_the_right_of_an_assignment_needs_no_parentheses(self):
+        self.assertEqual(self._deobfuscate('$t = 1kb; $x = $t.GetType()'), '$x = 1kb.GetType()')
+
+    def test_a_bracket_inside_a_command_argument_restores_the_expression_reading(self):
+        self.assertEqual(
+            self._deobfuscate('$t = 0xFF; Write-Output ($t.GetType().FullName)'),
+            'Write-Output (0xFF.GetType().FullName)',
+        )
+
+    def test_a_receiver_folded_to_a_negative_number_in_an_argument_is_parenthesized(self):
+        self.assertEqual(
+            self._deobfuscate('$t = 1 - 2; Write-Output $t.GetType()'),
+            'Write-Output (-1).GetType()',
+        )
 
 
 class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
@@ -365,7 +386,6 @@ class TestPs1MembersTheObjectAdapterAddsToEveryValue(TestPs1):
             "$x = 'System.String', 'System.Object'",
         )
 
-    @unittest.expectedFailure
     def test_the_psobject_of_a_number_has_no_constant_spelling(self):
         source = '$x = (5).PSObject'
         self.assertEqual(self._deobfuscate(source), source)
