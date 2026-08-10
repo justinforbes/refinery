@@ -1069,6 +1069,205 @@ class TestDeobfuscationWithScope(TestBase):
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestGuaranteedGlobalNamesInWithScope(TestBase):
+    """
+    `undefined`, `NaN` and `Infinity` are the three names whose value the language guarantees, and
+    that guarantee is what makes an expression over them foldable at all. It is a guarantee about
+    the global binding, not about the spelling: inside a `with` body the name is looked up on the
+    object first, so it denotes whatever the object supplies — through its prototype as well, and
+    through a property added after the body starts running — and an accessor makes the read itself
+    observable.
+
+    Every case pins the emitted text rather than only the behavior, because comparing behavior is
+    blind in both directions here: an untouched program behaves like itself, so refusing every fold
+    would satisfy it, and the controls below would still pass with the whole feature deleted.
+    """
+
+    def _unchanged(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(deobfuscate_source(source), source)
+
+    def _folds_to(self, source: str, folded: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(folded), (output, None))
+        self.assertEqual(deobfuscate_source(source), folded)
+
+    def test_typeof_undefined_is_not_folded_where_the_with_object_supplies_the_name(self):
+        """
+        Node: `number`. The bare `undefined` denotes `o.undefined`, the number one, so `typeof`
+        answers for that value; the global's answer would be `'undefined'`.
+        """
+        self._unchanged(
+            inspect.cleandoc("""
+                var o = { undefined: 1 };
+                with (o) {
+                  console.log(typeof undefined);
+                }
+            """),
+            'number\n',
+        )
+
+    def test_bitwise_complement_of_nan_is_not_folded_where_the_with_object_supplies_the_name(self):
+        """
+        Node: `-6`. The bare `NaN` denotes `o.NaN`, which is five, so the complement is minus six;
+        the global's answer would be minus one, since ToInt32 maps a NaN to zero.
+        """
+        self._unchanged(
+            inspect.cleandoc("""
+                var o = { NaN: 5 };
+                with (o) {
+                  console.log(String(~NaN));
+                }
+            """),
+            '-6\n',
+        )
+
+    def test_logical_not_of_infinity_is_not_folded_where_the_with_object_supplies_the_name(self):
+        """
+        Node: `true`. The bare `Infinity` denotes `o.Infinity`, which is zero and therefore falsy;
+        the global's answer would be `false`.
+        """
+        self._unchanged(
+            inspect.cleandoc("""
+                var o = { Infinity: 0 };
+                with (o) {
+                  console.log(String(!Infinity));
+                }
+            """),
+            'true\n',
+        )
+
+    def test_undefined_is_not_folded_in_a_with_body_whose_object_gains_the_name(self):
+        """
+        Node: `undefined|number`. The object supplies nothing when the body starts, so the first
+        read is the global one, and it supplies the name by the time of the second. The two reads
+        are spelled identically and mean different things, so neither is decided by the spelling.
+        """
+        self._unchanged(
+            inspect.cleandoc("""
+                var SINK = [];
+                var o = {};
+                with (o) {
+                  SINK.push(typeof undefined);
+                  o.undefined = 1;
+                  SINK.push(typeof undefined);
+                }
+                console.log(SINK.join('|'));
+            """),
+            'undefined|number\n',
+        )
+
+    def test_nan_is_not_folded_where_only_the_prototype_of_the_with_object_supplies_the_name(self):
+        """
+        Node: `-10`. A `with` scope resolves a name by asking the object whether it has the
+        property, which walks the prototype chain, so the inherited nine answers although `o`
+        itself has no such property.
+        """
+        self._unchanged(
+            inspect.cleandoc("""
+                var proto = { NaN: 9 };
+                var o = Object.create(proto);
+                with (o) {
+                  console.log(String(~NaN));
+                }
+            """),
+            '-10\n',
+        )
+
+    def test_infinity_read_in_a_with_body_is_not_folded_past_the_objects_getter(self):
+        """
+        Node: `read|true`. Reading the bare name runs the accessor, so the read is observable even
+        before its value is used; folding it would drop the push as well as answer `false`.
+        """
+        self._unchanged(
+            inspect.cleandoc("""
+                var SINK = [];
+                var o = { get Infinity() {
+                  SINK.push('read');
+                  return 0;
+                } };
+                with (o) {
+                  SINK.push(String(!Infinity));
+                }
+                console.log(SINK.join('|'));
+            """),
+            'read|true\n',
+        )
+
+    def test_typeof_undefined_outside_any_with_body_folds(self):
+        self._folds_to(
+            'console.log(typeof undefined);',
+            "console.log('undefined');",
+            'undefined\n',
+        )
+
+    def test_bitwise_complement_of_nan_outside_any_with_body_folds(self):
+        self._folds_to(
+            'console.log(String(~NaN));',
+            "console.log('-1');",
+            '-1\n',
+        )
+
+    def test_logical_not_of_infinity_outside_any_with_body_folds(self):
+        self._folds_to(
+            'console.log(String(!Infinity));',
+            "console.log('false');",
+            'false\n',
+        )
+
+    def test_nan_folds_in_a_statement_that_follows_a_with_body(self):
+        """
+        The dynamic scope ends with the body, so the trailing statement is an ordinary one and its
+        `NaN` is the global. Containing a `with` anywhere does not disqualify a program from this
+        fold.
+        """
+        self._folds_to(
+            inspect.cleandoc("""
+                var o = { NaN: 5 };
+                with (o) {
+                  console.log(o.NaN);
+                }
+                console.log(String(~NaN));
+            """),
+            inspect.cleandoc("""
+                var o = { NaN: 5 };
+                with (o) {
+                  console.log(o.NaN);
+                }
+                console.log(String(-1));
+            """),
+            '5\n-1\n',
+        )
+
+    def test_undefined_folds_in_a_function_declared_outside_the_with_body_that_calls_it(self):
+        """
+        Node: `undefined`. A function's scope chain is the one it was created in, so the body of `f`
+        never sees `o` however `f` is called, and `o.undefined` does not reach the name it reads.
+        """
+        self._folds_to(
+            inspect.cleandoc("""
+                function f() {
+                  return typeof undefined;
+                }
+                var o = { undefined: 1 };
+                with (o) {
+                  console.log(f());
+                }
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  return 'undefined';
+                }
+                var o = { undefined: 1 };
+                with (o) {
+                  console.log(f());
+                }
+            """),
+            'undefined\n',
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestDeobfuscationModuleScope(TestBase):
     """
     Semantics preservation for the module execution model. The oracle runs each snippet as a CommonJS

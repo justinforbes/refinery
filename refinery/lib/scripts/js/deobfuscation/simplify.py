@@ -758,12 +758,20 @@ class JsSimplifications(Transformer):
         that name. A nested unary is applied through the same kernel, so that an operand spelled with
         one of those names is still readable once an operator stands in front of it — `-Infinity` is
         how the negative infinity is written, and nothing else spells it.
+
+        Resolving to no binding is not by itself the global. `SemanticModel.resolve` also answers `None`
+        for a name whose lookup crosses a `with` body, where the object supplies the value at run time
+        and a property named `undefined` shadows the global one no declaration mentions. Reading such a
+        name is not even pure — the property may be a getter — so the question is asked as
+        `read_has_dynamic_effect`, which is the model's name for it.
         """
         node = strip_parens(operand)
         if node is None:
             return False, None
         if isinstance(node, JsIdentifier):
             if node.name not in GLOBAL_VALUE_NAMES or self.model.resolve(node) is not None:
+                return False, None
+            if self.model.read_has_dynamic_effect(node):
                 return False, None
             return True, GLOBAL_VALUE_NAMES[node.name]
         if isinstance(node, JsUnaryExpression):
