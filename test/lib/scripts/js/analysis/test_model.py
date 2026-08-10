@@ -957,3 +957,75 @@ class TestSemanticModel(TestBase):
     def test_global_not_reachable_by_direct_eval(self):
         ast, model = self._model('var x; eval(payload);')
         self.assertFalse(model.local_reachable_by_direct_eval(self._binding(ast, model, 'x')))
+
+
+class TestFreeNameReachableByDirectEval(TestBase):
+    """
+    A direct `eval` can declare a binding that no reference in the source records, so a name the
+    model resolves to nothing is not necessarily the global one. Which positions can see such a
+    binding follows from what escapes an `eval`: a `var` or a function declaration is created in
+    the var scope the call stands in and outlives the call, while a `let` or a `const` lives in a
+    scope discarded with it. So the reachable positions are exactly those whose scope that var
+    scope contains — every position in the function the `eval` stands in, including nested ones,
+    and no position outside it.
+
+    That containment is about position and not about order: a function written above the `eval`
+    reads the binding just as one written below it does, because the declaration is made when the
+    `eval` runs and the reading function's scope chain is the one it was created in.
+    """
+
+    @staticmethod
+    def _model(source: str):
+        ast = JsParser(source).parse()
+        return ast, build_semantic_model(ast)
+
+    def _reachable(self, source: str, name: str) -> bool:
+        ast, model = self._model(source)
+        node = next(
+            n for n in ast.walk_in_order()
+            if isinstance(n, JsIdentifier) and n.name == name and model.is_reference(n)
+        )
+        return model.free_name_reachable_by_direct_eval(node)
+
+    def test_no_direct_eval_in_the_program(self):
+        self.assertFalse(self._reachable('function g(){ return q; }', 'q'))
+
+    def test_direct_eval_and_read_in_the_same_scope(self):
+        self.assertTrue(self._reachable('eval(payload); q;', 'q'))
+
+    def test_read_written_before_the_direct_eval_of_its_scope(self):
+        self.assertTrue(self._reachable('q; eval(payload);', 'q'))
+
+    def test_read_in_a_function_written_before_the_direct_eval_of_its_scope(self):
+        self.assertTrue(self._reachable('function g(){ return q; } eval(payload);', 'q'))
+
+    def test_read_in_a_function_below_the_scope_of_the_direct_eval(self):
+        self.assertTrue(self._reachable('eval(payload); function g(){ return q; }', 'q'))
+
+    def test_read_in_the_function_holding_the_direct_eval(self):
+        self.assertTrue(self._reachable('function g(){ eval(payload); return q; }', 'q'))
+
+    def test_read_in_a_function_nested_in_the_one_holding_the_direct_eval(self):
+        self.assertTrue(
+            self._reachable('function g(){ eval(payload); function h(){ return q; } }', 'q'))
+
+    def test_direct_eval_in_a_block_declares_into_the_enclosing_function(self):
+        self.assertTrue(self._reachable('function g(){ { eval(payload); } return q; }', 'q'))
+
+    def test_read_outside_the_function_holding_the_direct_eval(self):
+        self.assertFalse(self._reachable('function g(){ eval(payload); } q;', 'q'))
+
+    def test_read_in_a_sibling_of_the_function_holding_the_direct_eval(self):
+        self.assertFalse(
+            self._reachable('function g(){ eval(payload); } function h(){ return q; }', 'q'))
+
+    def test_read_outside_the_arrow_function_holding_the_direct_eval(self):
+        self.assertFalse(self._reachable('var g = () => { eval(payload); }; q;', 'q'))
+
+    def test_indirect_eval_declares_onto_the_global_object(self):
+        """
+        An indirect `eval` runs in the global scope, so its `var` becomes a property of the global
+        object rather than a binding that shadows one — and for a name whose global property is
+        neither writable nor configurable it cannot even do that.
+        """
+        self.assertFalse(self._reachable('function g(){ (0, eval)(payload); return q; }', 'q'))

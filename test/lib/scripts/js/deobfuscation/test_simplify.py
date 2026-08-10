@@ -46,6 +46,10 @@ class TestBasicSimplifications(TestJsDeobfuscator):
     def test_arithmetic_unsigned_right_shift(self):
         self.assertEqual('4294967295;', self._simplify('(-1) >>> 0;'))
 
+    def test_string_of_negative_infinity(self):
+        self.assertEqual(
+            "console.log('-Infinity');", self._simplify('console.log(String(-Infinity));'))
+
     def test_arithmetic_division_by_zero(self):
         self.assertEqual('1e999;', self._simplify('1 / 0;'))
 
@@ -814,8 +818,12 @@ class TestGlobalAliasStripping(TestJsDeobfuscator):
     def test_host_alias_existence_guard_not_folded(self):
         self.assertEqual('var g = window || {};', self._simplify('var g = window || {};'))
 
-    def test_falsy_global_existence_guard_not_folded(self):
-        self.assertEqual('var s = NaN || 5;', self._simplify('var s = NaN || 5;'))
+    def test_falsy_global_existence_guard_answers_from_the_value_not_the_existence(self):
+        """
+        `NaN` exists, so the existence shortcut that folds `String || String` to its left operand would
+        answer `NaN` here. `NaN` is also falsy, so the operator answers `5`.
+        """
+        self.assertEqual('var s = 5;', self._simplify('var s = NaN || 5;'))
 
     def test_local_global_object_alias_member_stripped(self):
         source = inspect.cleandoc(

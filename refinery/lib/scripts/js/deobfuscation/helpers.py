@@ -86,6 +86,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
     JsWhileStatement,
+    strip_parens,
 )
 from refinery.lib.scripts.js.numbers import (
     STRING_NUMERIC_TRIM,
@@ -184,16 +185,21 @@ GLOBAL_VALUE_NAMES: dict[str, Value] = {
     'Infinity': float('inf'),
 }
 """
-The three names that denote a value rather than a binding a program can move. Each is a property of
-the global object that ECMA-262 makes non-writable and non-configurable, so no assignment, `delete`,
-or `defineProperty` can change what a read of it answers — which is what separates them from every
-other global, including the ones a program is equally unlikely to reassign. They have no literal
-spelling, so an operand written with one of these names carries a value that `extract_literal_value`
-cannot report, and a caller that wants it has to look here.
+The three global names that carry a value no literal spells, so that an operand written with one of
+them holds a value `extract_literal_value` cannot report and a caller that wants it looks here.
 
-The guarantee is about the *global* of that name only. All three are ordinary identifiers as far as
-scoping goes — a parameter, a `let`, or a `var` of the same name shadows them — so a caller must
-resolve the name against the scope it is read in before trusting this table.
+What makes reading them safe is *not* the specification. ES5 made them non-writable and
+non-configurable, but ES3 did not — its own Annex E lists the change as an intentional
+incompatibility — and ES3 is what Windows Script Host runs, which is the dialect of the `.js`, `.wsf`
+and `.hta` droppers this tool exists for. Measured under `cscript`, JScript 11.0: `undefined =
+'CLOBBERED'` sticks, and `typeof undefined` becomes `'string'` afterwards. Clobbering `undefined` is
+a live obfuscation technique precisely because it breaks a naive `=== undefined` check.
+
+What makes reading them safe is the binding analysis. A program that assigns one of these names at
+top level creates an `IMPLICIT_GLOBAL` binding the model records, and `denoted_value` — the only
+reader that may consult this table — refuses any name the model resolves. All three are also
+ordinary identifiers as far as scoping goes: a parameter, a `let` or a `var` of the same name shadows
+them, and that is the same refusal. Reading the table without asking the model is a bug.
 """
 
 PROTO_KEY = '__proto__'
@@ -928,49 +934,95 @@ def is_reference(node: JsIdentifier) -> bool:
     return True
 
 
-def is_truthy(node: Node) -> bool | None:
+def denoted_value(node: Node | None, model: SemanticModel) -> tuple[bool, Value]:
     """
-    Return the JavaScript truthiness of a literal node, or `None` when the value cannot be
-    determined statically. This is the AST-node counterpart of the value-domain `to_boolean`;
-    the two must agree on which values are falsy (`undefined`, `null`, `0`, `NaN`, `''`).
+    The value *node* denotes, as `(True, value)`, or `(False, None)` when nothing decides it. This is
+    `extract_literal_value` widened by the two things a literal cannot express: a name from
+    `GLOBAL_VALUE_NAMES`, and an operator standing in front of either.
+
+    A name is answered only where the program cannot have given it another meaning, and that is a
+    question about the scope the name is read in — which is why this needs the model and
+    `extract_literal_value` does not, and why every reader that wants one of these names must come
+    through here. There are three ways the meaning can differ from the global's, and `resolve`
+    reports only the first:
+
+    - a declaration binds the name, anywhere from a parameter to an assignment at top level, which
+      the model records as an `IMPLICIT_GLOBAL`
+    - the lookup crosses a `with` body, where the object may carry a property of that name and
+      reading it may even run a getter. `resolve` answers `None` here as well, so
+      `read_has_dynamic_effect` is what separates the two cases
+    - a direct `eval` declared the name, which no reference records at all;
+      `free_name_reachable_by_direct_eval` reports the positions that could see such a binding
     """
-    if isinstance(node, JsBooleanLiteral):
-        return node.value
-    if isinstance(node, JsNumericLiteral):
-        # return correct value for NaN
-        return (v := node.value) != 0 and v == v
-    if isinstance(node, JsStringLiteral):
-        return bool(node.value)
-    if isinstance(node, JsNullLiteral):
-        return False
-    if isinstance(node, JsIdentifier) and node.name == 'undefined':
-        return False
-    if isinstance(node, JsArrayExpression):
-        return True
+    node = strip_parens(node)
+    if node is None:
+        return False, None
+    if isinstance(node, JsIdentifier):
+        if node.name not in GLOBAL_VALUE_NAMES or model.resolve(node) is not None:
+            return False, None
+        if model.read_has_dynamic_effect(node):
+            return False, None
+        if model.free_name_reachable_by_direct_eval(node):
+            return False, None
+        return True, GLOBAL_VALUE_NAMES[node.name]
+    if isinstance(node, JsUnaryExpression):
+        apply = UNARY_OPS.get(node.operator)
+        if apply is None:
+            return False, None
+        known, value = denoted_value(node.operand, model)
+        return (True, apply(value)) if known else (False, None)
+    return extract_literal_value(node)
+
+
+def allocated_object_type(node: Node | None) -> str | None:
+    """
+    The `typeof` of the object *node* allocates, when it is a form that always evaluates to a freshly
+    created one — `None` otherwise. Such a node has no value this module can extract: an object or
+    function expression denotes an identity no literal reproduces, and an array whose elements are
+    not themselves literals is the same. Its *type* is nevertheless fixed by the syntax alone, and so
+    is its truthiness, since every object is truthy — which is why `!{}`, `typeof {}` and
+    `if ([f()])` are all answerable from this one fact.
+
+    Deciding an operand from its allocation says nothing about whether evaluating it is free of
+    effects; `[f()]` allocates an array and calls `f`. A caller that discards the operand has to ask
+    that separately.
+    """
+    node = strip_parens(node)
+    if isinstance(node, (JsObjectExpression, JsArrayExpression)):
+        return 'object'
+    if isinstance(node, (JsFunctionExpression, JsArrowFunctionExpression, JsClassExpression)):
+        return 'function'
     return None
 
 
-def is_statically_evaluable(node: Node) -> bool:
+def is_truthy(node: Node, model: SemanticModel) -> bool | None:
     """
-    Return whether the node can be evaluated to a known truthiness at transform time. This
-    includes all literal types and the `undefined` identifier.
+    The JavaScript truthiness of *node*, or `None` when nothing decides it. The AST-node counterpart
+    of the value-domain `to_boolean`, which it answers by asking wherever a value is known: the two
+    used to agree by inspection, and now agree by construction.
+
+    An allocation is the one case with no value to ask about, and it needs none — every object is
+    truthy. This does not gate that on the allocation being effect-free, because deciding truthiness
+    does not by itself discard the operand; the caller that goes on to drop it is the one that has to
+    keep its effects.
     """
-    return (
-        is_literal(node)
-        or (isinstance(node, JsIdentifier) and node.name == 'undefined')
-        or isinstance(node, JsArrayExpression)
-    )
+    known, value = denoted_value(node, model)
+    if known:
+        return to_boolean(value)
+    return True if allocated_object_type(node) is not None else None
 
 
-def is_nullish(node: Node) -> bool:
+def is_nullish(node: Node, model: SemanticModel) -> bool | None:
     """
-    Return whether the node is statically known to be `null` or `undefined`.
+    Whether *node* denotes `null` or `undefined` — the two values `??` treats as absent — or `None`
+    when the value it denotes is not decided. A caller has to tell that third answer from `False`:
+    `a ?? b` keeps `a` when `a` is known not to be nullish, and must be left alone when nothing is
+    known about it at all.
     """
-    if isinstance(node, JsNullLiteral):
-        return True
-    if isinstance(node, JsIdentifier) and node.name == 'undefined':
-        return True
-    return False
+    known, value = denoted_value(node, model)
+    if not known:
+        return None
+    return value is None or value is JS_NULL
 
 
 _MAX_DIGITS_IN_A_DOUBLE = {

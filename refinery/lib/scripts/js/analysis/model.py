@@ -306,8 +306,14 @@ class Binding:
 class Scope:
     """
     A lexical scope. `node` is the AST node that introduces it (the script, a function, a block, a
-    catch clause, a class, or a `with`). `is_dynamic` marks a region whose bindings cannot be resolved
-    statically because names may be injected at runtime (`with`, direct `eval`).
+    catch clause, a class, or a `with`). `is_dynamic` marks a `with` body, whose bindings cannot be
+    resolved statically because the object supplies them at run time.
+
+    A direct `eval` is not marked here even though it too can inject a name. It would have to mark the
+    whole enclosing function, which would make every name in a function containing one unresolvable,
+    where what an `eval` actually does is narrower and is answered by the two queries written for it:
+    `local_reachable_by_direct_eval` for a binding that already exists, and
+    `free_name_reachable_by_direct_eval` for one the `eval` may have declared.
     """
     kind: ScopeKind
     node: Node
@@ -1157,6 +1163,30 @@ class SemanticModel:
         if owner is None or owner.kind is ScopeKind.SCRIPT:
             return False
         return self._function_has_direct_eval(owner.node)
+
+    def free_name_reachable_by_direct_eval(self, node: Node) -> bool:
+        """
+        Whether a direct `eval` could have installed a binding that a free name at *node* reads instead
+        of the global one. `resolve` answering `None` means this model saw no declaration of the name,
+        which is not the same as there being none: `eval('var undefined = 4')` declares one that no
+        reference here records, and a read of that name afterwards is the binding, not the global.
+
+        Only `var` and function declarations escape an `eval` — a `let` inside one lives in a scope
+        discarded with the call — so a binding it installs lands in the var scope the call itself stands
+        in, and is visible at *node* exactly when that var scope contains *node*'s scope. This is the
+        mirror of `local_reachable_by_direct_eval`, which asks whether an `eval` can name a binding that
+        already exists and therefore counts one nested *below* the binding's owner; a nested `eval`
+        declares into its own function and so is not counted here.
+        """
+        scope = self.scope_of(node)
+        if scope is None:
+            return True
+        for site in self._direct_eval_sites(self.root):
+            site_scope = self.scope_of(site)
+            owner = site_scope.var_scope if site_scope is not None else None
+            if owner is None or owner.contains(scope):
+                return True
+        return False
 
     def binding_maybe_reassigned_dynamically(self, binding: Binding) -> bool:
         """

@@ -3506,3 +3506,262 @@ class TestDeobfuscateWithin(TestBase):
         """
         source = "console.log('日本語');"
         self.assertEqual(deobfuscate_within(source, seconds=20), source)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestDecidedTestsKeepTheirEffects(TestBase):
+    """
+    A conditional, `&&`, `||` and `??` whose test is decidable folds to the operand that runs.
+    Evaluating the test remains part of what the program does: it can call a function, or read a
+    property whose getter runs. Which operand the fold discards is not the same for all four — the
+    conditional discards the test and the untaken branch, `&&` with a truthy test discards the
+    test, and `||` and `??` keep the test as their result and discard the right-hand side instead —
+    so each shape is written out.
+
+    Every test here allocates an array, which is truthy whatever it contains: that is what makes a
+    test decidable while it still runs a call or an accessor. Each case names the program a fold
+    that lost the effect would produce and requires it to behave differently, so that a case whose
+    discarded operand printed nothing cannot pass for a proof.
+    """
+
+    _CALL = inspect.cleandoc("""
+        var SINK = [];
+        function t(v) {
+          SINK.push(v);
+          return v;
+        }
+    """)
+
+    _GETTER = inspect.cleandoc("""
+        var SINK = [];
+        var o = { get p() {
+          SINK.push('g');
+          return 1;
+        } };
+    """)
+
+    def _preserves(self, preamble: str, source: str, misfolded: str):
+        program = F'{preamble}\n{source}'
+        self.assertNotEqual(
+            behavior(program),
+            behavior(F'{preamble}\n{misfolded}'),
+            'the program does not discriminate: it behaves the same with and without the effect',
+        )
+        deobfuscated = deobfuscate_source(program)
+        self.assertEqual(
+            behavior(program),
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_conditional_keeps_the_call_in_its_decided_test(self):
+        """
+        Node: `a t`.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                var r = [t('t')] ? 'a' : 'b';
+                console.log(r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = 'a';
+                console.log(r, SINK.join('|'));
+            """),
+        )
+
+    def test_conditional_keeps_the_getter_in_its_decided_test(self):
+        """
+        Node: `a g`.
+        """
+        self._preserves(
+            self._GETTER,
+            inspect.cleandoc("""
+                var r = [o.p] ? 'a' : 'b';
+                console.log(r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = 'a';
+                console.log(r, SINK.join('|'));
+            """),
+        )
+
+    def test_conditional_keeps_the_test_and_runs_only_the_taken_branch(self):
+        """
+        Node: `a t|a`. The order matters as much as the set: the test runs before the branch it
+        selects.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                var r = [t('t')] ? t('a') : t('b');
+                console.log(r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = t('a');
+                console.log(r, SINK.join('|'));
+            """),
+        )
+
+    def test_conditional_statement_keeps_its_test_when_the_whole_value_is_discarded(self):
+        """
+        Node: `t|a`.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                [t('t')] ? t('a') : t('b');
+                console.log(SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                t('a');
+                console.log(SINK.join('|'));
+            """),
+        )
+
+    def test_logical_and_keeps_the_call_in_its_decided_test(self):
+        """
+        Node: `x t`. A truthy test makes the right-hand side the result, so the test is what the
+        fold discards.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                var r = [t('t')] && 'x';
+                console.log(r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = 'x';
+                console.log(r, SINK.join('|'));
+            """),
+        )
+
+    def test_logical_and_keeps_the_getter_in_its_decided_test(self):
+        """
+        Node: `x g`.
+        """
+        self._preserves(
+            self._GETTER,
+            inspect.cleandoc("""
+                var r = [o.p] && 'x';
+                console.log(r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = 'x';
+                console.log(r, SINK.join('|'));
+            """),
+        )
+
+    def test_logical_and_statement_keeps_its_test_before_the_right_hand_side(self):
+        """
+        Node: `t|u`.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                [t('t')] && t('u');
+                console.log(SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                t('u');
+                console.log(SINK.join('|'));
+            """),
+        )
+
+    def test_logical_and_with_a_falsy_test_discards_the_right_hand_side(self):
+        """
+        Node: `0` and an empty sink. This is the other shape: the test is the result and the
+        right-hand side is what goes, so the call it holds must never run.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                var r = 0 && t('u');
+                console.log(r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = t('u');
+                console.log(r, SINK.join('|'));
+            """),
+        )
+
+    def test_logical_or_keeps_its_test_and_discards_the_right_hand_side(self):
+        """
+        Node: `object t`. A truthy test is the result of `||`, so the discarded operand is the
+        right-hand side and its call must not run — while the test's own call must.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                var r = [t('t')] || t('u');
+                console.log(typeof r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = [];
+                console.log(typeof r, SINK.join('|'));
+            """),
+        )
+
+    def test_logical_or_statement_keeps_the_call_in_its_discarded_test(self):
+        """
+        Node: `t`. Nothing of the expression is used, so both operands are discarded as values and
+        only the test's effect survives.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                [t('t')] || t('u');
+                console.log(SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                console.log(SINK.join('|'));
+            """),
+        )
+
+    def test_nullish_keeps_its_test_and_discards_the_right_hand_side(self):
+        """
+        Node: `object t`. An array is not nullish, so `??` answers with the test and discards the
+        right-hand side.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                var r = [t('t')] ?? t('u');
+                console.log(typeof r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = t('u');
+                console.log(typeof r, SINK.join('|'));
+            """),
+        )
+
+    def test_nullish_statement_keeps_the_call_in_its_discarded_test(self):
+        """
+        Node: `t`.
+        """
+        self._preserves(
+            self._CALL,
+            inspect.cleandoc("""
+                [t('t')] ?? t('u');
+                console.log(SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                console.log(SINK.join('|'));
+            """),
+        )
+
+    def test_nullish_keeps_the_getter_in_its_test(self):
+        """
+        Node: `object g`.
+        """
+        self._preserves(
+            self._GETTER,
+            inspect.cleandoc("""
+                var r = [o.p] ?? 'x';
+                console.log(typeof r, SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var r = [];
+                console.log(typeof r, SINK.join('|'));
+            """),
+        )

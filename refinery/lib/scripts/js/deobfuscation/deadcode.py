@@ -15,9 +15,9 @@ from refinery.lib.scripts.js.analysis.effects import (
     EffectModel,
     side_effect_free,
 )
+from refinery.lib.scripts.js.analysis.model import SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     BodyProcessingTransformer,
-    is_statically_evaluable,
     is_truthy,
 )
 from refinery.lib.scripts.js.model import (
@@ -53,6 +53,18 @@ class JsDeadCodeElimination(BodyProcessingTransformer):
             self._effects = model_cache(self, self._root).effects
         return self._effects
 
+    @property
+    def model(self) -> SemanticModel | None:
+        """
+        The semantic model for the current script. Whether a test denotes a value at all is a scope
+        question — `undefined` is a value only where nothing has bound that name — so no branch can be
+        pruned without one. It is reached through the cache rather than through `effects`, which holds
+        a model but is built lazily and costs far more than this pass needs to spend on an `if`.
+        """
+        if self._root is None:
+            return None
+        return model_cache(self, self._root).model
+
     def visit_JsScript(self, node: JsScript):
         self._root = node
         self._effects = None
@@ -76,9 +88,10 @@ class JsDeadCodeElimination(BodyProcessingTransformer):
             return None
         if stmt.test is None:
             return None
-        if not is_statically_evaluable(stmt.test):
+        model = self.model
+        if model is None:
             return None
-        truthy = is_truthy(stmt.test)
+        truthy = is_truthy(stmt.test, model)
         if truthy is None:
             return None
         taken = stmt.consequent if truthy else stmt.alternate

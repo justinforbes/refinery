@@ -3,10 +3,7 @@ JavaScript syntax normalization transforms.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
-
-if TYPE_CHECKING:
-    from refinery.lib.scripts.js.deobfuscation.helpers import Value
+from typing import Callable
 
 from refinery.lib.scripts import Expression, Node, Transformer
 from refinery.lib.scripts.js.analysis.cache import ModelCache, model_cache
@@ -22,11 +19,12 @@ from refinery.lib.scripts.js.analysis.model import (
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
-    GLOBAL_VALUE_NAMES,
     OBJECT_PROTOTYPE_MEMBERS,
     RELATIONAL_OPS,
     UNARY_OPS,
     access_key,
+    allocated_object_type,
+    denoted_value,
     escape_js_string,
     eval_binary_op,
     extract_identifier_params,
@@ -36,7 +34,6 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     is_nullish,
     is_safe_iife_inline,
     is_simple_expression,
-    is_statically_evaluable,
     is_truthy,
     is_valid_identifier,
     is_valid_property_key,
@@ -115,15 +112,6 @@ def _callee_form_sensitive(node: Node) -> bool:
 
 
 _UNCONVERTIBLE = object()
-
-
-def _node_to_value(node: Node) -> object:
-    """
-    Convert an AST expression to its Python equivalent for use with BUILTIN_REGISTRY dispatch.
-    Returns the module-level sentinel `_UNCONVERTIBLE` when the node cannot be statically resolved.
-    """
-    ok, value = extract_literal_value(node)
-    return value if ok else _UNCONVERTIBLE
 
 
 def concat_string(node: Expression | None) -> str | None:
@@ -522,7 +510,7 @@ class JsSimplifications(Transformer):
             return None
         if not self.effects.call_is_foldable(node):
             return None
-        args = [_node_to_value(a) for a in node.arguments]
+        args = [self._node_to_value(a) for a in node.arguments]
         if any(a is _UNCONVERTIBLE for a in args):
             return None
         try:
@@ -540,7 +528,7 @@ class JsSimplifications(Transformer):
             return None
         if not self.effects.call_is_foldable(node):
             return None
-        args = [_node_to_value(a) for a in node.arguments]
+        args = [self._node_to_value(a) for a in node.arguments]
         if any(a is _UNCONVERTIBLE for a in args):
             return None
         try:
@@ -558,7 +546,7 @@ class JsSimplifications(Transformer):
             return None
         if callee.object is None:
             return None
-        receiver = _node_to_value(callee.object)
+        receiver = self._node_to_value(callee.object)
         if receiver is _UNCONVERTIBLE:
             return None
         if isinstance(receiver, str):
@@ -571,7 +559,7 @@ class JsSimplifications(Transformer):
             return None
         if not self.effects.call_is_foldable(node, receiver_type=type(receiver)):
             return None
-        args = [_node_to_value(a) for a in node.arguments]
+        args = [self._node_to_value(a) for a in node.arguments]
         if any(a is _UNCONVERTIBLE for a in args):
             return None
         try:
@@ -629,14 +617,28 @@ class JsSimplifications(Transformer):
             return None
         return make_string_literal(sep.join(parts))
 
+    def _discarding(self, test: Expression, kept: Expression | None) -> Expression | None:
+        """
+        *kept*, preceded by *test* where dropping the latter would lose an effect. A fold that picks a
+        branch answers from the test's *value* and has no further use for it, but evaluating it is
+        still part of what the program does — the test may call, or read a property whose getter runs —
+        so it stays in front of the result unless it provably does nothing. `JsDeadCodeElimination`
+        keeps a statement test for the same reason and in the same way.
+        """
+        if kept is None:
+            return None
+        if self.effects.is_side_effect_free(test, discarded=True):
+            return kept
+        return JsSequenceExpression(expressions=[test, kept])
+
     def visit_JsConditionalExpression(self, node: JsConditionalExpression):
         self.generic_visit(node)
-        if node.test is None or not is_statically_evaluable(node.test):
+        if node.test is None:
             return None
-        truthy = is_truthy(node.test)
+        truthy = is_truthy(node.test, self.model)
         if truthy is None:
             return None
-        return node.consequent if truthy else node.alternate
+        return self._discarding(node.test, node.consequent if truthy else node.alternate)
 
     def visit_JsSequenceExpression(self, node: JsSequenceExpression):
         self.generic_visit(node)
@@ -730,57 +732,26 @@ class JsSimplifications(Transformer):
 
     def _fresh_object_type(self, operand: Node | None) -> str | None:
         """
-        The `typeof` of the object *operand* allocates, when it is a form that always evaluates to a
-        freshly created object and creating it has no other effect — `None` otherwise. Such a node has
-        no extractable value: `extract_literal_value` refuses an object or function expression, and
-        widening it to answer one would hand out a value whose identity no literal can reproduce.
-
-        Its type is nevertheless decided by the syntax alone, and so is its truthiness: every object is
-        truthy, which is why `!{}` and `typeof {}` are answerable from the same fact. The freedom from
-        effects is asked with the value discarded, because that is what folding does with it — only the
-        type or the truthiness survives, and the object itself does not.
+        The `typeof` of the object *operand* allocates, when creating it has no other effect — `None`
+        otherwise. The type is `allocated_object_type`'s syntactic answer; the freedom from effects is
+        asked with the value discarded, because that is what folding does with it. Only the type or the
+        truthiness survives, and the object itself does not.
         """
+        kind = allocated_object_type(operand)
+        if kind is None:
+            return None
         node = strip_parens(operand)
-        if isinstance(node, JsObjectExpression):
-            kind = 'object'
-        elif isinstance(node, (JsFunctionExpression, JsArrowFunctionExpression, JsClassExpression)):
-            kind = 'function'
-        else:
+        if node is None:
             return None
         return kind if self.effects.is_side_effect_free(node, discarded=True) else None
 
-    def _operand_value(self, operand: Node | None) -> tuple[bool, Value]:
+    def _node_to_value(self, node: Node | None) -> object:
         """
-        The value *operand* denotes, as `extract_literal_value` reports it, extended with the two forms
-        that denote one without being a literal. A name in `GLOBAL_VALUE_NAMES` is resolved against the
-        scope it is read in first, which is why it is answered here and not in `extract_literal_value`:
-        only a caller holding the semantic model can tell the global `undefined` from a parameter of
-        that name. A nested unary is applied through the same kernel, so that an operand spelled with
-        one of those names is still readable once an operator stands in front of it — `-Infinity` is
-        how the negative infinity is written, and nothing else spells it.
-
-        Resolving to no binding is not by itself the global. `SemanticModel.resolve` also answers `None`
-        for a name whose lookup crosses a `with` body, where the object supplies the value at run time
-        and a property named `undefined` shadows the global one no declaration mentions. Reading such a
-        name is not even pure — the property may be a getter — so the question is asked as
-        `read_has_dynamic_effect`, which is the model's name for it.
+        The Python equivalent of *node* for `BUILTIN_REGISTRY` dispatch, or the module-level sentinel
+        `_UNCONVERTIBLE` when nothing decides what the node denotes.
         """
-        node = strip_parens(operand)
-        if node is None:
-            return False, None
-        if isinstance(node, JsIdentifier):
-            if node.name not in GLOBAL_VALUE_NAMES or self.model.resolve(node) is not None:
-                return False, None
-            if self.model.read_has_dynamic_effect(node):
-                return False, None
-            return True, GLOBAL_VALUE_NAMES[node.name]
-        if isinstance(node, JsUnaryExpression):
-            apply = UNARY_OPS.get(node.operator)
-            if apply is None:
-                return False, None
-            known, value = self._operand_value(node.operand)
-            return (True, apply(value)) if known else (False, None)
-        return extract_literal_value(node)
+        known, value = denoted_value(node, self.model)
+        return value if known else _UNCONVERTIBLE
 
     def _deletion_is_unobservable(self, node: JsUnaryExpression) -> bool:
         """
@@ -850,7 +821,7 @@ class JsSimplifications(Transformer):
         apply = UNARY_OPS.get(op)
         if apply is None:
             return None
-        known, value = self._operand_value(operand)
+        known, value = denoted_value(operand, self.model)
         if not known:
             return None
         folded = value_to_node(apply(value))
@@ -872,18 +843,17 @@ class JsSimplifications(Transformer):
             return None
         if node.operator == '||' and self.effects.intrinsic_of(node.left) is not None:
             return node.left
-        if not is_statically_evaluable(node.left):
-            return None
         op = node.operator
         if op == '??':
-            if is_nullish(node.left):
-                return node.right
-            return node.left
-        truthy = is_truthy(node.left)
+            nullish = is_nullish(node.left, self.model)
+            if nullish is None:
+                return None
+            return self._discarding(node.left, node.right) if nullish else node.left
+        truthy = is_truthy(node.left, self.model)
         if truthy is None:
             return None
         if op == '&&':
-            return node.right if truthy else node.left
+            return self._discarding(node.left, node.right) if truthy else node.left
         if op == '||':
-            return node.left if truthy else node.right
+            return node.left if truthy else self._discarding(node.left, node.right)
         return None
