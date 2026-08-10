@@ -4389,3 +4389,136 @@ class TestGuaranteedGlobalNamesAreOrdinaryBindings(TestBase):
             """),
             'NaN',
         )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestFoldedCalleeKeepsHowTheFunctionIsReached(TestBase):
+    """
+    How a call reaches its function is part of what the call means, and not a detour on the way
+    to the same result. `o.m()` passes `o` as the receiver while a callee spelled as any other
+    expression passes none, and `eval(s)` runs `s` in the scope of the caller while any other
+    spelling of that same function runs it in the global scope. A conditional, `&&`, `||` or `??`
+    whose test is decidable folds to the operand that survives; when such an expression is what a
+    call invokes, putting the surviving operand in its place hands the call a callee of a
+    different kind.
+
+    Which operand survives is not the same for the four: the conditional keeps the branch its test
+    selects, whereas `&&`, `||` and `??` keep their right-hand side only for a truthy, a falsy and
+    a nullish test respectively, so each is written with the test value that leaves the callee
+    standing. Node decides and no case asserts the emitted text, because a callee reached without
+    a receiver has more than one correct spelling. Each case also names the program a fold that
+    lost the distinction would produce and requires Node to print something else for it, so a call
+    whose function cannot tell how it was reached cannot pass for a proof.
+    """
+
+    def _receiver_program(self, callee: str) -> str:
+        return '\n'.join([
+            "var o = { tag: 'self', m: function () {",
+            "  return this === o ? this.tag : 'detached';",
+            '} };',
+            F'console.log({callee}());',
+        ])
+
+    def _direct_eval_program(self, callee: str) -> str:
+        return '\n'.join([
+            'function reach() {',
+            "  var secret = 'local';",
+            F"  return {callee}('typeof secret');",
+            '}',
+            'console.log(reach());',
+        ])
+
+    def _preserves(self, source: str, misfolded: str):
+        self.assertNotEqual(
+            behavior(source),
+            behavior(misfolded),
+            'the program does not discriminate: it behaves the same however its callee is reached',
+        )
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(source),
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_conditional_taking_its_consequent_calls_without_a_receiver(self):
+        """
+        Node prints `detached`, and `self` once the callee is spelled `o.m`.
+        """
+        self._preserves(
+            self._receiver_program('(1 ? o.m : null)'),
+            self._receiver_program('o.m'),
+        )
+
+    def test_conditional_taking_its_alternate_calls_without_a_receiver(self):
+        """
+        Node prints `detached`, and `self` once the callee is spelled `o.m`.
+        """
+        self._preserves(
+            self._receiver_program('(0 ? null : o.m)'),
+            self._receiver_program('o.m'),
+        )
+
+    def test_logical_and_with_a_truthy_test_calls_its_right_hand_side_without_a_receiver(self):
+        """
+        Node prints `detached`, and `self` once the callee is spelled `o.m`.
+        """
+        self._preserves(
+            self._receiver_program('(1 && o.m)'),
+            self._receiver_program('o.m'),
+        )
+
+    def test_logical_or_with_a_falsy_test_calls_its_right_hand_side_without_a_receiver(self):
+        """
+        Node prints `detached`, and `self` once the callee is spelled `o.m`.
+        """
+        self._preserves(
+            self._receiver_program('(0 || o.m)'),
+            self._receiver_program('o.m'),
+        )
+
+    def test_nullish_with_a_nullish_test_calls_its_right_hand_side_without_a_receiver(self):
+        """
+        Node prints `detached`, and `self` once the callee is spelled `o.m`.
+        """
+        self._preserves(
+            self._receiver_program('(null ?? o.m)'),
+            self._receiver_program('o.m'),
+        )
+
+    def test_conditional_taking_its_consequent_leaves_its_eval_indirect(self):
+        """
+        Node prints `undefined`, and `string` once the callee is spelled `eval`, which then reads
+        the local of the function the call is written in.
+        """
+        self._preserves(
+            self._direct_eval_program('(1 ? eval : null)'),
+            self._direct_eval_program('eval'),
+        )
+
+    def test_logical_and_with_a_truthy_test_leaves_its_eval_indirect(self):
+        """
+        Node prints `undefined`, and `string` once the callee is spelled `eval`.
+        """
+        self._preserves(
+            self._direct_eval_program('(1 && eval)'),
+            self._direct_eval_program('eval'),
+        )
+
+    def test_logical_or_with_a_falsy_test_leaves_its_eval_indirect(self):
+        """
+        Node prints `undefined`, and `string` once the callee is spelled `eval`.
+        """
+        self._preserves(
+            self._direct_eval_program('(0 || eval)'),
+            self._direct_eval_program('eval'),
+        )
+
+    def test_nullish_with_a_nullish_test_leaves_its_eval_indirect(self):
+        """
+        Node prints `undefined`, and `string` once the callee is spelled `eval`.
+        """
+        self._preserves(
+            self._direct_eval_program('(null ?? eval)'),
+            self._direct_eval_program('eval'),
+        )

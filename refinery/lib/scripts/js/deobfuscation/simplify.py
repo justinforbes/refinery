@@ -617,17 +617,30 @@ class JsSimplifications(Transformer):
             return None
         return make_string_literal(sep.join(parts))
 
-    def _discarding(self, test: Expression, kept: Expression | None) -> Expression | None:
+    def _discarding(
+        self,
+        node: Expression,
+        test: Expression,
+        kept: Expression | None,
+    ) -> Expression | None:
         """
-        *kept*, preceded by *test* where dropping the latter would lose an effect. A fold that picks a
-        branch answers from the test's *value* and has no further use for it, but evaluating it is
-        still part of what the program does — the test may call, or read a property whose getter runs —
-        so it stays in front of the result unless it provably does nothing. `JsDeadCodeElimination`
-        keeps a statement test for the same reason and in the same way.
+        *kept* in place of *node*, preceded by *test* where dropping the latter would change what the
+        program does. Two separate reasons it may have to stay.
+
+        Evaluating it is an effect: a fold that picks a branch answers from the test's *value* and has
+        no further use for it, but the test may call, or read a property whose getter runs.
+        `JsDeadCodeElimination` keeps a statement test for the same reason and in the same way.
+
+        And *node* may be what a call invokes, in which case removing the operator around *kept*
+        changes the receiver: `(1 ? o.m : g)()` invokes with no receiver, where a bare `o.m()` binds
+        `o`, and `(1 ? eval : g)(s)` is an indirect eval where a bare `eval(s)` is a direct one. The
+        sequence is what preserves that — `(0, o.m)()` is the idiom for calling without a receiver —
+        so a form-sensitive branch keeps it even when the test does nothing at all.
         """
         if kept is None:
             return None
-        if self.effects.is_side_effect_free(test, discarded=True):
+        receiver_sensitive = is_invocation_target(node) and _callee_form_sensitive(kept)
+        if not receiver_sensitive and self.effects.is_side_effect_free(test, discarded=True):
             return kept
         return JsSequenceExpression(expressions=[test, kept])
 
@@ -638,7 +651,7 @@ class JsSimplifications(Transformer):
         truthy = is_truthy(node.test, self.model)
         if truthy is None:
             return None
-        return self._discarding(node.test, node.consequent if truthy else node.alternate)
+        return self._discarding(node, node.test, node.consequent if truthy else node.alternate)
 
     def visit_JsSequenceExpression(self, node: JsSequenceExpression):
         self.generic_visit(node)
@@ -848,12 +861,12 @@ class JsSimplifications(Transformer):
             nullish = is_nullish(node.left, self.model)
             if nullish is None:
                 return None
-            return self._discarding(node.left, node.right) if nullish else node.left
+            return self._discarding(node, node.left, node.right) if nullish else node.left
         truthy = is_truthy(node.left, self.model)
         if truthy is None:
             return None
         if op == '&&':
-            return self._discarding(node.left, node.right) if truthy else node.left
+            return self._discarding(node, node.left, node.right) if truthy else node.left
         if op == '||':
-            return node.left if truthy else self._discarding(node.left, node.right)
+            return node.left if truthy else self._discarding(node, node.left, node.right)
         return None
