@@ -1752,10 +1752,20 @@ class TestPs1AConditionReadsACommandNameWhole(TestBase):
 
 class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
     """
-    5.1 makes a `MinusMinus` token here as we do, and then reads it as a parameter of the command it
-    stands in — `Parser.cs:6527`, where the first one becomes a `CommandParameterAst` named `-` and
-    every later one a bare word. We end the command at it instead, so `f -- x` becomes two
-    statements and the second, `-- 'x'`, asks 5.1 to decrement a string literal.
+    A `--` ends the parameters of the command it stands in and is itself the last of them. 5.1 makes
+    a `MinusMinus` token here as we do, and its parser then reads three things from it: the first one
+    is a parameter named `-`, every later one is a bare word, and every `-word` behind it is a bare
+    word too. That is what `--` is for, and it is 5.1's own rule rather than a later version's —
+    `Parser.cs:5664` and `:5681` in the 2016 import of the closed-source engine.
+
+    We end the command at the `--` instead, so `f -- x` becomes two statements and the second,
+    `-- 'x'`, asks 5.1 to decrement a string literal. None of the three can be reached until that
+    is fixed, which is why all of it is expected to fail together.
+
+    The third has a witness a host can be asked for directly: 5.1 stamps such a token with
+    `CommandName`, so `command_names('f -- -Recurse')` measures `('f', '-Recurse')` where every
+    other spelling here measures `('f',)`. It is not in `corpus.NAMES` because what we print for it
+    is a script 5.1 refuses, and the differential that would carry the row has no ledger for that.
     """
 
     def _shaped(self, node: object, kind: type[_T]) -> _T:
@@ -1763,17 +1773,38 @@ class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
             self.fail(F'expected a {kind.__name__}, not a {type(node).__name__}')
         return node
 
-    @unittest.expectedFailure
-    def test_a_double_dash_argument_leaves_the_command_whole(self):
-        script = Ps1Parser('f -- x').parse()
+    def _arguments(self, source: str) -> list[Ps1CommandArgument]:
+        script = Ps1Parser(source).parse()
         commands = [node for node in script.walk() if isinstance(node, Ps1CommandInvocation)]
         self.assertEqual(len(script.body), 1)
         self.assertEqual(len(commands), 1)
         command, = commands
         self.assertEqual(self._shaped(command.name, Ps1StringLiteral).value, 'f')
-        self.assertEqual(len(command.arguments), 2)
-        dashes, word = (self._shaped(a, Ps1CommandArgument) for a in command.arguments)
-        self.assertEqual(dashes.kind, Ps1CommandArgumentKind.SWITCH)
-        self.assertEqual(dashes.name, '--')
-        self.assertEqual(word.kind, Ps1CommandArgumentKind.POSITIONAL)
-        self.assertEqual(self._shaped(word.value, Ps1StringLiteral).value, 'x')
+        return [self._shaped(argument, Ps1CommandArgument) for argument in command.arguments]
+
+    def _assertIsTheWord(self, argument: Ps1CommandArgument, word: str):
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.POSITIONAL)
+        self.assertEqual(self._shaped(argument.value, Ps1StringLiteral).value, word)
+
+    def _assertEndsTheParameters(self, argument: Ps1CommandArgument):
+        self.assertEqual(argument.kind, Ps1CommandArgumentKind.SWITCH)
+        self.assertEqual(argument.name, '--')
+
+    @unittest.expectedFailure
+    def test_a_double_dash_argument_leaves_the_command_whole(self):
+        dashes, word = self._arguments('f -- x')
+        self._assertEndsTheParameters(dashes)
+        self._assertIsTheWord(word, 'x')
+
+    @unittest.expectedFailure
+    def test_only_the_first_double_dash_ends_the_parameters(self):
+        first, second, word = self._arguments('f -- -- x')
+        self._assertEndsTheParameters(first)
+        self._assertIsTheWord(second, '--')
+        self._assertIsTheWord(word, 'x')
+
+    @unittest.expectedFailure
+    def test_a_switch_behind_a_double_dash_is_a_word(self):
+        dashes, recurse = self._arguments('f -- -Recurse')
+        self._assertEndsTheParameters(dashes)
+        self._assertIsTheWord(recurse, '-Recurse')
