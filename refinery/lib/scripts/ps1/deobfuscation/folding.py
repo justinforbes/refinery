@@ -16,15 +16,20 @@ from refinery.lib.scripts.ps1.analysis.values import (
     apply_unary,
     collect_byte_array,
     collect_integers,
+    convert,
+    integer_at,
     integer_of,
     is_truthy,
     make_string_literal,
+    pattern_at,
     read,
     render,
+    text_of,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.ast import get_body, get_member_name, string_value, unwrap_parens
-from refinery.lib.scripts.ps1.data import ENCODING_MAP
+from refinery.lib.scripts.ps1.data import ENCODING_MAP, named_type
+from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.deobfuscation.constants import PS1_ENV_CONSTANTS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     WorldAwareTransformer,
@@ -88,6 +93,24 @@ _REGEX_OPTION_INT: dict[int, int] = {
 _RIGHT_TO_LEFT = 64
 _MAX_STRING_EXPAND = 0x1000
 _MAX_RANGES_EXPAND = 15
+
+#: The whitespace `[Convert]::To<integer>(string)` strips, measured as `' 5 '` converting to 5. Only
+#: the one-argument form strips anything: `[Convert]::ToInt32(' 5 ', 16)` throws.
+_CONVERT_TRIM = ' \t\r\n'
+
+#: What `[Convert]::To<integer>(string)` reads, which is neither what a cast reads nor what Python's
+#: `int` does: an optional sign and decimal digits. Measured — `'+7'` is 7, `'007'` is 7 and `'-5'`
+#: is -5, while `'0x10'`, `'1_0'`, `'0b1010'`, `'7.5'`, `'1e3'`, `'1,000'` and `''` each throw.
+_CONVERT_SIGNED = re.compile(r'[+-]?[0-9]+\Z')
+
+#: What `[Convert]::To<integer>(string, base)` reads for a base that is not ten: the digits of that
+#: base and nothing else, and only base sixteen takes a `0x` prefix — `'0b1010'` at base two throws.
+#: A sign throws and so does whitespace, so neither is written here.
+_CONVERT_PATTERN: dict[int, re.Pattern[str]] = {
+    2: re.compile(r'[01]+\Z'),
+    8: re.compile(r'[0-7]+\Z'),
+    16: re.compile(r'(?:0[xX])?[0-9a-fA-F]+\Z'),
+}
 
 
 def _is_static_regex_call(node: Ps1InvokeMember) -> bool:
@@ -816,15 +839,18 @@ class Ps1ConstantFolding(WorldAwareTransformer):
             return make_string_literal(_ev)
         return None
 
-    _CONVERT_INT_METHODS = {
-        'tobyte'  : (0, 0xFF),
-        'toint16' : (-0x8000, 0x7FFF),
-        'toint32' : (-0x80000000, 0x7FFFFFFF),
-        'toint64' : (-0x8000000000000000, 0x7FFFFFFFFFFFFFFF),
-        'tosbyte' : (-0x80, 0x7F),
-        'touint16': (0, 0xFFFF),
-        'touint32': (0, 0xFFFFFFFF),
-        'touint64': (0, 0xFFFFFFFFFFFFFFFF),
+    #: The integer type each `[Convert]::To<T>` produces, which is what the result is spelled at.
+    #: Measured: `[Convert]::ToByte('FF', 16)` is a Byte and `[Convert]::ToInt64(5)` an Int64, so a
+    #: fold that wrote a bare numeral for either reported an Int32 the call never produced.
+    _CONVERT_INT_METHODS: dict[str, Ps1TypeName] = {
+        'tobyte'  : named_type('System.Byte'),
+        'toint16' : named_type('System.Int16'),
+        'toint32' : named_type('System.Int32'),
+        'toint64' : named_type('System.Int64'),
+        'tosbyte' : named_type('System.SByte'),
+        'touint16': named_type('System.UInt16'),
+        'touint32': named_type('System.UInt32'),
+        'touint64': named_type('System.UInt64'),
     }
 
     def _try_fold_convert(
@@ -843,43 +869,58 @@ class Ps1ConstantFolding(WorldAwareTransformer):
                 array = Ps1ArrayLiteral(elements=elements)
                 return Ps1ArrayExpression(
                     body=[Ps1ExpressionStatement(expression=array)])
-        bounds = self._CONVERT_INT_METHODS.get(lower)
-        if bounds is not None:
-            return self._fold_convert_int(node, bounds)
+        target = self._CONVERT_INT_METHODS.get(lower)
+        if target is not None:
+            return self._fold_convert_int(node, target)
         if lower == 'tochar':
             n = integer_of(read(node.arguments[0])) if len(node.arguments) == 1 else None
             if n is not None and 0 <= n <= 0xFFFF:
                 return make_string_literal(chr(n))
         return None
 
-    def _fold_convert_int(
-        self, node: Ps1InvokeMember, bounds: tuple[int, int],
-    ) -> Expression | None:
-        lo, hi = bounds
-        if len(node.arguments) == 1:
-            n = integer_of(read(node.arguments[0]))
-            if n is not None and lo <= n <= hi:
-                return Ps1IntegerLiteral(raw=str(n))
-            sv = string_value(node.arguments[0])
-            if sv is not None:
-                sv = sv.strip()
-                try:
-                    value = int(sv, 0)
-                except (ValueError, OverflowError):
-                    return None
-                if lo <= value <= hi:
-                    return Ps1IntegerLiteral(raw=str(value))
-        elif len(node.arguments) == 2:
-            sv = string_value(node.arguments[0])
-            base_int = integer_of(read(node.arguments[1]))
-            if sv is not None and base_int in (2, 8, 10, 16):
-                try:
-                    value = int(sv, base_int)
-                except (ValueError, OverflowError):
-                    return None
-                if lo <= value <= hi:
-                    return Ps1IntegerLiteral(raw=str(value))
-        return None
+    @staticmethod
+    def _fold_convert_int(node: Ps1InvokeMember, target: Ps1TypeName) -> Expression | None:
+        """
+        `[Convert]::To<integer>(...)`, whose String operand is read by an oracle that is neither the
+        cast's nor Python's — a third one, measured, and this is where the difference is written.
+
+        For every source but a String the call *is* the cast, so it asks `convert`:
+        `[Convert]::ToInt32(1.5)` and `(2.5)` are both 2, which is the half-to-even a cast performs,
+        and a Char, a `$true` and a `$null` each convert exactly as they do under one.
+
+        A String is stricter than the cast in the one-argument form. `[Convert]::ToInt32('0x10')`
+        throws where `[int]'0x10'` is 16, and so do `'7.5'`, `'1e3'`, `'1,000'`, `'1_0'`, `'0b1010'`
+        and the empty String, each of which a cast or Python's own `int` reads as a number — which
+        is what this used to do, so `[Convert]::ToInt32('0x10')` answered 16 for a script that stops.
+
+        With an explicit base it is stricter still and it reads a *pattern*: `'FFFFFFFF'` at base
+        sixteen is the Int32 -1 and `'80000000'` is -2147483648, where the digits read as a number
+        are out of range and this refused to fold them at all.
+        """
+        arguments = node.arguments
+        if len(arguments) == 1:
+            fact = read(arguments[0])
+            text = text_of(fact)
+            if text is None:
+                return _folded(convert(fact, target))
+            digits = text.strip(_CONVERT_TRIM)
+            if not _CONVERT_SIGNED.match(digits):
+                return None
+            return render(integer_at(target, int(digits)))
+        if len(arguments) != 2:
+            return None
+        text = text_of(read(arguments[0]))
+        base = integer_of(read(arguments[1]))
+        if text is None or base is None:
+            return None
+        if base == 10:
+            if not _CONVERT_SIGNED.match(text):
+                return None
+            return render(integer_at(target, int(text)))
+        digits_of_base = _CONVERT_PATTERN.get(base)
+        if digits_of_base is None or not digits_of_base.match(text):
+            return None
+        return render(pattern_at(target, int(text, base)))
 
     @staticmethod
     def _try_fold_bitconverter_tostring(node: Ps1InvokeMember) -> Expression | None:

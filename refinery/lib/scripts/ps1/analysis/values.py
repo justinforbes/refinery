@@ -528,6 +528,36 @@ def integer_of(fact: Ps1Fact) -> int | None:
     return None if isinstance(payload, bool) or not isinstance(payload, int) else payload
 
 
+def integer_at(target: Ps1TypeName, value: int) -> Ps1Fact:
+    """
+    `value` as a value of `target`, or `UNKNOWN` where `target` names no integer width or does not
+    hold it. A width that does not hold a number is a throw rather than a wrap, measured for every
+    one of them, so a caller that folds refuses either way and the two are one answer here.
+    """
+    bounds = _INTEGER_RANGE.get(target)
+    if bounds is None or not bounds[0] <= value <= bounds[1]:
+        return UNKNOWN
+    return Ps1Constant(target, value)
+
+
+def pattern_at(target: Ps1TypeName, magnitude: int) -> Ps1Fact:
+    """
+    The value the bit pattern `magnitude` denotes in a register of `target`'s width, with that
+    width's sign, or `UNKNOWN` where `target` names no width or the pattern is wider than it holds.
+
+    A pattern is not a magnitude, which is the whole reason this is a separate question: measured,
+    `[int]'0xFFFFFFFF'` is -1 and `[Convert]::ToInt32('FFFFFFFF', 16)` is -1, where the digits read
+    as a number are four billion. Two callers with different spellings ask it, so it is stated once.
+    """
+    bounds = _INTEGER_RANGE.get(target)
+    if bounds is None:
+        return UNKNOWN
+    try:
+        return Ps1Constant(target, _pattern_at_width(bounds, magnitude))
+    except _Throws:
+        return UNKNOWN
+
+
 def text_of(fact: Ps1Fact) -> str | None:
     """
     The `String` a fact names, or `None` for a fact that names anything else. This is what a caller

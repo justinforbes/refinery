@@ -1385,6 +1385,64 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Double\t1.5',
             'OUT\tSystem.Double\t1.5',
         ),
+    "$t = [Convert]::ToInt32('FFFFFFFF', 16); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t-1',
+            'OUT\tSystem.Int32\t-1',
+        ),
+    "$t = [Convert]::ToInt32('80000000', 16); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t-2147483648',
+            'OUT\tSystem.Int32\t-2147483648',
+        ),
+    "$t = [Convert]::ToInt32('0x10'); Write-Output (,$t); Write-Output $t":
+        ('THROW\tFormatException\tSystem.Management.Automation.MethodInvocationException',),
+    "$t = [Convert]::ToInt32('1_0'); Write-Output (,$t); Write-Output $t":
+        ('THROW\tFormatException\tSystem.Management.Automation.MethodInvocationException',),
+    "$t = [Convert]::ToInt32('7.5'); Write-Output (,$t); Write-Output $t":
+        ('THROW\tFormatException\tSystem.Management.Automation.MethodInvocationException',),
+    "$t = [Convert]::ToInt32(' 5 '); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t5',
+            'OUT\tSystem.Int32\t5',
+        ),
+    "$t = [Convert]::ToInt32('-10', 16); Write-Output (,$t); Write-Output $t":
+        ('THROW\tArgumentException\tSystem.Management.Automation.MethodInvocationException',),
+    "$t = [Convert]::ToInt32('017', 8); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t15',
+            'OUT\tSystem.Int32\t15',
+        ),
+    "$t = [Convert]::ToByte('FF', 16); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Byte\t255',
+            'OUT\tSystem.Byte\t255',
+        ),
+    '$t = [Convert]::ToInt64(5); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int64\t5',
+            'OUT\tSystem.Int64\t5',
+        ),
+    '$t = [Convert]::ToInt32(1.5); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    '$t = [Convert]::ToInt32(1.5d); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    '$t = [Convert]::ToInt32($null); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$t = [Convert]::ToChar(65); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Char\tA',
+            'OUT\tSystem.Char\tA',
+        ),
     "$t = 'abc' -as [int]; Write-Output (,$t); Write-Output $t":
         (
             'OUT\t\t<null>',
@@ -1483,6 +1541,9 @@ TYPE_DEFECTS: dict[str, str] = {
     '$t = [int][char]65; Write-Output (,$t); Write-Output $t':
         'The inner Char is spelled as a String, and 5.1 answers 65 for a Char cast to Int32 while '
         "`[int]'A'` throws. The erasure turns a value into a throw.",
+    '$t = [Convert]::ToChar(65); Write-Output (,$t); Write-Output $t':
+        'The call produces a Char and the fold writes a one-character String, which is the same '
+        'erasure a cast to Char takes and retires with it.',
 }
 
 #: Which words 5.1 read as a command name, for each script whose corruption entry turns on where a
