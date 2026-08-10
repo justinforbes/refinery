@@ -506,6 +506,20 @@ def resolve_type(name: str | Ps1TypeName) -> Ps1TypeName | None:
     return _canonical_type_name(parsed)
 
 
+def named_type(name: str) -> Ps1TypeName:
+    """
+    A type a *module* names, rather than one a script did: `resolve_type` with the unresolved case
+    treated as the defect it is. A module that writes a type name out and gets `None` back does not
+    receive a weaker answer, it receives a comparison that is silently false forever after, so this
+    raises at import instead of letting one through. Anything read out of a script goes through
+    `resolve_type`, where not being a type is an ordinary answer.
+    """
+    resolved = resolve_type(name)
+    if resolved is None:
+        raise ValueError(F'the collected type table does not resolve {name}')
+    return resolved
+
+
 def _canonical_type_name(parsed: Ps1TypeName) -> Ps1TypeName | None:
     for candidate in _definition_candidates(parsed.definition):
         if candidate not in _TYPE_TABLE and candidate not in _WMI_TYPES:

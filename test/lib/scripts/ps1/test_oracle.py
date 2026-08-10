@@ -310,32 +310,6 @@ TABLE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('OUT\tSystem.Management.Automation.CommandTypes\tAlias',),
 }
 
-#: `X -as [T]` and `[T]X` are not the same expression, measured: a conversion that cannot be made
-#: yields `$null` for `-as` and throws for a cast. `'abc' -as [int]` is `$null` and `[int]'abc'`
-#: throws; `300 -as [byte]` is `$null` and `[byte]300` throws. `typecast.py:44` rewrites the one
-#: into the other before it tries to fold, so a script that carried on now stops.
-_AS_IS_NOT_A_CAST = (
-    'The `-as` operator is rewritten as a cast, which is a different expression: a conversion that '
-    'cannot be made yields $null here and throws there.'
-)
-
-#: A cast to a numeric type with no literal spelling is folded to a bare numeral, and a bare numeral
-#: re-reads as an Int32: `[byte]5` becomes `5` and `[uint32]7` becomes `7`. The value survives and
-#: the type does not, which is the erasure the phase exists to end. The repair is not a better
-#: spelling — there is none — but a `render` that keeps the cast where the language has no literal.
-_A_CAST_TARGET_IS_ERASED = (
-    'The cast is folded away to a bare numeral, which re-reads as an Int32. The target type has no '
-    'literal spelling, so dropping the cast is what loses it.'
-)
-
-#: A string operand is read with Python's own `int(text, 0)`, which knows three spellings 5.1 does
-#: not: a digit separator, a binary prefix and an octal one. Each makes a script that stops answer
-#: instead.
-_PYTHONS_OWN_NUMERALS = (
-    "The string is read with Python's integer parser, which accepts a digit separator and the `0b` "
-    'and `0o` prefixes. 5.1 accepts none of them and throws.'
-)
-
 #: What every Char row of `TYPE_DEFECTS` that is a method call has in common. A Char is not a
 #: String and carries none of its instance methods, so 5.1 reports MethodNotFound for each; the
 #: fold spells the Char as a one-character String, which has them all.
@@ -1307,6 +1281,26 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tfoo',
             'OUT\tSystem.String\tfoo',
         ),
+    '$t = [int]$null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$t = [string]$null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t',
+            'OUT\tSystem.String\t',
+        ),
+    '$t = [bool]$null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [char]$null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Char\t\x00',
+            'OUT\tSystem.Char\t\x00',
+        ),
     "$t = 'a' + $null; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.String\ta',
@@ -1431,44 +1425,13 @@ TYPE_DEFECTS: dict[str, str] = {
     "$OFS = '-'; $t = [string]('a', 'b'); Write-Output $t":
         'A collection renders to a String separated by $OFS (LangSpec 6.8), which this script '
         'sets. The fold bakes in the default separator.',
-    '$t = [byte]5; Write-Output (,$t); Write-Output $t':
-        _A_CAST_TARGET_IS_ERASED,
-    '$t = [sbyte]-5; Write-Output (,$t); Write-Output $t':
-        _A_CAST_TARGET_IS_ERASED,
-    '$t = [int16]7; Write-Output (,$t); Write-Output $t':
-        _A_CAST_TARGET_IS_ERASED,
-    '$t = [uint16]7; Write-Output (,$t); Write-Output $t':
-        _A_CAST_TARGET_IS_ERASED,
-    '$t = [uint32]7; Write-Output (,$t); Write-Output $t':
-        _A_CAST_TARGET_IS_ERASED,
-    '$t = [uint64]7; Write-Output (,$t); Write-Output $t':
-        _A_CAST_TARGET_IS_ERASED,
-    '$t = [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
-        _A_CAST_TARGET_IS_ERASED,
-    '$t = [long]5; Write-Output (,$t); Write-Output $t':
-        'The same erasure where the language does have a literal for the type: `5L` spells the '
-        'Int64 that `[long]5` produces, and the fold writes `5`.',
-    "$t = [byte]'0x80'; Write-Output (,$t); Write-Output $t":
-        _A_CAST_TARGET_IS_ERASED,
-    "$t = [uint16]'0xFFFF'; Write-Output (,$t); Write-Output $t":
-        _A_CAST_TARGET_IS_ERASED,
-    "$t = [int]'1_0'; Write-Output (,$t); Write-Output $t":
-        _PYTHONS_OWN_NUMERALS,
-    "$t = [int]'0b1010'; Write-Output (,$t); Write-Output $t":
-        _PYTHONS_OWN_NUMERALS,
-    "$t = [int]'0o17'; Write-Output (,$t); Write-Output $t":
-        _PYTHONS_OWN_NUMERALS,
-    '$t = 5 -as [long]; Write-Output (,$t); Write-Output $t':
-        'The same erasure reached through `-as`, which is rewritten to a cast and then folded away.',
-    "$t = 'abc' -as [int]; Write-Output (,$t); Write-Output $t":
-        _AS_IS_NOT_A_CAST,
-    '$t = 300 -as [byte]; Write-Output (,$t); Write-Output $t':
-        _AS_IS_NOT_A_CAST,
     '$t = [char]0; Write-Output (,$t); Write-Output $t':
         'A cast to Char folds to a one-character String, so the type is lost at the point it was '
         'being asked for.',
     '$t = [char]65535; Write-Output (,$t); Write-Output $t':
         'The same erasure at the top of the Char range.',
+    '$t = [char]$null; Write-Output (,$t); Write-Output $t':
+        'The same erasure over the absent value, which a cast to Char makes the NUL character of.',
     '$t = [int][char]65; Write-Output (,$t); Write-Output $t':
         'The inner Char is spelled as a String, and 5.1 answers 65 for a Char cast to Int32 while '
         "`[int]'A'` throws. The erasure turns a value into a throw.",

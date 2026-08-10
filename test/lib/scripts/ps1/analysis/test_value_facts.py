@@ -1312,7 +1312,7 @@ class TestPs1MeasuredCasts(unittest.TestCase):
     """
 
     def test_every_cast_the_corpus_measures_is_selected(self):
-        self.assertEqual(len(CAST_ROWS), 73, 'a measured cast was added or withdrawn')
+        self.assertEqual(len(CAST_ROWS), 77, 'a measured cast was added or withdrawn')
         self.assertEqual(sorted(set(DECLINED_CASTS) - set(CAST_ROWS)), [])
         self.assertEqual(sorted(set(DECLINED_CASTS) & set(THROWN)), [])
 
@@ -1544,13 +1544,14 @@ class TestPs1ConvertRefusals(unittest.TestCase):
 
     def test_a_fact_that_is_not_a_value_is_never_converted_into_one(self):
         """
-        `$null` and a value known only by its type are both looked up in the grid and neither is
-        computed from, so `[int] $null` is an Int32 whose number is unanswered. A fact that names no
-        type at all indexes no cell, and the cast answers nothing.
+        A value known only by its type is looked up in the grid and not computed from, so a cast of
+        a Double nothing pins is an Int32 whose number is unanswered, and a fact that names no type
+        at all indexes no cell and answers nothing. `$null` is neither of those: it is the value an
+        absent one *is*, and every target converts it as that target's own zero.
         """
         self.assertEqual(convert(UNKNOWN, INT32), NOTHING)
         self.assertEqual(convert(Ps1Typed(DOUBLE), INT32).value, Ps1Typed(INT32))
-        self.assertEqual(convert(NULL, INT32).value, Ps1Typed(INT32))
+        self.assertEqual(convert(NULL, INT32), Ps1Outcome(False, Ps1Constant(INT32, 0)))
 
     def test_a_cast_the_grid_does_not_cover_is_refused_rather_than_assumed(self):
         """
@@ -2025,7 +2026,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in CAST_ROWS
             if _read(CAST_ROWS[expression].operand) is not UNKNOWN
         }
-        self.assertEqual(len(composed), 73)
+        self.assertEqual(len(composed), 77)
         self.assertEqual(
             composed, {expression: _converted(expression) for expression in composed})
 
@@ -2148,7 +2149,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 1092)
+        self.assertEqual(len(compared), 1105)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2163,7 +2164,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1159)
+        self.assertEqual(len(compared), 1171)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2178,7 +2179,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1159)
+        self.assertEqual(len(compared), 1171)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2189,7 +2190,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 657)
+        self.assertEqual(len(STRINGS), 665)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
@@ -2239,7 +2240,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 160)
+        self.assertEqual(len(consulted), 164)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -2289,7 +2290,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 840)
+        self.assertEqual(len(compared), 852)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 

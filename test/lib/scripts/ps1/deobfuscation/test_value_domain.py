@@ -271,16 +271,13 @@ class TestPs1ACastOfAStringIsReadByTheRulesOfFivePointOne(TestPs1):
     produces it under a type 5.1 did not.
     """
 
-    @unittest.expectedFailure
     def test_a_digit_separator_is_no_numeral_and_the_cast_throws(self):
         source = "$x = [int]'1_0'"
         self.assertEqual(self._deobfuscate(source), source)
 
-    @unittest.expectedFailure
     def test_a_folded_cast_keeps_the_type_its_target_names(self):
         self.assertEqual(self._deobfuscate("$x = [byte]'0x80'"), '$x = [byte]128')
 
-    @unittest.expectedFailure
     def test_a_string_that_fills_the_target_width_is_the_negative_number_it_denotes(self):
         self.assertEqual(self._deobfuscate("$x = [int]'0xFFFFFFFF'"), '$x = -1')
 

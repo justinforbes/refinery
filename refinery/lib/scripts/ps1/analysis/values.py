@@ -61,6 +61,7 @@ from refinery.lib.scripts.ps1.data import (
     binary_outcome,
     command_output_types,
     conversion_outcome,
+    named_type,
     operand_witnesses,
     resolve_member_type,
     resolve_type,
@@ -208,17 +209,12 @@ def collect_byte_array(node: Expression) -> bytes | None:
         return None
 
 
-def _type(name: str) -> Ps1TypeName:
-    """
-    A type this module names, resolved through the one resolver rather than spelled here — a name
-    written out as text would be a second vocabulary inside the module whose purpose is to have one.
-    A name the table does not resolve raises at import: every answer below is keyed by the result,
-    so a missing row would not move an answer, it would make every comparison silently false.
-    """
-    resolved = resolve_type(name)
-    if resolved is None:
-        raise ValueError(F'the collected type table does not resolve {name}')
-    return resolved
+#: A type this module names, resolved through the one resolver rather than spelled here — a name
+#: written out as text would be a second vocabulary inside the module whose purpose is to have one.
+#: A name the table does not resolve raises at import, which is what `named_type` is for: every
+#: answer below is keyed by the result, so a missing row would not move an answer, it would make
+#: every comparison silently false.
+_type = named_type
 
 
 #: The type every string literal has, and the narrowest one a numeral can. A numeral's is decided by
@@ -531,6 +527,24 @@ def type_of(fact: Ps1Fact) -> Ps1TypeName | None:
     """
     if isinstance(fact, (Ps1Typed, Ps1Constant)):
         return fact.type
+    return None
+
+
+def text_of(fact: Ps1Fact) -> str | None:
+    """
+    The `String` a fact names, or `None` for a fact that names anything else. This is what a caller
+    holding a fact asks instead of reaching for the payload, and the reason it exists is the one
+    distinction the payload cannot make: a `Char` carries a Python `str` too, and it is not a String
+    — measured, the two differ in what `-is [char]` answers, in which methods they have, in what
+    `[int]` makes of them and in what `+` does with them on the left. A caller that read the payload
+    would get the same characters back for both.
+
+    It is not a spelling. `refinery.lib.scripts.ps1.ast.string_value` answers what text a *node* is
+    written as, which is a syntactic question the analysis layer asks about command names and paths;
+    this answers what text a *value* is, which only the domain can say.
+    """
+    if isinstance(fact, Ps1Constant) and fact.type == _STRING and isinstance(fact.payload, str):
+        return fact.payload
     return None
 
 
@@ -1128,7 +1142,16 @@ def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
 
     A `String` is read by `_from_string`, which is a different oracle from every other source and
     reaches only the targets whose throws this module already sees.
+
+    `$null` converts as the zero of whatever it is cast to, which is the same thing `_kernel` makes
+    of it in an arithmetic context and is measured here for every target the domain names:
+    `[int]$null` and `[decimal]$null` are zero, `[char]$null` is the NUL character and `[bool]$null`
+    is `$False`, each of them what the same cast of `0` produces. The one exception is `String`,
+    where `[string]$null` is empty and `[string]0` is `0` — an absent value writes nothing, and the
+    zero it computes as is not a zero it renders as.
     """
+    if fact is NULL:
+        return '' if target == _STRING else _cast(target, Ps1Constant(_INT32, 0))
     if not isinstance(fact, Ps1Constant):
         return None
     if target == _STRING:
