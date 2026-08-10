@@ -3051,6 +3051,56 @@ class TestNumericLiteralsAreDoubles(TestBase):
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestParseFloatGrammar(TestBase):
+    """
+    `parseFloat` reads the longest prefix of its argument that spells a decimal literal, and that
+    grammar is wider than a run of digits and a point: it admits an exponent, and it admits the word
+    `Infinity` behind an optional sign. Node says what number each string names, and the emitted
+    program has to name the same one whether the tool folds the call or leaves it standing.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    def test_the_grammar_without_an_exponent_or_an_infinity_folds_to_its_numbers(self):
+        """
+        Node: `3.14 42 2.5 0 1 1.2 NaN NaN`. Padding is skipped, the parse stops at the first
+        character that cannot continue the literal, and a prefix of `Infinity` is not one.
+        """
+        source = (
+            "console.log(parseFloat('3.14'), parseFloat(' 42 '), parseFloat('2.5abc'),"
+            " parseFloat('0x10'), parseFloat('1e'), parseFloat('1.2.3'), parseFloat('Infinit'),"
+            " parseFloat('nope'));")
+        self._prints(source, '3.14 42 2.5 0 1 1.2 NaN NaN\n')
+        self.assertEqual(
+            deobfuscate_source(source),
+            'console.log(3.14, 42, 2.5, 0, 1, 1.2, NaN, NaN);')
+
+    @unittest.expectedFailure
+    def test_an_exponent_belongs_to_the_literal_parse_float_reads(self):
+        """
+        Node: `1000 1000 1000 0.001 50 -150`. Stopping at the `e` reads a mantissa the string never
+        names on its own, so every one of these is off by a factor the exponent decides.
+        """
+        self._prints(
+            "console.log(parseFloat('1e3'), parseFloat('1E3'), parseFloat('1e+3'),"
+            " parseFloat('1e-3'), parseFloat('.5e2'), parseFloat('-1.5e2'));",
+            '1000 1000 1000 0.001 50 -150\n')
+
+    @unittest.expectedFailure
+    def test_the_word_infinity_is_a_literal_parse_float_reads(self):
+        """
+        Node: `Infinity -Infinity Infinity Infinity`. The word carries an optional sign and, like
+        every other parse here, ends wherever the literal does rather than at the end of the string.
+        """
+        self._prints(
+            "console.log(parseFloat('Infinity'), parseFloat('-Infinity'),"
+            " parseFloat('+Infinity'), parseFloat('Infinityabc'));",
+            'Infinity -Infinity Infinity Infinity\n')
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestUnaryOperatorFoldCoverage(TestBase):
     """
     Every unary operator whose result is decided by its operand, asserted to be folded away. Each case is
@@ -3294,6 +3344,83 @@ class TestFoldedNegativeNumbers(TestBase):
         self._folds_like_a_written_negative(
             'var f = function () { return 0 - 5; };'
             " console.log(f() * 2, [10, 20, 30][f() + 6], String(f()), 'abcdef'.slice(f()));")
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestClassMemberNamesArePropertyKeys(TestBase):
+    """
+    The name of a class field or method is a property key, exactly as the `foo` in `obj.foo` and in
+    `{ foo: 1 }` is, and never a read of a binding that happens to be spelled the same. Every case
+    declares a variable under the member's name, so reading the member name as a use of that binding
+    renames the member: the field then answers `undefined` under the name it was written with, and
+    the method is no longer there to be called. Node says what each program prints.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    def test_a_computed_class_member_name_is_a_variable_read(self):
+        """
+        The control for the four cases below: in brackets the name really is an expression, so the
+        binding must be substituted there and the key the class ends up with is its value.
+        """
+        source = (
+            "var k = 'a'; class C { [k] = 1; }"
+            " console.log(new C().a, Object.keys(new C()).join('|'));")
+        self._prints(source, '1 a\n')
+        self.assertEqual(
+            deobfuscate_source(source),
+            inspect.cleandoc(
+                """
+                class C {
+                  ['a'] = 1;
+                }
+                console.log(new C().a, Object.keys(new C()).join('|'));
+                """
+            ),
+        )
+
+    @unittest.expectedFailure
+    def test_an_instance_field_name_is_not_a_variable_read(self):
+        """
+        Node: `1 label X`. The instance carries one property and it is named `label`, so a rewritten
+        key is observable both through the access and through the list of keys.
+        """
+        self._prints(
+            "var label = 'X'; class C { label = 1; }"
+            " console.log(new C().label, Object.keys(new C()).join('|'), label);",
+            '1 label X\n')
+
+    @unittest.expectedFailure
+    def test_an_instance_method_name_is_not_a_variable_read(self):
+        """
+        Node: `5 hi`. A renamed method leaves `new C().greet` undefined, so the call is a `TypeError`
+        and not merely a wrong value.
+        """
+        self._prints(
+            "var greet = 'hi'; class C { greet() { return 5; } }"
+            ' console.log(new C().greet(), greet);',
+            '5 hi\n')
+
+    @unittest.expectedFailure
+    def test_a_static_field_name_is_not_a_variable_read(self):
+        """
+        Node: `7 T`. The property belongs to the constructor rather than to an instance, which is a
+        second place a member name is written.
+        """
+        self._prints(
+            "var tag = 'T'; class C { static tag = 7; } console.log(C.tag, tag);",
+            '7 T\n')
+
+    @unittest.expectedFailure
+    def test_a_static_method_name_is_not_a_variable_read(self):
+        """
+        Node: `9 R`.
+        """
+        self._prints(
+            "var run = 'R'; class C { static run() { return 9; } } console.log(C.run(), run);",
+            '9 R\n')
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
