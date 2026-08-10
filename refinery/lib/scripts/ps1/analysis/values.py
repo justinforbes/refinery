@@ -547,9 +547,9 @@ def read(node: Node | None) -> Ps1Fact:
     any type all answer `UNKNOWN`, never a value that happens to be close.
 
     Only literal structure is read — literals, the array and parenthesis forms that wrap them,
-    `$true`, `$false` and `$null`. A cast is `convert` and an operator is not read at all, so that a
-    caller asking what the *source* says never receives an answer that came from evaluating
-    something.
+    `$true`, `$false` and `$null`, and the casts that are a *spelling* rather than a conversion, for
+    which see `_cast_spelling`. An operator is not read at all, so that a caller asking what the
+    *source* says never receives an answer that came from evaluating something.
 
     A sign is not an exception to that, because the parser has already decided it: a `-` written
     directly against a numeral is part of the numeral and reaches this inside `raw`, while
@@ -573,6 +573,8 @@ def read(node: Node | None) -> Ps1Fact:
         return NULL
     if isinstance(node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
         return _array(node, _pinned).value
+    if isinstance(node, Ps1CastExpression):
+        return _cast_spelling(node)
     return UNKNOWN
 
 
@@ -644,6 +646,33 @@ def _is_value(fact: Ps1Fact) -> bool:
     value *is*, not the absence of knowledge about it.
     """
     return fact is NULL or isinstance(fact, Ps1Constant)
+
+
+def _cast_spelling(node: Ps1CastExpression) -> Ps1Fact:
+    """
+    The value a cast *spells*, which is a question about the source and not an evaluation of it. The
+    language has no literal for a `System.Char` or for any of the six integer widths, so `render`
+    writes a value of one of those as a cast of a numeral, and this reads exactly that back:
+    `read(render(fact))` is `fact` for every value the domain can spell, and until this arm existed
+    it was not — a value this module wrote out could not be read in again.
+
+    One operator deep is where that matters, because one operator deep is where folding works. A
+    pass standing at `[char] 72 + [char] 105` asks `read` for each operand and `apply` for the
+    operator; a Char that cannot be read back is a Char that cannot be added to anything, so the
+    only way to fold it would have been to spell it as a String first, which is the erasure the
+    whole phase exists to end.
+
+    It is the *target* that is restricted and not the operand. A cast to a type that does have a
+    literal is a conversion rather than a spelling — `[int] '1e3'` is a question about .NET's parser
+    and `[int] (1 + 2)` an operator underneath one — and neither is what the source pins. That
+    restriction is also what keeps `read` from walking into an expression: the only thing it
+    recurses through is another spelling.
+    """
+    target = resolve_type(node.type_name)
+    if target is None or target not in _SPELLED_BY_A_CAST:
+        return UNKNOWN
+    outcome = convert(read(node.operand), target)
+    return UNKNOWN if outcome.may_throw else outcome.value
 
 
 def _numeral(raw: str) -> Ps1Fact:
@@ -1621,6 +1650,12 @@ _CAST_SPELLING = {
     _UINT32: 'uint32',
     _UINT64: 'uint64',
 }
+
+#: The types a cast *spells* rather than converts to, which is the six widths above and the `Char`
+#: `_rendered_character` writes the same way. One set keys both directions — `render` writes a cast
+#: for exactly these and `read` reads one back for exactly these — so neither can grow without the
+#: other and `read(render(fact)) == fact` cannot quietly stop holding.
+_SPELLED_BY_A_CAST = frozenset(_CAST_SPELLING) | {_CHAR}
 
 
 def render(fact: Ps1Fact) -> Expression | None:

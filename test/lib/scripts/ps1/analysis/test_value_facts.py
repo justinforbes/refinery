@@ -354,10 +354,6 @@ THROWN: tuple[str, ...] = tuple(
     expression for expression in CAST_ROWS if _throws(_transcript(expression))
 )
 
-#: The reason a row is declined for want of an operand rather than for want of a rule: `read`
-#: evaluates nothing, so the inner cast pins no value for the outer one to convert.
-_NO_OPERAND = 'the operand is a cast, and `read` evaluates nothing'
-
 #: The measured casts whose value the domain declines to compute, under the reason `convert`
 #: documents for each. Every row here is one a host printed a value for, so an entry states that
 #: the domain answers less than the host does — deliberately, because the rule that would produce
@@ -381,14 +377,18 @@ DECLINED: dict[str, tuple[str, ...]] = {
     'a Single is a width nothing here computes in': (
         '[single]1.5',
     ),
-    _NO_OPERAND: (
-        '[int][char]65',
-        '[int][char]48',
-    ),
 }
 
 DECLINED_CASTS: tuple[str, ...] = tuple(
     expression for group in DECLINED.values() for expression in group
+)
+
+#: The measured casts whose operand is itself a cast, which is how the language spells a value of a
+#: type it has no literal for. They are the round trip the domain has to make inside one expression:
+#: the inner cast is read as the value it spells, and the outer one converts that.
+NESTED_CASTS: tuple[str, ...] = (
+    '[int][char]65',
+    '[int][char]48',
 )
 
 #: Every measured way a script spells a collection, each of which the corpus counts the elements
@@ -1144,15 +1144,15 @@ class TestPs1ValueSpelling(unittest.TestCase):
             {expression: expression for expression in CAST_SPELLINGS},
         )
 
-    def test_the_cast_a_value_is_written_as_has_no_read_twin(self):
+    def test_the_cast_a_value_is_written_as_reads_back_as_that_value(self):
         """
-        `read` answers what the source pins and evaluates nothing, so it does not read a cast back
-        and there is no round trip to hold this arm to. What says the spelling is right is the
-        host, which stamped `[byte]5` a Byte 5.
+        A cast is how the language spells a value of a type it has no literal for, so it is a
+        spelling `read` has to invert or nothing this module writes out could be read in again.
+        What says each spelling names the right value is the host, which stamped `[byte]5` a Byte 5.
         """
         for expression in CAST_SPELLINGS:
             with self.subTest(expression):
-                self.assertEqual(_read(expression), UNKNOWN)
+                self.assertEqual(_read(expression), _measured_fact(expression))
         self.assertEqual(_measured('[byte]5'), ('System.Byte', '5'))
 
     def test_a_char_and_a_one_character_string_are_not_written_alike(self):
@@ -1286,7 +1286,8 @@ class TestPs1ReadOnlyReadsTheSource(unittest.TestCase):
 
     def test_an_expression_whose_value_only_an_evaluation_produces_is_refused(self):
         for expression in (
-            '[char]65',
+            "[int]'27'",
+            '[int](1 + 2)',
             "'AB'.Length",
             "5 + '5'",
             "'ABC'[0]",
@@ -1344,20 +1345,22 @@ class TestPs1MeasuredCasts(unittest.TestCase):
         and every declined cast whose operand is read has that type in the grid: `[int]'0x10'` is an
         Int32 whether or not this can say that .NET reads those digits as sixteen.
         """
-        for expression in sorted(set(DECLINED_CASTS) - set(DECLINED[_NO_OPERAND])):
+        for expression in sorted(DECLINED_CASTS):
             with self.subTest(expression):
                 name, _ = _measured(expression)
                 self.assertEqual(_converted(expression).value, Ps1Typed(_type(name)))
 
-    def test_a_cast_of_an_operand_the_source_does_not_pin_answers_nothing(self):
+    def test_a_cast_of_a_cast_reaches_the_value_the_host_printed(self):
         """
-        The host prints 65 for `[int][char]65` and 48 for `[int][char]48`, and `read` evaluates
-        neither inner cast. A cast of a value nothing is known about has no type either: what
-        `[int]` does is decided by what it is given, and over a String it throws.
+        The host prints 65 for `[int][char]65` and 48 for `[int][char]48`. The inner cast is how the
+        language spells a Char, so `read` names the Char and the outer conversion has an operand to
+        work from: a Char is a number to `[int]`, where the one-character String it used to be
+        spelled as parses its digits instead.
         """
-        for expression in DECLINED[_NO_OPERAND]:
+        for expression in NESTED_CASTS:
             with self.subTest(expression):
-                self.assertEqual(_converted(expression), NOTHING)
+                self.assertEqual(
+                    _converted(expression), Ps1Outcome(False, _measured_fact(expression)))
 
     def test_a_cast_the_host_threw_on_pins_no_value_and_reports_the_throw(self):
         """
@@ -2022,21 +2025,21 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in CAST_ROWS
             if _read(CAST_ROWS[expression].operand) is not UNKNOWN
         }
-        self.assertEqual(len(composed), 71)
+        self.assertEqual(len(composed), 73)
         self.assertEqual(
             composed, {expression: _converted(expression) for expression in composed})
 
-    def test_a_cast_of_a_cast_is_the_value_the_host_printed_where_one_step_pins_none(self):
+    def test_a_cast_of_a_cast_is_the_value_the_host_printed(self):
         self.assertEqual(
-            {expression: _converted(expression) for expression in DECLINED[_NO_OPERAND]},
-            {expression: NOTHING for expression in DECLINED[_NO_OPERAND]},
-        )
-        self.assertEqual(
-            {expression: _evaluated(expression) for expression in DECLINED[_NO_OPERAND]},
+            {expression: _evaluated(expression) for expression in NESTED_CASTS},
             {
                 expression: Ps1Outcome(False, _measured_fact(expression))
-                for expression in DECLINED[_NO_OPERAND]
+                for expression in NESTED_CASTS
             },
+        )
+        self.assertEqual(
+            {expression: _converted(expression) for expression in NESTED_CASTS},
+            {expression: _evaluated(expression) for expression in NESTED_CASTS},
         )
 
     def test_a_measured_operation_is_answered_as_the_single_step_answers_it(self):
@@ -2145,7 +2148,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 1041)
+        self.assertEqual(len(compared), 1092)
         self.assertEqual(
             [
                 site.source for site in compared
