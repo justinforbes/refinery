@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.effects import object_sets_prototype
+from refinery.lib.scripts.js.analysis.model import SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ARRAY_PROTOTYPE_METHODS,
     GLOBAL_VALUE_NAMES,
@@ -47,6 +48,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     eval_binary_op,
     js_parse_int,
     js_typeof,
+    name_is_unbound,
     names_global_value,
     to_boolean,
     to_number,
@@ -1128,6 +1130,16 @@ def is_runtime_name(name: str) -> bool:
     return name in STATIC_OBJECTS or (None, name) in BUILTIN_REGISTRY
 
 
+def names_runtime_builtin(node: JsIdentifier, model: SemanticModel) -> bool:
+    """
+    Whether *node* names a runtime symbol this interpreter models, read where nothing has bound the
+    name. The spelling alone does not settle it: `catch (parseInt)` and `function o(parseInt)` both
+    give the name a value of their own, and evaluating a call to it as the built-in then computes an
+    answer the program never produces.
+    """
+    return is_runtime_name(node.name) and name_is_unbound(node, model)
+
+
 class JsInterpreter:
     """
     Execute a JavaScript function body with concrete argument values. Returns a Python value or
@@ -1140,6 +1152,7 @@ class JsInterpreter:
         max_string_len: int = MAX_STRING_LEN,
         max_recursion: int = _MAX_RECURSION,
         effects: EffectModel | None = None,
+        model: SemanticModel | None = None,
         closure: Mapping[str, Value] | None = None,
         closure_env: Mapping[int, Mapping[str, Value]] | None = None,
         established: Callable[[_FuncNode], bool] | None = None,
@@ -1149,6 +1162,12 @@ class JsInterpreter:
         self.max_string_len = max_string_len
         self.max_recursion = max_recursion
         self._effects = effects
+        self._model = model if model is not None else effects and effects.model
+        """
+        The scope authority, held separately from *effects*. Whether a name still reaches the host is a
+        question about bindings alone, so a caller that has only the semantic model — reflection builds
+        one and would pay for an effect model it never consults — can answer it by passing *model*.
+        """
         self._closure: Mapping[str, Value] = closure or {}
         self._closure_env: Mapping[int, Mapping[str, Value]] = closure_env or {}
         self._established = established
@@ -1522,6 +1541,14 @@ class JsInterpreter:
             return None
         return func
 
+    def _names_a_runtime_builtin(self, node: JsIdentifier) -> bool:
+        """
+        Whether *node* still reaches the host built-in of that name. Without a model this answers
+        `False` and the call becomes irreducible, for the same reason `_names_a_global_value` does.
+        """
+        model = self._model
+        return model is not None and names_runtime_builtin(node, model)
+
     def _names_a_global_value(self, node: JsIdentifier) -> bool:
         """
         Whether *node* is `undefined`, `NaN` or `Infinity` still denoting the global value, which only
@@ -1530,10 +1557,8 @@ class JsInterpreter:
         function supplies, and guessing the global is how a call to `function f(NaN) { return NaN + 1 }`
         folded to `NaN` instead of to its argument.
         """
-        effects = self._effects
-        if effects is None:
-            return False
-        return names_global_value(node, effects.model)
+        model = self._model
+        return model is not None and names_global_value(node, model)
 
     def _resolves_to_a_binding(self, node: JsIdentifier) -> bool:
         """
@@ -1542,10 +1567,8 @@ class JsInterpreter:
         the closure, or to a `let` whose declarator has not run, which is a read in its temporal dead
         zone that throws — so the well-known-global `typeof` fallback must not answer for it.
         """
-        effects = self._effects
-        if effects is None:
-            return False
-        return effects.model.resolve(node) is not None
+        model = self._model
+        return model is not None and model.resolve(node) is not None
 
     def _eval_identifier(self, node: JsIdentifier) -> Value:
         name = node.name
@@ -1771,14 +1794,17 @@ class JsInterpreter:
         raise InterpreterError
 
     def _eval_function_call(self, node: JsCallExpression) -> Value:
+        """
+        Call the function a bare name denotes. The registry is consulted last, and only for a name the
+        scope has left alone: it records what the *host* provides, which is what a name reaches only
+        when nothing nearer has claimed it. Asking it first is how a call to a parameter or a `catch`
+        binding named `parseInt` was answered by the real `parseInt`.
+        """
         callee = node.callee
         if not isinstance(callee, JsIdentifier):
             raise InterpreterError
         name = callee.name
         args = [self._eval(a) for a in node.arguments]
-        builtin = BUILTIN_REGISTRY.get((None, name))
-        if builtin is not None:
-            return builtin(args)
         if name in self._env:
             target = self._env[name]
             if isinstance(target, (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)):
@@ -1789,6 +1815,9 @@ class JsInterpreter:
         func = self._resolve_function_node(callee)
         if func is not None:
             return self._call_function(func, args)
+        builtin = BUILTIN_REGISTRY.get((None, name))
+        if builtin is not None and self._names_a_runtime_builtin(callee):
+            return builtin(args)
         raise InterpreterError
 
     def _eval_method_call(self, node: JsCallExpression) -> Value:

@@ -1177,11 +1177,24 @@ class SemanticModel:
         mirror of `local_reachable_by_direct_eval`, which asks whether an `eval` can name a binding that
         already exists and therefore counts one nested *below* the binding's owner; a nested `eval`
         declares into its own function and so is not counted here.
+
+        An `eval` whose own argument contains *node* is excluded, and that exclusion is about order
+        rather than scope: the arguments of a call are evaluated before the call runs, so the code the
+        `eval` is about to execute cannot have declared anything the argument reads. Without it,
+        `eval(atob('...'))` — the shape most of this tool's corpus is written in — would refuse to read
+        `atob` on the strength of the very `eval` it is decoding the body of.
         """
         scope = self.scope_of(node)
         if scope is None:
             return True
+        enclosing = {id(node)}
+        cursor = node.parent
+        while cursor is not None:
+            enclosing.add(id(cursor))
+            cursor = cursor.parent
         for site in self._direct_eval_sites(self.root):
+            if any(id(argument) in enclosing for argument in getattr(site, 'arguments', ())):
+                continue
             site_scope = self.scope_of(site)
             owner = site_scope.var_scope if site_scope is not None else None
             if owner is None or owner.contains(scope):

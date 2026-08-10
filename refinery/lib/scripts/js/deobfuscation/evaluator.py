@@ -39,6 +39,7 @@ from refinery.lib.scripts.js.deobfuscation.interpreter import (
     JsInterpreter,
     _ThrowSignal,
     is_runtime_name,
+    names_runtime_builtin,
 )
 from refinery.lib.scripts.js.deobfuscation.options import (
     is_host_entrypoint,
@@ -140,9 +141,9 @@ def _is_value_closed(
     for node in walk_scope(body):
         if isinstance(node, JsIdentifier) and is_reference(node) and node.name not in local_names:
             name = node.name
-            if name in known_pure or is_runtime_name(name):
+            if name in known_pure:
                 continue
-            if names_global_value(node, model):
+            if names_runtime_builtin(node, model) or names_global_value(node, model):
                 continue
             return False
     return True
@@ -237,7 +238,8 @@ def _unresolved_names(
     plain_assigned: set[str] = set()
     compound_assigned: set[str] = set()
     read: set[str] = set()
-    rebound_value_names: set[str] = set()
+    host_supplied: set[str] = set()
+    claimed: set[str] = set()
     for node in walk_scope(body, include_root_body=True):
         if not isinstance(node, JsIdentifier) or not is_reference(node):
             continue
@@ -252,13 +254,15 @@ def _unresolved_names(
                 read.add(name)
         else:
             read.add(name)
-            if name in GLOBAL_VALUE_NAMES and not names_global_value(node, model):
-                rebound_value_names.add(name)
+            if names_runtime_builtin(node, model) or names_global_value(node, model):
+                host_supplied.add(name)
+            elif name in GLOBAL_VALUE_NAMES or is_runtime_name(name):
+                claimed.add(name)
     external_names: set[str] = set()
     for name in read - plain_assigned:
-        if name in known_pure or is_runtime_name(name):
+        if name in known_pure:
             continue
-        if name in GLOBAL_VALUE_NAMES and name not in rebound_value_names:
+        if name in host_supplied and name not in claimed:
             continue
         external_names.add(name)
     return external_names

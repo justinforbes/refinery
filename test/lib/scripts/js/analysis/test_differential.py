@@ -1892,16 +1892,16 @@ class TestModelBlindFoldRegressions(TestBase):
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestBuiltinNameBoundByAnEnclosingParameter(TestBase):
     """
-    A parameter binds its name for the whole of the function it belongs to, and a nested function
-    is part of that function. A parameter named `parseInt` or `String` is therefore what the name
-    denotes in a nested body exactly as it is in the outer body, and a fold that reads the name as
-    the built-in there computes with a function the program never calls.
+    A parameter binds its name for the whole of the function it belongs to, and a nested function is
+    part of that function. A parameter named `parseInt` or `String` is therefore what the name denotes
+    in a nested body exactly as it is in the outer body, and reading it as the built-in there computes
+    with a function the program never calls.
 
-    Node decides. Each case names the program a fold that missed the binding would produce and
-    requires Node to print something else for it, so a replacement that answers the call the way
-    the built-in does cannot pass for a proof. The two controls put the same replacement where the
-    tool already resolves it — at the top level, and in the very function the read is written in —
-    so the boundary the defect lives on is recorded next to it.
+    Node decides. Each case names the program a fold that missed the binding would produce and requires
+    Node to print something else for it, so a replacement that answers the call the way the built-in
+    does cannot pass for a proof. The controls put the same replacement where resolving it was never in
+    doubt — at the top level, and in the very function the read is written in — so that a fix which
+    works by refusing to fold anything at all does not pass either.
     """
 
     def _shadowed(self, source: str, misfolded: str):
@@ -1957,7 +1957,6 @@ class TestBuiltinNameBoundByAnEnclosingParameter(TestBase):
             """),
         )
 
-    @unittest.expectedFailure
     def test_a_parameter_of_an_enclosing_function_shadows_a_called_builtin(self):
         """
         Node: `r10`, and `10` for the program that read the name as the built-in. The parameter is
@@ -1984,7 +1983,6 @@ class TestBuiltinNameBoundByAnEnclosingParameter(TestBase):
             """),
         )
 
-    @unittest.expectedFailure
     def test_a_parameter_of_an_enclosing_function_shadows_a_called_builtin_constructor(self):
         """
         Node: `r7`, and `7` for the program that read the name as the built-in. A constructor
@@ -2011,7 +2009,6 @@ class TestBuiltinNameBoundByAnEnclosingParameter(TestBase):
             """),
         )
 
-    @unittest.expectedFailure
     def test_both_reads_of_an_enclosing_parameter_denote_it(self):
         """
         Node: `r10/r12`, and `10/r12` for the program that read only the nested occurrence as the
@@ -2040,16 +2037,16 @@ class TestBuiltinNameBoundByAnEnclosingParameter(TestBase):
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestBuiltinNameBoundByACatchClause(TestBase):
     """
-    A catch clause binds its name for the block it heads, so a catch binding named `parseInt` is
-    what that name denotes there, and a fold that reads the name as the built-in computes with a
-    function the program never calls. Where a parameter is missed only for a read written inside a
-    nested function, this binding is missed for a read written directly in the block that binds it,
-    which is why it is a class of its own and not another case of the one above.
+    A catch clause binds its name for the block it heads, so a catch binding named `parseInt` is what
+    that name denotes there, and reading it as the built-in computes with a function the program never
+    calls. It is a class of its own rather than another case of the one above because the binder is
+    what is under test: a catch clause reaches a read written directly in its own block, where a
+    parameter's reach is what carries it into a nested function.
 
     Node decides, and each case names the program a fold that missed the binding would produce and
     requires Node to print something else for it. The control binds the replacement with a `var` in
-    the very same block, so what the block is and where the read sits are held fixed and the binder
-    is the only thing that differs.
+    the very same block, so what the block is and where the read sits are held fixed and the binder is
+    the only thing that differs.
     """
 
     def _shadowed(self, source: str, misfolded: str):
@@ -2094,7 +2091,6 @@ class TestBuiltinNameBoundByACatchClause(TestBase):
             """),
         )
 
-    @unittest.expectedFailure
     def test_a_catch_binding_shadows_a_called_builtin_read_in_its_own_block(self):
         """
         Node: `r10`, and `10` for the program that read the name as the built-in. The thrown
@@ -2123,7 +2119,6 @@ class TestBuiltinNameBoundByACatchClause(TestBase):
             """),
         )
 
-    @unittest.expectedFailure
     def test_a_catch_binding_shadows_a_called_builtin_read_in_a_nested_function(self):
         """
         Node: `r10`, and `10` for the program that read the name as the built-in.
@@ -2153,7 +2148,6 @@ class TestBuiltinNameBoundByACatchClause(TestBase):
             """),
         )
 
-    @unittest.expectedFailure
     def test_a_destructured_catch_binding_shadows_a_called_builtin(self):
         """
         Node: `r10`, and `10` for the program that read the name as the built-in. A pattern is a

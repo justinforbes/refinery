@@ -934,29 +934,37 @@ def is_reference(node: JsIdentifier) -> bool:
     return True
 
 
-def names_global_value(node: JsIdentifier, model: SemanticModel) -> bool:
+def name_is_unbound(node: JsIdentifier, model: SemanticModel) -> bool:
     """
-    Whether *node* is one of `GLOBAL_VALUE_NAMES` read where the program cannot have given that name
-    another meaning. This is the single question that decides whether the table may be consulted, and
-    every reader of these names has to come through here: the value is a fact about the global, and
-    whether the name still denotes the global is a fact about the scope.
+    Whether nothing in the program can have given *node*'s name a meaning of its own, so that it still
+    denotes whatever the host supplies under that name. This is the question behind every table of
+    well-known names the tool keeps — the values in `GLOBAL_VALUE_NAMES`, the built-ins in
+    `BUILTIN_REGISTRY` — because what such a table records is a fact about the *host*, and whether the
+    name still reaches the host is a fact about the *scope*.
 
-    There are three ways the meaning can differ, and `resolve` reports only the first:
+    There are three ways a name can mean something else, and `resolve` reports only the first:
 
-    - a declaration binds the name, anywhere from a parameter to an assignment at top level, which
-      the model records as an `IMPLICIT_GLOBAL`
-    - the lookup crosses a `with` body, where the object may carry a property of that name and
-      reading it may even run a getter. `resolve` answers `None` here as well, so
-      `read_has_dynamic_effect` is what separates the two cases
-    - a direct `eval` declared the name, which no reference records at all;
+    - a declaration binds it, anywhere from a parameter or a `catch` clause to an assignment at top
+      level, which the model records as an `IMPLICIT_GLOBAL`
+    - the lookup crosses a `with` body, where the object may carry a property of that name and reading
+      it may even run a getter. `resolve` answers `None` here as well, so `read_has_dynamic_effect` is
+      what separates the two cases
+    - a direct `eval` declared it, which no reference records at all;
       `free_name_reachable_by_direct_eval` reports the positions that could see such a binding
     """
     return (
-        node.name in GLOBAL_VALUE_NAMES
-        and model.resolve(node) is None
+        model.resolve(node) is None
         and not model.read_has_dynamic_effect(node)
         and not model.free_name_reachable_by_direct_eval(node)
     )
+
+
+def names_global_value(node: JsIdentifier, model: SemanticModel) -> bool:
+    """
+    Whether *node* is one of `GLOBAL_VALUE_NAMES` still denoting its value. Every reader of those
+    names has to come through here.
+    """
+    return node.name in GLOBAL_VALUE_NAMES and name_is_unbound(node, model)
 
 
 def denoted_value(node: Node | None, model: SemanticModel) -> tuple[bool, Value]:

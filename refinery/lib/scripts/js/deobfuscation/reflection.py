@@ -103,7 +103,7 @@ def _site_in_async_function(site: Node) -> bool:
     return isinstance(func, FUNCTION_NODES) and func.is_async
 
 
-def _try_eval_string_arg(node: Expression) -> str | None:
+def _try_eval_string_arg(node: Expression, model: SemanticModel) -> str | None:
     from refinery.lib.scripts.js.deobfuscation.interpreter import (
         InterpreterError,
         IrreducibleExpression,
@@ -111,7 +111,7 @@ def _try_eval_string_arg(node: Expression) -> str | None:
         _ThrowSignal,
     )
     try:
-        result = JsInterpreter().eval_expression(node)
+        result = JsInterpreter(model=model).eval_expression(node)
     except (InterpreterError, IrreducibleExpression, _ThrowSignal, RecursionError, ValueError, OverflowError):
         return None
     if isinstance(result, str):
@@ -123,6 +123,7 @@ def _extract_eval_code(
     node: JsCallExpression,
     *,
     free_global_name: Callable[[Expression | None], str | None],
+    eval_string: Callable[[Expression | None], str | None],
 ) -> str | None:
     """
     Extract the code string from a direct `eval("code")` / `(eval)("code")`. The callee must be the
@@ -132,7 +133,7 @@ def _extract_eval_code(
         return None
     if len(node.arguments) != 1:
         return None
-    return string_value(node.arguments[0]) or _try_eval_string_arg(node.arguments[0])
+    return string_value(node.arguments[0]) or eval_string(node.arguments[0])
 
 
 def _extract_indirect_eval_code(
@@ -141,6 +142,7 @@ def _extract_indirect_eval_code(
     *,
     alias_name: Callable[[Expression | None], str | None],
     free_global_name: Callable[[Expression | None], str | None],
+    eval_string: Callable[[Expression | None], str | None],
 ) -> str | None:
     """
     Extract the code string from indirect eval patterns:
@@ -160,9 +162,9 @@ def _extract_indirect_eval_code(
         exprs = callee.expressions
         if len(exprs) >= 2 and free_global_name(exprs[-1]) == 'eval':
             if all(side_effect_free(e, read_effect=read_effect) for e in exprs[:-1]):
-                return string_value(node.arguments[0]) or _try_eval_string_arg(node.arguments[0])
+                return string_value(node.arguments[0]) or eval_string(node.arguments[0])
     if alias_name(node.callee) == 'eval':
-        return string_value(node.arguments[0]) or _try_eval_string_arg(node.arguments[0])
+        return string_value(node.arguments[0]) or eval_string(node.arguments[0])
     return None
 
 
@@ -172,6 +174,7 @@ def _extract_string_call_code(
     *,
     alias_name: Callable[[Expression | None], str | None],
     free_global_name: Callable[[Expression | None], str | None],
+    eval_string: Callable[[Expression | None], str | None],
 ) -> str | None:
     """
     Extract the code string a named global string-call evaluates — a deferred timer
@@ -189,13 +192,14 @@ def _extract_string_call_code(
         return None
     if not node.arguments:
         return None
-    return string_value(node.arguments[0]) or _try_eval_string_arg(node.arguments[0])
+    return string_value(node.arguments[0]) or eval_string(node.arguments[0])
 
 
 def _extract_function_body_code(
     constructor_call: JsCallExpression | JsNewExpression,
     *,
     free_global_name: Callable[[Expression | None], str | None],
+    eval_string: Callable[[Expression | None], str | None],
 ) -> str | None:
     """
     Extract the body code string from Function constructor calls:
@@ -214,7 +218,7 @@ def _extract_function_body_code(
     if not args:
         return None
     last = args[-1]
-    body = string_value(last) or _try_eval_string_arg(last)
+    body = string_value(last) or eval_string(last)
     if body is None:
         return None
     if not all(isinstance(a, JsStringLiteral) for a in args[:-1]):
@@ -251,7 +255,10 @@ def _is_constructor_chain(
 
 
 def _extract_constructor_chain_code(
-    node: JsCallExpression, read_effect: Callable[[Node], bool] | None = None,
+    node: JsCallExpression,
+    read_effect: Callable[[Node], bool] | None = None,
+    *,
+    eval_string: Callable[[Expression | None], str | None],
 ) -> str | None:
     """
     Extract code from constructor chain IIFE patterns:
@@ -266,7 +273,7 @@ def _extract_constructor_chain_code(
         return None
     if len(inner_call.arguments) != 1:
         return None
-    return string_value(inner_call.arguments[0]) or _try_eval_string_arg(inner_call.arguments[0])
+    return string_value(inner_call.arguments[0]) or eval_string(inner_call.arguments[0])
 
 
 def _invoked_function_constructor_code(
@@ -274,6 +281,7 @@ def _invoked_function_constructor_code(
     read_effect: Callable[[Node], bool] | None = None,
     *,
     free_global_name: Callable[[Expression | None], str | None],
+    eval_string: Callable[[Expression | None], str | None],
 ) -> tuple[str, bool] | None:
     """
     If *node* immediately invokes a `Function` constructor — `Function("code")()`,
@@ -285,10 +293,11 @@ def _invoked_function_constructor_code(
     """
     inner = node.callee
     if isinstance(inner, (JsCallExpression, JsNewExpression)):
-        code = _extract_function_body_code(inner, free_global_name=free_global_name)
+        code = _extract_function_body_code(
+            inner, free_global_name=free_global_name, eval_string=eval_string)
         if code is not None:
             return code, len(inner.arguments) > 1 or bool(node.arguments)
-    chain = _extract_constructor_chain_code(node, read_effect)
+    chain = _extract_constructor_chain_code(node, read_effect, eval_string=eval_string)
     if chain is not None:
         return chain, bool(node.arguments)
     return None
@@ -682,6 +691,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
             self._read_effect = self._dynamic_read_effect(node)
             self._alias_name = self._alias_member_name(node)
             self._free_global = self._free_global_name(node)
+            self._eval_string = self._string_argument_value(node)
             self._inline_statements(node)
             self._inline_expressions(node)
             self._lower_timers(node)
@@ -739,6 +749,23 @@ class JsReflectionInlining(ScriptLevelTransformer):
             if model.resolve(ident) is None and not model.read_has_dynamic_effect(ident):
                 return ident.name
             return None
+        return resolve
+
+    def _string_argument_value(self, root: JsScript) -> Callable[[Expression | None], str | None]:
+        """
+        A resolver folding an argument expression to the string it denotes — `atob('...')` to the code
+        it decodes — or `None`. The interpreter is given *root*'s semantic model, because a call it
+        answers from the built-in registry is the built-in only where nothing has bound that name; the
+        effect model is not built, since none of the questions asked here are about effects. Resolved
+        lazily against *root*'s current model, mirroring `_dynamic_read_effect`.
+        """
+        def resolve(node: Expression | None) -> str | None:
+            if node is None:
+                return None
+            model = model_cache(self, root).model
+            if model.scope_of(node) is None:
+                return None
+            return _try_eval_string_arg(node, model)
         return resolve
 
     def _inline_statements(self, root: JsScript) -> None:
@@ -828,6 +855,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
             TIMER_NAMES,
             alias_name=self._alias_name,
             free_global_name=self._free_global,
+            eval_string=self._eval_string,
         )
         if code is None:
             return
@@ -865,6 +893,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
             SYNC_EVAL_NAMES,
             alias_name=self._alias_name,
             free_global_name=self._free_global,
+            eval_string=self._eval_string,
         )
         if sync is not None:
             parsed = self._resolve_reflected_body(
@@ -919,21 +948,23 @@ class JsReflectionInlining(ScriptLevelTransformer):
         alias_name = self._alias_name
         free_global_name = self._free_global
         constructor = _invoked_function_constructor_code(
-            node, read_effect, free_global_name=free_global_name)
+            node, read_effect, free_global_name=free_global_name, eval_string=self._eval_string)
         if constructor is not None:
             code, binds = constructor
             parsed = self._resolve_reflected_body(
                 code, site, root, ReflectedScope.FUNCTION_CONSTRUCTOR, at_global_scope, binds=binds,
             )
             return (ReflectedScope.FUNCTION_CONSTRUCTOR, parsed) if parsed is not None else None
-        direct = _extract_eval_code(node, free_global_name=free_global_name)
+        direct = _extract_eval_code(
+            node, free_global_name=free_global_name, eval_string=self._eval_string)
         if direct is not None:
             parsed = self._resolve_reflected_body(
                 direct, site, root, ReflectedScope.DIRECT_EVAL, at_global_scope,
             )
             return (ReflectedScope.DIRECT_EVAL, parsed) if parsed is not None else None
         code = _extract_indirect_eval_code(
-            node, read_effect, alias_name=alias_name, free_global_name=free_global_name)
+            node, read_effect, alias_name=alias_name, free_global_name=free_global_name,
+            eval_string=self._eval_string)
         if code is not None:
             parsed = self._resolve_reflected_body(
                 code, site, root, ReflectedScope.GLOBAL_EVAL, at_global_scope,
