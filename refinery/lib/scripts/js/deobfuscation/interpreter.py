@@ -16,11 +16,11 @@ if TYPE_CHECKING:
     from typing import Callable, Mapping, TypeAlias
 
     from refinery.lib.scripts.js.analysis.effects import EffectModel
+    from refinery.lib.scripts.js.deobfuscation.helpers import Value
     from refinery.lib.scripts.js.model import JsArrowFunctionExpression as _Arrow
     from refinery.lib.scripts.js.model import JsFunctionDeclaration as _FuncDecl
     from refinery.lib.scripts.js.model import JsFunctionExpression as _FuncExpr
 
-    Value: TypeAlias = str | float | bool | list | dict | _FuncDecl | _FuncExpr | _Arrow | None
     _FuncNode: TypeAlias = _FuncDecl | _FuncExpr | _Arrow
 
 from refinery.lib.scripts import Node
@@ -35,13 +35,20 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     RELATIONAL_OPS,
     SEQUENCE_DATA_PROPERTIES,
     STRING_PROTOTYPE_METHODS,
+    UNARY_OPS,
     JsBuffer,
+    _array_element_string,
     _js_pow,
+    _to_int,
     _to_int32,
     _to_uint32,
     canonical_array_index,
     eval_binary_op,
     js_parse_int,
+    js_typeof,
+    to_boolean,
+    to_number,
+    to_string,
     utf16_code_units,
     walk_scope,
 )
@@ -87,12 +94,6 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
     JsWhileStatement,
-)
-from refinery.lib.scripts.js.numbers import (
-    STRING_NUMERIC_TRIM,
-    apply_sign,
-    js_number_to_string,
-    to_js_number,
 )
 
 MAX_ITERATIONS = 100_000
@@ -157,37 +158,6 @@ def _deep_copy_value(value):
     return value
 
 
-def _truthy(value: Value) -> bool:
-    """
-    Return the JavaScript truthiness of a runtime value. This is the runtime counterpart of the
-    AST-node `refinery.lib.scripts.js.deobfuscation.helpers.is_truthy`; the two must agree on which
-    values are falsy (`undefined`, `null`, `0`, `NaN`, `''`) so that interpreted and
-    statically-folded conditionals stay consistent.
-    """
-    if value is None or value is JS_NULL:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0 and value == value
-    if isinstance(value, str):
-        return len(value) > 0
-    if isinstance(value, list):
-        return True
-    if isinstance(value, dict):
-        return True
-    if isinstance(value, (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)):
-        return True
-    return False
-
-
-def _to_int(value: Value) -> int:
-    n = to_number(value)
-    if n != n or math.isinf(n):
-        return 0
-    return int(n)
-
-
 def _to_index(value: Value) -> int:
     n = to_number(value)
     if n != n:
@@ -213,78 +183,6 @@ def _to_array_length(value: Value) -> int:
     return length
 
 
-def to_number(value: Value) -> float:
-    """
-    Apply the ECMA-262 ToNumber abstract operation. The string case is not Python's `float`: that
-    function reads a wider grammar than JavaScript's StrNumericLiteral, and every place it is wider
-    has to be refused before it is asked. It accepts `inf`, `infinity` and `nan`, where only the
-    exact spelling `Infinity` names an infinity; it accepts a numeric separator; and it accepts any
-    Unicode decimal digit, where the language accepts only `0` through `9` — hence the ASCII test,
-    which is total over the grammar because a StrNumericLiteral has no character outside that range.
-
-    The sign is applied to the magnitude rather than read out of the parsed integer, because a
-    signed zero is a Number that Python's integers cannot hold: `Number('-0')` is `-0`, and `1 / -0`
-    is `-Infinity`.
-    """
-    if isinstance(value, bool):
-        return 1.0 if value else 0.0
-    if isinstance(value, (int, float)):
-        return to_js_number(value)
-    if isinstance(value, str):
-        s = value.strip(STRING_NUMERIC_TRIM)
-        if not s:
-            return 0.0
-        if not s.isascii() or '_' in s:
-            return float('nan')
-        if s[0] in '+-' and len(s) > 2 and s[1] == '0' and s[2] in 'xXoObB':
-            return float('nan')
-        try:
-            integer = int(s, 0)
-        except ValueError:
-            pass
-        else:
-            return apply_sign(to_js_number(abs(integer)), s[0] == '-')
-        magnitude = s[1:] if s[0] in '+-' else s
-        if magnitude.isalpha() and magnitude != 'Infinity':
-            return float('nan')
-        try:
-            return float(s)
-        except ValueError:
-            return float('nan')
-    if value is JS_NULL:
-        return 0.0
-    if isinstance(value, list):
-        return to_number(to_string(value))
-    return float('nan')
-
-
-def to_string(value: Value) -> str:
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return 'undefined'
-    if value is JS_NULL:
-        return 'null'
-    if isinstance(value, bool):
-        return 'true' if value else 'false'
-    if isinstance(value, (int, float)):
-        return js_number_to_string(to_js_number(value))
-    if isinstance(value, list):
-        return ','.join(_array_element_string(v) for v in value)
-    return '[object Object]'
-
-
-def _array_element_string(value: Value) -> str:
-    """
-    Stringify an array element for `Array.prototype.toString` / `join`. JavaScript renders `null` and
-    `undefined` elements as the empty string (e.g. `[1, null, 2].toString()` is `'1,,2'`), unlike a
-    top-level `String(null)` which is `'null'`.
-    """
-    if value is None or value is JS_NULL:
-        return ''
-    return to_string(value)
-
-
 def _to_primitive(value: Value) -> Value:
     """
     Replicate the ECMA-262 ToPrimitive abstract operation with the default hint, as used by `+`.
@@ -294,20 +192,6 @@ def _to_primitive(value: Value) -> Value:
     if isinstance(value, (list, dict)):
         return to_string(value)
     return value
-
-
-def _js_typeof(value: Value) -> str:
-    if value is None:
-        return 'undefined'
-    if isinstance(value, bool):
-        return 'boolean'
-    if isinstance(value, (int, float)):
-        return 'number'
-    if isinstance(value, str):
-        return 'string'
-    if isinstance(value, (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)):
-        return 'function'
-    return 'object'
 
 
 def js_strict_equal(a: Value, b: Value) -> bool:
@@ -1397,7 +1281,7 @@ class JsInterpreter:
                 self._env[name] = None
 
     def _exec_if(self, node: JsIfStatement) -> None:
-        if _truthy(self._eval(node.test)):
+        if to_boolean(self._eval(node.test)):
             if node.consequent:
                 self._exec_statement(node.consequent)
         elif node.alternate:
@@ -1436,7 +1320,7 @@ class JsInterpreter:
                 self._eval(node.init)
         while True:
             self._tick()
-            if node.test and not _truthy(self._eval(node.test)):
+            if node.test and not to_boolean(self._eval(node.test)):
                 break
             if self._exec_loop_body(node.body):
                 break
@@ -1446,7 +1330,7 @@ class JsInterpreter:
     def _exec_while(self, node: JsWhileStatement) -> None:
         while True:
             self._tick()
-            if not _truthy(self._eval(node.test)):
+            if not to_boolean(self._eval(node.test)):
                 break
             if self._exec_loop_body(node.body):
                 break
@@ -1456,7 +1340,7 @@ class JsInterpreter:
             self._tick()
             if self._exec_loop_body(node.body):
                 break
-            if not _truthy(self._eval(node.test)):
+            if not to_boolean(self._eval(node.test)):
                 break
 
     def _exec_for_in(self, node: JsForInStatement) -> None:
@@ -1598,7 +1482,7 @@ class JsInterpreter:
             return self._eval_member(expr)
         if isinstance(expr, JsConditionalExpression):
             test = self._eval(expr.test)
-            return self._eval(expr.consequent) if _truthy(test) else self._eval(expr.alternate)
+            return self._eval(expr.consequent) if to_boolean(test) else self._eval(expr.alternate)
         if isinstance(expr, JsArrayExpression):
             return [self._eval(e) if e else None for e in expr.elements]
         if isinstance(expr, JsSequenceExpression):
@@ -1733,36 +1617,30 @@ class JsInterpreter:
         raise InterpreterError
 
     def _eval_unary(self, node: JsUnaryExpression) -> Value:
+        """
+        Apply a unary operator through `UNARY_OPS`, which holds the ones that are functions of the
+        operand's value. `typeof` on a bare name is answered before the operand is evaluated because it
+        is the one expression that reads a name without requiring it to exist: `typeof missing` is
+        `'undefined'` where evaluating `missing` is a `ReferenceError`.
+        """
         op = node.operator
-        if op == 'typeof':
-            if isinstance(node.operand, JsIdentifier):
-                operand = node.operand
-                name = operand.name
-                if name in self._env:
-                    return _js_typeof(self._env[name])
-                if self._resolve_function_node(operand) is not None:
-                    return 'function'
-                if self._resolves_to_lexical_binding(operand):
-                    raise IrreducibleExpression(node)
-                result = _global_typeof(name)
-                if result is None:
-                    raise IrreducibleExpression(node)
-                return result
-            return _js_typeof(self._eval(node.operand))
-        if op == 'void':
-            self._eval(node.operand)
-            return None
-        operand = self._eval(node.operand)
-        if op == '-':
-            v = to_number(operand)
-            return -v if v != 0 else -float(v)
-        if op == '+':
-            return to_number(operand)
-        if op == '~':
-            return _to_int32(~_to_int(operand))
-        if op == '!':
-            return not _truthy(operand)
-        raise InterpreterError
+        operand = node.operand
+        if op == 'typeof' and isinstance(operand, JsIdentifier):
+            name = operand.name
+            if name in self._env:
+                return js_typeof(self._env[name])
+            if self._resolve_function_node(operand) is not None:
+                return 'function'
+            if self._resolves_to_lexical_binding(operand):
+                raise IrreducibleExpression(node)
+            result = _global_typeof(name)
+            if result is None:
+                raise IrreducibleExpression(node)
+            return result
+        apply = UNARY_OPS.get(op)
+        if apply is None:
+            raise InterpreterError
+        return apply(self._eval(operand))
 
     def _eval_update(self, node: JsUpdateExpression) -> Value:
         """
@@ -1796,9 +1674,9 @@ class JsInterpreter:
         the expression forms, read in the other direction.
         """
         if operator == '&&=':
-            return not _truthy(current)
+            return not to_boolean(current)
         if operator == '||=':
-            return _truthy(current)
+            return to_boolean(current)
         if operator == '??=':
             return current is not None and current is not JS_NULL
         raise InterpreterError
@@ -1814,9 +1692,9 @@ class JsInterpreter:
     def _eval_logical(self, node: JsLogicalExpression) -> Value:
         left = self._eval(node.left)
         if node.operator == '&&':
-            return self._eval(node.right) if _truthy(left) else left
+            return self._eval(node.right) if to_boolean(left) else left
         if node.operator == '||':
-            return left if _truthy(left) else self._eval(node.right)
+            return left if to_boolean(left) else self._eval(node.right)
         if node.operator == '??':
             if left is None or left is JS_NULL:
                 return self._eval(node.right)
@@ -2024,13 +1902,13 @@ class JsInterpreter:
         if method == 'every':
             for i, item in enumerate(arr):
                 self._tick()
-                if not _truthy(self._call_function(callback, [item, i, arr])):
+                if not to_boolean(self._call_function(callback, [item, i, arr])):
                     return False
             return True
         if method == 'some':
             for i, item in enumerate(arr):
                 self._tick()
-                if _truthy(self._call_function(callback, [item, i, arr])):
+                if to_boolean(self._call_function(callback, [item, i, arr])):
                     return True
             return False
         if method == 'map':
@@ -2043,19 +1921,19 @@ class JsInterpreter:
             filtered: list[Value] = []
             for i, item in enumerate(arr):
                 self._tick()
-                if _truthy(self._call_function(callback, [item, i, arr])):
+                if to_boolean(self._call_function(callback, [item, i, arr])):
                     filtered.append(item)
             return filtered
         if method == 'find':
             for i, item in enumerate(arr):
                 self._tick()
-                if _truthy(self._call_function(callback, [item, i, arr])):
+                if to_boolean(self._call_function(callback, [item, i, arr])):
                     return item
             return None
         if method == 'findIndex':
             for i, item in enumerate(arr):
                 self._tick()
-                if _truthy(self._call_function(callback, [item, i, arr])):
+                if to_boolean(self._call_function(callback, [item, i, arr])):
                     return i
             return -1
         if method == 'forEach':

@@ -6,6 +6,7 @@ import unittest
 from test import TestBase
 
 from test.lib.scripts.js.analysis.differential import (
+    DeobfuscationFailed,
     behavior,
     deobfuscate_source,
     deobfuscate_within,
@@ -2853,29 +2854,13 @@ class TestNumericLiteralsAreDoubles(TestBase):
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestUnaryOperatorFoldCoverage(TestBase):
     """
-    Known-failing, and a *precision* gap rather than a correctness one: every case below produces the right
-    answer today, it simply produces it unfolded. That distinction decides how these tests are written —
-    asserting `behavior(input) == behavior(output)` would pass immediately and prove nothing, so each case
-    asserts the fold happened instead.
+    Every unary operator whose result is decided by its operand, asserted to be folded away. Each case is
+    written as an assertion about the emitted text rather than about behavior, because a deobfuscator that
+    declined every one of these folds would still preserve behavior: an untouched program behaves like
+    itself, so `behavior(input) == behavior(output)` cannot tell a fold from a refusal.
 
-    The cause is two independent unary implementations. `JsSimplifications.visit_JsUnaryExpression`
-    (`refinery/lib/scripts/js/deobfuscation/simplify.py`) folds `!`, `-`, `+`, `~` and `typeof`, each against
-    its own ad-hoc operand test, while `JsInterpreter._eval_unary`
-    (`refinery/lib/scripts/js/deobfuscation/interpreter.py`) evaluates the same operators over a different
-    value domain. There is no shared kernel — no `eval_unary_op` exists anywhere in the tree — so each arm
-    declines a different subset:
-
-    - `~` is gated on `value == value and value not in (inf, -inf)`, so `~NaN` and `~Infinity` are declined
-      although both are `-1`
-    - `typeof` handles only numeric, string and boolean literals; `null`, `undefined`, object, array and
-      function literals fall through
-    - `+` on a string or `null` is not folded at all, though `+'12'` is `12` and `+null` is `0`
-    - `delete` on a property of a local object literal is not folded
-
-    Task #20 consolidated the *binary* operator tables the same way; this is the unary counterpart, and the
-    shape is extract-a-kernel-then-wrap rather than patch-each-arm. Two seams make that worth doing properly:
-    the interpreter's domain includes values (`JsBuffer`, `dict`) that no literal spells, and `delete` has an
-    effect, so a shared kernel must return "declined" rather than guess.
+    The behavioral control is kept as its own test at the end, over the same sources, so a fold that
+    silently changes what a case computes fails there rather than passing here.
     """
 
     def _folds(self, source: str, token: str):
@@ -2897,73 +2882,61 @@ class TestUnaryOperatorFoldCoverage(TestBase):
             F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
         )
 
-    @unittest.expectedFailure
     def test_bitwise_not_of_nan_folds(self):
         """
-        Node: `~NaN` is `-1`. The guard excludes NaN rather than folding it.
+        Node: `~NaN` is `-1`, since ToInt32 maps every non-finite value to zero.
         """
         self._folds('console.log(String(~NaN));', '~')
 
-    @unittest.expectedFailure
     def test_bitwise_not_of_infinity_folds(self):
         """
         Node: `~Infinity` is `-1`, since ToInt32 maps every non-finite value to zero.
         """
         self._folds('console.log(String(~Infinity));', '~')
 
-    @unittest.expectedFailure
     def test_bitwise_not_of_negative_infinity_folds(self):
         self._folds('console.log(String(~(-Infinity)));', '~')
 
-    @unittest.expectedFailure
     def test_typeof_null_folds(self):
         """
-        Node: `'object'`. `typeof` reads the literal's Python type, and the null literal is not in the table.
+        Node: `'object'`, the answer `typeof` has given for `null` since the first edition.
         """
         self._folds('console.log(typeof null);', 'typeof')
 
-    @unittest.expectedFailure
     def test_typeof_undefined_folds(self):
         self._folds('console.log(typeof undefined);', 'typeof')
 
-    @unittest.expectedFailure
     def test_typeof_an_object_literal_folds(self):
         self._folds('console.log(typeof {});', 'typeof')
 
-    @unittest.expectedFailure
     def test_typeof_an_array_literal_folds(self):
         self._folds('console.log(typeof []);', 'typeof')
 
-    @unittest.expectedFailure
     def test_typeof_a_function_expression_folds(self):
         """
         Node: `'function'`. Worth folding because an obfuscator uses exactly this to test for a callable.
         """
         self._folds('console.log(typeof function () {});', 'typeof')
 
-    @unittest.expectedFailure
     def test_unary_plus_on_a_string_literal_folds(self):
         """
         Node: `+'12'` is `12`. Numeric coercion of a string literal is decided by the syntax alone.
         """
         self._folds("console.log(String(+'12'));", '+')
 
-    @unittest.expectedFailure
     def test_unary_plus_on_null_folds(self):
         self._folds('console.log(String(+null));', '+')
 
-    @unittest.expectedFailure
     def test_logical_not_of_an_object_literal_folds(self):
         """
-        Node: `false`. The array literal case already folds, so the two disagree on sibling forms.
+        Node: `false`. Every object is truthy, whichever literal form creates it.
         """
         self._folds('console.log(String(!{}));', '!')
 
-    @unittest.expectedFailure
     def test_delete_of_a_property_of_a_local_object_literal_folds(self):
         """
-        Node: `true`, and the property is gone. This is the case a shared kernel must be able to *decline*
-        rather than guess, since `delete` mutates — included to pin the requirement, not to demand the fold.
+        Node: `true`, and the property is gone. `delete` mutates, so folding it away is only sound when the
+        mutation cannot be observed — which is what this source arranges by never reading `o.a` again.
         """
         self._folds("var o = { a: 1 }; console.log(String(delete o.a));", 'delete')
 
@@ -2988,10 +2961,10 @@ class TestUnaryOperatorFoldCoverage(TestBase):
     def test_bitwise_not_of_a_finite_number_already_folds(self):
         self._folds('console.log(String(~1e21));', '~')
 
-    def test_every_declined_unary_still_behaves_correctly(self):
+    def test_every_folded_unary_still_behaves_correctly(self):
         """
-        The load-bearing control for this whole class: none of the above is a miscompile. If this ever fails,
-        the item has changed from a precision gap to a correctness defect and must be re-triaged as such.
+        The load-bearing control for this whole class: none of the folds above is a miscompile. The tests
+        above assert only that the operator disappeared, which a fold to the wrong value satisfies too.
         """
         for source in (
             'console.log(String(~NaN));',
@@ -3009,6 +2982,119 @@ class TestUnaryOperatorFoldCoverage(TestBase):
         ):
             with self.subTest(source=source):
                 self._preserves(source)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNegatedInfinityTermination(TestBase):
+    """
+    An infinity is a Number that no numeric literal spells: `Infinity` is a global binding,
+    `-Infinity` is an operator applied to that binding, and a literal large enough to denote one is
+    a spelling of digits rather than of the value they overflow to. A pass that folds such an
+    expression and writes the answer back has nothing to write but an expression of the shape it
+    just consumed, and a pass that keeps consuming its own output never settles.
+
+    Each case is a small, ordinary program whose deobfuscation has to finish in bounded time. What
+    it finishes as is deliberately left open, because declining a fold is always allowed and looping
+    on one never is; only Node's verdict on the program is required to survive.
+    """
+
+    def _terminates_and_prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        try:
+            deobfuscated = deobfuscate_within(source, seconds=20)
+        except DeobfuscationFailed as failure:
+            self.fail(F'the deobfuscation did not run to completion:\n{failure}')
+        if deobfuscated is None:
+            self.fail('the deobfuscation did not terminate')
+        self.assertEqual(behavior(deobfuscated), (output, None))
+
+    def test_negative_infinity_terminates(self):
+        self._terminates_and_prints('console.log(String(-Infinity));', '-Infinity\n')
+
+    def test_unary_plus_applied_to_negative_infinity_terminates(self):
+        self._terminates_and_prints('console.log(String(+(-Infinity)));', '-Infinity\n')
+
+    def test_negation_of_a_string_naming_infinity_terminates(self):
+        self._terminates_and_prints("console.log(String(-('Infinity')));", '-Infinity\n')
+
+    def test_negation_of_a_literal_that_overflows_to_infinity_terminates(self):
+        self._terminates_and_prints('console.log(String(-(2e308)));', '-Infinity\n')
+
+    def test_negative_infinity_consumed_by_arithmetic_terminates(self):
+        self._terminates_and_prints(
+            'console.log(String(-Infinity + 1), 1 / -Infinity);', '-Infinity -0\n')
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestFoldedNegativeNumbers(TestBase):
+    """
+    JavaScript has no negative numeric literal: `-5` is the negation operator applied to `5`. A fold
+    that arrives at a negative number therefore has two ways to record it that print the same text,
+    and a consumer that reads only one of them stops folding exactly where the other carries on.
+
+    Every case computes negative five a different way, hands it to the same four consumers, and has
+    to end at the program the written `-5` ends at. Node decides what all of them mean: each source
+    here prints one and the same line.
+    """
+
+    _FOLDED = "console.log(-10, 20, '-5', 'bcdef');"
+    _OUTPUT = '-10 20 -5 bcdef\n'
+
+    def _folds_like_a_written_negative(self, source: str):
+        self.assertEqual(behavior(source), (self._OUTPUT, None))
+        self.assertEqual(deobfuscate_source(source), self._FOLDED)
+
+    def test_a_written_negative_is_consumed_by_every_fold(self):
+        self.assertEqual(behavior(self._FOLDED), (self._OUTPUT, None))
+        self._folds_like_a_written_negative(
+            "console.log(-5 * 2, [10, 20, 30][-5 + 6], String(-5), 'abcdef'.slice(-5));")
+
+    def test_a_negative_difference_is_consumed_by_every_fold(self):
+        self._folds_like_a_written_negative(
+            'console.log((0 - 5) * 2, [10, 20, 30][(0 - 5) + 6], String(0 - 5),'
+            " 'abcdef'.slice(0 - 5));")
+
+    def test_a_negated_sum_is_consumed_by_every_fold(self):
+        self._folds_like_a_written_negative(
+            'console.log(-(2 + 3) * 2, [10, 20, 30][-(2 + 3) + 6], String(-(2 + 3)),'
+            " 'abcdef'.slice(-(2 + 3)));")
+
+    def test_a_bitwise_complement_that_is_negative_is_consumed_by_every_fold(self):
+        """
+        `~4` is negative five and nothing in the source is written with a sign at all, so the
+        negation can only have been introduced by the fold.
+        """
+        self._folds_like_a_written_negative(
+            "console.log(~4 * 2, [10, 20, 30][~4 + 6], String(~4), 'abcdef'.slice(~4));")
+
+    def test_a_negated_numeric_string_is_consumed_by_every_fold(self):
+        self._folds_like_a_written_negative(
+            "console.log(-'5' * 2, [10, 20, 30][-'5' + 6], String(-'5'), 'abcdef'.slice(-'5'));")
+
+    def test_a_negative_carried_through_unary_plus_is_consumed_by_every_fold(self):
+        self._folds_like_a_written_negative(
+            'console.log(+(-5) * 2, [10, 20, 30][+(-5) + 6], String(+(-5)),'
+            " 'abcdef'.slice(+(-5)));")
+
+    def test_a_negative_from_string_coercion_is_consumed_by_every_fold(self):
+        self._folds_like_a_written_negative(
+            "console.log(Number('-5') * 2, [10, 20, 30][Number('-5') + 6], String(Number('-5')),"
+            " 'abcdef'.slice(Number('-5')));")
+
+    def test_a_negative_rounded_by_math_is_consumed_by_every_fold(self):
+        self._folds_like_a_written_negative(
+            'console.log(Math.round(-4.6) * 2, [10, 20, 30][Math.round(-4.6) + 6],'
+            " String(Math.round(-4.6)), 'abcdef'.slice(Math.round(-4.6)));")
+
+    def test_a_negative_bound_to_a_variable_is_consumed_by_every_fold(self):
+        self._folds_like_a_written_negative(
+            'var n = ~4;'
+            " console.log(n * 2, [10, 20, 30][n + 6], String(n), 'abcdef'.slice(n));")
+
+    def test_a_negative_returned_by_a_function_is_consumed_by_every_fold(self):
+        self._folds_like_a_written_negative(
+            'var f = function () { return 0 - 5; };'
+            " console.log(f() * 2, [10, 20, 30][f() + 6], String(f()), 'abcdef'.slice(f()));")
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')

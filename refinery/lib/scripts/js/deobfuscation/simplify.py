@@ -3,7 +3,10 @@ JavaScript syntax normalization transforms.
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from refinery.lib.scripts.js.deobfuscation.helpers import Value
 
 from refinery.lib.scripts import Expression, Node, Transformer
 from refinery.lib.scripts.js.analysis.cache import ModelCache, model_cache
@@ -19,9 +22,10 @@ from refinery.lib.scripts.js.analysis.model import (
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
+    GLOBAL_VALUE_NAMES,
     OBJECT_PROTOTYPE_MEMBERS,
     RELATIONAL_OPS,
-    _to_int32,
+    UNARY_OPS,
     access_key,
     escape_js_string,
     eval_binary_op,
@@ -724,31 +728,127 @@ class JsSimplifications(Transformer):
                 self.mark_changed()
         return None
 
+    def _fresh_object_type(self, operand: Node | None) -> str | None:
+        """
+        The `typeof` of the object *operand* allocates, when it is a form that always evaluates to a
+        freshly created object and creating it has no other effect — `None` otherwise. Such a node has
+        no extractable value: `extract_literal_value` refuses an object or function expression, and
+        widening it to answer one would hand out a value whose identity no literal can reproduce.
+
+        Its type is nevertheless decided by the syntax alone, and so is its truthiness: every object is
+        truthy, which is why `!{}` and `typeof {}` are answerable from the same fact. The freedom from
+        effects is asked with the value discarded, because that is what folding does with it — only the
+        type or the truthiness survives, and the object itself does not.
+        """
+        node = strip_parens(operand)
+        if isinstance(node, JsObjectExpression):
+            kind = 'object'
+        elif isinstance(node, (JsFunctionExpression, JsArrowFunctionExpression, JsClassExpression)):
+            kind = 'function'
+        else:
+            return None
+        return kind if self.effects.is_side_effect_free(node, discarded=True) else None
+
+    def _operand_value(self, operand: Node | None) -> tuple[bool, Value]:
+        """
+        The value *operand* denotes, as `extract_literal_value` reports it, extended with the two forms
+        that denote one without being a literal. A name in `GLOBAL_VALUE_NAMES` is resolved against the
+        scope it is read in first, which is why it is answered here and not in `extract_literal_value`:
+        only a caller holding the semantic model can tell the global `undefined` from a parameter of
+        that name. A nested unary is applied through the same kernel, so that an operand spelled with
+        one of those names is still readable once an operator stands in front of it — `-Infinity` is
+        how the negative infinity is written, and nothing else spells it.
+        """
+        node = strip_parens(operand)
+        if node is None:
+            return False, None
+        if isinstance(node, JsIdentifier):
+            if node.name not in GLOBAL_VALUE_NAMES or self.model.resolve(node) is not None:
+                return False, None
+            return True, GLOBAL_VALUE_NAMES[node.name]
+        if isinstance(node, JsUnaryExpression):
+            apply = UNARY_OPS.get(node.operator)
+            if apply is None:
+                return False, None
+            known, value = self._operand_value(node.operand)
+            return (True, apply(value)) if known else (False, None)
+        return extract_literal_value(node)
+
+    def _deletion_is_unobservable(self, node: JsUnaryExpression) -> bool:
+        """
+        Whether the `delete` at *node* removes a property that nothing in the program can read, so that
+        the deletion is a dead store and only its result — `true`, the answer for every configurable and
+        every absent property — remains. The object literal keeps the property, which is sound precisely
+        because no reader of it survives; editing the literal instead would have to be ordered against
+        every read, while leaving it needs no ordering at all.
+
+        The object must be a container held by a local that nothing else can reach: a single unwritten
+        declaration bound to a freshly allocated literal, immutable across the rest of the program, and
+        referenced only through statically named properties other than the deleted one. That last
+        condition is what rules out every reader — a method call, a spread, a `for-in`, or an escape into
+        a call would each be able to observe the property, and none of them is a named read.
+        """
+        member = strip_parens(node.operand)
+        if not isinstance(member, JsMemberExpression):
+            return False
+        base = member.object
+        key = access_key(member)
+        if key is None or not isinstance(base, JsIdentifier):
+            return False
+        binding = self.model.resolve(base)
+        if binding is None or binding.writes or len(binding.declarations) != 1:
+            return False
+        value = self.model.singular_value(binding)
+        if not isinstance(value, (JsObjectExpression, JsArrayExpression)):
+            return False
+        if not self.effects.binding_is_immutable_container(binding, exclude=node):
+            return False
+        for reference in self.model.references(binding):
+            if reference is base:
+                continue
+            access = reference.parent
+            if not isinstance(access, JsMemberExpression) or access.object is not reference:
+                return False
+            if access_key(access) in (None, key):
+                return False
+        return True
+
     def visit_JsUnaryExpression(self, node: JsUnaryExpression):
+        """
+        Fold a unary operator against its operand. Everything that is a function of the operand's value
+        is answered by the shared `UNARY_OPS` kernel, so that a fold performed here and the same
+        operator applied by the interpreter cannot disagree; what is left is the two questions a value
+        cannot answer — the type of an object whose identity no literal spells, and whether a `delete`
+        may be dropped.
+
+        A value whose spelling still needs a unary operator is left alone. `-Infinity` and `void 0` are
+        how those two values are written, so folding one of them produces the expression it replaces:
+        no operator is removed, and the pass would rewrite the same node for as long as it is allowed
+        to run. Declining says the operand was already written in the shortest form it has.
+        """
         self.generic_visit(node)
-        if node.operand is None:
+        operand = node.operand
+        if operand is None:
             return None
         op = node.operator
-        if op == '!' and is_statically_evaluable(node.operand):
-            truthy = is_truthy(node.operand)
-            if truthy is not None:
-                return JsBooleanLiteral(value=not truthy)
-        if op == '-' and isinstance(node.operand, JsNumericLiteral):
-            return make_numeric_literal(-node.operand.value)
-        if op == '+' and isinstance(node.operand, JsNumericLiteral):
-            return node.operand
-        if op == '~' and isinstance(node.operand, JsNumericLiteral):
-            value = node.operand.value
-            if value == value and value not in (float('inf'), float('-inf')):
-                return make_numeric_literal(_to_int32(~int(value)))
-        if op == 'typeof' and is_literal(node.operand):
-            if isinstance(node.operand, JsNumericLiteral):
-                return make_string_literal('number')
-            if isinstance(node.operand, JsStringLiteral):
-                return make_string_literal('string')
-            if isinstance(node.operand, JsBooleanLiteral):
-                return make_string_literal('boolean')
-        return None
+        if op == 'delete':
+            return JsBooleanLiteral(value=True) if self._deletion_is_unobservable(node) else None
+        kind = self._fresh_object_type(operand)
+        if kind is not None:
+            if op == 'typeof':
+                return make_string_literal(kind)
+            if op == '!':
+                return JsBooleanLiteral(value=False)
+        apply = UNARY_OPS.get(op)
+        if apply is None:
+            return None
+        known, value = self._operand_value(operand)
+        if not known:
+            return None
+        folded = value_to_node(apply(value))
+        if isinstance(folded, JsUnaryExpression):
+            return None
+        return folded
 
     def visit_JsStringLiteral(self, node: JsStringLiteral):
         quote = node.raw[0] if node.raw else '\''

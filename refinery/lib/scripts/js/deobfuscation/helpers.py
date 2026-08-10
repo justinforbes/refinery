@@ -1,5 +1,14 @@
 """
-Shared utilities for JavaScript deobfuscation transforms.
+Shared utilities for JavaScript deobfuscation transforms, and the runtime value domain they and the
+interpreter agree on: what a JavaScript value is (`Value`, `JS_NULL`, `JsBuffer`), the ECMA-262
+conversions between values (`to_number`, `to_string`, `to_boolean`, `js_typeof`), the operator tables
+over them (`UNARY_OPS`, `BINARY_OPS`), and the two bridges to the syntax tree
+(`extract_literal_value`, `value_to_node`).
+
+That domain lives below the interpreter rather than inside it, because a static fold and an emulated
+execution must answer an operator the same way — if `~NaN` were implemented once for each, only one of
+the two would be wrong at a time and nothing would say which. The interpreter is a consumer here like
+any transform is.
 """
 from __future__ import annotations
 
@@ -12,7 +21,13 @@ from typing import TYPE_CHECKING, Callable, Iterator, Sequence
 
 if TYPE_CHECKING:
     from typing import TypeAlias
+
+    from refinery.lib.scripts.js.model import JsArrowFunctionExpression as _Arrow
+    from refinery.lib.scripts.js.model import JsFunctionDeclaration as _FuncDecl
+    from refinery.lib.scripts.js.model import JsFunctionExpression as _FuncExpr
+
     LiteralValue: TypeAlias = str | int | float | bool | list | dict | None
+    Value: TypeAlias = str | float | bool | list | dict | _FuncDecl | _FuncExpr | _Arrow | None
 
 from refinery.lib.scripts import (
     Expression,
@@ -163,6 +178,24 @@ class _JsNull:
 
 JS_NULL = _JsNull()
 
+GLOBAL_VALUE_NAMES: dict[str, Value] = {
+    'undefined': None,
+    'NaN': float('nan'),
+    'Infinity': float('inf'),
+}
+"""
+The three names that denote a value rather than a binding a program can move. Each is a property of
+the global object that ECMA-262 makes non-writable and non-configurable, so no assignment, `delete`,
+or `defineProperty` can change what a read of it answers — which is what separates them from every
+other global, including the ones a program is equally unlikely to reassign. They have no literal
+spelling, so an operand written with one of these names carries a value that `extract_literal_value`
+cannot report, and a caller that wants it has to look here.
+
+The guarantee is about the *global* of that name only. All three are ordinary identifiers as far as
+scoping goes — a parameter, a `let`, or a `var` of the same name shadows them — so a caller must
+resolve the name against the scope it is read in before trusting this table.
+"""
+
 PROTO_KEY = '__proto__'
 """
 The one property key whose plain spelling in an object literal does not denote an own property.
@@ -243,6 +276,127 @@ def _to_uint32(v: int | float) -> int:
             return 0
         v = int(v) if v >= 0 else -int(-v)
     return v & 0xFFFFFFFF
+
+
+def to_boolean(value: Value) -> bool:
+    """
+    Apply the ECMA-262 ToBoolean abstract operation. This is the value-domain counterpart of the
+    AST-node `is_truthy`; the two must agree on which values are falsy (`undefined`, `null`, `0`,
+    `NaN`, `''`) so that interpreted and statically-folded conditionals stay consistent.
+    """
+    if value is None or value is JS_NULL:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0 and value == value
+    if isinstance(value, str):
+        return len(value) > 0
+    if isinstance(value, list):
+        return True
+    if isinstance(value, dict):
+        return True
+    if isinstance(value, (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)):
+        return True
+    return False
+
+
+def to_number(value: Value) -> float:
+    """
+    Apply the ECMA-262 ToNumber abstract operation. The string case is not Python's `float`: that
+    function reads a wider grammar than JavaScript's StrNumericLiteral, and every place it is wider
+    has to be refused before it is asked. It accepts `inf`, `infinity` and `nan`, where only the
+    exact spelling `Infinity` names an infinity; it accepts a numeric separator; and it accepts any
+    Unicode decimal digit, where the language accepts only `0` through `9` — hence the ASCII test,
+    which is total over the grammar because a StrNumericLiteral has no character outside that range.
+
+    The sign is applied to the magnitude rather than read out of the parsed integer, because a
+    signed zero is a Number that Python's integers cannot hold: `Number('-0')` is `-0`, and `1 / -0`
+    is `-Infinity`.
+    """
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    if isinstance(value, (int, float)):
+        return to_js_number(value)
+    if isinstance(value, str):
+        s = value.strip(STRING_NUMERIC_TRIM)
+        if not s:
+            return 0.0
+        if not s.isascii() or '_' in s:
+            return float('nan')
+        if s[0] in '+-' and len(s) > 2 and s[1] == '0' and s[2] in 'xXoObB':
+            return float('nan')
+        try:
+            integer = int(s, 0)
+        except ValueError:
+            pass
+        else:
+            return apply_sign(to_js_number(abs(integer)), s[0] == '-')
+        magnitude = s[1:] if s[0] in '+-' else s
+        if magnitude.isalpha() and magnitude != 'Infinity':
+            return float('nan')
+        try:
+            return float(s)
+        except ValueError:
+            return float('nan')
+    if value is JS_NULL:
+        return 0.0
+    if isinstance(value, list):
+        return to_number(to_string(value))
+    return float('nan')
+
+
+def to_string(value: Value) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return 'undefined'
+    if value is JS_NULL:
+        return 'null'
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, (int, float)):
+        return js_number_to_string(to_js_number(value))
+    if isinstance(value, list):
+        return ','.join(_array_element_string(v) for v in value)
+    return '[object Object]'
+
+
+def _array_element_string(value: Value) -> str:
+    """
+    Stringify an array element for `Array.prototype.toString` / `join`. JavaScript renders `null` and
+    `undefined` elements as the empty string (e.g. `[1, null, 2].toString()` is `'1,,2'`), unlike a
+    top-level `String(null)` which is `'null'`.
+    """
+    if value is None or value is JS_NULL:
+        return ''
+    return to_string(value)
+
+
+def _to_int(value: Value) -> int:
+    n = to_number(value)
+    if n != n or math.isinf(n):
+        return 0
+    return int(n)
+
+
+def js_typeof(value: Value) -> str:
+    """
+    Apply the `typeof` operator to a value. Total over the domain, and the reason `typeof null` is
+    `'object'` falls out of the ordering rather than being stated: `JS_NULL` is not any of the
+    primitive types tested for, so it reaches the same answer every object does.
+    """
+    if value is None:
+        return 'undefined'
+    if isinstance(value, bool):
+        return 'boolean'
+    if isinstance(value, (int, float)):
+        return 'number'
+    if isinstance(value, str):
+        return 'string'
+    if isinstance(value, (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)):
+        return 'function'
+    return 'object'
 
 
 def _js_div(a: int | float, b: int | float) -> int | float:
@@ -341,6 +495,29 @@ which is why `+` is `operator.add` here: on numbers that is what `+` means, but 
 or an object `+` is a different operator entirely — it applies ToPrimitive to both sides and concatenates when
 either is a string. A caller holding uncoerced values must not reach this table for `+`; the interpreter routes
 every operator through `JsInterpreter._apply_binary`, which resolves the string cases before delegating here.
+"""
+
+UNARY_OPS: dict[str, Callable[[Value], Value]] = {
+    '-'     : lambda v: -to_number(v),
+    '+'     : to_number,
+    '~'     : lambda v: float(_to_int32(~_to_int(v))),
+    '!'     : lambda v: not to_boolean(v),
+    'void'  : lambda v: None,
+    'typeof': js_typeof,
+}
+"""
+JavaScript's unary operators that are functions of their operand's *value* alone. Each is total over
+the value domain — the coercions answer for every value rather than refusing any — so a caller holding
+a value needs no per-operator guard, and a caller holding a syntax tree needs only to obtain the value.
+
+`delete` is absent because it is not one of these: its result depends on the operand's *reference*
+rather than its value, and evaluating it changes the object it names. A pass that wants to fold a
+`delete` has to reason about that object, which is a question about the program and not about a value,
+so the absence is what keeps this table from being asked it.
+
+`void` is a member despite discarding its operand, because discarding a value is still a function of
+it. The caller remains responsible for evaluating the operand: `void f()` is `undefined` and calls `f`,
+and this table only supplies the first half.
 """
 
 RELATIONAL_OPS: dict[str, Callable] = {
@@ -524,6 +701,13 @@ def value_to_node(value: object) -> Expression | None:
     literal form that denotes it faithfully. Refusing is always sound — the caller leaves the original
     expression in place — whereas rendering an approximation silently changes what the program means,
     so every case here either round-trips exactly or returns `None`.
+
+    A finite number is spelled by `make_numeric_literal` whatever its sign, so that a negative one is a
+    single literal carrying its sign in the `raw` and not a negation applied to its magnitude. Those
+    two nodes synthesize to the same text, which is what let the second spelling go unnoticed, but only
+    the first is a `JsNumericLiteral`: the fold that reads an operand with `numeric_value` sees a number
+    in one and nothing in the other. The values with no literal spelling at all — `NaN`, the infinities
+    and `undefined` — are the only ones this returns a compound node for.
     """
     if isinstance(value, str):
         return make_string_literal(value)
@@ -537,12 +721,7 @@ def value_to_node(value: object) -> Expression | None:
             return JsIdentifier(name='Infinity')
         if number == float('-inf'):
             return JsUnaryExpression(operator='-', operand=JsIdentifier(name='Infinity'))
-        magnitude = make_numeric_literal(abs(number))
-        if magnitude is None:
-            return None
-        if number < 0 or is_negative_zero(number):
-            return JsUnaryExpression(operator='-', operand=magnitude)
-        return magnitude
+        return make_numeric_literal(number)
     if isinstance(value, JsBuffer):
         return None
     if isinstance(value, list):
@@ -695,7 +874,7 @@ def is_reference(node: JsIdentifier) -> bool:
 def is_truthy(node: Node) -> bool | None:
     """
     Return the JavaScript truthiness of a literal node, or `None` when the value cannot be
-    determined statically. This is the AST-node counterpart of the runtime `interpreter._truthy`;
+    determined statically. This is the AST-node counterpart of the value-domain `to_boolean`;
     the two must agree on which values are falsy (`undefined`, `null`, `0`, `NaN`, `''`).
     """
     if isinstance(node, JsBooleanLiteral):
