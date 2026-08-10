@@ -1752,20 +1752,24 @@ class TestPs1AConditionReadsACommandNameWhole(TestBase):
 
 class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
     """
-    A `--` ends the parameters of the command it stands in and is itself the last of them. 5.1 makes
-    a `MinusMinus` token here as we do, and its parser then reads three things from it: the first one
-    is a parameter named `-`, every later one is a bare word, and every `-word` behind it is a bare
-    word too. That is what `--` is for, and it is 5.1's own rule rather than a later version's —
-    `Parser.cs:5664` and `:5681` in the 2016 import of the closed-source engine.
+    A `--` ends the parameters of the command it stands in and is itself the last of them. Every
+    expectation below was read off a 5.1 host, which builds one command in each case and reports no
+    error:
+
+        f -- x           f | parameter -- | 'x'
+        f -- -- x        f | parameter -- | '--' | 'x'
+        f -- -Recurse    f | parameter -- | '-Recurse'
+        f -Recurse       f | parameter -Recurse
+
+    5.1 names that parameter `-` where we name a switch by the whole word it was written as, which
+    is why `--` is the name here and `-Recurse` is the name there.
 
     We end the command at the `--` instead, so `f -- x` becomes two statements and the second,
-    `-- 'x'`, asks 5.1 to decrement a string literal. None of the three can be reached until that
-    is fixed, which is why all of it is expected to fail together.
+    `-- 'x'`, asks 5.1 to decrement a string literal. Nothing below can be reached until that is
+    fixed, so all of it fails together; each still fails on its own once it is.
 
-    The third has a witness a host can be asked for directly: 5.1 stamps such a token with
-    `CommandName`, so `command_names('f -- -Recurse')` measures `('f', '-Recurse')` where every
-    other spelling here measures `('f',)`. It is not in `corpus.NAMES` because what we print for it
-    is a script 5.1 refuses, and the differential that would carry the row has no ledger for that.
+    None of these is a `BOUNDARIES` row, because what we print for them is a script 5.1 refuses and
+    the differential that would carry the row has no ledger for that.
     """
 
     def _shaped(self, node: object, kind: type[_T]) -> _T:
