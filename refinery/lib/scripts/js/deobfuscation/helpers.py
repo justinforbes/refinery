@@ -934,17 +934,14 @@ def is_reference(node: JsIdentifier) -> bool:
     return True
 
 
-def denoted_value(node: Node | None, model: SemanticModel) -> tuple[bool, Value]:
+def names_global_value(node: JsIdentifier, model: SemanticModel) -> bool:
     """
-    The value *node* denotes, as `(True, value)`, or `(False, None)` when nothing decides it. This is
-    `extract_literal_value` widened by the two things a literal cannot express: a name from
-    `GLOBAL_VALUE_NAMES`, and an operator standing in front of either.
+    Whether *node* is one of `GLOBAL_VALUE_NAMES` read where the program cannot have given that name
+    another meaning. This is the single question that decides whether the table may be consulted, and
+    every reader of these names has to come through here: the value is a fact about the global, and
+    whether the name still denotes the global is a fact about the scope.
 
-    A name is answered only where the program cannot have given it another meaning, and that is a
-    question about the scope the name is read in — which is why this needs the model and
-    `extract_literal_value` does not, and why every reader that wants one of these names must come
-    through here. There are three ways the meaning can differ from the global's, and `resolve`
-    reports only the first:
+    There are three ways the meaning can differ, and `resolve` reports only the first:
 
     - a declaration binds the name, anywhere from a parameter to an assignment at top level, which
       the model records as an `IMPLICIT_GLOBAL`
@@ -954,15 +951,25 @@ def denoted_value(node: Node | None, model: SemanticModel) -> tuple[bool, Value]
     - a direct `eval` declared the name, which no reference records at all;
       `free_name_reachable_by_direct_eval` reports the positions that could see such a binding
     """
+    return (
+        node.name in GLOBAL_VALUE_NAMES
+        and model.resolve(node) is None
+        and not model.read_has_dynamic_effect(node)
+        and not model.free_name_reachable_by_direct_eval(node)
+    )
+
+
+def denoted_value(node: Node | None, model: SemanticModel) -> tuple[bool, Value]:
+    """
+    The value *node* denotes, as `(True, value)`, or `(False, None)` when nothing decides it. This is
+    `extract_literal_value` widened by the two things a literal cannot express: a name that still
+    denotes one of the global values, and an operator standing in front of either.
+    """
     node = strip_parens(node)
     if node is None:
         return False, None
     if isinstance(node, JsIdentifier):
-        if node.name not in GLOBAL_VALUE_NAMES or model.resolve(node) is not None:
-            return False, None
-        if model.read_has_dynamic_effect(node):
-            return False, None
-        if model.free_name_reachable_by_direct_eval(node):
+        if not names_global_value(node, model):
             return False, None
         return True, GLOBAL_VALUE_NAMES[node.name]
     if isinstance(node, JsUnaryExpression):

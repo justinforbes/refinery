@@ -5,6 +5,10 @@ import unittest
 
 from test import TestBase
 
+from refinery.lib.scripts.js.analysis.model import build_semantic_model
+from refinery.lib.scripts.js.model import JsIdentifier
+from refinery.lib.scripts.js.parser import JsParser
+
 from test.lib.scripts.js.analysis.differential import (
     DeobfuscationFailed,
     behavior,
@@ -3764,4 +3768,624 @@ class TestDecidedTestsKeepTheirEffects(TestBase):
                 var r = [];
                 console.log(typeof r, SINK.join('|'));
             """),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestFoldsIntoScopesThatRebindAGlobalName(TestBase):
+    """
+    A value computed at analysis time is written back into the program as source text, and some
+    values are spelled by a global name — `undefined`, `NaN`, `Infinity`, `globalThis` — because
+    the language has no literal for them. Such a name is an ordinary binding, so a parameter, a
+    `var`, a `let`, a `catch` binding, a function declaration, or a `with` object can rebind it in
+    any enclosing scope. The text written back therefore has to denote the computed value in the
+    scope it lands in, not merely in a scope where nothing was rebound.
+
+    Node decides and behavior is the criterion: no case asserts the emitted text, which would pin
+    today's choice of spelling rather than the property that must not regress. Every program
+    observes its rebinding alongside the folded value, so spelling that value with the bare global
+    name changes what the program prints.
+    """
+
+    def _check(self, source: str):
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(source),
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_undefined_folded_into_a_function_whose_parameter_rebinds_the_name(self):
+        """
+        Node: `undefined/shadow`. `u` is never assigned and so holds `undefined`, but inside `f`
+        that name is the parameter, which the call binds to `'shadow'`.
+        """
+        self._check(inspect.cleandoc("""
+            var u;
+            function f(undefined) {
+              return String(u) + '/' + String(undefined);
+            }
+            console.log(f('shadow'));
+        """))
+
+    def test_nan_folded_into_a_function_whose_parameter_rebinds_the_name(self):
+        """
+        Node: `NaN/3`. The quotient is a NaN, while the name inside `f` is the parameter, which
+        holds three.
+        """
+        self._check(inspect.cleandoc("""
+            var n = 0 / 0;
+            function f(NaN) {
+              return String(n) + '/' + String(NaN);
+            }
+            console.log(f(3));
+        """))
+
+    def test_infinity_folded_into_a_function_whose_parameter_rebinds_the_name(self):
+        """
+        Node: `Infinity/shadow`.
+        """
+        self._check(inspect.cleandoc("""
+            var big = 1 / 0;
+            function f(Infinity) {
+              return String(big) + '/' + String(Infinity);
+            }
+            console.log(f('shadow'));
+        """))
+
+    def test_negative_infinity_folded_into_a_function_whose_parameter_rebinds_the_name(self):
+        """
+        Node: `-Infinity/shadow`. A negated bare name would be the negation of the parameter's
+        string, which is a NaN.
+        """
+        self._check(inspect.cleandoc("""
+            var small = -1 / 0;
+            function f(Infinity) {
+              return String(small) + '/' + String(Infinity);
+            }
+            console.log(f('shadow'));
+        """))
+
+    def test_nan_folded_in_a_function_whose_var_rebinds_the_name(self):
+        """
+        Node: `NaN/shadow`.
+        """
+        self._check(inspect.cleandoc("""
+            function f() {
+              var NaN = 'shadow';
+              return String(0 / 0) + '/' + String(NaN);
+            }
+            console.log(f());
+        """))
+
+    def test_infinity_folded_above_the_var_that_rebinds_the_name_later_in_the_body(self):
+        """
+        Node: `Infinity/shadow`. The rebinding `var` is written below the fold site but hoists over
+        it, so the bare name there is the local, still holding the `undefined` it hoisted with.
+        """
+        self._check(inspect.cleandoc("""
+            function f() {
+              var head = String(1 / 0);
+              var Infinity = 'shadow';
+              return head + '/' + String(Infinity);
+            }
+            console.log(f());
+        """))
+
+    def test_nan_folded_in_a_function_whose_function_declaration_rebinds_the_name(self):
+        """
+        Node: `NaN/function`. The declaration hoists to the top of the body, so the bare name is
+        that function everywhere in it.
+        """
+        self._check(inspect.cleandoc("""
+            function f() {
+              var head = String(0 / 0);
+              function NaN() {}
+              return head + '/' + typeof NaN;
+            }
+            console.log(f());
+        """))
+
+    def test_infinity_folded_in_a_function_whose_let_rebinds_the_name(self):
+        """
+        Node: `Infinity/shadow`.
+        """
+        self._check(inspect.cleandoc("""
+            function f() {
+              let Infinity = 'shadow';
+              return String(1 / 0) + '/' + String(Infinity);
+            }
+            console.log(f());
+        """))
+
+    def test_undefined_folded_in_a_block_whose_let_rebinds_the_name(self):
+        """
+        Node: `undefined|shadow`. A function that returns nothing yields `undefined`, a name the
+        block's `let` binds to `'shadow'`.
+        """
+        self._check(inspect.cleandoc("""
+            var SINK = [];
+            function nothing() {}
+            {
+              let undefined = 'shadow';
+              SINK.push(String(nothing()));
+              SINK.push(String(undefined));
+            }
+            console.log(SINK.join('|'));
+        """))
+
+    def test_undefined_folded_in_a_catch_block_whose_binding_rebinds_the_name(self):
+        """
+        Node: `undefined|caught`. The catch parameter is an ordinary binding of the name for the
+        whole handler.
+        """
+        self._check(inspect.cleandoc("""
+            var SINK = [];
+            var u;
+            try {
+              throw 'caught';
+            } catch (undefined) {
+              SINK.push(String(u));
+              SINK.push(String(undefined));
+            }
+            console.log(SINK.join('|'));
+        """))
+
+    def test_nan_folded_in_a_with_body_whose_object_supplies_the_name(self):
+        """
+        Node: `NaN|shadow`. The body resolves the name against the object first, so it denotes the
+        object's property there.
+        """
+        self._check(inspect.cleandoc("""
+            var SINK = [];
+            var n = 0 / 0;
+            var o = { NaN: 'shadow' };
+            with (o) {
+              SINK.push(String(n));
+              SINK.push(String(NaN));
+            }
+            console.log(SINK.join('|'));
+        """))
+
+    def test_undefined_folded_in_a_with_body_whose_object_supplies_the_name(self):
+        """
+        Node: `undefined|shadow`.
+        """
+        self._check(inspect.cleandoc("""
+            var SINK = [];
+            var u;
+            var o = { undefined: 'shadow' };
+            with (o) {
+              SINK.push(String(u));
+              SINK.push(String(undefined));
+            }
+            console.log(SINK.join('|'));
+        """))
+
+    def test_nan_folded_into_a_nested_function_that_inherits_the_parameter_rebinding(self):
+        """
+        Node: `NaN/3`. The fold site is a scope that rebinds nothing itself; the name it would use
+        resolves through the enclosing function's parameter.
+        """
+        self._check(inspect.cleandoc("""
+            function outer(NaN) {
+              function inner() {
+                return String(0 / 0);
+              }
+              return inner() + '/' + String(NaN);
+            }
+            console.log(outer(3));
+        """))
+
+    def test_constructed_receiver_read_where_a_parameter_rebinds_the_global_object_name(self):
+        """
+        Node: `G/X`. A `Function`-constructed function called with no receiver has `this` bound to
+        the global object, so it reads the global marker; the name for that object is the parameter
+        here, which holds an ordinary object carrying a different marker.
+        """
+        self._check(inspect.cleandoc("""
+            globalThis.marker = 'G';
+            function f(globalThis) {
+              return new Function('return this.marker')() + '/' + globalThis.marker;
+            }
+            console.log(f({ marker: 'X' }));
+        """))
+
+    def test_constructed_this_compared_where_a_parameter_rebinds_the_global_object_name(self):
+        """
+        Node: `true/false`. The constructed function returns the global object itself, while the name
+        for it inside `f` is the parameter, which is a different object.
+        """
+        self._check(inspect.cleandoc("""
+            var REAL = globalThis;
+            function f(globalThis) {
+              var constructed = new Function('return this')();
+              return String(constructed === REAL) + '/' + String(globalThis === REAL);
+            }
+            console.log(f({}));
+        """))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestGuaranteedGlobalNamesAreOrdinaryBindings(TestBase):
+    """
+    `undefined`, `NaN` and `Infinity` denote the values the language guarantees only where the
+    program has not given the name another meaning, and there are several ways it can. A
+    declaration in the scope of the read or any scope enclosing it does it — a parameter, a `var`,
+    a `let`, a `const`, a catch binding, a function. So does a `with` object that carries the
+    property, where reading the name may additionally run an accessor. So does a direct `eval`,
+    which can declare the name with no declaration appearing anywhere in the source.
+
+    Each rebinding case names the program the unsound fold would produce and requires it to behave
+    differently from the original before requiring the deobfuscation to behave like the original.
+    Without that pairing the case would be blind: a rebound value that answers the tested operation
+    the same way the global does passes whether the fold was refused or not.
+
+    The three converse cases carry a rebinding that is not positioned to reach the read, so the
+    fold is owed. Comparing behavior cannot see that one was refused — refusing every fold
+    preserves behavior — so they count the referencing occurrences of the name that survive.
+    """
+
+    @staticmethod
+    def _references(source: str, name: str) -> int:
+        ast = JsParser(source).parse()
+        model = build_semantic_model(ast)
+        seen: set[int] = set()
+        count = 0
+        for node in ast.walk_in_order():
+            if not isinstance(node, JsIdentifier) or node.name != name or id(node) in seen:
+                continue
+            seen.add(id(node))
+            if model.is_reference(node):
+                count += 1
+        return count
+
+    def _rebound(self, source: str, misfolded: str):
+        self.assertNotEqual(
+            behavior(source),
+            behavior(misfolded),
+            'the program does not discriminate: it behaves the same folded and unfolded',
+        )
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(source),
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def _folds(self, source: str, name: str):
+        self.assertEqual(self._references(source, name), 1)
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(source),
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+        self.assertEqual(
+            self._references(deobfuscated, name),
+            0,
+            F'the name was still read, so it was not folded; result was:\n{deobfuscated}',
+        )
+
+    def test_typeof_undefined_is_not_folded_where_a_parameter_binds_the_name(self):
+        """
+        Node: `number`. The parameter holds one, so `typeof` answers for that; the global's answer
+        would be `'undefined'`.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                function f(undefined) {
+                  return typeof undefined;
+                }
+                console.log(f(1));
+            """),
+            inspect.cleandoc("""
+                function f(undefined) {
+                  return 'undefined';
+                }
+                console.log(f(1));
+            """),
+        )
+
+    def test_bitwise_complement_of_nan_is_not_folded_where_an_enclosing_function_binds_it(self):
+        """
+        Node: `-6`. The read is in a nested function and the `var` is in the one enclosing it, so
+        the name is five and its complement minus six; the global's answer would be minus one,
+        since ToInt32 maps a NaN to zero.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                function outer() {
+                  var NaN = 5;
+                  function inner() {
+                    return ~NaN;
+                  }
+                  return inner();
+                }
+                console.log(String(outer()));
+            """),
+            inspect.cleandoc("""
+                function outer() {
+                  var NaN = 5;
+                  function inner() {
+                    return -1;
+                  }
+                  return inner();
+                }
+                console.log(String(outer()));
+            """),
+        )
+
+    def test_logical_not_of_infinity_is_not_folded_where_a_block_lets_the_name(self):
+        """
+        Node: `true`. The `let` holds zero, which is falsy; the global's answer would be `false`.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                {
+                  let Infinity = 0;
+                  console.log(String(!Infinity));
+                }
+            """),
+            inspect.cleandoc("""
+                {
+                  let Infinity = 0;
+                  console.log(String(false));
+                }
+            """),
+        )
+
+    def test_typeof_undefined_is_not_folded_where_a_const_binds_the_name(self):
+        """
+        Node: `number`.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                const undefined = 1;
+                console.log(typeof undefined);
+            """),
+            inspect.cleandoc("""
+                const undefined = 1;
+                console.log('undefined');
+            """),
+        )
+
+    def test_bitwise_complement_of_nan_is_not_folded_where_a_catch_clause_binds_the_name(self):
+        """
+        Node: `-6`. The caught value is five, so the complement is minus six.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                try {
+                  throw 5;
+                } catch (NaN) {
+                  console.log(String(~NaN));
+                }
+            """),
+            inspect.cleandoc("""
+                try {
+                  throw 5;
+                } catch (NaN) {
+                  console.log(String(-1));
+                }
+            """),
+        )
+
+    def test_typeof_infinity_is_not_folded_where_a_function_declaration_binds_the_name(self):
+        """
+        Node: `function`. Truthiness could not tell the two apart — a function and the global
+        infinity are both truthy — so the operation is `typeof`, where the global answers
+        `'number'`.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                function Infinity() {}
+                console.log(typeof Infinity);
+            """),
+            inspect.cleandoc("""
+                function Infinity() {}
+                console.log('number');
+            """),
+        )
+
+    def test_typeof_undefined_is_not_folded_where_a_top_level_var_binds_the_name(self):
+        """
+        Node: `number`. The oracle runs a snippet as a module, whose top level is a function scope,
+        so the declaration binds the name there; at the top level of a classic script the same
+        `var` would be a no-op, the global property being neither writable nor configurable.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                var undefined = 1;
+                console.log(typeof undefined);
+            """),
+            inspect.cleandoc("""
+                var undefined = 1;
+                console.log('undefined');
+            """),
+        )
+
+    def test_bitwise_complement_of_nan_is_not_folded_where_the_with_object_carries_the_name(self):
+        """
+        Node: `-6`.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                var o = { NaN: 5 };
+                with (o) {
+                  console.log(String(~NaN));
+                }
+            """),
+            inspect.cleandoc("""
+                var o = { NaN: 5 };
+                with (o) {
+                  console.log(String(-1));
+                }
+            """),
+        )
+
+    def test_logical_not_of_infinity_is_not_folded_where_the_with_object_runs_a_getter(self):
+        """
+        Node: `g|true`. Reading the name runs the accessor, so the read is observable before its
+        value is ever used: a fold loses the push as well as answering `false`.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                var SINK = [];
+                var o = { get Infinity() {
+                  SINK.push('g');
+                  return 0;
+                } };
+                with (o) {
+                  SINK.push(String(!Infinity));
+                }
+                console.log(SINK.join('|'));
+            """),
+            inspect.cleandoc("""
+                var SINK = [];
+                var o = { get Infinity() {
+                  SINK.push('g');
+                  return 0;
+                } };
+                with (o) {
+                  SINK.push(String(false));
+                }
+                console.log(SINK.join('|'));
+            """),
+        )
+
+    def test_typeof_undefined_is_not_folded_where_a_direct_eval_declares_the_name(self):
+        """
+        Node: `number`. A `var` declared by a direct `eval` lands in the var scope the call stands
+        in and outlives it, so the name is bound although no declaration of it is in the source.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                eval('var undefined = 1;');
+                console.log(typeof undefined);
+            """),
+            inspect.cleandoc("""
+                eval('var undefined = 1;');
+                console.log('undefined');
+            """),
+        )
+
+    def test_bitwise_complement_of_nan_is_not_folded_where_a_direct_eval_in_it_declares_it(self):
+        """
+        Node: `-6`.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                function f() {
+                  eval('var NaN = 5;');
+                  return ~NaN;
+                }
+                console.log(String(f()));
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  eval('var NaN = 5;');
+                  return -1;
+                }
+                console.log(String(f()));
+            """),
+        )
+
+    def test_bitwise_complement_of_nan_is_not_folded_in_a_function_below_the_direct_eval(self):
+        """
+        Node: `-6`. The binding lands in `f`, and a function nested inside `f` inherits its scope,
+        so the read there sees it too.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                function f() {
+                  eval('var NaN = 5;');
+                  function g() {
+                    return ~NaN;
+                  }
+                  return g();
+                }
+                console.log(String(f()));
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  eval('var NaN = 5;');
+                  function g() {
+                    return -1;
+                  }
+                  return g();
+                }
+                console.log(String(f()));
+            """),
+        )
+
+    def test_typeof_undefined_is_not_folded_where_the_direct_eval_follows_the_reader(self):
+        """
+        Node: `number`. The `eval` is written after the function that reads the name and runs
+        before it is called, so what decides the read is the scope the `eval` stands in, not where
+        it stands within it.
+        """
+        self._rebound(
+            inspect.cleandoc("""
+                function g() {
+                  return typeof undefined;
+                }
+                eval('var undefined = 1;');
+                console.log(g());
+            """),
+            inspect.cleandoc("""
+                function g() {
+                  return 'undefined';
+                }
+                eval('var undefined = 1;');
+                console.log(g());
+            """),
+        )
+
+    def test_typeof_undefined_folds_where_the_direct_eval_is_in_an_unrelated_function(self):
+        """
+        Node: `ran undefined`. The `eval` declares into `unrelated`, a scope that does not contain
+        the read, so the read is the global one and owes its fold.
+        """
+        self._folds(
+            inspect.cleandoc("""
+                var SINK = [];
+                function unrelated() {
+                  eval('var undefined = 1;');
+                  SINK.push('ran');
+                }
+                unrelated();
+                console.log(SINK.join('|'), typeof undefined);
+            """),
+            'undefined',
+        )
+
+    def test_bitwise_complement_of_nan_folds_where_an_unrelated_function_parameter_binds_it(self):
+        """
+        Node: `1 -1`.
+        """
+        self._folds(
+            inspect.cleandoc("""
+                var SINK = [];
+                function unrelated(NaN) {
+                  SINK.push(arguments.length);
+                }
+                unrelated(5);
+                console.log(SINK.join('|'), String(~NaN));
+            """),
+            'NaN',
+        )
+
+    def test_bitwise_complement_of_nan_folds_where_a_sibling_block_lets_the_name(self):
+        """
+        Node: `-1`. A `let` is scoped to its block, which the read is not in.
+        """
+        self._folds(
+            inspect.cleandoc("""
+                {
+                  let NaN = 5;
+                }
+                console.log(String(~NaN));
+            """),
+            'NaN',
         )

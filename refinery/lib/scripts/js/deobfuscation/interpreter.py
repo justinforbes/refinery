@@ -27,6 +27,7 @@ from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.effects import object_sets_prototype
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ARRAY_PROTOTYPE_METHODS,
+    GLOBAL_VALUE_NAMES,
     JS_NULL,
     LOGICAL_ASSIGNMENT_OPS,
     OBJECT_PROTOTYPE_MEMBERS,
@@ -46,6 +47,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     eval_binary_op,
     js_parse_int,
     js_typeof,
+    names_global_value,
     to_boolean,
     to_number,
     to_string,
@@ -1520,31 +1522,40 @@ class JsInterpreter:
             return None
         return func
 
-    def _resolves_to_lexical_binding(self, node: JsIdentifier) -> bool:
+    def _names_a_global_value(self, node: JsIdentifier) -> bool:
         """
-        Whether *node* resolves to a local `let`, `const`, or `class` binding. Such a name is absent from
-        `_env` only while its declarator has not yet run, i.e. it is being read in its temporal dead zone,
-        so the read throws at runtime and the well-known-global `typeof` fallback must not apply to it.
+        Whether *node* is `undefined`, `NaN` or `Infinity` still denoting the global value, which only
+        the semantic model can say. Without one this answers `False` and the name becomes irreducible:
+        an interpreter that cannot see the scope cannot tell the global from a binding an enclosing
+        function supplies, and guessing the global is how a call to `function f(NaN) { return NaN + 1 }`
+        folded to `NaN` instead of to its argument.
         """
         effects = self._effects
         if effects is None:
             return False
-        binding = effects.model.resolve(node)
-        return binding is not None and binding.is_lexical
+        return names_global_value(node, effects.model)
+
+    def _resolves_to_a_binding(self, node: JsIdentifier) -> bool:
+        """
+        Whether *node* resolves to any binding at all. A name the model binds but `_env` does not hold
+        has a value this interpreter does not know — it may belong to an enclosing scope that is not in
+        the closure, or to a `let` whose declarator has not run, which is a read in its temporal dead
+        zone that throws — so the well-known-global `typeof` fallback must not answer for it.
+        """
+        effects = self._effects
+        if effects is None:
+            return False
+        return effects.model.resolve(node) is not None
 
     def _eval_identifier(self, node: JsIdentifier) -> Value:
         name = node.name
-        if name == 'undefined':
-            return None
-        if name == 'NaN':
-            return float('nan')
-        if name == 'Infinity':
-            return float('inf')
         if name in self._env:
             return self._env[name]
         func = self._resolve_function_node(node)
         if func is not None:
             return func
+        if self._names_a_global_value(node):
+            return GLOBAL_VALUE_NAMES[name]
         raise IrreducibleExpression(node)
 
     def _js_add(self, left: Value, right: Value) -> Value:
@@ -1631,7 +1642,7 @@ class JsInterpreter:
                 return js_typeof(self._env[name])
             if self._resolve_function_node(operand) is not None:
                 return 'function'
-            if self._resolves_to_lexical_binding(operand):
+            if self._resolves_to_a_binding(operand):
                 raise IrreducibleExpression(node)
             result = _global_typeof(name)
             if result is None:

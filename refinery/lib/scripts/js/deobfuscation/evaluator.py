@@ -20,11 +20,13 @@ from refinery.lib.scripts.js.analysis.model import (
     pattern_identifiers,
 )
 from refinery.lib.scripts.js.deobfuscation.helpers import (
+    GLOBAL_VALUE_NAMES,
     ScriptLevelTransformer,
     access_key,
     binding_has_references,
     extract_literal_value,
     is_reference,
+    names_global_value,
     references_receiver_this,
     remove_declarator,
     substitute_params,
@@ -107,6 +109,7 @@ def _is_inplace_mutation(node: JsIdentifier) -> bool:
 def _is_value_closed(
     func: JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression,
     known_pure: set[str],
+    model: SemanticModel,
 ) -> bool:
     """
     Check whether a function's body is closed enough for the interpreter to evaluate a call to it: it
@@ -137,7 +140,9 @@ def _is_value_closed(
     for node in walk_scope(body):
         if isinstance(node, JsIdentifier) and is_reference(node) and node.name not in local_names:
             name = node.name
-            if name in known_pure or name in ('undefined', 'NaN', 'Infinity') or is_runtime_name(name):
+            if name in known_pure or is_runtime_name(name):
+                continue
+            if names_global_value(node, model):
                 continue
             return False
     return True
@@ -209,6 +214,7 @@ def _collect_declared_names(body, names: set[str]) -> None:
 def _unresolved_names(
     func: JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression,
     known_pure: set[str],
+    model: SemanticModel,
 ) -> set[str]:
     """
     Return the set of external names referenced by *func* that are not locally declared, not in
@@ -231,6 +237,7 @@ def _unresolved_names(
     plain_assigned: set[str] = set()
     compound_assigned: set[str] = set()
     read: set[str] = set()
+    rebound_value_names: set[str] = set()
     for node in walk_scope(body, include_root_body=True):
         if not isinstance(node, JsIdentifier) or not is_reference(node):
             continue
@@ -245,9 +252,13 @@ def _unresolved_names(
                 read.add(name)
         else:
             read.add(name)
+            if name in GLOBAL_VALUE_NAMES and not names_global_value(node, model):
+                rebound_value_names.add(name)
     external_names: set[str] = set()
     for name in read - plain_assigned:
-        if name in known_pure or name in ('undefined', 'NaN', 'Infinity') or is_runtime_name(name):
+        if name in known_pure or is_runtime_name(name):
+            continue
+        if name in GLOBAL_VALUE_NAMES and name not in rebound_value_names:
             continue
         external_names.add(name)
     return external_names
@@ -489,7 +500,7 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
                     continue
                 visible_pure = self._visible_pure_names(self._effects.model.function_scope(func))
 
-                if _is_value_closed(func, visible_pure):
+                if _is_value_closed(func, visible_pure, self._effects.model):
                     self._pure_nodes.add(id(func))
                     changed = True
                     continue
@@ -498,7 +509,7 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
                     and func.body is not None
                     and not references_receiver_this(func.body)
                 ):
-                    unresolved = _unresolved_names(func, visible_pure)
+                    unresolved = _unresolved_names(func, visible_pure, self._effects.model)
                     if not unresolved:
                         self._pure_nodes.add(id(func))
                         changed = True
@@ -618,7 +629,7 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
         if self._effects is None or not self._effects.summary_of(func).is_literal_replaceable:
             return
         pure_names = self._visible_pure_names(self._effects.model.scope_of(node))
-        if _is_value_closed(func, pure_names):
+        if _is_value_closed(func, pure_names, self._effects.model):
             args = self._extract_constant_args(node.arguments, node)
             if args is None:
                 return
@@ -628,7 +639,7 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
             func.body is not None
             and not references_receiver_this(func.body)
         ):
-            unresolved = _unresolved_names(func, pure_names)
+            unresolved = _unresolved_names(func, pure_names, self._effects.model)
             closure = self._collect_closure_constants(func)
             if unresolved <= closure.keys():
                 args = self._extract_constant_args(node.arguments, node)
