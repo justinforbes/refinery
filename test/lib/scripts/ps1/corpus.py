@@ -624,6 +624,80 @@ NAMES: tuple[str, ...] = (
 )
 
 
+#: The operand values the shipped operator grid was captured from, as they stood when the domain's
+#: `_SPANNED` was measured. Written here rather than read out of the resource on purpose: it is what
+#: makes a regeneration of the grid fail loudly instead of leaving that measurement quietly stale.
+#:
+#: The measurement is a differential and no test can re-run it. The whole grid was captured a second
+#: time with the extremes these values are missing, and the cells that moved are `GRID_WITNESS_GAPS`
+#: below; the types no moved cell blames are the ones a cell may be read as a fact over.
+GRID_WITNESSES: dict[str, tuple[str, ...]] = {
+    'System.Byte'     : ('[byte]0', '[byte]1', '[byte]255'),
+    'System.SByte'    : ('[sbyte]0', '[sbyte]1', '[sbyte]-128', '[sbyte]127'),
+    'System.Int16'    : ('[int16]0', '[int16]1', '[int16]-32768', '[int16]32767'),
+    'System.UInt16'   : ('[uint16]0', '[uint16]1', '[uint16]65535'),
+    'System.Int32'    : ('0', '1', '-1', '2147483647', '-2147483648'),
+    'System.UInt32'   : ('[uint32]0', '[uint32]1', '[uint32]4294967295'),
+    'System.Int64'    : ('0L', '1L', '-1L', '9223372036854775807L'),
+    'System.UInt64'   : ('[uint64]0', '[uint64]1', '[uint64]18446744073709551615'),
+    'System.Single'   : ('[single]0', '[single]1.5', '[single]-1.5'),
+    'System.Double'   : ('0.0', '1.5', '-1.5', '[double]::MaxValue'),
+    'System.Decimal'  : ('0d', '1.5d', '-1.5d', '[decimal]::MaxValue'),
+    'System.String'   : ("''", "'abc'", "'5'", "'0xabc'", "'-2'"),
+    'System.Char'     : ('[char]65', '[char]0', '[char]48'),
+    'System.Boolean'  : ('$true', '$false'),
+    'System.Object[]' : ('@()', '@(1, 2)', "@('a', 'b')", '@(10, 20, 30)'),
+    'System.Void'     : ('$null',),
+}
+
+
+#: The operand types the witnesses above do not reach every outcome of, each with one cell that
+#: proves it: the operator, the two operand types, what the shipped grid records, and what the type
+#: really produces there. The second half is measured — the same capture again, with
+#: `[int64]::MinValue`, `[single]::MaxValue` and `::MinValue`, `[decimal]::MinValue`, `[char]65535`,
+#: six more strings and three more collections added — and 390 of the 4096 binary cells moved in
+#: all, 93 of them by gaining a throw the resource says cannot happen. Every one of the 390 carries
+#: an operand named here, and no other type is named by one.
+#:
+#: `System.String` is the one the type ledger already had from the other side: `Byte + String`
+#: records `Int32`, and `1 + '2147483648'` is measured an `Int64` in `TYPES`.
+#:
+#: The recorded half of each row is a ratchet on the shipped resource; the produced half is what a
+#: regeneration would have to reproduce, and until one happens it is what the resource is wrong by.
+GRID_WITNESS_GAPS: dict[str, tuple[str, str, str, tuple[str, ...], tuple[str, ...]]] = {
+    'System.String': (
+        '+', 'System.Byte', 'System.String',
+        ('System.Int32', 'throw'),
+        ('System.Decimal', 'System.Double', 'System.Int32', 'System.Int64', 'throw'),
+    ),
+    'System.Int64': (
+        '-', 'System.Byte', 'System.Int64',
+        ('System.Int64',),
+        ('System.Double', 'System.Int64'),
+    ),
+    'System.Char': (
+        '*', 'System.UInt16', 'System.Char',
+        ('System.Int32',),
+        ('System.Double', 'System.Int32'),
+    ),
+    'System.Decimal': (
+        '-', 'System.Byte', 'System.Decimal',
+        ('System.Decimal',),
+        ('System.Decimal', 'throw'),
+    ),
+    'System.Single': (
+        '-band', 'System.Byte', 'System.Single',
+        ('System.Int64', 'System.UInt64'),
+        ('System.Int64', 'System.UInt64', 'throw'),
+    ),
+    'System.Object[]': (
+        '+', 'System.Int32', 'System.Object[]',
+        ('System.Int32', 'throw'),
+        ('System.Double', 'System.Int32', 'throw'),
+    ),
+}
+
+
 #: Every table whose entries a real host may be asked to *run*, in one place, so that the set the
 #: execution rule is written about and the set handed to a host cannot come apart: a table added to
 #: one and not the other is either runnable but never measured, or listed and refused at run time.

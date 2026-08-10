@@ -17,8 +17,8 @@ value of this type*. When an interval or a known-bits refinement is built it bec
 
 Throwing is a separate axis, which is why an operation answers a `Ps1Outcome` rather than a fact:
 `[int] $s` over a String is *an Int32, or it throws*, and a domain that had to fold that into one
-element could only answer that it knows nothing. `may_throw` is set only where a measurement
-recorded a throw; not knowing is `UNKNOWN`.
+element could only answer that it knows nothing. `may_throw` is `False` only where this module
+claims an operation cannot throw; not knowing is `Ps1Outcome(True, UNKNOWN)`.
 
 The type side has two views over one engine. `resolve_expression_type` is the single-type core: one
 expression, one `refinery.lib.scripts.ps1.dotnet.Ps1TypeName` or `None`. `candidate_types` is the
@@ -485,17 +485,28 @@ class Ps1Outcome(typing.NamedTuple):
     separate because they are not alternatives — an operation that yields an Int32 *or* throws is
     both, and a domain that had to choose could only answer `UNKNOWN` and lose the type it knows.
 
-    `may_throw` is asserted only where a measurement recorded a throw. An operation this module
-    cannot decide answers `Ps1Outcome(False, UNKNOWN)`: not knowing what happens is not a claim that
-    nothing is thrown, and a caller must read `UNKNOWN` as the refusal it is.
+    Both fields are read in the same direction, which is what makes the two of them one answer:
+    `may_throw` is `False` only where this module claims the operation *cannot* throw, exactly as
+    `UNKNOWN` is the value of one that names none. Not knowing anything is therefore
+    `Ps1Outcome(True, UNKNOWN)` and not `Ps1Outcome(False, UNKNOWN)` — the latter is a claim of
+    safety made by the one answer that has no grounds for any claim. It made generalising an operand
+    *remove* a throw: `1 / $x` for a divisor this module could not type answered that it cannot
+    throw, where the same division over a divisor it could type answered that it can. Only
+    `render` refusing to spell an `UNKNOWN` kept that out of a fold, which is a guard that holds one
+    operation deep and no further.
+
+    An operation known to throw and one this module declines to judge are the same outcome here,
+    which is what *may* means. Telling them apart would want a consumer that acts on a certain
+    throw, and there is none: the reader of this axis folds, and both answers stop it.
     """
 
     may_throw: bool
     value: Ps1Fact
 
 
-#: The refusal, named once so that the several places that decline read alike.
-NOTHING = Ps1Outcome(False, UNKNOWN)
+#: The refusal, named once so that the several places that decline read alike. It claims nothing on
+#: either axis — no value, and no freedom from a throw.
+NOTHING = Ps1Outcome(True, UNKNOWN)
 
 
 def type_of(fact: Ps1Fact) -> Ps1TypeName | None:
@@ -756,6 +767,44 @@ _SHIFT_WIDTHS = {_INT32: 32, _INT64: 64}
 #: value can have.
 _VOID = _type('System.Void')
 
+#: The operand types whose witnesses reach every outcome a cell over them has.
+#:
+#: A capture is a *lower* bound: it records what some values did. Reading a cell as *what this
+#: operation produces* is an upper-bound claim, and no witness list proves one — it can only fail to
+#: disprove it. So which cells may be read that way is declared, and the declaration is a
+#: measurement rather than an argument. The whole grid was captured a second time with the extremes
+#: the shipped witness list is missing — `[int64]::MinValue`, `[single]::MaxValue` and `::MinValue`,
+#: `[double]::MinValue` and `::Epsilon`, `[decimal]::MinValue`, `[char]65535`, six more strings and
+#: three more collections — and **390 of the 4096 binary cells moved**, 93 of them by gaining a
+#: throw they had not recorded. Every one of the 390 carries an operand this set leaves out, which
+#: is what makes it the right set rather than a hopeful one.
+#:
+#: What each exclusion costs is a cell, not a worry. `Byte + String` was `{Int32}` and is really
+#: `{Int32, Int64, Decimal, Double}`, which is the `1 + '2147483648'` the type corpus measures as an
+#: Int64 and this module used to answer `Int32` to. `Byte - Int64` was `{Int64}` and is really
+#: `{Int64, Double}`. `UInt16 * Char` was `{Int32}` and is really `{Int32, Double}`. `Byte -
+#: Decimal` and `Byte -band Single` were each recorded as never throwing and each throws.
+#:
+#: A `Double` is here although its own extremes are absent, because there is nothing for them to
+#: reach: arithmetic never leaves a Double — it saturates to an infinity rather than widening or
+#: throwing — and the second capture found no cell that a Double alone moves.
+#:
+#: The measurement is against the shipped resource, so regenerating it re-opens the question.
+#: `test.lib.scripts.ps1.corpus.GRID_WITNESSES` is the ratchet that says so out loud, and
+#: `GRID_WITNESS_GAPS` beside it carries the cell that convicts each type left out here.
+_SPANNED = frozenset({
+    _BOOLEAN,
+    _BYTE,
+    _DOUBLE,
+    _INT16,
+    _INT32,
+    _SBYTE,
+    _UINT16,
+    _UINT32,
+    _UINT64,
+    _VOID,
+})
+
 
 #: What a kernel computes in. A `Decimal` is here because PowerShell has one and Python's is the
 #: only faithful carrier for it; a `bool` because a comparison is an operation like any other; a
@@ -783,6 +832,15 @@ def apply(operator: str, left: Ps1Fact, right: Ps1Fact) -> Ps1Outcome:
     throw is one the kernel checks for itself — see `_throws_are_modelled`. Without that exception a
     single throwing pair anywhere in a cell would cost every other pair in it its fold; with it, a
     throw the kernel cannot see is still never folded past.
+
+    A value the kernel computed is answered without asking whether the witnesses span the operands,
+    and the two halves of that survive the question the cell alone does not. The *throw*: of the
+    cells the kernel computes in, the eight whose recorded silence about throwing is wrong are all a
+    `Decimal` subtraction, which `_throws_are_modelled` already covers — measured against the second
+    capture `_SPANNED` was found by. The *type*: an under-recorded set can only make `_stamped`
+    refuse, because which promotion a pair takes is settled by their types, so the one thing their
+    values decide is overflow, and an overflowed value leaves every candidate rather than landing in
+    the wrong one.
     """
     cell = binary_outcome(operator, *(_grid_type(left), _grid_type(right)))  # type: ignore[misc]
     if cell is None:
@@ -796,7 +854,7 @@ def apply(operator: str, left: Ps1Fact, right: Ps1Fact) -> Ps1Outcome:
             stamped = _stamped(computed, cell.types)
             if stamped is not UNKNOWN:
                 return Ps1Outcome(False, stamped)
-    return _from_cell(cell)
+    return _from_binary_cell(cell, _spans(left, right))
 
 
 def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
@@ -814,6 +872,10 @@ def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
     A `String` operand is never computed from. .NET parses one by rules Python does not share:
     measured, `[int]'1e3'` is 1000, `[int]'0x10'` is 16, `[int]' 5 '` is 5 and `[double]'1,5'` is
     15, while `[int]'abc'` throws. Those reach the grid for their type and stop there.
+
+    A source the witnesses do not span keeps its type and loses the rest, which is `[int]'abc'`
+    still being *an Int32 or a throw* — see `_from_conversion_cell` for why a cast may say that
+    where an operator may not.
     """
     source = _grid_type(fact)
     cell = None if source is None else conversion_outcome(target, source)
@@ -828,7 +890,7 @@ def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
             stamped = _stamped(computed, cell.types)
             if stamped is not UNKNOWN:
                 return Ps1Outcome(False, stamped)
-    return _from_cell(cell)
+    return _from_conversion_cell(cell, _spans(fact))
 
 
 def _cast_throws_are_modelled(target: Ps1TypeName) -> bool:
@@ -947,19 +1009,60 @@ def _grid_type(fact: Ps1Fact) -> Ps1TypeName | None:
     return type_of(fact)
 
 
-def _from_cell(cell) -> Ps1Outcome:
+def _spans(*facts: Ps1Fact) -> bool:
     """
-    What a cell says on its own, with nothing computed from the values. One type and no `$null`
-    among the outcomes is a typed value; `$null` and nothing else is `$null`, which is a value and
-    not an absence — `$null * 5` really is `$null`, and reading that cell as *unknown* would leave a
-    caller to guess where a measurement had already answered. Anything wider is a refusal, because a
-    caller cannot act on a value that might be either of two types.
+    Whether every operand is of a type the grid's witnesses reach every outcome of, so that the cell
+    they index may be read as what the operation *does* rather than as what a capture *saw*. See
+    `_SPANNED` for which types those are and what it took to find out.
     """
-    if not cell.types and cell.may_be_null and not cell.may_throw:
-        return Ps1Outcome(False, NULL)
+    return all(_grid_type(fact) in _SPANNED for fact in facts)
+
+
+def _cell_value(cell) -> Ps1Fact:
+    """
+    The fact a cell's recorded outcomes name. One type and no `$null` beside it is a typed value;
+    `$null` and no type at all is `$null`, which is a value and not an absence — `$null * 5` really
+    is `$null`, and reading that cell as *unknown* would leave a caller to guess where a measurement
+    had already answered. Anything wider names nothing, because a caller cannot act on a value that
+    might be either of two types.
+    """
+    if not cell.types and cell.may_be_null:
+        return NULL
     if len(cell.types) == 1 and not cell.may_be_null:
-        return Ps1Outcome(cell.may_throw, Ps1Typed(next(iter(cell.types))))
-    return Ps1Outcome(cell.may_throw, UNKNOWN)
+        return Ps1Typed(next(iter(cell.types)))
+    return UNKNOWN
+
+
+def _from_binary_cell(cell, spanned: bool) -> Ps1Outcome:
+    """
+    What a binary cell says on its own, with nothing computed from the values.
+
+    An operator's result type is decided by the operands' values as much as by their types — that is
+    the whole reason a cell is a set — so a cell whose operands the witnesses do not span is read as
+    nothing at all. Not its type, which was measured to be a lower bound and not a bound; not its
+    silence about throwing, which is a lower bound in the same way and is wrong in 93 cells; and not
+    its `$null`, which is a claim about a value like any other.
+    """
+    if not spanned:
+        return NOTHING
+    return Ps1Outcome(cell.may_throw, _cell_value(cell))
+
+
+def _from_conversion_cell(cell, spanned: bool) -> Ps1Outcome:
+    """
+    What a conversion cell says on its own, which is more than a binary cell says, because a cast's
+    result type is settled by what was *written*: a cast produces a value assignable to its target
+    or it throws, whatever the operand held. Measured, and not assumed from the shape of a cast:
+    every target's cells carry exactly that target, and the one exception is `[array]`, whose
+    accelerator names an abstract type and whose cells carry the one concrete array type it builds.
+
+    So a source the witnesses do not span keeps the type and loses what the witnesses were the only
+    evidence for — that the cast cannot throw, and that it answers `$null`.
+    """
+    named = _cell_value(cell)
+    if spanned:
+        return Ps1Outcome(cell.may_throw, named)
+    return Ps1Outcome(True, named if isinstance(named, Ps1Typed) else UNKNOWN)
 
 
 def _stamped(value: _Number, candidates: frozenset[Ps1TypeName]) -> Ps1Fact:
@@ -1041,13 +1144,13 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         return _COMPARISONS[operator](a, b)
     if operator == '/':
         if b == 0:
-            raise _Throws
+            return _divided_by_zero(b)
         if isinstance(a, int) and isinstance(b, int) and a % b == 0:
             return a // b
         return _decimal_result(operator_module.truediv(a, b))
     if operator == '%':
         if b == 0:
-            raise _Throws
+            return _divided_by_zero(b)
         if isinstance(a, int) and isinstance(b, int):
             remainder = abs(a) % abs(b)
             return -remainder if a < 0 else remainder
@@ -1056,6 +1159,23 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         return _finite(math.fmod(a, b))
     arithmetic = _ARITHMETIC.get(operator)
     return None if arithmetic is None else _decimal_result(arithmetic(a, b))
+
+
+def _divided_by_zero(divisor: _Number) -> _Number | None:
+    """
+    What dividing by a zero produces, which is not one answer: an integer or a `Decimal` divisor of
+    zero throws, and a floating one does not. Measured on both counts — the `/` and `%` cells over
+    `Int32` and over `Decimal` each recorded a throw, and the ones over `Double` and `Single`
+    recorded none although `0.0` is among the witnesses the capture divided by.
+
+    So a float names no value here rather than a throw: what a host produces is an infinity or a
+    `NaN`, and `_finite` is where the domain says it does not carry one. Raising instead would have
+    reported `1.5 / 0.0` as an operation that may throw, which is a claim about the one axis a
+    caller acts on and it is false.
+    """
+    if isinstance(divisor, float):
+        return None
+    raise _Throws
 
 
 def _numeric_pair(left: Ps1Fact, right: Ps1Fact):

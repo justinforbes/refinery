@@ -14,6 +14,7 @@ import unittest
 
 from typing import Callable, NamedTuple
 
+from test.lib.scripts.ps1.corpus import GRID_WITNESS_GAPS, GRID_WITNESSES
 from test.lib.scripts.ps1.test_oracle import TYPE_TRANSCRIPTS
 
 from refinery.lib.scripts.ps1.analysis.values import (
@@ -25,16 +26,24 @@ from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Fact,
     Ps1Outcome,
     Ps1Typed,
+    apply,
     convert,
     make_string_literal,
     read,
     render,
     type_of,
 )
-from refinery.lib.scripts.ps1.data import resolve_type
+from refinery.lib.scripts.ps1.data import (
+    OperatorOutcome,
+    binary_outcome,
+    conversion_outcome,
+    operand_witnesses,
+    resolve_type,
+)
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
+    Ps1BinaryExpression,
     Ps1ExpressionStatement,
     Ps1HereString,
     Ps1ParenExpression,
@@ -381,6 +390,228 @@ def _converted(expression: str) -> Ps1Outcome:
     return convert(_read(row.operand), _type(row.target))
 
 
+#: A measured row that assigns an expression to `$t` and writes it. The second witness is optional
+#: here where the other harvests require it, because a row whose value is `$null` has only the
+#: first: writing `$null` writes nothing at all, so there would be no second line to measure.
+_OPERATION_ROW = re.compile(
+    r'\$t = (?P<expression>.+?); Write-Output \(,\$t\)(?:; Write-Output \$t)?'
+)
+
+
+def _application(expression: str) -> Ps1BinaryExpression | None:
+    """
+    The one binary operator a measured expression applies, or `None` where it applies none. This
+    selection is by the parse where the numeral and cast harvests select on the text, because what
+    reads an operator row is a fold and a fold sees the parse; a row that stops being selected is
+    caught by the count rather than by the shape of the selection.
+    """
+    statement = Ps1Parser(F'$t = {expression}').parse().body[0]
+    if not isinstance(statement, Ps1ExpressionStatement):
+        return None
+    assignment = statement.expression
+    if not isinstance(assignment, Ps1AssignmentExpression):
+        return None
+    applied = assignment.value
+    return applied if isinstance(applied, Ps1BinaryExpression) else None
+
+
+def _operation_rows() -> dict[str, tuple[str, ...]]:
+    rows: dict[str, tuple[str, ...]] = {}
+    for row, transcript in TYPE_TRANSCRIPTS.items():
+        match = _OPERATION_ROW.fullmatch(row)
+        if match is None:
+            continue
+        expression = match.group('expression')
+        if _application(expression) is not None:
+            rows[expression] = transcript
+    return rows
+
+
+#: Every measured operation, keyed by the expression the row applies its operator in.
+OPERATION_ROWS: dict[str, tuple[str, ...]] = _operation_rows()
+
+#: The measured operations a 5.1 host answered by throwing, which are therefore the rows that have
+#: no value to be held against.
+THROWN_OPERATIONS: tuple[str, ...] = tuple(
+    expression for expression, transcript in OPERATION_ROWS.items() if _throws(transcript)
+)
+
+
+def _measured_operation(expression: str) -> tuple[str, str]:
+    """
+    The .NET type and the rendered value a host printed for a measured operation, read from the
+    `(,$t)` witness, which is the one witness every row has.
+    """
+    return _printed(OPERATION_ROWS[expression][0])
+
+
+def _measured_operation_fact(expression: str) -> Ps1Fact:
+    """
+    The fact a host printed for a measured operation. A row that reports no type and `<null>` is
+    `$null`, which is a value the operation produced rather than a sign that it produced none.
+    """
+    name, rendered = _measured_operation(expression)
+    if (name, rendered) == ('', '<null>'):
+        return NULL
+    return Ps1Constant(_type(name), _PAYLOADS[name](rendered))
+
+
+def _applied(expression: str) -> Ps1Outcome:
+    """
+    What `apply` makes of a measured operation: the operator the row spells, over the facts `read`
+    makes of the two operands it stands between. This is the call
+    `refinery.lib.scripts.ps1.deobfuscation.folding` makes for the same expression, so what is
+    answered here is what that pass sees.
+    """
+    applied = _application(expression)
+    assert applied is not None, expression
+    return apply(applied.operator.lower(), read(applied.left), read(applied.right))
+
+
+#: The measured operations the domain answers with the exact value a host printed for them. Each is
+#: a fold the constant folding pass performs, so this list is what says a fold was not lost.
+PINNED_OPERATIONS: tuple[str, ...] = (
+    '0xFFFFFFFF -bxor 0x5A',
+    '0xFFFFFFFF + 0',
+    '0xFFFFFFFFFFFFFFFF + 0',
+    '1kb + 0',
+    '1L + 0',
+    '10d + 0',
+    '10 - $null',
+    '$null + 5',
+    '$null - 5',
+    '$null -band 1',
+    '$null * 1',
+    '2147483647 + 1',
+    '100000000000000d * 100000000000000d',
+    '-2147483647 - 1',
+    '10 -ne 20',
+)
+
+#: The measured operations whose result a host printed to fewer digits than the value has: 5.1
+#: writes a Double as fifteen significant figures, and `512MB * 512MB` is 2 to the 58th exactly.
+#: What such a row measures is the widening, so the type is what the value is held against.
+ABBREVIATED_OPERATIONS: tuple[str, ...] = (
+    '512MB * 512MB',
+    '9223372036854775807 + 2',
+)
+
+#: The binary operators the grid was captured for: the five arithmetic, the three bitwise, the two
+#: shifts and the six comparisons.
+GRID_OPERATORS: tuple[str, ...] = (
+    '+',
+    '-',
+    '*',
+    '/',
+    '%',
+    '-band',
+    '-bor',
+    '-bxor',
+    '-shl',
+    '-shr',
+    '-eq',
+    '-ne',
+    '-lt',
+    '-le',
+    '-gt',
+    '-ge',
+)
+
+#: The operand types the shipped grid's witnesses reach every outcome of: every type the capture
+#: used as an operand, less the ones a `GRID_WITNESS_GAPS` row convicts.
+SPANNED_TYPES: frozenset[str] = frozenset(GRID_WITNESSES) - frozenset(GRID_WITNESS_GAPS)
+
+#: The conversion cells every witness of their source threw for. The capture recorded no type at
+#: all for a `[char]` of a Decimal or of a Single, so there is nothing in either cell for a cast
+#: over a source the witnesses fall short of to keep.
+EVERY_WITNESS_THREW: tuple[tuple[str, str], ...] = (
+    ('System.Char', 'System.Decimal'),
+    ('System.Char', 'System.Single'),
+)
+
+
+def _grid_operand(name: str) -> Ps1Fact:
+    """
+    A fact of the grid's operand type `name` that pins no value, so that the cell it indexes is the
+    only place an answer about it could come from. The `System.Void` row is `$null`'s — the corpus
+    lists `$null` as the witness it was captured from — and there is no value of that type for a
+    `Ps1Typed` to stand for.
+    """
+    return NULL if name == 'System.Void' else Ps1Typed(_type(name))
+
+
+def _cell(operator: str, left: str | Ps1TypeName, right: str | Ps1TypeName) -> OperatorOutcome:
+    """
+    The grid cell an operator and two operand types index. A cell the grid does not cover raises
+    here, naming what was asked for, rather than reaching an expectation as `None`: a question the
+    grid stopped answering has to fail where it is asked and say which question it was.
+    """
+    cell = binary_outcome(operator, left, right)
+    if cell is None:
+        raise KeyError(F'the grid has no cell for {left} {operator} {right}')
+    return cell
+
+
+def _cast_cell(target: str | Ps1TypeName, source: str | Ps1TypeName) -> OperatorOutcome:
+    """
+    The conversion cell a target and a source type index, read the way `_cell` reads a binary one.
+    """
+    cell = conversion_outcome(target, source)
+    if cell is None:
+        raise KeyError(F'the grid has no cell for [{target}] of {source}')
+    return cell
+
+
+def _recorded(cell: OperatorOutcome) -> tuple[str, ...]:
+    """
+    A grid cell spelled the way `GRID_WITNESS_GAPS` spells one: the types it was observed to
+    produce, with `throw` and `null` beside them where it was observed to do either, sorted so that
+    the shipped cell and the recorded one can be compared.
+    """
+    names = [str(one) for one in cell.types]
+    if cell.may_throw:
+        names.append('throw')
+    if cell.may_be_null:
+        names.append('null')
+    return tuple(sorted(names))
+
+
+def _generalisations(fact: Ps1Fact) -> tuple[Ps1Fact, ...]:
+    """
+    The facts that say strictly less about the same value: that it carries the type it carries,
+    where it carries one, and that nothing at all is known about it.
+    """
+    carried = type_of(fact)
+    return (UNKNOWN,) if carried is None else (Ps1Typed(carried), UNKNOWN)
+
+
+#: One operand of each type the domain builds facts of, which is what the questions below about
+#: generalising an operand are asked over. A zero of each numeric kind is here because the divisor
+#: is what decides whether a division throws, and the three kinds do not agree about it.
+OPERANDS: tuple[Ps1Fact, ...] = (
+    NULL,
+    MEASURED['0xFF'],
+    MEASURED['1L'],
+    MEASURED['10d'],
+    MEASURED['1.5'],
+    Ps1Constant(INT32, 0),
+    Ps1Constant(INT64, 0),
+    Ps1Constant(DECIMAL, decimal.Decimal(0)),
+    Ps1Constant(DOUBLE, 0.0),
+    Ps1Constant(BOOLEAN, True),
+    Ps1Constant(CHAR, 'A'),
+    Ps1Constant(STRING, 'abc'),
+)
+
+#: A division and a remainder by a zero of each numeric kind, as the type it is written in, the
+#: value divided and the zero it is divided by.
+ZERO_DIVISIONS: tuple[tuple[Ps1TypeName, Ps1Fact, Ps1Fact], ...] = (
+    (INT32, Ps1Constant(INT32, 5), Ps1Constant(INT32, 0)),
+    (DECIMAL, Ps1Constant(DECIMAL, decimal.Decimal(5)), Ps1Constant(DECIMAL, decimal.Decimal(0))),
+    (DOUBLE, Ps1Constant(DOUBLE, 1.5), Ps1Constant(DOUBLE, 0.0)),
+)
+
+
 class TestPs1MeasuredNumerals(unittest.TestCase):
     """
     A numeric literal's spelling decides its .NET type as much as its digits do, and every
@@ -489,7 +720,7 @@ class TestPs1FactLattice(unittest.TestCase):
 class TestPs1Outcome(unittest.TestCase):
 
     def test_the_refusal_names_no_value_and_claims_no_absence_of_a_throw(self):
-        self.assertEqual(NOTHING, Ps1Outcome(False, UNKNOWN))
+        self.assertEqual(NOTHING, Ps1Outcome(True, UNKNOWN))
         self.assertIsNone(type_of(NOTHING.value))
 
     def test_an_outcome_carries_a_type_and_a_possible_throw_at_once(self):
@@ -923,6 +1154,354 @@ class TestPs1ConvertRefusals(unittest.TestCase):
         not.
         """
         self.assertEqual(convert(Ps1Constant(DOUBLE, 1.5), DECIMAL).value, Ps1Typed(DECIMAL))
+
+
+class TestPs1OutcomeIsWeakOnBothAxes(unittest.TestCase):
+    """
+    An outcome's two fields are read in the same direction: `may_throw` is `False` only where the
+    domain claims the operation *cannot* throw, exactly as `UNKNOWN` is the value of one that names
+    none. So an answer about operands the domain knows less about may lose a value and may gain a
+    throw, and never the other way round — a throw that a *weaker* premise takes away is one no
+    measurement ever removed.
+    """
+
+    def test_an_operand_nothing_is_known_about_leaves_both_axes_unclaimed(self):
+        unclaimed = Ps1Outcome(True, UNKNOWN)
+        for operator in GRID_OPERATORS:
+            for fact in OPERANDS:
+                with self.subTest(F'{fact!r} {operator}'):
+                    self.assertEqual(apply(operator, UNKNOWN, fact), unclaimed)
+                    self.assertEqual(apply(operator, fact, UNKNOWN), unclaimed)
+        for target in (INT32, DOUBLE, STRING, CHAR, BOOLEAN, DECIMAL):
+            with self.subTest(str(target)):
+                self.assertEqual(convert(UNKNOWN, target), unclaimed)
+
+    def test_generalising_a_divisor_does_not_take_away_the_throw_it_had(self):
+        """
+        Division by a zero divisor is where the two axes came apart: the domain reports a possible
+        throw for the pair it is handed, and an answer for a divisor it knows less about must not
+        be that the division is safe. `Ps1Outcome(False, UNKNOWN)` reads as exactly that to the
+        folding pass, which folds an outcome that cannot throw.
+        """
+        five = Ps1Constant(INT32, 5)
+        zero = Ps1Constant(INT32, 0)
+        self.assertEqual(apply('/', five, zero), Ps1Outcome(True, UNKNOWN))
+        self.assertEqual(apply('/', five, Ps1Typed(INT32)).may_throw, True)
+        self.assertEqual(apply('/', five, UNKNOWN), Ps1Outcome(True, UNKNOWN))
+        self.assertEqual(apply('/', Ps1Typed(INT32), zero).may_throw, True)
+        self.assertEqual(apply('%', five, zero), Ps1Outcome(True, UNKNOWN))
+        self.assertEqual(apply('%', five, UNKNOWN), Ps1Outcome(True, UNKNOWN))
+
+    def test_generalising_an_operand_never_takes_away_a_throw(self):
+        """
+        Wherever the domain reports a possible throw, it reports one for every pair that says less
+        about the same two values. Nothing narrows the premise: a throw reported for operands the
+        domain knows exactly is a throw it has grounds for, and an answer that has *fewer* grounds
+        cannot be the one that clears the operation.
+        """
+        for operator in GRID_OPERATORS:
+            for left in OPERANDS:
+                for right in OPERANDS:
+                    if not apply(operator, left, right).may_throw:
+                        continue
+                    for wider in _generalisations(left):
+                        with self.subTest(F'{wider!r} {operator} {right!r}'):
+                            self.assertEqual(apply(operator, wider, right).may_throw, True)
+                    for wider in _generalisations(right):
+                        with self.subTest(F'{left!r} {operator} {wider!r}'):
+                            self.assertEqual(apply(operator, left, wider).may_throw, True)
+
+    def test_generalising_the_operand_of_a_cast_the_host_threw_on_keeps_the_throw(self):
+        for expression in THROWN:
+            row = CAST_ROWS[expression]
+            operand = _read(row.operand)
+            target = _type(row.target)
+            asked = [operand, *_generalisations(operand)]
+            with self.subTest(expression):
+                self.assertEqual(
+                    [convert(fact, target).may_throw for fact in asked], [True] * len(asked))
+
+
+class TestPs1ZeroDivisors(unittest.TestCase):
+    """
+    Dividing by a zero is not one operation with one answer, and which answer it has is measured
+    rather than reasoned about: the `/` and `%` cells over Int32 and over Decimal each recorded a
+    throw, and the ones over Double recorded none although `0.0` is one of the values the capture
+    divided by. A domain that raised for every zero would be claiming a throw on the one axis a
+    caller acts on, with nothing that ever observed one.
+    """
+
+    def test_a_zero_divisor_throws_exactly_where_the_capture_recorded_a_throw(self):
+        expected = {
+            ('/', 'System.Int32')   : True,
+            ('/', 'System.Decimal') : True,
+            ('/', 'System.Double')  : False,
+            ('%', 'System.Int32')   : True,
+            ('%', 'System.Decimal') : True,
+            ('%', 'System.Double')  : False,
+        }
+        self.assertEqual(
+            {
+                (operator, str(kind)): _cell(operator, kind, kind).may_throw
+                for operator in ('/', '%')
+                for kind, _, _ in ZERO_DIVISIONS
+            },
+            expected,
+        )
+        self.assertEqual(
+            {
+                (operator, str(kind)): apply(operator, dividend, zero).may_throw
+                for operator in ('/', '%')
+                for kind, dividend, zero in ZERO_DIVISIONS
+            },
+            expected,
+        )
+
+    def test_a_float_divided_by_zero_names_no_value_and_no_throw(self):
+        """
+        What a host produces there is an infinity, which is a value this domain deliberately does
+        not carry — so the answer names the Double the cell records and no number, and a fold is
+        refused for want of a value rather than by a throw that was never observed.
+        """
+        for operator in ('/', '%'):
+            with self.subTest(operator):
+                outcome = apply(
+                    operator, Ps1Constant(DOUBLE, 1.5), Ps1Constant(DOUBLE, 0.0))
+                self.assertEqual(outcome, Ps1Outcome(False, Ps1Typed(DOUBLE)))
+                self.assertIsNone(render(outcome.value))
+
+
+class TestPs1MeasuredOperators(unittest.TestCase):
+    """
+    What `left <operator> right` produces, held against what a 5.1 host printed for the same
+    expression. `apply` is asked here exactly as the folding pass asks it, so what this class
+    formalizes is which measured operations a script is rewritten by and to what — and the failure
+    it exists to catch is an answer the host did not produce.
+    """
+
+    def test_every_measured_operation_is_selected(self):
+        self.assertEqual(
+            len(OPERATION_ROWS), 32, 'a measured operation was added or withdrawn')
+        self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
+        self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
+        self.assertEqual(
+            sorted(THROWN_OPERATIONS), ["16 + 'file'", '[decimal]::MaxValue + 1'])
+
+    def test_a_measured_operation_the_domain_pins_is_pinned_to_the_fact_the_host_printed(self):
+        self.assertEqual(
+            {expression: _applied(expression) for expression in PINNED_OPERATIONS},
+            {
+                expression: Ps1Outcome(False, _measured_operation_fact(expression))
+                for expression in PINNED_OPERATIONS
+            },
+        )
+
+    def test_the_measured_operations_a_fold_rewrites_are_the_ones_it_has_a_value_for(self):
+        """
+        The folding pass rewrites an outcome that cannot throw and names a value with a spelling.
+        Reading a cell more carefully costs none of those, because a value the kernel computed is
+        answered on the kernel's own evidence and never asks whether the cell's witnesses reached
+        far enough.
+        """
+        rewritten = [
+            expression for expression in OPERATION_ROWS
+            if not _applied(expression).may_throw
+            and render(_applied(expression).value) is not None
+        ]
+        self.assertEqual(
+            sorted(rewritten), sorted(PINNED_OPERATIONS + ABBREVIATED_OPERATIONS))
+
+    def test_no_measured_operation_is_answered_with_a_type_the_host_did_not_print(self):
+        """
+        A cell records what some values did, so a type read out of one is a claim about every
+        value. `1 + '2147483648'` is where the two come apart: the host printed an Int64 that the
+        cell an Int32 and a String index does not carry.
+        """
+        named = {
+            expression: type_of(_applied(expression).value)
+            for expression in OPERATION_ROWS
+            if type_of(_applied(expression).value) is not None
+        }
+        self.assertEqual(
+            named,
+            {
+                expression: _type(_measured_operation(expression)[0])
+                for expression in named
+            },
+        )
+
+    def test_an_operation_the_host_threw_on_is_left_with_nothing_to_fold_to(self):
+        self.assertEqual(
+            {
+                expression: (
+                    _applied(expression).may_throw, render(_applied(expression).value))
+                for expression in THROWN_OPERATIONS
+            },
+            {expression: (True, None) for expression in THROWN_OPERATIONS},
+        )
+
+    def test_an_overflow_the_host_widened_is_answered_as_the_double_it_produced(self):
+        """
+        The digits a host printed for these two are fewer than the value carries, so the type is
+        what the row measures: a domain computing in Python's unbounded integers would report the
+        exact sum under an integer type the host never produced.
+        """
+        self.assertEqual(
+            {
+                expression: (
+                    _applied(expression).may_throw, type_of(_applied(expression).value))
+                for expression in ABBREVIATED_OPERATIONS
+            },
+            {
+                expression: (False, _type(_measured_operation(expression)[0]))
+                for expression in ABBREVIATED_OPERATIONS
+            },
+        )
+
+
+class TestPs1CellsTheWitnessesReach(unittest.TestCase):
+    """
+    A grid cell records what some values were observed to do, which is a lower bound. Reading one
+    as what the operation *produces* is a claim about every value, and the operand types the
+    shipped witnesses reach every outcome of are the ones that claim was measured to survive over.
+    `test.lib.scripts.ps1.corpus.GRID_WITNESS_GAPS` carries the cell that convicts each of the
+    others, so what an exclusion costs is a cell rather than a worry.
+    """
+
+    def test_the_operand_types_an_answered_cell_stands_on_are_the_ones_reached(self):
+        answered = {
+            (operator, left, right)
+            for operator in GRID_OPERATORS
+            for left in GRID_WITNESSES
+            for right in GRID_WITNESSES
+            if apply(operator, _grid_operand(left), _grid_operand(right)) != NOTHING
+        }
+        self.assertEqual(
+            sorted({name for _, left, right in answered for name in (left, right)}),
+            sorted(SPANNED_TYPES),
+        )
+
+    def test_the_cell_a_witness_gap_convicts_is_not_answered_from(self):
+        """
+        Each gap row is one cell measured twice: what the shipped grid records over its witnesses,
+        and what the operand type really produces there. The first is what an answer would come
+        from and the second is why it may not.
+        """
+        for name, row in GRID_WITNESS_GAPS.items():
+            operator, left, right, recorded, produced = row
+            with self.subTest(name):
+                self.assertEqual(_recorded(_cell(operator, left, right)), recorded)
+                self.assertNotEqual(recorded, produced)
+                self.assertEqual(
+                    apply(operator, _grid_operand(left), _grid_operand(right)), NOTHING)
+
+    def test_the_type_ledger_contradicts_the_cell_a_string_operand_indexes(self):
+        """
+        What an addition does to a string is decided by which string, and the ledger holds one the
+        capture never wrote out: measured, `1 + '2147483648'` is an Int64, which is a type the cell
+        an Int32 and a String index does not carry at all.
+        """
+        self.assertEqual(_measured("1 + '2147483648'"), ('System.Int64', '2147483649'))
+        self.assertEqual(
+            sorted(str(one) for one in _cell('+', INT32, STRING).types),
+            ['System.Double', 'System.Int32'],
+        )
+        self.assertEqual(_applied("1 + '2147483648'"), NOTHING)
+
+    def test_a_cell_over_operands_the_witnesses_reach_is_still_the_answer(self):
+        """
+        Measured, `$null * 1` really is `$null` — a value the operation produced and not a sign
+        that it produced none — and `$null` is the witness the grid's `System.Void` row was
+        captured from.
+        """
+        self.assertEqual(_measured_operation_fact('$null * 1'), NULL)
+        self.assertEqual(apply('*', NULL, Ps1Typed(INT32)), Ps1Outcome(False, NULL))
+        self.assertEqual(_cell('-band', INT32, INT32).single_type, INT32)
+        self.assertEqual(
+            apply('-band', Ps1Typed(INT32), Ps1Typed(INT32)), Ps1Outcome(False, Ps1Typed(INT32)))
+
+
+class TestPs1SpanRestsOnTheShippedGrid(unittest.TestCase):
+    """
+    Which cells may be read as a fact was measured against the resource this repository ships, by
+    capturing the whole grid a second time over the extremes the shipped witness list is missing.
+    No test can re-run that, so the witness list is a ratchet: a regenerated resource has to fail
+    here rather than leave the measurement standing on a capture it was not made from.
+    """
+
+    def test_the_shipped_grid_carries_the_witnesses_the_span_was_measured_from(self):
+        self.assertEqual(operand_witnesses(), GRID_WITNESSES)
+
+    def test_every_operand_type_the_grid_was_captured_over_is_reached_or_convicted(self):
+        self.assertEqual(sorted(set(GRID_WITNESS_GAPS) - set(GRID_WITNESSES)), [])
+        self.assertEqual(
+            sorted(SPANNED_TYPES | frozenset(GRID_WITNESS_GAPS)), sorted(GRID_WITNESSES))
+
+    def test_the_cell_a_gap_row_names_is_one_the_type_it_convicts_is_an_operand_of(self):
+        for name, row in GRID_WITNESS_GAPS.items():
+            operator, left, right, _, _ = row
+            with self.subTest(name):
+                self.assertIn(name, (left, right))
+                self.assertIsNotNone(binary_outcome(operator, left, right))
+
+    def test_every_operator_the_span_is_read_over_has_a_grid_of_its_own(self):
+        covered = {
+            operator: binary_outcome(operator, INT32, INT32) is not None
+            for operator in GRID_OPERATORS
+        }
+        self.assertEqual(covered, {operator: True for operator in GRID_OPERATORS})
+
+
+class TestPs1CastNamesItsTargetWhereAnOperatorNamesNothing(unittest.TestCase):
+    """
+    A cast differs from an operator in exactly one way here: what a cast produces is settled by the
+    type that was written, where what an operator produces is settled by its operands' values as
+    much as by their types. So over a source the witnesses fall short of, a cast still names the
+    target and loses only what the witnesses were the evidence for, while an operator over the same
+    operand is left with nothing to say at all.
+    """
+
+    def test_a_cast_from_a_source_the_witnesses_fall_short_of_still_names_its_target(self):
+        answers = {
+            (target, source): convert(_grid_operand(source), _type(target))
+            for source in GRID_WITNESS_GAPS
+            for target in GRID_WITNESSES
+            if conversion_outcome(target, source) is not None
+        }
+        self.assertEqual(len(answers), 84, 'a conversion cell was added or withdrawn')
+        self.assertEqual(
+            {cell: answer for cell, answer in answers.items() if cell not in EVERY_WITNESS_THREW},
+            {
+                cell: Ps1Outcome(True, Ps1Typed(_type(cell[0])))
+                for cell in answers
+                if cell not in EVERY_WITNESS_THREW
+            },
+        )
+        self.assertEqual(
+            {cell: answers[cell] for cell in EVERY_WITNESS_THREW},
+            {cell: Ps1Outcome(True, UNKNOWN) for cell in EVERY_WITNESS_THREW},
+        )
+
+    def test_such_a_cast_no_longer_claims_that_it_cannot_throw(self):
+        """
+        The cell for a `[string]` of a Char recorded no throw, which is a lower bound in the same
+        way its type is: the three characters the capture wrote out are not every character. The
+        type is what a cast produces or throws trying, so it stands where the silence does not.
+        """
+        self.assertEqual(_cast_cell(STRING, CHAR).may_throw, False)
+        self.assertEqual(convert(Ps1Typed(CHAR), STRING), Ps1Outcome(True, Ps1Typed(STRING)))
+
+    def test_an_operator_over_the_same_source_is_left_without_an_answer(self):
+        """
+        Measured, `[int]'5'` is Int32 5 and `1 + '5'` is Int32 6. The cast still names the Int32 the
+        host stamped it with, where the operator names nothing: what `+` produces over a String was
+        measured to depend on which string, and `[int]` of one is an Int32 or a throw whichever
+        string it is handed.
+        """
+        self.assertEqual(_measured("[int]'5'"), ('System.Int32', '5'))
+        self.assertEqual(_converted("[int]'5'"), Ps1Outcome(True, Ps1Typed(INT32)))
+        self.assertEqual(_measured("1 + '5'"), ('System.Int32', '6'))
+        self.assertEqual(_applied("1 + '5'"), NOTHING)
 
 
 if __name__ == '__main__':

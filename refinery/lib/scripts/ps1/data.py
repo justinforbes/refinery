@@ -895,6 +895,18 @@ def _outcome(recorded: list[str] | None) -> OperatorOutcome | None:
     )
 
 
+def operand_witnesses() -> dict[str, tuple[str, ...]]:
+    """
+    The expressions each grid cell was measured over, keyed by the type they produce. This is the
+    capture's *method* rather than its result, and it is published because a cell is a lower bound:
+    a caller deciding how far to trust one has to know what was tried, and a caller that recorded
+    such a decision has to be able to tell that the ground under it moved.
+    """
+    return {
+        name: tuple(texts) for name, texts in _OPERATORS['witnesses'].items()
+    }
+
+
 def binary_outcome(
     operator: str,
     left: str | Ps1TypeName,
