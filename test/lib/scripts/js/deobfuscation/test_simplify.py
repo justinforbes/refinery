@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
@@ -1159,3 +1160,35 @@ class TestConcatReassociation(TestJsDeobfuscator):
 
     def test_template_literal_not_merged(self):
         self.assertEqual("f(x + `a` + 'b');", self._simplify("f(x + `a` + 'b');"))
+
+
+class TestGlobalValueNameOperands(TestJsDeobfuscator):
+    """
+    `undefined`, `NaN` and `Infinity` name values that the tool already reads through a call, and it
+    already spells them back as `void 0`, `0 / 0` and `1e999`. An operand written with one of the
+    names is therefore as constant as one written with those expressions, but an arithmetic or a
+    concatenation reading it is left standing. Node says what each expression here denotes.
+    """
+
+    def test_the_same_operands_spelled_without_a_name_are_folded(self):
+        self.assertEqual('1e999;', self._simplify('1e999 + 1;'))
+        self.assertEqual('0;', self._simplify('1 / 1e999;'))
+        self.assertEqual("f(x + 'aundefined');", self._simplify("f(x + 'a' + void 0);"))
+        self.assertEqual("f(x + 'aNaN');", self._simplify("f(x + 'a' + (0 / 0));"))
+
+    @unittest.expectedFailure
+    def test_arithmetic_reading_a_global_value_name_is_folded(self):
+        """
+        Node: `Infinity` and `0`.
+        """
+        self.assertEqual('1e999;', self._simplify('Infinity + 1;'))
+        self.assertEqual('0;', self._simplify('1 / Infinity;'))
+
+    @unittest.expectedFailure
+    def test_a_global_value_name_concatenated_onto_a_string_is_merged(self):
+        """
+        Node: `aundefined`, `aNaN` and `aInfinity`.
+        """
+        self.assertEqual("f(x + 'aundefined');", self._simplify("f(x + 'a' + undefined);"))
+        self.assertEqual("f(x + 'aNaN');", self._simplify("f(x + 'a' + NaN);"))
+        self.assertEqual("f(x + 'aInfinity');", self._simplify("f(x + 'a' + Infinity);"))
