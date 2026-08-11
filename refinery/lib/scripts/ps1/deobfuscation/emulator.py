@@ -1682,12 +1682,22 @@ class Ps1ForEachPipeline(Transformer):
     @staticmethod
     def _results_to_node(results: list[_Value]) -> Expression | None:
         """
-        Turn the per-item scriptblock outputs of `<array> | %{ ... }` into a node. A pipeline that
-        produces single characters is the canonical char-building obfuscation, so those are joined
-        into one string (indexing a char string and indexing the equivalent array agree). Results
-        with multi-character or non-string elements stay a
-        `refinery.lib.scripts.ps1.model.Ps1ArrayLiteral`, so e.g. `('foo','bar' | %{ $_ })[1]` is
-        still the element `'bar'` rather than a joined character.
+        Turn the per-item scriptblock outputs of `<array> | %{ ... }` into a node.
+
+        **A result of one-character strings is joined, and that is a ledgered wrong answer.** A
+        pipeline builds a collection whatever its items are: measured, `@('a', 'b') | %{ $_ }` is an
+        `Object[]` of two, so `.Count` is 2, `-join '-'` writes the separator and `foreach` runs
+        twice, and the join changes each of those.
+
+        What it is standing in for is **`$OFS`**, which is the thing to build before deleting it.
+        The shape both loader samples use is `$OFS = ''` followed by `"$chars"`, and interpolating
+        a collection joins it on `$OFS` — so a unit that does not read `$OFS` renders that array
+        with the default space and loses the whole chain. Deleting the join without `$OFS` was
+        measured: two real samples stop resolving entirely. The `-join ''` spelling of the same
+        thing already folds without it.
+
+        `('foo', 'bar' | %{ $_ })[1]` is the one case the join declines, which is the same case
+        stated for one shape of it.
         """
         if not results:
             return None
