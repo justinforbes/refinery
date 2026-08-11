@@ -46,7 +46,6 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     _to_uint32,
     canonical_array_index,
     eval_binary_op,
-    js_parse_int,
     js_typeof,
     name_is_unbound,
     names_global_value,
@@ -99,6 +98,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
 )
+from refinery.lib.scripts.js.numbers import js_parse_float, js_parse_int
 
 MAX_ITERATIONS = 100_000
 MAX_STRING_LEN = 1_000_000
@@ -831,30 +831,7 @@ def _global_parse_int(args: list[Value]) -> Value:
 def _global_parse_float(args: list[Value]) -> Value:
     if not args:
         return float('nan')
-    s = to_string(args[0]).strip()
-    if not s:
-        return float('nan')
-    digits: list[str] = []
-    i = 0
-    if i < len(s) and s[i] in '+-':
-        digits.append(s[i])
-        i += 1
-    has_dot = False
-    while i < len(s):
-        if s[i].isdigit():
-            digits.append(s[i])
-        elif s[i] == '.' and not has_dot:
-            digits.append(s[i])
-            has_dot = True
-        else:
-            break
-        i += 1
-    if not digits or digits == ['+'] or digits == ['-']:
-        return float('nan')
-    try:
-        return float(''.join(digits))
-    except ValueError:
-        return float('nan')
+    return js_parse_float(to_string(args[0]))
 
 
 @_register((None, 'isNaN'))

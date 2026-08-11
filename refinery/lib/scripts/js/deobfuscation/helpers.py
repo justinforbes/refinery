@@ -89,10 +89,9 @@ from refinery.lib.scripts.js.model import (
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import (
-    STRING_NUMERIC_TRIM,
-    apply_sign,
     is_negative_zero,
     js_number_to_string,
+    js_string_to_number,
     to_js_number,
 )
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
@@ -309,42 +308,18 @@ def to_boolean(value: Value) -> bool:
 
 def to_number(value: Value) -> float:
     """
-    Apply the ECMA-262 ToNumber abstract operation. The string case is not Python's `float`: that
-    function reads a wider grammar than JavaScript's StrNumericLiteral, and every place it is wider
-    has to be refused before it is asked. It accepts `inf`, `infinity` and `nan`, where only the
-    exact spelling `Infinity` names an infinity; it accepts a numeric separator; and it accepts any
-    Unicode decimal digit, where the language accepts only `0` through `9` — hence the ASCII test,
-    which is total over the grammar because a StrNumericLiteral has no character outside that range.
-
-    The sign is applied to the magnitude rather than read out of the parsed integer, because a
-    signed zero is a Number that Python's integers cannot hold: `Number('-0')` is `-0`, and `1 / -0`
-    is `-Infinity`.
+    Apply the ECMA-262 ToNumber abstract operation, which is a dispatch on the type of a value. The
+    string case is the only one with a grammar behind it, and that grammar is `js_string_to_number`
+    in the Number domain, where the reading of a Number belongs; asking Python's `float` here
+    instead would answer a different question, its own grammar being wider than the language's in
+    several places at once.
     """
     if isinstance(value, bool):
         return 1.0 if value else 0.0
     if isinstance(value, (int, float)):
         return to_js_number(value)
     if isinstance(value, str):
-        s = value.strip(STRING_NUMERIC_TRIM)
-        if not s:
-            return 0.0
-        if not s.isascii() or '_' in s:
-            return float('nan')
-        if s[0] in '+-' and len(s) > 2 and s[1] == '0' and s[2] in 'xXoObB':
-            return float('nan')
-        try:
-            integer = int(s, 0)
-        except ValueError:
-            pass
-        else:
-            return apply_sign(to_js_number(abs(integer)), s[0] == '-')
-        magnitude = s[1:] if s[0] in '+-' else s
-        if magnitude.isalpha() and magnitude != 'Infinity':
-            return float('nan')
-        try:
-            return float(s)
-        except ValueError:
-            return float('nan')
+        return js_string_to_number(value)
     if value is JS_NULL:
         return 0.0
     if isinstance(value, list):
@@ -1038,71 +1013,6 @@ def is_nullish(node: Node, model: SemanticModel) -> bool | None:
     if not known:
         return None
     return value is None or value is JS_NULL
-
-
-_MAX_DIGITS_IN_A_DOUBLE = {
-    radix: math.ceil(1024 / math.log2(radix)) for radix in range(2, 37)
-}
-"""
-Per radix, the digit count past which a written-out integer is certainly outside the double range
-and so denotes an infinity. Answering from the count rather than from the value keeps `parseInt`
-total: building the integer first would make it hostage to CPython's limit on converting a long
-decimal string, which raises rather than returning the `Infinity` the language specifies.
-"""
-
-
-def js_parse_int(s: str, radix: int = 0) -> float | None:
-    """
-    Replicate the semantics of JavaScript's `parseInt(string, radix)`. Strips leading whitespace,
-    handles an optional `+`/`-` sign, and skips a leading `0x`/`0X` prefix for radix 16. Parses
-    leading characters valid for the given radix (2-36) and stops at the first invalid one. Returns
-    `None` when no valid digits are found (JS would return `NaN`).
-
-    A radix of `0` is the language's "not supplied" — `parseInt(s)` and `parseInt(s, 0)` are the
-    same call — and it is not a synonym for 10: an unsupplied radix reads a `0x` prefix as selecting
-    base 16, so `parseInt('0x1f')` is `31`. A caller that defaults the radix to 10 instead answers
-    `0` for that string, having stopped at the `x`.
-
-    The digits are accumulated exactly and only then coerced, because `parseInt` reads the whole
-    digit string before producing a Number: enough digits and the result is `Infinity`, and a digit
-    string past 2^53 names the nearest double rather than itself. Leading zeros are dropped as they
-    are read and the count is answered as soon as it passes the bound, so a digit string of any
-    length costs what its significant prefix costs rather than what it is.
-    """
-    s = s.strip(STRING_NUMERIC_TRIM)
-    if not s:
-        return None
-    negative = False
-    if s[0] in '+-':
-        negative = s[0] == '-'
-        s = s[1:]
-    hex_prefixed = len(s) >= 2 and s[0] == '0' and s[1] in 'xX'
-    if radix == 0:
-        radix = 16 if hex_prefixed else 10
-    if not (2 <= radix <= 36):
-        return None
-    if radix == 16 and hex_prefixed:
-        s = s[2:]
-    limit = _MAX_DIGITS_IN_A_DOUBLE[radix]
-    digits: list[str] = []
-    scanned = False
-    for ch in s:
-        if '0' <= ch <= '9':
-            if ord(ch) - ord('0') >= radix:
-                break
-        elif 'a' <= ch <= 'z' or 'A' <= ch <= 'Z':
-            if ord(ch.lower()) - ord('a') + 10 >= radix:
-                break
-        else:
-            break
-        scanned = True
-        if digits or ch != '0':
-            digits.append(ch)
-        if len(digits) > limit:
-            return apply_sign(float('inf'), negative)
-    if not scanned:
-        return None
-    return apply_sign(to_js_number(int(''.join(digits) or '0', radix)), negative)
 
 
 def get_body(node: Node) -> list[Statement] | None:

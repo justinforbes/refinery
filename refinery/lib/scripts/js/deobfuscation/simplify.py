@@ -37,7 +37,6 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     is_truthy,
     is_valid_identifier,
     is_valid_property_key,
-    js_parse_int,
     make_numeric_literal,
     make_string_literal,
     numeric_value,
@@ -78,7 +77,7 @@ from refinery.lib.scripts.js.model import (
     JsUnaryExpression,
     strip_parens,
 )
-from refinery.lib.scripts.js.numbers import exact_integer
+from refinery.lib.scripts.js.numbers import exact_integer, js_parse_int
 from refinery.lib.scripts.js.precedence import parens_required
 
 _OBJECT_PROTO_PROPERTIES = OBJECT_PROTOTYPE_MEMBERS

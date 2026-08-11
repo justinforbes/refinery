@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
@@ -238,3 +239,59 @@ class TestVariableDemasking(TestJsDeobfuscator):
             """
         )
         self.assertEqual(source, self._demask(source))
+
+
+class TestStackKeysThatOnlyLookLikeIndices(TestJsDeobfuscator):
+    """
+    A stack key is a property name, and only a name spelled with ASCII digits names the element a
+    parameter stands in for. `str.isdigit` answers a different question: it is true of every Unicode
+    decimal digit and of the superscripts, so it accepts names that index nothing.
+    """
+
+    def _demask(self, source: str) -> str:
+        return self._run_transformer(source, JsRestArrayUnpacking)
+
+    @unittest.expectedFailure
+    def test_an_arabic_indic_digit_names_a_property_and_not_a_parameter(self):
+        """
+        `s['٢']` and `s[2]` are two properties in JavaScript, so a rewrite that gives them one
+        name computes a different sum: with the arguments `(0, 0, 5)` the function returns `14`
+        where the rewritten one returns `18`.
+        """
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var f = function(p0, p1, p2) {
+                  var v0;
+                  v0 = 9;
+                  return p2 + v0;
+                };
+                """
+            ),
+            self._demask(
+                "var f = function(...s) {"
+                " s.length = 3; s['٢'] = 9; return s[2] + s['٢']; };"
+            ),
+        )
+
+    @unittest.expectedFailure
+    def test_a_superscript_two_names_a_property_and_does_not_end_the_pass(self):
+        """
+        `'²'.isdigit()` is true and `int('²')` raises, so the pass reads the key as an index
+        and then fails to build one.
+        """
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var f = function(p0) {
+                  var v0;
+                  v0 = 9;
+                  return p0 + v0;
+                };
+                """
+            ),
+            self._demask(
+                "var f = function(...s) {"
+                " s.length = 1; s['²'] = 9; return s[0] + s['²']; };"
+            ),
+        )

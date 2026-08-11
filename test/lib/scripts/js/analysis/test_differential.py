@@ -3329,6 +3329,27 @@ class TestNumericLiteralsAreDoubles(TestBase):
             ' console.log(String(f()), String(g()), String(h()));',
             'NaN NaN 5\n')
 
+    def test_arithmetic_on_a_string_reads_the_number_the_language_reads(self):
+        """
+        Node: `1000 42 NaN NaN -Infinity 32 12`. Every operator coerces its string operand through
+        the same grammar the `Number` call uses, which reads an exponent, refuses one it does not
+        finish, refuses the numeric separator, and keeps the sign of a zero.
+        """
+        self._prints(
+            "console.log(+'1e3', +' 42 ', String(+'1e'), String(+'1_0'), 1 / +'-0',"
+            " String(+'0x10' * 2), String('3' * '4'));",
+            '1000 42 NaN NaN -Infinity 32 12\n')
+
+    def test_a_string_coerced_behind_a_function_reads_the_same_grammar(self):
+        """
+        Node: `1000 NaN Infinity 16`. The same coercion where the string arrives as an argument
+        rather than standing beside the operator.
+        """
+        self._prints(
+            'var f = function (s) { return s * 1; };'
+            " console.log(f('1e3'), String(f('1e')), String(f('Infinity')), f('0x10'));",
+            '1000 NaN Infinity 16\n')
+
     def test_parse_int_reads_its_radix_through_the_signed_32_bit_wrap(self):
         """
         Node: `16 10 255`. The radix is coerced with ToInt32, so `2**32 + 16` selects base sixteen,
@@ -3370,7 +3391,6 @@ class TestParseFloatGrammar(TestBase):
             deobfuscate_source(source),
             'console.log(3.14, 42, 2.5, 0, 1, 1.2, 0 / 0, 0 / 0);')
 
-    @unittest.expectedFailure
     def test_an_exponent_belongs_to_the_literal_parse_float_reads(self):
         """
         Node: `1000 1000 1000 0.001 50 -150`. Stopping at the `e` reads a mantissa the string never
@@ -3381,7 +3401,6 @@ class TestParseFloatGrammar(TestBase):
             " parseFloat('1e-3'), parseFloat('.5e2'), parseFloat('-1.5e2'));",
             '1000 1000 1000 0.001 50 -150\n')
 
-    @unittest.expectedFailure
     def test_the_word_infinity_is_a_literal_parse_float_reads(self):
         """
         Node: `Infinity -Infinity Infinity Infinity`. The word carries an optional sign and, like
@@ -3391,6 +3410,124 @@ class TestParseFloatGrammar(TestBase):
             "console.log(parseFloat('Infinity'), parseFloat('-Infinity'),"
             " parseFloat('+Infinity'), parseFloat('Infinityabc'));",
             'Infinity -Infinity Infinity Infinity\n')
+
+    def test_an_exponent_that_is_begun_and_never_finished_shortens_the_literal(self):
+        """
+        Node: `1 1 1 1 1.2 100 1 1000`. An exponent the string does not complete is not an error but
+        a shorter literal, so each of these names the mantissa alone — and `1e2.5` names a hundred,
+        the point ending an exponent that was completed by the digit ahead of it.
+        """
+        self._prints(
+            "console.log(parseFloat('1e'), parseFloat('1E'), parseFloat('1e+'), parseFloat('1e-'),"
+            " parseFloat('1.2e'), parseFloat('1e2.5'), parseFloat('1ee3'), parseFloat('1e+3e4'));",
+            '1 1 1 1 1.2 100 1 1000\n')
+
+    def test_an_exponent_with_no_digits_ahead_of_it_names_no_number(self):
+        """
+        Node: `NaN NaN 50`. A mantissa may be written as a bare fraction but never omitted.
+        """
+        self._prints(
+            "console.log(String(parseFloat('e3')), String(parseFloat('.e3')),"
+            " parseFloat('.5e2'));",
+            'NaN NaN 50\n')
+
+    def test_a_sign_is_read_where_the_literal_begins_and_nowhere_else(self):
+        """
+        Node: `1 -0.5 NaN NaN 1 NaN`. A sign belongs to the literal only where it is adjacent to
+        one, so a space behind it or a second sign ahead of it leaves a string naming nothing, while
+        a sign behind the digits is merely where the parse stops.
+        """
+        self._prints(
+            "console.log(parseFloat('+1'), parseFloat('-.5'), String(parseFloat('- 1')),"
+            " String(parseFloat('+-1')), parseFloat('1-'), String(parseFloat('-')));",
+            '1 -0.5 NaN NaN 1 NaN\n')
+
+    def test_an_infinity_by_overflow_and_a_zero_by_underflow_keep_their_signs(self):
+        """
+        Node: `Infinity -Infinity true false 5e-324`. A magnitude the double range cannot hold
+        becomes an infinity and one below its smallest subnormal becomes a zero, and both keep the
+        sign the string was written with. `Object.is` is the only witness of the negative zero,
+        which prints as `0` and is `=== 0`.
+        """
+        self._prints(
+            "console.log(String(parseFloat('1e999')), String(parseFloat('-1e999')),"
+            " Object.is(parseFloat('-1e-999'), -0), Object.is(parseFloat('1e-999'), -0),"
+            " String(parseFloat('5e-324')));",
+            'Infinity -Infinity true false 5e-324\n')
+
+    def test_a_parse_that_stops_at_a_base_prefix_keeps_the_sign_of_its_zero(self):
+        """
+        Node: `true true true false`. `parseFloat` reads no base other than ten, so it stops at the
+        letter and answers the signed zero the two characters ahead of it name.
+        """
+        self._prints(
+            "console.log(Object.is(parseFloat('-0'), -0), Object.is(parseFloat('-0x10'), -0),"
+            " Object.is(parseFloat('-0b101'), -0), Object.is(parseFloat('+0x10'), -0));",
+            'true true true false\n')
+
+    def test_padding_is_what_the_language_calls_whitespace_and_nothing_else(self):
+        """
+        Node: `2.5 -150 NaN NaN 5 NaN`. `U+FEFF`, `U+00A0` and `U+3000` are whitespace to the
+        language, two of which Python's `str.strip` also removes and one of which it leaves.
+        `U+0085` and `U+001C` are the reverse, removed by `str.strip` and not whitespace here, and
+        `U+200B` is neither.
+        """
+        self._prints(
+            R"console.log(parseFloat('\uFEFF 2.5'), parseFloat('\u00A0-1.5e2\u3000'),"
+            R" String(parseFloat('\u00855')), String(parseFloat('\u001C5')),"
+            R" parseFloat('5\u0085'), String(parseFloat('\u200B5')));",
+            '2.5 -150 NaN NaN 5 NaN\n')
+
+    def test_digits_of_another_script_and_characters_that_look_like_digits_are_not_digits(self):
+        """
+        Node: `NaN 1 NaN 2 NaN`. The Arabic-Indic digits, the superscript two and the Roman numeral
+        all satisfy one of Python's `isdigit` or `isnumeric`; the language's decimal digits are `0`
+        through `9` and nothing else, so each of them is only where a parse stops.
+        """
+        self._prints(
+            R"console.log(String(parseFloat('\u0661\u0662\u0663')), parseFloat('1\u0661'),"
+            R" String(parseFloat('\u00B2')), parseFloat('2\u00B2'),"
+            R" String(parseFloat('\u216B')));",
+            'NaN 1 NaN 2 NaN\n')
+
+    def test_a_base_other_than_ten_is_read_no_further_than_its_prefix(self):
+        """
+        Node: `0 0 0 1 777 10`. A leading zero selects no base at all, so `0777` is read in full.
+        """
+        self._prints(
+            "console.log(parseFloat('0x10'), parseFloat('0b101'), parseFloat('0o17'),"
+            " parseFloat('1_0'), parseFloat('0777'), parseFloat('10n'));",
+            '0 0 0 1 777 10\n')
+
+    def test_an_empty_string_names_no_number_here_and_zero_to_the_whole_string_reader(self):
+        """
+        Node: `NaN NaN NaN 0 0 0`. This is the one place the two readings of a string differ on text
+        that contains no digit at all.
+        """
+        self._prints(
+            R"console.log(String(parseFloat('')), String(parseFloat('   ')),"
+            R" String(parseFloat('\uFEFF')), Number(''), Number('   '), Number('\uFEFF'));",
+            'NaN NaN NaN 0 0 0\n')
+
+    def test_a_very_long_run_of_digits_names_the_infinity_it_denotes(self):
+        """
+        Node: `Infinity Infinity Infinity NaN`. Four hundred digits are a number the double range
+        cannot hold, whether written out or reached through an exponent of four hundred digits.
+        """
+        digits = '1' * 400
+        self._prints(
+            F"console.log(String(parseFloat('{digits}')), String(parseFloat('1e{'9' * 400}')),"
+            F" String(parseFloat('{digits}x')), String(Number('{digits}x')));",
+            'Infinity Infinity Infinity NaN\n')
+
+    def test_parse_float_reached_through_a_name_reads_the_same_grammar(self):
+        """
+        Node: `2.5 1 NaN`.
+        """
+        self._prints(
+            "var read = parseFloat;"
+            " console.log(read('2.5abc'), read('1e'), String(read('nope')));",
+            '2.5 1 NaN\n')
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')

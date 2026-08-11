@@ -24,7 +24,6 @@ from refinery.lib.scripts import (
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     BINARY_OPS,
     ScopeProcessingTransformer,
-    js_parse_int,
     make_string_literal,
     property_key,
     remove_declarator,
@@ -55,7 +54,7 @@ from refinery.lib.scripts.js.model import (
     JsWhileStatement,
     Statement,
 )
-from refinery.lib.scripts.js.numbers import exact_integer
+from refinery.lib.scripts.js.numbers import exact_integer, js_parse_int
 
 
 class Encoding(enum.Enum):
