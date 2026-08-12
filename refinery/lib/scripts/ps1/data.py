@@ -911,6 +911,38 @@ class OperatorOutcome(typing.NamedTuple):
             return None
         return next(iter(self.types))
 
+    @property
+    def always_throws(self) -> bool:
+        """
+        Whether every witnessed pair in this cell threw, so that no value was observed to come out
+        of it at all.
+
+        **It names no cause, and must not be read as naming one.** 220 of the binary grid's cells
+        answer `True` and at least 26 of those are a *value* reason rather than a missing method:
+        `2 / $null` is `Attempted to divide by zero`, and division has a perfectly good method for
+        an Int32. They fill the cell only because `System.Void` has exactly one inhabitant, so
+        every witnessed pair threw and nothing survived to be a type. `Int32 / Boolean` is the
+        control that shows it: same operator, same value reason, **not** selected, because `$true`
+        divides fine and leaves `types` non-empty. A caller wanting to know *why* asks the host.
+
+        **`may_throw` alone answers a different question, and reading it as this one is the mistake
+        the grid invites.** Only five of the ten Boolean-left cells throw at all, and the split
+        that matters is inside those five: `$true * 2` throws with nothing witnessed, while
+        `$true / 2` is 0.5 and throws only over a divisor the left operand has no part in. Reading
+        the throw axis on its own put `/` and `%` into the emulator's refusal set, twice.
+
+        The claim is about the *cell* and never about one operand. Projecting it onto a side is a
+        separate step needing its own evidence — `_NO_OPERATOR_METHOD_ON_BOOLEAN` does exactly that
+        and is sound only because its three members were measured operand-wise against a host, and
+        because it is used to refuse, where a wrong projection costs a fold and cannot invent a
+        value.
+
+        A cell that produced `$null` did produce something, so `may_be_null` excludes it. No cell
+        of either grid carries that shape today, which makes the clause inert rather than idle: it
+        is what the sentence above means, and a capture that ever recorded one would need it.
+        """
+        return self.may_throw and not self.may_be_null and not self.types
+
 
 def _outcome(recorded: list[str] | None) -> OperatorOutcome | None:
     if recorded is None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from collections import Counter
-from typing import Iterator
+from typing import Iterator, NamedTuple
 
 from refinery.lib.scripts.ps1 import data
 
@@ -315,6 +315,54 @@ def _cast_single_type(target: str, source: str):
     return outcome.single_type
 
 
+def _always_throws(operator: str, left: str, right: str) -> bool:
+    outcome = data.binary_outcome(operator, left, right)
+    assert outcome is not None
+    return outcome.always_throws
+
+
+class RecordedCell(NamedTuple):
+    """
+    One grid cell from both ends of the same measurement: the grid it belongs to, the key it is
+    indexed by, the outcome the reader answers for it, and the entries the capture holds under that
+    key. A question about the reader's predicates is asked of the outcome and held against the
+    entries, so that a predicate is compared with the data it reads rather than with itself.
+    """
+    grid: str
+    key: tuple[str, ...]
+    outcome: data.OperatorOutcome
+    entries: tuple[str, ...]
+
+
+def _every_recorded_cell() -> Iterator[RecordedCell]:
+    for operator in BINARY_OPERATORS:
+        for left in OPERAND_TYPES:
+            for right in OPERAND_TYPES:
+                outcome = data.binary_outcome(operator, left, right)
+                assert outcome is not None, (operator, left, right)
+                yield RecordedCell(
+                    'binary',
+                    (operator, left, right),
+                    outcome,
+                    tuple(data._OPERATORS['binary'][operator][left][right]),
+                )
+    for target in CONVERSION_TARGETS:
+        for source in OPERAND_TYPES:
+            outcome = data.conversion_outcome(target, source)
+            assert outcome is not None, (target, source)
+            yield RecordedCell(
+                'conversion',
+                (target, source),
+                outcome,
+                tuple(data._OPERATORS['conversions'][target][source]),
+            )
+
+
+#: Every cell of both shipped grids, which is the population the questions about `always_throws` below
+#: are asked over rather than a handful of cells chosen here.
+RECORDED_CELLS: tuple[RecordedCell, ...] = tuple(_every_recorded_cell())
+
+
 class TestPs1OperatorOutcomeSingleType(unittest.TestCase):
     """
     `single_type` is the one answer a caller may act on without a value domain, so it is available
@@ -356,6 +404,100 @@ class TestPs1OperatorOutcomeSingleType(unittest.TestCase):
             if outcome.single_type != expected:
                 wrong.append(key)
         self.assertEqual(wrong, [])
+
+
+class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
+    """
+    `always_throws` is the cell every witness threw for and none of them produced anything out of, which
+    is the one shape a caller may read as the operator having no answer for these operand types at
+    all. The two questions it is not sit on either side of it: a cell that threw for one witness and
+    answered for another, and a cell whose only outcome was `$null`. Both are populated, so reading
+    either in its place is a wrong answer rather than a stricter one.
+    """
+
+    def test_a_cell_always_throws_exactly_where_the_capture_recorded_only_a_throw(self):
+        self.assertEqual(len(RECORDED_CELLS), 4336)
+        self.assertEqual(
+            [
+                cell.key for cell in RECORDED_CELLS
+                if cell.outcome.always_throws != (set(cell.entries) == {'throw'})
+            ],
+            [],
+        )
+
+    def test_throwing_and_always_throwing_are_different_questions(self):
+        self.assertEqual(
+            Counter((cell.outcome.may_throw, cell.outcome.always_throws) for cell in RECORDED_CELLS),
+            Counter({
+                (False, False) : 2777,  # noqa
+                (True, False)  : 1335,  # noqa
+                (True, True)   : 224,   # noqa
+            }),
+        )
+
+    def test_having_no_type_and_always_throwing_are_different_questions(self):
+        typeless = [cell for cell in RECORDED_CELLS if not cell.outcome.types]
+        self.assertEqual(len(typeless), 242)
+        self.assertEqual(
+            [cell.key for cell in typeless if not cell.outcome.always_throws],
+            [cell.key for cell in typeless if set(cell.entries) == {'null'}],
+        )
+        self.assertEqual(len([cell for cell in typeless if not cell.outcome.always_throws]), 18)
+
+    def test_no_cell_records_a_throw_and_a_null_with_no_type_beside_them(self):
+        """
+        That shape is the only one that would tell the null clause of `always_throws` from the two
+        beside it, and neither grid holds a cell of it, so a predicate that dropped the clause
+        answers exactly as the shipped one does. The census is pinned whole rather than that one
+        shape counted, so a regeneration producing the shape is read here first.
+        """
+        self.assertEqual(
+            Counter(
+                (bool(cell.outcome.types), cell.outcome.may_throw, cell.outcome.may_be_null)
+                for cell in RECORDED_CELLS
+            ),
+            Counter({
+                (False, False, True) : 18,    # noqa
+                (False, True, False) : 224,   # noqa
+                (True, False, False) : 2750,  # noqa
+                (True, False, True)  : 9,     # noqa
+                (True, True, False)  : 1324,  # noqa
+                (True, True, True)   : 11,    # noqa
+            }),
+        )
+
+    def test_a_cell_whose_every_witness_produced_null_is_not_always_throws(self):
+        self.assertEqual(_binary('*', 'System.Void', 'System.Int32'), ((), False, True))
+        self.assertIs(_always_throws('*', 'System.Void', 'System.Int32'), False)
+
+    def test_a_boolean_dividend_throws_beside_two_types_where_a_boolean_factor_has_none(self):
+        self.assertEqual(
+            _binary('/', 'System.Boolean', 'System.Int32'),
+            (('System.Double', 'System.Int32'), True, False),
+        )
+        self.assertIs(_always_throws('/', 'System.Boolean', 'System.Int32'), False)
+        self.assertEqual(_binary('*', 'System.Boolean', 'System.Int32'), ((), True, False))
+        self.assertIs(_always_throws('*', 'System.Boolean', 'System.Int32'), True)
+
+    def test_both_grids_hold_cells_the_predicate_calls_always_throws(self):
+        self.assertEqual(
+            Counter(cell.grid for cell in RECORDED_CELLS if cell.outcome.always_throws),
+            Counter({'binary': 220, 'conversion': 4}),
+        )
+
+    def test_the_casts_that_always_throw_are_the_four_no_witness_reached_a_char_from(self):
+        self.assertEqual(
+            [
+                cell.key for cell in RECORDED_CELLS
+                if cell.grid == 'conversion' and cell.outcome.always_throws
+            ],
+            [
+                ('char', 'System.Single'),
+                ('char', 'System.Double'),
+                ('char', 'System.Decimal'),
+                ('char', 'System.Boolean'),
+            ],
+        )
 
 
 class TestPs1OperatorGridUnknowns(unittest.TestCase):

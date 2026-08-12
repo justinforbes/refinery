@@ -4,10 +4,28 @@ from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
+from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.deobfuscation import (
     Ps1ForEachPipeline,
     Ps1FunctionEvaluator,
 )
+from refinery.lib.scripts.ps1.deobfuscation.emulator import _NO_OPERATOR_METHOD_ON_BOOLEAN
+
+#: The Int32 that every measurement in `TestPs1WhichSideOfWhichOperatorABooleanMayStandOn` was taken
+#: against, as the grid names its type.
+INT32 = 'System.Int32'
+
+
+def _boolean_cell(operator: str, right: str) -> data.OperatorOutcome:
+    """
+    The grid cell a Boolean left operand and `right` index. A cell the grid does not cover raises
+    here, naming what was asked for, rather than answering `None`: an operator or a type the grid
+    stopped covering has to fail the comparison it stands in and not drop out of it.
+    """
+    cell = data.binary_outcome(operator, 'System.Boolean', right)
+    if cell is None:
+        raise KeyError(F'the grid has no cell for a Boolean {operator} {right}')
+    return cell
 
 
 class TestPs1FunctionEvaluator(TestPs1):
@@ -904,6 +922,46 @@ class TestPs1WhichSideOfWhichOperatorABooleanMayStandOn(TestPs1):
         ]:
             with self.subTest(source):
                 self._assertUnchanged(source, Ps1ForEachPipeline)
+
+    def test_the_operators_refused_are_the_ones_the_grid_says_always_throw_for_a_boolean(self):
+        """
+        The list is hand written and the grid is measured, so it is the measurement the list has to
+        keep agreeing with: an operator whose Boolean cell stops always throwing, and one that
+        becomes so, are both a row of the capture the refusal no longer follows. The whole operator
+        axis is asked rather than the ten measured above, so an operator the grid does not cover
+        cannot enter the list until a capture covers it either.
+        """
+        operators = list(data._OPERATORS['binary'])
+        self.assertEqual(len(operators), 16)
+        self.assertEqual(
+            {operator for operator in operators if _boolean_cell(operator, INT32).always_throws},
+            set(_NO_OPERATOR_METHOD_ON_BOOLEAN),
+        )
+
+    def test_the_boolean_row_reaches_past_the_int32_the_refusal_is_pinned_to(self):
+        """
+        The refusal is by operand where the grid answers by cell, so the two part company wherever
+        the rest of the Boolean row disagrees with the column it was measured against. Every
+        disagreement the capture holds is listed: `*` always throws for every right operand but a
+        Decimal, `+` and `-` for a Decimal alone, and `/` and `%` add the two whose throw is the
+        divisor rather than the Boolean standing left of it.
+        """
+        operators = list(data._OPERATORS['binary'])
+        types = list(data._OPERATORS['witnesses'])
+        self.assertEqual((len(operators), len(types)), (16, 16))
+        disagreeing = {}
+        for operator in operators:
+            measured = _boolean_cell(operator, INT32).always_throws
+            found = [one for one in types if _boolean_cell(operator, one).always_throws != measured]
+            if found:
+                disagreeing[operator] = found
+        self.assertEqual(disagreeing, {
+            '+': ['System.Decimal'],
+            '-': ['System.Decimal'],
+            '*': ['System.Decimal'],
+            '/': ['System.Decimal', 'System.Object[]', 'System.Void'],
+            '%': ['System.Decimal', 'System.Object[]', 'System.Void'],
+        })
 
 
 class TestPs1AHexadecimalNumeralInsideABodyDenotesThePatternItFills(TestPs1):
