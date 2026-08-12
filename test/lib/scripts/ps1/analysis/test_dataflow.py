@@ -5,14 +5,18 @@ from test import TestBase
 from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.ps1.analysis.blocks import build_block_model
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
-from refinery.lib.scripts.ps1.analysis.dataflow import Ps1FlowUnknown, build_variable_flow
+from refinery.lib.scripts.ps1.analysis.dataflow import (
+    Ps1FlowUnknown,
+    Ps1ObservedWrite,
+    build_variable_flow,
+)
 from refinery.lib.scripts.ps1.analysis.dominance import build_dominance
 from refinery.lib.scripts.ps1.analysis.model import (
     Ps1SemanticModel,
     build_semantic_model,
     is_write_occurrence,
 )
-from refinery.lib.scripts.ps1.model import Ps1Variable
+from refinery.lib.scripts.ps1.model import Ps1CommandInvocation, Ps1Variable
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -632,3 +636,78 @@ class TestPs1UnattributableWriteHoles(TestPs1VariableFlow):
         """
         self.assertEqual(
             self._observed('''$x = 'a'; & { iex '$script:x = 1' }; Write-Host $x'''), 0)
+
+
+class TestPs1WhatStandsWhereNoSingleWriteIsObserved(TestBase):
+    """
+    What a name is worth is asked at a point rather than at an occurrence, and the three answers are
+    distinct: the write whose value stands there, `NOTHING` when no write of the name has run yet so
+    the name still holds whatever the session established before the script did, and `UNKNOWN` when
+    no single write can be named. Told `NOTHING` for a name a branch may have written, a caller
+    publishes the value of a variable the script assigns as the one the session came with.
+    """
+
+    def _observed_at(self, source: str, site: int = -1, name: str = 'x'):
+        """
+        The index among the writes of *name* of the one observed at the *site*-th statement of the
+        script, or the `Ps1ObservedWrite` that stands there in place of one.
+        """
+        tree, _, flow = _models(source)
+        occurrences = [
+            node for node in _in_source_order(tree)
+            if isinstance(node, Ps1Variable) and node.name.lower() == name
+        ]
+        writes = [node for node in occurrences if is_write_occurrence(node)]
+        found = flow.write_observed_at(name, tree.body[site])
+        if isinstance(found, Ps1ObservedWrite):
+            return found
+        return next(index for index, write in enumerate(writes) if write is found)
+
+    def test_a_name_no_statement_writes_still_holds_what_the_session_established(self):
+        self.assertIs(self._observed_at('Write-Host $x'), Ps1ObservedWrite.NOTHING)
+
+    def test_the_write_standing_at_the_point_is_the_one_observed_there(self):
+        self.assertEqual(self._observed_at("$x = 'a'; Write-Host $x"), 0)
+
+    def test_a_write_the_point_precedes_is_not_yet_the_one_standing_there(self):
+        self.assertIs(self._observed_at("Write-Host $x; $x = 'a'", site=0), Ps1ObservedWrite.NOTHING)
+
+    def test_a_write_inside_a_child_scope_leaves_the_session_value_standing(self):
+        self.assertIs(
+            self._observed_at("& { $x = 'a' }; Write-Host $x"), Ps1ObservedWrite.NOTHING)
+
+    def test_a_branch_that_may_have_written_the_name_is_not_the_name_being_unwritten(self):
+        self.assertIs(
+            self._observed_at("if ($c) { $x = 'a' }; Write-Host $x"), Ps1ObservedWrite.UNKNOWN)
+
+    def test_a_while_body_that_may_have_written_the_name_is_not_the_name_being_unwritten(self):
+        self.assertIs(
+            self._observed_at("while ($c) { $x = 'a' }; Write-Host $x"), Ps1ObservedWrite.UNKNOWN)
+
+    def test_a_foreach_body_over_a_literal_collection_writes_the_name(self):
+        """
+        This body runs, so the write is what stands at the point after it. Naming it is not required
+        of the layer; the one answer that is wrong is that nothing has written the name.
+        """
+        self.assertIs(
+            self._observed_at("foreach ($i in 1, 2) { $x = 'a' }; Write-Host $x"),
+            Ps1ObservedWrite.UNKNOWN)
+
+    def test_a_dotted_block_writes_the_name_of_whoever_ran_it(self):
+        """
+        A dotted block performs its bare writes on the caller, so the same holds here: the write ran
+        and the answer may be conservative, but it may not be that the name is unwritten.
+        """
+        self.assertIs(
+            self._observed_at(". { $x = 'a' }; Write-Host $x"), Ps1ObservedWrite.UNKNOWN)
+
+    def test_a_write_spelled_as_a_command_naming_the_variable_is_the_one_observed(self):
+        tree, _, flow = _models("Set-Variable x 'v'; Write-Host $x")
+        command = next(
+            node for node in _in_source_order(tree.body[0])
+            if isinstance(node, Ps1CommandInvocation)
+        )
+        self.assertIs(flow.write_observed_at('x', tree.body[-1]), command)
+
+    def test_a_call_that_may_write_any_name_is_not_the_name_being_unwritten(self):
+        self.assertIs(self._observed_at('iex $c; Write-Host $x'), Ps1ObservedWrite.UNKNOWN)

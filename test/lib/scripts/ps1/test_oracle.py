@@ -1491,9 +1491,6 @@ TYPE_DEFECTS: dict[str, str] = {
         'The same erasure for an array of Char, which folds to one String.',
     "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
         'A Char[] is not a String; the fold makes it answer as though it were.',
-    "$OFS = '-'; $t = [string]('a', 'b'); Write-Output $t":
-        'A collection renders to a String separated by $OFS (LangSpec 6.8), which this script '
-        'sets. The fold bakes in the default separator.',
 }
 
 #: Which words 5.1 read as a command name, for each script whose corruption entry turns on where a

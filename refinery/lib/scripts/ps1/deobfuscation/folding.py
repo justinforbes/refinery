@@ -23,6 +23,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     convert,
     integer_at,
     integer_of,
+    invariant_text,
     is_truthy,
     make_string_literal,
     pattern_at,
@@ -117,25 +118,6 @@ _TEXT_OPERATORS = frozenset({
     '-replace', '-creplace', '-ireplace',
     '-split', '-csplit', '-isplit',
     '-join',
-})
-
-#: The types whose `ToString()` writes the same text `[string]` of the value does. Measured on a
-#: host whose culture writes a decimal comma: `(1.50d).ToString()` is `1,50` where `[string]1.50d`
-#: is `1.50`, and `(1.5).ToString()` is `1,5`. `ToString()` reads the *current* culture and a cast
-#: does not, so only the types that carry no culture at all may be answered from one — a Char, a
-#: Boolean and the integer widths, each measured to agree, and a String, which is its own text.
-_CULTURE_FREE_TEXT = frozenset({
-    _CHAR,
-    _INT32,
-    _STRING,
-    named_type('System.Boolean'),
-    named_type('System.Byte'),
-    named_type('System.Int16'),
-    named_type('System.Int64'),
-    named_type('System.SByte'),
-    named_type('System.UInt16'),
-    named_type('System.UInt32'),
-    named_type('System.UInt64'),
 })
 
 #: The whitespace `[Convert]::To<integer>(string)` strips, measured as `' 5 '` converting to 5. Only
@@ -543,16 +525,13 @@ def _value_to_string(receiver: Ps1Fact, member: str, arguments: list[str | int])
     A method on a receiver that is not a String, of which exactly one is folded: `ToString()` with
     no argument, and only for a value whose text carries no culture.
 
-    `ToString()` is *not* `[string]` in general. Measured on a host whose culture writes a decimal
-    comma, `(1.50d).ToString()` is `1,50` where `[string]1.50d` is `1.50` — the method reads the
-    current culture and the cast does not. `_CULTURE_FREE_TEXT` is the set where the two were
-    measured to agree, so this answers from `coerced_text` only there.
+    `ToString()` is *not* `[string]` in general — the method reads the current culture and the
+    cast does not — so what it writes is `invariant_text` rather than `coerced_text`, which is the
+    same question the separator of a collection asks and is answered once for both.
     """
     if member != 'tostring' or arguments:
         return None
-    if type_of(receiver) not in _CULTURE_FREE_TEXT:
-        return None
-    text = coerced_text(receiver)
+    text = invariant_text(receiver)
     return None if text is None else make_string_literal(text)
 
 

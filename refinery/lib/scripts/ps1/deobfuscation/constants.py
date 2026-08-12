@@ -22,9 +22,9 @@ from refinery.lib.scripts.ps1.analysis.model import (
     is_write_occurrence,
     Ps1OccurrenceRole,
 )
+from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
 from refinery.lib.scripts.ps1.analysis.values import (
     UNKNOWN,
-    coerced_text,
     integer_of,
     make_string_literal,
     read,
@@ -242,7 +242,7 @@ def _clone_constant(node: Node) -> Expression:
     return clone
 
 
-def _interpolated(value: Expression) -> Expression | None:
+def _interpolated(value: Expression, site: Ps1Variable, flow: Ps1VariableFlow) -> Expression | None:
     """
     What a value contributes where it is interpolated into an expandable string, which is the text
     it renders to and not the way it was written.
@@ -250,14 +250,15 @@ def _interpolated(value: Expression) -> Expression | None:
     This is the one place where how a value is spelled and what it renders to are different
     questions, and installing the spelling answered the wrong one: measured, `$s = 0xFF; "$s"` is
     the String `255` on 5.1 where the literal written in reads `0xFF`, and `$c = [char]65; "$c"` is
-    `A` where the cast reads as itself. `coerced_text` is that second question, and a value it names
-    no text for is left alone rather than written down some other way.
+    `A` where the cast reads as itself. `coerced_text_at` is that second question, asked at *site*
+    because a collection is separated by `$OFS`; a value it names no text for is left alone rather
+    than written down some other way.
 
     A here-string is refused because a part is not a standalone literal: the synthesizer writes a
     part's characters into the surrounding quotes, so a spelling that carries its own delimiters has
     nowhere to put them.
     """
-    text = coerced_text(read(value))
+    text = coerced_text_at(value, site, flow)
     if text is None:
         return None
     literal = make_string_literal(text)
@@ -592,7 +593,7 @@ class Ps1ConstantInlining(Transformer):
         if const_value is None:
             return
         if isinstance(node.parent, Ps1ExpandableString):
-            replacement = _interpolated(const_value)
+            replacement = _interpolated(const_value, node, state.flow)
         else:
             replacement = _clone_constant(const_value)
         if replacement is None:

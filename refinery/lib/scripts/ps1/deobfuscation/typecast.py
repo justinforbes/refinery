@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import string
 
-from refinery.lib.scripts import Transformer, canonical
+from refinery.lib.scripts import Node, Transformer, canonical
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow
+from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
 from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Outcome,
-    collect_facts,
     collect_integers,
     convert,
     make_string_literal,
@@ -22,6 +24,7 @@ from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1BinaryExpression,
     Ps1CastExpression,
+    Ps1Script,
     Ps1TypeExpression,
 )
 
@@ -51,15 +54,38 @@ class Ps1TypeCasts(Transformer):
     folds neither of them — so an `-as` this cannot answer is left standing rather than turned into
     the cast that stops the script.
 
-    Two arms are still read syntactically, and each is a ledgered defect rather than a fold that
-    could be asked of the domain: `[char[]]` of a list of numbers, and `[string]` of a collection.
-    The conversion grid was captured over scalar targets only, so there is no cell to read for
-    either, and both retire with the capture that adds the column.
+    One arm is still read syntactically and is a ledgered defect rather than a fold that could be
+    asked of the domain: `[char[]]` of a list of numbers. The conversion grid was captured over
+    scalar targets only, so there is no cell to read for an array target, and it retires with the
+    capture that adds the column. `[string]` of a collection stood beside it until the separator
+    became a question that could be asked — see `_joined_collection`.
 
     Every question here is asked of one step. The operand has already been visited, so `read` names
     whatever it came to and `convert` answers the cast over that; `evaluate` would walk the operand
     again at every node, which is quadratic over a tree a visitor is already descending.
     """
+
+    def __init__(self):
+        super().__init__()
+        self._flow: Ps1VariableFlow | None = None
+        self._entry = False
+
+    def visit(self, node: Node):
+        """
+        Captured once rather than per cast: every fold below marks the pass changed, which drops the
+        cache, so a per-site lookup would rebuild the control-flow graphs of the whole script once
+        per folded cast. This pass replaces an expression with the value it produces and neither
+        adds nor removes a statement, so the graphs it would rebuild are the graphs it already has,
+        and the writes it would find are the same writes.
+        """
+        if self._entry or not isinstance(node, Ps1Script):
+            return super().visit(node)
+        self._entry = True
+        try:
+            self._flow = model_cache(self, node).variable_flow
+            return super().visit(node)
+        finally:
+            self._entry = False
 
     def visit_Ps1BinaryExpression(self, node: Ps1BinaryExpression):
         self.generic_visit(node)
@@ -97,31 +123,18 @@ class Ps1TypeCasts(Transformer):
         named = text_of(read(node.operand))
         return None if named is None else Ps1TypeExpression(offset=node.offset, name=named)
 
-    @staticmethod
-    def _joined_collection(node: Ps1CastExpression, target) -> Expression | None:
+    def _joined_collection(self, node: Ps1CastExpression, target) -> Expression | None:
         """
-        `[string]` of a collection, which is a ledgered defect rather than a fold: 5.1 separates the
-        elements with `$OFS`, which lives in the session and not in the script, so the text written
-        here is only right for a run that left the separator alone. The domain refuses it for that
-        reason and this does not, which is why it is still here.
-
-        Only a collection of Strings is read, which is what it always read and is deliberately not
-        widened: what each element contributes is the same question `coerced_text` answers, but
-        answering it for a number or a Char would put more values through the separator this is
-        already wrong about.
+        `[string]` of a collection, whose elements 5.1 separates with `$OFS`. The conversion grid
+        was captured over scalar targets only, so the domain has no cell to read for this, and the
+        separator is not a property of the value in any case:
+        `refinery.lib.scripts.ps1.analysis.separator` is what answers it, at the point the cast
+        stands, and refuses wherever a run could have written the name something else.
         """
-        if target != _STRING or node.operand is None:
+        if target != _STRING or node.operand is None or self._flow is None:
             return None
-        facts = collect_facts(unwrap_single_paren(node.operand))
-        if facts is None or len(facts) < 2:
-            return None
-        parts: list[str] = []
-        for fact in facts:
-            text = text_of(fact)
-            if text is None:
-                return None
-            parts.append(text)
-        return make_string_literal(' '.join(parts))
+        text = coerced_text_at(unwrap_single_paren(node.operand), node, self._flow)
+        return None if text is None else make_string_literal(text)
 
     @staticmethod
     def _characters(node: Ps1CastExpression, target) -> Expression | None:

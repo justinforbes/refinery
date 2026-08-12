@@ -6,7 +6,8 @@ from __future__ import annotations
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.commands import CommandKind, Ps1CommandModel
-from refinery.lib.scripts.ps1.analysis.values import coerced_text, read
+from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow
+from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
 from refinery.lib.scripts.ps1.ast import get_command_name
 from refinery.lib.scripts.ps1.data import (
     ALL_PARAMETER_NAMES,
@@ -63,6 +64,7 @@ class Ps1Simplifications(Transformer):
     def __init__(self):
         super().__init__()
         self._commands: Ps1CommandModel | None = None
+        self._flow: Ps1VariableFlow | None = None
         self._entry = False
 
     def visit(self, node: Node):
@@ -70,7 +72,9 @@ class Ps1Simplifications(Transformer):
             return super().visit(node)
         self._entry = True
         try:
-            self._commands = model_cache(self, node).commands
+            cache = model_cache(self, node)
+            self._commands = cache.commands
+            self._flow = cache.variable_flow
             return super().visit(node)
         finally:
             self._entry = False
@@ -142,9 +146,12 @@ class Ps1Simplifications(Transformer):
         What a subexpression contributes is what the value it holds *renders* to and not the way it
         was written — measured, `"$(0xFF)"` is `255` and `"$([char]65)"` is `A` — which is the same
         question `refinery.lib.scripts.ps1.deobfuscation.constants` answers for a variable
-        substituted into one of these.
+        substituted into one of these. A collection contributes its elements separated by `$OFS`,
+        which is why the question is asked at the string rather than of the value alone.
         """
         self.generic_visit(node)
+        if self._flow is None:
+            return None
         parts: list[str] = []
         for p in node.parts:
             if isinstance(p, Ps1StringLiteral):
@@ -153,7 +160,7 @@ class Ps1Simplifications(Transformer):
             if isinstance(p, Ps1SubExpression) and len(p.body) == 1:
                 stmt = p.body[0]
                 if isinstance(stmt, Ps1ExpressionStatement) and stmt.expression is not None:
-                    sv = coerced_text(read(stmt.expression))
+                    sv = coerced_text_at(stmt.expression, node, self._flow)
                     if sv is not None:
                         parts.append(sv)
                         continue

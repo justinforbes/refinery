@@ -30,10 +30,11 @@ runs something else, and something else is opaque too.
 **Only the scope the code stands in.** Measured on 5.1 (`temp/ps1/census_measurements.md`): `&`
 opens a child scope, so `& 'stage2.ps1'` and `& $sb` leave the caller's `$x` alone, and so does
 `$ExecutionContext.InvokeCommand.InvokeScript('$x = 1')` — which runs in a scope of its own however
-much it looks like `Invoke-Expression`. All three are deliberately absent. The narrow hole that
-leaves is a *qualified* write from inside one of them — `& { iex '$script:x = 1' }` does reach the
-caller — recorded as a hole rather than paid for by treating every call operator as a caller-scope
-write.
+much it looks like `Invoke-Expression`. All three are deliberately absent. Two narrow holes are left
+and both are measured rather than assumed: a *qualified* write from inside one of them, since
+`& { $script:x = 1 }` does reach the caller, and the `useLocalScope = $false` overload
+`InvokeScript($false, $sb, $null, $null)`, which reaches it as well. Each is recorded as a hole
+rather than paid for by treating every call operator as a caller-scope write.
 """
 from __future__ import annotations
 

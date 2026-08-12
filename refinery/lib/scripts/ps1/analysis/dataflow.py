@@ -100,6 +100,7 @@ from refinery.lib.scripts.ps1.analysis.model import (
 from refinery.lib.scripts.ps1.analysis.opaque import writes_nobody_can_attribute
 from refinery.lib.scripts.ps1.ast import in_evaluation_order
 from refinery.lib.scripts.ps1.model import (
+    Ps1ScopeModifier,
     Ps1ScriptBlock,
     Ps1Variable,
 )
@@ -140,6 +141,20 @@ class Ps1FlowUnknown(enum.Flag):
     MUTATED_IN_PLACE = enum.auto()
 
 
+class Ps1ObservedWrite(enum.Enum):
+    """
+    What `Ps1VariableFlow.write_observed_at` answers where it names no write occurrence. Two answers
+    rather than one, because a caller acts on them differently: nothing having been written is a
+    fact about the name, and it is the caller's own business what a name nobody wrote is worth.
+    """
+    #: No write of the name has run by the time the point is reached, so what stands there is
+    #: whatever stood before the script did.
+    NOTHING = enum.auto()
+    #: No single write can be named — several reach, one may have run in between, or something the
+    #: script does puts the name out of reach altogether.
+    UNKNOWN = enum.auto()
+
+
 class Ps1VariableFlow:
     """
     Which write each variable read of one script observes, over that script's semantic, control-flow
@@ -168,6 +183,7 @@ class Ps1VariableFlow:
         self._any_unattributable: bool | None = None
         self._any_placed: bool | None = None
         self._blocks_by_owner: dict[int, list[Ps1ScriptBlock]] = {}
+        self._deferred_writes: dict[tuple[str, int], bool] = {}
         self._mutated: frozenset[str] | None = None
 
     def reaching_definition(self, read: Ps1Variable) -> Ps1Variable | None:
@@ -199,13 +215,69 @@ class Ps1VariableFlow:
             graph,
             use,
             definitions,
-            self._block_kills(graph, binding) | self._unattributable_kills(graph, read, use),
+            self._block_kills(graph, binding.name) | self._unattributable_kills(graph, read, use),
         )
         if found is None:
             return None
         if not self._observes_completed_store(graph, placed[id(found)][1], use):
             return None
         return found
+
+    def write_observed_at(self, key: str, site: Node) -> Node | Ps1ObservedWrite:
+        """
+        The write of the script's own binding of *key* whose value stands where *site* is evaluated,
+        or why none can be named.
+
+        The sibling of `reaching_definition` for a read nothing spells. A name the *engine* consults
+        where a value is used — `$OFS`, which a collection is joined with — is read at a point
+        holding no occurrence to key a binding by and no position to order against, so the name and
+        the point are given here instead. What the two share is the whole of the ordering: the same
+        definitions, the same block and unattributable kills, the same completed-store rule.
+
+        **Only a site the script's own scope evaluates is answered.** A body has a scope of its own
+        and a bare write inside one binds there, so a site within a body may be reading a name this
+        binding is not — `& { $OFS = '-'; [string]@(1, 2) }` separates on the block's own write, of
+        which the script's binding says nothing at all. Projecting the site out of the body
+        the way a read is projected would answer for the wrong binding, so it is refused instead.
+
+        `Ps1ObservedWrite.NOTHING` is the answer no read of an occurrence has and this one needs: a
+        name the script has not written by the time the point is reached still has a value, and only
+        the caller knows what. It is a claim that no write and no kill lies between the script's
+        entry and the point, which is stronger than `reaching_definition` naming none — a write on
+        a branch, or one a back edge carries around, names no single definition and is not nothing.
+        """
+        graph = self.flow.graph_of(self.semantic.root)
+        if graph is None or self._doubt_without_a_point():
+            return Ps1ObservedWrite.UNKNOWN
+        if key in self.mutated_in_place or self._deferred_body_writes(key):
+            return Ps1ObservedWrite.UNKNOWN
+        located = self.flow.locate(site)
+        if located is None or located[0] is not graph:
+            return Ps1ObservedWrite.UNKNOWN
+        use = located[1]
+        placed: dict[int, CfgNode] = {}
+        definitions: list[tuple[Node, CfgNode]] = []
+        binding = self.semantic.root_scope.bindings.get(key)
+        if binding is not None:
+            if binding.dynamic_or_qualified or _shadows_a_wider_scope(binding):
+                return Ps1ObservedWrite.UNKNOWN
+            for write in binding.writes:
+                where = self.flow.locate(write.node)
+                if where is None or where[0] is not graph:
+                    return Ps1ObservedWrite.UNKNOWN
+                placed[id(write.node)] = where[1]
+                if not self._stores_after(use, site, write.node):
+                    definitions.append((write.node, where[1]))
+        kills = self._block_kills(graph, key) | self._unattributable_kills(graph, site, use)
+        found = self._between.reaching_definition(graph, use, definitions, kills)
+        if found is not None:
+            if not self._observes_completed_store(graph, placed[id(found)], use):
+                return Ps1ObservedWrite.UNKNOWN
+            return found
+        blocking = kills | frozenset(id(node) for _, node in definitions)
+        if self._between.any_between(graph.entry, use, blocking):
+            return Ps1ObservedWrite.UNKNOWN
+        return Ps1ObservedWrite.NOTHING
 
     def unknowns(self, binding: Binding) -> Ps1FlowUnknown:
         """
@@ -230,7 +302,7 @@ class Ps1VariableFlow:
             graphs.add(id(placed[0]))
         if len(graphs) > 1:
             found |= Ps1FlowUnknown.WRITES_IN_SEVERAL_BODIES
-        if self._deferred_body_writes(binding):
+        if self._deferred_body_writes(binding.name, binding.scope.node):
             found |= Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY
         if binding.scope.writes_unreadable_names or self.deferred_unattributable_writes:
             found |= Ps1FlowUnknown.WRITTEN_BY_UNREADABLE_NAME
@@ -288,7 +360,7 @@ class Ps1VariableFlow:
             located = self.flow.locate(facts.site)
         return None
 
-    def _stores_after(self, use: CfgNode, read: Ps1Variable, write: Ps1Variable) -> bool:
+    def _stores_after(self, use: CfgNode, read: Node, write: Node) -> bool:
         """
         Whether *write* stores its value only once *read* has already been evaluated, both of them
         parts of the one statement *use* stands for.
@@ -314,16 +386,28 @@ class Ps1VariableFlow:
                 return False
         return False
 
-    def _deferred_body_writes(self, binding: Binding) -> bool:
+    def _deferred_body_writes(self, key: str, own: Node | None = None) -> bool:
         """
-        Whether a block whose run time this layer cannot place may write *binding*. A stored block is
-        a value: it may be invoked before or after any statement here, so a write inside it defeats
-        every ordering the graphs could establish.
+        Whether a block whose run time this layer cannot place may write the binding *key* names.
+        Asked once per binding by `unknowns` and once per site by `write_observed_at`, so the walk
+        over every block of the script is kept rather than repeated.
+        """
+        cached = (key, id(own))
+        found = self._deferred_writes.get(cached)
+        if found is None:
+            found = self._deferred_writes[cached] = self._find_deferred_body_writes(key, own)
+        return found
 
-        The binding's own body is not one of those blocks. A stored block's statements are perfectly
-        ordered against *each other* however late the block runs, and counting it against itself
-        makes every binding local to a stored block unanswerable — which reads as caution and is
-        simply a wrong reading of the question.
+    def _find_deferred_body_writes(self, key: str, own: Node | None) -> bool:
+        """
+        Whether a block whose run time this layer cannot place may write the binding *key* names. A
+        stored block is a value: it may be invoked before or after any statement here, so a write
+        inside it defeats every ordering the graphs could establish.
+
+        The body a binding lives in is not one of those blocks, and *own* is what names it. A stored
+        block's statements are perfectly ordered against *each other* however late the block runs,
+        and counting it against itself makes every binding local to a stored block unanswerable —
+        which reads as caution and is simply a wrong reading of the question.
 
         Every other block of the script is one, wherever it is written. A stored block is a value
         and its bare writes land in the scope of whoever runs it, so `$b = { $x = 'b' }` written at
@@ -332,13 +416,13 @@ class Ps1VariableFlow:
         first.
         """
         for block in self._blocks_of(self.semantic.root):
-            if block is binding.scope.node:
+            if block is own:
                 continue
             facts = self.blocks.facts(block)
             if facts.reach not in (Ps1BlockReach.STORED, Ps1BlockReach.UNKNOWN):
                 continue
             for write in self.blocks.writes_reaching_caller(block):
-                if write.key == binding.name:
+                if write.key == key:
                     return True
         return False
 
@@ -354,23 +438,23 @@ class Ps1VariableFlow:
             ]
         return found
 
-    def _block_kills(self, graph: ControlFlowGraph, binding: Binding) -> frozenset[int]:
+    def _block_kills(self, graph: ControlFlowGraph, name: str) -> frozenset[int]:
         """
-        The nodes of *graph* that run a script block writing *binding* into the scope that invokes
-        it. A `. { $x = 'b' }` is one statement to the graph and its store is invisible in the tree
-        around it, so without this the caller's `$x` reads as never having been touched.
+        The nodes of *graph* that run a script block writing the binding *name* names into the scope
+        that invokes it. A `. { $x = 'b' }` is one statement to the graph and its store is invisible
+        in the tree around it, so without this the caller's `$x` reads as never having been touched.
 
         The answer turns on the graph and the name alone, both fixed for as long as this model
         lives, so it is computed once per pair rather than per read.
         """
-        key = (id(graph), binding.name)
+        key = (id(graph), name)
         found = self._kills.get(key)
         if found is not None:
             return found
         kills: set[int] = set()
         for block in self._blocks_of(graph.owner):
             if not any(
-                write.key == binding.name
+                write.key == name
                 for write in self.blocks.writes_reaching_caller(block)
             ):
                 continue
@@ -418,7 +502,7 @@ class Ps1VariableFlow:
                 yield placed[1], node
 
     def _unattributable_kills(
-        self, graph: ControlFlowGraph, read: Ps1Variable, use: CfgNode,
+        self, graph: ControlFlowGraph, read: Node, use: CfgNode,
     ) -> frozenset[int]:
         """
         The unattributable writes of *graph* that may already have run when *read* is evaluated.
@@ -456,7 +540,7 @@ class Ps1VariableFlow:
         return found
 
     def _runs_after(
-        self, graph: ControlFlowGraph, use: CfgNode, read: Ps1Variable, effect: Node,
+        self, graph: ControlFlowGraph, use: CfgNode, read: Node, effect: Node,
     ) -> bool:
         """
         Whether *effect* runs its unreadable code only once *read* has been evaluated, both of them
@@ -635,6 +719,36 @@ class Ps1VariableFlow:
                     seen.add(id(successor))
                     stack.append(successor)
         return frozenset(seen)
+
+
+#: The qualifiers that name a scope wider than the one a script's own statements write. A bare write
+#: at the top level of a script lands in the script's scope, and `$global:` names the scope around
+#: it, so the two are different names that a read resolves in order — but `Ps1SemanticModel` binds
+#: both at the root and cannot tell them apart. `$script:` and `$local:` are not among them: at the
+#: top level they name the scope a bare write already lands in.
+_WIDER_SCOPES = frozenset({
+    Ps1ScopeModifier.GLOBAL,
+    Ps1ScopeModifier.USING,
+})
+
+
+def _shadows_a_wider_scope(binding: Binding) -> bool:
+    """
+    Whether *binding* holds writes through two scopes a read would resolve in order. The model files
+    a `$global:` write at the root beside the script's own, so `$x = 'a'; $global:x = 'b'` reads as
+    one name written twice where the language has two, and the second is the one a bare read never
+    sees. A single write through a wider scope is not this: with nothing shadowing it, a bare read
+    resolves to it and the two readings agree.
+
+    A command that writes a name in a wider scope — `Set-Variable x 'v' -Scope Global` — is not
+    caught, because the occurrence records no qualifier to read. That is a recorded hole rather than
+    a claim; every consumer of this refuses such a write for its own reasons today.
+    """
+    qualified = sum(
+        isinstance(write.node, Ps1Variable) and write.node.scope in _WIDER_SCOPES
+        for write in binding.writes
+    )
+    return 0 < qualified < len(binding.writes)
 
 
 def _scopes_of(scope: Scope) -> Iterator[Scope]:

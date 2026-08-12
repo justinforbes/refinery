@@ -280,22 +280,388 @@ class TestPs1ACastOfAStringIsReadByTheRulesOfFivePointOne(TestPs1):
         self.assertEqual(self._deobfuscate("$x = [int]'0xFFFFFFFF'"), '$x = -1')
 
 
-class TestPs1ValuesDecidedBySessionState(TestPs1):
+class TestPs1TheSeparatorOfACollectionIsWrittenByTheScript(TestPs1):
     """
-    Rendering a collection as a string separates the elements with the current value of `$OFS`,
-    which lives in the session rather than in the script, so no rendering of one is a constant.
+    Writing a collection as a String puts the value of `$OFS` between the elements. `$OFS` is an
+    ordinary variable rather than a setting the engine keeps, and the conversion looks the name up
+    wherever it happens, so what separates a collection is whatever the script wrote by that point.
+    Measured on 5.1: a name nothing has written separates with one space, `$null` separates with a
+    space and `''` with nothing, and every other value contributes the text it is written as. Only
+    an implicit conversion consults the name; `-join` and `[string]::Join` name their own separator.
+
+    A conversion is therefore a constant exactly where the separator standing at that point is one
+    the tool can name, and every other one is an expression that has to be left where it is.
     """
 
-    @unittest.expectedFailure
-    def test_a_collection_cast_to_string_is_not_folded_because_ofs_separates_it(self):
+    def test_an_unwritten_separator_is_the_single_space_the_conversion_falls_back_to(self):
+        source = inspect.cleandoc("""
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), "Write-Output '1 2'")
+
+    def test_the_separator_the_script_wrote_last_is_the_one_the_conversion_reads(self):
+        source = inspect.cleandoc("""
+            $OFS = ','
+            $OFS = ':'
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = ','
+            $OFS = ':'
+            Write-Output '1:2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_null_separator_separates_with_a_space(self):
+        source = inspect.cleandoc("""
+            $OFS = $null
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = $Null
+            Write-Output '1 2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_an_empty_separator_separates_with_nothing(self):
+        source = inspect.cleandoc("""
+            $OFS = ''
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = ''
+            Write-Output '12'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_number_separator_separates_with_the_digits_it_is_written_as(self):
+        source = inspect.cleandoc("""
+            $OFS = 5
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = 5
+            Write-Output '152'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_boolean_separator_separates_with_the_word_it_is_written_as(self):
+        source = inspect.cleandoc("""
+            $OFS = $true
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = $True
+            Write-Output '1True2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_char_separator_separates_with_the_character_it_holds(self):
+        source = inspect.cleandoc("""
+            $OFS = [char]45
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = [char]45
+            Write-Output '1-2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_each_conversion_reads_the_separator_that_stands_where_it_is_written(self):
+        source = inspect.cleandoc("""
+            Write-Output ([string]@(1, 2))
+            $OFS = '-'
+            Write-Output ([string]@(3, 4))
+        """)
+        expected = inspect.cleandoc("""
+            Write-Output '1 2'
+            $OFS = '-'
+            Write-Output '3-4'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_separator_a_command_writes_by_name_is_read_by_the_conversion(self):
+        source = inspect.cleandoc("""
+            Set-Variable OFS '-'
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = '-'
+            Write-Output '1-2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_separator_written_by_an_expression_the_tool_reads_is_read_by_the_conversion(self):
+        source = inspect.cleandoc("""
+            iex '$OFS = "-"'
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = "-"
+            Write-Output '1-2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_write_inside_a_call_operator_block_never_reaches_the_conversion(self):
+        source = inspect.cleandoc("""
+            & {
+              $OFS = '-'
+            }
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            & {
+              $OFS = '-'
+            }
+            Write-Output '1 2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_write_inside_a_function_body_never_reaches_the_conversion(self):
+        source = inspect.cleandoc("""
+            function f {
+              $OFS = '-'
+            }
+            f
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            function f {
+              $OFS = '-'
+            }
+            f
+            Write-Output '1 2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_single_element_collection_has_nowhere_to_put_a_separator(self):
+        source = inspect.cleandoc("""
+            Invoke-Expression $env:X
+            $t = [string]@(1)
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            Invoke-Expression $env:X
+            Write-Output '1'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_an_empty_collection_is_the_empty_string_whatever_the_separator_holds(self):
+        source = inspect.cleandoc("""
+            $OFS = @('-', '+')
+            $t = [string]@()
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = @('-', '+')
+            Write-Output ''
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_null_element_contributes_no_text_between_the_two_separators_around_it(self):
+        source = inspect.cleandoc("""
+            $t = [string]@(1, $null, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), "Write-Output '1  2'")
+
+    def test_a_collection_interpolated_into_a_string_reads_the_separator(self):
+        source = inspect.cleandoc("""
+            $OFS = ','
+            $t = "$(1, 2)"
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = ','
+            Write-Output '1,2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_variable_holding_a_collection_interpolated_reads_the_separator(self):
+        source = inspect.cleandoc("""
+            $OFS = ','
+            $c = 1, 2
+            $t = "$c"
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = ','
+            Write-Output '1,2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_join_operator_separates_with_the_separator_it_names(self):
+        source = inspect.cleandoc("""
+            Invoke-Expression $env:X
+            $t = @(1, 2) -join ':'
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            Invoke-Expression $env:X
+            Write-Output '1:2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_the_string_join_method_separates_with_the_separator_it_names(self):
         source = inspect.cleandoc("""
             $OFS = '-'
-            $t = [string]('a', 'b')
+            $t = [string]::Join(':', @(1, 2))
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = '-'
+            Write-Output '1:2'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_unary_join_separates_with_nothing(self):
+        source = inspect.cleandoc("""
+            $OFS = '-'
+            $t = -join ('a', 'b')
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $OFS = '-'
+            Write-Output 'ab'
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_separator_whose_text_the_culture_decides_is_refused(self):
+        """
+        `$OFS = 1.5` separates with `1,5` on a host whose culture writes a decimal comma, so the
+        text of this conversion is not a property of the script at all.
+        """
+        source = inspect.cleandoc("""
+            $OFS = 1.5
+            $t = [string]@(1, 2)
             Write-Output $t
         """)
         self.assertEqual(self._deobfuscate(source), source)
 
-    def test_a_collection_joined_onto_a_string_is_not_folded_because_ofs_separates_it(self):
+    def test_an_array_separator_is_refused(self):
+        """
+        Measured, an array separator contributes `System.Object[]` rather than its elements.
+        """
+        source = inspect.cleandoc("""
+            $OFS = @('-', '+')
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_separator_whose_value_the_script_does_not_decide_is_refused(self):
+        source = inspect.cleandoc("""
+            $OFS = $env:X
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_write_only_a_branch_performs_is_refused(self):
+        """
+        The condition has to be one nothing in the script decides. A variable no statement assigns
+        is `$null`, which is falsy, so `if ($c)` is a branch that provably never runs and a
+        conversion after it reads the separator that stood before it.
+        """
+        source = inspect.cleandoc("""
+            if ($args[0]) {
+              $OFS = '-'
+            }
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_write_a_branch_performs_is_refused_though_another_write_precedes_it(self):
+        source = inspect.cleandoc("""
+            $OFS = ','
+            if ($args[0]) {
+              $OFS = '-'
+            }
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_write_a_while_body_may_perform_is_refused(self):
+        source = inspect.cleandoc("""
+            while ($args[0]) {
+              $OFS = '-'
+            }
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_foreach_body_over_a_literal_collection_writes_the_separator(self):
+        """
+        This body runs, so the conversion after it is `1-2`. Computing it is not required of the
+        tool; the one answer that is wrong is the fallback space, which says nothing wrote the name.
+        """
+        source = inspect.cleandoc("""
+            foreach ($i in 1, 2) {
+              $OFS = '-'
+            }
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        folded = inspect.cleandoc("""
+            foreach ($i in 1, 2) {
+              $OFS = '-'
+            }
+            Write-Output '1-2'
+        """)
+        self.assertIn(self._deobfuscate(source), (source, folded))
+
+    def test_a_write_whose_name_nothing_can_read_is_refused(self):
+        source = inspect.cleandoc("""
+            Set-Variable $env:X '-'
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_the_fallback_space_is_refused_after_a_call_that_may_have_written_the_name(self):
+        source = inspect.cleandoc("""
+            Invoke-Expression $env:X
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_written_separator_is_refused_once_a_call_may_have_replaced_it(self):
+        source = inspect.cleandoc("""
+            $OFS = ','
+            Invoke-Expression $env:X
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_dot_sourced_file_may_have_written_the_name(self):
+        source = inspect.cleandoc("""
+            . stage2.ps1
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_collection_concatenated_onto_a_string_is_left_standing(self):
+        """
+        `'a' + @(1, 2)` is `a1-2` here, by the same separator every other conversion reads. The tool
+        computes none of this arm yet, so the one answer it may give is the expression itself.
+        """
         source = inspect.cleandoc("""
             $OFS = '-'
             $t = 'a' + @(1, 2)
@@ -303,13 +669,60 @@ class TestPs1ValuesDecidedBySessionState(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), source)
 
-    def test_a_collection_in_an_expandable_string_is_not_folded_because_ofs_separates_it(self):
+    def test_a_dot_sourced_block_writes_the_separator_of_whoever_ran_it(self):
+        """
+        Measured, this prints `1-2`: a dotted block performs its writes on the caller. Computing it
+        is not required of the tool; the one answer that is wrong is the fallback space, which says
+        the name was never written.
+        """
         source = inspect.cleandoc("""
-            $OFS = '-'
-            $t = "$(1, 2)"
+            . {
+              $OFS = '-'
+            }
+            $t = [string]@(1, 2)
             Write-Output $t
         """)
-        self.assertEqual(self._deobfuscate(source), source)
+        folded = inspect.cleandoc("""
+            . {
+              $OFS = '-'
+            }
+            Write-Output '1-2'
+        """)
+        self.assertIn(self._deobfuscate(source), (source, folded))
+
+    def test_a_pipeline_body_writes_the_separator_of_whoever_ran_it(self):
+        source = inspect.cleandoc("""
+            1, 2, 3 | ForEach-Object {
+              $OFS = '-'
+            }
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        folded = inspect.cleandoc("""
+            1, 2, 3 | ForEach-Object {
+              $OFS = '-'
+            }
+            Write-Output '1-2'
+        """)
+        self.assertIn(self._deobfuscate(source), (source, folded))
+
+    def test_a_qualified_write_in_a_function_body_writes_the_scripts_separator(self):
+        source = inspect.cleandoc("""
+            function f {
+              $script:OFS = '-'
+            }
+            f
+            $t = [string]@(1, 2)
+            Write-Output $t
+        """)
+        folded = inspect.cleandoc("""
+            function f {
+              $script:OFS = '-'
+            }
+            f
+            Write-Output '1-2'
+        """)
+        self.assertIn(self._deobfuscate(source), (source, folded))
 
 
 class TestPs1APipelineProducesACollection(TestPs1):

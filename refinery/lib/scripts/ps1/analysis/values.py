@@ -609,6 +609,29 @@ def coerced_text(fact: Ps1Fact) -> str | None:
     return None if outcome.may_throw else text_of(outcome.value)
 
 
+#: The types outside the integer widths whose text carries no culture at all. The widths are not
+#: listed with them because `_INTEGER_RANGE` is already the one place they are named.
+_CULTURE_FREE = frozenset({_BOOLEAN, _CHAR, _STRING})
+
+
+def invariant_text(fact: Ps1Fact) -> str | None:
+    """
+    The text a value writes where the *current culture* renders it, or `None` where that text is not
+    the one this module computes.
+
+    It is `coerced_text` narrowed to the values no culture spells differently, and the narrowing is
+    the whole of it. Measured on a host whose culture writes a decimal comma: `(1.50d).ToString()`
+    is `1,50` and a collection separated by `$OFS = 1.5` reads `1,5`, where `[string]1.50d` is
+    `1.50`. So a caller reading a value the *host* formats — a `ToString()` call, the separator a
+    collection is joined with — computes the right characters only for a Boolean, a Char, a String
+    and the integer widths, each measured to agree.
+    """
+    found = type_of(fact)
+    if found is None or (found not in _CULTURE_FREE and found not in _INTEGER_RANGE):
+        return None
+    return coerced_text(fact)
+
+
 _DECIMAL_DIGITS = re.compile(r'[0-9]+\Z')
 _REAL_DIGITS = re.compile(r'(?:[0-9]*\.[0-9]+|[0-9]+\.?)(?:e[+-]?[0-9]+)?\Z', re.IGNORECASE)
 _HEX_DIGITS = re.compile(r'[0-9a-f]+\Z', re.IGNORECASE)
