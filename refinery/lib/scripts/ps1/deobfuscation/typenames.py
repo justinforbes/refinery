@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Transformer
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow
 from refinery.lib.scripts.ps1.analysis.values import (
+    Ps1VariableTyping,
     make_string_literal,
     resolve_expression_type,
 )
+from refinery.lib.scripts.ps1.analysis.variable_types import type_at
 from refinery.lib.scripts.ps1.ast import get_command_name, get_member_name, unwrap_parens
 from refinery.lib.scripts.ps1.data import (
     CANONICAL_TYPE_NAMES,
@@ -19,25 +23,18 @@ from refinery.lib.scripts.ps1.data import (
 )
 from refinery.lib.scripts.ps1.data import resolve_member_type as data_member_type
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName, parse_type_name
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    MutationKind,
-    iter_variable_mutations,
-)
 from refinery.lib.scripts.ps1.model import (
     Expression,
-    Ps1ArrayLiteral,
-    Ps1AssignmentExpression,
     Ps1CommandInvocation,
-    Ps1ForEachLoop,
-    Ps1HereString,
     Ps1IndexExpression,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1Pipeline,
     Ps1PipelineElement,
-    Ps1ScopeModifier,
+    Ps1Script,
     Ps1StringLiteral,
+    Ps1Variable,
 )
 
 
@@ -98,13 +95,13 @@ def canonical_member_name(type_name: str | Ps1TypeName, member: str) -> str | No
 def resolve_member_type(
     obj: Expression,
     member: str,
-    variable_types: dict[str, Ps1TypeName] | None = None,
+    type_of_variable: Ps1VariableTyping | None = None,
 ) -> Ps1TypeName | None:
     """
     Resolve the .NET result type of accessing `member` on `obj`, or `None` if the object type or the
     member cannot be resolved.
     """
-    obj_type = resolve_expression_type(obj, variable_types)
+    obj_type = resolve_expression_type(obj, type_of_variable)
     if obj_type is None:
         return None
     return data_member_type(obj_type, member)
@@ -147,7 +144,7 @@ def _pipeline_pipes_to_get_member(pipeline: Ps1Pipeline) -> bool:
 
 def _pipeline_source_type(
     pipeline: Ps1Pipeline,
-    variable_types: dict[str, Ps1TypeName] | None = None,
+    type_of_variable: Ps1VariableTyping | None = None,
 ) -> Ps1TypeName | None:
     """
     Determine the .NET type of the expression piped into `Get-Member`. Assumes `Get-Member` is the
@@ -160,82 +157,38 @@ def _pipeline_source_type(
         return None
     if source.expression is None:
         return None
-    return resolve_expression_type(source.expression, variable_types)
-
-
-#: What `foreach` yields from a string: the string itself, not its characters.
-_STRING = resolve_type('System.String')
-
-
-def _resolve_foreach_element_type(iterable: Expression | None) -> Ps1TypeName | None:
-    """
-    Determine the .NET type of elements produced by a foreach iterable. For a string, PowerShell
-    yields the string itself (not individual chars). For an array literal, if all elements share
-    the same resolved type, that type is returned.
-    """
-    if iterable is None:
-        return None
-    if isinstance(iterable, (Ps1StringLiteral, Ps1HereString)):
-        return _STRING
-    if isinstance(iterable, Ps1ArrayLiteral) and iterable.elements:
-        types = set()
-        for elem in iterable.elements:
-            if isinstance(elem, Expression):
-                t = resolve_expression_type(elem)
-                if t is None:
-                    return None
-                types.add(t)
-            else:
-                return None
-        if len(types) == 1:
-            return types.pop()
-    return None
-
-
-def collect_variable_types(root: Node) -> dict[str, Ps1TypeName]:
-    """
-    Scan the AST for single-assignment variables whose RHS has a resolvable .NET type; e.g.
-
-        $x = New-Object Net.WebClient
-
-    Returns a mapping from lowercase variable name to the canonical `Ps1TypeName`. Mutations that
-    do not change the variable's type (member/index assignments, ++/--) are not reassignments.
-    """
-    assign_counts: dict[str, int] = {}
-    typed_assigns: dict[str, Ps1TypeName] = {}
-    for var, kind, node in iter_variable_mutations(root):
-        if var.scope != Ps1ScopeModifier.NONE:
-            continue
-        key = var.name.lower()
-        if kind in (MutationKind.MEMBER_ASSIGN, MutationKind.INCRDECR):
-            continue
-        assign_counts[key] = assign_counts.get(key, 0) + 1
-        if kind is MutationKind.ASSIGN and isinstance(node, Ps1AssignmentExpression):
-            if node.operator == '=' and isinstance(node.value, Expression):
-                resolved = resolve_expression_type(node.value)
-                if resolved is not None:
-                    typed_assigns[key] = resolved
-        elif kind is MutationKind.FOREACH and isinstance(node, Ps1ForEachLoop):
-            element_type = _resolve_foreach_element_type(node.iterable)
-            if element_type is not None:
-                typed_assigns[key] = element_type
-    return {
-        key: type_name
-        for key, type_name in typed_assigns.items()
-        if assign_counts.get(key, 0) == 1
-    }
+    return resolve_expression_type(source.expression, type_of_variable)
 
 
 class VariableTypeAwareTransformer(Transformer):
+    """
+    A pass that asks `refinery.lib.scripts.ps1.analysis.variable_types.type_at` what a variable
+    holds where it is read, rather than carrying a table of names it built itself.
+
+    The flow model is captured once at the root, for the reason
+    `refinery.lib.scripts.ps1.deobfuscation.typecast.Ps1TypeCasts.visit` gives at greater length:
+    every fold below marks the pass changed, which drops the shared cache, so a per-site lookup
+    would rebuild the control-flow graphs of the whole script once per fold. Neither pass adds or
+    removes a statement, so the graphs it would rebuild are the graphs it already holds.
+    """
 
     def __init__(self):
         super().__init__()
-        self._variable_types: dict[str, Ps1TypeName] | None = None
+        self._flow: Ps1VariableFlow | None = None
+        self._entry = False
 
     def visit(self, node: Node):
-        if self._variable_types is None:
-            self._variable_types = collect_variable_types(node)
-        return super().visit(node)
+        if self._entry or not isinstance(node, Ps1Script):
+            return super().visit(node)
+        self._entry = True
+        try:
+            self._flow = model_cache(self, node).variable_flow
+            return super().visit(node)
+        finally:
+            self._entry = False
+
+    def _type_of_variable(self, var: Ps1Variable) -> Ps1TypeName | None:
+        return None if self._flow is None else type_at(var, self._flow)
 
 
 class Ps1TypeSystemSimplifications(VariableTypeAwareTransformer):
@@ -264,7 +217,7 @@ class Ps1TypeSystemSimplifications(VariableTypeAwareTransformer):
     def _try_normalize_member_case(self, node: Ps1MemberAccess | Ps1InvokeMember):
         if node.object is None:
             return
-        obj_type = resolve_expression_type(node.object, self._variable_types)
+        obj_type = resolve_expression_type(node.object, self._type_of_variable)
         if obj_type is None:
             return
         member_name = get_member_name(node.member)
@@ -312,7 +265,7 @@ class Ps1TypeSystemSimplifications(VariableTypeAwareTransformer):
             return None
         if not _pipeline_pipes_to_get_member(inner):
             return None
-        type_name = _pipeline_source_type(inner, self._variable_types)
+        type_name = _pipeline_source_type(inner, self._type_of_variable)
         if type_name is None:
             return None
         ordered = get_member_order(type_name)

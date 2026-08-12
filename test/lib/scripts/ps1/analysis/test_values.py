@@ -107,7 +107,7 @@ class TestPs1CandidateTypes(Ps1ExpressionTypeTest):
         webclient = resolve_type('System.Net.WebClient')
         assert webclient is not None
         self.assertEqual(
-            candidate_types(self._expr('$client'), self.CLOSED, {'client': webclient}),
+            candidate_types(self._expr('$client'), self.CLOSED, lambda var: webclient),
             frozenset({webclient}),
         )
         self.assertEqual(self._candidates('$client'), frozenset())

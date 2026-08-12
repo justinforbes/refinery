@@ -113,6 +113,40 @@ class TestPs1VariableDriveResolution(TestPs1):
         self.assertIn('DownloadFile', result)
         self.assertNotIn('Do*e', result)
 
+    def test_where_object_wildcard_matches_the_members_of_its_own_bodys_write(self):
+        result = self._apply(cleandoc("""
+            function f {
+              $q = New-Object Net.WebClient
+              $q | Get-Member | Where-Object {
+                $_.Name -ilike 'Downl*g'
+              }
+            }
+        """), Ps1WildcardResolution)
+        self.assertEqual(result, cleandoc("""
+            function f {
+              $q = New-Object Net.WebClient
+              'DownloadString'
+            }
+        """))
+
+    def test_where_object_wildcard_ignores_a_type_the_write_below_it_establishes(self):
+        self._assertUnchanged(cleandoc("""
+            $q | Get-Member | Where-Object {
+              $_.Name -ilike 'Downl*g'
+            }
+            $q = New-Object Net.WebClient
+        """), Ps1WildcardResolution)
+
+    def test_where_object_wildcard_ignores_a_type_written_in_another_scope(self):
+        self._assertUnchanged(cleandoc("""
+            function f {
+              $q = New-Object Net.WebClient
+            }
+            $q | Get-Member | Where-Object {
+              $_.Name -ilike 'Downl*g'
+            }
+        """), Ps1WildcardResolution)
+
 
 class TestPs1WildcardResolution(TestPs1):
 

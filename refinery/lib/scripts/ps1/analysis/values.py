@@ -42,7 +42,7 @@ import operator as operator_module
 import re
 import typing
 
-from typing import Callable, TypeVar
+from typing import Callable, TypeAlias, TypeVar
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.ast import (
@@ -93,6 +93,13 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
 )
 from refinery.lib.scripts.ps1.token import BACKTICK_ENCODE
+
+#: What a caller knows about the type of a variable *occurrence*. A function and not a table keyed
+#: by name, because a name is not a variable: two bodies may write the same name, and which write a
+#: read observes is a question only the caller's flow model can answer.
+#: `refinery.lib.scripts.ps1.analysis.variable_types.type_at` is the one implementation of it, and
+#: it is what keeps this module free of flow while still letting a pass answer per occurrence.
+Ps1VariableTyping: TypeAlias = Callable[['Ps1Variable'], 'Ps1TypeName | None']
 
 _T = TypeVar('_T')
 
@@ -231,7 +238,7 @@ _OBJECT_ARRAY = _type('System.Object[]')
 
 def resolve_expression_type(
     expr: Expression,
-    variable_types: dict[str, Ps1TypeName] | None = None,
+    type_of_variable: Ps1VariableTyping | None = None,
 ) -> Ps1TypeName | None:
     """
     Trace the .NET type of a PowerShell expression by walking member access chains. Returns the one
@@ -260,10 +267,11 @@ def resolve_expression_type(
         ):
             return _OBJECT_ARRAY
     if isinstance(expr, Ps1Variable):
-        key = expr.name.lower()
-        if variable_types and key in variable_types:
-            return variable_types[key]
-        declared = VARIABLE_TYPES.get(key)
+        if type_of_variable is not None:
+            named = type_of_variable(expr)
+            if named is not None:
+                return named
+        declared = VARIABLE_TYPES.get(expr.name.lower())
         return None if declared is None else resolve_type(declared)
     if isinstance(expr, Ps1TypeExpression):
         return resolve_type(expr.name)
@@ -284,7 +292,7 @@ def resolve_expression_type(
     if isinstance(expr, Ps1MemberAccess):
         if expr.object is None:
             return None
-        obj_type = resolve_expression_type(expr.object, variable_types)
+        obj_type = resolve_expression_type(expr.object, type_of_variable)
         if obj_type is None:
             return None
         member_name = get_member_name(expr.member)
@@ -309,7 +317,7 @@ _CLOSED_OUTPUT_CMDLETS = frozenset({
 def candidate_types(
     expr: Expression,
     world: Ps1TypeWorld,
-    variable_types: dict[str, Ps1TypeName] | None = None,
+    type_of_variable: Ps1VariableTyping | None = None,
 ) -> frozenset[Ps1TypeName]:
     """
     The set of canonical .NET type names the expression's value could have, or the empty set when
@@ -329,8 +337,8 @@ def candidate_types(
     if isinstance(expr, Ps1InvokeMember):
         return _static_method_candidates(expr)
     if isinstance(expr, Ps1CommandInvocation):
-        return _command_candidates(expr, world, variable_types)
-    single = resolve_expression_type(expr, variable_types)
+        return _command_candidates(expr, world, type_of_variable)
+    single = resolve_expression_type(expr, type_of_variable)
     return frozenset() if single is None else frozenset({single})
 
 
@@ -361,7 +369,7 @@ def _static_method_candidates(node: Ps1InvokeMember) -> frozenset[Ps1TypeName]:
 def _command_candidates(
     cmd: Ps1CommandInvocation,
     world: Ps1TypeWorld,
-    variable_types: dict[str, Ps1TypeName] | None,
+    type_of_variable: Ps1VariableTyping | None,
 ) -> frozenset[Ps1TypeName]:
     """
     The types a command's result could have: the constructed or queried type for the `New-Object`
@@ -380,7 +388,7 @@ def _command_candidates(
     if not world.may_trust_command_name(lower, cmd):
         return frozenset()
     if lower in TYPE_ARG_COMMANDS:
-        single = resolve_expression_type(cmd, variable_types)
+        single = resolve_expression_type(cmd, type_of_variable)
         return frozenset() if single is None else frozenset({single})
     if lower not in _CLOSED_OUTPUT_CMDLETS:
         return frozenset()
@@ -1232,7 +1240,7 @@ def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
 
 def evaluate(
     node: Node | None,
-    variable_types: dict[str, Ps1TypeName] | None = None,
+    type_of_variable: Ps1VariableTyping | None = None,
 ) -> Ps1Outcome:
     """
     What this expression produces. It is the module's one recursion and the only entry a caller
@@ -1260,31 +1268,32 @@ def evaluate(
     measured. A sign written against a numeral is not this case — the parser puts it in the
     numeral's own spelling, so `-1` is a literal and reaches `read`.
 
-    `variable_types` is what the caller has typed, exactly as `resolve_expression_type` takes it.
-    Nothing here invents a variable's value, so a variable the caller has not typed names nothing.
+    `type_of_variable` is what the caller can say about a variable occurrence, exactly as
+    `resolve_expression_type` takes it. Nothing here invents a variable's value, so a variable the
+    caller cannot type names nothing.
     """
     literal = read(node)
     if literal is not UNKNOWN:
         return Ps1Outcome(False, literal)
     if isinstance(node, Ps1ParenExpression):
-        return evaluate(node.expression, variable_types)
+        return evaluate(node.expression, type_of_variable)
     if isinstance(node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
-        return _array(node, lambda element: evaluate(element, variable_types))
+        return _array(node, lambda element: evaluate(element, type_of_variable))
     if isinstance(node, Ps1SubExpression):
-        return _subexpression(node, lambda element: evaluate(element, variable_types))
+        return _subexpression(node, lambda element: evaluate(element, type_of_variable))
     if isinstance(node, Ps1CastExpression):
-        return _evaluated_cast(node, variable_types)
+        return _evaluated_cast(node, type_of_variable)
     if isinstance(node, Ps1BinaryExpression):
-        return _evaluated_binary(node, variable_types)
+        return _evaluated_binary(node, type_of_variable)
     if isinstance(node, Ps1TypeExpression) or not isinstance(node, Expression):
         return NOTHING
-    named = resolve_expression_type(node, variable_types)
+    named = resolve_expression_type(node, type_of_variable)
     return NOTHING if named is None else Ps1Outcome(True, Ps1Typed(named))
 
 
 def _evaluated_cast(
     node: Ps1CastExpression,
-    variable_types: dict[str, Ps1TypeName] | None,
+    type_of_variable: Ps1VariableTyping | None,
 ) -> Ps1Outcome:
     """
     A cast, which is `convert` over whatever its operand evaluates to.
@@ -1302,7 +1311,7 @@ def _evaluated_cast(
     target = resolve_type(node.type_name)
     if target is None:
         return NOTHING
-    operand = evaluate(node.operand, variable_types)
+    operand = evaluate(node.operand, type_of_variable)
     if operand.value is not UNKNOWN:
         converted = convert(operand.value, target)
         return Ps1Outcome(operand.may_throw or converted.may_throw, converted.value)
@@ -1312,15 +1321,15 @@ def _evaluated_cast(
 
 def _evaluated_binary(
     node: Ps1BinaryExpression,
-    variable_types: dict[str, Ps1TypeName] | None,
+    type_of_variable: Ps1VariableTyping | None,
 ) -> Ps1Outcome:
     """
     An operator, which is `apply` over both of its operands. A short-circuiting operator needs no
     exception here: `-and`, `-or` and `-xor` were never measured, so the grid holds no cell for any
     of them and `apply` refuses before the question of whether the right operand ran can arise.
     """
-    left = evaluate(node.left, variable_types)
-    right = evaluate(node.right, variable_types)
+    left = evaluate(node.left, type_of_variable)
+    right = evaluate(node.right, type_of_variable)
     applied = apply(node.operator, left.value, right.value)
     return Ps1Outcome(
         left.may_throw or right.may_throw or applied.may_throw, applied.value)

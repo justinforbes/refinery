@@ -14,8 +14,7 @@ import re
 from fnmatch import translate as fnmatch_translate
 from typing import Iterable
 
-from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
-from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
+from refinery.lib.scripts.ps1.analysis.values import Ps1VariableTyping, resolve_expression_type
 from refinery.lib.scripts.ps1.ast import (
     argument_text,
     binds_parameter,
@@ -114,7 +113,7 @@ def _is_psobject_member_access(
 
 def _determine_where_object_candidates(
     elements: list,
-    variable_types: dict[str, Ps1TypeName] | None = None,
+    type_of_variable: Ps1VariableTyping | None = None,
 ) -> Iterable[str] | None:
     """
     Examine the pipeline elements preceding `Where-Object` to determine which candidates the
@@ -129,7 +128,7 @@ def _determine_where_object_candidates(
             inner = expr.expression
             if isinstance(inner, Ps1Pipeline):
                 result = _determine_where_object_candidates(
-                    inner.elements, variable_types,
+                    inner.elements, type_of_variable,
                 )
                 if result is not None:
                     return result
@@ -144,16 +143,16 @@ def _determine_where_object_candidates(
                     return _known_cmdlets()
                 if cmd_lower in GET_MEMBER_ALIASES:
                     return _candidates_from_get_member(
-                        elements, elem, variable_types,
+                        elements, elem, type_of_variable,
                     )
 
         if isinstance(expr, Ps1MemberAccess):
             pso = _is_psobject_member_access(expr, 'methods')
             if pso is not None:
-                return _candidates_from_type(pso.object, variable_types)
+                return _candidates_from_type(pso.object, type_of_variable)
             pso = _is_psobject_member_access(expr, 'properties')
             if pso is not None:
-                return _candidates_from_type(pso.object, variable_types)
+                return _candidates_from_type(pso.object, type_of_variable)
 
     return None
 
@@ -161,7 +160,7 @@ def _determine_where_object_candidates(
 def _candidates_from_get_member(
     elements: list,
     gm_element: Ps1PipelineElement,
-    variable_types: dict[str, Ps1TypeName] | None = None,
+    type_of_variable: Ps1VariableTyping | None = None,
 ) -> list[str] | None:
     """
     For a pipeline like `expr | Get-Member | Where-Object ...`, resolve the type of the expression
@@ -177,16 +176,16 @@ def _candidates_from_get_member(
     prev = elements[idx - 1]
     if not isinstance(prev, Ps1PipelineElement):
         return None
-    return _candidates_from_type(prev.expression, variable_types)
+    return _candidates_from_type(prev.expression, type_of_variable)
 
 
 def _candidates_from_type(
     expr: Expression | None,
-    variable_types: dict[str, Ps1TypeName] | None = None,
+    type_of_variable: Ps1VariableTyping | None = None,
 ) -> list[str] | None:
     if expr is None:
         return None
-    type_name = resolve_expression_type(expr, variable_types)
+    type_name = resolve_expression_type(expr, type_of_variable)
     if type_name is None:
         return None
     return member_names(type_name)
@@ -562,7 +561,7 @@ class Ps1WildcardResolution(VariableTypeAwareTransformer):
             return None
         preceding = node.elements[:-1]
         candidates = _determine_where_object_candidates(
-            preceding, self._variable_types,
+            preceding, self._type_of_variable,
         )
         if candidates is None:
             return None

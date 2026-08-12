@@ -171,6 +171,7 @@ class Ps1VariableFlow:
     ):
         self.semantic = semantic
         self.flow = flow
+        self.dominators = dominators
         self.blocks = blocks
         self.cycles = cycles
         self._between = ReachabilityQuery(dominators)
@@ -278,6 +279,96 @@ class Ps1VariableFlow:
         if self._between.any_between(graph.entry, use, blocking):
             return Ps1ObservedWrite.UNKNOWN
         return Ps1ObservedWrite.NOTHING
+
+    def written_before(self, read: Ps1Variable) -> bool:
+        """
+        Whether a write of the binding *read* names has certainly run by the time *read* is
+        evaluated.
+
+        Weaker than `reaching_definition`, which names *which* write reaches. This says only that
+        the name has been given a value at all, and it is what a caller reasoning about every write
+        of a binding at once has to establish before its reasoning means anything: a binding whose
+        writes all agree about something says nothing about a read that precedes all of them. What
+        stands there is whatever stood before the script ran, and `$q = New-Object X` written
+        *after* `$q | Get-Member` does not make the name a WebClient at the pipeline.
+
+        Two ways for a write to have run, and a caller needs both. A write whose statement dominates
+        the read's ran on every path that arrives. A write inside the *same* statement is ordered by
+        the language where the graphs cannot order it at all, which is what a script that builds a
+        name and reads it inside one `$( ... )` depends on.
+
+        The read is asked at the position `_position_of` gives it, so a read inside a body that runs
+        exactly where it is written is ordered against the writes around that body. Locating the
+        read where it is *spelled* instead refuses `$q = New-Object …; & { $q.Foo }` outright, which
+        is the shape this whole question was kept for.
+        """
+        binding = self.semantic.binding_of(read)
+        if binding is None or not binding.writes:
+            return False
+        placed = {id(write.node): self.flow.locate(write.node) for write in binding.writes}
+        first = placed[id(binding.writes[0].node)]
+        if first is None:
+            return False
+        graph = first[0]
+        use = self._position_of(read, graph)
+        if use is None:
+            return False
+        for write in binding.writes:
+            where = placed[id(write.node)]
+            if where is None or where[0] is not graph:
+                continue
+            if where[1] is not use:
+                if self.dominators.dominates_node(graph, where[1], use):
+                    return True
+            elif self._runs_before(graph, use, read, write.node):
+                return True
+        return False
+
+    def _runs_before(
+        self, graph: ControlFlowGraph, use: CfgNode, read: Node, write: Node,
+    ) -> bool:
+        """
+        Whether *write* is evaluated before *read*, both of them parts of the one statement *use*
+        stands for.
+
+        The positive counterpart of `_runs_after`, and it has to be its own question rather than
+        that one negated: `_runs_after` answers `False` wherever it cannot tell, which is the safe
+        answer for a caller keeping a kill and the unsafe one for a caller claiming an order. A
+        statement control can return to is refused for the reason stated there — the previous visit
+        ordered the two the other way round — and so is a read projected here out of a body, which
+        may be evaluated on visits this walk does not describe.
+        """
+        if use.element is None or self.cycles.repeats(use.element):
+            return False
+        placed = self.flow.locate(read)
+        if placed is None or placed[0] is not graph or placed[1] is not use:
+            return False
+        for node in in_evaluation_order(use.element):
+            if node is write:
+                return True
+            if node is read:
+                return False
+        return False
+
+    def unattributable_before(self, read: Ps1Variable) -> bool:
+        """
+        Whether a write nobody can attribute to a name may already have run when *read* is
+        evaluated.
+
+        The same fact `reaching_definition` folds into its kills, asked on its own. A caller whose
+        other half is not an ordering still has to know it: `Invoke-Expression $code` stores a value
+        of any type under any name, so a claim about a name that rests on the writes *of* it —
+        rather than on which one ran — is a claim only where nothing unattributable has run. `True`
+        is the answer to every doubt, a read the graphs do not place included.
+        """
+        if self.deferred_unattributable_writes:
+            return True
+        located = self.flow.locate(read)
+        if located is None:
+            return True
+        graph, use = located
+        kills = self._unattributable_kills(graph, read, use)
+        return bool(kills) and self._between.any_between(graph.entry, use, kills)
 
     def unknowns(self, binding: Binding) -> Ps1FlowUnknown:
         """

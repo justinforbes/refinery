@@ -2656,12 +2656,12 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
         )
         self.assertEqual(
             {
-                expression: evaluate(_slot(expression), {'s': STRING})
+                expression: evaluate(_slot(expression), lambda var: STRING)
                 for expression in reached
             },
             {expression: Ps1Outcome(True, Ps1Typed(INT32)) for expression in reached},
         )
-        self.assertEqual(evaluate(_slot('$s.Length, 1'), {'s': STRING}), NOTHING)
+        self.assertEqual(evaluate(_slot('$s.Length, 1'), lambda var: STRING), NOTHING)
 
 
 class TestPs1EvaluateComposesACastOfAStringWithAJoin(unittest.TestCase):

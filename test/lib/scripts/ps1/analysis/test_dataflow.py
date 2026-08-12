@@ -711,3 +711,66 @@ class TestPs1WhatStandsWhereNoSingleWriteIsObserved(TestBase):
 
     def test_a_call_that_may_write_any_name_is_not_the_name_being_unwritten(self):
         self.assertIs(self._observed_at('iex $c; Write-Host $x'), Ps1ObservedWrite.UNKNOWN)
+
+
+class TestPs1WrittenBefore(TestBase):
+    """
+    Whether the name holds something the script put there by the time a read of it is evaluated —
+    not which write, and not what value. A caller reasoning about every write of a binding at once
+    has nothing until this is true: what agreeing writes have in common says nothing about a read
+    none of them has reached yet.
+    """
+
+    def _written_before(self, source: str, read: int = -1, name: str = 'x') -> bool:
+        tree, _, flow = _models(source)
+        reads = [
+            node for node in _in_source_order(tree)
+            if isinstance(node, Ps1Variable)
+            and node.name.lower() == name
+            and not is_write_occurrence(node)
+        ]
+        return flow.written_before(reads[read])
+
+    def test_a_name_the_script_never_writes_holds_nothing_the_script_put_there(self):
+        self.assertFalse(self._written_before('Write-Host $x'))
+
+    def test_a_write_the_read_follows_has_run(self):
+        self.assertTrue(self._written_before("$x = 'a'; Write-Host $x"))
+
+    def test_a_write_the_read_precedes_has_not_run(self):
+        self.assertFalse(self._written_before("Write-Host $x; $x = 'a'"))
+
+    def test_a_write_on_one_branch_only_has_not_certainly_run(self):
+        self.assertFalse(self._written_before("if ($c) { $x = 'a' }; Write-Host $x"))
+
+    def test_a_write_before_a_branch_that_writes_again_has_run(self):
+        self.assertTrue(self._written_before("$x = 'a'; if ($c) { $x = 'b' }; Write-Host $x"))
+
+    def test_a_loop_body_read_above_the_only_write_is_reached_on_the_first_visit(self):
+        self.assertFalse(self._written_before("while ($c) { Write-Host $x; $x = 'a' }"))
+
+    def test_a_write_before_the_loop_has_run_at_a_read_inside_it(self):
+        self.assertTrue(self._written_before("$x = 'a'; while ($c) { Write-Host $x; $x = 'b' }"))
+
+    def test_a_write_earlier_in_the_one_statement_they_share_has_run(self):
+        """
+        The graphs hold `$( ... )` as a single point and can order nothing inside it; what orders
+        these two is the language.
+        """
+        self.assertTrue(self._written_before("$($x = 'a'; Write-Host $x)"))
+
+    def test_a_write_later_in_the_one_statement_they_share_has_not_run(self):
+        self.assertFalse(self._written_before("$(Write-Host $x; $x = 'a')"))
+
+    def test_a_write_the_read_produces_the_value_for_has_not_run(self):
+        """
+        Source position is not evaluation order: the target stands to the left of the read and is
+        stored into only once the read has been evaluated.
+        """
+        self.assertFalse(self._written_before('$x = [char]($x)'))
+
+    def test_a_write_later_in_a_repeated_statement_has_not_run_on_the_first_visit(self):
+        self.assertFalse(self._written_before("while ($c) { Write-Host $x ($x = 'a') }"))
+
+    def test_a_write_before_a_repeated_statement_has_run_at_every_visit_of_it(self):
+        self.assertTrue(self._written_before("$x = 'a'; while ($c) { Write-Host $x ($x = 'b') }"))
