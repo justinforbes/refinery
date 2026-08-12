@@ -9,7 +9,12 @@ from refinery.lib.scripts.ps1.deobfuscation import (
     Ps1ForEachPipeline,
     Ps1FunctionEvaluator,
 )
-from refinery.lib.scripts.ps1.deobfuscation.emulator import _NO_OPERATOR_METHOD_ON_BOOLEAN
+from refinery.lib.scripts.ps1.deobfuscation.emulator import (
+    _NO_OPERATOR_METHOD_ON_BOOLEAN,
+    _Ps1Interpreter,
+)
+from refinery.lib.scripts.ps1.model import Ps1ScriptBlock
+from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 #: The Int32 that every measurement in `TestPs1WhichSideOfWhichOperatorABooleanMayStandOn` was taken
 #: against, as the grid names its type.
@@ -651,6 +656,115 @@ class TestPs1APipelineOverAScalarRunsItsBlockOverThatOneItem(TestPs1):
 
     def test_an_array_source_runs_the_block_over_each_of_its_items(self):
         self.assertEqual(self._apply('@(5, 6) | % { $_ + 1 }', Ps1ForEachPipeline), '6, 7')
+
+
+class TestPs1AnArrayABlockHandsOutWholeIsNotTheValuesInsideIt(TestPs1):
+    """
+    Measured on 5.1: `@(1, 2) | %{ $_, $_ }` has `.Count` 4 with an `Int32` at each position, where
+    `@(1, 2) | %{ ,($_, $_) }` has `.Count` 2 with an `Object[]` at each. The two are one pipeline
+    apart and may not be spelled the same way.
+    """
+
+    def test_a_block_handing_out_an_array_per_item_is_not_one_handing_out_two_values(self):
+        self.assertEqual(self._apply('@(1, 2) | % { $_, $_ }', Ps1ForEachPipeline), '1, 1, 2, 2')
+        self.assertEqual(
+            self._apply('@(1, 2) | % { ,($_, $_) }', Ps1ForEachPipeline), '(1, 1), (2, 2)')
+
+    def test_a_source_of_one_item_whose_block_hands_out_one_value_folds_to_that_value(self):
+        self.assertEqual(self._apply("@('a') | % { $_ }", Ps1ForEachPipeline), "'a'")
+
+
+class TestPs1AReturnWritesTheStreamTheExpressionAloneWrites(TestPs1):
+    """
+    Both spellings of each shape are asserted together because the claim is that they agree, and
+    two expectations written apart can drift into agreeing with the code instead: the signal used
+    to carry the collapsed stream, so `return ,($_, $_)` handed out the two values inside the array
+    where the bare expression handed out the array.
+    """
+
+    def _both(self, body: str) -> tuple[str, str]:
+        return (
+            self._apply(F'@(1, 2) | % {{ {body} }}', Ps1ForEachPipeline),
+            self._apply(F'@(1, 2) | % {{ return {body} }}', Ps1ForEachPipeline),
+        )
+
+    def _both_values(self, body: str) -> tuple[str, str]:
+        return (
+            self._apply(F'function f {{ {body} }}\n$x = f', Ps1FunctionEvaluator),
+            self._apply(F'function f {{ return {body} }}\n$x = f', Ps1FunctionEvaluator),
+        )
+
+    def test_an_array_handed_out_is_one_object_whichever_spelling_writes_it(self):
+        self.assertEqual(self._both(',($_, $_)'), ('(1, 1), (2, 2)', '(1, 1), (2, 2)'))
+
+    def test_values_handed_out_stay_as_many_as_they_were_whichever_spelling_writes_them(self):
+        self.assertEqual(self._both('$_, $_'), ('1, 1, 2, 2', '1, 1, 2, 2'))
+        self.assertEqual(self._both('$_'), ('1, 2', '1, 2'))
+
+    def test_a_return_from_a_nested_block_hands_out_what_that_block_wrote(self):
+        self.assertEqual(
+            self._apply('@(1, 2) | % { if ($_ -eq 1) { return $_ } }', Ps1ForEachPipeline), '1')
+
+    def test_a_bare_return_hands_out_nothing_and_leaves_the_pipeline_alone(self):
+        self._assertUnchanged(cleandoc("""
+            @(1, 2) | % {
+              return
+            }
+        """), Ps1ForEachPipeline)
+
+    def test_a_call_folds_to_the_same_value_whichever_spelling_produced_it(self):
+        self.assertEqual(self._both_values('5'), ('$x = 5', '$x = 5'))
+        self.assertEqual(self._both_values("'a', 'b'"), ("$x = 'a', 'b'", "$x = 'a', 'b'"))
+
+
+class TestPs1TheStreamABlockWritesIsAskedForBesideTheValueItCollapsesTo(TestPs1):
+    """
+    `emit` answers with one entry per object a block hands out and `execute` with the value those
+    objects collapse to, so the two come apart wherever the collapse loses something.
+    """
+
+    @staticmethod
+    def _block(body: str) -> Ps1ScriptBlock:
+        block, = (
+            node
+            for node in Ps1Parser(F'& {{ {body} }}').parse().walk()
+            if isinstance(node, Ps1ScriptBlock)
+        )
+        return block
+
+    def _emit(self, body: str) -> list:
+        return _Ps1Interpreter().emit(self._block(body), {'_': 1})
+
+    def _emitted(self, body: str) -> tuple[list, list]:
+        return self._emit(body), self._emit(F'return {body}')
+
+    def _execute(self, body: str):
+        return _Ps1Interpreter().execute(self._block(body), {'_': 1})
+
+    def test_an_array_handed_out_whole_is_one_entry_where_its_values_are_two(self):
+        self.assertEqual(self._emit(',($_, $_)'), [[1, 1]])
+        self.assertEqual(self._emit('$_, $_'), [1, 1])
+
+    def test_the_value_both_blocks_produce_is_the_one_the_collapse_cannot_tell_apart(self):
+        self.assertEqual(self._execute(',($_, $_)'), [1, 1])
+        self.assertEqual(self._execute('$_, $_'), [1, 1])
+
+    def test_one_object_handed_out_is_one_entry_and_that_object_is_the_value(self):
+        self.assertEqual(self._emit('$_'), [1])
+        self.assertEqual(self._execute('$_'), 1)
+
+    def test_a_block_handing_out_nothing_has_an_empty_stream_and_no_value(self):
+        self.assertEqual(self._emit('$x = 5'), [])
+        self.assertIsNone(self._execute('$x = 5'))
+
+    def test_a_return_writes_the_stream_the_expression_alone_writes(self):
+        self.assertEqual(self._emitted(',($_, $_)'), ([[1, 1]], [[1, 1]]))
+        self.assertEqual(self._emitted('$_, $_'), ([1, 1], [1, 1]))
+        self.assertEqual(self._emitted('$_'), ([1], [1]))
+
+    def test_a_return_keeps_what_the_block_wrote_before_it(self):
+        self.assertEqual(self._emit("'a'; return $_"), ['a', 1])
+        self.assertEqual(self._emit("'a'; return ,($_, $_)"), ['a', [1, 1]])
 
 
 class TestPs1EmulatorRedirections(TestPs1):

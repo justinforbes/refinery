@@ -223,8 +223,18 @@ class _Ps1InterpreterError(Exception):
 
 
 class _ReturnSignal(Exception):
-    def __init__(self, value: _Value):
-        self.value = value
+    """
+    A `return` unwinding to the block it leaves, carrying the success **stream** written up to that
+    point rather than the value it collapses to.
+
+    The stream is what it has to be, for the reason `_Ps1Interpreter.emit` states: collapsing here
+    and letting the catcher re-assemble runs one object through the same lossy step twice, and
+    `return ,($x, $y)` then hands out the two values where the bare expression hands out the one
+    array. A `return` writes to the stream exactly as the expression alone does, so it must reach
+    its catcher in the same shape.
+    """
+    def __init__(self, stream: list[_Value]):
+        self.stream = stream
 
 
 class InvokeExpression(Exception):
@@ -286,21 +296,42 @@ class _Ps1Interpreter:
             return True
         return self._parent_env is not None and key in self._parent_env
 
-    def execute(
+    def emit(
         self,
         script_block: Ps1ScriptBlock,
         bindings: dict[str, _Value],
-    ) -> _Value:
+    ) -> list[_Value]:
+        """
+        The success stream a script block writes: one entry per object it hands out.
+
+        `execute` is this collapsed, and the two are separate entries because **the collapse is
+        lossy in exactly the way a pipeline needs**. A block emitting one two-element array and a
+        block emitting two values collapse to the same Python list, and nothing downstream can
+        tell them apart afterwards — measured, they are different pipelines: `@(1, 2) | %{ ,($_,
+        $_) }` has `.Count` 2 with an `Object[]` at each position, where `%{ $_, $_ }` has
+        `.Count` 4. A caller assembling a pipeline's own stream out of per-item results therefore
+        asks this, and one that wants the value a call produced asks `execute`.
+        """
         if script_block.begin_block or script_block.process_block:
             raise _Ps1InterpreterError
         if script_block.end_block or script_block.dynamicparam_block:
             raise _Ps1InterpreterError
         self._env = dict(bindings)
         self._iterations = 0
+        stream: list[_Value] = []
         try:
-            return self._exec_statements(script_block.body)
-        except _ReturnSignal as r:
-            return r.value
+            for statement in script_block.body:
+                self._emit_stmt(statement, stream)
+        except _ReturnSignal as signal:
+            return signal.stream
+        return stream
+
+    def execute(
+        self,
+        script_block: Ps1ScriptBlock,
+        bindings: dict[str, _Value],
+    ) -> _Value:
+        return self._collapse(self.emit(script_block, bindings))
 
     def _exec_statements(self, stmts: list) -> _Value:
         """
@@ -362,7 +393,7 @@ class _Ps1Interpreter:
         if isinstance(stmt, Ps1ReturnStatement):
             if stmt.pipeline:
                 self._append(stream, self._eval(stmt.pipeline))
-            raise _ReturnSignal(self._collapse(stream))
+            raise _ReturnSignal(list(stream))
         if isinstance(stmt, Ps1BreakStatement):
             raise _BreakSignal
         if isinstance(stmt, Ps1ContinueStatement):
@@ -1815,10 +1846,9 @@ class Ps1ForEachPipeline(Transformer):
         interpreter = _Ps1Interpreter()
         for item in items:
             try:
-                result = interpreter.execute(script_block, {'_': item})
+                results.extend(interpreter.emit(script_block, {'_': item}))
             except (_Ps1InterpreterError, InvokeExpression):
                 return None
-            results.append(result)
         return substituted(node, self._results_to_node(results))
 
     @staticmethod
@@ -1879,30 +1909,27 @@ class Ps1ForEachPipeline(Transformer):
     @staticmethod
     def _results_to_node(results: list[_Value]) -> Expression | None:
         """
-        Turn the per-item scriptblock outputs of `<array> | %{ ... }` into a node.
+        Turn the success stream of `<array> | %{ ... }` into a node.
 
         **A pipeline builds a collection whatever its items are**, so what stands here is the
-        success stream `_collapse` already describes and nothing narrower. A run of one-character
-        strings used to be joined into one String, which was a wrong answer measured six ways:
-        `@('a', 'b') | %{ $_ }` is an `Object[]` of two, so `.Count` is 2, `-join '-'` writes the
-        separator, `foreach` runs twice, and each of those changed. What the join was standing in
-        for is `$OFS`, and it is `refinery.lib.scripts.ps1.analysis.separator` that answers it now:
-        the collection this writes reaches the enclosing coercion as a collection, and the fold
-        that follows the emulation is where it becomes a String with the separator the script
-        wrote.
+        stream and nothing narrower. A run of one-character strings used to be joined into one
+        String, which was a wrong answer measured six ways: `@('a', 'b') | %{ $_ }` is an
+        `Object[]` of two, so `.Count` is 2, `-join '-'` writes the separator, `foreach` runs
+        twice, and each of those changed. What the join was standing in for is `$OFS`, and it is
+        `refinery.lib.scripts.ps1.analysis.separator` that answers it now: the collection this
+        writes reaches the enclosing coercion as a collection, and the fold that follows the
+        emulation is where it becomes a String with the separator the script wrote.
 
-        The stream is flattened rather than nested, which is the same measurement:
-        `@(1, 2) | %{ $_, $_ }` is four Int32s and not two pairs, where `%{ ,($_, $_) }` is the two
-        pairs. One block emitting nothing contributes nothing, and a stream that ends up empty is
-        `$null` — refused rather than spelled, because a pipeline that produced no value is not an
-        expression this can put in its place.
+        **The stream arrives already assembled, and that is the whole reason `emit` exists beside
+        `execute`.** Concatenating what a block *returned* would flatten a block that hands out one
+        array into the objects inside it: measured, `@(1, 2) | %{ $_, $_ }` is four Int32s where
+        `%{ ,($_, $_) }` is two pairs, and a collapsed result spells both the same way. A stream
+        that ends up empty is refused rather than spelled `$null`, because a pipeline that produced
+        no value is not an expression this can put in its place.
         """
-        stream: list[_Value] = []
-        for result in results:
-            _Ps1Interpreter._append(stream, result)
-        if not stream:
+        if not results:
             return None
-        return Ps1FunctionEvaluator._value_to_node(_Ps1Interpreter._collapse(stream))
+        return Ps1FunctionEvaluator._value_to_node(_Ps1Interpreter._collapse(results))
 
 
 def evaluate_truthy(
