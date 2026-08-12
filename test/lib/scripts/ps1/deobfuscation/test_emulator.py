@@ -519,9 +519,22 @@ class TestPs1AnArgumentIsFoldedOnlyWhereItsTypeSurvivesTheInterpreter(TestPs1):
         self._assertUnchanged(self._identity_call('([char]65)'), Ps1FunctionEvaluator)
         self.assertEqual(self._apply(self._identity_call("'A'"), Ps1FunctionEvaluator), "$x = 'A'")
 
+    def test_a_boolean_is_bound_and_handed_back_as_the_boolean_it_is(self):
+        self.assertEqual(
+            self._apply(self._identity_call('$true'), Ps1FunctionEvaluator), '$x = $True')
+        self.assertEqual(self._apply('$true | % { $_ }', Ps1ForEachPipeline), '$True')
+
     def test_a_pipeline_source_declines_the_same_values_a_parameter_declines(self):
-        self._assertUnchanged('[byte]5 | % {\n  $_\n}', Ps1ForEachPipeline)
-        self._assertUnchanged('([char]65) | % {\n  $_\n}', Ps1ForEachPipeline)
+        self._assertUnchanged(cleandoc("""
+            [byte]5 | % {
+              $_
+            }
+        """), Ps1ForEachPipeline)
+        self._assertUnchanged(cleandoc("""
+            ([char]65) | % {
+              $_
+            }
+        """), Ps1ForEachPipeline)
         self.assertEqual(self._apply('5 | % { $_ }', Ps1ForEachPipeline), '5')
 
 
@@ -533,7 +546,10 @@ class TestPs1AHexadecimalArgumentDenotesThePatternItFills(TestPs1):
     """
 
     def _call(self, argument: str, body: str = '$n') -> str:
-        return F'function f ($n) {{ {body} }}\n$x = f {argument}'
+        return cleandoc(F"""
+            function f ($n) {{ {body} }}
+            $x = f {argument}
+        """)
 
     def test_a_pattern_that_fills_an_int32_binds_the_negative_it_denotes(self):
         self.assertEqual(self._apply(self._call('0xFFFFFFFF'), Ps1FunctionEvaluator), '$x = -1')
@@ -558,8 +574,10 @@ class TestPs1AHexadecimalArgumentDenotesThePatternItFills(TestPs1):
 class TestPs1AProducedValueIsWrittenAsTheExpressionThatSpellsIt(TestPs1):
 
     def _folded(self, body: str, arguments: str) -> str:
-        return self._apply(
-            F'function f ($a, $b) {{ {body} }}\n$x = f {arguments}', Ps1FunctionEvaluator)
+        return self._apply(cleandoc(F"""
+            function f ($a, $b) {{ {body} }}
+            $x = f {arguments}
+        """), Ps1FunctionEvaluator)
 
     def test_a_body_that_compares_folds_to_the_boolean_it_produced(self):
         self.assertEqual(self._folded('$a -eq $b', '1 1'), '$x = $True')
@@ -584,9 +602,14 @@ class TestPs1AnEmissionThatDidNotHappenIsNotFoldedIntoOne(TestPs1):
     """
 
     def test_a_body_that_emits_nothing_leaves_its_call_alone(self):
-        self._assertUnchanged('function f {}\n$x = f', Ps1FunctionEvaluator)
-        self.assertEqual(
-            self._apply("function f { 'v' }\n$x = f", Ps1FunctionEvaluator), "$x = 'v'")
+        self._assertUnchanged(cleandoc("""
+            function f {}
+            $x = f
+        """), Ps1FunctionEvaluator)
+        self.assertEqual(self._apply(cleandoc("""
+            function f { 'v' }
+            $x = f
+        """), Ps1FunctionEvaluator), "$x = 'v'")
 
     def test_a_block_that_emits_nothing_for_every_item_leaves_its_pipeline_alone(self):
         self._assertUnchanged('(1, 2) | % {}', Ps1ForEachPipeline)
@@ -660,3 +683,255 @@ class TestPs1EmulatorRedirections(TestPs1):
             $x = F
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), source)
+
+
+class TestPs1APipelineSourceIsWhatTheCastAroundItMakesOfIt(TestPs1):
+    """
+    Measured on 5.1: `[char[]]'ab'` is two Chars where the string it was written around is one item,
+    `[int[]]('1', '2')` is two Int32s where the strings inside it would concatenate, and
+    `[string[]](1, 2)` is two Strings where the numbers inside it would add. A block run over what
+    stands inside the cast therefore runs the wrong number of times or over the wrong values.
+    """
+
+    def test_a_cast_that_decides_how_many_items_there_are_is_not_read_past(self):
+        self._assertUnchanged(cleandoc("""
+            [char[]]'ab' | % {
+              $_
+            }
+        """), Ps1ForEachPipeline)
+
+    def test_a_cast_that_decides_what_the_items_are_worth_is_not_read_past(self):
+        for source in [
+            cleandoc("""
+                [int[]]('1', '2') | % {
+                  $_ + 1
+                }
+            """),
+            cleandoc("""
+                [string[]](1, 2) | % {
+                  $_ + 1
+                }
+            """),
+        ]:
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1ForEachPipeline)
+
+    def test_a_cast_the_numbers_written_inside_it_already_answer_is_still_folded(self):
+        self.assertEqual(
+            self._apply('[Char[]](72, 73) | % { [char]($_ -bxor 0) }', Ps1ForEachPipeline),
+            "'H', 'I'",
+        )
+
+
+class TestPs1AnArrayCastAnElementDoesNotFitIsAThrowAndNotARename(TestPs1):
+    """
+    Measured on 5.1: `[byte[]](300, 1)`, `[byte[]](-1, 1)`, `[char[]](-1)` and `[int[]](2147483648)`
+    each raise `Value was either too large or too small`, and so does the pipeline written over
+    them, which therefore runs its block no times and produces nothing. Reading the cast as a name
+    for the numbers inside it hands back a collection the script never produces.
+    """
+
+    def test_a_pipeline_over_a_cast_no_element_of_which_fits_is_left_alone(self):
+        for source in [
+            cleandoc("""
+                [byte[]](300, 1) | % {
+                  $_
+                }
+            """),
+            cleandoc("""
+                [byte[]](-1, 1) | % {
+                  $_
+                }
+            """),
+            cleandoc("""
+                [char[]](-1) | % {
+                  $_
+                }
+            """),
+            cleandoc("""
+                [int[]](2147483648) | % {
+                  $_
+                }
+            """),
+        ]:
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1ForEachPipeline)
+
+    def test_a_pipeline_over_a_cast_every_element_fits_is_still_folded(self):
+        """
+        These pin a ledgered erasure, not an exact answer: on 5.1 `[byte[]](5, 6)` carries two
+        `System.Byte` and the numerals written back carry `System.Int32`, so what survives the fold
+        is the count and the magnitudes and not the element type. It is kept because the same
+        reading is what resolves `[Char[]](…) | %{ [char]($_ -bxor $k) }`, the shape real loaders
+        are written in, and because the erasure is bounded by the range check the tests above pin.
+        """
+        self.assertEqual(self._apply('[byte[]](5, 6) | % { $_ }', Ps1ForEachPipeline), '5, 6')
+        self.assertEqual(self._apply('[byte[]](255, 1) | % { $_ }', Ps1ForEachPipeline), '255, 1')
+        self.assertEqual(
+            self._apply('[Char[]](72, 73) | % { [char]($_ -bxor 0) }', Ps1ForEachPipeline),
+            "'H', 'I'",
+        )
+
+
+class TestPs1ANullWrittenAmongThePipelineSourceIsOneOfItsItems(TestPs1):
+    """
+    Measured on 5.1: `1, $null, 2 | % { $_ }` produces three objects, the middle one `$null`. A
+    source read as the two numbers it names runs the block twice and hands back a collection one
+    item shorter than the one the script produces.
+    """
+
+    def test_a_null_between_two_numbers_is_not_dropped_from_the_source(self):
+        self._assertUnchanged(cleandoc("""
+            1, $null, 2 | % {
+              $_
+            }
+        """), Ps1ForEachPipeline)
+
+    def test_a_source_of_numbers_alone_is_still_folded(self):
+        self.assertEqual(self._apply('1, 2 | % { $_ }', Ps1ForEachPipeline), '1, 2')
+
+
+class TestPs1WhichSideOfWhichOperatorABooleanMayStandOn(TestPs1):
+    """
+    Measured on 5.1 against the Int32 `2`, for every binary arithmetic and bitwise operator it has,
+    with `$true` and `$false` on each side. An operator dispatches to a method on its *left*
+    operand's type, and the three that `Boolean` carries none of are `*`, `-shl` and `-shr`: each
+    answers `The operation '[System.Boolean] * [System.Int32]' is not defined` for both Booleans, so
+    which one stands there decides nothing. The other seven convert it and answer a number for both,
+    the Boolean deciding only which number: `$true / 2` is the Double 0.5 where `$false / 2` is the
+    Int32 0, since left of a division the Boolean is the dividend. A Boolean on the *right* is
+    converted before any dispatch happens and is a value for all ten, except that there `$false` is
+    the divisor zero, which makes `2 / $false` and `2 % $false` `Attempted to divide by zero`.
+    """
+
+    def _call(self, expression: str, argument: str) -> str:
+        return cleandoc(F"""
+            function f {{
+              Param($n)
+              {expression}
+            }}
+            $x = f {argument}
+        """)
+
+    def test_the_operators_a_boolean_left_operand_has_no_method_for_leave_their_call_alone(self):
+        for operator in ['*', '-shl', '-shr']:
+            for argument in ['$true', '$false']:
+                with self.subTest(F'{argument} {operator} 2'):
+                    self._assertUnchanged(
+                        self._call(F'$n {operator} 2', argument), Ps1FunctionEvaluator)
+
+    def test_the_operators_a_boolean_left_operand_has_a_method_for_fold_to_their_number(self):
+        for operator, from_true, from_false in [
+            ('+', '3', '2'),
+            ('-', '-1', '-2'),
+            ('/', '0.5', '0'),
+            ('%', '1', '0'),
+            ('-band', '0', '0'),
+            ('-bor', '3', '2'),
+            ('-bxor', '3', '2'),
+        ]:
+            for argument, expected in [('$true', from_true), ('$false', from_false)]:
+                with self.subTest(F'{argument} {operator} 2'):
+                    self.assertEqual(
+                        self._apply(self._call(F'$n {operator} 2', argument), Ps1FunctionEvaluator),
+                        F'$x = {expected}',
+                    )
+
+    def test_a_boolean_right_operand_folds_for_every_one_of_the_ten_operators(self):
+        for operator, expected in [
+            ('+', '3'),
+            ('-', '1'),
+            ('*', '2'),
+            ('/', '2'),
+            ('%', '0'),
+            ('-band', '0'),
+            ('-bor', '3'),
+            ('-bxor', '3'),
+            ('-shl', '4'),
+            ('-shr', '1'),
+        ]:
+            with self.subTest(operator):
+                self.assertEqual(
+                    self._apply(self._call(F'2 {operator} $n', '$true'), Ps1FunctionEvaluator),
+                    F'$x = {expected}',
+                )
+
+    def test_a_false_right_operand_folds_for_every_operator_it_is_not_the_divisor_of(self):
+        for operator, expected in [
+            ('+', '2'),
+            ('-', '2'),
+            ('*', '0'),
+            ('-band', '0'),
+            ('-bor', '2'),
+            ('-bxor', '2'),
+            ('-shl', '2'),
+            ('-shr', '2'),
+        ]:
+            with self.subTest(F'2 {operator} $false'):
+                self.assertEqual(
+                    self._apply(self._call(F'2 {operator} $n', '$false'), Ps1FunctionEvaluator),
+                    F'$x = {expected}',
+                )
+
+    def test_the_false_standing_right_of_a_division_is_the_divisor_zero(self):
+        for operator in ['/', '%']:
+            with self.subTest(F'2 {operator} $false'):
+                self._assertUnchanged(
+                    self._call(F'2 {operator} $n', '$false'), Ps1FunctionEvaluator)
+
+    def test_a_block_reads_a_boolean_operand_exactly_as_a_function_body_does(self):
+        self.assertEqual(self._apply('$true | % { $_ -bor 2 }', Ps1ForEachPipeline), '3')
+        self.assertEqual(self._apply('$false | % { $_ -bor 2 }', Ps1ForEachPipeline), '2')
+        self.assertEqual(self._apply('$true | % { $_ / 2 }', Ps1ForEachPipeline), '0.5')
+        self.assertEqual(self._apply('$false | % { $_ / 2 }', Ps1ForEachPipeline), '0')
+        self.assertEqual(self._apply('$true | % { 2 -shl $_ }', Ps1ForEachPipeline), '4')
+        for source in [
+            cleandoc("""
+                $true | % {
+                  $_ -shr 2
+                }
+            """),
+            cleandoc("""
+                $false | % {
+                  $_ -shr 2
+                }
+            """),
+            cleandoc("""
+                $false | % {
+                  2 % $_
+                }
+            """),
+        ]:
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1ForEachPipeline)
+
+
+class TestPs1AHexadecimalNumeralInsideABodyDenotesThePatternItFills(TestPs1):
+    """
+    The same reading as for an argument, measured at the position an emulated body writes it in:
+    5.1 answers `0xFFFFFFFF` with the Int32 -1 in a function body and in a `%{ }` block alike, so
+    adding one to it is 0 at both, and `0xFFFFFFFFL` is 4294967295 at both.
+    """
+
+    def _call(self, body: str) -> str:
+        return cleandoc(F"""
+            function f {{ {body} }}
+            $x = f
+        """)
+
+    def test_a_function_body_reads_a_pattern_that_fills_an_int32_as_the_negative_it_names(self):
+        self.assertEqual(self._apply(self._call('0xFFFFFFFF'), Ps1FunctionEvaluator), '$x = -1')
+        self.assertEqual(self._apply(self._call('0xFFFFFFFF + 1'), Ps1FunctionEvaluator), '$x = 0')
+
+    def test_a_function_body_reads_a_pattern_narrower_than_its_width_as_its_magnitude(self):
+        self.assertEqual(self._apply(self._call('0xFF'), Ps1FunctionEvaluator), '$x = 255')
+
+    def test_a_function_body_reads_the_long_suffix_as_the_digits_read_as_a_number(self):
+        self.assertEqual(
+            self._apply(self._call('0xFFFFFFFFL'), Ps1FunctionEvaluator), '$x = 4294967295L')
+
+    def test_a_block_reads_a_numeral_exactly_as_a_function_body_does(self):
+        self.assertEqual(self._apply('1 | % { 0xFFFFFFFF }', Ps1ForEachPipeline), '-1')
+        self.assertEqual(self._apply('1 | % { 0xFFFFFFFF + 1 }', Ps1ForEachPipeline), '0')
+        self.assertEqual(self._apply('1 | % { 0xFF }', Ps1ForEachPipeline), '255')
+        self.assertEqual(self._apply('1 | % { 0xFFFFFFFFL }', Ps1ForEachPipeline), '4294967295L')

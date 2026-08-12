@@ -148,6 +148,70 @@ class TestPs1VariableDriveResolution(TestPs1):
         """), Ps1WildcardResolution)
 
 
+class TestPs1AWildcardIsNotMatchedPastABlockThatWritesItsCallersName(TestPs1):
+    """
+    Measured on 5.1: a dot-sourced block and a `ForEach-Object` or `Where-Object` body store into
+    the caller's `$q`, so after `. { $q = 5 }` the pipeline lists an Int32's members and `Downl*g`
+    matches none of them. A `&` block writes a scope of its own and leaves the WebClient standing.
+    """
+
+    def test_a_write_a_caller_scope_block_replaces_does_not_decide_the_member_list(self):
+        for source in [
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                . {
+                  $q = 5
+                }
+                $q | Get-Member | Where-Object {
+                  $_.Name -ilike 'Downl*g'
+                }
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                1..3 | ForEach-Object {
+                  $q = 5
+                }
+                $q | Get-Member | Where-Object {
+                  $_.Name -ilike 'Downl*g'
+                }
+            """),
+        ]:
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1WildcardResolution)
+
+    def test_a_block_that_writes_no_such_name_leaves_the_wildcard_resolvable(self):
+        result = self._apply(cleandoc("""
+            $q = New-Object Net.WebClient
+            . { $z = 5 }
+            $q | Get-Member | Where-Object {
+              $_.Name -ilike 'Downl*g'
+            }
+        """), Ps1WildcardResolution)
+        self.assertEqual(result, cleandoc("""
+            $q = New-Object Net.WebClient
+            . {
+              $z = 5
+            }
+            'DownloadString'
+        """))
+
+    def test_a_block_opening_a_scope_of_its_own_leaves_the_wildcard_resolvable(self):
+        result = self._apply(cleandoc("""
+            $q = New-Object Net.WebClient
+            & { $q = 5 }
+            $q | Get-Member | Where-Object {
+              $_.Name -ilike 'Downl*g'
+            }
+        """), Ps1WildcardResolution)
+        self.assertEqual(result, cleandoc("""
+            $q = New-Object Net.WebClient
+            & {
+              $q = 5
+            }
+            'DownloadString'
+        """))
+
+
 class TestPs1WildcardResolution(TestPs1):
 
     def test_wildcard_variable_get_item(self):

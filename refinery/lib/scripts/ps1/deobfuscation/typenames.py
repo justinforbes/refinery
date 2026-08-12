@@ -170,11 +170,20 @@ class VariableTypeAwareTransformer(Transformer):
     every fold below marks the pass changed, which drops the shared cache, so a per-site lookup
     would rebuild the control-flow graphs of the whole script once per fold. Neither pass adds or
     removes a statement, so the graphs it would rebuild are the graphs it already holds.
+
+    The model is dropped again when the walk it was captured for ends, so that a second walk over a
+    tree the first one rewrote cannot be answered from the first one's graphs. The answers are held
+    for as long as the model is, keyed on the occurrence they were asked about: `type_at` walks
+    every write of a binding, and a member chain, two passes and every iteration of the normalize
+    group ask about the same occurrences again. The occurrence is kept beside its answer because
+    `id` alone identifies a node only while that node is alive, and this walk frees the ones it
+    replaces.
     """
 
     def __init__(self):
         super().__init__()
         self._flow: Ps1VariableFlow | None = None
+        self._typed: dict[int, tuple[Ps1Variable, Ps1TypeName | None]] = {}
         self._entry = False
 
     def visit(self, node: Node):
@@ -186,9 +195,16 @@ class VariableTypeAwareTransformer(Transformer):
             return super().visit(node)
         finally:
             self._entry = False
+            self._flow = None
+            self._typed.clear()
 
     def _type_of_variable(self, var: Ps1Variable) -> Ps1TypeName | None:
-        return None if self._flow is None else type_at(var, self._flow)
+        if self._flow is None:
+            return None
+        found = self._typed.get(id(var))
+        if found is None or found[0] is not var:
+            found = self._typed[id(var)] = (var, type_at(var, self._flow))
+        return found[1]
 
 
 class Ps1TypeSystemSimplifications(VariableTypeAwareTransformer):

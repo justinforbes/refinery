@@ -123,7 +123,7 @@ class TestPs1TypeAt(TestBase):
 
     def test_a_read_before_the_write_it_shares_a_subexpression_with_is_refused(self):
         self.assertIsNone(
-            self._type_at("$(($q | Get-Member)[0].Name; $q = New-Object Net.WebClient)"))
+            self._type_at('$(($q | Get-Member)[0].Name; $q = New-Object Net.WebClient)'))
 
     def test_each_read_is_typed_by_the_write_it_observes_where_the_writes_disagree(self):
         source = cleandoc("""
@@ -258,6 +258,197 @@ class TestPs1TypeAt(TestBase):
         ]:
             with self.subTest(source):
                 self.assertEqual(self._type_at(source, name='s'), expected)
+
+
+class TestPs1ATypeIsNotTakenFromAStoreThatMayNotHaveCompleted(TestPs1TypeAt):
+    """
+    A `catch` handler is entered exactly on the run where the `try` body threw. Measured on 5.1 the
+    name holds what it held before the script started, both in the handler and at the statement
+    after the whole `try`, and `Get-Member` over that `$null` is an error rather than a member list.
+    """
+
+    def test_a_handler_does_not_carry_the_write_its_try_body_may_not_have_completed(self):
+        self.assertIsNone(self._type_at(cleandoc("""
+            try {
+              $q = New-Object Net.WebClient
+            } catch {
+              ($q | Get-Member)[0].Name
+            }
+        """)))
+
+    def test_a_read_after_the_whole_try_does_not_carry_the_write_inside_it(self):
+        self.assertIsNone(self._type_at(cleandoc("""
+            try {
+              $q = New-Object Net.WebClient
+            } catch {}
+            ($q | Get-Member)[0].Name
+        """)))
+
+    def test_a_read_only_the_completing_body_reaches_still_carries_the_write(self):
+        """
+        The floor under the two above: refusing every read a `try` stands anywhere near types
+        nothing in a script that handles an error at all.
+        """
+        self.assertEqual(self._type_at(cleandoc("""
+            try {
+              $q = New-Object Net.WebClient
+              $q.downloadstring('u')
+            } catch {}
+        """)), 'System.Net.WebClient')
+
+
+class TestPs1NoReadInsideATrapBodyIsTyped(TestPs1TypeAt):
+    """
+    A hole this layer has, recorded so that it is a stated fact with a test that changes when it
+    closes rather than an assumption nobody wrote down. A trap body is reached from the exceptional
+    exit of every definition in the block it stands in, so no write reaches a read inside it and
+    every such read is refused. For the write standing below the trap that is 5.1's own answer — a
+    throw from above it leaves the name `$null` — but the same refusal falls on a write that cannot
+    throw and on the body's own write directly above the read, and both of those do carry a value on
+    5.1. No floor is constructible inside a trap body today, so what is pinned here is the refusal
+    and not the completed-store rule the class above pins.
+    """
+
+    def test_a_write_standing_below_the_trap_does_not_type_a_read_inside_it(self):
+        self.assertIsNone(self._type_at(cleandoc("""
+            trap {
+              ($q | Get-Member)[0].Name
+            }
+            $q = New-Object Net.WebClient
+        """)))
+
+    def test_a_write_the_trap_body_performs_itself_does_not_type_the_read_below_it(self):
+        self.assertIsNone(self._type_at(cleandoc("""
+            trap {
+              $q = New-Object Net.WebClient
+              $q.downloadstring('u')
+            }
+        """)))
+
+    def test_a_write_that_cannot_throw_does_not_type_a_read_inside_the_trap_either(self):
+        self.assertIsNone(self._type_at(cleandoc("""
+            $q = 'abc'
+            trap {
+              $q.substring(0, 1)
+            }
+        """)))
+        self.assertEqual(self._type_at(cleandoc("""
+            $q = 'abc'
+            $q.substring(0, 1)
+        """)), 'System.String')
+
+
+class TestPs1AWriteNobodyCanReadTypesNoReadWhereverThatReadStands(TestPs1TypeAt):
+    """
+    Measured on 5.1 with `Invoke-Expression '$q = New-Object Text.StringBuilder'` between the write
+    and the read: the read carries the StringBuilder and not the WebClient the script wrote, at the
+    top level, inside `1..3 | %{ }` and inside `& { }` alike. Where the read is written decides
+    nothing, so the three have to answer together.
+    """
+
+    def test_a_read_the_call_precedes_carries_no_type(self):
+        for source in [
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                Invoke-Expression $code
+                $q.downloadstring('u')
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                Invoke-Expression $code
+                1..3 | %{ $q.downloadstring('u') }
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                Invoke-Expression $code
+                & { $q.downloadstring('u') }
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertIsNone(self._type_at(source))
+
+    def test_a_read_the_call_follows_still_carries_the_write(self):
+        for source in [
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                $q.downloadstring('u')
+                Invoke-Expression $code
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                1..3 | %{ $q.downloadstring('u') }
+                Invoke-Expression $code
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                & { $q.downloadstring('u') }
+                Invoke-Expression $code
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._type_at(source), 'System.Net.WebClient')
+
+
+class TestPs1ATypeIsNotCarriedPastABlockThatWritesItsCallersName(TestPs1TypeAt):
+    """
+    Measured on 5.1: a dot-sourced block and a `ForEach-Object` or `Where-Object` body store into
+    the caller's own `$q`, so the write standing above one of them is not what the read below it
+    observes. `($q | Get-Member)[0].Name` is `Clone` for a String, `Disposed` for a WebClient and
+    `CompareTo` for an Int32, and each of these scripts answers with the members of the type the
+    block left behind. A `&` block opens a scope of its own and changes nothing outside it.
+    """
+
+    def test_a_write_a_caller_scope_block_replaces_is_not_carried_past_it(self):
+        for source in [
+            cleandoc("""
+                $q = 'abc'
+                . { $q = New-Object Net.WebClient }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                . { $q = 5 }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                1..3 | ForEach-Object { $q = 5 }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                1..3 | Where-Object { $q = 5 }
+                ($q | Get-Member)[0].Name
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertIsNone(self._type_at(source))
+
+    def test_a_block_that_writes_no_such_name_leaves_the_write_above_it_standing(self):
+        for source in [
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                . { $z = 5 }
+                $q.downloadstring('u')
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                1..3 | ForEach-Object { $z = 5 }
+                $q.downloadstring('u')
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                1..3 | Where-Object { $z = 5 }
+                $q.downloadstring('u')
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                & { $q = 5 }
+                $q.downloadstring('u')
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._type_at(source), 'System.Net.WebClient')
 
 
 if __name__ == '__main__':

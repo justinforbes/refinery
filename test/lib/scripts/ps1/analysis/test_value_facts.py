@@ -1664,6 +1664,15 @@ class TestPs1AComputedPayloadNamesTheValueItsPythonKindDecides(unittest.TestCase
             with self.subTest(repr(payload)):
                 self.assertEqual(fact_of(payload), UNKNOWN)
 
+    def test_a_number_no_numeral_spells_names_nothing(self):
+        """
+        An infinity is a Double a run can hold and no source text can write down, so naming it here
+        would hand a caller a value it cannot put back into the script it came out of.
+        """
+        for payload in (INFINITY, -INFINITY):
+            with self.subTest(repr(payload)):
+                self.assertEqual(fact_of(payload), UNKNOWN)
+
     def test_a_value_whose_type_its_payload_carries_is_named_back_unchanged(self):
         for spelling in ('007', '2147483648', '1.5', '0xFFFFFFFF', '0xFFFFFFFFL'):
             with self.subTest(spelling):

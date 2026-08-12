@@ -33,7 +33,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
 )
 
-
 #: The reasons a binding's values cannot be tracked that no reasoning about its *type* can survive:
 #: each of the three is a way for something this layer does not see to store a value of any type
 #: under the name, so nothing the source spells about the name is a claim about what it holds.
@@ -63,10 +62,11 @@ def type_at(var: Ps1Variable, flow: Ps1VariableFlow) -> Ps1TypeName | None:
 
     The second rule has to establish two things the first gets for free. **That a write has run at
     all**, which `written_before` answers: writes that agree say nothing about a read that precedes
-    every one of them, where the name holds what it held before the script started. And **that
-    nothing unattributable has run**, which `unattributable_before` answers: `Invoke-Expression
-    $code` stores a value of any type under any name, and agreement among the writes the source
-    spells is no claim about the ones it does not. Writes spread over several bodies are refused
+    every one of them, where the name holds what it held before the script started. And **that the
+    writes it is agreeing over are all of them**, which `foreign_write_before` answers:
+    `Invoke-Expression $code` stores a value of any type under any name and `. { $q = … }` stores
+    into the caller's scope from a binding of its own, so agreement among the writes this binding
+    holds is no claim about the ones it does not. Writes spread over several bodies are refused
     there too, because whether one body runs before another is what this layer does not answer.
     """
     binding = flow.semantic.binding_of(var)
@@ -79,7 +79,7 @@ def type_at(var: Ps1Variable, flow: Ps1VariableFlow) -> Ps1TypeName | None:
         return _established_by(observed)
     if flow.unknowns(binding) & Ps1FlowUnknown.WRITES_IN_SEVERAL_BODIES:
         return None
-    if flow.unattributable_before(var) or not flow.written_before(var):
+    if flow.foreign_write_before(var) or not flow.written_before(var):
         return None
     named = {_established_by(write.node) for write in binding.writes}
     return named.pop() if len(named) == 1 else None

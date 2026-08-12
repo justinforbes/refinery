@@ -24,10 +24,13 @@ from refinery.lib.scripts.ps1.analysis.effects import (
 )
 from refinery.lib.scripts.ps1.analysis.separator import OFS_FALLBACK, OFS_NAME
 from refinery.lib.scripts.ps1.analysis.values import (
+    UNKNOWN,
     Ps1Constant,
     Ps1Fact,
     collect_facts,
     fact_of,
+    integer_at,
+    integer_of,
     make_string_literal,
     read,
     render,
@@ -43,7 +46,9 @@ from refinery.lib.scripts.ps1.data import (
     COMPARISON_OPS,
     ENCODING_MAP,
     is_type,
+    named_type,
 )
+from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     StringMethodError,
     apply_format_string,
@@ -113,6 +118,46 @@ _MAX_INTERPRETER_ITERATIONS = 100_000
 _MAX_INTERPRETER_STRING_LEN = 1_000_000
 _MAX_INTERPRETER_DEPTH = 64
 
+#: The operators whose *left* operand a `Boolean` may not be. 5.1 dispatches an operator to a method
+#: on the left operand's type and `Boolean` carries none of these three, so `$true * 2` is
+#: `The operation '[System.Boolean] * [System.Int32]' is not defined` — where the interpreter would
+#: answer a number, because Python's `bool` is an `int` and nothing here carries the .NET type that
+#: tells the two apart. What is left out is left out on the same measurement: `$true + 1`,
+#: `$true / 2` and `$true -bxor 1` are values on 5.1, and a `Boolean` on the *right* is a value for
+#: every one of the ten. The measured grid is not the oracle for this list — it answers a cell and
+#: not an operand, so its throw over `/` and `%` is the divisor `$false`, which `ps_divide` and
+#: `ps_modulo` already refuse where it stands.
+_NO_OPERATOR_METHOD_ON_BOOLEAN = frozenset({'*', '-shl', '-shr'})
+
+#: The element types `Ps1ForEachPipeline._get_constant_array` may drop off an array cast, spelled as
+#: `refinery.lib.scripts.ps1.ast.normalize_dotnet_type_name` writes them, each against the width
+#: that decides which numbers it holds. Each is a width the interpreter carries as the number the
+#: cast was written over, which is the ledgered residual — the item is the right number under the
+#: wrong type. Every other element type changes the item itself, and a cast this cannot read that
+#: way is refused rather than dropped. A `Char` is measured against `UInt16` because a code point is
+#: what it holds; the domain's integer widths carry no cell for `Char` itself.
+_WIDTH_TYPES: dict[str, Ps1TypeName] = {
+    name: named
+    for name, spelling in (
+        ('byte', 'System.Byte'),
+        ('char', 'System.UInt16'),
+        ('int', 'System.Int32'),
+        ('int16', 'System.Int16'),
+        ('int32', 'System.Int32'),
+        ('int64', 'System.Int64'),
+        ('long', 'System.Int64'),
+        ('sbyte', 'System.SByte'),
+        ('short', 'System.Int16'),
+        ('uint', 'System.UInt32'),
+        ('uint16', 'System.UInt16'),
+        ('uint32', 'System.UInt32'),
+        ('uint64', 'System.UInt64'),
+        ('ulong', 'System.UInt64'),
+        ('ushort', 'System.UInt16'),
+    )
+    for named in [named_type(spelling)]
+}
+
 
 def _value_of(fact: Ps1Fact) -> tuple[bool, _Value]:
     """
@@ -126,9 +171,37 @@ def _value_of(fact: Ps1Fact) -> tuple[bool, _Value]:
     String's; a Decimal; and every integer written at a width its own magnitude does not take, so
     `[byte] 5` is declined rather than folded back out as the Int32 `5`. It is one rule, so the
     types the interpreter grows into cannot come apart from the types it may accept.
+
+    **`$null` is refused although it round-trips**, because the round trip is about the value and
+    this is about the currency: `None` is what the interpreter also uses for a statement that
+    emitted nothing, and `_Ps1Interpreter._append` drops it on that reading. A `$null` handed in as
+    an item comes back out of the stream as an item that is not there, so `1, $null, 2 | %{ $_ }`
+    would fold to a collection of two. Until the interpreter has a mark for *no output*, an
+    emitted `$null` is a value it cannot carry.
     """
     carried = _carried(fact)
+    if carried is None:
+        return False, None
     return (True, carried) if fact_of(carried) == fact else (False, None)
+
+
+def _fills_the_width(fact: Ps1Fact, width: str) -> bool:
+    """
+    Whether an element of an array cast to *width* is a number that width holds, which is what
+    `Ps1ForEachPipeline._get_constant_array` needs before it may drop the cast and hand the element
+    on as the number written inside it.
+
+    Two ways to fail and they fail alike here. An element that is not a number at all is converted
+    by the cast rather than merely renamed — `[int[]]('1', '2')` hands out Int32s where the text
+    would concatenate. And a number the width does not hold is not converted at all: 5.1 throws on
+    `[byte[]](300, 1)`, so a fold that answered `300, 1` would put a value where the script has an
+    error.
+    """
+    named = _WIDTH_TYPES.get(width)
+    found = integer_of(fact)
+    if named is None or found is None:
+        return False
+    return integer_at(named, found) is not UNKNOWN
 
 
 def _carried(fact: Ps1Fact) -> _Value:
@@ -413,6 +486,21 @@ class _Ps1Interpreter:
         if self._iterations > self.max_iterations:
             raise _Ps1InterpreterError
 
+    @staticmethod
+    def _numeral(literal: Ps1IntegerLiteral) -> int:
+        """
+        The number an integer literal spells, asked of the value domain rather than of the node's
+        derived `value`: a hexadecimal numeral names the pattern its digits fill and not the
+        magnitude they read as, so `0xFFFFFFFF` is -1 and `0xFFFFFFFFL` is 4294967295. The bound
+        argument of a call is read the same way — see
+        `Ps1FunctionEvaluator._extract_constant_value` — and a body that answered differently from
+        its own call site would be two readers of one spelling.
+        """
+        found = integer_of(read(literal))
+        if found is None:
+            raise _Ps1InterpreterError
+        return found
+
     def _eval(self, expr) -> _Value:
         if expr is None:
             return None
@@ -425,7 +513,7 @@ class _Ps1Interpreter:
         if isinstance(expr, Ps1HereString):
             return expr.value
         if isinstance(expr, Ps1IntegerLiteral):
-            return expr.value
+            return self._numeral(expr)
         if isinstance(expr, Ps1RealLiteral):
             return expr.value
         if isinstance(expr, Ps1Variable):
@@ -660,6 +748,8 @@ class _Ps1Interpreter:
             self._env[key] = self._numeric_op(current, value, int.__sub__, float.__sub__)
         elif op == '*=':
             current = self._env.get(key)
+            if isinstance(current, bool):
+                raise _Ps1InterpreterError
             self._env[key] = self._numeric_op(current, value, int.__mul__, float.__mul__)
         else:
             raise _Ps1InterpreterError
@@ -696,6 +786,8 @@ class _Ps1Interpreter:
             return self._apply_type_cast(node.right.name, left)
         left = self._eval(node.left)
         right = self._eval(node.right)
+        if isinstance(left, bool) and op in _NO_OPERATOR_METHOD_ON_BOOLEAN:
+            raise _Ps1InterpreterError
         if op == '+':
             return self._add(left, right)
         if op == '-':
@@ -1736,14 +1828,28 @@ class Ps1ForEachPipeline(Transformer):
         a Char at all: until its values have types, an element of a `Char[]` has nowhere to land,
         and refusing the cast outright would drop the folds that shape depends on. A cast to a
         *scalar* is not dropped, because `[string](1, 2)` is one item and not two.
+
+        **What may be dropped is exactly a width over numbers, and nothing else.** The residual is
+        that the block sees a number where 5.1 shows it a narrower one; a cast this cannot read
+        that way changes what the block is handed, not merely what it is called. `[Char[]]'ab'`
+        hands out two Chars where the operand alone is one String, so dropping it changes the
+        *count*; `[int[]]('1', '2')` hands out numbers where the elements alone are text, so
+        `$_ + 1` becomes concatenation. Both were refused before the reader was widened to a
+        scalar source and are refused here, and so is `[byte[]](300, 1)`, where the cast is not
+        merely narrower than the number but does not hold it: 5.1 throws there and the pipeline
+        never runs at all.
         """
-        while (
-            isinstance(expr, Ps1CastExpression)
-            and normalize_dotnet_type_name(expr.type_name).endswith('[]')
-        ):
+        widths: list[str] = []
+        while isinstance(expr, Ps1CastExpression):
+            target = normalize_dotnet_type_name(expr.type_name)
+            if not target.endswith('[]'):
+                break
+            widths.append(target[:-2])
             expr = expr.operand
         facts = collect_facts(expr)
         if facts is None:
+            return None
+        if any(not _fills_the_width(fact, width) for width in widths for fact in facts):
             return None
         values: list[_Value] = []
         for fact in facts:

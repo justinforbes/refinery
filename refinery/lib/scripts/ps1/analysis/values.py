@@ -705,6 +705,10 @@ def fact_of(payload: object) -> Ps1Fact:
     and the two are the same Python object, which is the whole reason `Ps1Constant` carries a type
     beside its payload. A caller that means a Char has to build the fact instead of asking here,
     and one whose currency cannot tell the two apart is a caller whose Chars are already gone.
+
+    A number no literal spells names nothing here, which is `_finite`'s rule read at this boundary
+    too: `render` states that a value it is handed always has a spelling, and a fact carrying an
+    infinity would be the one that does not.
     """
     if payload is None:
         return NULL
@@ -713,7 +717,7 @@ def fact_of(payload: object) -> Ps1Fact:
     if isinstance(payload, int):
         return _widest_needed(payload)
     if isinstance(payload, float):
-        return _double(payload)
+        return UNKNOWN if _finite(payload) is None else _double(payload)
     if isinstance(payload, str):
         return Ps1Constant(_STRING, payload)
     if isinstance(payload, (list, tuple)):

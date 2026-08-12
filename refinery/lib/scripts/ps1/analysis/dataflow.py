@@ -293,32 +293,40 @@ class Ps1VariableFlow:
         *after* `$q | Get-Member` does not make the name a WebClient at the pipeline.
 
         Two ways for a write to have run, and a caller needs both. A write whose statement dominates
-        the read's ran on every path that arrives. A write inside the *same* statement is ordered by
-        the language where the graphs cannot order it at all, which is what a script that builds a
-        name and reads it inside one `$( ... )` depends on.
+        the read's ran on every path that arrives, and stored what it ran to store —
+        `_observes_completed_store` is asked here for the reason this module's own documentation
+        gives it: `try { $q = New-Object X } catch { $q.Foo }` reaches the handler on exactly the
+        run where the store did not happen, and dominance cannot see that. A write inside the *same*
+        statement is ordered by the language where the graphs cannot order it at all, which is what
+        a script that builds a name and reads it inside one `$( ... )` depends on.
 
         The read is asked at the position `_position_of` gives it, so a read inside a body that runs
         exactly where it is written is ordered against the writes around that body. Locating the
         read where it is *spelled* instead refuses `$q = New-Object …; & { $q.Foo }` outright, which
-        is the shape this whole question was kept for.
+        is the shape this whole question was kept for. The graph a write is asked in is the write's
+        own, so a binding whose writes are spread over several bodies is answered by whichever of
+        them the read can be projected into, rather than by whichever one happens to be written
+        first.
         """
         binding = self.semantic.binding_of(read)
         if binding is None or not binding.writes:
             return False
-        placed = {id(write.node): self.flow.locate(write.node) for write in binding.writes}
-        first = placed[id(binding.writes[0].node)]
-        if first is None:
-            return False
-        graph = first[0]
-        use = self._position_of(read, graph)
-        if use is None:
-            return False
+        positions: dict[int, CfgNode | None] = {}
         for write in binding.writes:
-            where = placed[id(write.node)]
-            if where is None or where[0] is not graph:
+            where = self.flow.locate(write.node)
+            if where is None:
                 continue
-            if where[1] is not use:
-                if self.dominators.dominates_node(graph, where[1], use):
+            graph, at = where
+            if id(graph) not in positions:
+                positions[id(graph)] = self._position_of(read, graph)
+            use = positions[id(graph)]
+            if use is None:
+                continue
+            if at is not use:
+                if (
+                    self.dominators.dominates_node(graph, at, use)
+                    and self._observes_completed_store(graph, at, use)
+                ):
                     return True
             elif self._runs_before(graph, use, read, write.node):
                 return True
@@ -350,25 +358,43 @@ class Ps1VariableFlow:
                 return False
         return False
 
-    def unattributable_before(self, read: Ps1Variable) -> bool:
+    def foreign_write_before(self, read: Ps1Variable) -> bool:
         """
-        Whether a write nobody can attribute to a name may already have run when *read* is
+        Whether a write the binding *read* names does not hold may already have run when *read* is
         evaluated.
 
-        The same fact `reaching_definition` folds into its kills, asked on its own. A caller whose
-        other half is not an ordering still has to know it: `Invoke-Expression $code` stores a value
-        of any type under any name, so a claim about a name that rests on the writes *of* it —
-        rather than on which one ran — is a claim only where nothing unattributable has run. `True`
-        is the answer to every doubt, a read the graphs do not place included.
+        The kills `reaching_definition` folds into its selection, asked on their own. A caller whose
+        other half is not an ordering still has to know them, because its whole claim is that the
+        writes it can see are all the writes there are: `Invoke-Expression $code` stores a value of
+        any type under any name, and `. { $q = New-Object X }` stores into the caller's scope from a
+        binding of its own — neither appears in `Binding.writes`, and a name every visible write
+        agrees about is still whatever one of these left behind. `True` is the answer to every
+        doubt, a read the graphs do not place included.
+
+        The unattributable half is `ambient_value_survives` read the other way round, and it is
+        spelled as that rather than assembled again: asking the read's *own* graph would let an
+        `Invoke-Expression` in the script around it go unseen, since the graph of a block holds none
+        of the statements that surround the block. `written_before` projects the read with
+        `_position_of` and this has to be answered at the same position or the two say nothing
+        together.
         """
-        if self.deferred_unattributable_writes:
+        if not self.ambient_value_survives(read):
             return True
-        located = self.flow.locate(read)
-        if located is None:
+        binding = self.semantic.binding_of(read)
+        if binding is None:
             return True
-        graph, use = located
-        kills = self._unattributable_kills(graph, read, use)
-        return bool(kills) and self._between.any_between(graph.entry, use, kills)
+        for write in binding.writes:
+            placed = self.flow.locate(write.node)
+            if placed is None:
+                return True
+            graph = placed[0]
+            kills = self._block_kills(graph, binding.name)
+            if not kills:
+                continue
+            use = self._position_of(read, graph)
+            if use is None or self._between.any_between(graph.entry, use, kills):
+                return True
+        return False
 
     def unknowns(self, binding: Binding) -> Ps1FlowUnknown:
         """

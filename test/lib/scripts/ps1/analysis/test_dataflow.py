@@ -774,3 +774,26 @@ class TestPs1WrittenBefore(TestBase):
 
     def test_a_write_before_a_repeated_statement_has_run_at_every_visit_of_it(self):
         self.assertTrue(self._written_before("$x = 'a'; while ($c) { Write-Host $x ($x = 'b') }"))
+
+    def test_a_store_the_handler_is_only_reached_without_has_not_run(self):
+        """
+        Measured on 5.1: the handler is entered exactly on the run where the cast raised, and `$x`
+        is `$null` there — the statement ran and its store did not land.
+        """
+        self.assertFalse(self._written_before("try { [int]$x = 'abc' } catch { Write-Host $x }"))
+
+    def test_a_store_the_statement_after_the_try_may_be_reached_without_has_not_run(self):
+        self.assertFalse(self._written_before("try { [int]$x = 'abc' } catch { }; Write-Host $x"))
+
+    def test_no_read_inside_a_trap_body_is_told_the_name_was_written(self):
+        """
+        A hole recorded rather than assumed. A trap body is reached from the exceptional exit of
+        every definition in its block, so nothing reaches a read inside it. For the write standing
+        below the trap that is 5.1's answer, and for the body's own write directly above the read it
+        is not — that one has run. The refusal is what is pinned, so there is no floor beside it.
+        """
+        self.assertFalse(self._written_before("trap { Write-Host $x }; $x = 'a'"))
+        self.assertFalse(self._written_before("trap { $x = 'a'; Write-Host $x }"))
+
+    def test_a_read_only_the_completed_store_reaches_has_it(self):
+        self.assertTrue(self._written_before("try { $x = 'a'; Write-Host $x } catch { }"))

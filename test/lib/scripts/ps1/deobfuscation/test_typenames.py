@@ -234,3 +234,214 @@ class TestPs1MemberFoldsFollowTheWriteAReadObserves(TestPs1):
               $s.Substring(0, 1)
             }
         """))
+
+
+class TestPs1AMemberIsNotSpelledFromAStoreThatMayNotHaveCompleted(TestPs1):
+    """
+    A handler runs on the run where its `try` body threw. Measured on 5.1 the name is `$null` at
+    that read and at the statement after the whole `try`, and `Get-Member` over `$null` reports
+    `You must specify an object for the Get-Member cmdlet`, so an index into it names no member of
+    anything.
+    """
+
+    def test_a_handler_does_not_spell_a_member_from_its_try_bodys_write(self):
+        self._assertUnchanged(cleandoc("""
+            try {
+              $q = New-Object Net.WebClient
+            } catch {
+              ($q | Get-Member)[0].Name
+            }
+        """), Ps1TypeSystemSimplifications)
+
+    def test_a_read_after_the_whole_try_does_not_spell_a_member_from_the_write_inside_it(self):
+        self._assertUnchanged(cleandoc("""
+            try {
+              $q = New-Object Net.WebClient
+            } catch {}
+            ($q | Get-Member)[0].Name
+        """), Ps1TypeSystemSimplifications)
+
+    def test_a_read_only_the_completing_body_reaches_still_resolves(self):
+        result = self._apply(cleandoc("""
+            try {
+              $q = New-Object Net.WebClient
+              $q.downloadstring('u')
+            } catch {}
+        """), Ps1TypeSystemSimplifications)
+        self.assertEqual(result, cleandoc("""
+            try {
+              $q = New-Object Net.WebClient
+              $q.DownloadString('u')
+            } catch {}
+        """))
+
+
+class TestPs1NoMemberIsSpelledInsideATrapBody(TestPs1):
+    """
+    The hole `refinery.lib.scripts.ps1.analysis.variable_types` carries, seen from the pass that
+    spells members: no read inside a `trap` body is typed, so none of them is spelled. For the write
+    standing below the trap that is 5.1's answer, since a throw from above it leaves the name
+    `$null`; for a write that cannot throw it is not, and the same read written outside the trap
+    does resolve. What is pinned is the refusal rather than the completed-store rule.
+    """
+
+    def test_a_write_standing_below_the_trap_does_not_spell_a_member_inside_it(self):
+        self._assertUnchanged(cleandoc("""
+            trap {
+              ($q | Get-Member)[0].Name
+            }
+            $q = New-Object Net.WebClient
+        """), Ps1TypeSystemSimplifications)
+
+    def test_a_write_that_cannot_throw_does_not_spell_one_inside_the_trap_either(self):
+        self._assertUnchanged(cleandoc("""
+            $q = 'abc'
+            trap {
+              $q.substring(0, 1)
+            }
+        """), Ps1TypeSystemSimplifications)
+        self.assertEqual(self._apply(cleandoc("""
+            $q = 'abc'
+            $q.substring(0, 1)
+        """), Ps1TypeSystemSimplifications), cleandoc("""
+            $q = 'abc'
+            $q.Substring(0, 1)
+        """))
+
+
+class TestPs1AMemberIsNotSpelledPastABlockThatWritesItsCallersName(TestPs1):
+    """
+    Measured on 5.1: `. { $q = New-Object Net.WebClient }` and a `ForEach-Object` or `Where-Object`
+    body store into the caller's `$q`, so `($q | Get-Member)[0].Name` answers `Disposed` after one
+    of them where the String written above it would answer `Clone`, and `CompareTo` where the
+    WebClient written above it would answer `Disposed`. A `&` block writes a scope of its own.
+    """
+
+    def test_a_write_a_caller_scope_block_replaces_does_not_spell_the_members(self):
+        for source in [
+            cleandoc("""
+                $q = 'abc'
+                . {
+                  $q = New-Object Net.WebClient
+                }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                . {
+                  $q = 5
+                }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                1..3 | ForEach-Object {
+                  $q = 5
+                }
+                $q.downloadstring('u')
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                1..3 | Where-Object {
+                  $q = 5
+                }
+                $q.downloadstring('u')
+            """),
+        ]:
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1TypeSystemSimplifications)
+
+    def test_a_block_that_writes_no_such_name_leaves_the_members_resolvable(self):
+        result = self._apply(cleandoc("""
+            $q = 'abc'
+            . { $z = 5 }
+            ($q | Get-Member)[0].Name
+        """), Ps1TypeSystemSimplifications)
+        self.assertEqual(result, cleandoc("""
+            $q = 'abc'
+            . {
+              $z = 5
+            }
+            'Clone'
+        """))
+
+    def test_a_block_opening_a_scope_of_its_own_leaves_the_members_resolvable(self):
+        result = self._apply(cleandoc("""
+            $q = New-Object Net.WebClient
+            & { $q = 5 }
+            $q.downloadstring('u')
+        """), Ps1TypeSystemSimplifications)
+        self.assertEqual(result, cleandoc("""
+            $q = New-Object Net.WebClient
+            & {
+              $q = 5
+            }
+            $q.DownloadString('u')
+        """))
+
+
+class TestPs1AMemberIsNotSpelledAcrossACallThatMayHaveRewrittenTheName(TestPs1):
+    """
+    Measured on 5.1: with `Invoke-Expression '$q = New-Object Text.StringBuilder'` between them, the
+    read carries a StringBuilder rather than the WebClient the script wrote, and it does so whether
+    the read stands at the top level, inside `1..3 | %{ }` or inside `& { }`. Writing the read into
+    a block that runs right there is therefore no way around the call.
+    """
+
+    def test_a_read_inside_a_block_the_call_precedes_leaves_the_member_alone(self):
+        for source in [
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                Invoke-Expression $code
+                1..3 | % {
+                  $q.downloadstring('u')
+                }
+            """),
+            cleandoc("""
+                $q = New-Object Net.WebClient
+                Invoke-Expression $code
+                & {
+                  $q.downloadstring('u')
+                }
+            """),
+        ]:
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1TypeSystemSimplifications)
+
+    def test_a_read_inside_a_block_the_call_follows_still_resolves(self):
+        for source, expected in [
+            (
+                cleandoc("""
+                    $q = New-Object Net.WebClient
+                    1..3 | % {
+                      $q.downloadstring('u')
+                    }
+                    Invoke-Expression $code
+                """),
+                cleandoc("""
+                    $q = New-Object Net.WebClient
+                    1..3 | % {
+                      $q.DownloadString('u')
+                    }
+                    Invoke-Expression $code
+                """),
+            ),
+            (
+                cleandoc("""
+                    $q = New-Object Net.WebClient
+                    & {
+                      $q.downloadstring('u')
+                    }
+                    Invoke-Expression $code
+                """),
+                cleandoc("""
+                    $q = New-Object Net.WebClient
+                    & {
+                      $q.DownloadString('u')
+                    }
+                    Invoke-Expression $code
+                """),
+            ),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._apply(source, Ps1TypeSystemSimplifications), expected)
