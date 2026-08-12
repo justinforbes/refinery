@@ -31,16 +31,17 @@ def to_js_number(value: int | float) -> float:
         return float('-inf') if value < 0 else float('inf')
 
 
-STRING_NUMERIC_TRIM = (
+TRIMMABLE_WHITESPACE = (
     '\t\n\v\f\r\x20\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006'
     '\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
 )
 """
-The characters a string may be padded with and still name a Number: ECMA-262 WhiteSpace, which is
-the space separators together with `U+FEFF`, plus the line terminators. It is spelled out rather
-than left to `str.strip`, whose notion of a space is neither a subset nor a superset of this one:
-Python takes `U+001C` through `U+001F`, which JavaScript does not, and leaves `U+FEFF`, which
-JavaScript takes.
+The characters ECMA-262 TrimString removes: WhiteSpace, which is the space separators together with
+`U+FEFF`, plus the line terminators. It is what a string may be padded with and still name a Number,
+and it is equally what `String.prototype.trim` takes off, one set, because the specification defines
+the second in terms of the first. It is spelled out rather than left to `str.strip`, whose notion of
+a space is neither a subset nor a superset of this one: Python takes `U+001C` through `U+001F`, which
+JavaScript does not, and leaves `U+FEFF`, which JavaScript takes.
 """
 
 
@@ -101,15 +102,13 @@ The ECMA-262 NonDecimalIntegerLiteral production, in the form StrNumericLiteral 
 numeric separator forbidden, and with no sign, since the sign belongs to the decimal alternative.
 """
 
-_NON_DECIMAL_RADIX = {'b': 2, 'o': 8, 'x': 16}
 
-
-def _read_decimal_literal(text: str) -> tuple[float, int] | None:
+def _decimal_literal(match: re.Match[str] | None) -> float | None:
     """
-    The Number named by the StrDecimalLiteral that *text* begins with, together with the length of
-    that literal, or `None` when the text does not begin with one. A reader of a prefix wants only
-    the Number; a reader of a whole string wants the length as well, so that it can refuse text with
-    anything left over.
+    The Number named by a StrDecimalLiteral that `_STR_DECIMAL_LITERAL` has matched, and `None` when
+    it matched none. Which match is asked for is the whole difference between the two readers of the
+    production: `Number` reads the string it is given and so asks for a `fullmatch`, where
+    `parseFloat` reads what the string begins with and so asks for a `match`.
 
     The matched text goes to Python's `float`, which reads it identically, because the grammar has
     already excluded every spelling on which the two disagree: `inf`, `nan`, the numeric separator,
@@ -118,15 +117,12 @@ def _read_decimal_literal(text: str) -> tuple[float, int] | None:
     truncated first — `float` is linear in them, and shortening them would move the rounding that
     makes `5e-324` and `1e309` come out at all.
     """
-    match = _STR_DECIMAL_LITERAL.match(text)
     if match is None:
         return None
     literal = match[0]
     negative = literal[0] == '-'
-    if literal[0] in '+-':
-        literal = literal[1:]
-    magnitude = float('inf') if literal == 'Infinity' else float(literal)
-    return apply_sign(magnitude, negative), match.end()
+    magnitude = literal[1:] if literal[0] in '+-' else literal
+    return apply_sign(float('inf') if magnitude == 'Infinity' else float(magnitude), negative)
 
 
 def _read_non_decimal_integer(text: str) -> float | None:
@@ -135,10 +131,13 @@ def _read_non_decimal_integer(text: str) -> float | None:
     otherwise. Because this alternative carries neither a sign nor a numeric separator,
     `Number('-0x10')` and `Number('0x1_0')` are both `NaN`, where the same text is a perfectly good
     numeric literal in source and a perfectly good expression at runtime.
+
+    Once the production has matched, the text is also a Python integer literal, so the base it names
+    is read by asking for base zero rather than by decoding the prefix a second time.
     """
     if _NON_DECIMAL_INTEGER.fullmatch(text) is None:
         return None
-    return to_js_number(int(text[2:], _NON_DECIMAL_RADIX[text[1].lower()]))
+    return to_js_number(int(text, 0))
 
 
 def js_string_to_number(text: str) -> float:
@@ -148,17 +147,14 @@ def js_string_to_number(text: str) -> float:
     literal the text merely begins with is not an answer here, so `Number('1x')` is `NaN` where
     `parseFloat('1x')` is `1`. Padding and nothing else names zero.
     """
-    text = text.strip(STRING_NUMERIC_TRIM)
+    text = text.strip(TRIMMABLE_WHITESPACE)
     if not text:
         return 0.0
     integer = _read_non_decimal_integer(text)
     if integer is not None:
         return integer
-    read = _read_decimal_literal(text)
-    if read is None:
-        return float('nan')
-    value, length = read
-    return value if length == len(text) else float('nan')
+    value = _decimal_literal(_STR_DECIMAL_LITERAL.fullmatch(text))
+    return float('nan') if value is None else value
 
 
 def js_parse_float(text: str) -> float:
@@ -168,10 +164,8 @@ def js_parse_float(text: str) -> float:
     as one, and `NaN` only for text that does not begin as one at all. It reads no
     NonDecimalIntegerLiteral, which is why `parseFloat('0x10')` is `0`, stopped at the `x`.
     """
-    read = _read_decimal_literal(text.lstrip(STRING_NUMERIC_TRIM))
-    if read is None:
-        return float('nan')
-    return read[0]
+    value = _decimal_literal(_STR_DECIMAL_LITERAL.match(text.lstrip(TRIMMABLE_WHITESPACE)))
+    return float('nan') if value is None else value
 
 
 _MAX_DIGITS_IN_A_DOUBLE = {
@@ -199,11 +193,12 @@ def js_parse_int(text: str, radix: int = 0) -> float | None:
 
     The digits are accumulated exactly and only then coerced, because `parseInt` reads the whole
     digit string before producing a Number: enough digits and the result is `Infinity`, and a digit
-    string past 2^53 names the nearest double rather than itself. Leading zeros are dropped as they
-    are read and the count is answered as soon as it passes the bound, so a digit string of any
-    length costs what its significant prefix costs rather than what it is.
+    string past 2^53 names the nearest double rather than itself. The count is answered as soon as it
+    passes the bound, and the leading zeros are taken off ahead of the scan rather than tested for
+    inside it, so a digit string of any length costs what its significant prefix costs rather than
+    what it is. A zero is a digit in every radix this reads, which is what makes that legitimate.
     """
-    text = text.strip(STRING_NUMERIC_TRIM)
+    text = text.strip(TRIMMABLE_WHITESPACE)
     if not text:
         return None
     negative = False
@@ -217,10 +212,11 @@ def js_parse_int(text: str, radix: int = 0) -> float | None:
         return None
     if radix == 16 and hex_prefixed:
         text = text[2:]
+    significant = text.lstrip('0')
+    scanned = len(significant) < len(text)
     limit = _MAX_DIGITS_IN_A_DOUBLE[radix]
     digits: list[str] = []
-    scanned = False
-    for ch in text:
+    for ch in significant:
         if '0' <= ch <= '9':
             if ord(ch) - ord('0') >= radix:
                 break
@@ -230,8 +226,7 @@ def js_parse_int(text: str, radix: int = 0) -> float | None:
         else:
             break
         scanned = True
-        if digits or ch != '0':
-            digits.append(ch)
+        digits.append(ch)
         if len(digits) > limit:
             return apply_sign(float('inf'), negative)
     if not scanned:

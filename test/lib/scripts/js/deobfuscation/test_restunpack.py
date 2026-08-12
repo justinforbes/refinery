@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import unittest
 
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
@@ -243,15 +242,16 @@ class TestVariableDemasking(TestJsDeobfuscator):
 
 class TestStackKeysThatOnlyLookLikeIndices(TestJsDeobfuscator):
     """
-    A stack key is a property name, and only a name spelled with ASCII digits names the element a
-    parameter stands in for. `str.isdigit` answers a different question: it is true of every Unicode
-    decimal digit and of the superscripts, so it accepts names that index nothing.
+    A stack key is a property name, and only the canonical decimal spelling of an index names the
+    element a parameter stands in for. `str.isdigit` answers a different question: it is true of every
+    Unicode decimal digit and of the superscripts, so it accepts names that index nothing. Restricting
+    it to ASCII answers a different question still: a run of ASCII digits behind a zero is a name no
+    element of any array has.
     """
 
     def _demask(self, source: str) -> str:
         return self._run_transformer(source, JsRestArrayUnpacking)
 
-    @unittest.expectedFailure
     def test_an_arabic_indic_digit_names_a_property_and_not_a_parameter(self):
         """
         `s['٢']` and `s[2]` are two properties in JavaScript, so a rewrite that gives them one
@@ -269,16 +269,15 @@ class TestStackKeysThatOnlyLookLikeIndices(TestJsDeobfuscator):
                 """
             ),
             self._demask(
-                "var f = function(...s) {"
+                'var f = function(...s) {'
                 " s.length = 3; s['٢'] = 9; return s[2] + s['٢']; };"
             ),
         )
 
-    @unittest.expectedFailure
     def test_a_superscript_two_names_a_property_and_does_not_end_the_pass(self):
         """
-        `'²'.isdigit()` is true and `int('²')` raises, so the pass reads the key as an index
-        and then fails to build one.
+        `s['²']` and `s[0]` are two properties, and the superscript is a name no index has, so the
+        one parameter stays alone and the key becomes a local beside it.
         """
         self.assertEqual(
             inspect.cleandoc(
@@ -291,7 +290,29 @@ class TestStackKeysThatOnlyLookLikeIndices(TestJsDeobfuscator):
                 """
             ),
             self._demask(
-                "var f = function(...s) {"
+                'var f = function(...s) {'
                 " s.length = 1; s['²'] = 9; return s[0] + s['²']; };"
+            ),
+        )
+
+    def test_a_leading_zero_names_a_property_and_not_the_index_its_digits_spell(self):
+        """
+        `s['01']` and `s[1]` are two properties in JavaScript — `Object.keys` of the array reports
+        `0`, `1` and `01` — so a rewrite that gives them one name computes a different sum: with
+        the arguments `(0, 5)` the function returns `14` where the rewritten one returns `18`.
+        """
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var f = function(p0, p1) {
+                  var v0;
+                  v0 = 9;
+                  return p1 + v0;
+                };
+                """
+            ),
+            self._demask(
+                'var f = function(...s) {'
+                " s.length = 2; s['01'] = 9; return s[1] + s['01']; };"
             ),
         )

@@ -373,8 +373,12 @@ class TestExtendedOperatorFolding(TestJsDeobfuscator):
     def test_parseint_fold(self):
         self.assertEqual('3379;', self._simplify("parseInt('3379kkQfix');"))
 
-    def test_parseint_no_leading_digits(self):
-        self.assertEqual("parseInt('abc');", self._simplify("parseInt('abc');"))
+    def test_parseint_no_leading_digits_folds_to_the_not_a_number_it_names(self):
+        """
+        Node prints `NaN` for `parseInt('abc')`: a string whose first character is not a digit of
+        the radix names no number, which is a result the language settles as fully as any other.
+        """
+        self.assertEqual('0 / 0;', self._simplify("parseInt('abc');"))
 
     def test_parseint_hex_radix_folded(self):
         self.assertEqual('255;', self._simplify("parseInt('0xFF', 16);"))

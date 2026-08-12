@@ -77,7 +77,7 @@ from refinery.lib.scripts.js.model import (
     JsUnaryExpression,
     strip_parens,
 )
-from refinery.lib.scripts.js.numbers import exact_integer, js_parse_int
+from refinery.lib.scripts.js.numbers import exact_integer
 from refinery.lib.scripts.js.precedence import parens_required
 
 _OBJECT_PROTO_PROPERTIES = OBJECT_PROTOTYPE_MEMBERS
@@ -418,10 +418,7 @@ class JsSimplifications(Transformer):
 
     def visit_JsCallExpression(self, node: JsCallExpression):
         self.generic_visit(node)
-        callee = node.callee
-        if isinstance(callee, JsIdentifier) and callee.name == 'parseInt':
-            return self._fold_parseint(node)
-        fn = callee
+        fn = node.callee
         if isinstance(fn, JsParenthesizedExpression):
             fn = fn.expression
         if isinstance(fn, JsFunctionExpression):
@@ -441,27 +438,6 @@ class JsSimplifications(Transformer):
             or self._try_fold_split(node)
             or self._try_fold_join(node)
         )
-
-    def _fold_parseint(self, node: JsCallExpression) -> JsNumericLiteral | None:
-        if len(node.arguments) < 1:
-            return None
-        if not self.effects.call_is_foldable(node):
-            return None
-        radix = 0
-        if len(node.arguments) >= 2:
-            radix_value = numeric_value(node.arguments[1])
-            if radix_value is None:
-                return None
-            resolved = exact_integer(radix_value)
-            if resolved is None:
-                return None
-            radix = resolved
-        sv = string_value(node.arguments[0])
-        if sv is not None:
-            result = js_parse_int(sv, radix)
-            if result is not None:
-                return make_numeric_literal(result)
-        return None
 
     @staticmethod
     def _try_inline_iife(

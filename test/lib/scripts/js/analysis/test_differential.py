@@ -3531,6 +3531,122 @@ class TestParseFloatGrammar(TestBase):
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestStringTrimReadsTheWhitespaceOfTheLanguage(TestBase):
+    """
+    `trim`, `trimStart` and `trimEnd` remove ECMAScript WhiteSpace together with the line
+    terminators, which is not the set Python's `str.strip` removes without an argument: the two
+    disagree in both directions, so a trim written with Python's default keeps a character the engine
+    takes off and takes off five the engine keeps.
+
+    Each case compares the trimmed string with the exact string the language leaves it as, so every
+    boolean Node prints is `true` and a trim that removed one character too many or too few prints
+    `false`. One case additionally asserts the emitted text, because a comparison of behavior alone
+    is satisfied by declining to fold and cannot tell a correct trim from an absent one.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    def test_the_padding_only_python_strips_survives_a_trim(self):
+        """
+        Node: `true true true true true`. `U+001C` through `U+001F` and `U+0085` are all removed by
+        `str.strip` and none of them is ECMAScript WhiteSpace, so `trim` leaves each string whole.
+        """
+        self._prints(
+            R"console.log('\u001CX\u001C'.trim() === '\u001CX\u001C',"
+            R" '\u001DX\u001D'.trim() === '\u001DX\u001D',"
+            R" '\u001EX\u001E'.trim() === '\u001EX\u001E',"
+            R" '\u001FX\u001F'.trim() === '\u001FX\u001F',"
+            R" '\u0085X\u0085'.trim() === '\u0085X\u0085');",
+            'true true true true true\n')
+
+    def test_the_byte_order_mark_python_leaves_in_place_is_taken_off_by_all_three(self):
+        """
+        Node: `true true true`. `U+FEFF` is ECMAScript WhiteSpace and `str.strip` keeps it, so it is
+        the one character each of the three methods removes that Python's default does not.
+        """
+        source = (
+            R"console.log('\uFEFFX\uFEFF'.trim() === 'X', '\uFEFFX'.trimStart() === 'X',"
+            R" 'X\uFEFF'.trimEnd() === 'X');")
+        self._prints(source, 'true true true\n')
+        self.assertEqual(deobfuscate_source(source), 'console.log(true, true, true);')
+
+    def test_one_end_is_trimmed_with_the_set_that_trims_both(self):
+        """
+        Node: `true true`. A character the language keeps is kept by `trimStart` and by `trimEnd` as
+        well, so the three methods cannot be read as three different sets.
+        """
+        self._prints(
+            R"console.log('\u001CX'.trimStart() === '\u001CX', 'X\u0085'.trimEnd() === 'X\u0085');",
+            'true true\n')
+
+    def test_every_whitespace_character_is_taken_off_and_a_look_alike_is_not(self):
+        """
+        Node: `true true`. The first string is padded with every character the WhiteSpace and the
+        LineTerminator productions name, and the second with the zero width space, which is a `Cf`
+        character the productions do not name however much it reads like one.
+        """
+        self._prints(
+            R"console.log('\u0009\u000A\u000B\u000C\u000D\u0020\u00A0\u1680\u2000"
+            R"\u200A\u2028\u2029\u202F\u205F\u3000\uFEFFX'.trimStart() === 'X',"
+            R" '\u200BX\u200B'.trim() === '\u200BX\u200B');",
+            'true true\n')
+
+    def test_a_trim_stops_at_the_first_character_the_language_keeps(self):
+        """
+        Node: `true`. Each side is padded with a mark and a space and then a character that stops
+        the trim, so what is left begins and ends with one `str.strip` would have removed.
+        """
+        self._prints(
+            R"console.log('\uFEFF \u001CX\u0085 \uFEFF'.trim() === '\u001CX\u0085');",
+            'true\n')
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestParseIntEvaluatesEveryArgumentItIsWrittenWith(TestBase):
+    """
+    A call evaluates each argument it is written with, and how many of them the function reads has
+    nothing to do with it. `parseInt` reads two, so replacing a call of it with the number those two
+    name is only the same program while everything else the call was written with still runs: an
+    argument can throw, and an argument can write.
+    """
+
+    def _preserves(self, source: str, expected: tuple[str, str | None]):
+        self.assertEqual(expected, behavior(source))
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            expected,
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_a_third_argument_that_names_nothing_throws_before_parse_int_is_reached(self):
+        """
+        Node prints nothing and exits with an uncaught `ReferenceError`: the arguments are evaluated
+        before the call and `nowhere` is declared in no scope. A rewrite that keeps only the two
+        arguments the function reads turns a program that throws into one that prints `2`.
+        """
+        self._preserves("console.log(parseInt('10', 2, nowhere));", ('', 'ReferenceError'))
+
+    def test_a_third_argument_that_increments_is_evaluated(self):
+        """
+        Node: `2 1`. The string and the radix decide the result and the third argument decides `x`,
+        so one program witnesses both the number the call names and the write a fold must not drop.
+        """
+        self._preserves("var x = 0; console.log(parseInt('10', 2, x++), x);", ('2 1\n', None))
+
+    def test_a_third_argument_that_calls_is_evaluated(self):
+        """
+        Node: `2 third`. The same argument list where the effect is a call rather than a write.
+        """
+        self._preserves(
+            "var sink = []; var n = parseInt('10', 2, sink.push('third'));"
+            " console.log(n, sink.join('|'));",
+            ('2 third\n', None))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestUnaryOperatorFoldCoverage(TestBase):
     """
     Every unary operator whose result is decided by its operand, asserted to be folded away. Each case is

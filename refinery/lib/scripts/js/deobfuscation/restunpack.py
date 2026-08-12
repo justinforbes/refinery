@@ -18,6 +18,7 @@ from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.model import SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
+    canonical_array_index,
     member_key,
     numeric_value,
 )
@@ -247,15 +248,32 @@ def _mentioned_names(node: Node) -> set[str]:
     return {child.name for child in node.walk() if isinstance(child, JsIdentifier)}
 
 
+class _StackNames(NamedTuple):
+    """
+    The identifier every stack key is rewritten to, together with the parameter list the function is
+    given and the locals it has to declare. The three are answered at once because they are one
+    classification, and a rewrite that re-derives it reaches a different verdict in each place it
+    asks.
+    """
+    of_key: dict[str, str]
+    params: list[str]
+    local_names: list[str]
+
+
 def _generate_names(
     param_count: int,
     keys: set[str],
     taken: set[str],
-) -> tuple[dict[str, str], list[str]]:
+) -> _StackNames:
     """
     Fresh identifier names for the stack keys, together with the whole parameter list they are drawn
     from. A key naming an index below *param_count* is that parameter and takes its name from its
     position, so that two keys can never land on one name; every other key names a local.
+
+    Naming an index is what `canonical_array_index` decides and not what `str.isdigit` accepts: an
+    array is indexed only by the canonical decimal spelling of its index, so `'01'`, `'٢'` and `'²'`
+    are ordinary property names that read `undefined`. Handing any of them the parameter it resembles
+    both collapses two properties onto one binding and mints one parameter name twice.
     """
     used = set(taken)
     params: list[str] = []
@@ -266,11 +284,13 @@ def _generate_names(
         if name not in used:
             used.add(name)
             params.append(name)
-    mapping: dict[str, str] = {}
+    of_key: dict[str, str] = {}
+    local_names: list[str] = []
     candidate = 0
     for key in sorted(keys, key=_sort_key):
-        if key.isdigit() and int(key) < param_count:
-            mapping[key] = params[int(key)]
+        index = canonical_array_index(key)
+        if index is not None and index < param_count:
+            of_key[key] = params[index]
             continue
         while True:
             name = F'v{candidate}'
@@ -278,16 +298,14 @@ def _generate_names(
             if name not in used:
                 break
         used.add(name)
-        mapping[key] = name
-    return mapping, params
+        of_key[key] = name
+        local_names.append(name)
+    return _StackNames(of_key, params, local_names)
 
 
 def _sort_key(key: str) -> tuple[int, int | str]:
-    try:
-        n = int(key)
-        return (0, n)
-    except ValueError:
-        return (1, key)
+    index = canonical_array_index(key)
+    return (1, key) if index is None else (0, index)
 
 
 def _remove_truncation(body: JsBlockStatement, length_access: JsMemberExpression) -> None:
@@ -361,38 +379,28 @@ class JsRestArrayUnpacking(ScriptLevelTransformer):
             fn.params.clear()
             return True
         taken = _mentioned_names(fn.body)
-        mapping, params = _generate_names(param_count, set(accesses.keys()), taken)
+        names = _generate_names(param_count, set(accesses.keys()), taken)
         for key, nodes in accesses.items():
-            name = mapping[key]
+            name = names.of_key[key]
             for access_node in nodes:
                 replacement = JsIdentifier(name=name)
                 _replace_in_parent(access_node, replacement)
         _remove_truncation(fn.body, length_access)
         fn.params.clear()
-        for name in params:
+        for name in names.params:
             fn.params.append(JsIdentifier(name=name))
         if stack_chain is None:
-            self._add_local_declarations(fn.body, mapping, param_count)
+            self._add_local_declarations(fn.body, names.local_names)
         return True
 
     def _add_local_declarations(
         self,
         body: JsBlockStatement,
-        mapping: dict[str, str],
-        param_count: int,
+        locals_: list[str],
     ) -> None:
         """
-        Insert `var` declarations for local variables (keys that aren't parameters).
+        Insert `var` declarations for the locals the rewrite minted.
         """
-        locals_: list[str] = []
-        for key, name in mapping.items():
-            try:
-                idx = int(key)
-                if 0 <= idx < param_count:
-                    continue
-            except ValueError:
-                pass
-            locals_.append(name)
         if not locals_:
             return
         declarators = [

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import math
+import unicodedata
+
+from collections.abc import Callable
 
 from test import TestBase
 
@@ -11,14 +14,40 @@ from refinery.lib.scripts.js.numbers import (
     js_string_to_number,
 )
 
-LANGUAGE_WHITESPACE = (
-    '\t\n\v\f\r\x20\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006'
-    '\u2007\u2008\u2009\u200A\u2028\u2029\u202F\u205F\u3000\uFEFF'
-)
+NAMED_WHITESPACE = [0x0009, 0x000B, 0x000C, 0xFEFF]
 """
-Every character Node accepts as padding around a number and no other one: the space separators, the
-line terminators, and the byte order mark.
+The code points the ECMA-262 WhiteSpace production names one at a time: the tab, the vertical tab,
+the form feed and the zero width no-break space. Its one remaining alternative is `<USP>`, which is
+every code point of the Unicode general category `Zs`.
 """
+
+LINE_TERMINATORS = [0x000A, 0x000D, 0x2028, 0x2029]
+"""
+The code points of the ECMA-262 LineTerminator production: the line feed, the carriage return, the
+line separator and the paragraph separator.
+"""
+
+
+def _str_whitespace() -> str:
+    space_separators = (cp for cp in range(0x110000) if unicodedata.category(chr(cp)) == 'Zs')
+    return ''.join(map(chr, sorted({*NAMED_WHITESPACE, *LINE_TERMINATORS, *space_separators})))
+
+
+LANGUAGE_WHITESPACE = _str_whitespace()
+"""
+Every character the ECMA-262 StrWhiteSpaceChar production admits, assembled from the two productions
+above and the Unicode database rather than copied out of the code under test. Node removes exactly
+these twenty-five characters with `String.prototype.trim` and accepts exactly them as padding around
+a number.
+"""
+
+
+def _spelled(characters: str) -> list[str]:
+    return [F'U+{ord(character):04X}' for character in characters]
+
+
+def _every_character_that(is_padding: Callable[[str], bool]) -> list[str]:
+    return [F'U+{cp:04X}' for cp in range(0x110000) if is_padding(chr(cp))]
 
 
 class TestJsParseInt(TestBase):
@@ -296,7 +325,24 @@ class TestStringNumericGrammar(TestBase):
         self.assertFalse(is_negative_zero(js_string_to_number('+0')))
         self.assertFalse(is_negative_zero(js_parse_float('+0x10')))
 
-    def test_every_character_the_language_calls_whitespace_pads_a_number(self):
+    def _pads_a_number(self, pad: str) -> bool:
+        return self._number(F'{pad}42{pad}') == 42.0
+
+    def _pads_a_float(self, pad: str) -> bool:
+        return self._float(F'{pad}-1.5e2{pad}') == -150.0
+
+    def test_the_characters_that_pad_a_number_are_the_ones_the_language_calls_whitespace(self):
+        """
+        Each reader is asked which characters it treats as padding by putting every code point there
+        is in front of a number and behind it, and its answer has to be the set the two productions
+        and the Unicode database name. Walking that set alone can only find a character the reader
+        forgot; walking all of Unicode is what finds one the reader invented.
+
+        Neither probe mistakes a character for padding: a digit ahead of `42` names a different
+        number and a sign or a point behind that digit leaves a string that names none, while a sign
+        ahead of `-1.5e2` leaves a string no reader accepts and a digit ahead of it stops the parse
+        at the minus.
+        """
         for pad in LANGUAGE_WHITESPACE:
             with self.subTest(pad=F'U+{ord(pad):04X}'):
                 self.assertEqual(42.0, self._number(F'{pad}42{pad}'))
@@ -305,6 +351,12 @@ class TestStringNumericGrammar(TestBase):
                 self.assertEqual(-150.0, self._float(F'{pad}-1.5e2{pad}'))
                 self.assertEqual(0.0, self._number(pad * 3))
                 self.assertEqual('NaN', self._float(pad * 3))
+        self.assertEqual(
+            _spelled(LANGUAGE_WHITESPACE), _every_character_that(self._pads_a_number)
+        )
+        self.assertEqual(
+            _spelled(LANGUAGE_WHITESPACE), _every_character_that(self._pads_a_float)
+        )
 
     def test_padding_python_strips_and_the_language_does_not_ends_the_number(self):
         """

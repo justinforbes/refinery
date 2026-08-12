@@ -98,7 +98,11 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
 )
-from refinery.lib.scripts.js.numbers import js_parse_float, js_parse_int
+from refinery.lib.scripts.js.numbers import (
+    TRIMMABLE_WHITESPACE,
+    js_parse_float,
+    js_parse_int,
+)
 
 MAX_ITERATIONS = 100_000
 MAX_STRING_LEN = 1_000_000
@@ -421,17 +425,17 @@ def _str_to_upper(s: str, args: list[Value]) -> Value:
 
 @_register((str, 'trim'))
 def _str_trim(s: str, args: list[Value]) -> Value:
-    return s.strip()
+    return s.strip(TRIMMABLE_WHITESPACE)
 
 
 @_register((str, 'trimStart'))
 def _str_trim_start(s: str, args: list[Value]) -> Value:
-    return s.lstrip()
+    return s.lstrip(TRIMMABLE_WHITESPACE)
 
 
 @_register((str, 'trimEnd'))
 def _str_trim_end(s: str, args: list[Value]) -> Value:
-    return s.rstrip()
+    return s.rstrip(TRIMMABLE_WHITESPACE)
 
 
 @_register((str, 'repeat'))
