@@ -483,6 +483,135 @@ class TestPs1EmulatorExtra(TestPs1):
                 self.assertIn("$x = 'FOLDED'", result)
 
 
+class TestPs1AnArgumentIsFoldedOnlyWhereItsTypeSurvivesTheInterpreter(TestPs1):
+    """
+    The interpreter's values are Python objects and carry no .NET type, so binding one is a claim
+    that the object stands for the value the source wrote. Where it does not, the call is left
+    alone: a fold that dropped the type would answer `[byte] 5` with the Int32 5, which is a
+    different value in every place the difference shows.
+    """
+
+    def _identity_call(self, argument: str) -> str:
+        return cleandoc(F"""
+            function f {{
+              Param($n)
+              $n
+            }}
+            $x = f {argument}
+        """)
+
+    def test_a_numeral_written_wider_than_its_magnitude_is_not_bound(self):
+        self._assertUnchanged(self._identity_call('1L'), Ps1FunctionEvaluator)
+        self.assertEqual(self._apply(self._identity_call('1'), Ps1FunctionEvaluator), '$x = 1')
+
+    def test_a_numeral_written_at_the_width_its_magnitude_takes_is_bound(self):
+        self.assertEqual(
+            self._apply(self._identity_call('2147483648L'), Ps1FunctionEvaluator),
+            '$x = 2147483648L',
+        )
+
+    def test_a_width_cast_is_not_bound_as_the_numeral_written_inside_it(self):
+        self._assertUnchanged(self._identity_call('([byte]5)'), Ps1FunctionEvaluator)
+        self._assertUnchanged(self._identity_call('([uint32]7)'), Ps1FunctionEvaluator)
+        self.assertEqual(self._apply(self._identity_call('(5)'), Ps1FunctionEvaluator), '$x = 5')
+
+    def test_a_char_is_not_bound_as_the_string_that_carries_the_same_character(self):
+        self._assertUnchanged(self._identity_call('([char]65)'), Ps1FunctionEvaluator)
+        self.assertEqual(self._apply(self._identity_call("'A'"), Ps1FunctionEvaluator), "$x = 'A'")
+
+    def test_a_pipeline_source_declines_the_same_values_a_parameter_declines(self):
+        self._assertUnchanged('[byte]5 | % {\n  $_\n}', Ps1ForEachPipeline)
+        self._assertUnchanged('([char]65) | % {\n  $_\n}', Ps1ForEachPipeline)
+        self.assertEqual(self._apply('5 | % { $_ }', Ps1ForEachPipeline), '5')
+
+
+class TestPs1AHexadecimalArgumentDenotesThePatternItFills(TestPs1):
+    """
+    A hexadecimal numeral names a bit pattern in the width its digits fill, not the magnitude the
+    digits read as: 5.1 makes `0xFFFFFFFF` the Int32 -1, so a body that adds one to it produces 0
+    and never 4294967296.
+    """
+
+    def _call(self, argument: str, body: str = '$n') -> str:
+        return F'function f ($n) {{ {body} }}\n$x = f {argument}'
+
+    def test_a_pattern_that_fills_an_int32_binds_the_negative_it_denotes(self):
+        self.assertEqual(self._apply(self._call('0xFFFFFFFF'), Ps1FunctionEvaluator), '$x = -1')
+        self.assertEqual(
+            self._apply(self._call('0xFFFFFFFF', '$n + 1'), Ps1FunctionEvaluator), '$x = 0')
+
+    def test_a_pattern_narrower_than_the_width_it_fills_binds_its_magnitude(self):
+        self.assertEqual(self._apply(self._call('0xFF'), Ps1FunctionEvaluator), '$x = 255')
+        self.assertEqual(
+            self._apply(self._call('0x7FFFFFFF', '$n + 1'), Ps1FunctionEvaluator),
+            '$x = 2147483648L',
+        )
+
+    def test_the_long_suffix_binds_the_digits_read_as_a_number(self):
+        self.assertEqual(
+            self._apply(self._call('0xFFFFFFFFL'), Ps1FunctionEvaluator), '$x = 4294967295L')
+
+    def test_a_pipeline_reads_a_pattern_the_same_way_a_parameter_does(self):
+        self.assertEqual(self._apply('0xFFFFFFFF | % { $_ + 1 }', Ps1ForEachPipeline), '0')
+
+
+class TestPs1AProducedValueIsWrittenAsTheExpressionThatSpellsIt(TestPs1):
+
+    def _folded(self, body: str, arguments: str) -> str:
+        return self._apply(
+            F'function f ($a, $b) {{ {body} }}\n$x = f {arguments}', Ps1FunctionEvaluator)
+
+    def test_a_body_that_compares_folds_to_the_boolean_it_produced(self):
+        self.assertEqual(self._folded('$a -eq $b', '1 1'), '$x = $True')
+        self.assertEqual(self._folded('$a -eq $b', '1 2'), '$x = $False')
+
+    def test_a_body_that_divides_folds_to_the_fraction_it_produced(self):
+        self.assertEqual(self._folded('$a / $b', '3 2'), '$x = 1.5')
+        self.assertEqual(self._folded('$a / $b', '4 2'), '$x = 2')
+
+    def test_a_block_writes_each_item_under_the_type_it_produced(self):
+        self.assertEqual(
+            self._apply('(1, 2) | % { $_ -eq 1 }', Ps1ForEachPipeline), '$True, $False')
+        self.assertEqual(self._apply('(3, 2) | % { $_ / 2 }', Ps1ForEachPipeline), '1.5, 1')
+
+
+class TestPs1AnEmissionThatDidNotHappenIsNotFoldedIntoOne(TestPs1):
+    """
+    Producing nothing is not producing `$null`: measured on 5.1, `@(g).Count` is 0 for a body that
+    emits nothing and 1 for `@($null)`, and `g | %{ }` runs the block no times where `$null | %{ }`
+    runs it once. So nothing may stand in the place of an emission that never happened, and the
+    call is left where it is.
+    """
+
+    def test_a_body_that_emits_nothing_leaves_its_call_alone(self):
+        self._assertUnchanged('function f {}\n$x = f', Ps1FunctionEvaluator)
+        self.assertEqual(
+            self._apply("function f { 'v' }\n$x = f", Ps1FunctionEvaluator), "$x = 'v'")
+
+    def test_a_block_that_emits_nothing_for_every_item_leaves_its_pipeline_alone(self):
+        self._assertUnchanged('(1, 2) | % {}', Ps1ForEachPipeline)
+
+    def test_an_item_that_emitted_nothing_contributes_nothing_to_the_stream(self):
+        self.assertEqual(
+            self._apply('@(1, 2) | % { if ($_ -eq 1) { $_ } }', Ps1ForEachPipeline), '1')
+
+
+class TestPs1APipelineOverAScalarRunsItsBlockOverThatOneItem(TestPs1):
+
+    def test_a_number_is_one_item(self):
+        self.assertEqual(self._apply('5 | % { $_ + 1 }', Ps1ForEachPipeline), '6')
+
+    def test_a_string_is_one_item_and_not_a_run_of_its_characters(self):
+        self.assertEqual(self._apply("'abc' | % { $_.Length }", Ps1ForEachPipeline), '3')
+        self.assertEqual(self._apply("'abc' | % { $_ }", Ps1ForEachPipeline), "'abc'")
+
+    def test_the_one_item_still_contributes_everything_its_block_emits(self):
+        self.assertEqual(self._apply('5 | % { $_, $_ }', Ps1ForEachPipeline), '5, 5')
+
+    def test_an_array_source_runs_the_block_over_each_of_its_items(self):
+        self.assertEqual(self._apply('@(5, 6) | % { $_ + 1 }', Ps1ForEachPipeline), '6, 7')
+
+
 class TestPs1EmulatorRedirections(TestPs1):
 
     def test_a_redirected_foreach_pipeline_is_not_folded_into_its_value(self):

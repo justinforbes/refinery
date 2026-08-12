@@ -46,6 +46,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     collect_integers,
     convert,
     evaluate,
+    fact_of,
     integer_of,
     make_string_literal,
     read,
@@ -70,6 +71,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
     Ps1CastExpression,
+    Ps1ExpandableHereString,
+    Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1HereString,
     Ps1IntegerLiteral,
@@ -302,6 +305,15 @@ def _elements(fact: Ps1Fact) -> tuple[Ps1Fact, ...]:
     payload = fact.payload
     assert isinstance(payload, tuple), payload
     return payload
+
+
+def _payload(fact: Ps1Fact) -> object:
+    """
+    The Python object a constant carries, which is everything a caller whose currency is a payload
+    holds of the value: the type stamped beside it stays behind.
+    """
+    assert isinstance(fact, Ps1Constant), fact
+    return fact.payload
 
 
 def _read_shape(expression: str) -> tuple[Ps1TypeName | None, int]:
@@ -1579,6 +1591,94 @@ class TestPs1ReadOnlyReadsTheSource(unittest.TestCase):
     def test_reading_nothing_at_all_is_unknown(self):
         self.assertEqual(read(None), UNKNOWN)
         self.assertEqual(read(Ps1ParenExpression()), UNKNOWN)
+
+
+class TestPs1ADoubleQuotedStringIsPinnedOnlyWhereEveryPartIsText(unittest.TestCase):
+    """
+    A double-quoted string whose parts are all literal text spells the text it holds and runs
+    nothing to produce it, which is the shape a pass leaves behind once it has written a constant
+    into an expansion. One part that still interpolates makes the whole string a value only a run
+    names, and a string missing that part is a different string, so nothing is pinned at all.
+    """
+
+    def _spelled_by(self, *parts: str) -> list[Expression]:
+        return [Ps1StringLiteral(value=part, raw=F"'{part}'") for part in parts]
+
+    def test_a_string_of_text_alone_is_pinned_to_the_text_its_parts_spell(self):
+        self.assertEqual(
+            read(Ps1ExpandableString(parts=self._spelled_by('value: ', 'SECRET', ' end'))),
+            Ps1Constant(STRING, 'value: SECRET end'),
+        )
+
+    def test_a_here_string_of_text_alone_is_pinned_the_same_way(self):
+        self.assertEqual(
+            read(Ps1ExpandableHereString(parts=self._spelled_by('a\n', 'b'))),
+            Ps1Constant(STRING, 'a\nb'),
+        )
+
+    def test_a_string_with_one_part_that_is_not_text_is_pinned_to_nothing(self):
+        for expression in ('"a$b"', '"$x"', '"a$(1)b"', '"$(1)"', '"${env:Temp}\\x"'):
+            with self.subTest(expression):
+                self.assertEqual(_read(expression), UNKNOWN)
+
+    def test_a_string_the_parser_wrote_as_one_literal_is_pinned_to_that_literal(self):
+        self.assertEqual(_read('"abc"'), Ps1Constant(STRING, 'abc'))
+        self.assertEqual(_read('"a`nb"'), Ps1Constant(STRING, 'a\nb'))
+
+
+class TestPs1AComputedPayloadNamesTheValueItsPythonKindDecides(unittest.TestCase):
+    """
+    `fact_of` is `read`'s counterpart for a caller holding a value it computed rather than one it
+    found written down. A payload carries no .NET type, so the value it names is the one its Python
+    kind decides and never the one it was made from: what a caller loses by holding a payload is
+    exactly the difference between the two, and it is stated here rather than assumed.
+    """
+
+    def test_a_number_takes_the_width_an_unsuffixed_numeral_takes(self):
+        self.assertEqual(fact_of(7), MEASURED['007'])
+        self.assertEqual(fact_of(2147483648), MEASURED['2147483648'])
+        self.assertEqual(fact_of(9223372036854775808), MEASURED['9223372036854775808'])
+        self.assertEqual(fact_of(1.5), MEASURED['1.5'])
+
+    def test_a_boolean_is_a_boolean_although_python_carries_it_as_an_integer(self):
+        self.assertEqual(fact_of(True), Ps1Constant(BOOLEAN, True))
+        self.assertEqual(fact_of(False), Ps1Constant(BOOLEAN, False))
+        self.assertNotEqual(fact_of(True), fact_of(1))
+
+    def test_a_python_none_is_the_null_value(self):
+        self.assertEqual(fact_of(None), NULL)
+        self.assertEqual(fact_of(None), _read('$Null'))
+
+    def test_a_one_character_string_is_a_string_and_never_a_char(self):
+        self.assertEqual(_measured('[char]65'), ('System.Char', 'A'))
+        self.assertEqual(fact_of('A'), _read("'A'"))
+        self.assertNotEqual(fact_of('A'), _measured_fact('[char]65'))
+
+    def test_a_sequence_names_the_collection_of_what_its_elements_name(self):
+        self.assertEqual(fact_of([1, 'a']), _read("1, 'a'"))
+        self.assertEqual(fact_of(()), _read('@()'))
+        self.assertEqual(fact_of([[1, 2], 3]), _read('(1, 2), 3'))
+
+    def test_an_object_no_powershell_value_stands_behind_names_nothing(self):
+        for payload in (b'abc', {'a': 1}, decimal.Decimal('1.5'), object()):
+            with self.subTest(repr(payload)):
+                self.assertEqual(fact_of(payload), UNKNOWN)
+
+    def test_a_value_whose_type_its_payload_carries_is_named_back_unchanged(self):
+        for spelling in ('007', '2147483648', '1.5', '0xFFFFFFFF', '0xFFFFFFFFL'):
+            with self.subTest(spelling):
+                self.assertEqual(fact_of(_payload(MEASURED[spelling])), MEASURED[spelling])
+
+    def test_a_value_whose_type_its_payload_left_behind_is_named_back_as_another(self):
+        self.assertEqual(fact_of(_payload(_read('[byte]5'))), Ps1Constant(INT32, 5))
+        self.assertEqual(fact_of(_payload(_read('[char]65'))), Ps1Constant(STRING, 'A'))
+        self.assertEqual(fact_of(_payload(MEASURED['1L'])), Ps1Constant(INT32, 1))
+        self.assertEqual(fact_of(_payload(MEASURED['1.5d'])), UNKNOWN)
+
+    def test_a_named_value_is_written_and_read_back_as_the_value_it_named(self):
+        for payload in (None, True, 7, 2147483648, 1.5, 'abc', 'A', [1, 'a'], ()):
+            with self.subTest(repr(payload)):
+                self.assertEqual(_read(_spelled(fact_of(payload))), fact_of(payload))
 
 
 class TestPs1MeasuredCasts(unittest.TestCase):

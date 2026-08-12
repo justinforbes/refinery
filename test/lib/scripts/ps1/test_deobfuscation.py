@@ -265,8 +265,9 @@ class TestPs1Integration(TestPs1):
         self.assertIn('$r = for', result)
 
     def test_expandable_here_string_inlining_not_stale(self):
-        # The constant inlined into the expandable here-string must reach the output, and the
-        # source assignment is then removed cleanly (no dangling $v).
+        # Once $v is inlined the here-string is text alone, which is a value the domain reads, so
+        # $h holds a constant too and the chain resolves all the way to the call. The constant must
+        # reach the output and neither assignment may be left behind.
         result = self._deobfuscate_iterative(cleandoc("""
             $v = 'SECRET'
             $h = @"
@@ -274,10 +275,7 @@ class TestPs1Integration(TestPs1):
             "@
             Write-Host $h
         """))
-        self.assertEqual(result, cleandoc("""
-            $h = "value: SECRET end"
-            Write-Host $h
-        """))
+        self.assertEqual(result, 'Write-Host "value: SECRET end"')
 
     def test_step_budget_enforced_across_phases(self):
         # A step budget smaller than the total work must raise rather than letting phase 2 run

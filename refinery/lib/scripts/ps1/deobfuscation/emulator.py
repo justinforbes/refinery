@@ -24,8 +24,13 @@ from refinery.lib.scripts.ps1.analysis.effects import (
 )
 from refinery.lib.scripts.ps1.analysis.separator import OFS_FALLBACK, OFS_NAME
 from refinery.lib.scripts.ps1.analysis.values import (
+    Ps1Constant,
+    Ps1Fact,
+    collect_facts,
+    fact_of,
     make_string_literal,
-    unwrap_to_array_literal,
+    read,
+    render,
 )
 from refinery.lib.scripts.ps1.ast import (
     get_command_name,
@@ -33,7 +38,6 @@ from refinery.lib.scripts.ps1.ast import (
     normalize_command_name,
     normalize_dotnet_type_name,
     standalone_command_statement,
-    string_value,
 )
 from refinery.lib.scripts.ps1.data import (
     COMPARISON_OPS,
@@ -108,6 +112,37 @@ from refinery.lib.scripts.ps1.model import (
 _MAX_INTERPRETER_ITERATIONS = 100_000
 _MAX_INTERPRETER_STRING_LEN = 1_000_000
 _MAX_INTERPRETER_DEPTH = 64
+
+
+def _value_of(fact: Ps1Fact) -> tuple[bool, _Value]:
+    """
+    The interpreter's own currency for a value the domain names, or `(False, None)` where its
+    currency cannot hold that value.
+
+    The test is a **round trip** rather than a list of types this happens to know: a `_Value`
+    carries a magnitude and a Python kind and no .NET type at all, so it may stand for a fact only
+    where `refinery.lib.scripts.ps1.analysis.values.fact_of` gives that same fact back. What that
+    refuses is exactly what carrying the value here would lose — a Char, whose payload is a
+    String's; a Decimal; and every integer written at a width its own magnitude does not take, so
+    `[byte] 5` is declined rather than folded back out as the Int32 `5`. It is one rule, so the
+    types the interpreter grows into cannot come apart from the types it may accept.
+    """
+    carried = _carried(fact)
+    return (True, carried) if fact_of(carried) == fact else (False, None)
+
+
+def _carried(fact: Ps1Fact) -> _Value:
+    """
+    The Python object under a fact, read with no regard for whether it stands for the value —
+    which is `_value_of`'s question and is asked of the answer rather than of the parts.
+    """
+    if isinstance(fact, Ps1Constant):
+        payload = fact.payload
+        if isinstance(payload, tuple):
+            return [_carried(one) for one in payload]
+        if isinstance(payload, (str, bool, int, float)):
+            return payload
+    return None
 
 
 class _Ps1InterpreterError(Exception):
@@ -1382,18 +1417,15 @@ class Ps1FunctionEvaluator(Transformer):
     @staticmethod
     def _extract_constant_value(val: Expression | None) -> tuple[bool, _Value]:
         """
-        Try to extract a constant value from a command argument expression.
-        - Returns `(True, value)` on success.
-        - Returns `(False, None)` on failure.
+        The value an argument expression pins, as the interpreter's own currency, or `(False, None)`
+        where it pins none this can hold.
+
+        What stood here read the tree itself, and it read it wrongly in the one place it mattered:
+        a `Ps1IntegerLiteral` was taken at its derived `value`, so `0xFFFFFFFF` reached a bound
+        parameter as four billion where 5.1 binds -1. `read` is where a spelling becomes a value
+        now, and `_value_of` is what refuses the values this interpreter cannot carry.
         """
-        sv = string_value(val) if val is not None else None
-        if sv is not None:
-            return True, sv
-        if isinstance(val, Ps1IntegerLiteral):
-            return True, val.value
-        if isinstance(val, Ps1RealLiteral):
-            return True, val.value
-        return False, None
+        return _value_of(read(val))
 
     @staticmethod
     def _extract_constant_args(
@@ -1517,19 +1549,22 @@ class Ps1FunctionEvaluator(Transformer):
 
     @staticmethod
     def _value_to_node(value: _Value) -> Expression | None:
-        if isinstance(value, list):
-            elements: list[Expression] = []
-            for item in value:
-                node = Ps1FunctionEvaluator._value_to_node(item)
-                if node is None:
-                    return None
-                elements.append(node)
-            return Ps1ArrayLiteral(elements=elements)
-        if isinstance(value, str):
-            return make_string_literal(value)
-        if isinstance(value, int) and not isinstance(value, bool):
-            return Ps1IntegerLiteral(raw=str(value))
-        return None
+        """
+        The expression that spells a computed value, or `None` where nothing does.
+
+        Both halves are the domain's: `fact_of` says which PowerShell value a Python object
+        denotes, and `render` says how that value is written. What stood here spelled a number as
+        a bare decimal numeral and refused everything else, so a body producing `$true` or a
+        fraction was left unfolded although each of the two has a spelling.
+
+        **Producing nothing is not producing `$null`**, and that is why `None` is refused here
+        although `render` spells it. A variable bound to either reads the same, which is what makes
+        the two look interchangeable, but the stream does not: measured, `@(g).Count` is 0 for a
+        body that emits nothing and 1 for `@($null)`, and `g | %{ }` runs the block no times where
+        `$null | %{ }` runs it once. An emission that did not happen has no expression to stand in
+        its place.
+        """
+        return None if value is None else render(fact_of(value))
 
     @staticmethod
     def _make_iex_node(code: str) -> Ps1CommandInvocation | None:
@@ -1689,31 +1724,33 @@ class Ps1ForEachPipeline(Transformer):
 
     @staticmethod
     def _get_constant_array(expr: Expression | None) -> list[_Value] | None:
-        while isinstance(expr, Ps1CastExpression):
+        """
+        The items a pipeline source hands one at a time, or `None` where this cannot say what they
+        are. A scalar source is one item, which is what a pipeline does with one.
+
+        **The element type of an array cast is dropped, and that is the residual this stands on.**
+        `[Char[]](72, 73)` is read as the numbers written inside it, so a block reading `$_` is
+        emulated over an Int32 where 5.1 hands it a Char. The two agree wherever the block converts
+        the item back — `[Char]($_ -bxor $k)`, which is the shape loaders write — and come apart
+        wherever it does not. What ends it is not a wider reader here but the interpreter carrying
+        a Char at all: until its values have types, an element of a `Char[]` has nowhere to land,
+        and refusing the cast outright would drop the folds that shape depends on. A cast to a
+        *scalar* is not dropped, because `[string](1, 2)` is one item and not two.
+        """
+        while (
+            isinstance(expr, Ps1CastExpression)
+            and normalize_dotnet_type_name(expr.type_name).endswith('[]')
+        ):
             expr = expr.operand
-        if expr is not None:
-            array = unwrap_to_array_literal(expr)
-            if array is not None:
-                expr = array
-        if not isinstance(expr, Ps1ArrayLiteral):
+        facts = collect_facts(expr)
+        if facts is None:
             return None
         values: list[_Value] = []
-        for elem in expr.elements:
-            sv = string_value(elem)
-            if sv is not None:
-                values.append(sv)
-                continue
-            if isinstance(elem, Ps1IntegerLiteral):
-                values.append(elem.value)
-                continue
-            if (
-                isinstance(elem, Ps1UnaryExpression)
-                and elem.operator == '-'
-                and isinstance(elem.operand, Ps1IntegerLiteral)
-            ):
-                values.append(-elem.operand.value)
-                continue
-            return None
+        for fact in facts:
+            ok, value = _value_of(fact)
+            if not ok:
+                return None
+            values.append(value)
         return values
 
     @staticmethod

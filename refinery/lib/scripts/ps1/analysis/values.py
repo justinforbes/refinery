@@ -77,6 +77,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1BinaryExpression,
     Ps1CastExpression,
     Ps1CommandInvocation,
+    Ps1ExpandableHereString,
+    Ps1ExpandableString,
     Ps1ExpressionStatement,
     Ps1HereString,
     Ps1IntegerLiteral,
@@ -662,6 +664,8 @@ def read(node: Node | None) -> Ps1Fact:
         return UNKNOWN if node.expression is None else read(node.expression)
     if isinstance(node, (Ps1StringLiteral, Ps1HereString)):
         return Ps1Constant(_STRING, node.value)
+    if isinstance(node, (Ps1ExpandableString, Ps1ExpandableHereString)):
+        return _quoted(node.parts)
     if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
         return _numeral(node.raw)
     if is_builtin_variable(node, {'true'}):
@@ -677,6 +681,50 @@ def read(node: Node | None) -> Ps1Fact:
     if isinstance(node, Ps1CastExpression):
         return _cast_spelling(node)
     return UNKNOWN
+
+
+def fact_of(payload: object) -> Ps1Fact:
+    """
+    The value a Python object denotes where nothing has narrowed it, or `UNKNOWN` for one that
+    denotes none.
+
+    This is `read`'s counterpart for a caller holding a value it *computed* rather than one it
+    found written down — the emulator is that caller, and `render` is where what it computed
+    becomes a tree again. A number decides the way an unsuffixed numeral decides, because the
+    narrowest width that holds a magnitude is the only rule the domain has for a bare one.
+
+    **A `str` is a String and never a Char.** That is not a gap: a payload does not carry a type
+    and the two are the same Python object, which is the whole reason `Ps1Constant` carries a type
+    beside its payload. A caller that means a Char has to build the fact instead of asking here,
+    and one whose currency cannot tell the two apart is a caller whose Chars are already gone.
+    """
+    if payload is None:
+        return NULL
+    if isinstance(payload, bool):
+        return Ps1Constant(_BOOLEAN, payload)
+    if isinstance(payload, int):
+        return _widest_needed(payload)
+    if isinstance(payload, float):
+        return _double(payload)
+    if isinstance(payload, str):
+        return Ps1Constant(_STRING, payload)
+    if isinstance(payload, (list, tuple)):
+        return _collected(Ps1Outcome(False, fact_of(one)) for one in payload).value
+    return UNKNOWN
+
+
+def _quoted(parts: list) -> Ps1Fact:
+    """
+    A double-quoted string all of whose parts are text, which is the one shape of it that pins a
+    value: an expansion is a read of something this does not know, and one part it cannot name
+    leaves the whole string unnamed rather than shortened.
+    """
+    text: list[str] = []
+    for part in parts:
+        if not isinstance(part, Ps1StringLiteral):
+            return UNKNOWN
+        text.append(part.value)
+    return Ps1Constant(_STRING, ''.join(text))
 
 
 def _pinned(node: Node | None) -> Ps1Outcome:
