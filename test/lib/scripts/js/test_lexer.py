@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 from test import TestBase
 
 from refinery.lib.scripts.js.lexer import JsLexer
@@ -306,3 +308,58 @@ class TestJsLexer(TestBase):
 
     def test_at_token(self):
         self.assertEqual(self._tokens('@'), [(JsTokenKind.AT, '@')])
+
+    def _bounded_tokens(self, source: str, limit: int = 16) -> list[tuple[JsTokenKind, str]]:
+        """
+        The first *limit* tokens of *source*, the end of file among them. A scan that consumes no
+        input yields tokens for as long as anything reads them, and `list` cannot report that as a
+        failure because it never returns at all; reading a bounded prefix turns the same defect into
+        an assertion about a sequence whose end is missing.
+        """
+        return [
+            (token.kind, token.value)
+            for token in itertools.islice(JsLexer(source).tokenize(), limit)
+        ]
+
+    def test_a_backslash_that_begins_no_escape_is_a_token_that_consumes_it(self):
+        """
+        Node refuses every program written with one, so the character names nothing; what these
+        pin is that the scan moves past it and reaches the end of the input.
+        """
+        backslash = '\\'
+        self.assertEqual(self._bounded_tokens(backslash), [
+            (JsTokenKind.ERROR, backslash),
+            (JsTokenKind.EOF, ''),
+        ])
+        self.assertEqual(self._bounded_tokens(F'a{backslash}b'), [
+            (JsTokenKind.IDENTIFIER, 'a'),
+            (JsTokenKind.ERROR, backslash),
+            (JsTokenKind.IDENTIFIER, 'b'),
+            (JsTokenKind.EOF, ''),
+        ])
+        self.assertEqual(self._bounded_tokens(F'a{backslash}'), [
+            (JsTokenKind.IDENTIFIER, 'a'),
+            (JsTokenKind.ERROR, backslash),
+            (JsTokenKind.EOF, ''),
+        ])
+        self.assertEqual(self._bounded_tokens(F'a{backslash}{backslash}b'), [
+            (JsTokenKind.IDENTIFIER, 'a'),
+            (JsTokenKind.ERROR, backslash),
+            (JsTokenKind.ERROR, backslash),
+            (JsTokenKind.IDENTIFIER, 'b'),
+            (JsTokenKind.EOF, ''),
+        ])
+
+    def test_a_unicode_escape_in_an_identifier_is_still_one_identifier(self):
+        """
+        Node reads a declaration whose name is written with a unicode escape as a declaration of the
+        name that escape denotes, and prints the value for a program that goes on to read the plain
+        spelling. The escape is therefore part of the name, whether it opens the name or sits inside
+        it, and never a token standing beside it.
+        """
+        self.assertEqual(
+            self._bounded_tokens(R'\u0061bc'),
+            [(JsTokenKind.IDENTIFIER, R'\u0061bc'), (JsTokenKind.EOF, '')])
+        self.assertEqual(
+            self._bounded_tokens(R'a\u0062c'),
+            [(JsTokenKind.IDENTIFIER, R'a\u0062c'), (JsTokenKind.EOF, '')])

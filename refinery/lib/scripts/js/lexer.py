@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Generator
 
-from refinery.lib.scripts.js.token import KEYWORDS, JsToken, JsTokenKind
+from refinery.lib.scripts.js.token import (
+    KEYWORDS,
+    LINE_TERMINATORS,
+    WHITESPACE,
+    JsToken,
+    JsTokenKind,
+)
 
 _ESCAPE_MAP: dict[str, str] = {
     'b'  : '\b',
@@ -58,7 +64,7 @@ def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int]:
             if len(hexstr) == 4 and _HEX.issuperset(hexstr):
                 return chr(int(hexstr, 16)), pos + 4
         return 'u', pos
-    if c in '\r\n':
+    if c in LINE_TERMINATORS:
         if c == '\r' and pos < length and src[pos] == '\n':
             pos += 1
         return '', pos
@@ -170,10 +176,19 @@ class JsLexer:
         return self.pos >= len(self.source)
 
     def _skip_whitespace(self) -> bool:
+        """
+        Consume the ECMA-262 WhiteSpace between two tokens. It is the whole production and not the
+        space and the tab alone, because every other character in it separates tokens just as they
+        do: a file that opens with a byte order mark is ordinary, and reading that mark as a token
+        of its own splits one program into two statements.
+
+        Line terminators are deliberately not consumed here. They separate tokens too, but they also
+        end a line, and the parser reads the end of a line as a place a semicolon may be inserted.
+        """
         start = self.pos
         src = self.source
         length = len(src)
-        while self.pos < length and src[self.pos] in ' \t':
+        while self.pos < length and src[self.pos] in WHITESPACE:
             self.pos += 1
         return self.pos > start
 
@@ -182,7 +197,7 @@ class JsLexer:
         src = self.source
         length = len(src)
         self.pos += 2
-        while self.pos < length and src[self.pos] != '\n':
+        while self.pos < length and src[self.pos] not in LINE_TERMINATORS:
             self.pos += 1
         return src[start:self.pos]
 
@@ -196,7 +211,7 @@ class JsLexer:
             if src[self.pos] == '*' and src[self.pos + 1] == '/':
                 self.pos += 2
                 return src[start:self.pos], has_newline
-            if src[self.pos] in '\r\n':
+            if src[self.pos] in LINE_TERMINATORS:
                 has_newline = True
             self.pos += 1
         self.pos = length
@@ -289,7 +304,7 @@ class JsLexer:
                 while self.pos < length and src[self.pos].isalpha():
                     self.pos += 1
                 return src[start:self.pos]
-            if c in '\r\n':
+            if c in LINE_TERMINATORS:
                 break
             self.pos += 1
         return src[start:self.pos]
@@ -376,7 +391,7 @@ class JsLexer:
         prev_allows_regex = True
 
         if src.startswith('#!'):
-            end = src.find('\n')
+            end = min((at for at in map(src.find, LINE_TERMINATORS) if at >= 0), default=-1)
             self.pos = end if end >= 0 else length
 
         while True:
@@ -393,7 +408,7 @@ class JsLexer:
                 self.pos += 2
                 yield JsToken(JsTokenKind.NEWLINE, '\r\n', start)
                 continue
-            if c in '\r\n':
+            if c in LINE_TERMINATORS:
                 self.pos += 1
                 yield JsToken(JsTokenKind.NEWLINE, c, start)
                 continue
@@ -443,7 +458,12 @@ class JsLexer:
                 yield tok
                 continue
 
-            if c.isalpha() or c == '_' or c == '$' or c == '\\':
+            if (
+                c.isalpha()
+                or c == '_'
+                or c == '$'
+                or (c == '\\' and src[self.pos + 1:self.pos + 2] == 'u')
+            ):
                 tok = self._read_identifier_or_keyword()
                 prev_allows_regex = tok.kind not in _EXPR_END_KINDS
                 yield tok

@@ -9,6 +9,7 @@ from test import TestBase
 
 from refinery.lib.scripts.js.numbers import (
     is_negative_zero,
+    js_number_to_string,
     js_parse_float,
     js_parse_int,
     js_string_to_number,
@@ -492,3 +493,75 @@ class TestStringNumericGrammar(TestBase):
         self.assertEqual(1e-05, self._number('1e-' + '0' * 400 + '5'))
         self.assertEqual('NaN', self._number('1e' + '9' * 400 + 'x'))
         self.assertEqual(math.inf, self._float('1e' + '9' * 400 + 'x'))
+
+
+def _the_double_denoted_by(value: int) -> float:
+    """
+    The Number an exact integer denotes. `float` is Python's correctly rounded conversion and
+    answers for every integer a double can hold; the one thing it refuses is a magnitude that leaves
+    the range, which is the infinity of that sign.
+    """
+    try:
+        return float(value)
+    except OverflowError:
+        return -math.inf if value < 0 else math.inf
+
+
+class TestJsNumberToStringSpellsAnIntegerAsTheDoubleItDenotes(TestBase):
+    """
+    `js_number_to_string` is `String(n)`, whose domain is the Number and therefore the double. A
+    Python `int` reaches it wherever an exact integer was computed, and the text it is given has to
+    be the text the double denoting it is given, digit for digit — most of all where the two
+    disagree about what the digits are. Every expected value below is what Node prints for `String`
+    of the same integer.
+    """
+
+    def _spelled(self, value: int) -> str:
+        spelling = js_number_to_string(value)
+        self.assertEqual(spelling, js_number_to_string(_the_double_denoted_by(value)))
+        return spelling
+
+    def test_an_integer_a_double_holds_exactly_keeps_every_digit_it_was_written_with(self):
+        self.assertEqual('0', self._spelled(0))
+        self.assertEqual('1', self._spelled(1))
+        self.assertEqual('-1', self._spelled(-1))
+        self.assertEqual('255', self._spelled(255))
+        self.assertEqual('4294967296', self._spelled(2 ** 32))
+        self.assertEqual('9007199254740991', self._spelled(2 ** 53 - 1))
+        self.assertEqual('9007199254740992', self._spelled(2 ** 53))
+        self.assertEqual('9007199254740994', self._spelled(2 ** 53 + 2))
+
+    def test_an_integer_past_the_precision_of_a_double_is_spelled_as_its_nearest_one(self):
+        """
+        Above `2**53` the integers a double holds are spaced further apart than one, so an integer
+        between two of them has no spelling of its own and prints as the one it rounds to. The
+        magnitudes further up print the digits a double determines and zeros for the rest.
+        """
+        self.assertEqual('9007199254740992', self._spelled(2 ** 53 + 1))
+        self.assertEqual('-9007199254740992', self._spelled(-(2 ** 53 + 1)))
+        self.assertEqual('9223372036854776000', self._spelled(2 ** 63))
+        self.assertEqual('18446744073709552000', self._spelled(2 ** 64))
+        self.assertEqual(
+            '1.2345678901234568e+29', self._spelled(123456789012345678901234567890))
+        self.assertEqual('1.2676506002282294e+30', self._spelled(2 ** 100))
+
+    def test_an_integer_wide_enough_is_spelled_with_an_exponent_rather_than_its_digits(self):
+        self.assertEqual('100000000000000000000', self._spelled(10 ** 20))
+        self.assertEqual('1e+21', self._spelled(10 ** 21))
+        self.assertEqual('1e+21', self._spelled(10 ** 21 + 1))
+        self.assertEqual('1e+308', self._spelled(10 ** 308))
+        self.assertEqual('8.98846567431158e+307', self._spelled(2 ** 1023))
+
+    def test_an_integer_too_large_for_a_double_is_spelled_as_the_infinity_it_denotes(self):
+        """
+        Beyond the largest double there is no Number left to round to, and the sign is all that
+        survives. `float` raises on each of these, so the conversion a spelling goes through cannot
+        be the one Python offers for an integer that fits.
+        """
+        self.assertEqual('Infinity', self._spelled(10 ** 309))
+        self.assertEqual('Infinity', self._spelled(2 ** 1024))
+        self.assertEqual('-Infinity', self._spelled(-(2 ** 1024)))
+        self.assertEqual('Infinity', self._spelled(10 ** 400))
+        self.assertEqual('-Infinity', self._spelled(-(10 ** 400)))
+        self.assertEqual('Infinity', self._spelled(int('1' * 400)))
+        self.assertEqual('Infinity', self._spelled(2 ** 5000))

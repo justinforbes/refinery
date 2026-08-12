@@ -18,6 +18,8 @@ import re
 
 from decimal import Decimal
 
+from refinery.lib.scripts.js.token import LINE_TERMINATORS, WHITESPACE
+
 
 def to_js_number(value: int | float) -> float:
     """
@@ -31,17 +33,17 @@ def to_js_number(value: int | float) -> float:
         return float('-inf') if value < 0 else float('inf')
 
 
-TRIMMABLE_WHITESPACE = (
-    '\t\n\v\f\r\x20\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006'
-    '\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
-)
+TRIMMABLE_WHITESPACE = WHITESPACE + LINE_TERMINATORS
 """
-The characters ECMA-262 TrimString removes: WhiteSpace, which is the space separators together with
-`U+FEFF`, plus the line terminators. It is what a string may be padded with and still name a Number,
-and it is equally what `String.prototype.trim` takes off, one set, because the specification defines
-the second in terms of the first. It is spelled out rather than left to `str.strip`, whose notion of
-a space is neither a subset nor a superset of this one: Python takes `U+001C` through `U+001F`, which
-JavaScript does not, and leaves `U+FEFF`, which JavaScript takes.
+The characters ECMA-262 TrimString removes: WhiteSpace plus the line terminators. It is what a string
+may be padded with and still name a Number, and it is equally what `String.prototype.trim` takes off,
+one set, because the specification defines the second in terms of the first.
+
+It is the union of the two lexical productions rather than a list of its own, so that the set the
+lexer skips between tokens and the set a Number tolerates around itself cannot drift apart; they are
+the same characters read for two purposes. Neither is `str.strip`'s notion of a space, which is a
+third set: Python takes `U+001C` through `U+001F`, which JavaScript does not, and leaves `U+FEFF`,
+which JavaScript takes.
 """
 
 
@@ -134,9 +136,17 @@ def _read_non_decimal_integer(text: str) -> float | None:
 
     Once the production has matched, the text is also a Python integer literal, so the base it names
     is read by asking for base zero rather than by decoding the prefix a second time.
+
+    The digit count is answered before the integer is built, for the reason `js_parse_int` answers it:
+    a literal past the double range denotes an infinity, and building it first spends the length of
+    the text to produce a value that is discarded. One bound serves every base here, because the
+    binary one is the loosest — a digit string of *n* significant digits is worth at least `2 ** (n-1)`
+    whatever base it is read in.
     """
     if _NON_DECIMAL_INTEGER.fullmatch(text) is None:
         return None
+    if len(text[2:].lstrip('0')) > _MAX_DIGITS_IN_A_DOUBLE[2]:
+        return float('inf')
     return to_js_number(int(text, 0))
 
 
@@ -261,7 +271,7 @@ def _significant_digits_to_string(value: float) -> str:
     return F'-{result}' if negative else result
 
 
-def js_number_to_string(value: float) -> str:
+def js_number_to_string(value: int | float) -> str:
     """
     Apply `Number.prototype.toString` to a Number. Total over the domain, including the values that
     have no literal spelling: `NaN`, the infinities, and negative zero, which prints as `0` because
@@ -272,7 +282,13 @@ def js_number_to_string(value: float) -> str:
     is the same branch of the algorithm `_significant_digits_to_string` would take. Spelling it as
     `int(value)` instead would be wrong past 2^53, where the double's exact value has more digits
     than it determines — `2 ** 60` is `1152921504606847000`, not `1152921504606846976`.
+
+    That reasoning is also why a Python `int` is coerced here rather than refused. This module exists
+    because integers leak in, and an integer arriving with more digits than a double determines is
+    exactly the case the paragraph above describes: it has to print as the Number it denotes, not as
+    itself.
     """
+    value = to_js_number(value)
     if value != value:
         return 'NaN'
     if value == float('inf'):

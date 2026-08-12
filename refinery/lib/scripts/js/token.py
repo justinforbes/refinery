@@ -4,6 +4,29 @@ import enum
 
 from dataclasses import dataclass
 
+WHITESPACE = (
+    '\t\v\f\x20\xa0        '
+    '      　﻿'
+)
+"""
+The ECMA-262 WhiteSpace production: the tab, the vertical tab, the form feed and the zero width
+no-break space, together with `<USP>`, every code point of the Unicode general category `Zs`. These
+separate tokens and carry no other meaning, which is what distinguishes them from `LINE_TERMINATORS`
+— a newline additionally ends a line, and the parser reads that as a place a semicolon may be
+inserted. A lexer that folded the two together would insert semicolons where the language does not.
+
+Spelled out rather than derived from `unicodedata` at import time, and rather than left to Python's
+`str.isspace`, which is a third set again: it takes `U+001C` through `U+001F` and `U+0085`, which the
+language does not, and leaves `U+FEFF`, which the language takes. The test module derives the same
+set from the Unicode database and asserts the two agree.
+"""
+
+LINE_TERMINATORS = '\n\r  '
+"""
+The ECMA-262 LineTerminator production: the line feed, the carriage return, the line separator and
+the paragraph separator. A `\\r\\n` pair is one terminator and not two.
+"""
+
 
 class JsTokenKind(enum.Enum):
     INTEGER         = 'integer'          # noqa

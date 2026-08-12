@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import inspect
+import json
+import unicodedata
 import unittest
 
 from test import TestBase
 
+from refinery.lib.scripts import canonical
 from refinery.lib.scripts.js.analysis.model import build_semantic_model
+from refinery.lib.scripts.js.lexer import JsLexer
 from refinery.lib.scripts.js.model import JsIdentifier
 from refinery.lib.scripts.js.parser import JsParser
+from refinery.lib.scripts.js.token import JsTokenKind
 
 from test.lib.scripts.js.analysis.differential import (
     DeobfuscationFailed,
@@ -5130,3 +5135,501 @@ class TestFoldedCalleeKeepsHowTheFunctionIsReached(TestBase):
             self._direct_eval_program('(null ?? eval)'),
             self._direct_eval_program('eval'),
         )
+
+
+_SPACE_LIKE_CATEGORIES = frozenset({'Cc', 'Cf', 'Zl', 'Zp', 'Zs'})
+"""
+The Unicode general categories a character that could be mistaken for a space belongs to: the
+controls, the format characters, and the three kinds of separator.
+"""
+
+SPACE_LIKE_CODE_POINTS = sorted(
+    cp for cp in range(0x110000)
+    if unicodedata.category(chr(cp)) in _SPACE_LIKE_CATEGORIES or chr(cp).isspace()
+)
+"""
+Every code point that could be mistaken for a space: the categories above together with everything
+Python's `str.isspace` accepts, which is the notion a reader written in Python reaches for by
+default. Offering the engine this whole set rather than a list of characters is what finds a
+character a reader invented, and not merely one it forgot.
+"""
+
+_ASK_WHICH_CHARACTERS_STAND_BETWEEN_TOKENS = R'''
+const separates = [];
+const ends = [];
+for (const cp of CANDIDATES) {
+    const c = String.fromCodePoint(cp);
+    const name = 'q' + cp;
+    try {
+        if (eval('(function(){ var' + c + name + ' = 7; return ' + name + '; })()') === 7) {
+            separates.push(cp);
+        }
+    } catch (error) {}
+    try {
+        if (eval('(function(){ return' + c + '42; })()') === undefined) {
+            ends.push(cp);
+        }
+    } catch (error) {}
+}
+console.log(JSON.stringify(separates));
+console.log(JSON.stringify(ends));
+'''
+"""
+A program that reports, for each candidate character, whether it may stand between `var` and the
+name it declares, and whether it ends the statement a `return` begins. The first is what separates
+two tokens at all and the second is what ends a line, so the difference of the two is the
+whitespace of the language as the engine reads it. Each declaration is given a name of its own
+because a direct `eval` puts a `var` into the enclosing scope, where the next round would find it.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestTokensAreSeparatedByTheWhitespaceOfTheLanguage(TestBase):
+    """
+    Whitespace between two tokens is the whole ECMA-262 WhiteSpace production and not the space and
+    the tab alone. A character of it that the lexer does not skip becomes a token of its own, which
+    splits one statement into two; a character the lexer skips that is not in it merges two programs
+    that the engine says are different. Node names the set, and the lexer has to answer with it.
+    """
+
+    def _node_reading(self) -> tuple[list[int], list[int]]:
+        source = F'const CANDIDATES = {json.dumps(SPACE_LIKE_CODE_POINTS)};'
+        output, error = behavior(source + _ASK_WHICH_CHARACTERS_STAND_BETWEEN_TOKENS)
+        self.assertIsNone(error)
+        separates, ends = (json.loads(line) for line in output.splitlines())
+        return separates, ends
+
+    def _between_two_names(self, code_point: int) -> list[JsTokenKind]:
+        return [token.kind for token in JsLexer(F'a{chr(code_point)}b').tokenize()]
+
+    def _skipped_by_the_lexer(self) -> list[int]:
+        two_names = [JsTokenKind.IDENTIFIER, JsTokenKind.IDENTIFIER, JsTokenKind.EOF]
+        return [
+            cp for cp in SPACE_LIKE_CODE_POINTS if self._between_two_names(cp) == two_names
+        ]
+
+    def _read_as_a_line_ending(self) -> list[int]:
+        a_broken_line = [
+            JsTokenKind.IDENTIFIER,
+            JsTokenKind.NEWLINE,
+            JsTokenKind.IDENTIFIER,
+            JsTokenKind.EOF,
+        ]
+        return [
+            cp for cp in SPACE_LIKE_CODE_POINTS if self._between_two_names(cp) == a_broken_line
+        ]
+
+    def test_the_lexer_skips_the_characters_that_separate_tokens_without_ending_a_line(self):
+        separates, ends = self._node_reading()
+        self.assertEqual([cp for cp in separates if cp not in ends], self._skipped_by_the_lexer())
+
+    def test_the_lexer_ends_a_line_at_the_characters_that_end_a_statement(self):
+        """
+        A line ending is where a semicolon may be inserted, so the characters the lexer reports as
+        one have to be the characters the engine inserts a semicolon at, no more and no fewer.
+        """
+        _, ends = self._node_reading()
+        self.assertEqual(ends, self._read_as_a_line_ending())
+
+    def test_a_program_woven_with_every_whitespace_character_is_the_spaced_program(self):
+        """
+        Node prints `3`. The same tokens separated by each character of the set in turn are the same
+        program as the one separated by spaces: the same tree, and the same deobfuscated text.
+        """
+        separates, ends = self._node_reading()
+        whitespace = [cp for cp in separates if cp not in ends]
+        spaced = 'var a = 1 ; var b = 2 ; console . log ( a + b ) ;'
+        words = spaced.split(' ')
+        woven = words[0] + ''.join(
+            chr(whitespace[index % len(whitespace)]) + word
+            for index, word in enumerate(words[1:])
+        )
+        self.assertEqual(behavior(woven), ('3\n', None))
+        self.assertEqual(canonical(JsParser(woven).parse()), canonical(JsParser(spaced).parse()))
+        self.assertEqual(deobfuscate_source(woven), 'console.log(3);')
+        self.assertEqual(deobfuscate_source(woven), deobfuscate_source(spaced))
+
+    def test_a_file_that_begins_with_a_byte_order_mark_is_the_file_without_it(self):
+        """
+        Node prints `3` for both. A byte order mark is whitespace, so a file that opens with one
+        opens with the token behind it; reading the mark as a token of its own would make the first
+        statement of every such file a statement no grammar admits.
+        """
+        program = 'var greeting = 1 + 2;\nconsole.log(greeting);'
+        marked = chr(0xFEFF) + program
+        self.assertEqual(behavior(marked), ('3\n', None))
+        self.assertEqual(canonical(JsParser(marked).parse()), canonical(JsParser(program).parse()))
+        self.assertEqual(deobfuscate_source(marked), 'console.log(3);')
+
+    def test_a_character_python_calls_a_space_and_the_language_does_not_separates_nothing(self):
+        """
+        Node refuses every one of these programs and runs the one written with a space. `U+001C`
+        through `U+001F` and `U+0085` are removed by Python's `str.strip` and are whitespace to
+        nothing in the language, so each is a character no grammar admits between two tokens.
+        """
+        not_a_separator = [
+            JsTokenKind.IDENTIFIER,
+            JsTokenKind.ERROR,
+            JsTokenKind.IDENTIFIER,
+            JsTokenKind.EOF,
+        ]
+        for cp in [0x001C, 0x001D, 0x001E, 0x001F, 0x0085]:
+            with self.subTest(character=F'U+{cp:04X}'):
+                self.assertEqual(
+                    behavior(F'var{chr(cp)}x = 1; console.log(x);'), ('', 'SyntaxError'))
+                self.assertEqual(self._between_two_names(cp), not_a_separator)
+        self.assertEqual(behavior('var x = 1; console.log(x);'), ('1\n', None))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAutomaticSemicolonInsertionIsWhereTheLineEnds(TestBase):
+    """
+    A semicolon is inserted where a line ends and nowhere else. Widening the set of characters that
+    separate two tokens must therefore not widen the set that ends a line: a character read as both
+    would end statements that were never over, and one read as neither would join statements the
+    engine keeps apart. Every expected value is what Node prints for the program as written.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    def test_a_line_feed_after_return_ends_the_return_statement(self):
+        self._prints('function f() {\n  return\n  42;\n}\nconsole.log(f());', 'undefined\n')
+
+    def test_carriage_return_line_feed_endings_end_a_line_where_a_line_feed_does(self):
+        self._prints('function f() {\r\n  return\r\n  42;\r\n}\r\nconsole.log(f());', 'undefined\n')
+        self._prints('var a = 1\r\nvar b = 2\r\nconsole.log(a + b)', '3\n')
+
+    def test_statements_separated_only_by_newlines_are_separate_statements(self):
+        self._prints('var a = 1\nvar b = 2\nconsole.log(a + b)', '3\n')
+
+    def test_a_newline_ahead_of_a_prefix_increment_ends_the_previous_statement(self):
+        """
+        Node prints `2 1`: the line ending closes `var y = x`, so `++x` is a statement of its own
+        and `y` holds the value `x` had before it. Joined into one line the two read as `x ++ x`,
+        which is no program at all.
+        """
+        self._prints('var x = 1\nvar y = x\n++x\nconsole.log(x, y)', '2 1\n')
+        self._prints('var x = 1\r\nvar y = x\r\n++x\r\nconsole.log(x, y)', '2 1\n')
+
+    def test_whitespace_that_ends_no_line_does_not_end_a_return_statement(self):
+        """
+        Node prints `42` for each. The tab, the vertical tab, the form feed, the no-break space, the
+        ideographic space and the byte order mark all separate two tokens and none of them ends a
+        line, so the `return` reads the number written behind it.
+        """
+        for cp in [0x0009, 0x000B, 0x000C, 0x00A0, 0x3000, 0xFEFF]:
+            with self.subTest(character=F'U+{cp:04X}'):
+                self._prints(F'function f() {{ return{chr(cp)}42; }} console.log(f());', '42\n')
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestTheLineSeparatorsEndALineRatherThanSeparateLikeASpace(TestBase):
+    """
+    `U+2028` and `U+2029` are line terminators of the language, which is a different thing from
+    whitespace: they separate two tokens as a space does, and they additionally end a line, where a
+    comment stops and a semicolon may be inserted. Node was asked what each program below does
+    before any of them was written down.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    def test_a_line_separator_ends_a_single_line_comment(self):
+        """
+        Node prints `1` and then `2`: the comment ends at the separator, so the call written behind
+        it is code. A separator that ends no line leaves that call inside the comment, where it is
+        deleted along with it.
+        """
+        self._prints(F'console.log(1); // done{chr(0x2028)}console.log(2);', '1\n2\n')
+        self._prints(F'console.log(1); // done{chr(0x2029)}console.log(2);', '1\n2\n')
+
+    def test_a_line_separator_between_two_operands_is_no_token_of_its_own(self):
+        """
+        Node prints `3`: the call has the one argument `1 + 2`, the separator being only where the
+        line ends. A separator that is a token of its own splits the sum into two arguments, and the
+        call then prints `1 2`.
+        """
+        self._prints(F'console.log(1{chr(0x2028)}+ 2);', '3\n')
+        self._prints(F'console.log(1{chr(0x2029)}+ 2);', '3\n')
+
+    def test_a_line_separator_inside_an_expression_leaves_the_expression_whole(self):
+        """
+        Node prints `3`: an expression continues across the end of a line, so a `+` still waiting
+        for its right operand finds the number written on the next one.
+        """
+        self._prints(F'var x = 1 +{chr(0x2028)}2; console.log(x);', '3\n')
+        self._prints(F'var x = 1 +{chr(0x2029)}2; console.log(x);', '3\n')
+
+    def test_a_line_separator_after_return_ends_the_return_statement(self):
+        """
+        Node prints `undefined`: a semicolon is inserted at the end of the line exactly as a line
+        feed would have it inserted.
+        """
+        self._prints(F'function f() {{ return{chr(0x2028)}42; }} console.log(f());', 'undefined\n')
+        self._prints(F'function f() {{ return{chr(0x2029)}42; }} console.log(f());', 'undefined\n')
+
+    def test_a_line_separator_inside_a_string_literal_is_a_character_of_the_string(self):
+        """
+        Node prints the two letters with the separator between them: a line terminator is an
+        ordinary character of a string literal and ends no line there.
+        """
+        self._prints(
+            F"console.log(JSON.stringify('a{chr(0x2028)}b'));", F'"a{chr(0x2028)}b"\n')
+        self._prints(
+            F"console.log(JSON.stringify('a{chr(0x2029)}b'));", F'"a{chr(0x2029)}b"\n')
+
+
+_ASK_WHICH_CHARACTERS_A_FORGIVING_DECODE_REMOVES = R'''
+const removed = [];
+for (const cp of CANDIDATES) {
+    const c = String.fromCodePoint(cp);
+    try {
+        if (atob('QUJ' + c + 'D') === 'ABC') removed.push(cp);
+    } catch (error) {}
+}
+console.log(JSON.stringify(removed));
+'''
+"""
+A program that reports which candidate characters a forgiving base64 decode removes from its
+argument. A character it does not remove is one the decode refuses the whole argument over, so the
+same experiment names both the padding a call may be folded through and the throw a call is.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAtobRemovesTheWhitespaceOfAForgivingBase64Decode(TestBase):
+    """
+    `atob` removes a set of characters from its argument before it decodes, and refuses the argument
+    over any character outside that set. The set therefore decides both what a call computes and
+    whether it computes anything at all, so reading it too widely turns a program that throws into
+    one that has a value. Node names the set.
+    """
+
+    def _folded(self, code_point: int) -> str:
+        return deobfuscate_source(RF"SINK(atob('QUJ\u{code_point:04X}D'));")
+
+    def _catching_program(self, escape: str) -> str:
+        return (
+            F"try {{ console.log(atob('QUJ{escape}D')); }}"
+            F' catch (error) {{ console.log(error.name); }}')
+
+    def test_the_characters_a_decode_removes_are_the_ones_node_removes_and_no_others(self):
+        """
+        Every character that could be mistaken for a space is offered to a decode in Node, and only
+        the ones it removes may be folded away: for every other character the call is a throw.
+        """
+        source = F'const CANDIDATES = {json.dumps(SPACE_LIKE_CODE_POINTS)};'
+        output, error = behavior(source + _ASK_WHICH_CHARACTERS_A_FORGIVING_DECODE_REMOVES)
+        self.assertIsNone(error)
+        self.assertEqual(
+            json.loads(output),
+            [cp for cp in SPACE_LIKE_CODE_POINTS if self._folded(cp) == "SINK('ABC');"],
+        )
+
+    def test_an_argument_padded_with_them_decodes_to_the_text_it_names(self):
+        """
+        Node prints `ABC` and then `Hello, world`: the removal happens before the decode and does
+        not care where in the argument the characters sit.
+        """
+        padded = R"console.log(atob('\t\n\f\r QUJD \r\f\n\t'));"
+        self.assertEqual(behavior(padded), ('ABC\n', None))
+        self.assertEqual(deobfuscate_source(padded), "console.log('ABC');")
+        interior = R"console.log(atob('SGVs\nbG8s\tIHdv\rcmxk'));"
+        self.assertEqual(behavior(interior), ('Hello, world\n', None))
+        self.assertEqual(deobfuscate_source(interior), "console.log('Hello, world');")
+
+    def test_an_argument_holding_a_character_it_does_not_remove_is_refused(self):
+        """
+        Node prints `InvalidCharacterError` for each. The vertical tab, the no-break space, the em
+        space, the byte order mark and the line separator are each whitespace of one kind or
+        another, and none of them is whitespace to a forgiving decode.
+        """
+        for escape in [
+            R'\u000B',
+            R'\u00A0',
+            R'\u2003',
+            R'\uFEFF',
+            R'\u2028',
+            '!',
+        ]:
+            with self.subTest(escape=escape):
+                source = self._catching_program(escape)
+                self.assertEqual(behavior(source), ('InvalidCharacterError\n', None))
+                self.assertEqual(
+                    behavior(deobfuscate_source(source)), ('InvalidCharacterError\n', None))
+
+    def test_a_refused_argument_is_not_folded_to_a_value(self):
+        """
+        Node prints nothing and exits with the refusal uncaught. It is a `DOMException` rather than
+        an `Error`, which is why the type is reported as the bare `ERROR`; what the case pins is
+        that neither program prints, where a folded call would print `ABC`.
+        """
+        source = R"console.log(atob('QUJ\u000BD'));"
+        self.assertEqual(behavior(source), ('', 'ERROR'))
+        self.assertEqual(behavior(deobfuscate_source(source)), ('', 'ERROR'))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNumberParseIntAndParseFloatAreTheGlobalFunctions(TestBase):
+    """
+    `Number.parseInt` and `parseInt` are one function object, and so are `Number.parseFloat` and
+    `parseFloat`. A call therefore names the same number whichever way it is written, and the two
+    programs deobfuscate to the same text.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    def _parse_int_calls(self, spelling: str) -> str:
+        return (
+            F"console.log({spelling}('101', 2), {spelling}('ff', 16), {spelling}('0x1f'),"
+            F" {spelling}('1e3'), {spelling}(' 42abc'), String({spelling}('nope')));")
+
+    def _parse_float_calls(self, spelling: str) -> str:
+        return (
+            F"console.log({spelling}('2.5abc'), {spelling}('1e3'), {spelling}('-1.5e2'),"
+            F" {spelling}('0x10'), String({spelling}('Infinity')), String({spelling}('nope')));")
+
+    def test_each_spelling_names_one_and_the_same_function(self):
+        self._prints(
+            'console.log(Number.parseInt === parseInt, Number.parseFloat === parseFloat);',
+            'true true\n')
+
+    def test_parse_int_reached_through_number_folds_as_the_global_one_does(self):
+        """
+        Node prints `5 255 31 1 42 NaN` for both. A radix is read where one is given, a `0x` prefix
+        selects sixteen where none is, an exponent is no part of an integer, padding is skipped, and
+        a string naming no number is not a number.
+        """
+        through_number = self._parse_int_calls('Number.parseInt')
+        through_global = self._parse_int_calls('parseInt')
+        self._prints(through_number, '5 255 31 1 42 NaN\n')
+        self._prints(through_global, '5 255 31 1 42 NaN\n')
+        self.assertEqual(
+            deobfuscate_source(through_number), "console.log(5, 255, 31, 1, 42, 'NaN');")
+        self.assertEqual(deobfuscate_source(through_number), deobfuscate_source(through_global))
+
+    def test_parse_float_reached_through_number_folds_as_the_global_one_does(self):
+        """
+        Node prints `2.5 1000 -150 0 Infinity NaN` for both. The parse ends where the decimal
+        literal does, an exponent belongs to that literal, a base prefix does not, and the word
+        `Infinity` is a literal of its own.
+        """
+        through_number = self._parse_float_calls('Number.parseFloat')
+        through_global = self._parse_float_calls('parseFloat')
+        self._prints(through_number, '2.5 1000 -150 0 Infinity NaN\n')
+        self._prints(through_global, '2.5 1000 -150 0 Infinity NaN\n')
+        self.assertEqual(
+            deobfuscate_source(through_number),
+            "console.log(2.5, 1000, -150, 0, 'Infinity', 'NaN');")
+        self.assertEqual(deobfuscate_source(through_number), deobfuscate_source(through_global))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestANumberWrittenInABaseOtherThanTenIsReadAtAnyLength(TestBase):
+    """
+    `Number` reads a base prefix and then every digit written behind it, and how many digits that is
+    is not bounded by what a double can hold. Node says what each of these strings names.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    def test_a_run_of_digits_a_double_holds_names_the_integer_it_spells(self):
+        """
+        Node prints `255 9007199254740991 9007199254740992`. The last string has no double of its
+        own, so the digits it names are not the digits it was written with.
+        """
+        source = (
+            "console.log(Number('0xff'), Number('0x1fffffffffffff'),"
+            " Number('0x20000000000001'));")
+        self._prints(source, '255 9007199254740991 9007199254740992\n')
+        self.assertEqual(
+            deobfuscate_source(source),
+            'console.log(255, 9007199254740991, 9007199254740992);')
+
+    def test_a_run_of_digits_past_the_double_range_names_an_infinity(self):
+        """
+        Node prints `Infinity` for each. The count of digits decides this and their values do not,
+        so a string far longer than any number has to be answered as quickly as one that merely
+        overflows.
+        """
+        for prefix, digit, count in [('0x', 'f', 300), ('0b', '1', 1100), ('0o', '7', 400)]:
+            with self.subTest(prefix=prefix):
+                source = F"console.log(String(Number('{prefix}{digit * count}')));"
+                self._prints(source, 'Infinity\n')
+                self.assertEqual(deobfuscate_source(source), "console.log('Infinity');")
+
+    def test_leading_zeros_are_not_digits_of_the_number_they_precede(self):
+        """
+        Node prints `16`: five thousand zeros behind the prefix change neither what the string names
+        nor how long it takes to name it.
+        """
+        source = F"console.log(Number('0x{'0' * 5000}10'));"
+        self._prints(source, '16\n')
+        self.assertEqual(deobfuscate_source(source), 'console.log(16);')
+
+
+_BACKSLASH = '\\'
+"""
+A single backslash. In an identifier it begins a unicode escape, and outside a string literal it has
+no other meaning at all.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestABackslashThatBeginsNoEscapeDoesNotStallTheReader(TestBase):
+    """
+    Node refuses every program below, so none of them names anything and there is no answer to
+    compare against. What these pin is that there is an answer at all: a backslash the scan did not
+    consume yielded tokens without end, and a reader that never returns is a defect no comparison of
+    results can express, because the comparison is never reached. Only a bound on the time can.
+    """
+
+    def _answered_within(self, source: str):
+        self.assertEqual(behavior(source), ('', 'SyntaxError'))
+        self.assertIsNotNone(deobfuscate_within(source, 30.0))
+
+    def test_a_backslash_standing_between_two_statements_is_answered(self):
+        self._answered_within(F'console.log(1); {_BACKSLASH} console.log(2);')
+
+    def test_a_backslash_between_two_identifier_characters_is_answered(self):
+        self._answered_within(F'var a{_BACKSLASH}b = 1; console.log(a{_BACKSLASH}b);')
+
+    def test_a_backslash_at_the_end_of_the_input_is_answered(self):
+        self._answered_within(F'console.log(1); {_BACKSLASH}')
+
+    def test_two_backslashes_in_a_row_are_answered(self):
+        self._answered_within(F'var a{_BACKSLASH}{_BACKSLASH}b = 1; console.log(1);')
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnIdentifierWrittenWithAnEscapeIsTheNameThatEscapeDenotes(TestBase):
+    """
+    The name an identifier carries is the code points its escapes resolve to and not the characters
+    it was typed with, so a binding written with an escape and a read written plainly are one name,
+    and so is the reverse pair. Node prints `7` for both programs below.
+
+    Both are pinned as expected failures. The declarator carries the spelling the source used where
+    the read carries the other one, the two never match, the declaration reads as unused, and it is
+    dropped: what is left exits with a `ReferenceError` where the program it replaced printed a
+    number. Each pin asserts what Node does, so it retires itself once the two spellings are one
+    name.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
+
+    @unittest.expectedFailure
+    def test_a_binding_written_with_an_escape_is_read_by_its_plain_spelling(self):
+        self._prints(R'var \u0061bc = 7; console.log(abc);', '7\n')
+
+    @unittest.expectedFailure
+    def test_a_binding_written_plainly_is_read_by_a_spelling_with_an_escape(self):
+        self._prints(R'var abc = 7; console.log(\u0061bc);', '7\n')

@@ -815,8 +815,13 @@ def _math_log2(args: list[Value]) -> Value:
 
 
 @_register((None, 'parseInt'))
+@_register(('Number', 'parseInt'))
 def _global_parse_int(args: list[Value]) -> Value:
     """
+    `Number.parseInt` is registered to the same function rather than to a copy of it, because the
+    specification says the two property values *are* the same function object; an obfuscator reaching
+    the global through its `Number` spelling is reaching this.
+
     The radix is read with ToInt32 rather than by truncation, because that is the coercion the
     specification names and the two disagree outside the int32 range: `parseInt('10', 2 ** 32 + 16)`
     is `16`, the radix the wrap lands on, and not the `NaN` an out-of-range value would answer.
@@ -832,6 +837,7 @@ def _global_parse_int(args: list[Value]) -> Value:
 
 
 @_register((None, 'parseFloat'))
+@_register(('Number', 'parseFloat'))
 def _global_parse_float(args: list[Value]) -> Value:
     if not args:
         return float('nan')
@@ -870,7 +876,7 @@ def _global_atob(args: list[Value]) -> Value:
         raise InterpreterError
     s = to_string(args[0])
     try:
-        cleaned = _RE_WHITESPACE.sub('', s)
+        cleaned = _RE_ASCII_WHITESPACE.sub('', s)
         padded = cleaned + '=' * (-len(cleaned) % 4)
         return base64.b64decode(padded, validate=True).decode('latin-1')
     except Exception:
@@ -889,7 +895,14 @@ def _global_btoa(args: list[Value]) -> Value:
 
 
 _UNESCAPE_PATTERN = re.compile(r'%u([0-9A-Fa-f]{4})|%([0-9A-Fa-f]{2})')
-_RE_WHITESPACE = re.compile(r'\s')
+_RE_ASCII_WHITESPACE = re.compile(r'[\t\n\f\r ]')
+"""
+The characters forgiving-base64 decoding removes before it reads a `atob` argument: ASCII whitespace,
+which is a third set again and neither of the two this package already names. It is narrower than
+Python's `\\s`, which also takes the vertical tab and `U+001C` through `U+001F`, and it is narrower
+than `TRIMMABLE_WHITESPACE`, which takes the space separators and the byte order mark. Every
+character outside it is a character `atob` throws on, so reading it as padding deletes a throw.
+"""
 _RE_NON_BASE64 = re.compile(r'[^A-Za-z0-9+/=]')
 
 
