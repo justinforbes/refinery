@@ -12,6 +12,7 @@ from refinery.lib.scripts.ps1.analysis.dataflow import (
 )
 from refinery.lib.scripts.ps1.analysis.dominance import build_dominance
 from refinery.lib.scripts.ps1.analysis.model import (
+    Ps1OccurrenceRole,
     Ps1SemanticModel,
     build_semantic_model,
     is_write_occurrence,
@@ -797,3 +798,32 @@ class TestPs1WrittenBefore(TestBase):
 
     def test_a_read_only_the_completed_store_reaches_has_it(self):
         self.assertTrue(self._written_before("try { $x = 'a'; Write-Host $x } catch { }"))
+
+
+class TestPs1WrittenBeforeAtAnOccurrenceThatObservesWhatItWrites(TestPs1WrittenBefore):
+    """
+    `$x += 1`, `$x++` and `$x--` are one occurrence filed under both the binding's reads and its
+    writes, and the question is asked at that one node. The value it stores is the value it is
+    producing, so where nothing else wrote the name the occurrence reads the `$null` that stood
+    before the script ran: `$x += 1` alone leaves `$x` holding 1, which is `$null + 1` and not the
+    sum of a value already stored.
+    """
+
+    def _written_before_its_own_store(self, source: str, name: str = 'x') -> bool:
+        _, semantic, flow = _models(source)
+        observing, = [
+            write.node for write in semantic.script_scope.bindings[name].writes
+            if write.role is Ps1OccurrenceRole.WRITE_OBSERVING
+            and isinstance(write.node, Ps1Variable)
+        ]
+        return flow.written_before(observing)
+
+    def test_an_occurrence_has_not_stored_the_value_it_is_evaluated_to_produce(self):
+        for source in ['$x += 1', '$x++', '$x--']:
+            with self.subTest(source):
+                self.assertFalse(self._written_before_its_own_store(source))
+
+    def test_a_write_standing_before_such_an_occurrence_has_run_by_the_time_it_reads(self):
+        for source in ['$x = 1; $x += 1', '$x = 1; $x++']:
+            with self.subTest(source):
+                self.assertTrue(self._written_before_its_own_store(source))

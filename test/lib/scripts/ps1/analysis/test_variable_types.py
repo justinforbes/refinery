@@ -260,6 +260,60 @@ class TestPs1TypeAt(TestBase):
                 self.assertEqual(self._type_at(source, name='s'), expected)
 
 
+class TestPs1AWriteThroughAWiderScopeIsNotTheNameABareReadResolves(TestPs1TypeAt):
+    """
+    At the top level of a script a bare `$q = …` writes the script scope and `$global:q = …` writes
+    the scope around it, so the two are different variables and a bare read below them resolves to
+    the script one. `$using:` names a scope wider still. `$script:` is not one of these: at the top
+    level it names the scope a bare write already lands in, so a qualified write and a bare write
+    are one variable there and a read carries whichever of them ran last.
+    """
+
+    def test_a_bare_read_does_not_carry_what_a_write_to_a_wider_scope_stored(self):
+        for qualifier in ['global', 'using']:
+            with self.subTest(qualifier):
+                self.assertIsNone(self._type_at(cleandoc(F"""
+                    $q = $text
+                    ${qualifier}:q = New-Object Net.WebClient
+                    $q.downloadstring('u')
+                """)))
+
+    def test_a_bare_write_standing_beside_a_wider_one_is_refused_and_not_read_past(self):
+        """
+        5.1 answers `System.String` here — the value the bare write stored, which is the one the
+        read resolves to. The refusal is what this layer has while one binding stands for the two
+        names; the answer that may not stand is the WebClient, which is under a name no read of
+        this script reaches.
+        """
+        self.assertIsNone(self._type_at(cleandoc("""
+            $q = 'text'
+            $global:q = New-Object Net.WebClient
+            $q.downloadstring('u')
+        """)))
+
+    def test_a_name_only_a_wider_scope_writes_is_the_one_a_bare_read_resolves_to(self):
+        self.assertEqual(self._type_at(cleandoc("""
+            $global:q = New-Object Net.WebClient
+            $q.downloadstring('u')
+        """)), 'System.Net.WebClient')
+
+    def test_the_script_qualifier_names_the_scope_a_bare_write_already_lands_in(self):
+        for source in [
+            cleandoc("""
+                $q = $text
+                $script:q = New-Object Net.WebClient
+                $q.downloadstring('u')
+            """),
+            cleandoc("""
+                $script:q = $text
+                $q = New-Object Net.WebClient
+                $q.downloadstring('u')
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._type_at(source), 'System.Net.WebClient')
+
+
 class TestPs1ATypeIsNotTakenFromAStoreThatMayNotHaveCompleted(TestPs1TypeAt):
     """
     A `catch` handler is entered exactly on the run where the `try` body threw. Measured on 5.1 the

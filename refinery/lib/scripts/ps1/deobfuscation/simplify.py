@@ -68,6 +68,13 @@ class Ps1Simplifications(Transformer):
         self._entry = False
 
     def visit(self, node: Node):
+        """
+        The models are captured once at the root and dropped again when the walk they were captured
+        for ends, for the reason
+        `refinery.lib.scripts.ps1.deobfuscation.typenames.VariableTypeAwareTransformer` states: a
+        second walk over a tree the first one rewrote enters on the guarded arm and would otherwise
+        be answered from the first walk's graphs.
+        """
         if self._entry or not isinstance(node, Ps1Script):
             return super().visit(node)
         self._entry = True
@@ -78,6 +85,8 @@ class Ps1Simplifications(Transformer):
             return super().visit(node)
         finally:
             self._entry = False
+            self._commands = None
+            self._flow = None
 
     def visit_Ps1Variable(self, node: Ps1Variable):
         self.generic_visit(node)

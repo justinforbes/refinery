@@ -139,6 +139,10 @@ class Ps1FlowUnknown(enum.Flag):
     #: `$x[0] = 'z'`, `$x.Length = 5`. No occurrence of the name writes it, so every occurrence is in
     #: `reads` and the change is invisible to the ordering above.
     MUTATED_IN_PLACE = enum.auto()
+    #: The binding holds writes through two scopes a read resolves in order — see
+    #: `_shadows_a_wider_scope`. One name here is two names in the language, and every write of the
+    #: wider one is a write a bare read never observes.
+    SHADOWS_A_WIDER_SCOPE = enum.auto()
 
 
 class Ps1ObservedWrite(enum.Enum):
@@ -250,7 +254,7 @@ class Ps1VariableFlow:
         graph = self.flow.graph_of(self.semantic.root)
         if graph is None or self._doubt_without_a_point():
             return Ps1ObservedWrite.UNKNOWN
-        if key in self.mutated_in_place or self._deferred_body_writes(key):
+        if key in self.mutated_in_place or self._deferred_body_writes(key, self.semantic.root):
             return Ps1ObservedWrite.UNKNOWN
         located = self.flow.locate(site)
         if located is None or located[0] is not graph:
@@ -260,7 +264,10 @@ class Ps1VariableFlow:
         definitions: list[tuple[Node, CfgNode]] = []
         binding = self.semantic.root_scope.bindings.get(key)
         if binding is not None:
-            if binding.dynamic_or_qualified or _shadows_a_wider_scope(binding):
+            if self.unknowns(binding) & (
+                Ps1FlowUnknown.REACHED_BY_QUALIFIER
+                | Ps1FlowUnknown.SHADOWS_A_WIDER_SCOPE
+            ):
                 return Ps1ObservedWrite.UNKNOWN
             for write in binding.writes:
                 where = self.flow.locate(write.node)
@@ -345,7 +352,15 @@ class Ps1VariableFlow:
         statement control can return to is refused for the reason stated there — the previous visit
         ordered the two the other way round — and so is a read projected here out of a body, which
         may be evaluated on visits this walk does not describe.
+
+        **One occurrence is not before itself**, and the walk below would say it is: `$x += 1` and
+        `$x++` are one node filed under both `reads` and `writes`, so the first test would match it
+        as the write and claim a value had been stored at the point of its own store. The two
+        questions phrased the other way round order the read first and fail safe where this one
+        fails open, which is why the refusal has to be spelled here.
         """
+        if read is write:
+            return False
         if use.element is None or self.cycles.repeats(use.element):
             return False
         placed = self.flow.locate(read)
@@ -383,16 +398,19 @@ class Ps1VariableFlow:
         binding = self.semantic.binding_of(read)
         if binding is None:
             return True
+        positions: dict[int, CfgNode | None] = {}
         for write in binding.writes:
             placed = self.flow.locate(write.node)
             if placed is None:
                 return True
             graph = placed[0]
+            if id(graph) not in positions:
+                positions[id(graph)] = self._position_of(read, graph)
+            use = positions[id(graph)]
+            if use is None:
+                return True
             kills = self._block_kills(graph, binding.name)
-            if not kills:
-                continue
-            use = self._position_of(read, graph)
-            if use is None or self._between.any_between(graph.entry, use, kills):
+            if self._between.any_between(graph.entry, use, kills):
                 return True
         return False
 
@@ -410,6 +428,8 @@ class Ps1VariableFlow:
         found = Ps1FlowUnknown.NONE
         if binding.dynamic_or_qualified:
             found |= Ps1FlowUnknown.REACHED_BY_QUALIFIER
+        if _shadows_a_wider_scope(binding):
+            found |= Ps1FlowUnknown.SHADOWS_A_WIDER_SCOPE
         graphs: set[int] = set()
         for write in binding.writes:
             placed = self.flow.locate(write.node)
@@ -503,11 +523,16 @@ class Ps1VariableFlow:
                 return False
         return False
 
-    def _deferred_body_writes(self, key: str, own: Node | None = None) -> bool:
+    def _deferred_body_writes(self, key: str, own: Node) -> bool:
         """
         Whether a block whose run time this layer cannot place may write the binding *key* names.
         Asked once per binding by `unknowns` and once per site by `write_observed_at`, so the walk
         over every block of the script is kept rather than repeated.
+
+        *own* is required rather than defaulted so that a caller states which body the binding lives
+        in. A default of `None` happens to answer the same for a binding of the root scope, because
+        a `Ps1Script` is not a `Ps1ScriptBlock` and so is never among the blocks walked — an
+        accident that would go on being right until the day the walk or the caller changed.
         """
         cached = (key, id(own))
         found = self._deferred_writes.get(cached)
@@ -515,7 +540,7 @@ class Ps1VariableFlow:
             found = self._deferred_writes[cached] = self._find_deferred_body_writes(key, own)
         return found
 
-    def _find_deferred_body_writes(self, key: str, own: Node | None) -> bool:
+    def _find_deferred_body_writes(self, key: str, own: Node) -> bool:
         """
         Whether a block whose run time this layer cannot place may write the binding *key* names. A
         stored block is a value: it may be invoked before or after any statement here, so a write
@@ -857,9 +882,14 @@ def _shadows_a_wider_scope(binding: Binding) -> bool:
     sees. A single write through a wider scope is not this: with nothing shadowing it, a bare read
     resolves to it and the two readings agree.
 
+    Published as `Ps1FlowUnknown.SHADOWS_A_WIDER_SCOPE` rather than asked by whoever remembers to:
+    it is a fact about the binding and every consumer reading `binding.writes` needs it, so a
+    consumer that asked for itself is one more consumer that could forget. `reaching_definition`
+    refuses on any unknown at all and inherits it that way.
+
     A command that writes a name in a wider scope — `Set-Variable x 'v' -Scope Global` — is not
     caught, because the occurrence records no qualifier to read. That is a recorded hole rather than
-    a claim; every consumer of this refuses such a write for its own reasons today.
+    a claim; it lands on `Scope.writes_unreadable_names` instead, which is a refusal of its own.
     """
     qualified = sum(
         isinstance(write.node, Ps1Variable) and write.node.scope in _WIDER_SCOPES

@@ -21,7 +21,7 @@ from __future__ import annotations
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1FlowUnknown, Ps1VariableFlow
 from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
-from refinery.lib.scripts.ps1.data import resolve_type
+from refinery.lib.scripts.ps1.data import named_type
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -34,15 +34,19 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 #: The reasons a binding's values cannot be tracked that no reasoning about its *type* can survive:
-#: each of the three is a way for something this layer does not see to store a value of any type
-#: under the name, so nothing the source spells about the name is a claim about what it holds.
+#: each of the four is a way for the writes this layer sees to say nothing about what the name holds
+#: where it is read. Three of them are a store of any type by something out of view. The fourth is
+#: `SHADOWS_A_WIDER_SCOPE`, which is the opposite shape and has the same consequence: the writes are
+#: all in view, and some of them land on a name a bare read never resolves to, so
+#: `$q = 'text'; $global:q = 5` reads as one name typed twice where the language has two.
 #: A write nothing can place and a store through a member are not among them — they say which write
 #: ran cannot be settled, and where the writes agree that question has no bearing on the type;
 #: `$x.Length = 5` leaves `$x` naming the object it already named. Writes spread over several
-#: bodies are the third of that kind, and `type_at` refuses them on its own account rather than
+#: bodies are of that kind too, and `type_at` refuses them on its own account rather than
 #: here, because its first rule can still name one of them.
 _INSTALLS_ANY_TYPE = (
     Ps1FlowUnknown.REACHED_BY_QUALIFIER
+    | Ps1FlowUnknown.SHADOWS_A_WIDER_SCOPE
     | Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY
     | Ps1FlowUnknown.WRITTEN_BY_UNREADABLE_NAME
 )
@@ -113,7 +117,7 @@ def _established_by(write: Node) -> Ps1TypeName | None:
 
 
 #: What `foreach` yields from a string: the string itself, not its characters.
-_STRING = resolve_type('System.String')
+_STRING = named_type('System.String')
 
 
 def _element_type(iterable: Expression | None) -> Ps1TypeName | None:

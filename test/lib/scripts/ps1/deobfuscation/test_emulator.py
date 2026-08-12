@@ -791,6 +791,44 @@ class TestPs1AnArrayCastAnElementDoesNotFitIsAThrowAndNotARename(TestPs1):
         )
 
 
+class TestPs1AnArrayCastToATypeThatDoesNotResolveIsWhereTheScriptStops(TestPs1):
+    """
+    Windows PowerShell 5.1 has no `[short]`, `[ushort]`, `[uint]` or `[ulong]` accelerator — those
+    arrived in later versions — so `[ushort[]](1, 2)` is `Unable to find type` and the pipeline
+    written over it runs its block no times at all. The integer widths 5.1 does have name a type
+    the numbers inside the cast survive, and those are the ones the fold stands on.
+    """
+
+    def test_a_pipeline_over_a_cast_5_1_has_no_type_for_is_left_alone(self):
+        for spelling in ['short', 'ushort', 'uint', 'ulong']:
+            with self.subTest(spelling):
+                self._assertUnchanged(cleandoc(F"""
+                    [{spelling}[]](1, 2) | % {{
+                      $_ + 1
+                    }}
+                """), Ps1ForEachPipeline)
+
+    def test_a_pipeline_over_a_width_5_1_resolves_is_still_folded(self):
+        for spelling in [
+            'byte',
+            'sbyte',
+            'int',
+            'int16',
+            'int32',
+            'int64',
+            'long',
+            'uint16',
+            'uint32',
+            'uint64',
+            'char',
+        ]:
+            with self.subTest(spelling):
+                self.assertEqual(
+                    self._apply(F'[{spelling}[]](1, 2) | % {{ $_ + 1 }}', Ps1ForEachPipeline),
+                    '2, 3',
+                )
+
+
 class TestPs1ANullWrittenAmongThePipelineSourceIsOneOfItsItems(TestPs1):
     """
     Measured on 5.1: `1, $null, 2 | % { $_ }` produces three objects, the middle one `$null`. A
@@ -993,3 +1031,48 @@ class TestPs1AHexadecimalNumeralInsideABodyDenotesThePatternItFills(TestPs1):
         self.assertEqual(self._apply('1 | % { 0xFFFFFFFF + 1 }', Ps1ForEachPipeline), '0')
         self.assertEqual(self._apply('1 | % { 0xFF }', Ps1ForEachPipeline), '255')
         self.assertEqual(self._apply('1 | % { 0xFFFFFFFFL }', Ps1ForEachPipeline), '4294967295L')
+
+
+class TestPs1ANumeralWithAMultiplierSuffixIsAnIntegerAndNotAFraction(TestPs1):
+    """
+    Measured on 5.1: `1kb` is the Int32 1024 and `2gb` the Int64 2147483648, a magnitude no Int32
+    holds, where `1.5` and `1e3` are Doubles and `1.5d` a Decimal. The parser files every one of
+    them as a real literal, so what a body produced has to be written back at the type the numeral
+    it was written as has, and not at the one the node is named after.
+    """
+
+    def _call(self, body: str) -> str:
+        return cleandoc(F"""
+            function f {{ {body} }}
+            $x = f
+        """)
+
+    def test_a_multiplier_suffix_is_written_back_as_the_integer_numeral_it_names(self):
+        self.assertEqual(self._apply(self._call('1kb'), Ps1FunctionEvaluator), '$x = 1024')
+        self.assertEqual(self._apply(self._call('2gb'), Ps1FunctionEvaluator), '$x = 2147483648L')
+        self.assertEqual(self._apply(self._call('1kb + 1'), Ps1FunctionEvaluator), '$x = 1025')
+
+    def test_a_numeral_5_1_reads_as_a_double_is_written_back_as_a_real_numeral(self):
+        self.assertEqual(self._apply(self._call('1.5'), Ps1FunctionEvaluator), '$x = 1.5')
+        self.assertEqual(self._apply(self._call('1e3'), Ps1FunctionEvaluator), '$x = 1000.0')
+        self.assertEqual(self._apply(self._call('2.5kb'), Ps1FunctionEvaluator), '$x = 2560.0')
+
+    def test_a_decimal_is_declined_rather_than_handed_back_as_a_double(self):
+        self._assertUnchanged(cleandoc("""
+            function f {
+              1.5d
+            }
+            $x = f
+        """), Ps1FunctionEvaluator)
+        self._assertUnchanged(cleandoc("""
+            1 | % {
+              1.5d
+            }
+        """), Ps1ForEachPipeline)
+
+    def test_a_block_reads_a_real_literal_exactly_as_a_function_body_does(self):
+        self.assertEqual(self._apply('1 | % { 1kb }', Ps1ForEachPipeline), '1024')
+        self.assertEqual(self._apply('1 | % { 2gb }', Ps1ForEachPipeline), '2147483648L')
+        self.assertEqual(self._apply('1 | % { 1kb + 1 }', Ps1ForEachPipeline), '1025')
+        self.assertEqual(self._apply('1 | % { 1.5 }', Ps1ForEachPipeline), '1.5')
+        self.assertEqual(self._apply('1 | % { 1e3 }', Ps1ForEachPipeline), '1000.0')

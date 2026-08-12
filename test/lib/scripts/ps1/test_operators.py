@@ -358,8 +358,8 @@ def _every_recorded_cell() -> Iterator[RecordedCell]:
             )
 
 
-#: Every cell of both shipped grids, which is the population the questions about `always_throws` below
-#: are asked over rather than a handful of cells chosen here.
+#: Every cell of both shipped grids, which is the population the questions about `always_throws`
+#: below are asked over rather than a handful of cells chosen here.
 RECORDED_CELLS: tuple[RecordedCell, ...] = tuple(_every_recorded_cell())
 
 
@@ -408,11 +408,11 @@ class TestPs1OperatorOutcomeSingleType(unittest.TestCase):
 
 class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
     """
-    `always_throws` is the cell every witness threw for and none of them produced anything out of, which
-    is the one shape a caller may read as the operator having no answer for these operand types at
-    all. The two questions it is not sit on either side of it: a cell that threw for one witness and
-    answered for another, and a cell whose only outcome was `$null`. Both are populated, so reading
-    either in its place is a wrong answer rather than a stricter one.
+    `always_throws` is the cell every witness threw for and none of them produced anything out of,
+    which is the one shape a caller may read as the operator having no answer for these operand
+    types at all. The two questions it is not sit on either side of it: a cell that threw for one
+    witness and answered for another, and a cell whose only outcome was `$null`. Both are populated,
+    so reading either in its place is a wrong answer rather than a stricter one.
     """
 
     def test_a_cell_always_throws_exactly_where_the_capture_recorded_only_a_throw(self):

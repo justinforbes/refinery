@@ -47,8 +47,8 @@ from refinery.lib.scripts.ps1.data import (
     ENCODING_MAP,
     is_type,
     named_type,
+    resolve_type,
 )
-from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     StringMethodError,
     apply_format_string,
@@ -67,6 +67,7 @@ from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     carried_redirections,
     substituted,
 )
+from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
@@ -129,34 +130,25 @@ _MAX_INTERPRETER_DEPTH = 64
 #: `ps_modulo` already refuse where it stands.
 _NO_OPERATOR_METHOD_ON_BOOLEAN = frozenset({'*', '-shl', '-shr'})
 
-#: The element types `Ps1ForEachPipeline._get_constant_array` may drop off an array cast, spelled as
-#: `refinery.lib.scripts.ps1.ast.normalize_dotnet_type_name` writes them, each against the width
-#: that decides which numbers it holds. Each is a width the interpreter carries as the number the
-#: cast was written over, which is the ledgered residual — the item is the right number under the
-#: wrong type. Every other element type changes the item itself, and a cast this cannot read that
-#: way is refused rather than dropped. A `Char` is measured against `UInt16` because a code point is
-#: what it holds; the domain's integer widths carry no cell for `Char` itself.
-_WIDTH_TYPES: dict[str, Ps1TypeName] = {
-    name: named
-    for name, spelling in (
-        ('byte', 'System.Byte'),
-        ('char', 'System.UInt16'),
-        ('int', 'System.Int32'),
-        ('int16', 'System.Int16'),
-        ('int32', 'System.Int32'),
-        ('int64', 'System.Int64'),
-        ('long', 'System.Int64'),
-        ('sbyte', 'System.SByte'),
-        ('short', 'System.Int16'),
-        ('uint', 'System.UInt32'),
-        ('uint16', 'System.UInt16'),
-        ('uint32', 'System.UInt32'),
-        ('uint64', 'System.UInt64'),
-        ('ulong', 'System.UInt64'),
-        ('ushort', 'System.UInt16'),
-    )
-    for named in [named_type(spelling)]
-}
+#: The one element type `Ps1ForEachPipeline._get_constant_array` may drop off an array cast that the
+#: script's own spelling does not already name: a `Char` is measured against `UInt16` because a code
+#: point is what it holds, and the domain's integer widths carry no cell for `Char` itself.
+_CHAR_WIDTH = named_type('System.UInt16')
+
+
+def _width_of(spelling: str) -> Ps1TypeName | None:
+    """
+    The type an element of an array cast to *spelling* is measured against, or `None` for a spelling
+    that names no type at all.
+
+    Which spellings name a type is `refinery.lib.scripts.ps1.data.resolve_type` and not a table of
+    its own, because a table would have to restate the accelerators 5.1 has and a name it invented
+    is the one mistake that costs a fold its soundness: `[ushort]` does not resolve on 5.1, so a
+    script written with it stops there, and a table that carried it would drop the cast and fold on
+    past the error. Whether the type it names is a width the item survives is `integer_at`'s
+    question, asked in `_fills_the_width`, so this refuses nothing that resolves.
+    """
+    return _CHAR_WIDTH if spelling == 'char' else resolve_type(spelling)
 
 
 def _value_of(fact: Ps1Fact) -> tuple[bool, _Value]:
@@ -197,7 +189,7 @@ def _fills_the_width(fact: Ps1Fact, width: str) -> bool:
     `[byte[]](300, 1)`, so a fold that answered `300, 1` would put a value where the script has an
     error.
     """
-    named = _WIDTH_TYPES.get(width)
+    named = _width_of(width)
     found = integer_of(fact)
     if named is None or found is None:
         return False
@@ -208,11 +200,19 @@ def _carried(fact: Ps1Fact) -> _Value:
     """
     The Python object under a fact, read with no regard for whether it stands for the value —
     which is `_value_of`'s question and is asked of the answer rather than of the parts.
+
+    `None` is this function's refusal and never a value it carries, which is what lets an element
+    refuse the collection around it: a `$null` item reads as `None` here and the interpreter's
+    stream deletes a `None`, so a collection holding one would come back a member short. That is
+    the same refusal `_value_of` states for a `$null` handed over on its own, and stating it here
+    is what makes it reach an element — a list is not `None`, so the caller's test never sees the
+    item that could not be carried.
     """
     if isinstance(fact, Ps1Constant):
         payload = fact.payload
         if isinstance(payload, tuple):
-            return [_carried(one) for one in payload]
+            items = [_carried(one) for one in payload]
+            return None if any(one is None for one in items) else items
         if isinstance(payload, (str, bool, int, float)):
             return payload
     return None
@@ -501,6 +501,23 @@ class _Ps1Interpreter:
             raise _Ps1InterpreterError
         return found
 
+    @staticmethod
+    def _real(literal: Ps1RealLiteral) -> _Value:
+        """
+        The number a real literal spells, asked of the value domain for the reason `_numeral` gives
+        and refused where this currency cannot hold it.
+
+        A multiplier suffix does not make a numeral a fraction: measured, `1kb` is the Int32 1024
+        where the node's derived `value` is the float 1024.0, and since `_value_to_node` spells a
+        float as a `Double` the derived reading wrote a type the script never had. A `Decimal` — the
+        `d` suffix — has no place in this currency at all and is declined rather than flattened onto
+        a `Double`, which is the same rule `_value_of` states for a bound argument.
+        """
+        ok, value = _value_of(read(literal))
+        if not ok:
+            raise _Ps1InterpreterError
+        return value
+
     def _eval(self, expr) -> _Value:
         if expr is None:
             return None
@@ -515,7 +532,7 @@ class _Ps1Interpreter:
         if isinstance(expr, Ps1IntegerLiteral):
             return self._numeral(expr)
         if isinstance(expr, Ps1RealLiteral):
-            return expr.value
+            return self._real(expr)
         if isinstance(expr, Ps1Variable):
             return self._eval_variable(expr)
         if isinstance(expr, Ps1AssignmentExpression):

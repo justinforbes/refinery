@@ -77,6 +77,11 @@ class Ps1TypeCasts(Transformer):
         per folded cast. This pass replaces an expression with the value it produces and neither
         adds nor removes a statement, so the graphs it would rebuild are the graphs it already has,
         and the writes it would find are the same writes.
+
+        Dropped again when the walk it was captured for ends, for the reason
+        `refinery.lib.scripts.ps1.deobfuscation.typenames.VariableTypeAwareTransformer` states: a
+        second walk over a tree the first one rewrote enters on the guarded arm and would otherwise
+        be answered from the first walk's graphs.
         """
         if self._entry or not isinstance(node, Ps1Script):
             return super().visit(node)
@@ -86,6 +91,7 @@ class Ps1TypeCasts(Transformer):
             return super().visit(node)
         finally:
             self._entry = False
+            self._flow = None
 
     def visit_Ps1BinaryExpression(self, node: Ps1BinaryExpression):
         self.generic_visit(node)
