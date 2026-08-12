@@ -103,6 +103,7 @@ from refinery.lib.scripts.js.numbers import (
     js_parse_float,
     js_parse_int,
 )
+from refinery.lib.scripts.js.token import ASCII_WHITESPACE
 
 MAX_ITERATIONS = 100_000
 MAX_STRING_LEN = 1_000_000
@@ -819,8 +820,8 @@ def _math_log2(args: list[Value]) -> Value:
 def _global_parse_int(args: list[Value]) -> Value:
     """
     `Number.parseInt` is registered to the same function rather than to a copy of it, because the
-    specification says the two property values *are* the same function object; an obfuscator reaching
-    the global through its `Number` spelling is reaching this.
+    specification says the two property values *are* the same function object; an obfuscator
+    reaching the global through its `Number` spelling is reaching this.
 
     The radix is read with ToInt32 rather than by truncation, because that is the coercion the
     specification names and the two disagree outside the int32 range: `parseInt('10', 2 ** 32 + 16)`
@@ -872,11 +873,22 @@ def _global_string(args: list[Value]) -> Value:
 
 @_register((None, 'atob'))
 def _global_atob(args: list[Value]) -> Value:
+    """
+    Apply the WHATWG forgiving-base64 decode, which is what `atob` answers with. Padding is read
+    rather than supplied: the decode takes off one or two `=` only from an argument whose length is
+    already a multiple of four, and every `=` that survives that is a character outside the alphabet
+    and refuses the whole argument. Completing the group instead is how `atob('QQ=')` answered `'A'`
+    where the engine throws, so a call the program never returns from folded to a value.
+    """
     if not args:
         raise InterpreterError
     s = to_string(args[0])
     try:
         cleaned = _RE_ASCII_WHITESPACE.sub('', s)
+        if len(cleaned) % 4 == 0:
+            cleaned = cleaned[:-2] if cleaned.endswith('==') else cleaned.removesuffix('=')
+        if len(cleaned) % 4 == 1 or '=' in cleaned:
+            raise InterpreterError
         padded = cleaned + '=' * (-len(cleaned) % 4)
         return base64.b64decode(padded, validate=True).decode('latin-1')
     except Exception:
@@ -895,13 +907,14 @@ def _global_btoa(args: list[Value]) -> Value:
 
 
 _UNESCAPE_PATTERN = re.compile(r'%u([0-9A-Fa-f]{4})|%([0-9A-Fa-f]{2})')
-_RE_ASCII_WHITESPACE = re.compile(r'[\t\n\f\r ]')
+_RE_ASCII_WHITESPACE = re.compile(F"[{re.escape(ASCII_WHITESPACE)}]")
 """
-The characters forgiving-base64 decoding removes before it reads a `atob` argument: ASCII whitespace,
-which is a third set again and neither of the two this package already names. It is narrower than
-Python's `\\s`, which also takes the vertical tab and `U+001C` through `U+001F`, and it is narrower
-than `TRIMMABLE_WHITESPACE`, which takes the space separators and the byte order mark. Every
-character outside it is a character `atob` throws on, so reading it as padding deletes a throw.
+The characters forgiving-base64 decoding removes before it reads an `atob` argument. The set is
+`refinery.lib.scripts.js.token.ASCII_WHITESPACE` and is narrower than Python's `\\s`, which also
+takes the vertical tab and `U+001C` through `U+001F`, and narrower than
+`refinery.lib.scripts.js.numbers.TRIMMABLE_WHITESPACE`, which takes the space separators and the
+byte order mark. Every character outside it is a character `atob` throws on, so reading it as
+padding deletes a throw.
 """
 _RE_NON_BASE64 = re.compile(r'[^A-Za-z0-9+/=]')
 
@@ -1543,6 +1556,21 @@ class JsInterpreter:
         model = self._model
         return model is not None and names_runtime_builtin(node, model)
 
+    def _names_a_static_object(self, node: JsIdentifier) -> bool:
+        """
+        Whether *node*, standing in receiver position ahead of a method the registry knows, still
+        reaches the host object of that name. It is the question `_names_a_runtime_builtin` asks
+        for a bare callee, and the static branch has to ask it too: `var Number = {parseInt: ...}`
+        gives the name a value of its own, and answering the call from the registry then computes a
+        number the program never produces. Without a model this answers `True` rather than `False`,
+        matching `_callee_is_intact`: an interpreter used on one expression in isolation cannot see
+        a scope, so the assumption is the caller's.
+        """
+        if node.name in self._env:
+            return False
+        model = self._model
+        return model is None or names_runtime_builtin(node, model)
+
     def _names_a_global_value(self, node: JsIdentifier) -> bool:
         """
         Whether *node* is `undefined`, `NaN` or `Infinity` still denoting the global value, which only
@@ -1827,6 +1855,8 @@ class JsInterpreter:
             args = [self._eval(a) for a in node.arguments]
             builtin = BUILTIN_REGISTRY.get((static_name, method_name))
             if builtin is not None:
+                if not self._names_a_static_object(member.object):
+                    raise InterpreterError
                 if not self._callee_is_intact(node):
                     raise InterpreterError
                 return builtin(args)

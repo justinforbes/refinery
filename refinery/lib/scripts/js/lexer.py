@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from typing import Generator
 
@@ -26,6 +28,49 @@ _ESCAPE_MAP: dict[str, str] = {
 
 _HEX = frozenset('0123456789abcdefABCDEF')
 _OCTAL = frozenset('01234567')
+_DECIMAL = frozenset('0123456789')
+
+_WHITESPACE = frozenset(WHITESPACE)
+_LINE_TERMINATOR = re.compile(F'[{re.escape(LINE_TERMINATORS)}]')
+"""
+The two productions `refinery.lib.scripts.js.token` spells, in the shapes this scan reads them. The
+spelling stays a string there because `refinery.lib.scripts.js.numbers.TRIMMABLE_WHITESPACE` is the
+concatenation of the two, and neither shape here is the right one for the other: whitespace is asked
+about one character at a time, where a comment asks only where the next terminator is.
+"""
+
+_MAX_CODE_POINT = 0x10FFFF
+"""
+The largest code point a `\\u{...}` escape may name. A larger one is no escape at all, and it is
+asked about here rather than left to `chr`, which raises: the scan runs inside a generator that the
+parser reads statement by statement, so an exception raised in it is not a diagnostic but the end
+of the token stream, and every statement behind the escape disappears with it.
+"""
+
+_IDENTIFIER_PUNCTUATION = frozenset('_$')
+_IDENTIFIER_JOINERS = frozenset('\u200c\u200d')
+"""
+The zero width non-joiner and the zero width joiner, which are IdentifierPart and nothing else: they
+may stand inside a name but not open one. They carry no width, so a name written with one reads as
+the same name, which is exactly what makes them worth writing in an obfuscated file.
+"""
+
+
+def _begins_unicode_escape(src: str, pos: int) -> bool:
+    return src[pos:pos + 2] == '\\u'
+
+
+def _at_identifier_start(src: str, pos: int) -> bool:
+    """
+    Whether an IdentifierName begins at *pos*. A backslash opens one only where it opens a
+    unicode escape; one that begins no escape is a character no name may hold, and reading it as
+    the start of a name is how a scan that consumed nothing yielded empty identifiers for as long
+    as anything read them.
+    """
+    c = src[pos:pos + 1]
+    if not c:
+        return False
+    return c.isalpha() or c in _IDENTIFIER_PUNCTUATION or _begins_unicode_escape(src, pos)
 
 
 def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int]:
@@ -53,12 +98,12 @@ def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int]:
         return 'x', pos
     if c == 'u':
         if pos < length and src[pos] == '{':
-            end = src.find('}', pos + 1)
-            if end != -1:
-                hexstr = src[pos + 1:end]
-                if hexstr and _HEX.issuperset(hexstr):
-                    return chr(int(hexstr, 16)), end + 1
-                return 'u', end + 1
+            end = pos + 1
+            while end < length and src[end] in _HEX:
+                end += 1
+            if end > pos + 1 and end < length and src[end] == '}':
+                value = int(src[pos + 1:end], 16)
+                return chr(value) if value <= _MAX_CODE_POINT else 'u', end + 1
         elif pos + 3 < length:
             hexstr = src[pos:pos + 4]
             if len(hexstr) == 4 and _HEX.issuperset(hexstr):
@@ -188,17 +233,21 @@ class JsLexer:
         start = self.pos
         src = self.source
         length = len(src)
-        while self.pos < length and src[self.pos] in WHITESPACE:
+        while self.pos < length and src[self.pos] in _WHITESPACE:
             self.pos += 1
         return self.pos > start
 
     def _read_line_comment(self) -> str:
+        """
+        Consume a comment that runs to the end of its line, and the `#!` line, which is one. The end
+        is looked for at once rather than one character at a time, because a comment is the longest
+        run of characters this scan ever walks and the run is over as soon as a terminator is
+        anywhere in it.
+        """
         start = self.pos
         src = self.source
-        length = len(src)
-        self.pos += 2
-        while self.pos < length and src[self.pos] not in LINE_TERMINATORS:
-            self.pos += 1
+        end = _LINE_TERMINATOR.search(src, self.pos + 2)
+        self.pos = end.start() if end else len(src)
         return src[start:self.pos]
 
     def _read_block_comment(self) -> tuple[str, bool]:
@@ -336,17 +385,17 @@ class JsLexer:
                 self.pos += 2
                 return self._read_prefixed_int(start, '01_')
 
-        while self.pos < length and (src[self.pos].isdigit() or src[self.pos] == '_'):
+        while self.pos < length and (src[self.pos] in _DECIMAL or src[self.pos] == '_'):
             self.pos += 1
 
         is_float = False
         if self.pos < length and src[self.pos] == '.':
             next_pos = self.pos + 1
-            if next_pos < length and src[next_pos].isdigit():
+            if next_pos < length and src[next_pos] in _DECIMAL:
                 is_float = True
                 self.pos += 1
                 while self.pos < length and (
-                    src[self.pos].isdigit() or src[self.pos] == '_'
+                    src[self.pos] in _DECIMAL or src[self.pos] == '_'
                 ):
                     self.pos += 1
 
@@ -356,7 +405,7 @@ class JsLexer:
             if self.pos < length and src[self.pos] in '+-':
                 self.pos += 1
             while self.pos < length and (
-                src[self.pos].isdigit() or src[self.pos] == '_'
+                src[self.pos] in _DECIMAL or src[self.pos] == '_'
             ):
                 self.pos += 1
 
@@ -373,9 +422,9 @@ class JsLexer:
         length = len(src)
         while self.pos < length:
             c = src[self.pos]
-            if c.isalnum() or c == '_' or c == '$':
+            if c.isalnum() or c in _IDENTIFIER_PUNCTUATION or c in _IDENTIFIER_JOINERS:
                 self.pos += 1
-            elif c == '\\' and self.pos + 1 < length and src[self.pos + 1] == 'u':
+            elif _begins_unicode_escape(src, self.pos):
                 self._read_string_escape()
             else:
                 break
@@ -391,8 +440,7 @@ class JsLexer:
         prev_allows_regex = True
 
         if src.startswith('#!'):
-            end = min((at for at in map(src.find, LINE_TERMINATORS) if at >= 0), default=-1)
-            self.pos = end if end >= 0 else length
+            self._read_line_comment()
 
         while True:
             self._skip_whitespace()
@@ -450,28 +498,22 @@ class JsLexer:
                 else:
                     self._brace_stack[-1] -= 1
 
-            if c.isdigit() or (
-                c == '.' and self.pos + 1 < length and src[self.pos + 1].isdigit()
+            if c in _DECIMAL or (
+                c == '.' and src[self.pos + 1:self.pos + 2] in _DECIMAL
             ):
                 tok = self._read_number()
                 prev_allows_regex = False
                 yield tok
                 continue
 
-            if (
-                c.isalpha()
-                or c == '_'
-                or c == '$'
-                or (c == '\\' and src[self.pos + 1:self.pos + 2] == 'u')
-            ):
+            if _at_identifier_start(src, self.pos):
                 tok = self._read_identifier_or_keyword()
                 prev_allows_regex = tok.kind not in _EXPR_END_KINDS
                 yield tok
                 continue
 
             if c == '#':
-                nxt = src[self.pos + 1] if self.pos + 1 < length else ''
-                if nxt.isalpha() or nxt == '_' or nxt == '$' or nxt == '\\':
+                if _at_identifier_start(src, self.pos + 1):
                     self.pos += 1
                     name = self._read_identifier_or_keyword()
                     prev_allows_regex = False

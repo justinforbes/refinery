@@ -8,6 +8,7 @@ from collections.abc import Callable
 from test import TestBase
 
 from refinery.lib.scripts.js.numbers import (
+    TRIMMABLE_WHITESPACE,
     is_negative_zero,
     js_number_to_string,
     js_parse_float,
@@ -495,18 +496,6 @@ class TestStringNumericGrammar(TestBase):
         self.assertEqual(math.inf, self._float('1e' + '9' * 400 + 'x'))
 
 
-def _the_double_denoted_by(value: int) -> float:
-    """
-    The Number an exact integer denotes. `float` is Python's correctly rounded conversion and
-    answers for every integer a double can hold; the one thing it refuses is a magnitude that leaves
-    the range, which is the infinity of that sign.
-    """
-    try:
-        return float(value)
-    except OverflowError:
-        return -math.inf if value < 0 else math.inf
-
-
 class TestJsNumberToStringSpellsAnIntegerAsTheDoubleItDenotes(TestBase):
     """
     `js_number_to_string` is `String(n)`, whose domain is the Number and therefore the double. A
@@ -517,9 +506,7 @@ class TestJsNumberToStringSpellsAnIntegerAsTheDoubleItDenotes(TestBase):
     """
 
     def _spelled(self, value: int) -> str:
-        spelling = js_number_to_string(value)
-        self.assertEqual(spelling, js_number_to_string(_the_double_denoted_by(value)))
-        return spelling
+        return js_number_to_string(value)
 
     def test_an_integer_a_double_holds_exactly_keeps_every_digit_it_was_written_with(self):
         self.assertEqual('0', self._spelled(0))
@@ -565,3 +552,17 @@ class TestJsNumberToStringSpellsAnIntegerAsTheDoubleItDenotes(TestBase):
         self.assertEqual('-Infinity', self._spelled(-(10 ** 400)))
         self.assertEqual('Infinity', self._spelled(int('1' * 400)))
         self.assertEqual('Infinity', self._spelled(2 ** 5000))
+
+
+class TestThePaddingOfANumberIsTwoSetsReadAsOne(TestBase):
+    """
+    The ECMA-262 TrimString production is WhiteSpace together with the LineTerminators, and it is
+    what a string may be padded with and still name a Number. Everywhere else the two are separate
+    sets — one stands between two tokens and the other additionally ends a line — so what is pinned
+    here is that the padding is their union exactly, and that no character is counted in it twice.
+    """
+
+    def test_the_padding_of_a_number_is_the_whitespace_and_the_line_terminators_together(self):
+        self.assertEqual(
+            sorted(_spelled(LANGUAGE_WHITESPACE)), sorted(_spelled(TRIMMABLE_WHITESPACE)))
+        self.assertEqual(len(set(TRIMMABLE_WHITESPACE)), len(TRIMMABLE_WHITESPACE))

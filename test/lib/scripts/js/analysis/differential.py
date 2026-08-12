@@ -168,13 +168,18 @@ def behavior(source: str, *, timeout: float = 15.0) -> tuple[str, str | None]:
     (e.g. folding `(function(){})(x)` to `void 0` turns "(intermediate value) is not a function" into
     "(void 0) is not a function" — the same `TypeError`). Stack traces and file paths are dropped too,
     so an original snippet and its deobfuscation compare equal whenever they throw the same way.
+
+    The snippet reaches the file untranslated, because which characters end a line is a question
+    the engine is asked here: the platform default rewrites every `\\n` on the way out, so a case
+    written with `\\r\\n` handed Node a `\\r\\r\\n`, and the two sides of the comparison then read
+    different programs.
     """
     node = node_executable()
     if node is None:
         raise RuntimeError('node.js is not available')
     with tempfile.TemporaryDirectory() as folder:
         path = os.path.join(folder, 'snippet.js')
-        with open(path, 'w', encoding='utf-8') as stream:
+        with open(path, 'w', encoding='utf-8', newline='') as stream:
             stream.write(source)
         proc = subprocess.run(
             [node, path],

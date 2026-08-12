@@ -1,11 +1,55 @@
 from __future__ import annotations
 
 import itertools
+import unicodedata
+
+from collections.abc import Iterable
 
 from test import TestBase
 
 from refinery.lib.scripts.js.lexer import JsLexer
-from refinery.lib.scripts.js.token import JsTokenKind
+from refinery.lib.scripts.js.parser import JsParser
+from refinery.lib.scripts.js.token import (
+    ASCII_WHITESPACE,
+    LINE_TERMINATORS,
+    WHITESPACE,
+    JsTokenKind,
+)
+
+
+NAMED_WHITESPACE = [0x0009, 0x000B, 0x000C, 0xFEFF]
+"""
+The code points the ECMA-262 WhiteSpace production names one at a time: the tab, the vertical tab,
+the form feed and the zero width no-break space. Its one remaining alternative is `<USP>`, which is
+every code point of the Unicode general category `Zs`.
+"""
+
+NAMED_LINE_TERMINATORS = [0x000A, 0x000D]
+"""
+The code points the ECMA-262 LineTerminator production names one at a time: the line feed and the
+carriage return. The two it has left are the line separator and the paragraph separator, which are
+the whole of the Unicode general categories `Zl` and `Zp`.
+"""
+
+WHATWG_ASCII_WHITESPACE = [0x0009, 0x000A, 0x000C, 0x000D, 0x0020]
+"""
+The code points the WHATWG Infra Standard calls ASCII whitespace: `U+0009` TAB, `U+000A` LF,
+`U+000C` FF, `U+000D` CR and `U+0020` SPACE. The vertical tab is not among them.
+"""
+
+
+def _spelled(code_points: Iterable[int]) -> list[str]:
+    """
+    The code points, sorted and named. Most of these characters have no width and the rest are
+    indistinguishable from a space, so a failure reporting the characters themselves reports
+    nothing at all.
+    """
+    return sorted(F'U+{code_point:04X}' for code_point in code_points)
+
+
+def _code_points_of_category(*categories: str) -> set[int]:
+    wanted = frozenset(categories)
+    return {cp for cp in range(0x110000) if unicodedata.category(chr(cp)) in wanted}
 
 
 class TestJsLexer(TestBase):
@@ -363,3 +407,218 @@ class TestJsLexer(TestBase):
         self.assertEqual(
             self._bounded_tokens(R'a\u0062c'),
             [(JsTokenKind.IDENTIFIER, R'a\u0062c'), (JsTokenKind.EOF, '')])
+
+    def _statements(self, source: str) -> int:
+        return len(JsParser(source).parse().body)
+
+    def test_a_code_point_escape_naming_no_code_point_ends_with_the_literal_it_is_in(self):
+        """
+        Node refuses the program: `U+110000` is past the last code point there is, so the escape
+        names nothing. The literal is over at its closing quote all the same, and the statement
+        written behind it is still a statement — a scan that went looking for the character the
+        escape promised would take the rest of the file with it.
+        """
+        source = R"x = '\u{110000}'; y;"
+        self.assertEqual(self._bounded_tokens(source), [
+            (JsTokenKind.IDENTIFIER, 'x'),
+            (JsTokenKind.EQUALS, '='),
+            (JsTokenKind.STRING_SINGLE, R"'\u{110000}'"),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.IDENTIFIER, 'y'),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.EOF, ''),
+        ])
+        self.assertEqual(self._statements(source), 2)
+
+    def test_a_code_point_escape_whose_brace_is_never_closed_ends_with_its_literal(self):
+        """
+        Node refuses the program: nothing closes the brace the escape opens, so what stands behind
+        it is no hexadecimal number. The quote ends the literal all the same, and the statement
+        behind it survives an escape that named nothing.
+        """
+        source = R"x = '\u{41'; y;"
+        self.assertEqual(self._bounded_tokens(source), [
+            (JsTokenKind.IDENTIFIER, 'x'),
+            (JsTokenKind.EQUALS, '='),
+            (JsTokenKind.STRING_SINGLE, R"'\u{41'"),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.IDENTIFIER, 'y'),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.EOF, ''),
+        ])
+        self.assertEqual(self._statements(source), 2)
+
+    def test_a_code_point_escape_naming_nothing_is_read_the_same_between_double_quotes(self):
+        source = R'x = "\u{110000}"; y;'
+        self.assertEqual(self._bounded_tokens(source), [
+            (JsTokenKind.IDENTIFIER, 'x'),
+            (JsTokenKind.EQUALS, '='),
+            (JsTokenKind.STRING_DOUBLE, R'"\u{110000}"'),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.IDENTIFIER, 'y'),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.EOF, ''),
+        ])
+        self.assertEqual(self._statements(source), 2)
+
+    def test_a_digit_of_another_script_is_a_digit_of_no_numeral(self):
+        """
+        Node refuses both programs. The decimal digits of the language are `0` through `9` and no
+        others, so an Arabic-Indic digit and a superscript digit each stand for themselves rather
+        than open a number.
+        """
+        self.assertEqual(self._bounded_tokens('x = \u0661\u0662\u0663; y;'), [
+            (JsTokenKind.IDENTIFIER, 'x'),
+            (JsTokenKind.EQUALS, '='),
+            (JsTokenKind.ERROR, '\u0661'),
+            (JsTokenKind.ERROR, '\u0662'),
+            (JsTokenKind.ERROR, '\u0663'),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.IDENTIFIER, 'y'),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.EOF, ''),
+        ])
+        self.assertEqual(self._bounded_tokens('x = \u00B2; y;'), [
+            (JsTokenKind.IDENTIFIER, 'x'),
+            (JsTokenKind.EQUALS, '='),
+            (JsTokenKind.ERROR, '\u00B2'),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.IDENTIFIER, 'y'),
+            (JsTokenKind.SEMICOLON, ';'),
+            (JsTokenKind.EOF, ''),
+        ])
+
+    def test_a_digit_of_another_script_behind_a_numeral_is_no_digit_of_it(self):
+        """
+        Node refuses each program. A number ends at the last of its own digits, so what follows is a
+        character standing beside the number rather than one more digit of it.
+        """
+        for digit in ['\u0661', '\u00B2', '\uFF11']:
+            with self.subTest(digit=F'U+{ord(digit):04X}'):
+                self.assertEqual(self._bounded_tokens(F'x = 1{digit}; y;'), [
+                    (JsTokenKind.IDENTIFIER, 'x'),
+                    (JsTokenKind.EQUALS, '='),
+                    (JsTokenKind.INTEGER, '1'),
+                    (JsTokenKind.ERROR, digit),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.IDENTIFIER, 'y'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.EOF, ''),
+                ])
+
+    def test_a_digit_of_another_script_behind_a_name_is_read_as_part_of_that_name(self):
+        """
+        Node runs the program written with the Arabic-Indic digit, whose general category `Nd` is
+        IdentifierPart, and refuses the one written with the superscript digit, whose category `No`
+        is not. Both are one name here, so the name the lexer reads is the wider of the two.
+        """
+        for digit in ['\u0661', '\u00B2']:
+            with self.subTest(digit=F'U+{ord(digit):04X}'):
+                self.assertEqual(self._bounded_tokens(F'x{digit} = 1; y;'), [
+                    (JsTokenKind.IDENTIFIER, F'x{digit}'),
+                    (JsTokenKind.EQUALS, '='),
+                    (JsTokenKind.INTEGER, '1'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.IDENTIFIER, 'y'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.EOF, ''),
+                ])
+
+    def test_a_hash_bang_line_ends_at_a_line_terminator_and_that_ending_ends_a_line(self):
+        """
+        Node runs each of these programs. The first line is a comment of which no token survives,
+        and the terminator that ends it is a line ending exactly as the one that ends any other
+        comment is. A carriage return and a line feed together are one ending and not two.
+        """
+        endings = [chr(0x000A), chr(0x000D), chr(0x000D) + chr(0x000A), chr(0x2028), chr(0x2029)]
+        for ending in endings:
+            with self.subTest(ending=' '.join(_spelled(map(ord, ending)))):
+                source = F'#!x{ending}y;'
+                self.assertEqual(self._bounded_tokens(source), [
+                    (JsTokenKind.NEWLINE, ending),
+                    (JsTokenKind.IDENTIFIER, 'y'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.EOF, ''),
+                ])
+                self.assertEqual(self._statements(source), 1)
+
+    def test_a_file_that_is_only_a_hash_bang_line_holds_no_token(self):
+        """
+        Node runs this file, and it prints nothing. The line is over without a terminator to end it.
+        """
+        self.assertEqual(self._bounded_tokens('#!/usr/bin/env node'), [(JsTokenKind.EOF, '')])
+        self.assertEqual(self._statements('#!/usr/bin/env node'), 0)
+
+    def test_a_joiner_may_stand_inside_a_name_and_may_not_open_one(self):
+        """
+        Node runs the first program and refuses the second. The zero width joiner and non-joiner are
+        IdentifierPart and not IdentifierStart, so a name holds one anywhere but at its beginning,
+        where the character stands for itself and the name behind it is a name of its own.
+        """
+        for joiner in [chr(0x200C), chr(0x200D)]:
+            with self.subTest(joiner=F'U+{ord(joiner):04X}'):
+                self.assertEqual(self._bounded_tokens(F'x = a{joiner}b; y;'), [
+                    (JsTokenKind.IDENTIFIER, 'x'),
+                    (JsTokenKind.EQUALS, '='),
+                    (JsTokenKind.IDENTIFIER, F'a{joiner}b'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.IDENTIFIER, 'y'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.EOF, ''),
+                ])
+                self.assertEqual(self._bounded_tokens(F'x = {joiner}ab; y;'), [
+                    (JsTokenKind.IDENTIFIER, 'x'),
+                    (JsTokenKind.EQUALS, '='),
+                    (JsTokenKind.ERROR, joiner),
+                    (JsTokenKind.IDENTIFIER, 'ab'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.IDENTIFIER, 'y'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.EOF, ''),
+                ])
+
+
+class TestTheWhitespaceProductionsAreThreeSetsAndNotOne(TestBase):
+    """
+    `WHITESPACE`, `LINE_TERMINATORS` and `ASCII_WHITESPACE` answer three different questions: what
+    may stand between two tokens, where a line ends and a semicolon may therefore be inserted, and
+    what a forgiving base64 decode removes from the argument of `atob` before it reads it. Their
+    union is what pads a number, and pinning that union alone is blind to a character that moved
+    from one of them into another — which is a change of where statements end, or of which arguments
+    `atob` refuses.
+
+    Each set is therefore pinned on its own, against the Unicode database or the standard that names
+    it rather than against a list copied out of the code under test.
+    """
+
+    def test_the_whitespace_production_is_the_four_named_characters_and_the_space_separators(self):
+        self.assertEqual(
+            _spelled({*NAMED_WHITESPACE, *_code_points_of_category('Zs')}),
+            _spelled(map(ord, WHITESPACE)))
+
+    def test_the_line_terminator_production_is_the_two_controls_and_the_two_separators(self):
+        self.assertEqual(
+            _spelled({*NAMED_LINE_TERMINATORS, *_code_points_of_category('Zl', 'Zp')}),
+            _spelled(map(ord, LINE_TERMINATORS)))
+
+    def test_no_character_both_separates_two_tokens_and_ends_the_line_they_stand_on(self):
+        self.assertEqual([], _spelled(map(ord, set(WHITESPACE) & set(LINE_TERMINATORS))))
+
+    def test_ascii_whitespace_is_the_five_code_points_the_whatwg_definition_names(self):
+        self.assertEqual(_spelled(WHATWG_ASCII_WHITESPACE), _spelled(map(ord, ASCII_WHITESPACE)))
+
+    def test_ascii_whitespace_is_the_ascii_of_the_language_without_the_vertical_tab(self):
+        """
+        The vertical tab is the one ASCII character the language calls whitespace that a forgiving
+        decode refuses rather than skips, and the two line terminators of ASCII are characters it
+        skips although they end a line. The set is therefore neither of the other two sets, nor
+        their union cut down to ASCII.
+        """
+        language = {ord(c) for c in WHITESPACE + LINE_TERMINATORS if ord(c) < 0x80}
+        self.assertEqual(_spelled(language - {0x000B}), _spelled(map(ord, ASCII_WHITESPACE)))
+        self.assertEqual(
+            _spelled([0x000A, 0x000D]),
+            _spelled(map(ord, set(ASCII_WHITESPACE) & set(LINE_TERMINATORS))))
+        self.assertEqual(
+            _spelled([0x0020]),
+            _spelled({ord(c) for c in ASCII_WHITESPACE} & _code_points_of_category('Zs')))

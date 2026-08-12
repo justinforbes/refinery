@@ -107,6 +107,8 @@ _PURE_INTRINSIC_METHODS = frozenset({
     'Number.isFinite',
     'Number.isInteger',
     'Number.isSafeInteger',
+    'Number.parseInt',
+    'Number.parseFloat',
 })
 
 _PURE_GLOBAL_FUNCTIONS = frozenset({

@@ -337,7 +337,7 @@ def to_string(value: Value) -> str:
     if isinstance(value, bool):
         return 'true' if value else 'false'
     if isinstance(value, (int, float)):
-        return js_number_to_string(to_js_number(value))
+        return js_number_to_string(value)
     if isinstance(value, list):
         return ','.join(_array_element_string(v) for v in value)
     return '[object Object]'

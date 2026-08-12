@@ -5,26 +5,41 @@ import enum
 from dataclasses import dataclass
 
 WHITESPACE = (
-    '\t\v\f\x20\xa0        '
-    '      　﻿'
+    '\u0009\u000b\u000c\u0020\u00a0\u1680\u2000\u2001\u2002\u2003'
+    '\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u202f\u205f\u3000'
+    '\ufeff'
 )
 """
 The ECMA-262 WhiteSpace production: the tab, the vertical tab, the form feed and the zero width
 no-break space, together with `<USP>`, every code point of the Unicode general category `Zs`. These
-separate tokens and carry no other meaning, which is what distinguishes them from `LINE_TERMINATORS`
-— a newline additionally ends a line, and the parser reads that as a place a semicolon may be
-inserted. A lexer that folded the two together would insert semicolons where the language does not.
+separate tokens and carry no other meaning, which is what distinguishes them from
+`LINE_TERMINATORS` — a newline additionally ends a line, and the parser reads that as a place a
+semicolon may be inserted. A lexer that folded the two together would insert semicolons where the
+language does not.
 
-Spelled out rather than derived from `unicodedata` at import time, and rather than left to Python's
-`str.isspace`, which is a third set again: it takes `U+001C` through `U+001F` and `U+0085`, which the
-language does not, and leaves `U+FEFF`, which the language takes. The test module derives the same
-set from the Unicode database and asserts the two agree.
+Every member is written as an escape rather than as itself, because most of them have no width and
+the rest are indistinguishable from a space: spelled as characters, the set cannot be read in a
+diff and an editor that trims or normalizes whitespace edits the grammar invisibly.
+
+Spelled out rather than derived from `unicodedata` at import time, and rather than left to
+Python's `str.isspace`, which is a third set again: it takes `U+001C` through `U+001F` and
+`U+0085`, which the language does not, and leaves `U+FEFF`, which the language takes.
 """
 
-LINE_TERMINATORS = '\n\r  '
+ASCII_WHITESPACE = '\u0009\u000a\u000c\u000d\u0020'
+"""
+The WHATWG definition of ASCII whitespace, which is what a forgiving base64 decode removes from the
+argument of `atob` before it reads it. It is a third set beside the two above and a subset of
+neither's purpose: it holds two line terminators, and it holds none of the space separators, so a
+`U+00A0` or a `U+FEFF` in such an argument is a character the decode refuses rather than skips.
+"""
+
+LINE_TERMINATORS = '\u000a\u000d\u2028\u2029'
 """
 The ECMA-262 LineTerminator production: the line feed, the carriage return, the line separator and
-the paragraph separator. A `\\r\\n` pair is one terminator and not two.
+the paragraph separator. A `\\r\\n` pair is one terminator and not two. The last two are
+written as escapes for the reason `WHITESPACE` is: a raw `U+2028` in a Python source file is a
+line break to `str.splitlines` and to most editors, and to Python's own tokenizer it is not.
 """
 
 

@@ -35,9 +35,9 @@ def to_js_number(value: int | float) -> float:
 
 TRIMMABLE_WHITESPACE = WHITESPACE + LINE_TERMINATORS
 """
-The characters ECMA-262 TrimString removes: WhiteSpace plus the line terminators. It is what a string
-may be padded with and still name a Number, and it is equally what `String.prototype.trim` takes off,
-one set, because the specification defines the second in terms of the first.
+The characters ECMA-262 TrimString removes: WhiteSpace plus the line terminators. It is what a
+string may be padded with and still name a Number, and it is equally what `String.prototype.trim`
+takes off, one set, because the specification defines the second in terms of the first.
 
 It is the union of the two lexical productions rather than a list of its own, so that the set the
 lexer skips between tokens and the set a Number tolerates around itself cannot drift apart; they are
@@ -104,6 +104,32 @@ The ECMA-262 NonDecimalIntegerLiteral production, in the form StrNumericLiteral 
 numeric separator forbidden, and with no sign, since the sign belongs to the decimal alternative.
 """
 
+_PREFIXED_RADIX = {'b': 2, 'o': 8, 'x': 16}
+"""
+The base each NonDecimalIntegerLiteral prefix letter selects.
+"""
+
+_MAX_DIGITS_IN_A_DOUBLE = {
+    radix: math.ceil(1024 / math.log2(radix)) for radix in range(2, 37)
+}
+"""
+Per radix, the digit count past which a written-out integer is certainly outside the double range
+and so denotes an infinity. Answering from the count rather than from the value keeps `parseInt`
+total: building the integer first would make it hostage to CPython's limit on converting a long
+decimal string, which raises rather than returning the `Infinity` the language specifies.
+"""
+
+
+def _denotes_an_infinity(digits: str, radix: int) -> bool:
+    """
+    Whether a run of *digits* read in *radix* is certainly outside the double range, and so denotes
+    an infinity rather than a Number. The leading zeros are no digits of the number they precede, so
+    they are taken off before the count is read; taking them off is what a short literal would pay
+    for, and it is asked for only once the whole run is already long enough to be worth asking about.
+    """
+    limit = _MAX_DIGITS_IN_A_DOUBLE[radix]
+    return len(digits) > limit and len(digits.lstrip('0')) > limit
+
 
 def _decimal_literal(match: re.Match[str] | None) -> float | None:
     """
@@ -137,15 +163,13 @@ def _read_non_decimal_integer(text: str) -> float | None:
     Once the production has matched, the text is also a Python integer literal, so the base it names
     is read by asking for base zero rather than by decoding the prefix a second time.
 
-    The digit count is answered before the integer is built, for the reason `js_parse_int` answers it:
-    a literal past the double range denotes an infinity, and building it first spends the length of
-    the text to produce a value that is discarded. One bound serves every base here, because the
-    binary one is the loosest — a digit string of *n* significant digits is worth at least `2 ** (n-1)`
-    whatever base it is read in.
+    The digit count is answered before the integer is built, as `js_parse_int` answers it: a
+    literal past the double range denotes an infinity, and building it first spends the length of
+    the text to produce a value that is discarded.
     """
     if _NON_DECIMAL_INTEGER.fullmatch(text) is None:
         return None
-    if len(text[2:].lstrip('0')) > _MAX_DIGITS_IN_A_DOUBLE[2]:
+    if _denotes_an_infinity(text[2:], _PREFIXED_RADIX[text[1].lower()]):
         return float('inf')
     return to_js_number(int(text, 0))
 
@@ -176,17 +200,6 @@ def js_parse_float(text: str) -> float:
     """
     value = _decimal_literal(_STR_DECIMAL_LITERAL.match(text.lstrip(TRIMMABLE_WHITESPACE)))
     return float('nan') if value is None else value
-
-
-_MAX_DIGITS_IN_A_DOUBLE = {
-    radix: math.ceil(1024 / math.log2(radix)) for radix in range(2, 37)
-}
-"""
-Per radix, the digit count past which a written-out integer is certainly outside the double range
-and so denotes an infinity. Answering from the count rather than from the value keeps `parseInt`
-total: building the integer first would make it hostage to CPython's limit on converting a long
-decimal string, which raises rather than returning the `Infinity` the language specifies.
-"""
 
 
 def js_parse_int(text: str, radix: int = 0) -> float | None:
@@ -283,12 +296,13 @@ def js_number_to_string(value: int | float) -> str:
     `int(value)` instead would be wrong past 2^53, where the double's exact value has more digits
     than it determines — `2 ** 60` is `1152921504606847000`, not `1152921504606846976`.
 
-    That reasoning is also why a Python `int` is coerced here rather than refused. This module exists
-    because integers leak in, and an integer arriving with more digits than a double determines is
-    exactly the case the paragraph above describes: it has to print as the Number it denotes, not as
-    itself.
+    That reasoning is also why a Python `int` is coerced here rather than refused. This module
+    exists because integers leak in, and an integer arriving with more digits than a double
+    determines is exactly the case the paragraph above describes: it has to print as the Number it
+    denotes, not as itself.
     """
-    value = to_js_number(value)
+    if not isinstance(value, float):
+        value = to_js_number(value)
     if value != value:
         return 'NaN'
     if value == float('inf'):

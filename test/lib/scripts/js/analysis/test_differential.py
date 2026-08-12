@@ -9,6 +9,7 @@ from test import TestBase
 
 from refinery.lib.scripts import canonical
 from refinery.lib.scripts.js.analysis.model import build_semantic_model
+from refinery.lib.scripts.js.deobfuscation.interpreter import BUILTIN_REGISTRY, InterpreterError
 from refinery.lib.scripts.js.lexer import JsLexer
 from refinery.lib.scripts.js.model import JsIdentifier
 from refinery.lib.scripts.js.parser import JsParser
@@ -5409,7 +5410,12 @@ class TestAtobRemovesTheWhitespaceOfAForgivingBase64Decode(TestBase):
     """
 
     def _folded(self, code_point: int) -> str:
-        return deobfuscate_source(RF"SINK(atob('QUJ\u{code_point:04X}D'));")
+        """
+        The escape is the braced form rather than the four digit one, because the four digit form
+        takes exactly four and a code point above `U+FFFF` spells five: `\\u110BD` is `U+110B`
+        followed by a `D`, so half the candidates were offered a character nobody was asking about.
+        """
+        return deobfuscate_source(RF"SINK(atob('QUJ\u{{{code_point:X}}}D'));")
 
     def _catching_program(self, escape: str) -> str:
         return (
@@ -5633,3 +5639,640 @@ class TestAnIdentifierWrittenWithAnEscapeIsTheNameThatEscapeDenotes(TestBase):
     @unittest.expectedFailure
     def test_a_binding_written_plainly_is_read_by_a_spelling_with_an_escape(self):
         self._prints(R'var abc = 7; console.log(\u0061bc);', '7\n')
+
+
+_ATOB_ARGUMENTS = [
+    'QUJD',
+    'QQ==',
+    'QQ=',
+    'QQ',
+    'Q',
+    'QUJDRA==',
+    'QUJDRA=',
+    'QUJDRA',
+    'QUJDR',
+    'QQ===',
+    'QUJD=',
+    'QQ=A',
+    'QUJ=D',
+    '=',
+    '==',
+    '====',
+    '',
+    ' QQ== ',
+    ' QQ= ',
+    'QR',
+    'QR==',
+]
+"""
+Arguments for a forgiving base64 decode: every length modulo four, each offered with a trailing `=`
+and without one, so that the padding and the length are asked about separately. `QR` is there
+because the bits a decode has left over are not required to be zero, the padded whitespace because
+the removal happens before the length is read, and the empty argument because it is the one that
+decodes to nothing rather than to a refusal.
+"""
+
+_ASK_WHAT_A_FORGIVING_DECODE_ANSWERS = R'''
+const answers = [];
+for (const argument of ARGUMENTS) {
+    try {
+        answers.push(atob(argument));
+    } catch (error) {
+        answers.push(null);
+    }
+}
+console.log(JSON.stringify(answers));
+'''
+"""
+A program that reports what a forgiving base64 decode answers for each argument, and a null for
+each argument it refuses. A decode answers a string and never a null, so the two cannot be
+confused for one another.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAForgivingDecodeReadsTheLengthOfItsArgumentBeforeItsPadding(TestBase):
+    """
+    A forgiving base64 decode removes the padding of its argument only where what is left of the
+    argument has a length a group ends on: `atob('QQ==')` is the letter `A` and `atob('QQ=')` is a
+    refusal, because three characters are no whole number of groups and the `=` is then simply a
+    character the base64 alphabet does not hold. Completing that group instead of refusing it is how
+    a call the program never returns from becomes a value.
+
+    Node is asked what each argument answers, and the builtin has to answer the same — on its own,
+    and again through a program deobfuscated whole.
+    """
+
+    def _node_answers(self) -> list[str | None]:
+        source = F'const ARGUMENTS = {json.dumps(_ATOB_ARGUMENTS)};'
+        output, error = behavior(source + _ASK_WHAT_A_FORGIVING_DECODE_ANSWERS)
+        self.assertIsNone(error)
+        return json.loads(output)
+
+    def _builtin_answers(self) -> list[str | None]:
+        decode = BUILTIN_REGISTRY[None, 'atob']
+        answers = []
+        for argument in _ATOB_ARGUMENTS:
+            try:
+                answers.append(decode([argument]))
+            except InterpreterError:
+                answers.append(None)
+        return answers
+
+    def test_the_builtin_answers_every_argument_the_way_node_answers_it(self):
+        self.assertEqual(self._node_answers(), self._builtin_answers())
+
+    def test_a_trailing_equals_short_of_a_whole_group_is_a_refusal_and_not_a_value(self):
+        """
+        Node prints nothing and exits with the refusal uncaught. It is a `DOMException` rather than
+        an `Error`, which is why the type is reported as the bare `ERROR`; what the case pins is
+        that the program still refuses, where a folded call would have printed `A`.
+        """
+        source = "console.log(atob('QQ='));"
+        self.assertEqual(behavior(source), ('', 'ERROR'))
+        self.assertEqual(deobfuscate_source(source), source)
+        self.assertEqual(behavior(deobfuscate_source(source)), ('', 'ERROR'))
+
+    def test_the_refusal_a_program_catches_is_the_one_node_raises(self):
+        """
+        Node prints `InvalidCharacterError` for each: an argument three characters long, one seven
+        characters long, one padded to a length no group ends on, and one padded past the group it
+        completes.
+        """
+        for argument in ['QQ=', 'QUJDRA=', 'QUJD=', 'QQ===']:
+            with self.subTest(argument=argument):
+                source = (
+                    F"try {{ console.log(atob('{argument}')); }}"
+                    F' catch (error) {{ console.log(error.name); }}')
+                self.assertEqual(behavior(source), ('InvalidCharacterError\n', None))
+                self.assertEqual(
+                    behavior(deobfuscate_source(source)), ('InvalidCharacterError\n', None))
+
+    def test_a_dead_binding_whose_decode_is_refused_keeps_the_refusal(self):
+        """
+        Node prints nothing for the first program and `after` for the second. Nothing reads either
+        binding, and only the one whose decode has a value may be removed along with it.
+        """
+        refused = "var value = atob('QQ='); console.log('after');"
+        self.assertEqual(behavior(refused), ('', 'ERROR'))
+        self.assertEqual(behavior(deobfuscate_source(refused)), ('', 'ERROR'))
+        decoded = "var value = atob('QQ=='); console.log('after');"
+        self.assertEqual(behavior(decoded), ('after\n', None))
+        self.assertEqual(deobfuscate_source(decoded), "console.log('after');")
+
+    def test_the_same_text_decodes_where_its_group_is_whole_or_its_padding_is_absent(self):
+        """
+        Node prints `A A` and `ABCD ABCD`. What the refusal above is about is the trailing `=` and
+        not the text it pads, so both spellings of the same bytes still fold to the string they
+        name — a decode that refused everything would satisfy the cases above and fail these.
+        """
+        two_letters = "console.log(atob('QQ=='), atob('QQ'));"
+        self.assertEqual(behavior(two_letters), ('A A\n', None))
+        self.assertEqual(deobfuscate_source(two_letters), "console.log('A', 'A');")
+        four_letters = "console.log(atob('QUJDRA'), atob('QUJDRA=='));"
+        self.assertEqual(behavior(four_letters), ('ABCD ABCD\n', None))
+        self.assertEqual(deobfuscate_source(four_letters), "console.log('ABCD', 'ABCD');")
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWellKnownObjectNameThatABindingHasClaimed(TestBase):
+    """
+    `Math`, `Number` and `String` are ordinary global bindings, and a program is free to name a
+    local one the same. Where it does, a member call written on that name is a call on the object
+    the program made, and answering it as the built-in computes with a function the program never
+    calls.
+
+    A call written inside a string that a direct `eval` runs is the same question asked where there
+    is nothing yet to ask it of: the call site is code that exists only once the eval has been
+    inlined, so what the name denotes there is decided by where that code lands rather than by an
+    effect model consulted beforehand.
+
+    Node decides. Each case names the program a fold that missed the binding would produce and
+    requires Node to print something else for it, so a replacement that answers the way the built-in
+    does cannot pass for a proof.
+    """
+
+    def _shadowed(self, source: str, misfolded: str):
+        self.assertNotEqual(
+            behavior(source),
+            behavior(misfolded),
+            'the program does not discriminate: the replacement answers as the built-in does',
+        )
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(source),
+            behavior(deobfuscated),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_a_local_variable_named_math_is_what_a_floor_call_reaches(self):
+        """
+        Node: `r1.5`, and `1` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f() {
+                  var Math = { floor: function (x) { return 'r' + x; } };
+                  return Math.floor(1.5);
+                }
+                console.log(f());
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  var Math = { floor: function (x) { return 'r' + x; } };
+                  return 1;
+                }
+                console.log(f());
+            """),
+        )
+
+    def test_a_parameter_named_math_is_what_a_floor_call_reaches(self):
+        """
+        Node: `r1.5`, and `1` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f(Math) {
+                  return Math.floor(1.5);
+                }
+                console.log(f({ floor: function (x) { return 'r' + x; } }));
+            """),
+            inspect.cleandoc("""
+                function f(Math) {
+                  return 1;
+                }
+                console.log(f({ floor: function (x) { return 'r' + x; } }));
+            """),
+        )
+
+    def test_a_catch_binding_named_math_is_what_a_floor_call_reaches(self):
+        """
+        Node: `r1.5`, and `1` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f() {
+                  try {
+                    throw { floor: function (x) { return 'r' + x; } };
+                  } catch (Math) {
+                    return Math.floor(1.5);
+                  }
+                }
+                console.log(f());
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  try {
+                    throw { floor: function (x) { return 'r' + x; } };
+                  } catch (Math) {
+                    return 1;
+                  }
+                }
+                console.log(f());
+            """),
+        )
+
+    def test_a_local_variable_named_number_is_what_a_parse_int_call_reaches(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f() {
+                  var Number = { parseInt: function (text) { return 'r' + text; } };
+                  return Number.parseInt('10');
+                }
+                console.log(f());
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  var Number = { parseInt: function (text) { return 'r' + text; } };
+                  return 10;
+                }
+                console.log(f());
+            """),
+        )
+
+    def test_a_local_variable_named_string_is_what_a_from_char_code_call_reaches(self):
+        """
+        Node: `r65`, and `A` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f() {
+                  var String = { fromCharCode: function (code) { return 'r' + code; } };
+                  return String.fromCharCode(65);
+                }
+                console.log(f());
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  var String = { fromCharCode: function (code) { return 'r' + code; } };
+                  return 'A';
+                }
+                console.log(f());
+            """),
+        )
+
+    def test_a_local_variable_named_math_is_what_a_call_inside_a_direct_eval_reaches(self):
+        """
+        Node: `r1.5`, and `1` for the program that read the name as the built-in. A direct eval runs
+        its argument in the scope of the call, which is the scope the local was declared in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f() {
+                  var Math = { floor: function (x) { return 'r' + x; } };
+                  return eval("Math.floor(1.5)");
+                }
+                console.log(f());
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  var Math = { floor: function (x) { return 'r' + x; } };
+                  return 1;
+                }
+                console.log(f());
+            """),
+        )
+
+    def test_a_parameter_named_math_is_what_a_call_inside_a_direct_eval_reaches(self):
+        """
+        Node: `r1.5`, and `1` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f(Math) {
+                  return eval("Math.floor(1.5)");
+                }
+                console.log(f({ floor: function (x) { return 'r' + x; } }));
+            """),
+            inspect.cleandoc("""
+                function f(Math) {
+                  return 1;
+                }
+                console.log(f({ floor: function (x) { return 'r' + x; } }));
+            """),
+        )
+
+    def test_a_catch_binding_named_number_is_what_a_call_inside_a_direct_eval_reaches(self):
+        """
+        Node: `r10`, and `10` for the program that read the name as the built-in.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f() {
+                  try {
+                    throw { parseInt: function (text) { return 'r' + text; } };
+                  } catch (Number) {
+                    return eval("Number.parseInt('10')");
+                  }
+                }
+                console.log(f());
+            """),
+            inspect.cleandoc("""
+                function f() {
+                  try {
+                    throw { parseInt: function (text) { return 'r' + text; } };
+                  } catch (Number) {
+                    return 10;
+                  }
+                }
+                console.log(f());
+            """),
+        )
+
+    def test_a_parameter_named_math_is_what_a_call_inside_a_nested_functions_eval_reaches(self):
+        """
+        Node: `r1.5`, and `1` for the program that read the name as the built-in. The parameter is
+        the only meaning `Math` has anywhere inside `outer`, and the eval runs inside `inner`, which
+        is inside `outer`.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function outer(Math) {
+                  function inner() {
+                    return eval("Math.floor(1.5)");
+                  }
+                  return inner();
+                }
+                console.log(outer({ floor: function (x) { return 'r' + x; } }));
+            """),
+            inspect.cleandoc("""
+                function outer(Math) {
+                  function inner() {
+                    return 1;
+                  }
+                  return inner();
+                }
+                console.log(outer({ floor: function (x) { return 'r' + x; } }));
+            """),
+        )
+
+    def test_a_parameter_named_string_is_what_a_call_inside_an_eval_of_a_built_string_reaches(self):
+        """
+        Node: `r65`, and `A` for the program that read the name as the built-in. The code the eval
+        runs is not written anywhere in the program; it is the value of an expression.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f(String) {
+                  return eval("Stri" + "ng.fromCharCode(65)");
+                }
+                console.log(f({ fromCharCode: function (code) { return 'r' + code; } }));
+            """),
+            inspect.cleandoc("""
+                function f(String) {
+                  return 'A';
+                }
+                console.log(f({ fromCharCode: function (code) { return 'r' + code; } }));
+            """),
+        )
+
+    def test_a_parameter_named_math_without_that_method_throws_where_the_builtin_answers(self):
+        """
+        Node: `TypeError`, and `1` for the program that read the name as the built-in. The object
+        the program passes has no `floor` at all, so answering the call with a number replaces a
+        throw with a value.
+        """
+        self._shadowed(
+            inspect.cleandoc("""
+                function f(Math) {
+                  try {
+                    return eval("Math.floor(1.5)");
+                  } catch (error) {
+                    return error.name;
+                  }
+                }
+                console.log(f({}));
+            """),
+            inspect.cleandoc("""
+                function f(Math) {
+                  try {
+                    return 1;
+                  } catch (error) {
+                    return error.name;
+                  }
+                }
+                console.log(f({}));
+            """),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestANumberParseCallWrittenWhereNothingReadsItsValue(TestBase):
+    """
+    `Number.parseInt` and `Number.parseFloat` are the global functions of those names, so a call of
+    one names a number wherever it is written. A statement that is nothing but such a call has a
+    value nothing reads, and what decides whether the statement may go is not the call but the
+    arguments it was written with: an argument can throw, and an argument can write.
+
+    Node says what each program prints, and the program it deobfuscates to has to print the same.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(deobfuscated),
+            (output, None),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_a_discarded_call_prints_what_the_program_around_it_prints(self):
+        """
+        Node prints `after` for each: the call names a number and the statement it is drops it, so
+        the only thing the run prints is what the statement behind it prints.
+        """
+        self._prints("Number.parseInt('42'); console.log('after');", 'after\n')
+        self._prints("Number.parseFloat('2.5'); console.log('after');", 'after\n')
+        self._prints("Number.parseInt('nope'); console.log('after');", 'after\n')
+        self._prints("Number.parseFloat('Infinity'); console.log('after');", 'after\n')
+        self._prints("Number.parseInt('42', 10); console.log('after');", 'after\n')
+
+    def test_a_call_whose_value_is_read_is_the_number_it_names(self):
+        """
+        Node prints `42` and `2.5`. The emitted text is pinned as well, because a program that
+        printed the right number by leaving the call where it stood would satisfy the comparison of
+        behavior and tell nothing about whether the call was read at all.
+        """
+        integer = "console.log(Number.parseInt('42'));"
+        self._prints(integer, '42\n')
+        self.assertEqual(deobfuscate_source(integer), 'console.log(42);')
+        decimal = "console.log(Number.parseFloat('2.5'));"
+        self._prints(decimal, '2.5\n')
+        self.assertEqual(deobfuscate_source(decimal), 'console.log(2.5);')
+
+    def test_a_discarded_call_whose_argument_names_nothing_still_throws(self):
+        """
+        Node prints nothing and exits with an uncaught `ReferenceError`: the argument is evaluated
+        before the call, and `nowhere` is declared in no scope. Dropping the statement because its
+        value is unread turns a program that throws into one that prints `after`.
+        """
+        source = "Number.parseInt(nowhere); console.log('after');"
+        self.assertEqual(behavior(source), ('', 'ReferenceError'))
+        self.assertEqual(behavior(deobfuscate_source(source)), ('', 'ReferenceError'))
+
+    def test_a_discarded_call_whose_argument_writes_still_writes(self):
+        """
+        Node prints `1`. The third argument is one `parseInt` never reads, and the increment it
+        performs outlives the statement whose value nothing reads.
+        """
+        self._prints("var x = 0; Number.parseInt('10', 2, x++); console.log(x);", '1\n')
+
+    def test_a_discarded_call_whose_argument_calls_still_calls(self):
+        """
+        Node prints `a`: the same argument list where the effect is a call rather than a write.
+        """
+        self._prints(
+            "var sink = []; Number.parseFloat(sink.push('a')); console.log(sink.join('|'));",
+            'a\n')
+
+
+_JOINERS = [chr(0x200C), chr(0x200D)]
+"""
+The zero width non-joiner and the zero width joiner. Both are IdentifierPart and neither is
+IdentifierStart, so a name may hold one anywhere but its beginning.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAJoinerInsideANameIsPartOfTheNameItStandsIn(TestBase):
+    """
+    A name that holds a zero width joiner or non-joiner is that name and not the name spelled
+    without it. Neither character has any width, so the two spellings are indistinguishable on the
+    page while denoting different bindings, and a reader that dropped one or refused it would either
+    conflate two names or lose one. Node says what each program prints.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(deobfuscated),
+            (output, None),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_a_binding_whose_name_holds_a_joiner_is_read_by_that_name(self):
+        """
+        Node prints `7`. The emitted text is pinned as well: the value reaches the call only because
+        the declaration and the read are one name, so a program that still prints `7` while leaving
+        the two standing tells nothing.
+        """
+        for joiner in _JOINERS:
+            with self.subTest(joiner=F'U+{ord(joiner):04X}'):
+                source = F'var a{joiner}b = 7; console.log(a{joiner}b);'
+                self._prints(source, '7\n')
+                self.assertEqual(deobfuscate_source(source), 'console.log(7);')
+
+    def test_two_names_that_differ_only_by_a_joiner_are_two_names(self):
+        """
+        Node prints `1 2`. A reader that dropped the joiner would declare `ab` twice and print the
+        second value for both reads.
+        """
+        for joiner in _JOINERS:
+            with self.subTest(joiner=F'U+{ord(joiner):04X}'):
+                self._prints(
+                    F'var ab = 1; var a{joiner}b = 2; console.log(ab, a{joiner}b);', '1 2\n')
+
+    def test_the_two_joiners_name_two_different_bindings(self):
+        """
+        Node prints `1 2`. The two characters are not one another, so the names they stand in are
+        not one name either.
+        """
+        non_joiner, joiner = _JOINERS
+        self._prints(
+            F'var a{non_joiner}b = 1; var a{joiner}b = 2;'
+            F' console.log(a{non_joiner}b, a{joiner}b);',
+            '1 2\n')
+
+    def test_a_name_spelled_without_the_joiner_reaches_no_binding(self):
+        """
+        Node prints `ReferenceError`: the program declares one name and reads another, however alike
+        the two look. A reader that dropped the joiner would print `7`.
+        """
+        for joiner in _JOINERS:
+            with self.subTest(joiner=F'U+{ord(joiner):04X}'):
+                self._prints(
+                    F'var a{joiner}b = 7;'
+                    ' try { console.log(ab); } catch (error) { console.log(error.name); }',
+                    'ReferenceError\n')
+
+    def test_a_parameter_whose_name_holds_a_joiner_is_read_in_the_body(self):
+        """
+        Node prints `7`.
+        """
+        for joiner in _JOINERS:
+            with self.subTest(joiner=F'U+{ord(joiner):04X}'):
+                self._prints(
+                    F'function f(a{joiner}b) {{ return a{joiner}b + 1; }} console.log(f(6));',
+                    '7\n')
+
+
+_LINE_ENDINGS = [chr(0x000A), chr(0x000D), chr(0x000D) + chr(0x000A), chr(0x2028), chr(0x2029)]
+"""
+Every spelling of a line ending: the line feed, the carriage return, the pair of the two, which is
+one ending and not two, and the line separator and the paragraph separator.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAFileThatOpensWithAHashBangLine(TestBase):
+    """
+    A file may open with a `#!` line, which is a comment: nothing it says is code, and it is over at
+    the first line terminator, of which the language has four. Node runs every program below, and
+    the deobfuscation of each has to run the same way — a line ending the reader does not know ends
+    the comment swallows the program written behind it, which prints nothing at all.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(deobfuscated),
+            (output, None),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def test_a_file_is_read_the_same_whichever_terminator_ends_its_hash_bang_line(self):
+        """
+        Node prints `1` for each of the five spellings, and each deobfuscates to the one program
+        they all are.
+        """
+        for ending in _LINE_ENDINGS:
+            with self.subTest(ending=' '.join(F'U+{ord(c):04X}' for c in ending)):
+                source = F'#!/usr/bin/env node{ending}console.log(1);'
+                self._prints(source, '1\n')
+                self.assertEqual(deobfuscate_source(source), 'console.log(1);')
+
+    def test_what_the_hash_bang_line_says_is_not_code(self):
+        """
+        Node prints `1` and never `boom`: the call written on the first line is inside the comment
+        the line is, and the one written below it is the whole program.
+        """
+        source = F"#!console.log('boom'){chr(0x000A)}console.log(1);"
+        self._prints(source, '1\n')
+        self.assertEqual(deobfuscate_source(source), 'console.log(1);')
+
+    def test_a_file_whose_hash_bang_line_is_all_of_it_prints_nothing(self):
+        source = '#!/usr/bin/env node'
+        self.assertEqual(behavior(source), ('', None))
+        self.assertEqual(behavior(deobfuscate_source(source)), ('', None))
+
+    def test_the_statements_below_a_hash_bang_line_end_where_their_lines_end(self):
+        """
+        Node prints `2 1`: the line ending closes `var y = x`, so `++x` is a statement of its own,
+        exactly as it is in a file that opens with no such line. A `#!` line that took the ending
+        with it would leave the two statements below it reading as `x ++ x`, which is no program.
+        """
+        for ending in [chr(0x000A), chr(0x000D) + chr(0x000A)]:
+            with self.subTest(ending=' '.join(F'U+{ord(c):04X}' for c in ending)):
+                lines = [
+                    '#!/usr/bin/env node',
+                    'var x = 1',
+                    'var y = x',
+                    '++x',
+                    'console.log(x, y)',
+                ]
+                self._prints(ending.join(lines), '2 1\n')
