@@ -22,6 +22,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     opens_a_redirection_target,
     takes_output_away,
 )
+from refinery.lib.scripts.ps1.analysis.separator import OFS_FALLBACK, OFS_NAME
 from refinery.lib.scripts.ps1.analysis.values import (
     make_string_literal,
     unwrap_to_array_literal,
@@ -163,6 +164,19 @@ class _Ps1Interpreter:
         if self._parent_env is not None:
             return self._parent_env.get(key)
         return None
+
+    def _written(self, key: str) -> bool:
+        """
+        Whether the emulated code has written this name anywhere in the scope chain it holds.
+
+        `_lookup` answers `$null` both for a name written `$null` and for one no emulated scope has
+        touched, which is the right answer for a *read* — the caller scope this interpreter is
+        entered without is a hole it has always had — and the wrong one wherever the two differ.
+        `$OFS` is where they differ, so that is what asks this.
+        """
+        if key in self._env:
+            return True
+        return self._parent_env is not None and key in self._parent_env
 
     def execute(
         self,
@@ -982,8 +996,6 @@ class _Ps1Interpreter:
     def _apply_type_cast(self, type_name: str, val: _Value) -> _Value:
         tn = normalize_dotnet_type_name(type_name)
         if tn == 'string':
-            if isinstance(val, list):
-                return ' '.join(self._to_str(item) for item in val)
             return self._to_str(val)
         if tn in ('int', 'int32', 'int64'):
             return self._to_int(val)
@@ -1148,8 +1160,7 @@ class _Ps1Interpreter:
             return len(value) > 0
         return True
 
-    @staticmethod
-    def _to_str(value: _Value) -> str:
+    def _to_str(self, value: _Value) -> str:
         if isinstance(value, str):
             return value
         if value is None:
@@ -1163,7 +1174,34 @@ class _Ps1Interpreter:
                 return str(int(value))
             return str(value)
         if isinstance(value, list):
-            return ' '.join(_Ps1Interpreter._to_str(item) for item in value)
+            return self._separator().join(self._to_str(item) for item in value)
+        raise _Ps1InterpreterError
+
+    def _separator(self) -> str:
+        """
+        What a collection coerced to a String is written with between its elements: `$OFS`, read
+        out of the scope chain the way the engine reads it at the point the coercion happens.
+
+        **A name the emulated code has not itself written is refused, not defaulted.** An
+        interpreter is entered at a call site whose caller scope it does not hold — the outermost
+        `_parent_env` is `None`, which is *unknown beyond here* and not *empty* — and the caller is
+        entitled to have written `$OFS`. Writing the fallback space there would be a value 5.1 does
+        not produce, and an explicit refusal is what this unit owes a wrong answer.
+        `refinery.lib.scripts.ps1.analysis.separator` asks the same question statically, at a point
+        where the enclosing scope is in view, and it is what folds the collections this declines;
+        the reconvergence of emulation and folding is what brings the two together.
+
+        A write of `$null` is the fallback and a write of `''` is not — see that module for the
+        measurement. A `Double` separator is refused because its text is the one thing here the
+        host's culture writes, and a collection separator because reading it asks this again.
+        """
+        if not self._written(OFS_NAME):
+            raise _Ps1InterpreterError
+        written = self._lookup(OFS_NAME)
+        if written is None:
+            return OFS_FALLBACK
+        if isinstance(written, (str, bool, int)):
+            return self._to_str(written)
         raise _Ps1InterpreterError
 
     @staticmethod
@@ -1183,11 +1221,10 @@ class _Ps1Interpreter:
             return 0
         raise _Ps1InterpreterError
 
-    @staticmethod
-    def _to_float(value: _Value) -> float:
+    def _to_float(self, value: _Value) -> float:
         if isinstance(value, (int, float)):
             return float(value)
-        return float(_Ps1Interpreter._to_str(value))
+        return float(self._to_str(value))
 
 
 class Ps1FunctionEvaluator(Transformer):
@@ -1684,34 +1721,28 @@ class Ps1ForEachPipeline(Transformer):
         """
         Turn the per-item scriptblock outputs of `<array> | %{ ... }` into a node.
 
-        **A result of one-character strings is joined, and that is a ledgered wrong answer.** A
-        pipeline builds a collection whatever its items are: measured, `@('a', 'b') | %{ $_ }` is an
-        `Object[]` of two, so `.Count` is 2, `-join '-'` writes the separator and `foreach` runs
-        twice, and the join changes each of those.
+        **A pipeline builds a collection whatever its items are**, so what stands here is the
+        success stream `_collapse` already describes and nothing narrower. A run of one-character
+        strings used to be joined into one String, which was a wrong answer measured six ways:
+        `@('a', 'b') | %{ $_ }` is an `Object[]` of two, so `.Count` is 2, `-join '-'` writes the
+        separator, `foreach` runs twice, and each of those changed. What the join was standing in
+        for is `$OFS`, and it is `refinery.lib.scripts.ps1.analysis.separator` that answers it now:
+        the collection this writes reaches the enclosing coercion as a collection, and the fold
+        that follows the emulation is where it becomes a String with the separator the script
+        wrote.
 
-        What it is standing in for is **`$OFS`**, which is the thing to build before deleting it.
-        The shape both loader samples use is `$OFS = ''` followed by `"$chars"`, and interpolating
-        a collection joins it on `$OFS` — so a unit that does not read `$OFS` renders that array
-        with the default space and loses the whole chain. Deleting the join without `$OFS` was
-        measured: two real samples stop resolving entirely. The `-join ''` spelling of the same
-        thing already folds without it.
-
-        `('foo', 'bar' | %{ $_ })[1]` is the one case the join declines, which is the same case
-        stated for one shape of it.
+        The stream is flattened rather than nested, which is the same measurement:
+        `@(1, 2) | %{ $_, $_ }` is four Int32s and not two pairs, where `%{ ,($_, $_) }` is the two
+        pairs. One block emitting nothing contributes nothing, and a stream that ends up empty is
+        `$null` — refused rather than spelled, because a pipeline that produced no value is not an
+        expression this can put in its place.
         """
-        if not results:
+        stream: list[_Value] = []
+        for result in results:
+            _Ps1Interpreter._append(stream, result)
+        if not stream:
             return None
-        if all(isinstance(r, str) and len(r) == 1 for r in results):
-            return make_string_literal(''.join(results))
-        if len(results) == 1:
-            return Ps1FunctionEvaluator._value_to_node(results[0])
-        elements: list[Expression] = []
-        for value in results:
-            node = Ps1FunctionEvaluator._value_to_node(value)
-            if node is None:
-                return None
-            elements.append(node)
-        return Ps1ArrayLiteral(elements=elements)
+        return Ps1FunctionEvaluator._value_to_node(_Ps1Interpreter._collapse(stream))
 
 
 def evaluate_truthy(

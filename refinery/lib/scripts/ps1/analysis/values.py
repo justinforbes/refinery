@@ -85,6 +85,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ParenExpression,
     Ps1RealLiteral,
     Ps1StringLiteral,
+    Ps1SubExpression,
     Ps1TypeExpression,
     Ps1UnaryExpression,
     Ps1Variable,
@@ -671,6 +672,8 @@ def read(node: Node | None) -> Ps1Fact:
         return NULL
     if isinstance(node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
         return _array(node, _pinned).value
+    if isinstance(node, Ps1SubExpression):
+        return _subexpression(node, _pinned).value
     if isinstance(node, Ps1CastExpression):
         return _cast_spelling(node)
     return UNKNOWN
@@ -707,10 +710,44 @@ def _array(
     """
     if isinstance(node, Ps1ArrayLiteral):
         return _collected(of(element) for element in node.elements)
+    stream = _stream(node.body, of)
+    return NOTHING if stream is None else _collected(stream)
+
+
+def _subexpression(
+    node: Ps1SubExpression,
+    of: Callable[[Expression], Ps1Outcome],
+) -> Ps1Outcome:
+    """
+    A `$( ... )`, which collects the same stream `@( ... )` collects and then *collapses* it. That
+    last step is the whole difference between the two spellings and it is measured: `$(1)` is an
+    Int32 where `@(1)` is an `Object[]` of one, and `$()` is `$null` where `@()` is the empty
+    array. Everything before the collapse agrees — `$(1, 2)`, `$(@(1, 2))` and `$(1; 2)` are each
+    two elements, and `$((1, 2), 3)` is two of which the first is an array — so the unrolling is
+    stated once, in `_stream`, rather than described twice with a chance of drifting.
+    """
+    stream = _stream(node.body, of)
+    if stream is None:
+        return NOTHING
+    if not stream:
+        return Ps1Outcome(False, NULL)
+    if len(stream) == 1:
+        return stream[0]
+    return _collected(stream)
+
+
+def _stream(
+    body: list,
+    of: Callable[[Expression], Ps1Outcome],
+) -> list[Ps1Outcome] | None:
+    """
+    The success stream a statement list contributes, with each statement's value unrolled one level
+    the way a pipeline unrolls it, or `None` where a statement is not one this can answer.
+    """
     outcomes: list[Ps1Outcome] = []
-    for statement in node.body:
+    for statement in body:
         if not isinstance(statement, Ps1ExpressionStatement) or statement.expression is None:
-            return NOTHING
+            return None
         outcome = of(statement.expression)
         inner = outcome.value
         if isinstance(inner, Ps1Constant) and inner.type == _OBJECT_ARRAY and isinstance(
@@ -719,7 +756,7 @@ def _array(
             outcomes.extend(Ps1Outcome(outcome.may_throw, one) for one in inner.payload)
         else:
             outcomes.append(outcome)
-    return _collected(outcomes)
+    return outcomes
 
 
 def _collected(outcomes: typing.Iterable[Ps1Outcome]) -> Ps1Outcome:
@@ -1185,6 +1222,8 @@ def evaluate(
         return evaluate(node.expression, variable_types)
     if isinstance(node, (Ps1ArrayLiteral, Ps1ArrayExpression)):
         return _array(node, lambda element: evaluate(element, variable_types))
+    if isinstance(node, Ps1SubExpression):
+        return _subexpression(node, lambda element: evaluate(element, variable_types))
     if isinstance(node, Ps1CastExpression):
         return _evaluated_cast(node, variable_types)
     if isinstance(node, Ps1BinaryExpression):

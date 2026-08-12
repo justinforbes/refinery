@@ -733,14 +733,12 @@ class TestPs1APipelineProducesACollection(TestPs1):
     `.Count`.
     """
 
-    @unittest.expectedFailure
     def test_a_pipeline_over_strings_stays_a_collection_of_strings(self):
         self.assertEqual(
             self._deobfuscate("$x = @('a', 'b') | ForEach-Object { $_ }"),
             "$x = 'a', 'b'",
         )
 
-    @unittest.expectedFailure
     def test_joining_a_pipeline_result_puts_the_separator_between_the_elements(self):
         source = inspect.cleandoc("""
             $x = @('a', 'b') | ForEach-Object { $_ }
@@ -748,7 +746,6 @@ class TestPs1APipelineProducesACollection(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output 'a-b'")
 
-    @unittest.expectedFailure
     def test_the_count_of_a_pipeline_result_is_the_number_of_emitted_objects(self):
         self.assertEqual(
             self._deobfuscate("$x = @('a', 'b') | ForEach-Object { $_ }; Write-Output $x.Count"),
@@ -777,14 +774,12 @@ class TestPs1APipelineProducesACollection(TestPs1):
             '$x = [char]65, [char]66',
         )
 
-    @unittest.expectedFailure
     def test_the_count_of_a_pipeline_of_chars_is_the_number_of_emitted_objects(self):
         self.assertEqual(
             self._deobfuscate('$x = (65, 66 | ForEach-Object { [char]$_ }).Count'),
             '$x = 2',
         )
 
-    @unittest.expectedFailure
     def test_a_pipeline_over_a_split_stays_a_collection_of_strings(self):
         self.assertEqual(
             self._deobfuscate("$x = 'a-b-c' -split '-' | ForEach-Object { $_ }"),

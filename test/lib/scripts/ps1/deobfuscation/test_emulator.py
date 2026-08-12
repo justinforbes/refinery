@@ -261,7 +261,7 @@ class TestPs1ForEachPipeline(TestPs1):
     def test_foreach_pipeline_char_convert(self):
         data = "'72z101z108z108z111'.Split('z') | %{ ([Char]([Convert]::ToInt16(($_.ToString()), 10))) }"
         result = self._deobfuscate(data)
-        self.assertIn('Hello', result)
+        self.assertEqual(result, "'H', 'e', 'l', 'l', 'o'")
 
     def test_foreach_pipeline_negative_integers(self):
         data = "((-83,-71,-65,-75,-107,-70,-75,-64,-110,-83,-75,-72,-79,-80) | %{ [char]($_ + 180) }) -join ''"
@@ -278,7 +278,7 @@ class TestPs1ForEachPipeline(TestPs1):
     def test_foreach_pipeline_expandable_string_hex_decode(self):
         data = "'46 75 6E' -split ' ' | %{[char][byte]\"0x$_\"}"
         result = self._deobfuscate(data)
-        self.assertIn('Fun', result)
+        self.assertEqual(result, "'F', 'u', 'n'")
 
     def test_foreach_pipeline_expandable_string_with_subexpr(self):
         data = "@('A','B','C') | %{\"item: $( $_ )\"}"
@@ -315,9 +315,9 @@ class TestPs1EmulatorExtra(TestPs1):
             "ForEach-Object { [Char]($_ -BXor 0) })")
         self.assertIn('Hello', result)
 
-    def test_char_array_xor_pipeline(self):
+    def test_a_string_cast_over_an_xor_pipeline_joins_on_the_default_ofs(self):
         result = self._deobfuscate("[String]([Char[]] (127,78,88,95) | % { [Char]($_ -BXor 0x2B) })")
-        self.assertIn('Test', result)
+        self.assertEqual(result, "'T e s t'")
 
     def test_function_multiple_outputs_form_array(self):
         result = self._apply("function f { 'a'; 'b' }; $x = f", Ps1FunctionEvaluator)
@@ -370,9 +370,8 @@ class TestPs1EmulatorExtra(TestPs1):
         self.assertEqual(result, "$o = 'C'")
 
     def test_psitem_is_pipeline_item(self):
-        # $PSItem resolves like $_; the single-character results collapse to a joined string.
         result = self._apply("(97,98,99) | % { [char]$PSItem }", Ps1ForEachPipeline)
-        self.assertEqual(result, "'abc'")
+        self.assertEqual(result, "'a', 'b', 'c'")
 
     def test_foreach_over_string_is_scalar(self):
         # PowerShell iterates a foreach over a string exactly once (the string is a scalar).
@@ -496,7 +495,7 @@ class TestPs1EmulatorRedirections(TestPs1):
 
     def test_an_unredirected_foreach_pipeline_is_still_folded(self):
         self.assertEqual(
-            self._apply("@('a', 'b') | ForEach-Object { $_ }", Ps1ForEachPipeline), "'ab'")
+            self._apply("@('a', 'b') | ForEach-Object { $_ }", Ps1ForEachPipeline), "'a', 'b'")
 
     def test_a_definition_a_redirected_call_still_names_is_kept(self):
         # The redirected call cannot be folded, so the name still has a caller when the definition

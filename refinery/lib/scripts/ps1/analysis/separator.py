@@ -38,13 +38,15 @@ from refinery.lib.scripts.ps1.analysis.values import (
 from refinery.lib.scripts.ps1.model import Ps1AssignmentExpression, Ps1Variable
 
 #: The key `refinery.lib.scripts.ps1.analysis.model.binding_key` files `$OFS` under. A scope
-#: qualifier does not change it, so `$script:OFS` is a write of this same name.
-_OFS = 'ofs'
+#: qualifier does not change it, so `$script:OFS` is a write of this same name. Public because the
+#: emulator asks the same name of its own live scope chain.
+OFS_NAME = 'ofs'
 
 #: What a join writes between two elements where nothing has written `$OFS`, and what one written
 #: `$null` writes as well — see this module's own documentation for why those are the same answer
-#: and are not the answer for `''`.
-_FALLBACK = ' '
+#: and are not the answer for `''`. Public for the same reason as the name above: an emulated join
+#: falls back to exactly this, and stating it twice is how the two would come to disagree.
+OFS_FALLBACK = ' '
 
 
 def output_field_separator_at(site: Node, flow: Ps1VariableFlow) -> str | None:
@@ -58,11 +60,11 @@ def output_field_separator_at(site: Node, flow: Ps1VariableFlow) -> str | None:
     settles it — once the payload is literal, the write it performs is one this can see or one
     that is not there.
     """
-    observed = flow.write_observed_at(_OFS, site)
+    observed = flow.write_observed_at(OFS_NAME, site)
     if observed is Ps1ObservedWrite.UNKNOWN:
         return None
     if observed is Ps1ObservedWrite.NOTHING:
-        return _FALLBACK
+        return OFS_FALLBACK
     return _separator_written_by(observed)
 
 
@@ -108,4 +110,4 @@ def _separator_written_by(write: Node) -> str | None:
     if assignment.target is not write or assignment.operator != '=':
         return None
     fact = read(assignment.value)
-    return _FALLBACK if fact is NULL else invariant_text(fact)
+    return OFS_FALLBACK if fact is NULL else invariant_text(fact)

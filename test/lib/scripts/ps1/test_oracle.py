@@ -1456,8 +1456,14 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 
 #: Rows of `corpus.TYPES` whose deobfuscation does not behave like the row. Held apart from
 #: `BEHAVIOUR_DEFECTS` rather than merged into it, because that table carries one entry per defect
-#: with a host-free twin for each, and these share a handful of root causes: the pipeline collapse,
-#: the Char erasure, and the cast whose target the fold drops.
+#: with a host-free twin for each, and these share a handful of root causes: the Char erasure and
+#: the cast whose target the fold drops.
+#:
+#: The pipeline collapse is gone, and five rows went with it. A `<array> | %{ … }` fold writes the
+#: collection the pipeline builds, and what used to join a run of one-character strings into one
+#: String was standing in for `$OFS` — which is now a question
+#: `refinery.lib.scripts.ps1.analysis.separator` answers at the point the collection is coerced.
+#: What is left of that group is one row, and it is the Char erasure rather than the collapse.
 #:
 #: The three that were about how a value is *spelled* rather than what it is have all gone. A
 #: numeral standing as a member receiver and a folded numeral inlined into a command argument were
@@ -1472,21 +1478,9 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: wrong one. The Char erasure is therefore not only a wrong type — it is a wrong value
 #: (`[int][char]48`), a wrong lookup (a Char hashtable key), and a throw that does not happen.
 TYPE_DEFECTS: dict[str, str] = {
-    "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output (,$t); Write-Output $t":
-        'A pipeline builds an Object[]. The emulator collapses a list of one-character strings '
-        'into one string, so both the container type and the element count are lost.',
-    "$t = @('a', 'b') | ForEach-Object { $_ }; Write-Output ($t -join '-')":
-        'The same collapse, seen through a join: one element means the separator never appears.',
-    "$t = @('a', 'b') | ForEach-Object { $_ }; foreach ($e in $t) { Write-Output $e }":
-        'The same collapse, as changed control flow: the loop runs once over one string rather '
-        'than twice over two.',
-    '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output (,$t)':
-        'The same collapse over Char results, which is the shape a char-building loader writes.',
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
-        'The collapse loses the count: .Count answers 1 where 5.1 answers 2, and the two Char '
-        'elements arrive as one String.',
-    "$t = 'a-b-c' -split '-' | ForEach-Object { $_ }; Write-Output (,$t)":
-        'The collapse is not about Char at all: any list of one-character strings falls to it.',
+        'The count is right and the elements are not: the interpreter has no Char in the values '
+        'it computes with, so a [char] cast reaches the tree as a one-character String.',
     '$t = [char[]](72, 73); Write-Output (,$t); Write-Output $t':
         'The same erasure for an array of Char, which folds to one String.',
     "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
