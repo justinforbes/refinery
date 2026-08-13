@@ -213,15 +213,25 @@ class JsLexer:
         self._template_depth = state.template_depth
         self._brace_stack = list(state.brace_stack)
 
-    def scan_regexp(self) -> JsToken:
+    def scan_regexp(self) -> JsToken | None:
         """
         Read a regular expression literal where scanning currently stands. ECMA-262 clause 12 picks
         the lexical goal symbol from the syntactic grammar context, which only the parser knows, so
-        no path through `tokenize` reaches this scan: a slash is spelled as the operator it looks
-        like until someone who is expecting an expression asks for it again.
+        no path through `JsLexer.tokenize` reaches this scan: a slash is spelled as the operator it
+        looks like until someone who is expecting an expression asks for it again.
+
+        The answer is `None` where no literal stands here, which is what makes asking affordable:
+        a RegularExpressionLiteral holds no line terminator, so a scan that reaches the end of its
+        line has read something that is not one, and the position it started from is given back
+        untouched for the caller to read as the operator it already looked like.
         """
         start = self.pos
-        return JsToken(JsTokenKind.REGEXP, self._read_regexp(), start)
+        if self._peek() != '/':
+            return None
+        text = self._read_regexp()
+        if text is None:
+            return None
+        return JsToken(JsTokenKind.REGEXP, text, start)
 
     def _peek(self, count: int = 1) -> str:
         return self.source[self.pos:self.pos + count]
@@ -338,15 +348,27 @@ class JsLexer:
         return self._scan_template_content(
             start, JsTokenKind.TEMPLATE_TAIL, JsTokenKind.TEMPLATE_MIDDLE, -1)
 
-    def _read_regexp(self) -> str:
+    def _read_regexp(self) -> str | None:
+        """
+        The RegularExpressionLiteral that begins here, or `None` where the text spells none. A
+        backslash escapes the character after it but never a line terminator, so a literal that
+        reaches the end of its line is unterminated rather than continued, and the position is
+        restored so that the same text can be read again as whatever else it may be.
+
+        RegularExpressionFirstChar admits neither a slash nor a star, which is what leaves `//` and
+        `/*` to spell the two comments and nothing else.
+        """
         start = self.pos
         src = self.source
         length = len(src)
         self.pos += 1
+        if self._peek() in ('*', '/'):
+            self.pos = start
+            return None
         in_class = False
         while self.pos < length:
             c = src[self.pos]
-            if c == '\\' and self.pos + 1 < length:
+            if c == '\\' and self.pos + 1 < length and src[self.pos + 1] not in LINE_TERMINATORS:
                 self.pos += 2
                 continue
             if c == '[':
@@ -365,7 +387,8 @@ class JsLexer:
             if c in LINE_TERMINATORS:
                 break
             self.pos += 1
-        return src[start:self.pos]
+        self.pos = start
+        return None
 
     def _read_prefixed_int(self, start: int, valid_digits: str) -> JsToken:
         src = self.source

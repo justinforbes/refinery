@@ -5,6 +5,7 @@ import inspect
 from test import TestBase
 
 from refinery.lib.scripts import Node
+from refinery.lib.scripts.js.analysis.model import pattern_identifiers
 from refinery.lib.scripts.js.model import (
     JsArrayPattern,
     JsAssignmentPattern,
@@ -72,10 +73,13 @@ LET_BEFORE_A_DESTRUCTURING_PATTERN = [
     ('let [a] = [42];', ['let declares a']),
     ('let [, a] = [1, 42];', ['let declares a']),
     ('let [a = 42] = [];', ['let declares a']),
+    ('let [a = let] = [];', ['let declares a', LET_IS_A_NAME]),
     ('let [...a] = [42];', ['let declares a']),
     ('let {a} = {a: 42};', ['let declares a']),
     ('let {b: a} = {b: 42};', ['let declares a']),
     ('let {a = 42} = {};', ['let declares a']),
+    ('let {a = let} = {};', ['let declares a', LET_IS_A_NAME]),
+    ('let {b: a = let} = {};', ['let declares a', LET_IS_A_NAME]),
     ('let {...a} = {b: 42};', ['let declares a']),
     (LET_BEFORE_A_BRACKET_ACROSS_A_LINE_BREAK, ['let declares a']),
     (LET_BEFORE_A_BRACE_ACROSS_A_LINE_BREAK, ['let declares a']),
@@ -184,8 +188,7 @@ class TestJsLetDeclarationOrName(TestBase):
                 for declarator in node.declarations:
                     target = declarator.id
                     names.extend(self._binding_names(target))
-                    if target is not None:
-                        bound.update(id(inner) for inner in target.walk())
+                    bound.update(id(name) for name in pattern_identifiers(target))
                 readings.append((node.offset, F'{node.kind.value} declares {", ".join(names)}'))
             elif isinstance(node, JsErrorNode):
                 readings.append((node.offset, PARSE_ERROR))

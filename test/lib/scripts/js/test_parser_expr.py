@@ -11,10 +11,12 @@ from refinery.lib.scripts.js.model import (
     JsAwaitExpression,
     JsBigIntLiteral,
     JsBinaryExpression,
+    JsBlockStatement,
     JsBooleanLiteral,
     JsCallExpression,
     JsConditionalExpression,
     JsExpressionStatement,
+    JsFunctionDeclaration,
     JsFunctionExpression,
     JsIdentifier,
     JsLogicalExpression,
@@ -38,6 +40,7 @@ from refinery.lib.scripts.js.model import (
     JsUpdateExpression,
     JsYieldExpression,
 )
+from refinery.lib.scripts.js.synth import JsSynthesizer
 
 
 class TestJsParserExpressions(TestBase):
@@ -596,3 +599,84 @@ class TestJsParserExpressions(TestBase):
         expr = self._parse_expr('new async.foo()')
         self.assertIsInstance(expr, JsNewExpression)
         self.assertIsInstance(expr.callee, JsMemberExpression)
+
+
+A_YIELD_WITH_NOTHING_LEFT_TO_READ = [
+    ('function* g() { `${yield}` }', 1, '`${yield}`;'),
+    ('function* g() { `a${yield}b${yield}c` }', 2, '`a${yield}b${yield}c`;'),
+    ('function* g() { tag`${yield}` }', 1, 'tag`${yield}`;'),
+    ('function* g() { f(yield) }', 1, 'f(yield);'),
+    ('function* g() { [yield] }', 1, '[yield];'),
+    ('function* g() { ({a: yield}) }', 1, '({ a: yield });'),
+    ('function* g() { yield }', 1, 'yield;'),
+]
+
+A_DELEGATING_YIELD_WITH_NOTHING_TO_READ = [
+    'function* g() { `${yield*}` }',
+    'function* g() { `a${yield*}b${yield*}c` }',
+    'function* g() { tag`${yield*}` }',
+    'function* g() { f(yield*) }',
+    'function* g() { [yield*] }',
+    'function* g() { ({a: yield*}) }',
+    'function* g() { yield* }',
+]
+
+
+class TestAYieldThatIsFollowedOnlyByTheEndOfWhatItStandsIn(TestBase):
+    """
+    A yield takes an argument only where one is written. Every source here writes the token that
+    closes the template hole, the call, the array, the object or the generator body directly behind
+    the word, so the plain yield has no argument to take and the delegating one has none to find.
+    """
+
+    def _yields(self, source: str) -> list[tuple[bool, str | None]]:
+        """
+        Every yield in the source, as the star it was written with and the source of the argument
+        it took, in the order the yields are written.
+        """
+        yields: list[tuple[bool, str | None]] = []
+        for node in JsParser(source).parse().walk_in_order():
+            if isinstance(node, JsYieldExpression):
+                argument = node.argument
+                spelled = None if argument is None else JsSynthesizer().convert(argument)
+                yields.append((node.delegate, spelled))
+        return yields
+
+    def _statements(self, source: str) -> list[str]:
+        return [JsSynthesizer().convert(node) for node in JsParser(source).parse().body]
+
+    def _generator_body(self, source: str) -> list[str]:
+        declaration = JsParser(source).parse().body[0]
+        if not isinstance(declaration, JsFunctionDeclaration):
+            self.fail(F'expected a function declaration, got {type(declaration).__name__}')
+        self.assertTrue(declaration.generator)
+        body = declaration.body
+        if not isinstance(body, JsBlockStatement):
+            self.fail(F'expected a block statement, got {type(body).__name__}')
+        return [JsSynthesizer().convert(node) for node in body.body]
+
+    def test_a_yield_with_nothing_left_to_read_takes_no_argument(self):
+        """
+        Node runs each of these generators, and each produces one `undefined` for every yield
+        written in it. Node also reads the source printed for the parse, which spells the same
+        program: the hole, the call, the array, the object and the body still hold the one
+        expression each was written with.
+        """
+        for source, count, printed in A_YIELD_WITH_NOTHING_LEFT_TO_READ:
+            with self.subTest(source=source):
+                self.assertEqual(self._yields(source), [(False, None)] * count)
+                self.assertEqual(self._generator_body(source), [printed])
+
+    def test_a_delegating_yield_with_nothing_to_read_damages_only_itself(self):
+        """
+        Node refuses every one of these, because the delegating yield is written with an expression
+        behind its star and none is left to read. What they pin is that the refusal stays where it
+        is written: the generator body still holds the one statement it was written with, and a
+        statement written behind the generator is still a statement of the program.
+        """
+        for source in A_DELEGATING_YIELD_WITH_NOTHING_TO_READ:
+            with self.subTest(source=source):
+                self.assertEqual(len(self._generator_body(source)), 1)
+                statements = self._statements(F'{source}\nzzz;')
+                self.assertEqual(len(statements), 2)
+                self.assertEqual(statements[1], 'zzz;')

@@ -209,17 +209,25 @@ class JsParser:
         whereas the other way around has already swallowed the rest of the line.
 
         Everything scanned since the slash is given back, because a lookahead token may have opened
-        or closed a template hole and a skipped comment would otherwise be collected twice.
+        or closed a template hole and a skipped comment would otherwise be collected twice. The
+        slash itself is given back too where no literal begins there, so that a scan which found no
+        terminator on its line leaves the operator standing rather than a literal nobody wrote.
         """
         if self._ahead_state is None:
             state, comments = self._lexer.capture(), len(self._pending_comments)
         else:
             state, comments = self._ahead_state
+        resume_pos, resume_state = self._lexer.pos, self._lexer.capture()
+        self._lexer.rewind(self._current.offset, state)
+        token = self._lexer.scan_regexp()
+        if token is None:
+            self._lexer.rewind(resume_pos, resume_state)
+            return self._current
         del self._pending_comments[comments:]
         self._ahead = None
+        self._ahead_newline = False
         self._ahead_state = None
-        self._lexer.rewind(self._current.offset, state)
-        self._current = self._lexer.scan_regexp()
+        self._current = token
         self._tokens = self._lexer.tokenize()
         return self._current
 
@@ -241,10 +249,10 @@ class JsParser:
     def _is_binding_identifier(self, token: JsToken) -> bool:
         """
         Whether the token can serve as an ordinary binding or reference name. Several contextual
-        keywords (`as`, `from`, `of`, `let`, `async`) are always valid names, and `await` and `yield` are
-        valid names except inside an async function or a generator respectively. This mirrors the identifier
-        acceptance of `_parse_primary_expression`, so a name-reading site accepts exactly the tokens the
-        expression grammar would treat as a reference.
+        keywords (`as`, `from`, `of`, `let`, `async`) are always valid names, while `await` and
+        `yield` are valid names except inside an async function or a generator respectively. This is
+        the identifier acceptance of `_parse_primary_expression` itself, so a name-reading site
+        accepts exactly the tokens the expression grammar would treat as a reference.
         """
         kind = token.kind
         return (
@@ -1227,6 +1235,14 @@ class JsParser:
         return expr
 
     def _parse_assignment_expression(self) -> Expression:
+        """
+        An AssignmentExpression, which is the only production a YieldExpression is one of. Reading
+        the `yield` here rather than among the primary expressions is what stops an operator from
+        attaching to it: a `yield` that the line terminator restriction left without an argument
+        ends the expression, and the slash that opens the next statement is not its divisor.
+        """
+        if self._at(JsTokenKind.YIELD) and self._in_generator:
+            return self._parse_yield_expression()
         left = self._parse_conditional_expression()
         if self._current.kind.is_assignment:
             op = self._advance().value
@@ -1425,17 +1441,10 @@ class JsParser:
         tok = self._current
         offset = tok.offset
 
-        if (
-            self._at(
-                JsTokenKind.IDENTIFIER,
-                JsTokenKind.AS,
-                JsTokenKind.FROM,
-                JsTokenKind.OF,
-                JsTokenKind.LET,
-            )
-            or (self._at(JsTokenKind.AWAIT) and not self._in_async)
-            or (self._at(JsTokenKind.YIELD) and not self._in_generator)
-        ):
+        if self._at(JsTokenKind.ASYNC):
+            return self._parse_async_expression()
+
+        if self._at_binding_identifier():
             self._advance()
             if self._at(JsTokenKind.ARROW) and not self._preceded_by_newline:
                 self._advance()
@@ -1516,12 +1525,6 @@ class JsParser:
             return self._parse_function_expression()
         if self._at(JsTokenKind.CLASS):
             return self._parse_class_expression()
-
-        if self._at(JsTokenKind.ASYNC):
-            return self._parse_async_expression()
-
-        if self._at(JsTokenKind.YIELD) and self._in_generator:
-            return self._parse_yield_expression()
 
         self._advance()
         return JsErrorNode(text=tok.value, message='unexpected token', offset=offset)
@@ -1875,19 +1878,30 @@ class JsParser:
         return JsIdentifier(name='async', offset=offset)
 
     def _parse_yield_expression(self) -> JsYieldExpression:
+        """
+        A YieldExpression, whose one line terminator restriction sits between the `yield` and what
+        follows it. A newline there ends the expression, so neither a `*` nor an argument can still
+        belong to it; a newline anywhere after the `*` is ordinary whitespace, and the argument is
+        read across it.
+
+        A token that closes the construct the `yield` stands in is not an argument, and the hole of
+        a template is closed by the text that resumes it rather than by a brace of its own.
+        """
         offset = self._current.offset
         self._advance()
-        delegate = False
-        if self._eat(JsTokenKind.STAR):
-            delegate = True
+        if self._preceded_by_newline:
+            return JsYieldExpression(argument=None, delegate=False, offset=offset)
+        delegate = self._eat(JsTokenKind.STAR) is not None
         argument = None
-        if not self._preceded_by_newline and not self._at(
+        if not self._at(
             JsTokenKind.SEMICOLON,
             JsTokenKind.RBRACE,
             JsTokenKind.RPAREN,
             JsTokenKind.RBRACKET,
             JsTokenKind.COMMA,
             JsTokenKind.COLON,
+            JsTokenKind.TEMPLATE_MIDDLE,
+            JsTokenKind.TEMPLATE_TAIL,
             JsTokenKind.EOF,
         ):
             argument = self._parse_assignment_expression()

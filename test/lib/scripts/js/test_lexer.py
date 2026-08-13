@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import itertools
 import unicodedata
 
@@ -13,6 +14,7 @@ from refinery.lib.scripts.js.token import (
     ASCII_WHITESPACE,
     LINE_TERMINATORS,
     WHITESPACE,
+    JsToken,
     JsTokenKind,
 )
 
@@ -36,6 +38,21 @@ WHATWG_ASCII_WHITESPACE = [0x0009, 0x000A, 0x000C, 0x000D, 0x0020]
 The code points the WHATWG Infra Standard calls ASCII whitespace: `U+0009` TAB, `U+000A` LF,
 `U+000C` FF, `U+000D` CR and `U+0020` SPACE. The vertical tab is not among them.
 """
+
+A_LINE_BREAK_BEFORE_THE_CLOSING_SLASH = inspect.cleandoc("""
+    x = / zzz
+    zzz /;
+""")
+
+A_LINE_BREAK_BEHIND_A_BACKSLASH = inspect.cleandoc(R"""
+    x = /zz\
+    z/;
+""")
+
+A_LINE_BREAK_INSIDE_A_CHARACTER_CLASS = inspect.cleandoc("""
+    x = /[zz
+    z]/;
+""")
 
 
 def _spelled(code_points: Iterable[int]) -> list[str]:
@@ -553,6 +570,58 @@ class TestJsLexer(TestBase):
                     (JsTokenKind.SEMICOLON, ';'),
                     (JsTokenKind.EOF, ''),
                 ])
+
+    def _scan_regexp(self, source: str, pos: int = 0) -> tuple[JsToken | None, int]:
+        """
+        What a regular expression scan of *source* reads where scanning stands at *pos*, and where
+        scanning stands once that scan is over.
+        """
+        lexer = JsLexer(source, pos)
+        return lexer.scan_regexp(), lexer.pos
+
+    def test_a_regexp_scan_reads_the_whole_literal_and_stops_behind_it(self):
+        """
+        Node reads each of these as one regular expression, whose `source` names the pattern
+        between the slashes: a slash inside a character class and a slash written behind a
+        backslash are characters of the pattern rather than the end of the literal.
+        """
+        for literal in ['/zzz/', '/zzz/gi', '/[/]/', '/[/]/gi', R'/a\/b/', R'/[\]/]/']:
+            with self.subTest(literal=literal):
+                self.assertEqual(
+                    self._scan_regexp(F'x = {literal};', 4),
+                    (JsToken(JsTokenKind.REGEXP, literal, 4), 4 + len(literal)))
+
+    def test_the_flags_of_a_regexp_are_the_name_characters_written_against_it(self):
+        """
+        Node prints `gi` for the flags of the first of these literals and the empty string for
+        those of the second, where a space stands between the literal and the name behind it.
+        """
+        self.assertEqual(
+            self._scan_regexp('/zzz/gi.flags'), (JsToken(JsTokenKind.REGEXP, '/zzz/gi', 0), 7))
+        self.assertEqual(
+            self._scan_regexp('/zzz/ .flags'), (JsToken(JsTokenKind.REGEXP, '/zzz/', 0), 5))
+
+    def test_a_regexp_scan_that_finds_no_end_of_the_literal_reads_nothing_and_stays(self):
+        """
+        Node refuses each of these programs. No regular expression literal reaches over the end of
+        the line it begins on, neither in its pattern nor inside a character class, and a backslash
+        carries it no further. The scan leaves scanning on the slash it was asked about, which is
+        still the operator it may have to be read as.
+        """
+        for source in [
+            'x = / zzz',
+            'x = /[zzz',
+            A_LINE_BREAK_BEFORE_THE_CLOSING_SLASH,
+            A_LINE_BREAK_BEHIND_A_BACKSLASH,
+            A_LINE_BREAK_INSIDE_A_CHARACTER_CLASS,
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(self._scan_regexp(source, 4), (None, 4))
+
+    def test_a_regexp_scan_where_no_slash_stands_reads_nothing_and_stays(self):
+        for source, pos in [('zzz', 0), ('x + y', 2), ('x = zzz', 4), (' /zzz/', 0), ('', 0)]:
+            with self.subTest(source=source, pos=pos):
+                self.assertEqual(self._scan_regexp(source, pos), (None, pos))
 
 
 class TestTheWhitespaceProductionsAreThreeSetsAndNotOne(TestBase):

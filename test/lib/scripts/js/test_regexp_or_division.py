@@ -9,8 +9,10 @@ from refinery.lib.scripts.js.model import (
     JsBinaryExpression,
     JsErrorNode,
     JsRegExpLiteral,
+    JsYieldExpression,
 )
 from refinery.lib.scripts.js.parser import JsParser
+from refinery.lib.scripts.js.synth import JsSynthesizer
 
 DIVISION = '/'
 DIVISION_ASSIGNMENT = '/='
@@ -147,6 +149,13 @@ CONTINUE_ACROSS_A_LINE_BREAK = inspect.cleandoc("""
     }
 """)
 
+YIELD_AS_A_NAME_ACROSS_A_LINE_BREAK = inspect.cleandoc("""
+    function f() {
+      yield
+      / zzz / g
+    }
+""")
+
 A_LINE_COMMENT_BEFORE_A_STATEMENT = inspect.cleandoc("""
     a;
     // c
@@ -157,6 +166,7 @@ ACROSS_A_LINE_BREAK = [
     (DIVISION_ACROSS_A_LINE_BREAK, [DIVISION, DIVISION]),
     (RETURN_ACROSS_A_LINE_BREAK, ['/zzz/']),
     (CONTINUE_ACROSS_A_LINE_BREAK, ['/zzz/']),
+    (YIELD_AS_A_NAME_ACROSS_A_LINE_BREAK, [DIVISION, DIVISION]),
 ]
 
 A_PATTERN_THAT_CONTAINS_A_SLASH = [
@@ -180,6 +190,58 @@ AROUND_A_COMMENT = [
     (A_LINE_COMMENT_BEFORE_A_STATEMENT, ['/zzz/']),
     ('var a = 8; a //zzz/', []),
 ]
+
+A_YIELD_AND_ITS_ARGUMENT_ON_ONE_LINE = inspect.cleandoc("""
+    function* g() {
+      yield /zzz/.source
+    }
+""")
+
+A_YIELD_WHOSE_ARGUMENT_STANDS_ON_THE_NEXT_LINE = inspect.cleandoc("""
+    function* g() {
+      yield
+      /zzz/.source
+    }
+""")
+
+A_YIELD_STAR_AND_ITS_ARGUMENT_ON_ONE_LINE = inspect.cleandoc("""
+    function* g() {
+      yield* /zzz/.source
+    }
+""")
+
+A_YIELD_STAR_WHOSE_ARGUMENT_STANDS_ON_THE_NEXT_LINE = inspect.cleandoc("""
+    function* g() {
+      yield*
+      /zzz/.source
+    }
+""")
+
+A_YIELD_WHOSE_STAR_STANDS_ON_THE_NEXT_LINE = inspect.cleandoc("""
+    function* g() {
+      yield
+      * zzz
+    }
+""")
+
+A_REGEXP_THAT_NEVER_CLOSES = [
+    '/ zzz',
+    'var x = / zzz',
+    'a = / zzz',
+    'f(/ zzz)',
+    '[/ zzz]',
+    'function f(){ return / zzz }',
+]
+
+A_CLOSING_SLASH_ON_THE_NEXT_LINE = inspect.cleandoc("""
+    var x = / zzz
+    qqq / 2;
+""")
+
+A_BACKSLASH_BEFORE_THE_LINE_BREAK = inspect.cleandoc(R"""
+    var x = /zz\
+    z/ 2;
+""")
 
 
 class TestJsRegExpOrDivision(TestBase):
@@ -267,3 +329,82 @@ class TestJsRegExpOrDivision(TestBase):
         for source, expected in AROUND_A_COMMENT:
             with self.subTest(source=source):
                 self.assertEqual(self._slash_readings(source), expected)
+
+    def _yields(self, source: str) -> list[tuple[bool, str | None]]:
+        """
+        Every yield in the source, as the star it was written with and the source of the argument
+        it took, in the order the yields are written.
+        """
+        yields: list[tuple[bool, str | None]] = []
+        for node in JsParser(source).parse().walk_in_order():
+            if isinstance(node, JsYieldExpression):
+                argument = node.argument
+                spelled = None if argument is None else JsSynthesizer().convert(argument)
+                yields.append((node.delegate, spelled))
+        return yields
+
+    def _round_trips(self, source: str, rounds: int) -> list[str]:
+        """
+        The source printed for the parse of *source*, the source printed for the parse of that, and
+        so on for *rounds* rounds.
+        """
+        printed = []
+        for _ in range(rounds):
+            source = JsSynthesizer().convert(JsParser(source).parse())
+            printed.append(source)
+        return printed
+
+    def test_a_line_break_behind_yield_leaves_it_without_an_argument(self):
+        self.assertEqual(
+            self._yields(A_YIELD_AND_ITS_ARGUMENT_ON_ONE_LINE), [(False, '/zzz/.source')])
+        self.assertEqual(
+            self._yields(A_YIELD_WHOSE_ARGUMENT_STANDS_ON_THE_NEXT_LINE), [(False, None)])
+        self.assertEqual(
+            self._slash_readings(A_YIELD_AND_ITS_ARGUMENT_ON_ONE_LINE), ['/zzz/'])
+        self.assertEqual(
+            self._slash_readings(A_YIELD_WHOSE_ARGUMENT_STANDS_ON_THE_NEXT_LINE), ['/zzz/'])
+
+    def test_the_star_of_a_yield_may_not_follow_a_line_break_although_its_argument_may(self):
+        self.assertEqual(
+            self._yields(A_YIELD_STAR_AND_ITS_ARGUMENT_ON_ONE_LINE), [(True, '/zzz/.source')])
+        self.assertEqual(
+            self._yields(A_YIELD_STAR_WHOSE_ARGUMENT_STANDS_ON_THE_NEXT_LINE),
+            [(True, '/zzz/.source')])
+        self.assertEqual(
+            self._yields(A_YIELD_WHOSE_STAR_STANDS_ON_THE_NEXT_LINE), [(False, None)])
+
+    def test_a_slash_whose_line_holds_no_second_slash_spells_no_regexp(self):
+        for source in A_REGEXP_THAT_NEVER_CLOSES:
+            with self.subTest(source=source):
+                self.assertEqual(self._slash_readings(source), [PARSE_ERROR])
+
+    def test_a_slash_on_the_next_line_closes_no_regexp_opened_on_this_one(self):
+        self.assertEqual(
+            self._slash_readings(A_CLOSING_SLASH_ON_THE_NEXT_LINE), [PARSE_ERROR, DIVISION])
+
+    def test_a_backslash_does_not_carry_a_regexp_over_the_end_of_its_line(self):
+        """
+        A backslash before a line break continues a string literal, and node reads the two lines it
+        joins as one. It continues no regular expression, so there are three readings and not one:
+        the slash that opened nothing, the backslash it left standing alone, and the slash on the
+        next line, which divides.
+        """
+        self.assertEqual(
+            self._slash_readings(A_BACKSLASH_BEFORE_THE_LINE_BREAK),
+            [PARSE_ERROR, PARSE_ERROR, DIVISION])
+
+    def test_a_slash_that_spells_no_regexp_prints_a_source_that_reads_back_as_itself(self):
+        """
+        None of these sources is a program any parser accepts, so what the parser makes of one is a
+        recovery rather than a reading. Printing that recovery and reading it again must stand
+        still: a round trip that keeps changing the text is one that loses a little of it each time
+        a tool prints what it read.
+        """
+        for source in [
+            *A_REGEXP_THAT_NEVER_CLOSES,
+            A_CLOSING_SLASH_ON_THE_NEXT_LINE,
+            A_BACKSLASH_BEFORE_THE_LINE_BREAK,
+        ]:
+            with self.subTest(source=source):
+                printed, *again = self._round_trips(source, 4)
+                self.assertEqual(again, [printed, printed, printed])
