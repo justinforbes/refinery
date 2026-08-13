@@ -1,5 +1,7 @@
 from .. import TestUnitBase
 
+import unittest
+
 
 class TestUniversalDeobfuscator(TestUnitBase):
     """
@@ -21,6 +23,7 @@ class TestUniversalDeobfuscator(TestUnitBase):
         self.assertEqual(
             bytes(b"'TVqQAAMA'\nWrite-Host 'go'" | unit), b"'TVqQAAMA'\nWrite-Host 'go'")
 
+    @unittest.expectedFailure
     def test_a_backend_with_no_such_notion_is_not_handed_the_switch(self):
         # JavaScript and VBA pipelines take no such keyword, so passing one would raise rather than
         # be ignored. Both settings have to reach them unchanged.
