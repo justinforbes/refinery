@@ -1451,6 +1451,101 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\t\t<null>',
             'OUT\t\t<null>',
         ),
+    '$a = New-Object byte[] 1; $t = $a[0]; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Byte\t0',
+            'OUT\tSystem.Byte\t0',
+        ),
+    "$a = New-Object byte[] '0b10'; $t = $a.Count; Write-Output (,$t); Write-Output $t":
+        (
+            'THROW\tConstructorInvokedThrowException,Microsoft.PowerShell.Commands.NewObjectCommand'
+            '\tSystem.Management.Automation.MethodException',
+        ),
+    "$a = New-Object byte[] '0o10'; $t = $a.Count; Write-Output (,$t); Write-Output $t":
+        (
+            'THROW\tConstructorInvokedThrowException,Microsoft.PowerShell.Commands.NewObjectCommand'
+            '\tSystem.Management.Automation.MethodException',
+        ),
+    'function f { ,$args }; $t = f 1 2; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1 2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    "$a = 10, 20, 30; $t = $a['1']; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t20',
+            'OUT\tSystem.Int32\t20',
+        ),
+    "$t = switch ('1') { 1 { 'number' } }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tnumber',
+            'OUT\tSystem.String\tnumber',
+        ),
+    "$t = switch (1) { '1' { 'text' } }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ttext',
+            'OUT\tSystem.String\ttext',
+        ),
+    "$t = switch ('0x10') { 16 { 'hex' } }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\t\t<null>',
+            'OUT\t\t<null>',
+        ),
+    "$t = 'abc' -replace '(?<x>b)', '[${x}]'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta[b]c',
+            'OUT\tSystem.String\ta[b]c',
+        ),
+    "$null = 'abc' -match '(b)'; $t = $Matches[1]; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tb',
+            'OUT\tSystem.String\tb',
+        ),
+    "$a = 'a,b,c' -split ',', 2; $t = $a.Count; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    "$a = 'a,b,c' -split ',', 2; $t = $a[1]; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tb,c',
+            'OUT\tSystem.String\tb,c',
+        ),
+    '$t = [string]1E20; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1E+20',
+            'OUT\tSystem.String\t1E+20',
+        ),
+    '$t = [string]0.0000001; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1E-07',
+            'OUT\tSystem.String\t1E-07',
+        ),
+    '$t = [string]1.5E-7; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1.5E-07',
+            'OUT\tSystem.String\t1.5E-07',
+        ),
+    '$t = 1 -ceq 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'A' -ceq 'a'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = 'A' -ieq 'a'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [array]5; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t5',
+            'OUT\tSystem.Int32\t1',
+        ),
 }
 
 
@@ -1472,11 +1567,23 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: where it is not. Their host-free twins in
 #: `test.lib.scripts.ps1.deobfuscation.test_value_domain` are what ratchets them now.
 #:
-#: Two entries record something worse than a wrong answer. `([char]65).ToUpper()` and
-#: `([char]65).Substring(0)` throw in 5.1 and answer `A` after the fold, and `([char]65) * 3` does
-#: the same: a script that stopped answers, which is the direction that turns a triage note into a
-#: wrong one. The Char erasure is therefore not only a wrong type — it is a wrong value
-#: (`[int][char]48`), a wrong lookup (a Char hashtable key), and a throw that does not happen.
+#: **The worst of the Char erasure is not in this ledger, and cannot be.** `([char]65).ToUpper()`,
+#: `([char]65).Substring(0)` and `([char]65) * 3` are measured to throw on 5.1, and a fold that
+#: answered `A` would be a script that stopped answering — the direction that turns a triage note
+#: into a wrong one. Every one of those is a corpus row and none of them is an entry here, because
+#: at the top level the tool leaves them alone: `emulator._value_of`'s round trip declines to carry
+#: a Char across the tree boundary at all, so nothing folds and nothing differs.
+#:
+#: One level in it does fold, and this ledger has no way to see it: a `([char]65).ToUpper()` written
+#: inside a function body the tool emulates emits `'A'`, because in there the interpreter computes
+#: in its own currency and a Char is a one-character Python string. A row here is a *top-level*
+#: snippet whose behaviour changes
+#: under rewriting, so a defect reachable only through an emulated body is invisible to it however
+#: bad it is. `test.lib.scripts.ps1.deobfuscation.test_emulator` is where those are pinned, and the
+#: gap between the two is why a regression test written against the bare expression proves nothing.
+#:
+#: So the Char erasure is a wrong type, a wrong value (`[int][char]48`), a wrong lookup (a Char
+#: hashtable key), and a throw that does not happen — and this ledger holds only the first two.
 TYPE_DEFECTS: dict[str, str] = {
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
         'The count is right and the elements are not: the interpreter has no Char in the values '

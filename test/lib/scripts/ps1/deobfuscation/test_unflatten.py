@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -237,6 +239,53 @@ class TestPs1ControlFlowDeflattening(TestPs1):
         f_idx = next(i for i, ln in enumerate(lines) if '$script:first' in ln)
         s_idx = next(i for i, ln in enumerate(lines) if '$script:second' in ln)
         self.assertLess(f_idx, s_idx)
+
+    @unittest.expectedFailure
+    def test_a_hexadecimal_state_constant_is_the_value_powershell_gives_it(self):
+        """
+        Measured on 5.1: `0xFFFFFFFF` is the Int32 -1, not the magnitude 4294967295. So state 0 ends
+        the machine, and the `4294967295` case is a state the host never enters. Reading the numeral
+        as its magnitude routes the machine into that case and emits code that never runs.
+        """
+        code = cleandoc("""
+            $s = 0
+            while ($s -ne -1) {
+              switch ($s) {
+                0 { Write-Host $script:reached; $s = 0xFFFFFFFF }
+                4294967295 { Write-Host $script:unreachable; $s = -1 }
+                default { break }
+              }
+            }
+        """)
+        result = self._apply(code, Ps1ControlFlowDeflattening)
+        self.assertEqual(result, 'Write-Host $script:reached')
+
+    @unittest.expectedFailure
+    def test_a_loop_whose_exit_condition_is_unevaluable_is_left_flattened(self):
+        """
+        Which state ends this loop depends on what `Get-Random` returns, so no state can be shown to
+        end it and none can be shown not to. Recovering the machine as `while ($True)` turns that
+        refusal into the answer that no state exits, and runs a body forever that the host may not
+        run at all.
+        """
+        self._assertUnchanged(cleandoc("""
+            $s = 0
+            while ($s -ne (Get-Random)) {
+              switch ($s) {
+                0 {
+                  Write-Host $script:first
+                  $s = 1
+                }
+                1 {
+                  Write-Host $script:second
+                  $s = 0
+                }
+                default {
+                  break
+                }
+              }
+            }
+        """), Ps1ControlFlowDeflattening)
 
     def test_string_state_ids_match(self):
         code = '\n'.join([

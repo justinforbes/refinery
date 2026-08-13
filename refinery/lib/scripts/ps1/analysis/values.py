@@ -1066,6 +1066,13 @@ _GRID_TYPES = frozenset(
 #: `{Int64, Double}`. `UInt16 * Char` was `{Int32}` and is really `{Int32, Double}`. `Byte -
 #: Decimal` and `Byte -band Single` were each recorded as never throwing and each throws.
 #:
+#: **A cell is the full cross-product of its two operands' witnesses**, which is what makes reading
+#: one as an upper bound a two-way-exhaustive claim over the chosen values rather than a pairwise
+#: assumption over them. `refinery/run-pwsh-operators.ps1` applies the operator to every `(l, r)`
+#: with `l` from the left type's witness list and `r` from the right type's, so a cell over two
+#: types in this set was measured at every combination those lists reach and not merely at each
+#: value in turn. Without that the set would be claiming something the capture never tried.
+#:
 #: A `Double` is here although its own extremes are absent, because there is nothing for them to
 #: reach: arithmetic never leaves a Double — it saturates to an infinity rather than widening or
 #: throwing — and the second capture found no cell that a Double alone moves.

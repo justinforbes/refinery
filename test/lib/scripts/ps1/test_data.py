@@ -9,6 +9,11 @@ def _definition_of(resolved) -> str | None:
     return None if resolved is None else resolved.definition
 
 
+def _ranks(name: str) -> tuple[int, ...] | None:
+    resolved = data.resolve_type(name)
+    return None if resolved is None else resolved.ranks
+
+
 def _definition(name: str) -> str | None:
     """
     The reflection `FullName` of the type a source name resolves to, which is what the collected
@@ -82,6 +87,22 @@ class TestPs1MetadataReader(unittest.TestCase):
 
     def test_canonical_type_is_resolve_type(self):
         self.assertEqual(data.canonical_type('int'), data.resolve_type('int'))
+
+    def test_the_array_accelerator_is_not_the_array_type_a_cast_to_it_produces(self):
+        """
+        A non-empty `ranks` is what makes a name an array type, and the accelerator `array` is where
+        that parts company with the cast written using it: `array` names `System.Array`, which is
+        not an array of anything, while `[array]5` yields a `System.Object[]`, which is. A predicate
+        reading `ranks` therefore answers `False` for `[array]` and `True` for the cast's result.
+        """
+        self.assertEqual(_definition('array'), 'System.Array')
+        self.assertEqual(_ranks('array'), ())
+        self.assertEqual(_ranks('byte[]'), (1,))
+        self.assertEqual(_ranks('System.Object[]'), (1,))
+        # Measured on 5.1: `$t = [array]5` leaves $t a System.Object[] that prints 5 and counts 1.
+        cast = data.conversion_outcome('array', 'System.Int32')
+        assert cast is not None
+        self.assertEqual(cast.single_type, data.resolve_type('System.Object[]'))
 
     def test_an_explicit_interface_member_is_present_with_its_type(self):
         # System.Array's Count comes from ICollection and is invisible to a bare GetProperties.

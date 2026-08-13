@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -1190,3 +1192,136 @@ class TestPs1ANumeralWithAMultiplierSuffixIsAnIntegerAndNotAFraction(TestPs1):
         self.assertEqual(self._apply('1 | % { 1kb + 1 }', Ps1ForEachPipeline), '1025')
         self.assertEqual(self._apply('1 | % { 1.5 }', Ps1ForEachPipeline), '1.5')
         self.assertEqual(self._apply('1 | % { 1e3 }', Ps1ForEachPipeline), '1000.0')
+
+
+class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
+    """
+    Each answer below is reached only through a body the tool emulates, and each is computed by a
+    rule 5.1 does not follow: a size string that Python's integer syntax reads and .NET's converter
+    throws on, a Double written the way `str` writes it rather than the way .NET writes it, and a
+    name the body never binds, whose value 5.1 takes from the caller and the interpreter reads as
+    `$null`.
+    """
+
+    @unittest.expectedFailure
+    def test_an_array_size_5_1_cannot_convert_is_not_folded_to_a_count(self):
+        for size in ['0b10', '0o10']:
+            source = cleandoc(F"""
+                function f {{
+                  $a = New-Object byte[] '{size}'
+                  $a.Count
+                }}
+                Write-Output (f)
+            """)
+            with self.subTest(size):
+                self.assertEqual(self._deobfuscate(source), source)
+
+    @unittest.expectedFailure
+    def test_a_double_becomes_the_text_5_1_writes_it_as(self):
+        for numeral, text in [
+            ('1E20', '1E+20'),
+            ('0.0000001', '1E-07'),
+            ('1.5E-7', '1.5E-07'),
+        ]:
+            source = cleandoc(F"""
+                function f {{
+                  [string]{numeral}
+                }}
+                Write-Output (f)
+            """)
+            with self.subTest(numeral):
+                self.assertEqual(self._deobfuscate(source), F"Write-Output '{text}'")
+
+    @unittest.expectedFailure
+    def test_an_expression_over_a_name_the_body_does_not_bind_is_not_folded(self):
+        # The caller writes a value no tool can know, so there is no number to fold the sum to;
+        # every answer here is one the reader of `$q` was never entitled to.
+        source = cleandoc("""
+            $q = $env:Temp
+            function f {
+              $q + 1
+            }
+            Write-Output (f)
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
+    """
+    5.1 answers each of these the same way in every session: `New-Object` builds a zero filled
+    array of the type its name spells, a call fills `$args` with what it was given, a .NET regular
+    expression captures a group under a name that `-replace` substitutes and that `-match` leaves
+    behind in `$Matches`, `-split` reads a limit as its second right operand, and a comparison
+    operator written with a `c` or an `i` compares the way that letter names. Each is asked inside
+    a function body, since a body is what the tool emulates.
+    """
+
+    def test_new_object_builds_a_byte_array_whose_elements_start_at_zero(self):
+        source = cleandoc("""
+            function f {
+              $a = New-Object byte[] 1
+              $a[0]
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), '$x = 0')
+
+    def test_the_args_a_call_fills_count_the_arguments_it_was_given(self):
+        source = cleandoc("""
+            function f {
+              ,$args
+            }
+            $t = f 1 2
+            $x = $t.Count
+        """)
+        self.assertEqual(self._deobfuscate(source), '$x = 2')
+
+    @unittest.expectedFailure
+    def test_a_named_group_is_substituted_under_the_name_it_was_captured_with(self):
+        source = cleandoc("""
+            function f {
+              'abc' -replace '(?<x>b)', '[${x}]'
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), "$x = 'a[b]c'")
+
+    @unittest.expectedFailure
+    def test_a_match_leaves_the_group_it_captured_in_the_matches_variable(self):
+        source = cleandoc("""
+            function f {
+              $null = 'abc' -match '(b)'
+              $Matches[1]
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), "$x = 'b'")
+
+    @unittest.expectedFailure
+    def test_a_split_limit_leaves_the_rest_of_the_string_in_the_final_element(self):
+        for tail, expected in [('$a.Count', '$x = 2'), ('$a[1]', "$x = 'b,c'")]:
+            source = cleandoc(F"""
+                function f {{
+                  $a = 'a,b,c' -split ',', 2
+                  {tail}
+                }}
+                $x = f
+            """)
+            with self.subTest(tail):
+                self.assertEqual(self._deobfuscate(source), expected)
+
+    @unittest.expectedFailure
+    def test_a_comparison_with_a_case_prefix_compares_the_way_the_prefix_names(self):
+        for comparison, expected in [
+            ('1 -ceq 1', '$True'),
+            ("'A' -ceq 'a'", '$False'),
+            ("'A' -ieq 'a'", '$True'),
+        ]:
+            source = cleandoc(F"""
+                function f {{
+                  {comparison}
+                }}
+                $x = f
+            """)
+            with self.subTest(comparison):
+                self.assertEqual(self._deobfuscate(source), F'$x = {expected}')
