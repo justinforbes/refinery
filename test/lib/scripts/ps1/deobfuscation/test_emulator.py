@@ -1087,7 +1087,7 @@ class TestPs1WhichSideOfWhichOperatorABooleanMayStandOn(TestPs1):
         cannot enter the list until a capture covers it either.
         """
         operators = list(data._OPERATORS['binary'])
-        self.assertEqual(len(operators), 30)
+        self.assertEqual(len(operators), 63)
         self.assertEqual(
             {operator for operator in operators if _boolean_cell(operator, INT32).always_throws},
             set(_NO_OPERATOR_METHOD_ON_BOOLEAN),
@@ -1104,7 +1104,7 @@ class TestPs1WhichSideOfWhichOperatorABooleanMayStandOn(TestPs1):
         """
         operators = list(data._OPERATORS['binary'])
         types = list(data._OPERATORS['witnesses'])
-        self.assertEqual((len(operators), len(types)), (30, 16))
+        self.assertEqual((len(operators), len(types)), (63, 16))
         disagreeing = {}
         for operator in operators:
             measured = _boolean_cell(operator, INT32).always_throws

@@ -6,6 +6,7 @@ from collections import Counter
 from typing import Iterator, NamedTuple
 
 from refinery.lib.scripts.ps1 import data
+from refinery.lib.scripts.ps1.lexer import _DASH_OPERATORS
 
 BINARY_OPERATORS = [
     '+',
@@ -18,26 +19,59 @@ BINARY_OPERATORS = [
     '-bxor',
     '-shl',
     '-shr',
+    '-and',
+    '-or',
+    '-xor',
     '-eq',
     '-ne',
     '-lt',
     '-le',
     '-gt',
     '-ge',
-    '-xor',
+    '-ceq',
+    '-cne',
+    '-clt',
+    '-cle',
+    '-cgt',
+    '-cge',
+    '-ieq',
+    '-ine',
+    '-ilt',
+    '-ile',
+    '-igt',
+    '-ige',
     '-contains',
     '-notcontains',
     '-in',
     '-notin',
+    '-ccontains',
+    '-cnotcontains',
+    '-cin',
+    '-cnotin',
+    '-icontains',
+    '-inotcontains',
+    '-iin',
+    '-inotin',
     '-like',
     '-notlike',
     '-match',
     '-notmatch',
+    '-clike',
+    '-cnotlike',
+    '-cmatch',
+    '-cnotmatch',
+    '-ilike',
+    '-inotlike',
+    '-imatch',
+    '-inotmatch',
     '-replace',
     '-creplace',
     '-ireplace',
     '-split',
+    '-csplit',
+    '-isplit',
     '-join',
+    '-f',
 ]
 
 UNARY_OPERATORS = [
@@ -227,10 +261,14 @@ class TestPs1OperatorGridCoverage(unittest.TestCase):
         self.assertEqual(list(data._OPERATORS['type_tests']), TYPE_OPERATORS)
         self.assertEqual(list(data._OPERATORS['conversions']), CONVERSION_TARGETS)
 
+    def test_every_operator_the_language_spells_is_measured_in_some_table(self):
+        measured = set(BINARY_OPERATORS) | set(UNARY_OPERATORS) | set(TYPE_OPERATORS)
+        self.assertEqual(sorted(set(_DASH_OPERATORS.values()) - measured), [])
+
     def test_every_binary_cell_is_present(self):
         cells = list(_every_binary_cell())
         self.assertEqual([key for key, outcome in cells if outcome is None], [])
-        self.assertEqual(len(cells), 7680)
+        self.assertEqual(len(cells), 16128)
 
     def test_every_conversion_cell_is_present(self):
         cells = list(_every_conversion_cell())
@@ -325,9 +363,9 @@ class TestPs1OperatorCellIsNotAType(unittest.TestCase):
     def test_the_binary_grid_is_not_one_type_per_cell(self):
         census = Counter(_classify(outcome) for _, outcome in _every_binary_cell())
         self.assertEqual(census, Counter({
-            'type determined' : 5780,  # noqa
-            'value dependent' : 1406,  # noqa
-            'always throws'   : 494,   # noqa
+            'type determined' : 13668,  # noqa
+            'value dependent' : 1838,   # noqa
+            'always throws'   : 622,    # noqa
         }))
 
     def test_the_conversion_grid_is_not_one_type_per_cell(self):
@@ -483,7 +521,7 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
     """
 
     def test_a_cell_always_throws_exactly_where_the_capture_recorded_only_a_throw(self):
-        self.assertEqual(len(RECORDED_CELLS), 8000)
+        self.assertEqual(len(RECORDED_CELLS), 16448)
         self.assertEqual(
             [
                 cell.key for cell in RECORDED_CELLS
@@ -496,15 +534,15 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
         self.assertEqual(
             Counter((cell.outcome.may_throw, cell.outcome.always_throws) for cell in RECORDED_CELLS),
             Counter({
-                (False, False) : 6227,  # noqa
-                (True, False)  : 1259,  # noqa
-                (True, True)   : 514,   # noqa
+                (False, False) : 14115, # noqa
+                (True, False)  : 1691,  # noqa
+                (True, True)   : 642,   # noqa
             }),
         )
 
     def test_having_no_type_and_always_throwing_are_different_questions(self):
         typeless = [cell for cell in RECORDED_CELLS if not cell.outcome.types]
-        self.assertEqual(len(typeless), 537)
+        self.assertEqual(len(typeless), 665)
         self.assertEqual(
             [cell.key for cell in typeless if not cell.outcome.always_throws],
             [cell.key for cell in typeless if set(cell.entries) == {'null'}],
@@ -529,9 +567,9 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
             ),
             Counter({
                 (False, False, True) : 23,    # noqa
-                (False, True, False) : 514,   # noqa
-                (True, False, False) : 6204,  # noqa
-                (True, True, False)  : 1259,  # noqa
+                (False, True, False) : 642,   # noqa
+                (True, False, False) : 14092, # noqa
+                (True, True, False)  : 1691,  # noqa
             }),
         )
 
@@ -551,7 +589,7 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
     def test_both_grids_hold_cells_the_predicate_calls_always_throws(self):
         self.assertEqual(
             Counter(cell.grid for cell in RECORDED_CELLS if cell.outcome.always_throws),
-            Counter({'binary': 494, 'conversion': 20}),
+            Counter({'binary': 622, 'conversion': 20}),
         )
 
     def test_the_casts_that_always_throw_are_a_collection_source_or_a_char_out_of_reach(self):
@@ -597,10 +635,15 @@ class TestPs1OperatorGridUnknowns(unittest.TestCase):
     as the cell producing nothing.
     """
 
-    def test_an_operator_the_grid_does_not_cover_is_none(self):
+    def test_an_operator_no_capture_covers_is_none(self):
+        self.assertIsNone(data.binary_outcome('-nosuchoperator', 'System.Int32', 'System.Int32'))
+
+    def test_an_operator_another_table_measures_is_not_found_among_the_binary_ones(self):
         self.assertIsNone(data.binary_outcome('-bnot', 'System.Int32', 'System.Int32'))
-        self.assertIsNone(data.binary_outcome('-and', 'System.Boolean', 'System.Boolean'))
-        self.assertIsNone(data.binary_outcome('-f', 'System.String', 'System.Int32'))
+        self.assertIsNone(data.binary_outcome('-not', 'System.Boolean', 'System.Boolean'))
+        self.assertIsNone(data.binary_outcome('-is', 'System.Int32', 'System.Int32'))
+        self.assertIsNone(data.binary_outcome('-isnot', 'System.Int32', 'System.Int32'))
+        self.assertIsNone(data.binary_outcome('-as', 'System.Int32', 'System.Int32'))
 
     def test_a_type_name_that_does_not_resolve_is_none(self):
         self.assertIsNone(data.binary_outcome('+', 'NotARealType', 'System.Int32'))

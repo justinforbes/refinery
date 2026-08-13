@@ -2677,7 +2677,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 21)
+        self.assertEqual(len(composed), 22)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -2918,7 +2918,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1148)
+        self.assertEqual(len(compared), 1147)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 

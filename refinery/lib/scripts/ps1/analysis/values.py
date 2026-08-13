@@ -1335,9 +1335,15 @@ def _evaluated_binary(
     type_of_variable: Ps1VariableTyping | None,
 ) -> Ps1Outcome:
     """
-    An operator, which is `apply` over both of its operands. A short-circuiting operator needs no
-    exception here: `-and`, `-or` and `-xor` were never measured, so the grid holds no cell for any
-    of them and `apply` refuses before the question of whether the right operand ran can arise.
+    An operator, which is `apply` over both of its operands.
+
+    A short-circuiting operator is answered here rather than excepted, and the answer is weaker than
+    the host's on purpose. `-and` and `-or` are measured, so `apply` has a cell for them; what no
+    cell can carry is that the right operand may never run at all. So `$false -and (1 / 0)` is
+    reported as a value that may throw where 5.1 answers `$false` and cannot throw. The error is a
+    fold refused and never a wrong answer: a throw is over-claimed rather than dropped, and the
+    right operand it was claimed for is the one whose value is unknown, which refuses the cell
+    anyway. Reading the left operand alone where it settles the result is a fold this does not take.
     """
     left = evaluate(node.left, type_of_variable)
     right = evaluate(node.right, type_of_variable)

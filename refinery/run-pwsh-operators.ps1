@@ -34,6 +34,10 @@ to a temporary directory instead of the data directory.
 The culture to collect under. The grid is expected to be culture-free; collecting twice and
 comparing is what turns that expectation into a measurement, and a cell that moves has to be
 refused or parameterised rather than shipped.
+
+That comparison has now been made. Collected under de-DE and again under en-US at 63 operators,
+not one row of the four tables differs, so the shipped grid is en-US because it was stamped that
+way and not because the number depends on it.
 #>
 [CmdletBinding()]
 param(
@@ -115,18 +119,33 @@ $Witnesses = [ordered] @{
 #: two-element right operand as a pattern and a replacement, so what each produces is a measurement
 #: and not a reading of its name.
 #:
-#: `-and` and `-or` are absent because they short-circuit, so an application of one is not a
-#: function of its operands and there is no cell to record. `-is`, `-isnot` and `-as` are absent
-#: because their right operand is a type rather than a value, which is a different grid.
+#: What decides the list is the parser: every operator a binary expression can carry is measured, so
+#: that a fold is never refused for want of a spelling. The case-explicit family is why that has to
+#: be said out loud. `-creplace` and `-ireplace` were measured and `-ceq` and `-imatch` were not, so
+#: a script writing `-ceq` lost every answer a script writing `-eq` was given.
+#:
+#: `-and` and `-or` are here although they short-circuit. What short-circuits is whether the right
+#: operand is *evaluated*, and that is the caller's question rather than a cell's: the value of an
+#: application is a function of the two values, and both are in hand here before either is applied.
+#:
+#: `-is`, `-isnot` and `-as` are absent because their right operand is a type rather than a value,
+#: which is a different grid.
 $BinaryOperators = @(
     '+', '-', '*', '/', '%',
     '-band', '-bor', '-bxor', '-shl', '-shr',
+    '-and', '-or', '-xor',
     '-eq', '-ne', '-lt', '-le', '-gt', '-ge',
-    '-xor',
+    '-ceq', '-cne', '-clt', '-cle', '-cgt', '-cge',
+    '-ieq', '-ine', '-ilt', '-ile', '-igt', '-ige',
     '-contains', '-notcontains', '-in', '-notin',
+    '-ccontains', '-cnotcontains', '-cin', '-cnotin',
+    '-icontains', '-inotcontains', '-iin', '-inotin',
     '-like', '-notlike', '-match', '-notmatch',
+    '-clike', '-cnotlike', '-cmatch', '-cnotmatch',
+    '-ilike', '-inotlike', '-imatch', '-inotmatch',
     '-replace', '-creplace', '-ireplace',
-    '-split', '-join'
+    '-split', '-csplit', '-isplit', '-join',
+    '-f'
 )
 
 #: The operators that take one operand, which have no cell in a grid over pairs and were left
