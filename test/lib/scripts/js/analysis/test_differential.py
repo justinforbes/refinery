@@ -6276,3 +6276,302 @@ class TestAFileThatOpensWithAHashBangLine(TestBase):
                     'console.log(x, y)',
                 ]
                 self._prints(ending.join(lines), '2 1\n')
+
+
+_SMILE = chr(0x1F600)
+_ACUTE = chr(0xE9)
+
+_SMILE_ESCAPED_SPELLINGS = [
+    R'\uD83D\uDE00',
+    R'\u{1F600}',
+]
+"""
+The two ways to write `U+1F600` without typing it: an escape for each of the code units that spell
+it, and one escape naming the code point.
+"""
+
+_SMILE_SPELLINGS = [_SMILE, *_SMILE_ESCAPED_SPELLINGS]
+"""
+Every way a program may write the one character `U+1F600`, the character itself included. Node
+reports the three literals equal to one another and each of them two code units long.
+"""
+
+_ACUTE_SPELLINGS = [_ACUTE, R'\u00E9', R'\u{E9}']
+"""
+The same three ways of writing `U+00E9`, a character the basic multilingual plane holds, where one
+code unit is the whole character.
+"""
+
+_SMILE_HALVES = R"'\uD83D' + '\uDE00'"
+"""
+An expression joining the two code units of `U+1F600`, each written as a string of its own. Node
+reports the result equal to every spelling of the character.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestHowAStringIsSpelledIsNoPartOfTheStringItDenotes(TestBase):
+    """
+    A JavaScript string is a sequence of UTF-16 code units, and nothing it answers recalls how the
+    source wrote it down: a character typed as itself, written as an escape for each of its two code
+    units, and written as one escape naming its code point are three spellings of one string. Every
+    output below is the one Node prints, and the deobfuscation of each program has to print it too.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(deobfuscated),
+            (output, None),
+            F'deobfuscation changed observable behavior; result was:\n{deobfuscated}',
+        )
+
+    def _compared(self, spellings: list[str], operator: str) -> str:
+        answers = ', '.join(
+            F"'{left}' {operator} '{right}'"
+            for left in spellings
+            for right in spellings
+        )
+        return F'console.log({answers});'
+
+    def _counted_and_indexed(self, spelling: str) -> str:
+        subject = F"'a{spelling}b'"
+        answers = ', '.join([
+            F'{subject}.length',
+            F'{subject}.charCodeAt(1)',
+            F'{subject}.charCodeAt(2)',
+            F"{subject}.indexOf('b')",
+            F'{subject}.slice(1, 3)',
+            F'{subject}.substring(1, 3)',
+            F"{subject}.split('').length",
+        ])
+        return F'console.log({answers});'
+
+    def _code_points_read(self, spelling: str) -> str:
+        subject = F"'a{spelling}b'"
+        answers = ', '.join(
+            F'{subject}.codePointAt({position})' for position in range(4)
+        )
+        return F'console.log({answers});'
+
+    def _searched(self, haystack: str, needle: str) -> str:
+        subject = F"'a{haystack}b'"
+        answers = ', '.join([
+            F"{subject}.indexOf('{needle}')",
+            F"{subject}.includes('{needle}')",
+            F"{subject}.replace('{needle}', 'X')",
+        ])
+        return F'console.log({answers});'
+
+    def _assembled(self, spelling: str) -> str:
+        subject = F"'{spelling}'"
+        answers = ', '.join([
+            F'String.fromCharCode(0xD83D, 0xDE00) === {subject}',
+            F'String.fromCodePoint(0x1F600) === {subject}',
+            F'({_SMILE_HALVES}) === {subject}',
+        ])
+        return F'console.log({answers});'
+
+    def _branched(self, left: str, right: str) -> str:
+        return (
+            F"if ('{left}' === '{right}') {{ console.log('same'); }}"
+            F" else {{ console.log('different'); }}"
+        )
+
+    def test_the_spellings_of_an_astral_character_denote_one_string(self):
+        """
+        Node prints `true` nine times: each spelling of `U+1F600` is equal to each of them, itself
+        included.
+        """
+        self._prints(
+            self._compared(_SMILE_SPELLINGS, '==='),
+            'true true true true true true true true true\n',
+        )
+
+    def test_the_spellings_of_a_basic_plane_character_denote_one_string(self):
+        """
+        Node prints `true` nine times for `U+00E9` as well, which is the same rule read where one
+        code unit is the whole character.
+        """
+        self._prints(
+            self._compared(_ACUTE_SPELLINGS, '==='),
+            'true true true true true true true true true\n',
+        )
+
+    def test_no_spelling_of_an_astral_character_orders_before_another(self):
+        """
+        Node prints `false` nine times for each operator: strings holding the same code units in the
+        same order stand in no order to one another.
+        """
+        for operator in ['<', '>']:
+            with self.subTest(operator=operator):
+                self._prints(
+                    self._compared(_SMILE_SPELLINGS, operator),
+                    'false false false false false false false false false\n',
+                )
+
+    def test_a_comparison_of_two_spellings_selects_the_branch_that_runs(self):
+        """
+        Node prints `same` for every pairing. The other branch is never reached, so a deobfuscation
+        that keeps it has deleted the code the program runs and written in the code it does not.
+        """
+        for left in _SMILE_SPELLINGS:
+            for right in _SMILE_SPELLINGS:
+                with self.subTest(left=left, right=right):
+                    self._prints(self._branched(left, right), 'same\n')
+
+    def test_a_search_finds_the_character_however_the_needle_is_spelled(self):
+        """
+        Node prints `1 true aXb` for every pairing: the character stands at code unit 1 of the
+        string, whichever of the two was written which way.
+        """
+        for haystack in _SMILE_SPELLINGS:
+            for needle in _SMILE_SPELLINGS:
+                with self.subTest(haystack=haystack, needle=needle):
+                    self._prints(self._searched(haystack, needle), '1 true aXb\n')
+
+    def test_an_astral_character_assembled_at_run_time_equals_every_spelling_of_it(self):
+        """
+        Node prints `true` three times for each spelling: a string is the code units it holds, so
+        one assembled from those units equals one the source wrote out.
+        """
+        for spelling in _SMILE_SPELLINGS:
+            with self.subTest(spelling=spelling):
+                self._prints(self._assembled(spelling), 'true true true\n')
+
+    def test_an_astral_character_written_with_escapes_is_counted_and_indexed_in_code_units(self):
+        """
+        Node prints `4 55357 56832 3`, the character twice, and `4`: it occupies units 1 and 2, so
+        the string is four units long, `b` begins at unit 3, and either cut from 1 to 3 is the
+        character itself.
+        """
+        for spelling in _SMILE_ESCAPED_SPELLINGS:
+            with self.subTest(spelling=spelling):
+                self._prints(
+                    self._counted_and_indexed(spelling),
+                    F'4 55357 56832 3 {_SMILE} {_SMILE} 4\n',
+                )
+
+    def test_a_basic_plane_character_is_counted_and_indexed_the_same_in_every_spelling(self):
+        """
+        Node prints `3 233 98 2`, the character followed by `b` twice, and `3`: one code unit is the
+        whole character here, so every count and every offset falls one short of the astral string.
+        """
+        for spelling in _ACUTE_SPELLINGS:
+            with self.subTest(spelling=spelling):
+                self._prints(
+                    self._counted_and_indexed(spelling),
+                    F'3 233 98 2 {_ACUTE}b {_ACUTE}b 3\n',
+                )
+
+    def test_the_character_beginning_at_a_position_is_read_from_the_units_standing_there(self):
+        """
+        Node prints `97 128512 56832 98` for every spelling of the astral string: the position
+        holding the high surrogate answers with the whole character, and the one holding the low
+        surrogate answers with that surrogate alone. For `U+00E9` it prints `97 233 98 undefined`,
+        where the fourth position is past the end of a string one unit shorter.
+        """
+        for spelling in _SMILE_SPELLINGS:
+            with self.subTest(spelling=spelling):
+                self._prints(self._code_points_read(spelling), '97 128512 56832 98\n')
+        for spelling in _ACUTE_SPELLINGS:
+            with self.subTest(spelling=spelling):
+                self._prints(self._code_points_read(spelling), '97 233 98 undefined\n')
+
+
+A_PROGRAM_THAT_REPORTS_ITS_MODE = (
+    'function probe() { return this; } console.log(probe() === undefined);'
+)
+"""
+A program that says which mode it runs in. A plain call passes no receiver, so `this` in the body is
+the global object where the code is sloppy and `undefined` where it is strict: Node prints `false`
+for the one and `true` for the other.
+"""
+
+SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE = [
+    "('use strict');",
+    "'use ' + 'strict';",
+    "'use' + ' ' + 'strict';",
+    "['use', 'strict'].join(' ');",
+    "'USE STRICT'.toLowerCase();",
+]
+"""
+Statements that denote the same text and are not directives either: a bracket around the literal, an
+operator beside it, or a call that computes it each leaves a statement that merely evaluates to the
+text. Node runs every program opening with one of these as sloppy code too, and what the tool makes
+of them is pinned in `test.lib.scripts.js.test_unfixed_defects`.
+"""
+
+_SPELLINGS_THAT_ONLY_DENOTE_THE_TEXT_OF_A_DIRECTIVE = [
+    R"'use\u0020strict';",
+]
+"""
+Statements that denote the text `use strict` and are not directives. A directive is a string literal
+written plainly, so an escape inside it leaves a statement that merely evaluates to the same text.
+Node runs every program opening with one of these as sloppy code.
+"""
+
+
+def a_script_opening_with(head: str) -> str:
+    return F'{head} {A_PROGRAM_THAT_REPORTS_ITS_MODE}'
+
+
+def a_function_body_opening_with(head: str) -> str:
+    return (
+        F'function probe() {{ {head} return this; }}'
+        ' console.log(probe() === undefined);'
+    )
+
+
+def a_file_holding_an_octal_literal_opening_with(head: str) -> str:
+    return F'{head} console.log(010);'
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestWhetherAStatementIsADirectiveIsDecidedByHowItIsWritten(TestBase):
+    """
+    The first statement of a script, and the first of a function body, is a directive when it is a
+    string literal and only then: what the statement denotes decides nothing and how it was written
+    decides everything. The tool rewrites a statement as it simplifies it, and a rewrite arriving at
+    the plain spelling turns sloppy code strict, silently and for the whole of the file or body the
+    statement stands at the top of.
+    """
+
+    def _prints(self, source: str, output: str):
+        self.assertEqual(behavior(source), (output, None))
+        deobfuscated = deobfuscate_source(source)
+        self.assertEqual(
+            behavior(deobfuscated),
+            (output, None),
+            F'deobfuscation changed observable behavior; result was:{chr(10)}{deobfuscated}',
+        )
+
+    def test_a_plainly_written_string_is_the_directive_and_stays_one(self):
+        """
+        Node prints `true` for both, since the file and the function body each open with the
+        directive. A rewrite that dropped it would leave the code sloppy.
+        """
+        self._prints(a_script_opening_with("'use strict';"), 'true' + chr(10))
+        self._prints(a_function_body_opening_with("'use strict';"), 'true' + chr(10))
+
+    def test_a_statement_that_only_denotes_the_text_leaves_the_script_sloppy(self):
+        for head in _SPELLINGS_THAT_ONLY_DENOTE_THE_TEXT_OF_A_DIRECTIVE:
+            with self.subTest(head=head):
+                self._prints(a_script_opening_with(head), 'false' + chr(10))
+
+    def test_a_statement_that_only_denotes_the_text_leaves_the_function_body_sloppy(self):
+        for head in _SPELLINGS_THAT_ONLY_DENOTE_THE_TEXT_OF_A_DIRECTIVE:
+            with self.subTest(head=head):
+                self._prints(a_function_body_opening_with(head), 'false' + chr(10))
+
+    def test_a_file_that_holds_an_octal_literal_still_parses(self):
+        """
+        Node prints `8` for each of these, an octal literal being a number in sloppy code and one of
+        the spellings strict mode forbids outright. A directive that appears where none was written
+        costs the file its ability to parse at all, so what comes back is not a program.
+        """
+        for head in _SPELLINGS_THAT_ONLY_DENOTE_THE_TEXT_OF_A_DIRECTIVE:
+            with self.subTest(head=head):
+                self._prints(
+                    a_file_holding_an_octal_literal_opening_with(head), '8' + chr(10))

@@ -91,6 +91,17 @@ def is_use_strict(node: JsStringLiteral) -> bool:
     return node.terminated and node.body == 'use strict'
 
 
+def spelling_states(body: str) -> tuple[bool, bool]:
+    """
+    What a literal's spelling states, as against what it denotes: whether it is the Use Strict
+    Directive, and whether it carries an escape strict code rejects. Both are facts about how the
+    literal was written and about nothing else, so a pass that re-spells one may do so only where
+    neither answer moves — re-spelling `'use\\x20strict'` as `'use strict'` writes a directive the
+    source never wrote, and every line behind it becomes strict code.
+    """
+    return body == 'use strict', has_legacy_numeric_escape(body)
+
+
 _STRICT_RESERVED = frozenset({
     'implements',
     'interface',

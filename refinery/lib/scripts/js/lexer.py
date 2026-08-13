@@ -31,7 +31,6 @@ _OCTAL = frozenset('01234567')
 _DECIMAL = frozenset('0123456789')
 
 _WHITESPACE = frozenset(WHITESPACE)
-_SURROGATE_PAIR = re.compile('[\ud800-\udbff][\udc00-\udfff]')
 _LINE_TERMINATOR = re.compile(F'[{re.escape(LINE_TERMINATORS)}]')
 """
 The two productions `refinery.lib.scripts.js.token` spells, in the shapes this scan reads them. The
@@ -57,6 +56,28 @@ the same name, which is exactly what makes them worth writing in an obfuscated f
 """
 
 
+_ABOVE_THE_BASIC_PLANE = re.compile('[\U00010000-\U0010FFFF]')
+
+
+def _as_code_units(text: str) -> str:
+    return _ABOVE_THE_BASIC_PLANE.sub(lambda m: code_units(ord(m.group())), text)
+
+
+def code_units(value: int) -> str:
+    """
+    The UTF-16 code units a code point is written with, held as the characters Python spells those
+    units with. A JavaScript string is a sequence of code units and a Python string a sequence of
+    code points, so a value above the basic plane is two characters here and not one: `\\u{1F600}`
+    and `\\uD83D\\uDE00` are one string written two ways, and it is the pair of surrogates they
+    share. Naming the code point instead would make them two strings, and would answer one short
+    for every question a program asks about the length of that string or the units inside it.
+    """
+    if value <= 0xFFFF:
+        return chr(value)
+    value -= 0x10000
+    return chr(0xD800 + (value >> 10)) + chr(0xDC00 + (value & 0x3FF))
+
+
 def _begins_unicode_escape(src: str, pos: int) -> bool:
     return src[pos:pos + 2] == '\\u'
 
@@ -74,29 +95,43 @@ def _at_identifier_start(src: str, pos: int) -> bool:
     return c.isalpha() or c in _IDENTIFIER_PUNCTUATION or _begins_unicode_escape(src, pos)
 
 
-def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int]:
+def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int, bool]:
+    """
+    What the escape opened at *pos* denotes, where it ends, and whether it is an escape the grammar
+    has. The third answer is what the two literals disagree about: a string keeps the escapes Annex
+    B holds open for sloppy code and reads anything else as the character behind the backslash,
+    while a template admits neither, so a run written with one denotes nothing at all.
+
+    Refusal is reported here rather than scanned for again, because the classification is this
+    decode: which spellings of `\\x` and `\\u` are malformed is a fact about the escape grammar, and
+    a second reader of the same text would be a second statement of it.
+    """
     if pos >= length:
-        return '', pos
+        return '', pos, False
     c = src[pos]
     pos += 1
     mapped = _ESCAPE_MAP.get(c)
     if mapped is not None:
-        return mapped, pos
+        return mapped, pos, True
     if c in _OCTAL:
         value = int(c, 8)
         remaining = 2 if c in '0123' else 1
+        legacy = c != '0'
         while remaining > 0 and pos < length and src[pos] in _OCTAL:
             value = value * 8 + int(src[pos], 8)
             pos += 1
             remaining -= 1
-        return chr(value), pos
+            legacy = True
+        if not legacy and pos < length and src[pos] in _DECIMAL:
+            legacy = True
+        return chr(value), pos, not legacy
     if c in '89':
-        return c, pos
-    if c == 'x' and pos + 1 < length:
+        return c, pos, False
+    if c == 'x':
         hexstr = src[pos:pos + 2]
         if len(hexstr) == 2 and _HEX.issuperset(hexstr):
-            return chr(int(hexstr, 16)), pos + 2
-        return 'x', pos
+            return chr(int(hexstr, 16)), pos + 2, True
+        return 'x', pos, False
     if c == 'u':
         if pos < length and src[pos] == '{':
             end = pos + 1
@@ -104,17 +139,19 @@ def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int]:
                 end += 1
             if end > pos + 1 and end < length and src[end] == '}':
                 value = int(src[pos + 1:end], 16)
-                return chr(value) if value <= _MAX_CODE_POINT else 'u', end + 1
-        elif pos + 3 < length:
+                if value <= _MAX_CODE_POINT:
+                    return code_units(value), end + 1, True
+                return 'u', end + 1, False
+        else:
             hexstr = src[pos:pos + 4]
             if len(hexstr) == 4 and _HEX.issuperset(hexstr):
-                return chr(int(hexstr, 16)), pos + 4
-        return 'u', pos
+                return chr(int(hexstr, 16)), pos + 4, True
+        return 'u', pos, False
     if c in LINE_TERMINATORS:
         if c == '\r' and pos < length and src[pos] == '\n':
             pos += 1
-        return '', pos
-    return c, pos
+        return '', pos, True
+    return c, pos, True
 
 
 _FOUR_CHAR_OPS: dict[str, JsTokenKind] = {
@@ -288,7 +325,7 @@ class JsLexer:
 
     def _read_string_escape(self) -> str:
         self.pos += 1
-        result, self.pos = _decode_one_escape(
+        result, self.pos, _ = _decode_one_escape(
             self.source, self.pos, len(self.source))
         return result
 
@@ -593,27 +630,23 @@ class JsLexer:
             yield JsToken(JsTokenKind.ERROR, c, start)
 
 
-def _combine_surrogate_pair(match: re.Match[str]) -> str:
-    high, low = match.group()
-    return chr(0x10000 + ((ord(high) - 0xD800) << 10) + (ord(low) - 0xDC00))
-
-
-def decode_js_string_body(text: str) -> str:
+def _decode_body(text: str) -> tuple[str, bool]:
     """
-    The text a literal body denotes, as a sequence of code points. A JavaScript string is a
-    sequence of UTF-16 code units, and the two part ways above the basic plane: a value is held
-    here as the code points those units name, which is why an adjacent surrogate pair is combined
-    into the one character it spells. Without that, `\\uD83D\\uDE00` and `\\u{1F600}` — one string
-    written two ways — would be two different values, and nothing downstream could see they are
-    the same.
+    The text a literal body denotes, and whether every escape in it is one the grammar has.
 
-    A lone surrogate is left standing, because it names no code point and JavaScript admits one in
-    a string. Where a rule needs the units rather than the points, it asks
-    `refinery.lib.scripts.js.deobfuscation.helpers.utf16_code_units`, which is the inverse.
+    The text is the code units the string is made of. A character above the basic plane is two of
+    them however it was written — as itself, as one `\\u{...}` escape, or as the two `\\uXXXX`
+    escapes naming its surrogates — so the three spellings denote one string here as they do in an
+    engine, and a program asking how long that string is, what stands at either half of it, or
+    whether it equals a string written the other way, is answered with what it would be answered.
+
+    A lone surrogate is left standing, because JavaScript admits one in a string and no pairing rule
+    may invent the partner it lacks.
     """
     if '\\' not in text:
-        return text
+        return _as_code_units(text), True
     parts: list[str] = []
+    valid = True
     i = 0
     length = len(text)
     while i < length:
@@ -622,13 +655,20 @@ def decode_js_string_body(text: str) -> str:
             parts.append(c)
             i += 1
             continue
-        decoded, i = _decode_one_escape(text, i + 1, length)
+        decoded, i, ok = _decode_one_escape(text, i + 1, length)
+        valid = valid and ok
         if decoded:
             parts.append(decoded)
-    result = ''.join(parts)
-    if _SURROGATE_PAIR.search(result):
-        return _SURROGATE_PAIR.sub(_combine_surrogate_pair, result)
-    return result
+    return _as_code_units(''.join(parts)), valid
+
+
+def decode_js_string_body(text: str) -> str:
+    """
+    The text a string literal body denotes. Every spelling denotes something here, because the one
+    a string has no rule for is the character behind the backslash; the reading a template gives
+    the same text is `decode_js_template_body`.
+    """
+    return _decode_body(text)[0]
 
 
 def has_legacy_numeric_escape(text: str) -> bool:
@@ -638,9 +678,9 @@ def has_legacy_numeric_escape(text: str) -> bool:
     `\\0` is the NUL escape and is none of these, and a backslash that escapes a backslash opens no
     escape at all, so the scan steps over both rather than counting them.
 
-    Two rules read this. Strict code rejects such an escape, and a template excludes it from the
-    grammar outright — which is a stronger statement, because a run that carries one denotes
-    nothing at all.
+    Strict code rejects such an escape, which is what reads this. A template refuses it too, but
+    refuses more besides, so that rule asks the decode rather than this scan: an escape naming no
+    character is a syntax error in either mode and no strict violation at all.
     """
     i = 0
     n = len(text)
@@ -671,11 +711,13 @@ def decode_js_template_body(text: str) -> str | None:
     a continuation in either file.
 
     The escapes a template admits are those of a string minus the ones Annex B keeps alive for
-    sloppy code. A template carrying one of those is not a template at all: untagged it is a syntax
-    error, and tagged it is a run whose cooked value the language states is `undefined`. There is
-    no text it denotes, and answering with the text the same spelling would denote in a string is
-    how a script no engine will run gets a value computed for it anyway.
+    sloppy code, and minus every spelling of `\\x` and `\\u` that names no character. A template
+    carrying one of those is not a template at all: untagged it is a syntax error, and tagged it is
+    a run whose cooked value the language states is `undefined`. There is no text it denotes, and
+    answering with the text the same spelling would denote in a string is how a script no engine
+    will run gets a value computed for it anyway.
     """
-    if has_legacy_numeric_escape(text):
-        return None
-    return decode_js_string_body(text.replace('\r\n', '\n').replace('\r', '\n'))
+    if '\r' in text:
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+    decoded, valid = _decode_body(text)
+    return decoded if valid else None

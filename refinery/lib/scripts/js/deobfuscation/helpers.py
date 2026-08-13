@@ -51,6 +51,7 @@ from refinery.lib.scripts.js.analysis.model import (
     is_use_position,
     reference_role,
 )
+from refinery.lib.scripts.js.lexer import code_units
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
@@ -248,13 +249,7 @@ def utf16_code_units(text: str) -> list[str]:
     """
     units: list[str] = []
     for char in text:
-        code = ord(char)
-        if code > 0xFFFF:
-            offset = code - 0x10000
-            units.append(chr(0xD800 + (offset >> 10)))
-            units.append(chr(0xDC00 + (offset & 0x3FF)))
-        else:
-            units.append(char)
+        units.extend(code_units(ord(char)))
     return units
 
 
@@ -552,40 +547,79 @@ def eval_binary_op(op: str, left: float, right: float) -> float | bool | None:
         return None
 
 
+_SURROGATE_PAIR = re.compile('[\ud800-\udbff][\udc00-\udfff]')
+
+
+def _escape_residue(m: re.Match[str]):
+    cp = ord(m.group())
+    if cp > 0xFF:
+        return F'\\u{cp:04X}'
+    return F'\\x{cp:02x}'
+
+
+def _combine_surrogate_pair(m: re.Match[str]) -> str:
+    high, low = m.group()
+    return chr(0x10000 + ((ord(high) - 0xD800) << 10) + (ord(low) - 0xDC00))
+
+
+def spell_astral_characters(value: str) -> str:
+    """
+    Write the pairs of code units that name a character above the basic plane as that character. A
+    value is held as the code units a JavaScript string is made of, which is what a program asking
+    about its length or its halves has to be answered from; but a file is written in characters, so
+    printing the units back would spell an emoji as two escapes nobody wrote.
+
+    A surrogate standing alone is left alone. It names no character, so there is nothing to write it
+    as, and an escape is the only spelling a file has for it.
+    """
+    return _SURROGATE_PAIR.sub(_combine_surrogate_pair, value)
+
+
 def escape_js_string(value: str, quote: str = "'") -> str:
     """
     Escape a string for use in a JavaScript string literal. Returns the escaped body without
     surrounding quotes. Backslash is escaped first to avoid double-escaping. Control characters
-    not covered by named escapes are emitted as `\\xHH`; surrogates as `\\uXXXX`.
+    not covered by named escapes are emitted as `\\xHH`; a surrogate that names no character on its
+    own as `\\uXXXX`, and a pair of them as the character they name.
     """
-    def _residue(m: re.Match[str]):
-        cp = ord(m.group())
-        if cp > 0xFF:
-            return F'\\u{cp:04X}'
-        return F'\\x{cp:02x}'
+    value = spell_astral_characters(value)
     value = value.replace('\\', r'\\')
     value = value.replace('\n', r'\n')
     value = value.replace('\r', r'\r')
     value = value.replace('\t', r'\t')
     value = value.replace('\0', r'\0')
     value = value.replace(quote, F'\\{quote}')
-    return re.sub(r'[\x01-\x1f\ud800-\udfff]', _residue, value)
+    return re.sub(r'[\x01-\x1f\ud800-\udfff]', _escape_residue, value)
 
 
 def escape_js_template_text(value: str) -> str:
     """
     Escape a string so that it spells itself inside a template literal. Three characters end a run
     of template text rather than standing in it — the backtick that closes the literal, the `${`
-    that opens a hole, and the backslash that would eat what follows it — and every other character
-    stands as itself, including the line terminators a template is allowed to span.
+    that opens a hole, and the backslash that would eat what follows it.
+
+    A line feed stands as itself, because a template is the one literal that may span lines. A
+    carriage return does not: every line terminator sequence a template is written with denotes a
+    line feed, so a return written into the text would come back as one and the string would not
+    be the string. A lone surrogate has to be spelled too, for the same reason a string spells one
+    — there is no encoding of the file that carries it.
     """
+    value = spell_astral_characters(value)
     value = value.replace('\\', r'\\')
+    value = value.replace('\r', r'\r')
     value = value.replace('`', r'\`')
-    return value.replace('${', r'\${')
+    value = value.replace('${', r'\${')
+    return re.sub(r'[\x00-\x08\x0b-\x1f\ud800-\udfff]', _escape_residue, value)
 
 
 def string_value(node: Expression | None) -> str | None:
-    if isinstance(node, JsStringLiteral):
+    """
+    The text a literal denotes, where it is a literal that denotes one. A literal the source never
+    closed is not, and answering with the text it would have denoted is how a fold repairs it: the
+    text goes into a fresh literal that carries the closing quote nobody wrote, and a file that no
+    engine reads comes back as a program that runs.
+    """
+    if isinstance(node, JsStringLiteral) and node.terminated:
         return node.value
     return None
 
@@ -711,7 +745,7 @@ def extract_literal_value(node: Node) -> tuple[bool, LiteralValue]:
     and this must stay paired with `value_to_node`, its declared inverse.
     """
     if isinstance(node, JsStringLiteral):
-        return True, node.value
+        return (True, node.value) if node.terminated else (False, None)
     if isinstance(node, JsNumericLiteral):
         return True, node.value
     if isinstance(node, JsBooleanLiteral):
@@ -807,7 +841,9 @@ def is_literal(node: Node) -> bool:
     `extract_literal_value` reads them: they are what `undefined` and `NaN` have instead of a
     literal, and an operator applied to literals is as constant as a literal is.
     """
-    if isinstance(node, (JsStringLiteral, JsNumericLiteral, JsBooleanLiteral, JsNullLiteral)):
+    if isinstance(node, JsStringLiteral):
+        return node.terminated
+    if isinstance(node, (JsNumericLiteral, JsBooleanLiteral, JsNullLiteral)):
         return True
     if isinstance(node, JsUnaryExpression):
         if node.operator == 'void' and isinstance(node.operand, VOID_LITERAL_OPERANDS):

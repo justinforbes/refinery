@@ -5,6 +5,27 @@ import unittest
 
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
+from refinery.units.scripting.js import js
+
+_ASTRAL = chr(0x1F600)
+
+_SPANNING = F"'a{_ASTRAL}b'"
+"""
+A JavaScript string literal whose middle character is above the basic multilingual plane. It is
+four code units long and JavaScript indexes it as `a`, a high surrogate, a low surrogate, `b`,
+while Python sees three code points, so every offset past the middle character differs by one.
+"""
+
+
+def _folded_value(expression: str) -> str:
+    """
+    The text `refinery.js` prints for *expression* once it has folded it. The expression is placed
+    in the argument of a `console.log` call, which survives because it is a side effect, so nothing
+    but the fold decides what comes back.
+    """
+    printed = F'console.log({expression});'.encode('utf8') | js() | str
+    return printed.removeprefix('console.log(').removesuffix(');')
+
 
 class TestBasicSimplifications(TestJsDeobfuscator):
 
@@ -1196,3 +1217,147 @@ class TestGlobalValueNameOperands(TestJsDeobfuscator):
         self.assertEqual("f(x + 'aundefined');", self._simplify("f(x + 'a' + undefined);"))
         self.assertEqual("f(x + 'aNaN');", self._simplify("f(x + 'a' + NaN);"))
         self.assertEqual("f(x + 'aInfinity');", self._simplify("f(x + 'a' + Infinity);"))
+
+
+class TestStringMethodsIndexInUtf16CodeUnits(TestJsDeobfuscator):
+    """
+    A `String.prototype` method that takes or returns an index or a length counts in UTF-16 code
+    units, so over `_SPANNING` every offset past the middle character is one greater than the count
+    of Python code points. Each call here is folded, so the offset the method read is written into
+    the deobfuscated file as a constant, where nothing recalls what the source said.
+    """
+
+    def test_char_at_returns_one_code_unit(self):
+        """
+        Node answers with the high surrogate 0xD83D at index 1 and the low surrogate 0xDE00 at
+        index 2. `charAt` names a single code unit, so it can never answer with a whole character
+        that spans two of them, and it can never run out of string before index 3.
+        """
+        self.assertEqual(
+            (
+                _folded_value(F'{_SPANNING}.charAt(1)'),
+                _folded_value(F'{_SPANNING}.charAt(2)'),
+            ),
+            (R"'\uD83D'", R"'\uDE00'"),
+        )
+
+    def test_at_indexes_code_units_from_either_end(self):
+        """
+        Node answers with the high surrogate 0xD83D at index 1 and the low surrogate 0xDE00 at
+        index -2. A negative index counts back from a length that is also measured in code units,
+        so the two ends of the string have to agree about where the middle character sits.
+        """
+        self.assertEqual(
+            (
+                _folded_value(F'{_SPANNING}.at(1)'),
+                _folded_value(F'{_SPANNING}.at(-2)'),
+            ),
+            (R"'\uD83D'", R"'\uDE00'"),
+        )
+
+    def test_substring_cuts_between_code_units(self):
+        """
+        Node answers with the high surrogate 0xD83D for `substring(1, 2)` and with the low
+        surrogate 0xDE00 followed by `b` for `substring(2)`.
+        """
+        self.assertEqual(
+            (
+                _folded_value(F'{_SPANNING}.substring(1, 2)'),
+                _folded_value(F'{_SPANNING}.substring(2)'),
+            ),
+            (R"'\uD83D'", R"'\uDE00b'"),
+        )
+
+    def test_index_of_reports_a_code_unit_offset(self):
+        """
+        Node answers `3` for both, since `b` follows two surrogates. The returned offset is what a
+        caller feeds back into an index, so reporting it one short misplaces every later cut, and
+        searching from position 3 must still find the character that sits there.
+        """
+        self.assertEqual(
+            (
+                _folded_value(F"{_SPANNING}.indexOf('b')"),
+                _folded_value(F"{_SPANNING}.indexOf('b', 3)"),
+            ),
+            ('3', '3'),
+        )
+
+    def test_last_index_of_reports_a_code_unit_offset(self):
+        """
+        Node answers `3`, the same offset the forward search reports for the only `b` in the
+        string.
+        """
+        self.assertEqual(_folded_value(F"{_SPANNING}.lastIndexOf('b')"), '3')
+
+    def test_includes_takes_a_code_unit_position(self):
+        """
+        Node answers `true`: the search starts at code unit 3, which is where `b` is. A position
+        measured in code points starts the search past the end of the string and finds nothing.
+        """
+        self.assertEqual(_folded_value(F"{_SPANNING}.includes('b', 3)"), 'true')
+
+    def test_starts_with_takes_a_code_unit_position(self):
+        """
+        Node answers `true`, because the string does start with `b` when read from code unit 3.
+        """
+        self.assertEqual(_folded_value(F"{_SPANNING}.startsWith('b', 3)"), 'true')
+
+    def test_ends_with_takes_a_code_unit_end_position(self):
+        """
+        Node answers `true`: the first three code units end with the two that spell the astral
+        character. An end position read as a code point cuts one unit short of it.
+        """
+        self.assertEqual(
+            _folded_value(F"{_SPANNING}.endsWith('{_ASTRAL}', 3)"),
+            'true',
+        )
+
+    def test_slice_cuts_between_code_units(self):
+        """
+        Node answers with the astral character for `slice(1, 3)` and with the low surrogate 0xDE00
+        followed by `b` for both `slice(2)` and `slice(-2)`. A cut may fall between the two halves
+        of a character, and a slice that starts on the second half begins with a lone surrogate.
+        """
+        self.assertEqual(
+            (
+                _folded_value(F'{_SPANNING}.slice(1, 3)'),
+                _folded_value(F'{_SPANNING}.slice(2)'),
+                _folded_value(F'{_SPANNING}.slice(-2)'),
+            ),
+            (F"'{_ASTRAL}'", R"'\uDE00b'", R"'\uDE00b'"),
+        )
+
+    def test_substr_counts_its_length_in_code_units(self):
+        """
+        Node answers with the astral character for `substr(1, 2)` and with the low surrogate 0xDE00
+        for `substr(2, 1)`. The second argument is a count of code units and not of characters, so
+        two of them are what it takes to name the middle character.
+        """
+        self.assertEqual(
+            (
+                _folded_value(F'{_SPANNING}.substr(1, 2)'),
+                _folded_value(F'{_SPANNING}.substr(2, 1)'),
+            ),
+            (F"'{_ASTRAL}'", R"'\uDE00'"),
+        )
+
+    def test_pad_start_measures_the_target_length_in_code_units(self):
+        """
+        Node answers with two dashes before the string. The target length is compared against a
+        length of four, so exactly two units are wanted; counting the astral character once asks
+        for one dash too many and changes what the padded string says.
+        """
+        self.assertEqual(
+            _folded_value(F"{_SPANNING}.padStart(6, '-')"),
+            F"'--a{_ASTRAL}b'",
+        )
+
+    def test_pad_end_measures_the_target_length_in_code_units(self):
+        """
+        Node answers with two dashes after the string, for the reason `padStart` gets two before
+        it.
+        """
+        self.assertEqual(
+            _folded_value(F"{_SPANNING}.padEnd(6, '-')"),
+            F"'a{_ASTRAL}b--'",
+        )

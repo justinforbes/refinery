@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from refinery.lib.scripts import Node, Synthesizer
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     escape_js_string,
@@ -83,9 +85,10 @@ from refinery.lib.scripts.js.model import (
 )
 from refinery.lib.scripts.js.numbers import exact_integer, is_negative_zero
 from refinery.lib.scripts.js.precedence import (
+    for_in_target_needs_parens,
+    for_initializer_needs_parens,
+    for_of_target_needs_parens,
     needs_parens,
-    opens_a_let_declaration,
-    opens_with_let,
     statement_needs_parens,
 )
 
@@ -294,8 +297,18 @@ class JsSynthesizer(Synthesizer):
         self._write(node.raw or escape_js_template_text(node.value or ''))
 
     def _emit_array_like(self, node):
+        """
+        An array literal, or the pattern that matches one. A hole is an element that was left out,
+        and what spells it is the comma that would have followed it, so a hole at the end needs a
+        comma of its own: the separators between the elements spell one fewer than there are, and
+        `[1, 2, ,]` written back as `[1, 2, ]` is an array of two.
+        """
         self._write('[')
-        if self._byte_grid(node.elements) or self._comma_separated(node.elements, wrap_sequences=True):
+        elements = node.elements
+        wrapped = self._byte_grid(elements) or self._comma_separated(elements, wrap_sequences=True)
+        if elements and elements[-1] is None:
+            self._write(',')
+        if wrapped:
             self._newline()
         self._write(']')
 
@@ -689,36 +702,49 @@ class JsSynthesizer(Synthesizer):
             self.visit(node.test)
         self._write(');')
 
-    def _emit_for_binding(self, node: Statement | Node, refuses_a_bare_let: bool = False):
+    def _emit_bracketed_if(self, node: Node | None, refuses: Callable[[Node], bool]):
+        if node is None:
+            return
+        if not refuses(node):
+            self.visit(node)
+            return
+        self._write('(')
+        self.visit(node)
+        self._write(')')
+
+    def _emit_for_binding(self, node: Statement | Node, refuses: Callable[[Node], bool]):
         """
-        The binding or the assignment target in a loop head. A declaration spells its own keyword;
-        anything else is an expression, and one opening with `let` has to be bracketed here for the
-        reason it has to be bracketed as a statement. A `for ... of` head refuses the bare name,
-        where a `for ... in` head and a `for` initializer refuse only the `let [` that opens a
-        declaration.
+        The binding or the assignment target in a loop head, bracketed where the head it stands in
+        refuses what it says. Each of the three heads refuses something the others do not, so which
+        rule applies is what the caller names; adding the next one is a rule beside them rather than
+        another answer inside this.
+
+        A declaration spells its own keyword and cannot be bracketed, so the rule reaches the value
+        each declarator is given instead — which is where a `for` initializer can still read an
+        `in` the head was not offering it.
 
         Nothing else is bracketed. The other shape a statement may not open with is an object
         literal, and a loop head is where one is a destructuring target: bracketing `for ({a} of x)`
         would make the target invalid rather than keep it whole.
         """
-        if isinstance(node, JsVariableDeclaration):
-            self._write(F'{node.kind.value} ')
-            for i, decl in enumerate(node.declarations):
-                if i > 0:
-                    self._write(', ')
+        if not isinstance(node, JsVariableDeclaration):
+            return self._emit_bracketed_if(node, refuses)
+        self._write(F'{node.kind.value} ')
+        for i, decl in enumerate(node.declarations):
+            if i > 0:
+                self._write(', ')
+            if decl.init is None or not refuses(decl.init):
                 self.visit(decl)
-            return
-        if opens_with_let(node) if refuses_a_bare_let else opens_a_let_declaration(node):
-            self._write('(')
-            self.visit(node)
-            self._write(')')
-        else:
-            self.visit(node)
+                continue
+            if decl.id:
+                self.visit(decl.id)
+            self._write(' = ')
+            self._emit_bracketed_if(decl.init, refuses)
 
     def visit_JsForStatement(self, node: JsForStatement):
         self._write('for (')
         if node.init:
-            self._emit_for_binding(node.init)
+            self._emit_for_binding(node.init, for_initializer_needs_parens)
         self._write('; ')
         if node.test:
             self.visit(node.test)
@@ -732,7 +758,7 @@ class JsSynthesizer(Synthesizer):
     def visit_JsForInStatement(self, node: JsForInStatement):
         self._write('for (')
         if node.left:
-            self._emit_for_binding(node.left)
+            self._emit_for_binding(node.left, for_in_target_needs_parens)
         self._write(' in ')
         if node.right:
             self.visit(node.right)
@@ -746,10 +772,10 @@ class JsSynthesizer(Synthesizer):
             self._write('await ')
         self._write('(')
         if node.left:
-            self._emit_for_binding(node.left, refuses_a_bare_let=True)
+            self._emit_for_binding(node.left, for_of_target_needs_parens)
         self._write(' of ')
         if node.right:
-            self.visit(node.right)
+            self._emit_element(node.right, True)
         self._write(') ')
         if node.body:
             self._emit_statement_body(node.body)

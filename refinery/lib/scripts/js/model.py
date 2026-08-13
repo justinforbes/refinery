@@ -511,18 +511,18 @@ class JsClassDeclaration(Statement):
 
 @dataclass(repr=False, eq=False)
 class JsImportSpecifier(Node):
-    imported: JsIdentifier | None = None
-    local: JsIdentifier | None = None
+    imported: Expression | None = None
+    local: Expression | None = None
 
 
 @dataclass(repr=False, eq=False)
 class JsImportDefaultSpecifier(Node):
-    local: JsIdentifier | None = None
+    local: Expression | None = None
 
 
 @dataclass(repr=False, eq=False)
 class JsImportNamespaceSpecifier(Node):
-    local: JsIdentifier | None = None
+    local: Expression | None = None
 
 
 @dataclass(repr=False, eq=False)
@@ -555,8 +555,8 @@ class JsMetaProperty(Expression):
 
 @dataclass(repr=False, eq=False)
 class JsExportSpecifier(Node):
-    local: JsIdentifier | None = None
-    exported: JsIdentifier | None = None
+    local: Expression | None = None
+    exported: Expression | None = None
 
 
 @dataclass(repr=False, eq=False)
@@ -574,7 +574,7 @@ class JsExportDefaultDeclaration(Statement):
 @dataclass(repr=False, eq=False)
 class JsExportAllDeclaration(Statement):
     source: JsStringLiteral | None = None
-    exported: JsIdentifier | None = None
+    exported: Expression | None = None
 
 
 @dataclass(repr=False, eq=False)

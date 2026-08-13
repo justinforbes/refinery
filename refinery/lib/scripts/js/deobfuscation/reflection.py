@@ -48,6 +48,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
 )
 from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.deobfuscation.strict_divergence import diverges_under_strict
+from refinery.lib.scripts.js.strict import is_use_strict
 from refinery.lib.scripts.js.model import (
     JsAssignmentExpression,
     JsAwaitExpression,
@@ -555,7 +556,7 @@ def _has_use_strict_directive(stmts: list[Statement]) -> bool:
             return False
         if not isinstance(stmt.expression, JsStringLiteral):
             return False
-        if stmt.expression.value == 'use strict':
+        if is_use_strict(stmt.expression):
             return True
     return False
 

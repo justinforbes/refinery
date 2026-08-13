@@ -54,6 +54,43 @@ LISTS_THAT_NO_EXPRESSION_SPELLS = [
     ('(a, b,)', [(JsIdentifier, 'a'), (JsIdentifier, 'b')]),
 ]
 
+STATEMENTS_WRITTEN_AFTER_A_LIST_NO_EXPRESSION_SPELLS = [
+    ["console.log('kept');"],
+    ['x = 1;'],
+    ['42;'],
+    ["'kept';"],
+    ['[1, 2].forEach(g);'],
+    ['(1);'],
+    ['`kept`;'],
+    ['b.c;'],
+    ['var v = 3;'],
+    [inspect.cleandoc("""
+        function g() {
+          return 2;
+        }
+    """)],
+    [inspect.cleandoc("""
+        class K {
+          m() {
+            return 1;
+          }
+        }
+    """)],
+    [inspect.cleandoc("""
+        try {
+          p();
+        } catch (e) {
+          q();
+        }
+    """)],
+    ["console.log('one');", "console.log('two');"],
+]
+"""
+What a file goes on to say after a list no expression spells. Each entry is written exactly as the
+printer emits it, so a statement that came back unchanged is one the parser neither dropped nor drew
+into the arrow head it was reading when it ran out of source.
+"""
+
 BRACKETED_LISTS_AFTER_ASYNC_THAT_NO_ARROW_FOLLOWS = [
     ('async ()', 'async()'),
     ('async (a)', 'async(a)'),
@@ -235,6 +272,22 @@ class TestJsArrowFunction(TestBase):
                 arrow = self._arrow(source)
                 self.assertEqual(self._parameters(arrow), parameters)
                 self.assertEqual(type(arrow.body), JsErrorNode)
+
+    def test_every_statement_written_after_such_a_list_comes_back_as_the_source_wrote_it(self):
+        """
+        Node rejects every file below, because the list is a parameter list and the body that would
+        bind it was never written. The parser has to make something of the list either way, and
+        whatever that is, the statements that follow are the analyst's file: reading one of them as
+        the missing body loses it, and so does dropping it.
+        """
+        for source, _ in LISTS_THAT_NO_EXPRESSION_SPELLS:
+            for statements in STATEMENTS_WRITTEN_AFTER_A_LIST_NO_EXPRESSION_SPELLS:
+                written = '\n'.join(statements)
+                for separator in (' ', '\n'):
+                    with self.subTest(source=source, written=written, separator=separator):
+                        self.assertEqual(
+                            self._statements(F'{source}{separator}{written}'),
+                            [*self._statements(source), *statements])
 
     def test_a_bracketed_list_after_async_that_no_arrow_follows_is_a_call_argument_list(self):
         """

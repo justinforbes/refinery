@@ -5,6 +5,7 @@ from test import TestBase
 from refinery.lib.scripts import Expression, Node
 from refinery.lib.scripts.js.model import (
     JsExpressionStatement,
+    JsStringLiteral,
     JsTaggedTemplateExpression,
     JsTemplateLiteral,
 )
@@ -20,8 +21,11 @@ ESCAPES = [
     (R'`\x41\x7F\xE9`', 'A\x7F\xE9'),
     (R'`\u0041\u00E9\u20AC`', 'A\xE9\u20AC'),
     (R'`\u{41}\u{E9}`', 'A\xE9'),
-    (R'`\u{1F600}`', '\U0001F600'),
-    (R'`\u{10FFFF}`', '\U0010FFFF'),
+    (R'`\u{00000041}`', 'A'),
+    (R'`\u{1F600}`', '\uD83D\uDE00'),
+    (R'`\u{10FFFF}`', '\uDBFF\uDFFF'),
+    (R'`\u{D800}`', '\uD800'),
+    (R'`\0`', '\x00'),
     (R'`a\`b`', 'a`b'),
     (R'`a\${b}c`', 'a${b}c'),
     (R'`a\$b`', 'a$b'),
@@ -32,7 +36,9 @@ ESCAPES = [
 ]
 """
 What each template denotes, measured with Node: the string a tag is handed for the one run of the
-literal, which is also the string the literal evaluates to.
+literal, which is also the string the literal evaluates to. A string is written here as the code
+units Node reports it holding, so a character above the basic plane is the two surrogates that
+spell it and the value is as long as `String.prototype.length` says.
 """
 
 LINE_CONTINUATIONS = [
@@ -58,15 +64,68 @@ A template spanning several lines. Node denotes a line feed for every line termi
 template is written with, and leaves the two separators that are not line breaks standing.
 """
 
-REFUSED_BY_THE_LANGUAGE = [
-    R'`\01`',
-    R'`\251`',
-    R'`\8`',
-    R'`\9`',
+A_STRING_READS_WHAT_A_TEMPLATE_REFUSES = [
+    (R"'\01'", R'`\01`', '\x01'),
+    (R"'\1'", R'`\1`', '\x01'),
+    (R"'\7'", R'`\7`', '\x07'),
+    (R"'\07'", R'`\07`', '\x07'),
+    (R"'\10'", R'`\10`', '\x08'),
+    (R"'\251'", R'`\251`', '\xA9'),
+    (R"'\00'", R'`\00`', '\x00'),
+    (R"'\08'", R'`\08`', '\x008'),
+    (R"'\09'", R'`\09`', '\x009'),
+    (R"'\8'", R'`\8`', '8'),
+    (R"'\9'", R'`\9`', '9'),
 ]
 """
-Templates Node refuses to evaluate at all, each with a SyntaxError naming the escape. A tag reading
-one of them is handed `undefined` for the run, so no string is what these denote.
+An escape written in a string, the same escape written in a template, and the text Node says the
+string denotes. These are the spellings at which the two literals part: Node evaluates every string
+here and refuses every template, naming the escape in a SyntaxError, so the one denotes text where
+the other denotes nothing at all.
+"""
+
+AN_ESCAPE_NEITHER_LITERAL_HAS = [
+    (R"'\x'", R'`\x`'),
+    (R"'\xA'", R'`\xA`'),
+    (R"'\xZZ'", R'`\xZZ`'),
+    (R"'\u'", R'`\u`'),
+    (R"'\u004'", R'`\u004`'),
+    (R"'\uZZZZ'", R'`\uZZZZ`'),
+    (R"'\u{}'", R'`\u{}`'),
+    (R"'\u{110000}'", R'`\u{110000}`'),
+    (R"'\u{41'", R'`\u{41`'),
+    (R"'\u{ 41}'", R'`\u{ 41}`'),
+    (R"'\u{4_1}'", R'`\u{4_1}`'),
+    (R"'\u{0x41}'", R'`\u{0x41}`'),
+]
+"""
+An escape neither literal has, in both spellings: a hexadecimal escape short of its digits or
+holding a character that is not one, and a braced code point that is empty, out of range,
+unterminated, or written with anything besides hexadecimal digits. Node refuses both spellings of
+every one of these, so neither literal denotes any text.
+"""
+
+REFUSED_BY_THE_LANGUAGE = [
+    *(template for _, template, _ in A_STRING_READS_WHAT_A_TEMPLATE_REFUSES),
+    *(template for _, template in AN_ESCAPE_NEITHER_LITERAL_HAS),
+]
+"""
+Every template of the two tables above, which Node refuses to evaluate, each with a SyntaxError
+naming the escape. A tag reading one of them is handed `undefined` for the run, so no string is what
+these denote.
+"""
+
+RUNS_THE_LANGUAGE_REFUSES = [
+    (R'`\01${1}`', [None, '']),
+    (R'`${1}\01`', ['', None]),
+    (R'`\8${1}\9`', [None, None]),
+    (R'`\0${1}\0`', ['\x00', '\x00']),
+]
+"""
+A template built from more than one run, carrying the refused escape in the first run, in the last,
+in both, and in neither. A tag is handed `undefined` for exactly the runs whose escape the grammar
+has no rule for and the text for the rest, and Node refuses the untagged literal wherever one such
+run is present.
 """
 
 RUNS_AND_HOLES = [
@@ -119,6 +178,7 @@ WRITTEN_BACK = [
     *(source for source, _, _ in RUNS_AND_HOLES),
     *(source for source, _, _, _ in TAGGED),
     *(source for source, _, _ in SPELLING_AND_VALUE),
+    *(source for source, _ in RUNS_THE_LANGUAGE_REFUSES),
     *REFUSED_BY_THE_LANGUAGE,
     NESTED_SIMPLE,
     NESTED_ESCAPES,
@@ -173,6 +233,12 @@ class TemplateLiteralTest(TestBase):
             self.fail('there is no node to print')
         return JsSynthesizer().convert(node)
 
+    def _string_text(self, source: str) -> str | None:
+        literal = self._expression(source)
+        if not isinstance(literal, JsStringLiteral):
+            self.fail(F'{source!r} parsed into a {type(literal).__name__}')
+        return literal.value
+
 
 class TestJsTemplateValue(TemplateLiteralTest):
 
@@ -207,6 +273,37 @@ class TestJsTemplateValue(TemplateLiteralTest):
         and the pair of escapes naming its surrogates denote the same string.
         """
         self.assertEqual(self._text(SURROGATE_PAIR), self._text(BRACED_ASTRAL))
+
+    def test_a_string_reads_the_escape_that_leaves_a_template_denoting_nothing(self):
+        """
+        Node evaluates each string here to the text in the third column and refuses each template
+        beside it. Which literal the escape is written in is the whole of the difference, so a
+        reader that answers the same for both has one of the two wrong.
+        """
+        for string, template, text in A_STRING_READS_WHAT_A_TEMPLATE_REFUSES:
+            with self.subTest(string=string, template=template):
+                self.assertEqual(self._string_text(string), text)
+                self.assertEqual(self._runs(self._template(template)), [None])
+
+    def test_an_escape_the_grammar_does_not_have_leaves_the_template_denoting_nothing(self):
+        """
+        Node refuses both spellings of each of these, so neither literal names any text: reporting
+        one is inventing a string the file could never have carried. What the string half of the
+        table is read as is pinned in `test.lib.scripts.js.test_unfixed_defects`.
+        """
+        for _, template in AN_ESCAPE_NEITHER_LITERAL_HAS:
+            with self.subTest(template=template):
+                self.assertEqual(self._runs(self._template(template)), [None])
+
+    def test_the_run_carrying_the_refused_escape_is_the_only_one_denoting_nothing(self):
+        """
+        A tag reading these is handed `undefined` for the run whose escape the grammar has no rule
+        for and the text for every other run, so one refused escape does not cost the literal the
+        runs written beside it.
+        """
+        for source, runs in RUNS_THE_LANGUAGE_REFUSES:
+            with self.subTest(source=source):
+                self.assertEqual(self._runs(self._template(source)), runs)
 
 
 class TestJsTemplateRuns(TemplateLiteralTest):

@@ -79,6 +79,7 @@ from refinery.lib.scripts.js.model import (
 )
 from refinery.lib.scripts.js.numbers import exact_integer
 from refinery.lib.scripts.js.precedence import parens_required
+from refinery.lib.scripts.js.strict import spelling_states
 
 _OBJECT_PROTO_PROPERTIES = OBJECT_PROTOTYPE_MEMBERS
 
@@ -818,11 +819,26 @@ class JsSimplifications(Transformer):
         return folded
 
     def visit_JsStringLiteral(self, node: JsStringLiteral):
+        """
+        Spell a literal the shortest way that denotes the same text, where the spelling it was
+        given states nothing of its own.
+
+        Two spellings state something. One the source never closed has no spelling at all, and
+        writing one hands it the quote nobody wrote — the file stops being the file that was read.
+        And a spelling a rule reads may not be traded for one the same rule reads differently: an
+        escape hiding a space in `'use\\x20strict'` is what keeps that line from being a directive,
+        and re-spelling it makes every line behind it strict code.
+        """
+        if not node.terminated:
+            return None
         quote = node.raw[0] if node.raw else '\''
         rebuilt = quote + escape_js_string(node.value, quote) + quote
-        if rebuilt != node.raw:
-            node.raw = rebuilt
-            self.mark_changed()
+        if rebuilt == node.raw:
+            return None
+        if spelling_states(rebuilt[1:-1]) != spelling_states(node.body):
+            return None
+        node.raw = rebuilt
+        self.mark_changed()
         return None
 
     def visit_JsLogicalExpression(self, node: JsLogicalExpression):

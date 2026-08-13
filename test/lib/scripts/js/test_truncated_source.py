@@ -19,6 +19,7 @@ from refinery.lib.scripts.js.model import (
 )
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
+from refinery.units.scripting.js import js
 
 
 _TOP_LEVEL = inspect.cleandoc("""
@@ -115,6 +116,56 @@ _TRUNCATIONS = {
         ' */\n  return handler;\n}\n',
     ),
 }
+
+
+_FOLDS = {
+    'template_at_top_level': Truncation(
+        _TOP_LEVEL,
+        'const banner = `loading ` + `the alpha module',
+        '`;\nconsole.log(banner);\n',
+    ),
+    'argument_at_top_level': Truncation(
+        _TOP_LEVEL,
+        "console.log('loading ' + 'the alpha module",
+        "');\n",
+    ),
+}
+"""
+Files whose last statement is a constant expression the tool computes, cut in the middle of one of
+the literals that expression is built from. Node accepts every `whole` here and refuses every `cut`,
+so the closing quote is the whole of the difference between a program and a buffer that is not one.
+"""
+
+FOLDS_ANSWERED_WITH_A_PROGRAM = {
+    'concatenation_at_top_level': Truncation(
+        _TOP_LEVEL,
+        "const banner = 'loading ' + 'the alpha module",
+        "';\nconsole.log(banner);\n",
+    ),
+    'array_at_top_level': Truncation(
+        _TOP_LEVEL,
+        "const parts = ['loading ', 'the alpha module",
+        "'];\nconsole.log(parts.join(''));\n",
+    ),
+    'concatenation_in_function_body': Truncation(
+        _FUNCTION_BODY,
+        "  const label = 'describing ' + 'the handler",
+        "';\n  return label;\n}\nconsole.log(describe('alpha'));\n",
+    ),
+    'call_result_in_function_body': Truncation(
+        _FUNCTION_BODY,
+        "  const label = 'describing the handler'.toUpperCase() + 'x",
+        "';\n  return label;\n}\nconsole.log(describe('alpha'));\n",
+    ),
+}
+"""
+The same kind of file, cut the same way, where the literal the cut left open stands in a declaration
+nothing goes on to read: the declaration is dropped before anything is printed, so the literal never
+reaches the printer at all. Nothing here is a program either, and the answer these are given is
+pinned in `test.lib.scripts.js.test_unfixed_defects`.
+"""
+
+_EVERY_FOLD = {**_FOLDS, **FOLDS_ANSWERED_WITH_A_PROGRAM}
 
 
 def _string_continued_over(line_ending: str) -> str:
@@ -416,3 +467,32 @@ class TestTruncatedSource(TestBase):
         for name, source in sources.items():
             with self.subTest(name):
                 self.assertEqual(guess_language(source), 'js')
+
+
+class TestAFoldOverALiteralTheCutLeftOpen(TestBase):
+    """
+    What the deobfuscator makes of a buffer that ends inside a literal a fold reaches. The buffer
+    is not a program — Node refuses every `cut` in either table and accepts every `whole` — and
+    the one thing the tool may not answer with is a program, because an analyst reading it has no
+    way left to tell that the file they handed over was cut. The literal was never closed, so no
+    text spells it, and refusing to print is the only answer that keeps that true.
+    """
+
+    def _deobfuscated(self, source: str) -> str:
+        return source.encode('utf8') | js() | str
+
+    def test_a_fold_that_reaches_a_literal_the_cut_left_open_is_refused(self):
+        for name, truncation in _FOLDS.items():
+            with self.subTest(name):
+                with self.assertRaises(UnspellableNode):
+                    self._deobfuscated(truncation.cut)
+
+    def test_the_same_file_with_its_delimiter_restored_deobfuscates_to_a_program(self):
+        """
+        Each closed file differs from the carved one by the single character the carve took, so a
+        corpus the tool refused for some other reason would leave the refusal above saying nothing.
+        """
+        for name, truncation in _EVERY_FOLD.items():
+            with self.subTest(name):
+                printed = self._deobfuscated(truncation.whole)
+                self.assertEqual(is_well_formed(JsParser(printed).parse()), True)
