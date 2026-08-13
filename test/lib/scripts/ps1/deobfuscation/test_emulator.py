@@ -1217,6 +1217,16 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
             with self.subTest(size):
                 self.assertEqual(self._deobfuscate(source), source)
 
+    def test_an_array_size_5_1_can_convert_is_folded_to_the_count_it_names(self):
+        source = cleandoc("""
+            function f {
+              $a = New-Object byte[] 2
+              $a.Count
+            }
+            Write-Output (f)
+        """)
+        self.assertEqual(self._deobfuscate(source), 'Write-Output 2')
+
     @unittest.expectedFailure
     def test_a_double_becomes_the_text_5_1_writes_it_as(self):
         for numeral, text in [
@@ -1245,6 +1255,17 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
             Write-Output (f)
         """)
         self.assertEqual(self._deobfuscate(source), source)
+
+    def test_an_expression_over_a_name_the_body_binds_itself_is_folded(self):
+        source = cleandoc("""
+            $q = $env:Temp
+            function f {
+              $q = 1
+              $q + 1
+            }
+            Write-Output (f)
+        """)
+        self.assertEqual(self._deobfuscate(source), 'Write-Output 2')
 
 
 class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
@@ -1311,10 +1332,8 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
             with self.subTest(tail):
                 self.assertEqual(self._deobfuscate(source), expected)
 
-    @unittest.expectedFailure
-    def test_a_comparison_with_a_case_prefix_compares_the_way_the_prefix_names(self):
+    def test_a_case_prefix_on_a_string_comparison_compares_the_way_it_names(self):
         for comparison, expected in [
-            ('1 -ceq 1', '$True'),
             ("'A' -ceq 'a'", '$False'),
             ("'A' -ieq 'a'", '$True'),
         ]:
@@ -1326,6 +1345,21 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
             """)
             with self.subTest(comparison):
                 self.assertEqual(self._deobfuscate(source), F'$x = {expected}')
+
+    @unittest.expectedFailure
+    def test_a_case_prefix_on_a_comparison_of_numbers_compares_them_all_the_same(self):
+        """
+        The prefix names how *text* is compared, so it makes no difference between two numbers and
+        `-ceq` answers what `-eq` answers. The grid carries no row for a prefixed operator at all,
+        which is why the string forms above fold and this one does not.
+        """
+        source = cleandoc("""
+            function f {
+              1 -ceq 1
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), '$x = $True')
 
 
 class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
@@ -1424,6 +1458,15 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
             $x = f
         """), Ps1FunctionEvaluator)
 
+    def test_a_string_band_can_convert_is_the_number_the_digits_spell(self):
+        source = cleandoc("""
+            function f {
+              '10' -band 15
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 10')
+
 
 class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
     """
@@ -1455,6 +1498,15 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
             $x = f
         """), Ps1FunctionEvaluator)
 
+    def test_a_tostring_call_on_a_char_is_the_string_that_char_spells(self):
+        source = cleandoc("""
+            function f {
+              ([char]65).ToString()
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'A'")
+
     @unittest.expectedFailure
     def test_a_char_times_a_number_is_a_throw_and_not_a_repeated_string(self):
         self._assertUnchanged(cleandoc("""
@@ -1463,6 +1515,15 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
             }
             $x = f
         """), Ps1FunctionEvaluator)
+
+    def test_a_char_plus_a_string_is_the_text_the_two_concatenate_to(self):
+        source = cleandoc("""
+            function f {
+              [char]65 + 'B'
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'AB'")
 
     @unittest.expectedFailure
     def test_a_byte_cast_the_value_does_not_fit_is_a_throw_and_not_a_masked_number(self):
@@ -1475,6 +1536,15 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
             """)
             with self.subTest(cast):
                 self._assertUnchanged(source, Ps1FunctionEvaluator)
+
+    def test_a_byte_cast_the_value_fits_is_the_number_it_names(self):
+        source = cleandoc("""
+            function f {
+              [byte]200
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 200')
 
     @unittest.expectedFailure
     def test_a_long_s_matches_no_s_under_the_culture_casing_ignorecase_means(self):
@@ -1506,6 +1576,16 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
             function f {
               $a = 10, 20, 30
               $a['1']
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 20')
+
+    def test_an_index_written_as_a_number_is_the_element_that_number_names(self):
+        source = cleandoc("""
+            function f {
+              $a = 10, 20, 30
+              $a[1]
             }
             $x = f
         """)

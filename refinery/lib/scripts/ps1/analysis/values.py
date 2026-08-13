@@ -1654,6 +1654,19 @@ def _stamped(value: _Number, candidates: frozenset[Ps1TypeName]) -> Ps1Fact:
     the value is refused rather than guessed. An integer no candidate holds takes `Decimal` or
     `Double` when the cell recorded one, which is the widening a host performs on overflow and the
     reason `2147483647 + 1` is a Double.
+
+    **The dispatch is exhaustive on purpose, and a payload of a kind not named here is refused.**
+    What stood at the end was `Double` for anything that reached it, which read as the arm for a
+    `float` and was in fact the arm for *everything else too* — so a kernel returning a collection
+    would have had it stamped `Ps1Constant(System.Double, (1, 2))`, a value of a type it is not, by
+    the one function whose whole job is to refuse exactly that. Nothing returns such a payload
+    today, which is what made it a trap rather than a defect: this is the guard every new kernel arm
+    is licensed by, so it has to fail closed for the kinds those arms will introduce.
+
+    The final refusal is unreachable while `_Number` names no collection, and a type checker says
+    so. That is the invariant rather than dead code: widening `_Number` is what a kernel arm over
+    collections has to do first, and the refusal is what that widening then lands on until an arm
+    here is written for the kind it added.
     """
     if isinstance(value, bool):
         return Ps1Constant(_BOOLEAN, value) if _BOOLEAN in candidates else UNKNOWN
@@ -1674,7 +1687,9 @@ def _stamped(value: _Number, candidates: frozenset[Ps1TypeName]) -> Ps1Fact:
     if isinstance(value, str):
         holders = [name for name in (_CHAR, _STRING) if name in candidates]
         return Ps1Constant(holders[0], value) if len(holders) == 1 else UNKNOWN
-    return Ps1Constant(_DOUBLE, value) if _DOUBLE in candidates else UNKNOWN
+    if isinstance(value, float):
+        return Ps1Constant(_DOUBLE, value) if _DOUBLE in candidates else UNKNOWN
+    return UNKNOWN
 
 
 def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:

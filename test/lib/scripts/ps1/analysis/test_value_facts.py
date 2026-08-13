@@ -17,7 +17,7 @@ import inspect
 import re
 import unittest
 
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 from test.lib.scripts.ps1.corpus import (
     BOUNDARIES,
@@ -39,6 +39,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Fact,
     Ps1Outcome,
     Ps1Typed,
+    _stamped,
     apply,
     apply_unary,
     candidate_types,
@@ -1707,6 +1708,41 @@ class TestPs1AComputedPayloadNamesTheValueItsPythonKindDecides(unittest.TestCase
         for payload in (None, True, 7, 2147483648, 1.5, 'abc', 'A', [1, 'a'], ()):
             with self.subTest(repr(payload)):
                 self.assertEqual(_read(_spelled(fact_of(payload))), fact_of(payload))
+
+
+class TestPs1AComputedValueIsStampedOnlyByAnArmThatNamesItsKind(unittest.TestCase):
+    """
+    `analysis.values._stamped` is the guard `apply` and `convert` route every value a kernel
+    computed through, and it dispatches on the payload's Python kind: a `bool`, an `int`, a
+    `Decimal`, a `str` and a `float` each have an arm, and the value is reported only under a type
+    the measured cell recorded. A payload of any other kind is therefore the one thing it must
+    refuse, since stamping it would report a value under a type it does not have — which is what a
+    trailing `Double` arm did to everything that reached it.
+    """
+
+    #: A cell recording a type for every arm, and the array type as well, so that a refusal below is
+    #: the guard declining to stamp a payload rather than the candidates withholding a type from it.
+    CANDIDATES = frozenset({BOOLEAN, INT32, DECIMAL, DOUBLE, STRING, OBJECT_ARRAY})
+
+    def test_a_payload_of_a_kind_no_arm_names_is_refused(self):
+        """
+        A tuple of facts is the payload an array constant carries and a kind `values._Number` does
+        not name, so a type checker reads the refusal it reaches as unreachable. That is the
+        invariant and not dead code: widening `_Number` is the first thing a kernel arm over
+        collections does, and this is what such a payload lands on until an arm names its kind.
+        """
+        collection: Any = (Ps1Constant(INT32, 1), Ps1Constant(INT32, 2))
+        self.assertEqual(_stamped(collection, self.CANDIDATES), UNKNOWN)
+
+    def test_a_payload_of_each_kind_an_arm_names_is_stamped_from_the_same_candidates(self):
+        self.assertEqual(_stamped(True, self.CANDIDATES), Ps1Constant(BOOLEAN, True))
+        self.assertEqual(_stamped(5, self.CANDIDATES), Ps1Constant(INT32, 5))
+        self.assertEqual(
+            _stamped(decimal.Decimal('1.5'), self.CANDIDATES),
+            Ps1Constant(DECIMAL, decimal.Decimal('1.5')),
+        )
+        self.assertEqual(_stamped('A', self.CANDIDATES), Ps1Constant(STRING, 'A'))
+        self.assertEqual(_stamped(1.5, self.CANDIDATES), Ps1Constant(DOUBLE, 1.5))
 
 
 class TestPs1MeasuredCasts(unittest.TestCase):
