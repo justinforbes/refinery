@@ -1610,6 +1610,29 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         (
             'THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
         ),
+    '$t = [byte]400; Write-Output (,$t); Write-Output $t':
+        (
+            'THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        ),
+    '$t = [byte](200 * 2); Write-Output (,$t); Write-Output $t':
+        (
+            'THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        ),
+    'function f { $null; 1; $null }; $t = f; Write-Output $t.Count; Write-Output (,$t)':
+        (
+            'OUT\tSystem.Int32\t3',
+            'OUT\tSystem.Object[]\t 1 ',
+        ),
+    "$t = 'ſ' -match 's'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = 'ſ' -cmatch 's'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
 }
 
 
@@ -1665,6 +1688,11 @@ TYPE_DEFECTS: dict[str, str] = {
         'Incrementing a String throws on 5.1 — the operator wants a number and says so. The '
         'interpreter substitutes zero for an operand it cannot read as one, so a script that '
         'stopped answers a collection instead.',
+    'function f { $null; 1; $null }; $t = f; Write-Output $t.Count; Write-Output (,$t)':
+        'A statement whose value is `$null` hands `$null` to the success stream, so the body '
+        'produces three objects. The interpreter spells *emitted nothing* with the same `None` it '
+        'spells `$null` with and drops it on append, so two of the three never reach the stream '
+        'and the call answers the one number left.',
     'function g { ,(1, 2) }; $t = @(g); Write-Output $t.Count; Write-Output (,$t[0])':
         'The unary comma hands out one array, and a pipeline unrolls a collection exactly once, so '
         '@( ) collects the single Object[] the body wrote. The interpreter unrolls it a second '

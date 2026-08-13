@@ -17,6 +17,7 @@ from refinery.lib.scripts.ps1.deobfuscation.emulator import (
 )
 from refinery.lib.scripts.ps1.model import Ps1ScriptBlock
 from refinery.lib.scripts.ps1.parser import Ps1Parser
+from refinery.units.scripting.ps1 import ps1
 
 #: The Int32 that every measurement in `TestPs1WhichSideOfWhichOperatorABooleanMayStandOn` was taken
 #: against, as the grid names its type.
@@ -1422,3 +1423,90 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
             }
             $x = f
         """), Ps1FunctionEvaluator)
+
+
+class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
+    """
+    Each of these is reached only inside a function body, since a body is what the tool folds.
+    `System.Char` has no instance `ToUpper` and no multiplication, and a cast throws where the value
+    does not fit the type, so all three are a script that stopped rather than a value. The
+    `IgnoreCase` that a case insensitive `-match` means is .NET's culture `ToLower`, under which
+    U+017F is no `s`, where Python's own folding makes it one. A sum too long for the interpreter's
+    stack has to leave the unit with an answer and not with a `RecursionError`. An index written as
+    a String is an index like any other, and 5.1 answers the element it numbers.
+    """
+
+    @staticmethod
+    def _sum_of_ones(terms: int) -> str:
+        """
+        A body adding `terms` ones, spelled one term to a line. A source of more than forty lines is
+        one the redirection corpus in `test.units.test_style` leaves whole rather than reissuing it
+        line by line, which would put this same fold in front of the same stack there.
+        """
+        chain = ' +\n  '.join(['1'] * terms)
+        return F'function f {{\n  {chain}\n}}\n$x = f'
+
+    @unittest.expectedFailure
+    def test_a_toupper_call_on_a_char_is_a_throw_and_not_the_char_it_was_called_on(self):
+        self._assertUnchanged(cleandoc("""
+            function f {
+              ([char]65).ToUpper()
+            }
+            $x = f
+        """), Ps1FunctionEvaluator)
+
+    @unittest.expectedFailure
+    def test_a_char_times_a_number_is_a_throw_and_not_a_repeated_string(self):
+        self._assertUnchanged(cleandoc("""
+            function f {
+              [char]65 * 2
+            }
+            $x = f
+        """), Ps1FunctionEvaluator)
+
+    @unittest.expectedFailure
+    def test_a_byte_cast_the_value_does_not_fit_is_a_throw_and_not_a_masked_number(self):
+        for cast in ['[byte]400', '[byte](200 * 2)']:
+            source = cleandoc(F"""
+                function f {{
+                  {cast}
+                }}
+                $x = f
+            """)
+            with self.subTest(cast):
+                self._assertUnchanged(source, Ps1FunctionEvaluator)
+
+    @unittest.expectedFailure
+    def test_a_long_s_matches_no_s_under_the_culture_casing_ignorecase_means(self):
+        for operator in ['-match', '-cmatch']:
+            source = cleandoc(F"""
+                function f {{
+                  'ſ' {operator} 's'
+                }}
+                $x = f
+            """)
+            with self.subTest(operator):
+                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $False')
+
+    def test_the_unit_folds_a_sum_of_two_thousand_ones_to_the_number_they_add_up_to(self):
+        # Both sums go through the unit and not the helper: raising the recursion limit is the
+        # unit's own doing, so where a fold over a body runs out of stack is measurable only there.
+        self.assertEqual(self._sum_of_ones(2000).encode('utf8') | ps1() | str, '$x = 2000')
+
+    @unittest.expectedFailure
+    def test_the_unit_answers_a_sum_too_long_to_fold_rather_than_crashing_on_it(self):
+        try:
+            bytes(self._sum_of_ones(5000).encode('utf8') | ps1())
+        except RecursionError:
+            self.fail('a RecursionError escaped the unit, which has to decline a fold instead')
+
+    @unittest.expectedFailure
+    def test_an_index_written_as_a_string_is_the_element_that_number_names(self):
+        source = cleandoc("""
+            function f {
+              $a = 10, 20, 30
+              $a['1']
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 20')

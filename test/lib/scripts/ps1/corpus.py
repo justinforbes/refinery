@@ -687,6 +687,11 @@ TYPES: tuple[str, ...] = (
     "$t = 'ab' -like 'a`*'; Write-Output (,$t); Write-Output $t",
     "$t = 'b' -like '[!a]'; Write-Output (,$t); Write-Output $t",
     "$t = '1_0' -band 15; Write-Output (,$t); Write-Output $t",
+    '$t = [byte]400; Write-Output (,$t); Write-Output $t',
+    '$t = [byte](200 * 2); Write-Output (,$t); Write-Output $t',
+    'function f { $null; 1; $null }; $t = f; Write-Output $t.Count; Write-Output (,$t)',
+    "$t = 'ſ' -match 's'; Write-Output (,$t); Write-Output $t",
+    "$t = 'ſ' -cmatch 's'; Write-Output (,$t); Write-Output $t",
 )
 
 
