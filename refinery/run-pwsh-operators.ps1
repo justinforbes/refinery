@@ -51,7 +51,11 @@ $ScriptDir =
     else { (Get-Location).Path }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $ScriptDir 'data' }
 
-$SchemaVersion = 1
+#: Two tables and five cast targets were added to a document that had only `binary` and
+#: `conversions`, so a reader written for the old one cannot tell the two apart by looking. The
+#: version is this grid's own and moves with this grid: `data.py` checks it against the shared
+#: `SCHEMA_VERSION`, which is the metadata tables' number and has no business being this one.
+$SchemaVersion = 2
 $JsonDepth = 64
 
 if ($Culture) {
@@ -63,6 +67,11 @@ if ($Culture) {
 #: the literal types, every integer type a cast may target, and the two shapes that are not scalars
 #: at all — a collection and $null — because an operator's behaviour over those is what the ledgered
 #: defects turn on.
+#:
+#: A number whose type carries no integer width of its own splits on its magnitude, because the
+#: operations that need a width take the narrowest one that holds the value: `3000000000.0 -shl 1`
+#: is a UInt32 and `5000000000.0 -shl 1` an Int64 where `1.5 -shl 1` is an Int32. Without a witness
+#: at each of those magnitudes the row named `Int32` alone, which is a rung and not the rule.
 #:
 #: A collection's own splits are its length and whether its elements are collections: a length is
 #: how much an operation has to reach into — none, one, or several — and an element that is itself a
@@ -81,7 +90,7 @@ $Witnesses = [ordered] @{
     'System.Int64'   = @('0L', '1L', '-1L', '9223372036854775807L')
     'System.UInt64'  = @('[uint64]0', '[uint64]1', '[uint64]18446744073709551615')
     'System.Single'  = @('[single]0', '[single]1.5', '[single]-1.5')
-    'System.Double'  = @('0.0', '1.5', '-1.5', '[double]::MaxValue')
+    'System.Double'  = @('0.0', '1.5', '-1.5', '3000000000.0', '5000000000.0', '[double]::MaxValue')
     'System.Decimal' = @('0d', '1.5d', '-1.5d', '[decimal]::MaxValue')
     'System.String'  = @("''", "'abc'", "'5'", "'0xabc'", "'-2'")
     'System.Char'    = @('[char]65', '[char]0', '[char]48')
@@ -98,21 +107,50 @@ $Witnesses = [ordered] @{
     'System.Void'    = @('$null')
 }
 
-#: The operators the value domain has to answer for. The comparison family is here because a
-#: comparison is not a Boolean when the left operand is a collection — it filters and returns an
-#: array — and that is a shape the grid must record rather than a rule read off a name.
+#: The operators the value domain has to answer for, in the shape where both operands are values.
+#: The comparison family is here because a comparison is not a Boolean when the left operand is a
+#: collection — it filters and returns an array — and that is a shape the grid must record rather
+#: than a rule read off a name. The text family is here for the same reason in reverse: `-split`
+#: answers with an array and `-join` with a String whatever it was given, and `-replace` reads a
+#: two-element right operand as a pattern and a replacement, so what each produces is a measurement
+#: and not a reading of its name.
+#:
+#: `-and` and `-or` are absent because they short-circuit, so an application of one is not a
+#: function of its operands and there is no cell to record. `-is`, `-isnot` and `-as` are absent
+#: because their right operand is a type rather than a value, which is a different grid.
 $BinaryOperators = @(
     '+', '-', '*', '/', '%',
     '-band', '-bor', '-bxor', '-shl', '-shr',
-    '-eq', '-ne', '-lt', '-le', '-gt', '-ge'
+    '-eq', '-ne', '-lt', '-le', '-gt', '-ge',
+    '-xor',
+    '-contains', '-notcontains', '-in', '-notin',
+    '-like', '-notlike', '-match', '-notmatch',
+    '-replace', '-creplace', '-ireplace',
+    '-split', '-join'
 )
 
+#: The operators that take one operand, which have no cell in a grid over pairs and were left
+#: unmeasured by one. `-bnot` is the reason this table exists: the width it complements at is
+#: decided by the operand's *value* where the operand has no width of its own, so the set a cell
+#: records is what shows that a single width written down is a floor rather than the rule.
+$UnaryOperators = @('-', '+', '-not', '-bnot')
+
 #: The types a cast may target, which is the conversion grid's second axis. `void` is excluded: it
-#: is the discard idiom rather than a type a value can have.
+#: is the discard idiom rather than a type a value can have. The array targets are here because a
+#: cast to one is how a script says what a collection holds, and the answer is a different type from
+#: the accelerator that was written — `[byte[]]` builds a `System.Byte[]` where `[array]` builds a
+#: `System.Object[]`.
 $ConversionTargets = @(
     'byte', 'sbyte', 'int16', 'uint16', 'int', 'uint32', 'long', 'uint64',
-    'single', 'double', 'decimal', 'string', 'char', 'bool', 'array'
+    'single', 'double', 'decimal', 'string', 'char', 'bool', 'array',
+    'byte[]', 'char[]', 'int[]', 'string[]', 'object[]'
 )
+
+#: The operators whose right operand is a type rather than a value, so that their grid is over a
+#: value's type and a written target — the conversion grid's axes, not the binary grid's. `-as` is
+#: here rather than among the conversions because it answers a failed cast with $null where a cast
+#: throws, and which of the two a script wrote is a difference the domain has to keep.
+$TypeOperators = @('-is', '-isnot', '-as')
 
 function Get-Outcome {
     <#
@@ -143,6 +181,45 @@ function Get-AxisLabel {
     $outcome = Get-Outcome $Value
     if ($outcome -eq 'null') { return 'System.Void' }
     return $outcome
+}
+
+function Get-CellOutcomes {
+    <#
+    .SYNOPSIS
+    Every outcome recorded anywhere under a table, however deeply it is keyed.
+
+    .DESCRIPTION
+    Handing these back through the pipeline is safe where handing a measured value back is not: what
+    a table holds is outcome *names*, and unrolling a list of names loses nothing.
+    #>
+    param($Node)
+    if ($Node -is [System.Collections.IDictionary]) {
+        foreach ($key in @($Node.Keys)) { Get-CellOutcomes $Node[$key] }
+    } else {
+        $Node
+    }
+}
+
+function Assert-Measured {
+    <#
+    .SYNOPSIS
+    Refuse a table in which some operator threw everywhere, because that is what a broken
+    measurement looks like and not what an operator does.
+
+    .DESCRIPTION
+    Every cell of an operator is filled from the same compiled block, and the only thing separating
+    a throw the operator caused from a throw the harness caused is that the harness causes all of
+    them. So an operator with nothing but throws under it is refused rather than shipped: the block
+    is compiled once and outside the try that records a throw, which is what makes this the one
+    failure the try can still hide.
+    #>
+    param($Table, [string] $Kind)
+    foreach ($op in @($Table.Keys)) {
+        $survivors = @(Get-CellOutcomes $Table[$op] | Where-Object { $_ -ne 'throw' })
+        if ($survivors.Count -eq 0) {
+            throw "every $Kind application of $op threw, so nothing was measured but the harness"
+        }
+    }
 }
 
 #: Each operand is evaluated once and each operator compiled once, because compiling a script block
@@ -221,6 +298,57 @@ foreach ($op in $BinaryOperators) {
     $Binary[$op] = $byLeft
 }
 
+$Unary = [ordered] @{}
+
+foreach ($op in $UnaryOperators) {
+    Write-Verbose "unary $op"
+    $apply = [ScriptBlock]::Create("`$script:OperandOut = $op `$script:OperandL")
+    $byOperand = [ordered] @{}
+    foreach ($name in $TypeNames) {
+        $seen = [System.Collections.Generic.HashSet[string]]::new()
+        foreach ($v in $Values[$name]) {
+            $script:OperandL = $v
+            try {
+                $script:OperandOut = $null
+                [void] $apply.InvokeReturnAsIs()
+                [void] $seen.Add((Get-Outcome $script:OperandOut))
+            } catch {
+                [void] $seen.Add('throw')
+            }
+        }
+        $byOperand[$name] = @($seen | Sort-Object)
+    }
+    $Unary[$op] = $byOperand
+}
+
+$TypeTests = [ordered] @{}
+
+foreach ($op in $TypeOperators) {
+    Write-Verbose "type operator $op"
+    $bySource = [ordered] @{}
+    foreach ($name in $TypeNames) {
+        $bySource[$name] = [ordered] @{}
+    }
+    foreach ($target in $ConversionTargets) {
+        $apply = [ScriptBlock]::Create("`$script:OperandOut = `$script:OperandL $op [$target]")
+        foreach ($name in $TypeNames) {
+            $seen = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($v in $Values[$name]) {
+                $script:OperandL = $v
+                try {
+                    $script:OperandOut = $null
+                    [void] $apply.InvokeReturnAsIs()
+                    [void] $seen.Add((Get-Outcome $script:OperandOut))
+                } catch {
+                    [void] $seen.Add('throw')
+                }
+            }
+            $bySource[$name][$target] = @($seen | Sort-Object)
+        }
+    }
+    $TypeTests[$op] = $bySource
+}
+
 $Conversions = [ordered] @{}
 
 foreach ($target in $ConversionTargets) {
@@ -244,6 +372,83 @@ foreach ($target in $ConversionTargets) {
     $Conversions[$target] = $bySource
 }
 
+Assert-Measured $Binary 'binary'
+Assert-Measured $Unary 'unary'
+Assert-Measured $TypeTests 'type-operator'
+Assert-Measured $Conversions 'cast to'
+
+#: Nine thousand cells hold seventy-two distinct answers between them, and naming an axis in every
+#: cell wrote a type name nine thousand times over. So the document lists the answers once, lists
+#: each axis once, and every cell becomes a position in both — which is the difference between
+#: forty kilobytes and two and a half.
+#:
+#: The tables are built above under their names and encoded here rather than being filled with
+#: positions as they go, because a position is unreadable and `Assert-Measured` has to be able to
+#: see what a cell says. Capture in the form that can be checked, encode once it has been.
+$Outcomes = [System.Collections.ArrayList]::new()
+$OutcomeIndex = @{}
+
+function Get-OutcomeSlot {
+    <#
+    .SYNOPSIS
+    The position of an outcome list in the document's table of them, adding it if it is new.
+    #>
+    param($Outcome)
+    $key = $Outcome -join "`t"
+    if (-not $OutcomeIndex.ContainsKey($key)) {
+        $OutcomeIndex[$key] = $Outcomes.Count
+        [void] $Outcomes.Add(@($Outcome))
+    }
+    return $OutcomeIndex[$key]
+}
+
+function ConvertTo-IndexedRow {
+    <#
+    .SYNOPSIS
+    One axis of a table, as the outcome positions its keys hold, in the axis's own order.
+
+    .DESCRIPTION
+    The result is wrapped by the comma operator on the way out for the reason every other value in
+    this script travels the way it does: returning a collection from a function collapses it, and a
+    row of one would come back as a bare number.
+    #>
+    param($Row, $Axis)
+    $out = [System.Collections.ArrayList]::new()
+    foreach ($key in $Axis) { [void] $out.Add((Get-OutcomeSlot $Row[$key])) }
+    return ,@($out)
+}
+
+function ConvertTo-IndexedTable {
+    <#
+    .SYNOPSIS
+    Two axes of a table, outer first, as rows of outcome positions.
+    #>
+    param($Table, $Outer, $Inner)
+    $out = [System.Collections.ArrayList]::new()
+    foreach ($key in $Outer) { [void] $out.Add((ConvertTo-IndexedRow $Table[$key] $Inner)) }
+    return ,@($out)
+}
+
+$IndexedBinary = [ordered] @{}
+foreach ($op in $BinaryOperators) {
+    $IndexedBinary[$op] = ConvertTo-IndexedTable $Binary[$op] $TypeNames $TypeNames
+}
+
+$IndexedUnary = [ordered] @{}
+foreach ($op in $UnaryOperators) {
+    $IndexedUnary[$op] = ConvertTo-IndexedRow $Unary[$op] $TypeNames
+}
+
+$IndexedTypeTests = [ordered] @{}
+foreach ($op in $TypeOperators) {
+    $IndexedTypeTests[$op] = ConvertTo-IndexedTable $TypeTests[$op] $TypeNames $ConversionTargets
+}
+
+$IndexedConversions = [ordered] @{}
+foreach ($target in $ConversionTargets) {
+    $IndexedConversions[$target] = ConvertTo-IndexedRow $Conversions[$target] $TypeNames
+}
+
 $document = [ordered] @{
     schema = [ordered] @{ version = $SchemaVersion }
     host = [ordered] @{
@@ -253,8 +458,13 @@ $document = [ordered] @{
         authoritative = (-not $Unauthoritative)
     }
     witnesses = $Witnesses
-    binary = $Binary
-    conversions = $Conversions
+    types = $TypeNames
+    targets = $ConversionTargets
+    outcomes = @($Outcomes)
+    binary = $IndexedBinary
+    unary = $IndexedUnary
+    type_tests = $IndexedTypeTests
+    conversions = $IndexedConversions
 }
 
 if ($Unauthoritative) {
@@ -265,6 +475,6 @@ if (-not (Test-Path $OutputDirectory)) {
 }
 
 $path = Join-Path $OutputDirectory 'pwsh-operators.json'
-$json = ($document | ConvertTo-Json -Depth $JsonDepth) -replace "`r`n", "`n"
+$json = $document | ConvertTo-Json -Depth $JsonDepth -Compress
 [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding $false))
 Write-Output "wrote $path"

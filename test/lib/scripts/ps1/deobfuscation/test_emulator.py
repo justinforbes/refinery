@@ -1087,7 +1087,7 @@ class TestPs1WhichSideOfWhichOperatorABooleanMayStandOn(TestPs1):
         cannot enter the list until a capture covers it either.
         """
         operators = list(data._OPERATORS['binary'])
-        self.assertEqual(len(operators), 16)
+        self.assertEqual(len(operators), 30)
         self.assertEqual(
             {operator for operator in operators if _boolean_cell(operator, INT32).always_throws},
             set(_NO_OPERATOR_METHOD_ON_BOOLEAN),
@@ -1098,12 +1098,13 @@ class TestPs1WhichSideOfWhichOperatorABooleanMayStandOn(TestPs1):
         The refusal is by operand where the grid answers by cell, so the two part company wherever
         the rest of the Boolean row disagrees with the column it was measured against. Every
         disagreement the capture holds is listed: `*` always throws for every right operand but a
-        Decimal, `+` and `-` for a Decimal alone, and `/` and `%` add the two whose throw is the
-        divisor rather than the Boolean standing left of it.
+        Decimal, `+` and `-` for a Decimal and for a collection, `/` and `%` add the two whose throw
+        is the divisor rather than the Boolean standing left of it, and the bitwise three part
+        company over a collection alone.
         """
         operators = list(data._OPERATORS['binary'])
         types = list(data._OPERATORS['witnesses'])
-        self.assertEqual((len(operators), len(types)), (16, 16))
+        self.assertEqual((len(operators), len(types)), (30, 16))
         disagreeing = {}
         for operator in operators:
             measured = _boolean_cell(operator, INT32).always_throws
@@ -1111,11 +1112,14 @@ class TestPs1WhichSideOfWhichOperatorABooleanMayStandOn(TestPs1):
             if found:
                 disagreeing[operator] = found
         self.assertEqual(disagreeing, {
-            '+': ['System.Decimal'],
-            '-': ['System.Decimal'],
+            '+': ['System.Decimal', 'System.Object[]'],
+            '-': ['System.Decimal', 'System.Object[]'],
             '*': ['System.Decimal'],
             '/': ['System.Decimal', 'System.Object[]', 'System.Void'],
             '%': ['System.Decimal', 'System.Object[]', 'System.Void'],
+            '-band': ['System.Object[]'],
+            '-bor': ['System.Object[]'],
+            '-bxor': ['System.Object[]'],
         })
 
 

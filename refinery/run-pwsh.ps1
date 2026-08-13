@@ -140,7 +140,11 @@ function Write-JsonFile {
     if ($depth -gt $JsonDepth) {
         throw "$Path nests $depth levels, past the -Depth $JsonDepth serializer limit."
     }
-    $json = ($Value | ConvertTo-Json -Depth $JsonDepth) -replace "`r`n", "`n"
+    #: Compressed because these files are read by a program and shipped through gzip, and the
+    #: indentation is most of what would be written: the operator grid was 86% whitespace before the
+    #: same flag reached it. It also settles the line endings the surrounding pipeline used to
+    #: normalize, because there are none left to normalize.
+    $json = $Value | ConvertTo-Json -Depth $JsonDepth -Compress
     $encoding = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText($Path, $json + "`n", $encoding)
     return $json.Length

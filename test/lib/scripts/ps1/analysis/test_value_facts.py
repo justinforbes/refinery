@@ -22,6 +22,7 @@ from typing import Any, Callable, NamedTuple
 from test.lib.scripts.ps1.corpus import (
     BOUNDARIES,
     GRID_WITNESS_GAPS,
+    GRID_COMPLETE_BUT_UNREAD,
     GRID_WITNESSES,
     PROBES,
     SNIPPETS,
@@ -694,9 +695,11 @@ GRID_OPERATORS: tuple[str, ...] = (
     '-ge',
 )
 
-#: The operand types the shipped grid's witnesses reach every outcome of: every type the capture
-#: used as an operand, less the ones a `GRID_WITNESS_GAPS` row convicts.
-SPANNED_TYPES: frozenset[str] = frozenset(GRID_WITNESSES) - frozenset(GRID_WITNESS_GAPS)
+#: The operand types a cell may be read as a fact over: every type the capture used as an operand,
+#: less the ones a `GRID_WITNESS_GAPS` row convicts, and less the ones measured complete that the
+#: domain does not read anyway.
+SPANNED_TYPES: frozenset[str] = (
+    frozenset(GRID_WITNESSES) - frozenset(GRID_WITNESS_GAPS) - GRID_COMPLETE_BUT_UNREAD)
 
 #: The conversion cells every witness of their source threw for. The capture recorded no type at
 #: all for a `[char]` of a Decimal or of a Single, so there is nothing in either cell for a cast
@@ -2555,8 +2558,11 @@ class TestPs1SpanRestsOnTheShippedGrid(unittest.TestCase):
 
     def test_every_operand_type_the_grid_was_captured_over_is_reached_or_convicted(self):
         self.assertEqual(sorted(set(GRID_WITNESS_GAPS) - set(GRID_WITNESSES)), [])
+        self.assertEqual(sorted(GRID_COMPLETE_BUT_UNREAD - set(GRID_WITNESSES)), [])
+        self.assertEqual(sorted(GRID_COMPLETE_BUT_UNREAD & set(GRID_WITNESS_GAPS)), [])
         self.assertEqual(
-            sorted(SPANNED_TYPES | frozenset(GRID_WITNESS_GAPS)), sorted(GRID_WITNESSES))
+            sorted(SPANNED_TYPES | frozenset(GRID_WITNESS_GAPS) | GRID_COMPLETE_BUT_UNREAD),
+            sorted(GRID_WITNESSES))
 
     def test_the_cell_a_gap_row_names_is_one_the_type_it_convicts_is_an_operand_of(self):
         for name, row in GRID_WITNESS_GAPS.items():
@@ -2589,7 +2595,7 @@ class TestPs1CastNamesItsTargetWhereAnOperatorNamesNothing(unittest.TestCase):
             for target in GRID_WITNESSES
             if conversion_outcome(target, source) is not None
         }
-        self.assertEqual(len(answers), 84, 'a conversion cell was added or withdrawn')
+        self.assertEqual(len(answers), 75, 'a conversion cell was added or withdrawn')
         self.assertEqual(
             {cell: answer for cell, answer in answers.items() if cell not in EVERY_WITNESS_THREW},
             {
@@ -2786,7 +2792,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1436)
+        self.assertEqual(len(compared), 1439)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2801,7 +2807,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1436)
+        self.assertEqual(len(compared), 1439)
         self.assertEqual(
             [
                 site.source for site in compared

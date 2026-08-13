@@ -24,6 +24,33 @@ BINARY_OPERATORS = [
     '-le',
     '-gt',
     '-ge',
+    '-xor',
+    '-contains',
+    '-notcontains',
+    '-in',
+    '-notin',
+    '-like',
+    '-notlike',
+    '-match',
+    '-notmatch',
+    '-replace',
+    '-creplace',
+    '-ireplace',
+    '-split',
+    '-join',
+]
+
+UNARY_OPERATORS = [
+    '-',
+    '+',
+    '-not',
+    '-bnot',
+]
+
+TYPE_OPERATORS = [
+    '-is',
+    '-isnot',
+    '-as',
 ]
 
 OPERAND_TYPES = [
@@ -61,6 +88,11 @@ CONVERSION_TARGETS = [
     'char',
     'bool',
     'array',
+    'byte[]',
+    'char[]',
+    'int[]',
+    'string[]',
+    'object[]',
 ]
 
 NUMERIC_TYPES = [
@@ -140,16 +172,31 @@ def _classify(outcome: data.OperatorOutcome | None) -> str:
     return 'value dependent'
 
 
+def _recorded_binary(operator: str, left: str, right: str) -> tuple[str, ...]:
+    """
+    The outcome names the capture recorded for one binary cell.
+
+    A cell in the shipped document is a position in its table of distinct outcomes, and the axes are
+    positions too, so reading one back means indexing through both. The axes come from the document
+    rather than from this file's own lists, because a test that read its own order would agree with
+    itself about a document that had been rewritten underneath it.
+    """
+    axis = data._OPERATORS['types']
+    cell = data._OPERATORS['binary'][operator][axis.index(left)][axis.index(right)]
+    return tuple(data._OPERATORS['outcomes'][cell])
+
+
+def _recorded_conversion(target: str, source: str) -> tuple[str, ...]:
+    """
+    The outcome names the capture recorded for one conversion cell, read as `_recorded_binary`
+    reads a binary one.
+    """
+    cell = data._OPERATORS['conversions'][target][data._OPERATORS['types'].index(source)]
+    return tuple(data._OPERATORS['outcomes'][cell])
+
+
 def _recorded_outcomes() -> set[str]:
-    recorded = set()
-    for by_left in data._OPERATORS['binary'].values():
-        for by_right in by_left.values():
-            for entries in by_right.values():
-                recorded.update(entries)
-    for by_source in data._OPERATORS['conversions'].values():
-        for entries in by_source.values():
-            recorded.update(entries)
-    return recorded
+    return {entry for outcome in data._OPERATORS['outcomes'] for entry in outcome}
 
 
 def _asymmetric_pairs(operator: str, types: list[str]) -> list[tuple[str, str]]:
@@ -174,17 +221,21 @@ class TestPs1OperatorGridCoverage(unittest.TestCase):
     def test_the_grid_axes_are_the_ones_the_capture_declares(self):
         self.assertEqual(list(data._OPERATORS['binary']), BINARY_OPERATORS)
         self.assertEqual(list(data._OPERATORS['witnesses']), OPERAND_TYPES)
+        self.assertEqual(data._OPERATORS['types'], OPERAND_TYPES)
+        self.assertEqual(data._OPERATORS['targets'], CONVERSION_TARGETS)
+        self.assertEqual(list(data._OPERATORS['unary']), UNARY_OPERATORS)
+        self.assertEqual(list(data._OPERATORS['type_tests']), TYPE_OPERATORS)
         self.assertEqual(list(data._OPERATORS['conversions']), CONVERSION_TARGETS)
 
     def test_every_binary_cell_is_present(self):
         cells = list(_every_binary_cell())
         self.assertEqual([key for key, outcome in cells if outcome is None], [])
-        self.assertEqual(len(cells), 4096)
+        self.assertEqual(len(cells), 7680)
 
     def test_every_conversion_cell_is_present(self):
         cells = list(_every_conversion_cell())
         self.assertEqual([key for key, outcome in cells if outcome is None], [])
-        self.assertEqual(len(cells), 240)
+        self.assertEqual(len(cells), 320)
 
     def test_an_operator_is_one_operator_in_any_casing(self):
         for operator in BINARY_OPERATORS:
@@ -262,7 +313,7 @@ class TestPs1OperatorCellIsNotAType(unittest.TestCase):
     def test_a_collection_on_the_left_of_a_comparison_filters_instead_of_answering_a_boolean(self):
         self.assertEqual(
             _binary('-ne', 'System.Object[]', 'System.Int32'),
-            (('System.Boolean', 'System.Object[]'), False, False),
+            (('System.Object[]',), False, False),
         )
 
     def test_a_collection_on_the_right_of_a_comparison_does_not_filter(self):
@@ -274,17 +325,17 @@ class TestPs1OperatorCellIsNotAType(unittest.TestCase):
     def test_the_binary_grid_is_not_one_type_per_cell(self):
         census = Counter(_classify(outcome) for _, outcome in _every_binary_cell())
         self.assertEqual(census, Counter({
-            'type determined' : 2270,  # noqa
-            'value dependent' : 1606,  # noqa
-            'always throws'   : 220,   # noqa
+            'type determined' : 5780,  # noqa
+            'value dependent' : 1406,  # noqa
+            'always throws'   : 494,   # noqa
         }))
 
     def test_the_conversion_grid_is_not_one_type_per_cell(self):
         census = Counter(_classify(outcome) for _, outcome in _every_conversion_cell())
         self.assertEqual(census, Counter({
-            'type determined' : 145,  # noqa
-            'value dependent' : 91,   # noqa
-            'always throws'   : 4,    # noqa
+            'type determined' : 191,  # noqa
+            'value dependent' : 109,  # noqa
+            'always throws'   : 20,   # noqa
         }))
 
 
@@ -344,7 +395,7 @@ def _every_recorded_cell() -> Iterator[RecordedCell]:
                     'binary',
                     (operator, left, right),
                     outcome,
-                    tuple(data._OPERATORS['binary'][operator][left][right]),
+                    _recorded_binary(operator, left, right),
                 )
     for target in CONVERSION_TARGETS:
         for source in OPERAND_TYPES:
@@ -354,7 +405,7 @@ def _every_recorded_cell() -> Iterator[RecordedCell]:
                 'conversion',
                 (target, source),
                 outcome,
-                tuple(data._OPERATORS['conversions'][target][source]),
+                _recorded_conversion(target, source),
             )
 
 
@@ -380,11 +431,27 @@ class TestPs1OperatorOutcomeSingleType(unittest.TestCase):
         self.assertIsNone(_cast_single_type('int', 'System.String'))
 
     def test_single_type_is_none_when_the_cell_may_be_null(self):
-        self.assertEqual(
-            _binary('+', 'System.Object[]', 'System.Object[]'),
-            (('System.Object[]',), False, True),
+        """
+        Asked of a constructed outcome rather than of a cell, because no cell of either grid now
+        carries one type beside a `$null`. The one that did was `@() + @()`, and it read that way
+        only while an empty collection was reaching the capture as `$null`; with the witness built
+        so that it arrives as a collection, appending two of them is an `Object[]` and nothing else.
+        """
+        collection = data.resolve_type('System.Object[]')
+        self.assertIsNotNone(collection)
+        assert collection is not None
+        outcome = data.OperatorOutcome(
+            types=frozenset({collection}),
+            may_throw=False,
+            may_be_null=True,
         )
-        self.assertIsNone(_single_type('+', 'System.Object[]', 'System.Object[]'))
+        self.assertEqual(len(outcome.types), 1)
+        self.assertIsNone(outcome.single_type)
+        self.assertEqual(
+            [key for key, cell in _every_cell()
+             if cell is not None and cell.may_be_null and len(cell.types) == 1],
+            [],
+        )
 
     def test_single_type_is_none_when_the_cell_has_more_than_one_type(self):
         self.assertIsNone(_single_type('+', 'System.Int32', 'System.Int32'))
@@ -416,7 +483,7 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
     """
 
     def test_a_cell_always_throws_exactly_where_the_capture_recorded_only_a_throw(self):
-        self.assertEqual(len(RECORDED_CELLS), 4336)
+        self.assertEqual(len(RECORDED_CELLS), 8000)
         self.assertEqual(
             [
                 cell.key for cell in RECORDED_CELLS
@@ -429,20 +496,20 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
         self.assertEqual(
             Counter((cell.outcome.may_throw, cell.outcome.always_throws) for cell in RECORDED_CELLS),
             Counter({
-                (False, False) : 2777,  # noqa
-                (True, False)  : 1335,  # noqa
-                (True, True)   : 224,   # noqa
+                (False, False) : 6227,  # noqa
+                (True, False)  : 1259,  # noqa
+                (True, True)   : 514,   # noqa
             }),
         )
 
     def test_having_no_type_and_always_throwing_are_different_questions(self):
         typeless = [cell for cell in RECORDED_CELLS if not cell.outcome.types]
-        self.assertEqual(len(typeless), 242)
+        self.assertEqual(len(typeless), 537)
         self.assertEqual(
             [cell.key for cell in typeless if not cell.outcome.always_throws],
             [cell.key for cell in typeless if set(cell.entries) == {'null'}],
         )
-        self.assertEqual(len([cell for cell in typeless if not cell.outcome.always_throws]), 18)
+        self.assertEqual(len([cell for cell in typeless if not cell.outcome.always_throws]), 23)
 
     def test_no_cell_records_a_throw_and_a_null_with_no_type_beside_them(self):
         """
@@ -450,6 +517,10 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
         beside it, and neither grid holds a cell of it, so a predicate that dropped the clause
         answers exactly as the shipped one does. The census is pinned whole rather than that one
         shape counted, so a regeneration producing the shape is read here first.
+
+        Four shapes are populated where six were. The two that went are the ones carrying a `$null`
+        beside a type, and they were the collection row reporting what `$null` does: an empty
+        collection reached the capture as `$null` until the witness was built to survive.
         """
         self.assertEqual(
             Counter(
@@ -457,12 +528,10 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
                 for cell in RECORDED_CELLS
             ),
             Counter({
-                (False, False, True) : 18,    # noqa
-                (False, True, False) : 224,   # noqa
-                (True, False, False) : 2750,  # noqa
-                (True, False, True)  : 9,     # noqa
-                (True, True, False)  : 1324,  # noqa
-                (True, True, True)   : 11,    # noqa
+                (False, False, True) : 23,    # noqa
+                (False, True, False) : 514,   # noqa
+                (True, False, False) : 6204,  # noqa
+                (True, True, False)  : 1259,  # noqa
             }),
         )
 
@@ -482,20 +551,42 @@ class TestPs1OperatorOutcomeUndefined(unittest.TestCase):
     def test_both_grids_hold_cells_the_predicate_calls_always_throws(self):
         self.assertEqual(
             Counter(cell.grid for cell in RECORDED_CELLS if cell.outcome.always_throws),
-            Counter({'binary': 220, 'conversion': 4}),
+            Counter({'binary': 494, 'conversion': 20}),
         )
 
-    def test_the_casts_that_always_throw_are_the_four_no_witness_reached_a_char_from(self):
+    def test_the_casts_that_always_throw_are_a_collection_source_or_a_char_out_of_reach(self):
+        """
+        Two causes, and the cells say which is which. A scalar cast from a collection throws at
+        every length the witnesses carry, including one, so `[int] @(5)` is no better off than
+        `[int] @(1, 2)`. A `Char` is out of reach of the four types no witness reached one from,
+        and `[char[]]` inherits exactly those four while `[char]` also has the collection above it.
+        """
         self.assertEqual(
             [
                 cell.key for cell in RECORDED_CELLS
                 if cell.grid == 'conversion' and cell.outcome.always_throws
             ],
             [
+                ('byte', 'System.Object[]'),
+                ('sbyte', 'System.Object[]'),
+                ('int16', 'System.Object[]'),
+                ('uint16', 'System.Object[]'),
+                ('int', 'System.Object[]'),
+                ('uint32', 'System.Object[]'),
+                ('long', 'System.Object[]'),
+                ('uint64', 'System.Object[]'),
+                ('single', 'System.Object[]'),
+                ('double', 'System.Object[]'),
+                ('decimal', 'System.Object[]'),
                 ('char', 'System.Single'),
                 ('char', 'System.Double'),
                 ('char', 'System.Decimal'),
                 ('char', 'System.Boolean'),
+                ('char', 'System.Object[]'),
+                ('char[]', 'System.Single'),
+                ('char[]', 'System.Double'),
+                ('char[]', 'System.Decimal'),
+                ('char[]', 'System.Boolean'),
             ],
         )
 
@@ -509,7 +600,7 @@ class TestPs1OperatorGridUnknowns(unittest.TestCase):
     def test_an_operator_the_grid_does_not_cover_is_none(self):
         self.assertIsNone(data.binary_outcome('-bnot', 'System.Int32', 'System.Int32'))
         self.assertIsNone(data.binary_outcome('-and', 'System.Boolean', 'System.Boolean'))
-        self.assertIsNone(data.binary_outcome('-join', 'System.Object[]', 'System.String'))
+        self.assertIsNone(data.binary_outcome('-f', 'System.String', 'System.Int32'))
 
     def test_a_type_name_that_does_not_resolve_is_none(self):
         self.assertIsNone(data.binary_outcome('+', 'NotARealType', 'System.Int32'))
@@ -535,13 +626,15 @@ class TestPs1OperatorGridLaws(unittest.TestCase):
         for operator in ('-band', '-bor', '-bxor'):
             self.assertEqual(_asymmetric_pairs(operator, SCALAR_TYPES), [], operator)
 
-    def test_the_bitwise_operators_are_not_commutative_over_a_collection_or_null(self):
+    def test_the_bitwise_operators_are_not_commutative_over_null(self):
+        """
+        Only over `$null`, and only for the three widths that keep their own. A collection used to
+        be here beside it, in the same three pairs, and it was `$null` being read as one: a bitwise
+        operator throws for a collection whichever side it stands on, which is symmetric.
+        """
         expected = [
-            ('System.UInt32', 'System.Object[]'),
             ('System.UInt32', 'System.Void'),
-            ('System.Int64', 'System.Object[]'),
             ('System.Int64', 'System.Void'),
-            ('System.UInt64', 'System.Object[]'),
             ('System.UInt64', 'System.Void'),
         ]
         for operator in ('-band', '-bor', '-bxor'):
@@ -562,11 +655,11 @@ class TestPs1OperatorGridLaws(unittest.TestCase):
         )
         self.assertEqual(
             _binary('+', 'System.Object[]', 'System.Int32'),
-            (('System.Int32', 'System.Object[]'), False, False),
+            (('System.Object[]',), False, False),
         )
         self.assertEqual(
             _binary('+', 'System.Int32', 'System.Object[]'),
-            (('System.Int32',), True, False),
+            ((), True, False),
         )
 
     def test_every_recorded_outcome_is_a_marker_or_a_type_the_type_table_resolves(self):
@@ -576,16 +669,20 @@ class TestPs1OperatorGridLaws(unittest.TestCase):
             'null',
             'System.Boolean',
             'System.Byte',
+            'System.Byte[]',
             'System.Char',
+            'System.Char[]',
             'System.Decimal',
             'System.Double',
             'System.Int16',
             'System.Int32',
+            'System.Int32[]',
             'System.Int64',
             'System.Object[]',
             'System.SByte',
             'System.Single',
             'System.String',
+            'System.String[]',
             'System.UInt16',
             'System.UInt32',
             'System.UInt64',
@@ -607,7 +704,7 @@ class TestPs1OperatorGridProvenance(unittest.TestCase):
         self.assertIs(host['authoritative'], True)
 
     def test_the_schema_version_is_the_one_the_reader_expects(self):
-        self.assertEqual(data._OPERATORS['schema']['version'], data.SCHEMA_VERSION)
+        self.assertEqual(data._OPERATORS['schema']['version'], data.OPERATOR_SCHEMA_VERSION)
 
 
 if __name__ == '__main__':

@@ -730,6 +730,14 @@ NAMES: tuple[str, ...] = (
 #: The measurement is a differential and no test can re-run it. The whole grid was captured a second
 #: time with the extremes these values are missing, and the cells that moved are `GRID_WITNESS_GAPS`
 #: below; the types no moved cell blames are the ones a cell may be read as a fact over.
+#:
+#: Re-measured when the grid was recaptured. The differential was run twice: once with every type
+#: widened, which moves 153 of the 9024 cells and blames only `Single`, `Decimal`, `Int64` and
+#: `Char`, and once with **only** the spanned types widened — `[byte]128`, `[uint16]32768`,
+#: `[uint32]2147483648`, `[uint64]9223372036854775808`, and five more Doubles including the
+#: magnitudes either side of the width changes — which moves **nothing at all**. The second is the
+#: one that justifies the span: a cell over a spanned operand is what it was however hard the
+#: witnesses for that operand are pushed.
 GRID_WITNESSES: dict[str, tuple[str, ...]] = {
     'System.Byte'     : ('[byte]0', '[byte]1', '[byte]255'),
     'System.SByte'    : ('[sbyte]0', '[sbyte]1', '[sbyte]-128', '[sbyte]127'),
@@ -740,12 +748,14 @@ GRID_WITNESSES: dict[str, tuple[str, ...]] = {
     'System.Int64'    : ('0L', '1L', '-1L', '9223372036854775807L'),
     'System.UInt64'   : ('[uint64]0', '[uint64]1', '[uint64]18446744073709551615'),
     'System.Single'   : ('[single]0', '[single]1.5', '[single]-1.5'),
-    'System.Double'   : ('0.0', '1.5', '-1.5', '[double]::MaxValue'),
+    'System.Double'   : ('0.0', '1.5', '-1.5', '3000000000.0', '5000000000.0',
+                         '[double]::MaxValue'),
     'System.Decimal'  : ('0d', '1.5d', '-1.5d', '[decimal]::MaxValue'),
     'System.String'   : ("''", "'abc'", "'5'", "'0xabc'", "'-2'"),
     'System.Char'     : ('[char]65', '[char]0', '[char]48'),
     'System.Boolean'  : ('$true', '$false'),
-    'System.Object[]' : ('@()', '@(1, 2)', "@('a', 'b')", '@(10, 20, 30)'),
+    'System.Object[]' : ('@()', '@(5)', ',@(1, 2)', '@(@(1, 2), @(3, 4))', '@(1, 2)',
+                         "@('a', 'b')", '@(10, 20, 30)'),
     'System.Void'     : ('$null',),
 }
 
@@ -789,12 +799,21 @@ GRID_WITNESS_GAPS: dict[str, tuple[str, str, str, tuple[str, ...], tuple[str, ..
         ('System.Int64', 'System.UInt64'),
         ('System.Int64', 'System.UInt64', 'throw'),
     ),
-    'System.Object[]': (
-        '+', 'System.Int32', 'System.Object[]',
-        ('System.Int32', 'throw'),
-        ('System.Double', 'System.Int32', 'throw'),
-    ),
 }
+
+
+#: The operand types the re-measurement found complete and the value domain still does not read a
+#: cell over. `Object[]` is the whole set, and it is here rather than among the gaps because it is
+#: not one: widening the collection row on its own — `@($null)`, `@(1)`, `@(0)`, `@(1, 'a')` and a
+#: collection holding an empty one — moves not a single cell of the shipped grid. What convicted it
+#: before was `[int] @(...)` reporting an Int32 beside its throw, and that Int32 was `$null`'s: an
+#: empty collection reached the capture as `$null` until the witness was built to survive.
+#:
+#: Reading it would be a change to what the deobfuscator folds rather than to what is recorded here,
+#: so it is deferred with the evidence rather than taken along with the recapture. Two ratchets say
+#: what it would cost to look at: the measured-operation count and the throw-carrying count in
+#: `test_value_facts` both move when `Object[]` joins `values._SPANNED`.
+GRID_COMPLETE_BUT_UNREAD: frozenset[str] = frozenset({'System.Object[]'})
 
 
 #: Every table whose entries a real host may be asked to *run*, in one place, so that the set the
