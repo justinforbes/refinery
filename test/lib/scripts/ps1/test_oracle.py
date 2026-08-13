@@ -22,6 +22,7 @@ import json
 import sys
 import unittest
 
+from collections import Counter
 from collections.abc import Callable, Sequence
 from unittest.mock import patch
 
@@ -1546,6 +1547,69 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Object[]\t5',
             'OUT\tSystem.Int32\t1',
         ),
+    '$i = 0; if ($false -and ($i++)) { }; $t = $i; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$i = 0; if ($true -or ($i++)) { }; $t = $i; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    "$a = @(0); $t = if ($a) { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tno',
+            'OUT\tSystem.String\tno',
+        ),
+    "$a = @(0, 0); $t = if ($a) { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tyes',
+            'OUT\tSystem.String\tyes',
+        ),
+    'function f { $i = 0; $i++; $i++; $i }; $t = f; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    "function f { $s = 'abc'; $s++; $s }; $t = f; Write-Output (,$t); Write-Output $t":
+        (
+            'THROW\tOperatorRequiresNumber\tSystem.Management.Automation.RuntimeException',
+        ),
+    'function g { ,(1, 2) }; $t = @(g); Write-Output $t.Count; Write-Output (,$t[0])':
+        (
+            'OUT\tSystem.Int32\t1',
+            'OUT\tSystem.Object[]\t1 2',
+        ),
+    "$t = @('1') -contains 1; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = @(1) -contains '1'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'a*' -like 'a`*'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'ab' -like 'a`*'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = 'b' -like '[!a]'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = '1_0' -band 15; Write-Output (,$t); Write-Output $t":
+        (
+            'THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        ),
 }
 
 
@@ -1592,6 +1656,20 @@ TYPE_DEFECTS: dict[str, str] = {
         'The same erasure for an array of Char, which folds to one String.',
     "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
         'A Char[] is not a String; the fold makes it answer as though it were.',
+    'function f { $i = 0; $i++; $i++; $i }; $t = f; Write-Output (,$t); Write-Output $t':
+        'An increment written as a statement hands nothing to the success stream on 5.1, so the '
+        'body produces the one number it ends with. The interpreter contributes the value of every '
+        'expression statement, so each increment joins the stream and the call answers a '
+        'collection of three.',
+    "function f { $s = 'abc'; $s++; $s }; $t = f; Write-Output (,$t); Write-Output $t":
+        'Incrementing a String throws on 5.1 — the operator wants a number and says so. The '
+        'interpreter substitutes zero for an operand it cannot read as one, so a script that '
+        'stopped answers a collection instead.',
+    'function g { ,(1, 2) }; $t = @(g); Write-Output $t.Count; Write-Output (,$t[0])':
+        'The unary comma hands out one array, and a pipeline unrolls a collection exactly once, so '
+        '@( ) collects the single Object[] the body wrote. The interpreter unrolls it a second '
+        'time, once where the statement contributes its value and again where the stream is '
+        'appended to, and the array arrives as its two elements.',
 }
 
 #: Which words 5.1 read as a command name, for each script whose corruption entry turns on where a
@@ -2096,3 +2174,46 @@ class TestPs1CommandTablesRestOnMeasuredBeliefs(Ps1OracleTest):
             [line.split('\t')[0] for transcript in measured for line in transcript],
             ['OUT', 'ERROR'],
         )
+
+
+class TestPs1NoCorpusTableListsTheSameScriptTwice(TestBase):
+    """
+    A duplicated row costs a host process and fails nothing: every transcript above is compared as
+    `dict(zip(table, behaviours(table)))`, and a dict keyed by the source keeps one of the two rows
+    and throws the second measurement away. `SNIPPETS` is not one of these tables and is left out by
+    being a dict rather than a sequence: it is keyed by node class, and a script that witnesses two
+    of them is written under both on purpose.
+
+    The tables are found rather than listed, so that one added to the corpus is guarded from the day
+    it is written, and the names found are pinned below, so that finding none cannot pass for
+    finding no duplicate.
+    """
+
+    def _tables(self) -> dict[str, tuple[str, ...]]:
+        return {
+            name: value
+            for name, value in vars(corpus).items()
+            if not name.startswith('_')
+            and isinstance(value, tuple)
+            and all(isinstance(row, str) for row in value)
+        }
+
+    def test_the_tables_found_are_the_ones_the_corpus_publishes(self):
+        self.assertEqual(sorted(self._tables()), [
+            'BEHAVIOURS',
+            'BOUNDARIES',
+            'CLAIMS',
+            'NAMES',
+            'PROBES',
+            'SPELLINGS',
+            'TABLES',
+            'TYPES',
+        ])
+
+    def test_no_table_lists_the_same_script_twice(self):
+        repeated = {}
+        for name, table in self._tables().items():
+            rows = sorted(row for row, count in Counter(table).items() if count > 1)
+            if rows:
+                repeated[name] = rows
+        self.assertEqual(repeated, {})

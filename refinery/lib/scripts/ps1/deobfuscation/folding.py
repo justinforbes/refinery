@@ -112,6 +112,15 @@ _STRING = named_type('System.String')
 #: contributes there is decided by the format specifier, and `'{0:X}' -f 65` is `41` where the text
 #: of the same operand is `65`. A comparison is absent for a stronger reason — `-eq` is decided by
 #: its *left* operand's type, so `[char]65 -eq 65` and `'A' -eq 65` are not the same question.
+#:
+#: **`-split` is here on a narrower claim than the sentence above makes.** Its right operand may be
+#: a collection, and only the first element of one is a pattern: the second is a *limit* and the
+#: third the split options, so `'a,b,c' -split ',', 2` is emitted as `-Split ',', '2'` and the
+#: number written as a limit comes back as text. That is measured to preserve the behaviour — the
+#: parameter converts a String back to the count, and the corpus row for it reports no difference
+#: through the host differential — but it is preserved by the *parameter's* conversion and not by
+#: the rule stated here. An operand slot of `-split` that ever stops converting its text would
+#: break silently, so a delimiter is what this set covers and a limit is what it happens to survive.
 _TEXT_OPERATORS = frozenset({
     '-match', '-cmatch', '-imatch', '-notmatch', '-cnotmatch', '-inotmatch',
     '-like', '-clike', '-ilike', '-notlike', '-cnotlike', '-inotlike',

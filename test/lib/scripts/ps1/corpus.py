@@ -674,6 +674,19 @@ TYPES: tuple[str, ...] = (
     "$t = 'A' -ceq 'a'; Write-Output (,$t); Write-Output $t",
     "$t = 'A' -ieq 'a'; Write-Output (,$t); Write-Output $t",
     '$t = [array]5; Write-Output (,$t); Write-Output $t.Count',
+    '$i = 0; if ($false -and ($i++)) { }; $t = $i; Write-Output (,$t); Write-Output $t',
+    '$i = 0; if ($true -or ($i++)) { }; $t = $i; Write-Output (,$t); Write-Output $t',
+    "$a = @(0); $t = if ($a) { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t",
+    "$a = @(0, 0); $t = if ($a) { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t",
+    'function f { $i = 0; $i++; $i++; $i }; $t = f; Write-Output (,$t); Write-Output $t',
+    "function f { $s = 'abc'; $s++; $s }; $t = f; Write-Output (,$t); Write-Output $t",
+    'function g { ,(1, 2) }; $t = @(g); Write-Output $t.Count; Write-Output (,$t[0])',
+    "$t = @('1') -contains 1; Write-Output (,$t); Write-Output $t",
+    "$t = @(1) -contains '1'; Write-Output (,$t); Write-Output $t",
+    "$t = 'a*' -like 'a`*'; Write-Output (,$t); Write-Output $t",
+    "$t = 'ab' -like 'a`*'; Write-Output (,$t); Write-Output $t",
+    "$t = 'b' -like '[!a]'; Write-Output (,$t); Write-Output $t",
+    "$t = '1_0' -band 15; Write-Output (,$t); Write-Output $t",
 )
 
 

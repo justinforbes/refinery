@@ -1325,3 +1325,100 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
             """)
             with self.subTest(comparison):
                 self.assertEqual(self._deobfuscate(source), F'$x = {expected}')
+
+
+class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
+    """
+    Measured on 5.1, each asked inside a function body since a body is what the tool emulates.
+    `-and` and `-or` never evaluate the operand they short circuit past. A collection is converted
+    to a Boolean by its count, except that a collection of one takes the truthiness of the single
+    element it holds. `-contains` converts the value it is given to the element's type before it
+    compares. A backtick makes the wildcard behind it literal, and a wildcard set has no negation,
+    `!` inside one being an ordinary character. `-band` converts a string by .NET's rules, which
+    read no digit group separator and answer InvalidCastFromStringToInteger instead.
+    """
+
+    @unittest.expectedFailure
+    def test_an_increment_the_short_circuit_skips_never_happens(self):
+        for condition in ['$false -and ($i++)', '$true -or ($i++)']:
+            source = cleandoc(F"""
+                function f {{
+                  $i = 0
+                  if ({condition}) {{ }}
+                  $i
+                }}
+                $x = f
+            """)
+            with self.subTest(condition):
+                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 0')
+
+    @unittest.expectedFailure
+    def test_a_collection_of_one_is_as_true_as_the_single_element_it_holds(self):
+        source = cleandoc("""
+            function f {
+              $a = @(0)
+              if ($a) { 'yes' } else { 'no' }
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'no'")
+
+    def test_a_collection_of_two_is_true_however_its_elements_read(self):
+        source = cleandoc("""
+            function f {
+              $a = @(0, 0)
+              if ($a) { 'yes' } else { 'no' }
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'yes'")
+
+    @unittest.expectedFailure
+    def test_contains_converts_the_value_it_is_given_to_the_elements_type(self):
+        for comparison in ["@('1') -contains 1", "@(1) -contains '1'"]:
+            source = cleandoc(F"""
+                function f {{
+                  {comparison}
+                }}
+                $x = f
+            """)
+            with self.subTest(comparison):
+                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $True')
+
+    @unittest.expectedFailure
+    def test_a_backticked_asterisk_matches_the_one_character_it_spells(self):
+        source = cleandoc("""
+            function f {
+              'a*' -like 'a`*'
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $True')
+
+    def test_a_backticked_asterisk_matches_nothing_a_bare_one_would(self):
+        source = cleandoc("""
+            function f {
+              'ab' -like 'a`*'
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $False')
+
+    @unittest.expectedFailure
+    def test_a_wildcard_set_reads_an_exclamation_mark_as_no_negation(self):
+        source = cleandoc("""
+            function f {
+              'b' -like '[!a]'
+            }
+            $x = f
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $False')
+
+    @unittest.expectedFailure
+    def test_a_string_band_cannot_convert_is_a_throw_and_not_a_number(self):
+        self._assertUnchanged(cleandoc("""
+            function f {
+              '1_0' -band 15
+            }
+            $x = f
+        """), Ps1FunctionEvaluator)
