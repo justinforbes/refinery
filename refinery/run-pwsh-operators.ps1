@@ -63,6 +63,14 @@ if ($Culture) {
 #: the literal types, every integer type a cast may target, and the two shapes that are not scalars
 #: at all — a collection and $null — because an operator's behaviour over those is what the ledgered
 #: defects turn on.
+#:
+#: A collection's own splits are its length and whether its elements are collections: a length is
+#: how much an operation has to reach into — none, one, or several — and an element that is itself a
+#: collection is one an operation may have no answer for. Which operators actually branch on either
+#: is the measurement rather than the reason for taking it. A scalar cast turns out to throw at
+#: every length including one, so `[int] @(5)` is no better off than `[int] @(1, 2)`; and the
+#: ordering comparisons throw only where an element is a collection, which is a throw the row had no
+#: witness for while every collection in it was flat.
 $Witnesses = [ordered] @{
     'System.Byte'    = @('[byte]0', '[byte]1', '[byte]255')
     'System.SByte'   = @('[sbyte]0', '[sbyte]1', '[sbyte]-128', '[sbyte]127')
@@ -78,7 +86,15 @@ $Witnesses = [ordered] @{
     'System.String'  = @("''", "'abc'", "'5'", "'0xabc'", "'-2'")
     'System.Char'    = @('[char]65', '[char]0', '[char]48')
     'System.Boolean' = @('$true', '$false')
-    'System.Object[]' = @('@()', '@(1, 2)', "@('a', 'b')", '@(10, 20, 30)')
+    'System.Object[]' = @(
+        '@()',
+        '@(5)',
+        ',@(1, 2)',
+        '@(@(1, 2), @(3, 4))',
+        '@(1, 2)',
+        "@('a', 'b')",
+        '@(10, 20, 30)'
+    )
     'System.Void'    = @('$null')
 }
 
@@ -113,6 +129,22 @@ function Get-Outcome {
     return $Value.GetType().FullName
 }
 
+function Get-AxisLabel {
+    <#
+    .SYNOPSIS
+    Which row and column of the grid a value belongs on, which is how the witness table is keyed.
+
+    .DESCRIPTION
+    An axis and a cell name $null differently, and both names are right for their job. A cell says
+    `null` because it has no type to report. An axis has to be labelled with something a witness can
+    be filed under, and `System.Void` is the label the grid uses for the shape that holds no value.
+    #>
+    param($Value)
+    $outcome = Get-Outcome $Value
+    if ($outcome -eq 'null') { return 'System.Void' }
+    return $outcome
+}
+
 #: Each operand is evaluated once and each operator compiled once, because compiling a script block
 #: per cell is what made a first version of this take longer than the grid is large: the work is
 #: tens of thousands of applications, and only sixteen of them are a different program.
@@ -129,12 +161,32 @@ function Get-Outcome {
 #: collapses a one-element collection to its element, so `[array] 5` reported an Int32 and a filter
 #: matching one thing reported the thing. Assignment is also the shape every ledgered row is written
 #: in, so what is captured is what `$t = <expression>` leaves in `$t`.
+#:
+#: A witness is built the same way and for the same reason. Invoking `@()` for its output gave
+#: $null, which filed a value with no type at all under `System.Object[]` and put $null's answers
+#: into the collection row of a shipped grid — `@() - 1` is where its Int32 came from.
+#:
+#: None of the three sites can share a helper that hands the value back, because returning it from a
+#: function collapses it exactly as the call operator does. The variable is the carrier, so reading
+#: it has to happen where the block was invoked.
+#:
+#: What a witness turned out to be is then checked against the row that claims it. The row key is
+#: the label the grid's axis carries and nothing downstream re-derives it, so a witness that is not
+#: what its row says mislabels every cell in it, silently and for good. This is the check that was
+#: missing.
 $TypeNames = @($Witnesses.Keys)
 $Values = [ordered] @{}
 foreach ($name in $TypeNames) {
     $collected = [System.Collections.ArrayList]::new()
     foreach ($text in $Witnesses[$name]) {
-        [void] $collected.Add(([ScriptBlock]::Create($text)).InvokeReturnAsIs())
+        $build = [ScriptBlock]::Create("`$script:OperandOut = $text")
+        $script:OperandOut = $null
+        [void] $build.InvokeReturnAsIs()
+        $actual = Get-AxisLabel $script:OperandOut
+        if ($actual -ne $name) {
+            throw "witness $text is a $actual, but it is listed under $name"
+        }
+        [void] $collected.Add($script:OperandOut)
     }
     $Values[$name] = $collected
 }
