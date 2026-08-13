@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from refinery.lib.scripts import Expression, Node, Statement
+from refinery.lib.scripts.js.lexer import has_legacy_numeric_escape
 from refinery.lib.scripts.js.model import (
     JsArrayPattern,
     JsArrowFunctionExpression,
@@ -72,36 +73,22 @@ def is_leading_zero_number(raw: str) -> bool:
     return len(raw) >= 2 and raw[0] == '0' and raw[1] in '0123456789'
 
 
-def has_octal_string_escape(raw: str) -> bool:
+def has_octal_string_escape(node: JsStringLiteral) -> bool:
     """
-    Whether the raw text of a string literal contains a legacy octal or non-octal-decimal escape — a
-    backslash followed by `1`-`9`, or by `0` immediately followed by another decimal digit. A plain `\\0`
-    (the NUL escape) is legal, as is an escaped backslash `\\\\`, so the scan tracks escaping and only a
-    backslash at an even distance from the previous literal character opens an escape.
+    Whether a string literal was written with an escape that strict code rejects. It is the same
+    spelling a template excludes from its grammar, so the scan itself lives beside the escapes it
+    reads and both rules ask it there.
     """
-    body = raw[1:-1] if len(raw) >= 2 else raw
-    i = 0
-    n = len(body)
-    while i < n:
-        if body[i] != '\\':
-            i += 1
-            continue
-        if i + 1 >= n:
-            break
-        nxt = body[i + 1]
-        if nxt in '123456789':
-            return True
-        if nxt == '0':
-            if i + 2 < n and body[i + 2] in '0123456789':
-                return True
-            i += 2
-            continue
-        i += 2
-    return False
+    return has_legacy_numeric_escape(node.body)
 
 
-def is_use_strict(raw: str) -> bool:
-    return len(raw) >= 2 and raw[1:-1] == 'use strict'
+def is_use_strict(node: JsStringLiteral) -> bool:
+    """
+    Whether a literal spells the Use Strict Directive. It is asked of the spelling rather than of
+    the value, because a directive is one: a literal that denotes `use strict` through an escape is
+    not the directive, and neither is one the source never closed.
+    """
+    return node.terminated and node.body == 'use strict'
 
 
 _STRICT_RESERVED = frozenset({
@@ -126,7 +113,7 @@ def _has_use_strict_prologue(stmts: list[Statement]) -> bool:
         expr = stmt.expression
         if not isinstance(expr, JsStringLiteral):
             return False
-        if is_use_strict(expr.raw):
+        if is_use_strict(expr):
             return True
     return False
 
@@ -161,7 +148,7 @@ def _check_node(node: Node, strict: bool, out: list[StrictViolation]) -> None:
         if is_leading_zero_number(node.raw):
             out.append(StrictViolation(node.offset, 'octal-literal'))
     elif isinstance(node, JsStringLiteral):
-        if has_octal_string_escape(node.raw):
+        if has_octal_string_escape(node):
             out.append(StrictViolation(node.offset, 'octal-escape'))
     elif isinstance(node, JsWithStatement):
         out.append(StrictViolation(node.offset, 'with-statement'))

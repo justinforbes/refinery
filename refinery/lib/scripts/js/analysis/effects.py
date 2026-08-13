@@ -2495,7 +2495,9 @@ def _static_string(node: Node | None) -> str | None:
     if isinstance(node, JsTemplateLiteral):
         if node.expressions:
             return None
-        return ''.join(quasi.value for quasi in node.quasis)
+        if any(quasi.value is None for quasi in node.quasis):
+            return None
+        return ''.join(quasi.value or '' for quasi in node.quasis)
     if isinstance(node, JsBinaryExpression) and node.operator == '+':
         left = _static_string(node.left)
         if left is None:

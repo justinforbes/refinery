@@ -562,9 +562,8 @@ class TestJsParserStatements(TestBase):
         has_error = False
         has_var = False
         for stmt in script.body:
-            if isinstance(stmt, JsExpressionStatement):
-                if isinstance(stmt.expression, JsErrorNode):
-                    has_error = True
+            if isinstance(stmt, JsErrorNode):
+                has_error = True
             if isinstance(stmt, JsVariableDeclaration):
                 has_var = True
         self.assertTrue(has_error)
@@ -573,7 +572,7 @@ class TestJsParserStatements(TestBase):
     def test_error_recovery_between_valid_statements(self):
         script = self._parse_all('var a = 1; ### var b = 2;')
         declarations = [s for s in script.body if isinstance(s, JsVariableDeclaration)]
-        errors = [s for s in script.body if isinstance(s, JsExpressionStatement) and isinstance(s.expression, JsErrorNode)]
+        errors = [s for s in script.body if isinstance(s, JsErrorNode)]
         self.assertEqual(len(declarations), 2)
         self.assertGreater(len(errors), 0)
 
@@ -582,7 +581,7 @@ class TestJsParserStatements(TestBase):
         self.assertIsInstance(script.body[0], JsFunctionDeclaration)
         block = script.body[0].body
         declarations = [s for s in block.body if isinstance(s, JsVariableDeclaration)]
-        errors = [s for s in block.body if isinstance(s, JsExpressionStatement) and isinstance(s.expression, JsErrorNode)]
+        errors = [s for s in block.body if isinstance(s, JsErrorNode)]
         self.assertEqual(len(declarations), 2)
         self.assertGreater(len(errors), 0)
 
@@ -590,8 +589,7 @@ class TestJsParserStatements(TestBase):
         script = self._parse_all('@@@')
         self.assertGreater(len(script.body), 0)
         for stmt in script.body:
-            self.assertIsInstance(stmt, JsExpressionStatement)
-            self.assertIsInstance(stmt.expression, JsErrorNode)
+            self.assertIsInstance(stmt, JsErrorNode)
 
     def test_for_empty_parts(self):
         stmt = self._parse_stmt('for (;;) { }')

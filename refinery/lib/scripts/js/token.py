@@ -257,9 +257,16 @@ _ASSIGNMENT_SET = frozenset({
 
 @dataclass
 class JsToken:
+    """
+    One token, where `value` is the text the source spelled it with. `terminated` reports whether a
+    token that needs a closing delimiter found one: a line or a file can end in the middle of a
+    literal, and whoever reads the text between the delimiters cannot tell from that text alone —
+    the last character of a string that ends in an escaped quote is a quote either way.
+    """
     kind: JsTokenKind
     value: str
     offset: int
+    terminated: bool = True
 
     def __repr__(self):
         v = self.value

@@ -9,6 +9,8 @@ rules (via `parens_required`) so it never strips a paren that is actually requir
 """
 from __future__ import annotations
 
+from typing import Generator
+
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -266,16 +268,16 @@ def needs_parens(child: Node, parent: Node | None) -> bool:
     return parens_required(child, parent, child)
 
 
-def statement_needs_parens(expr: Node) -> bool:
+def left_spine(expr: Node) -> Generator[Node, None, None]:
     """
-    Return whether an expression statement consisting of *expr* must be parenthesized because its
-    leftmost token would otherwise start a block, function declaration, or class declaration. The
-    hazard propagates down the left spine, e.g. `({}).x` or `(function(){})()`.
+    The nodes whose first token is also the first token of *expr*, outermost first. Every rule about
+    where a bracket is needed to keep a position from being misread is a rule about that one token,
+    so each of them walks this chain: `({}).x` and `(function(){})()` are bracketed for what stands
+    at the far end of it, not for what stands at the top.
     """
     node: Node | None = expr
     while node is not None:
-        if isinstance(node, (JsObjectExpression, JsFunctionExpression, JsClassExpression, JsObjectPattern)):
-            return True
+        yield node
         if isinstance(node, JsMemberExpression):
             node = node.object
         elif isinstance(node, JsCallExpression):
@@ -291,5 +293,44 @@ def statement_needs_parens(expr: Node) -> bool:
         elif isinstance(node, JsUpdateExpression) and not node.prefix:
             node = node.argument
         else:
-            return False
-    return False
+            return
+
+
+def opens_a_let_declaration(expr: Node) -> bool:
+    """
+    Whether *expr* begins with the two tokens `let [`. That is the one spelling a statement may not
+    read as an expression: `let` is an ordinary name everywhere else, so `let.a` and `let(1)` need
+    nothing, while `let[0]` written bare is a destructuring declaration and not the index the tree
+    holds. The same two tokens are refused at the head of a `for` and of a `for ... in`.
+    """
+    return any(
+        isinstance(node, JsMemberExpression)
+        and node.computed
+        and isinstance(node.object, JsIdentifier)
+        and node.object.name == 'let'
+        for node in left_spine(expr)
+    )
+
+
+def opens_with_let(expr: Node) -> bool:
+    """
+    Whether *expr* begins with the name `let` at all. A `for ... of` head refuses that much: where a
+    statement asks what follows the name, this position does not, and `for (let.a of x)` is no
+    program even though `let.a;` is one.
+    """
+    return any(
+        isinstance(node, JsIdentifier) and node.name == 'let'
+        for node in left_spine(expr)
+    )
+
+
+def statement_needs_parens(expr: Node) -> bool:
+    """
+    Whether an expression statement made of *expr* has to be bracketed, because its first token
+    would otherwise open something a statement reads as its own: a block, a function or class
+    declaration, or the declaration that `let [` begins.
+    """
+    for node in left_spine(expr):
+        if isinstance(node, (JsObjectExpression, JsFunctionExpression, JsClassExpression, JsObjectPattern)):
+            return True
+    return opens_a_let_declaration(expr)

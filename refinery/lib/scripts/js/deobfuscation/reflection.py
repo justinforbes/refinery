@@ -12,7 +12,13 @@ import enum
 
 from typing import Callable, NamedTuple
 
-from refinery.lib.scripts import Expression, Node, _clone_node, _replace_in_parent
+from refinery.lib.scripts import (
+    Expression,
+    Node,
+    _clone_node,
+    _replace_in_parent,
+    is_well_formed,
+)
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import side_effect_free
 from refinery.lib.scripts.js.analysis.model import (
@@ -83,12 +89,21 @@ class ReflectedScope(enum.Enum):
 
 
 def _try_parse(code: str, *, top_level_await: bool) -> JsScript | None:
+    """
+    The tree the reflected code spells, or `None` where it spells no program. Inlining is the one
+    place a parse has to be believed rather than merely used: what comes back is printed into the
+    file around it, so text the parser did not read would be printed as source it never agreed to,
+    and a literal the code left open would run on into whatever follows it at the call site.
+
+    Recovery makes the parser total, so raising is not the test. The test is whether the tree is
+    well formed, which is precisely the domain over which printing it back means what it said.
+    """
     try:
         from refinery.lib.scripts.js.parser import JsParser
         parsed = JsParser(code, top_level_await=top_level_await).parse()
     except Exception:
         return None
-    if not parsed.body:
+    if not parsed.body or not is_well_formed(parsed):
         return None
     return parsed
 

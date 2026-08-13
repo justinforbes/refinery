@@ -2088,8 +2088,16 @@ class JsInterpreter:
         return self._get_property(obj, key)
 
     def _eval_template(self, node: JsTemplateLiteral) -> Value:
+        """
+        A template denotes the text of its runs with what its holes evaluate to between them. A run
+        that denotes nothing makes the whole literal denote nothing: the language refuses such a
+        template rather than reading it, so there is no string to hand back and computing one would
+        answer for a script no engine will run.
+        """
         parts: list[str] = []
         for i, quasi in enumerate(node.quasis):
+            if quasi.value is None:
+                raise IrreducibleExpression(node)
             parts.append(quasi.value)
             if i < len(node.expressions):
                 parts.append(to_string(self._eval(node.expressions[i])))

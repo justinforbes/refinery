@@ -31,6 +31,7 @@ _OCTAL = frozenset('01234567')
 _DECIMAL = frozenset('0123456789')
 
 _WHITESPACE = frozenset(WHITESPACE)
+_SURROGATE_PAIR = re.compile('[\ud800-\udbff][\udc00-\udfff]')
 _LINE_TERMINATOR = re.compile(F'[{re.escape(LINE_TERMINATORS)}]')
 """
 The two productions `refinery.lib.scripts.js.token` spells, in the shapes this scan reads them. The
@@ -291,7 +292,16 @@ class JsLexer:
             self.source, self.pos, len(self.source))
         return result
 
-    def _read_string(self, quote: str) -> str:
+    def _read_string(self, quote: str) -> tuple[str, bool]:
+        """
+        The string literal that begins here, and whether the closing quote was there. A literal ends
+        at a line feed or a carriage return and at no other line terminator — `U+2028` and `U+2029`
+        stand inside one since ES2019 — and the terminator that ends it is left unread, so the line
+        still ends where the source ended it and a semicolon may be inserted there.
+
+        The escape is consumed before that check rather than after it, which is what lets a
+        backslash continue a literal onto the next line.
+        """
         start = self.pos
         src = self.source
         length = len(src)
@@ -301,12 +311,12 @@ class JsLexer:
             if c == '\\':
                 self._read_string_escape()
                 continue
+            if c in '\r\n':
+                break
             self.pos += 1
             if c == quote:
-                return src[start:self.pos]
-            if c in '\r\n':
-                return src[start:self.pos]
-        return src[start:self.pos]
+                return src[start:self.pos], True
+        return src[start:self.pos], False
 
     def _scan_template_content(
         self,
@@ -334,7 +344,7 @@ class JsLexer:
                 return JsToken(interp_kind, src[start:self.pos], start)
             self.pos += 1
         self._template_depth += depth_delta
-        return JsToken(close_kind, src[start:self.pos], start)
+        return JsToken(close_kind, src[start:self.pos], start, False)
 
     def _read_template(self) -> JsToken:
         start = self.pos
@@ -401,6 +411,16 @@ class JsLexer:
         return JsToken(JsTokenKind.INTEGER, src[start:self.pos], start)
 
     def _read_number(self) -> JsToken:
+        """
+        The numeric literal that begins here. The digits after the point are optional where there
+        are digits in front of it — `3.` is the number three — which is what makes `1..toString()`
+        a call on a numeral rather than a member of a member. The point belongs to the numeral
+        whenever it can, so `1.toString()` is a numeral with a name behind it and no program at all.
+
+        A literal that opens with the point has no such option: `.5` needs its digits, and the
+        point that would follow them belongs to whatever comes next. Neither has a prefixed literal,
+        which ends at its digits.
+        """
         start = self.pos
         src = self.source
         length = len(src)
@@ -419,6 +439,7 @@ class JsLexer:
 
         while self.pos < length and (src[self.pos] in _DECIMAL or src[self.pos] == '_'):
             self.pos += 1
+        has_integer_part = self.pos > start
 
         is_float = False
         if self.pos < length and src[self.pos] == '.':
@@ -430,6 +451,9 @@ class JsLexer:
                     src[self.pos] in _DECIMAL or src[self.pos] == '_'
                 ):
                     self.pos += 1
+            elif has_integer_part:
+                is_float = True
+                self.pos += 1
 
         if self.pos < length and src[self.pos] in 'eE':
             is_float = True
@@ -504,12 +528,12 @@ class JsLexer:
                 continue
 
             if c == "'":
-                text = self._read_string("'")
-                yield JsToken(JsTokenKind.STRING_SINGLE, text, start)
+                text, terminated = self._read_string("'")
+                yield JsToken(JsTokenKind.STRING_SINGLE, text, start, terminated)
                 continue
             if c == '"':
-                text = self._read_string('"')
-                yield JsToken(JsTokenKind.STRING_DOUBLE, text, start)
+                text, terminated = self._read_string('"')
+                yield JsToken(JsTokenKind.STRING_DOUBLE, text, start, terminated)
                 continue
             if c == '`':
                 yield self._read_template()
@@ -569,7 +593,24 @@ class JsLexer:
             yield JsToken(JsTokenKind.ERROR, c, start)
 
 
+def _combine_surrogate_pair(match: re.Match[str]) -> str:
+    high, low = match.group()
+    return chr(0x10000 + ((ord(high) - 0xD800) << 10) + (ord(low) - 0xDC00))
+
+
 def decode_js_string_body(text: str) -> str:
+    """
+    The text a literal body denotes, as a sequence of code points. A JavaScript string is a
+    sequence of UTF-16 code units, and the two part ways above the basic plane: a value is held
+    here as the code points those units name, which is why an adjacent surrogate pair is combined
+    into the one character it spells. Without that, `\\uD83D\\uDE00` and `\\u{1F600}` — one string
+    written two ways — would be two different values, and nothing downstream could see they are
+    the same.
+
+    A lone surrogate is left standing, because it names no code point and JavaScript admits one in
+    a string. Where a rule needs the units rather than the points, it asks
+    `refinery.lib.scripts.js.deobfuscation.helpers.utf16_code_units`, which is the inverse.
+    """
     if '\\' not in text:
         return text
     parts: list[str] = []
@@ -584,4 +625,57 @@ def decode_js_string_body(text: str) -> str:
         decoded, i = _decode_one_escape(text, i + 1, length)
         if decoded:
             parts.append(decoded)
-    return ''.join(parts)
+    result = ''.join(parts)
+    if _SURROGATE_PAIR.search(result):
+        return _SURROGATE_PAIR.sub(_combine_surrogate_pair, result)
+    return result
+
+
+def has_legacy_numeric_escape(text: str) -> bool:
+    """
+    Whether the body of a literal was written with a legacy octal or non-octal-decimal escape: a
+    backslash followed by `1` through `9`, or by `0` with another decimal digit behind it. A plain
+    `\\0` is the NUL escape and is none of these, and a backslash that escapes a backslash opens no
+    escape at all, so the scan steps over both rather than counting them.
+
+    Two rules read this. Strict code rejects such an escape, and a template excludes it from the
+    grammar outright — which is a stronger statement, because a run that carries one denotes
+    nothing at all.
+    """
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != '\\':
+            i += 1
+            continue
+        if i + 1 >= n:
+            return False
+        nxt = text[i + 1]
+        if nxt in '123456789':
+            return True
+        if nxt == '0':
+            if i + 2 < n and text[i + 2] in '0123456789':
+                return True
+        i += 2
+    return False
+
+
+def decode_js_template_body(text: str) -> str | None:
+    """
+    What a run of template text denotes, or `None` where it denotes nothing. It is the body of a
+    string literal with two rules more.
+
+    A template is the one literal that may span lines, and every line terminator sequence in it
+    denotes a line feed, so a file saved with CRLF endings holds the same template as one saved
+    with LF. Normalizing before the escapes are read is what keeps a backslash at the end of a line
+    a continuation in either file.
+
+    The escapes a template admits are those of a string minus the ones Annex B keeps alive for
+    sloppy code. A template carrying one of those is not a template at all: untagged it is a syntax
+    error, and tagged it is a run whose cooked value the language states is `undefined`. There is
+    no text it denotes, and answering with the text the same spelling would denote in a string is
+    how a script no engine will run gets a value computed for it anyway.
+    """
+    if has_legacy_numeric_escape(text):
+        return None
+    return decode_js_string_body(text.replace('\r\n', '\n').replace('\r', '\n'))

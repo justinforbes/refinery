@@ -28,7 +28,17 @@ class JsVarKind(enum.Enum):
 
 
 @dataclass(repr=False, eq=False)
-class JsErrorNode(Expression, Statement):
+class JsErrorNode(Expression, Statement, unparsed=True):
+    """
+    A span of source the parser could not read, kept verbatim so that what an analyst gets back
+    still contains what was written. It prints as `text` and so reads back as whatever that text
+    parses to, which is why a tree holding one states nothing about synthesizer fidelity.
+
+    It stands in either position, because the recovery that builds it does not know which was
+    expected. In statement position it is the statement, and is deliberately not wrapped in an
+    expression statement: the wrapper prints a semicolon that nobody wrote, which grows the file by
+    one character every time the tool reads its own output.
+    """
     text: str = ''
     message: str = ''
 
@@ -37,6 +47,15 @@ class JsErrorNode(Expression, Statement):
 class JsIdentifier(Expression):
     name: str = ''
 
+    def has_spelling(self) -> bool:
+        """
+        There is no name spelled by nothing. Printing one writes whatever stands around it and
+        closes up over the gap, so `a.` becomes `a` and a program loses a member read; the parser
+        builds an error node where it finds no name, and this is what says so if a transform ever
+        assembles one anyway.
+        """
+        return bool(self.name)
+
 
 @dataclass(repr=False, eq=False)
 class JsPrivateIdentifier(Expression):
@@ -44,7 +63,7 @@ class JsPrivateIdentifier(Expression):
 
 
 @dataclass(repr=False, eq=False)
-class JsNumericLiteral(Expression):
+class JsNumericLiteral(Expression, spelling='raw'):
     """
     A Number literal. `value` is the double the source denotes and `raw` is how that source spelled
     it; the two are independent because a spelling carries information the value does not, such as
@@ -60,19 +79,42 @@ class JsNumericLiteral(Expression):
 
 
 @dataclass(repr=False, eq=False)
-class JsBigIntLiteral(Expression):
+class JsBigIntLiteral(Expression, spelling='raw'):
     value: int = 0
     raw: str = '0n'
 
 
 @dataclass(repr=False, eq=False)
-class JsStringLiteral(Expression):
+class JsStringLiteral(Expression, spelling='raw'):
+    """
+    A String literal. `value` is the text it denotes and `raw` is how the source spelled it, which
+    part ways wherever an escape stands between them.
+
+    `terminated` reports whether the closing quote was there. A literal the source never closed is
+    not a form the language has, so no text spells it: printing what was written runs the literal on
+    into whatever the synthesizer prints next, and printing the quote that is missing turns a file
+    that does not parse into a program that runs.
+    """
     value: str = ''
     raw: str = "''"
+    terminated: bool = True
+
+    @property
+    def body(self) -> str:
+        """
+        The source text between the quotes, every escape still spelled as it was written. A rule
+        about how a literal was written reads this rather than `value`: a directive spelled with an
+        escape in it denotes the text `use strict` and is not a Use Strict Directive, because what
+        makes a directive is the spelling and not the value.
+        """
+        return self.raw[1:-1] if self.terminated else self.raw[1:]
+
+    def has_spelling(self) -> bool:
+        return self.terminated
 
 
 @dataclass(repr=False, eq=False)
-class JsRegExpLiteral(Expression):
+class JsRegExpLiteral(Expression, spelling='raw'):
     pattern: str = ''
     flags: str = ''
     raw: str = '//'
@@ -85,10 +127,27 @@ class JsTemplateLiteral(Expression):
 
 
 @dataclass(repr=False, eq=False)
-class JsTemplateElement(Node):
-    value: str = ''
+class JsTemplateElement(Node, spelling='raw'):
+    """
+    One run of text in a template literal. `raw` is that run as the source wrote it and `value` the
+    text it denotes; neither holds the delimiters that separate the runs from the expressions,
+    because the literal prints those itself and a run is what stands between them.
+
+    `terminated` reports whether the delimiter that ends the run was there. Only a template can
+    reach the end of the file unclosed, since no line terminator ends one, and a hole the source
+    left open ends here as an empty run that closes nothing.
+
+    `value` is `None` where the run denotes nothing, which is a run written with an escape the
+    template grammar excludes. The language says the same thing by handing a tag `undefined` for
+    such a run, and by refusing the untagged literal outright.
+    """
+    value: str | None = ''
     raw: str = ''
     tail: bool = False
+    terminated: bool = True
+
+    def has_spelling(self) -> bool:
+        return self.terminated
 
 
 @dataclass(repr=False, eq=False)

@@ -572,6 +572,18 @@ def escape_js_string(value: str, quote: str = "'") -> str:
     return re.sub(r'[\x01-\x1f\ud800-\udfff]', _residue, value)
 
 
+def escape_js_template_text(value: str) -> str:
+    """
+    Escape a string so that it spells itself inside a template literal. Three characters end a run
+    of template text rather than standing in it — the backtick that closes the literal, the `${`
+    that opens a hole, and the backslash that would eat what follows it — and every other character
+    stands as itself, including the line terminators a template is allowed to span.
+    """
+    value = value.replace('\\', r'\\')
+    value = value.replace('`', r'\`')
+    return value.replace('${', r'\${')
+
+
 def string_value(node: Expression | None) -> str | None:
     if isinstance(node, JsStringLiteral):
         return node.value

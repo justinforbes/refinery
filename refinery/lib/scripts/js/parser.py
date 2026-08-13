@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from refinery.lib.scripts.js.lexer import JsLexer, JsLexerState, decode_js_string_body
+from refinery.lib.scripts.js.lexer import (
+    JsLexer,
+    JsLexerState,
+    decode_js_string_body,
+    decode_js_template_body,
+)
 from refinery.lib.scripts.js.model import (
     Expression,
     JsArrayExpression,
@@ -335,10 +340,7 @@ class JsParser:
                 body.append(stmt)
             elif self._current.offset == mark:
                 tok = self._advance()
-                error = JsExpressionStatement(
-                    offset=tok.offset,
-                    expression=JsErrorNode(offset=tok.offset, text=tok.value),
-                )
+                error = JsErrorNode(offset=tok.offset, text=tok.value)
                 error.leading_comments.extend(comments)
                 body.append(error)
         return body
@@ -389,9 +391,9 @@ class JsParser:
                 return self._parse_export_declaration(decorators)
             if self._at(JsTokenKind.CLASS):
                 return self._parse_class_declaration(decorators)
-            return JsExpressionStatement(
-                expression=JsErrorNode(
-                    text='@', message='decorators must precede a class', offset=offset),
+            return JsErrorNode(
+                text=self._source[offset:self._current.offset].rstrip(),
+                message='decorators must precede a class',
                 offset=offset,
             )
         if kind == JsTokenKind.CLASS:
@@ -420,6 +422,8 @@ class JsParser:
             return JsLabeledStatement(label=expr, body=body, offset=offset)
 
         self._eat_semicolon()
+        if isinstance(expr, JsErrorNode):
+            return expr
         return JsExpressionStatement(expression=expr, offset=offset)
 
     def _parse_block_statement(self) -> JsBlockStatement:
@@ -1329,7 +1333,16 @@ class JsParser:
         return expr
 
     def _parse_call_expression(self) -> Expression:
+        """
+        A left-hand side expression: what may be called, indexed, or used to tag a template. An
+        arrow function is none of those. It is an AssignmentExpression and never a
+        LeftHandSideExpression, so nothing may attach to it, and the tail that would have attached
+        belongs to whatever follows instead — `f = a => {}` on one line and `[x].forEach(g)` on the
+        next are two statements, and reading the bracket as an index into the arrow makes them one.
+        """
         expr = self._parse_new_expression()
+        if isinstance(expr, JsArrowFunctionExpression):
+            return expr
         while True:
             if self._at(JsTokenKind.LPAREN):
                 expr = self._parse_call_arguments(expr, optional=False)
@@ -1367,10 +1380,21 @@ class JsParser:
         return expr
 
     def _member_property(self) -> Expression:
+        """
+        The name behind a dot. It is an IdentifierName, which is every word the language has and not
+        only the ones that may be a variable, so `a.if` and `a.default` are ordinary member reads.
+
+        Where the text behind the dot spells no word at all there is no name to build. An identifier
+        with no name spells nothing — printing it writes the dot and stops, which is not a program —
+        so what was read is handed back as itself instead.
+        """
         tok = self._advance()
         if tok.kind is JsTokenKind.PRIVATE_IDENTIFIER:
             return JsPrivateIdentifier(name=tok.value[1:], offset=tok.offset)
-        return JsIdentifier(name=tok.value, offset=tok.offset)
+        if tok.kind is JsTokenKind.IDENTIFIER or tok.kind.is_keyword:
+            return JsIdentifier(name=tok.value, offset=tok.offset)
+        return JsErrorNode(
+            text=tok.value, message='expected a property name', offset=tok.offset)
 
     def _parse_argument_list(self) -> list[Expression]:
         args: list[Expression] = []
@@ -1418,8 +1442,7 @@ class JsParser:
                 callee = self._parse_new_expression()
             while True:
                 if self._eat(JsTokenKind.DOT):
-                    prop_tok = self._advance()
-                    prop = JsIdentifier(name=prop_tok.value, offset=prop_tok.offset)
+                    prop = self._member_property()
                     callee = JsMemberExpression(
                         object=callee, property=prop, computed=False, offset=callee.offset)
                 elif self._at(JsTokenKind.LBRACKET):
@@ -1532,11 +1555,34 @@ class JsParser:
     def _parse_string_literal(self) -> JsStringLiteral:
         tok = self._advance()
         raw = tok.value
-        if len(raw) >= 2:
-            value = decode_js_string_body(raw[1:-1])
-        else:
-            value = raw
-        return JsStringLiteral(value=value, raw=raw, offset=tok.offset)
+        end = len(raw) - 1 if tok.terminated else len(raw)
+        return JsStringLiteral(
+            value=decode_js_string_body(raw[1:end]),
+            raw=raw,
+            terminated=tok.terminated,
+            offset=tok.offset,
+        )
+
+    @staticmethod
+    def _template_element(tok: JsToken, tail: bool) -> JsTemplateElement:
+        """
+        One run of text of a template literal, taken from the token without the delimiters around
+        it: one character opens every run, and the one that ends it is a backtick where the run
+        ends the literal and `${` where a hole follows. The text between them is cooked into what
+        it denotes, exactly as the body of a string literal is — a template that carries an escape
+        means what the escape means, and reading it as the characters that spell it is how a `\\t`
+        became two.
+        """
+        raw = tok.value
+        end = len(raw) - (1 if tail else 2) if tok.terminated else len(raw)
+        text = raw[1:end]
+        return JsTemplateElement(
+            value=decode_js_template_body(text),
+            raw=text,
+            tail=tail,
+            terminated=tok.terminated,
+            offset=tok.offset,
+        )
 
     def _parse_template_literal(self) -> JsTemplateLiteral:
         offset = self._current.offset
@@ -1544,39 +1590,23 @@ class JsParser:
         expressions: list[Expression] = []
 
         if self._at(JsTokenKind.TEMPLATE_FULL):
-            tok = self._advance()
-            raw = tok.value
-            value = raw[1:-1]
-            quasis.append(JsTemplateElement(
-                value=value, raw=raw, tail=True, offset=tok.offset))
+            quasis.append(self._template_element(self._advance(), True))
             return JsTemplateLiteral(
                 quasis=quasis, expressions=expressions, offset=offset)
 
-        tok = self._advance()
-        raw = tok.value
-        value = raw[1:-2]
-        quasis.append(JsTemplateElement(
-            value=value, raw=raw, tail=False, offset=tok.offset))
+        quasis.append(self._template_element(self._advance(), False))
 
         while True:
-            expr = self._parse_expression()
-            expressions.append(expr)
+            expressions.append(self._parse_expression())
             if self._at(JsTokenKind.TEMPLATE_TAIL):
-                tok = self._advance()
-                raw = tok.value
-                value = raw[1:-1]
-                quasis.append(JsTemplateElement(
-                    value=value, raw=raw, tail=True, offset=tok.offset))
+                quasis.append(self._template_element(self._advance(), True))
                 break
             elif self._at(JsTokenKind.TEMPLATE_MIDDLE):
-                tok = self._advance()
-                raw = tok.value
-                value = raw[1:-2]
-                quasis.append(JsTemplateElement(
-                    value=value, raw=raw, tail=False, offset=tok.offset))
+                quasis.append(self._template_element(self._advance(), False))
             else:
                 quasis.append(JsTemplateElement(
-                    value='', raw='', tail=True, offset=self._current.offset))
+                    value='', raw='', tail=True, terminated=False,
+                    offset=self._current.offset))
                 break
 
         return JsTemplateLiteral(
@@ -1744,56 +1774,56 @@ class JsParser:
         return JsIdentifier(name=tok.value, offset=tok.offset)
 
     def _parse_paren_or_arrow(self, is_async: bool = False) -> Expression:
+        """
+        What ECMA-262 calls `CoverParenthesizedExpressionAndArrowParameterList`: a bracketed list
+        that the token behind the closing bracket decides the reading of, because nothing inside it
+        does. It is read as a list of assignment expressions either way and only then converted,
+        which is what lets one pass read a head no expression grammar accepts.
+
+        Three of its shapes belong to the parameter reading alone and are not expressions at all —
+        the empty list, a rest element, and a trailing comma — so a list holding one of them is an
+        arrow head or it is nothing. The rest element in particular may only stand last, and reading
+        it as one of the list rather than as a case of its own is the whole difference between
+        `(...a) => a` and `(b, ...a) => a`.
+        """
         with self._with_no_in(False):
             offset = self._current.offset
             self._expect(JsTokenKind.LPAREN)
 
-            if self._at(JsTokenKind.RPAREN):
-                self._advance()
-                self._expect(JsTokenKind.ARROW)
-                body = self._parse_arrow_body(is_async)
-                return JsArrowFunctionExpression(params=[], body=body, offset=offset)
+            items: list[Expression] = []
+            head_only = True
 
-            if self._at(JsTokenKind.ELLIPSIS):
-                params = self._parse_arrow_params_rest()
-                self._expect(JsTokenKind.RPAREN)
-                self._expect(JsTokenKind.ARROW)
-                body = self._parse_arrow_body(is_async)
-                return JsArrowFunctionExpression(params=params, body=body, offset=offset)
-
-            expr = self._parse_expression()
-
-            if self._at(JsTokenKind.RPAREN):
-                self._advance()
-                if self._at(JsTokenKind.ARROW) and not self._preceded_by_newline:
-                    self._advance()
-                    params = self._expr_to_params(expr)
-                    body = self._parse_arrow_body(is_async)
-                    return JsArrowFunctionExpression(
-                        params=params, body=body, offset=offset)
-                return JsParenthesizedExpression(expression=expr, offset=offset)
+            while not self._at(JsTokenKind.RPAREN, JsTokenKind.EOF):
+                if self._at(JsTokenKind.ELLIPSIS):
+                    items.append(self._parse_rest_element())
+                    head_only = True
+                    break
+                items.append(self._parse_assignment_expression())
+                head_only = False
+                if not self._eat(JsTokenKind.COMMA):
+                    break
+                head_only = self._at(JsTokenKind.RPAREN)
 
             self._expect(JsTokenKind.RPAREN)
-            return JsParenthesizedExpression(expression=expr, offset=offset)
 
-    def _parse_arrow_params_rest(self) -> list[Expression]:
-        params: list[Expression] = []
-        while self._at(JsTokenKind.ELLIPSIS):
-            params.append(self._parse_rest_element())
-            if self._at(JsTokenKind.COMMA):
-                self._advance()
-        return params
+            if head_only or (self._at(JsTokenKind.ARROW) and not self._preceded_by_newline):
+                self._expect(JsTokenKind.ARROW)
+                body = self._parse_arrow_body(is_async)
+                return JsArrowFunctionExpression(
+                    params=[self._to_param(item) for item in items],
+                    body=body,
+                    offset=offset,
+                )
+
+            expression = items[0] if len(items) == 1 else JsSequenceExpression(
+                expressions=items, offset=offset)
+            return JsParenthesizedExpression(expression=expression, offset=offset)
 
     def _parse_arrow_body(self, is_async: bool = False) -> Expression | JsBlockStatement:
         with self._function_body_context(is_async, False):
             if self._at(JsTokenKind.LBRACE):
                 return self._parse_block_statement()
             return self._parse_assignment_expression()
-
-    def _expr_to_params(self, expr: Expression) -> list[Expression]:
-        if isinstance(expr, JsSequenceExpression):
-            return [self._to_param(e) for e in expr.expressions]
-        return [self._to_param(expr)]
 
     def _to_param(self, expr: Expression) -> Expression:
         if isinstance(expr, JsIdentifier):

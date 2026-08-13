@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from refinery.lib.scripts import Node, Synthesizer
-from refinery.lib.scripts.js.deobfuscation.helpers import escape_js_string
+from refinery.lib.scripts.js.deobfuscation.helpers import (
+    escape_js_string,
+    escape_js_template_text,
+)
 from refinery.lib.scripts.js.model import (
     JsArrowFunctionExpression,
     JsAssignmentPattern,
@@ -79,7 +82,12 @@ from refinery.lib.scripts.js.model import (
     Statement,
 )
 from refinery.lib.scripts.js.numbers import exact_integer, is_negative_zero
-from refinery.lib.scripts.js.precedence import needs_parens, statement_needs_parens
+from refinery.lib.scripts.js.precedence import (
+    needs_parens,
+    opens_a_let_declaration,
+    opens_with_let,
+    statement_needs_parens,
+)
 
 _WORD_UNARY_OPS = frozenset({'typeof', 'void', 'delete'})
 
@@ -266,19 +274,24 @@ class JsSynthesizer(Synthesizer):
 
     def visit_JsTemplateLiteral(self, node: JsTemplateLiteral):
         self._write('`')
-        qi = iter(node.quasis)
-        ei = iter(node.expressions)
-        for q in qi:
-            self._write(q.value)
-            e = next(ei, None)
-            if e is not None:
+        expressions = iter(node.expressions)
+        for quasi in node.quasis:
+            self.visit(quasi)
+            expression = next(expressions, None)
+            if expression is not None:
                 self._write('${')
-                self.visit(e)
+                self.visit(expression)
                 self._write('}')
         self._write('`')
 
     def visit_JsTemplateElement(self, node: JsTemplateElement):
-        self._write(node.value)
+        """
+        A run of template text is written the way the source wrote it, because `value` is what that
+        spelling denotes: printing the cooked text back turns an escaped backtick into one that
+        ends the literal and an escaped `${` into a hole. A run that was never written has no
+        spelling to print and is escaped from its value instead.
+        """
+        self._write(node.raw or escape_js_template_text(node.value or ''))
 
     def _emit_array_like(self, node):
         self._write('[')
@@ -676,13 +689,29 @@ class JsSynthesizer(Synthesizer):
             self.visit(node.test)
         self._write(');')
 
-    def _emit_for_binding(self, node: Statement | Node):
+    def _emit_for_binding(self, node: Statement | Node, refuses_a_bare_let: bool = False):
+        """
+        The binding or the assignment target in a loop head. A declaration spells its own keyword;
+        anything else is an expression, and one opening with `let` has to be bracketed here for the
+        reason it has to be bracketed as a statement. A `for ... of` head refuses the bare name,
+        where a `for ... in` head and a `for` initializer refuse only the `let [` that opens a
+        declaration.
+
+        Nothing else is bracketed. The other shape a statement may not open with is an object
+        literal, and a loop head is where one is a destructuring target: bracketing `for ({a} of x)`
+        would make the target invalid rather than keep it whole.
+        """
         if isinstance(node, JsVariableDeclaration):
             self._write(F'{node.kind.value} ')
             for i, decl in enumerate(node.declarations):
                 if i > 0:
                     self._write(', ')
                 self.visit(decl)
+            return
+        if opens_with_let(node) if refuses_a_bare_let else opens_a_let_declaration(node):
+            self._write('(')
+            self.visit(node)
+            self._write(')')
         else:
             self.visit(node)
 
@@ -717,7 +746,7 @@ class JsSynthesizer(Synthesizer):
             self._write('await ')
         self._write('(')
         if node.left:
-            self._emit_for_binding(node.left)
+            self._emit_for_binding(node.left, refuses_a_bare_let=True)
         self._write(' of ')
         if node.right:
             self.visit(node.right)
