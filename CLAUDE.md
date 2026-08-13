@@ -84,13 +84,12 @@ The following rules contradict common Python conventions. Check them explicitly:
 Whenever you make or substantially change a plan:
 Offer a prompt to the user where they can select any number of the following agents to challenge the plan:
 
-1. general purpose adversarial critic
-2. architectural: enforces "Architecture is P0"
-3. testability: design is testable
-4. research: design implements state of the art methodology
-5. safety: design has no obvious safety flaws
+1. architectural: enforces "Architecture is P0"
+2. testability: design is testable
+3. research: design implements state of the art methodology
+4. safety: design has no obvious safety flaws
 
-Launch all selected agents in parallel and revise the plan according to their feedback.
+Run these plus a separate general purpose adversarial critic in parallel and revise the plan according to their feedback.
 After planning, pause to compact before implementation.
 
 # Code Review Context
