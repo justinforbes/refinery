@@ -162,6 +162,7 @@ _ONE_CHAR_OPS: dict[str, JsTokenKind] = {
     '+' : JsTokenKind.PLUS,
     '-' : JsTokenKind.MINUS,
     '*' : JsTokenKind.STAR,
+    '/' : JsTokenKind.SLASH,
     '%' : JsTokenKind.PERCENT,
     '=' : JsTokenKind.EQUALS,
     '!' : JsTokenKind.BANG,
@@ -185,26 +186,16 @@ _ONE_CHAR_OPS: dict[str, JsTokenKind] = {
     '@' : JsTokenKind.AT,
 }
 
-_EXPR_END_KINDS = frozenset({
-    JsTokenKind.IDENTIFIER,
-    JsTokenKind.INTEGER,
-    JsTokenKind.FLOAT,
-    JsTokenKind.BIGINT,
-    JsTokenKind.STRING_SINGLE,
-    JsTokenKind.STRING_DOUBLE,
-    JsTokenKind.TEMPLATE_FULL,
-    JsTokenKind.TEMPLATE_TAIL,
-    JsTokenKind.REGEXP,
-    JsTokenKind.RPAREN,
-    JsTokenKind.RBRACKET,
-    JsTokenKind.INC,
-    JsTokenKind.DEC,
-    JsTokenKind.TRUE,
-    JsTokenKind.FALSE,
-    JsTokenKind.NULL,
-    JsTokenKind.THIS,
-    JsTokenKind.SUPER,
-})
+
+@dataclass(frozen=True)
+class JsLexerState:
+    """
+    What a rewind has to put back. The position is not part of it, because a rewind always goes to
+    the start of a token the parser is already holding: it is the template nesting alone that no
+    longer follows from that offset once scanning has moved past it.
+    """
+    template_depth: int
+    brace_stack: tuple[int, ...]
 
 
 @dataclass
@@ -213,6 +204,24 @@ class JsLexer:
     pos: int = 0
     _template_depth: int = 0
     _brace_stack: list[int] = field(default_factory=list)
+
+    def capture(self) -> JsLexerState:
+        return JsLexerState(self._template_depth, tuple(self._brace_stack))
+
+    def rewind(self, pos: int, state: JsLexerState) -> None:
+        self.pos = pos
+        self._template_depth = state.template_depth
+        self._brace_stack = list(state.brace_stack)
+
+    def scan_regexp(self) -> JsToken:
+        """
+        Read a regular expression literal where scanning currently stands. ECMA-262 clause 12 picks
+        the lexical goal symbol from the syntactic grammar context, which only the parser knows, so
+        no path through `tokenize` reaches this scan: a slash is spelled as the operator it looks
+        like until someone who is expecting an expression asks for it again.
+        """
+        start = self.pos
+        return JsToken(JsTokenKind.REGEXP, self._read_regexp(), start)
 
     def _peek(self, count: int = 1) -> str:
         return self.source[self.pos:self.pos + count]
@@ -437,9 +446,8 @@ class JsLexer:
     def tokenize(self) -> Generator[JsToken, None, None]:
         src = self.source
         length = len(src)
-        prev_allows_regex = True
 
-        if src.startswith('#!'):
+        if self.pos == 0 and src.startswith('#!'):
             self._read_line_comment()
 
         while True:
@@ -474,26 +482,20 @@ class JsLexer:
 
             if c == "'":
                 text = self._read_string("'")
-                prev_allows_regex = False
                 yield JsToken(JsTokenKind.STRING_SINGLE, text, start)
                 continue
             if c == '"':
                 text = self._read_string('"')
-                prev_allows_regex = False
                 yield JsToken(JsTokenKind.STRING_DOUBLE, text, start)
                 continue
             if c == '`':
-                tok = self._read_template()
-                prev_allows_regex = False
-                yield tok
+                yield self._read_template()
                 continue
 
             if c == '}' and self._template_depth > 0 and self._brace_stack:
                 if self._brace_stack[-1] == 0:
                     self._brace_stack.pop()
-                    tok = self._resume_template()
-                    prev_allows_regex = False
-                    yield tok
+                    yield self._resume_template()
                     continue
                 else:
                     self._brace_stack[-1] -= 1
@@ -501,87 +503,46 @@ class JsLexer:
             if c in _DECIMAL or (
                 c == '.' and src[self.pos + 1:self.pos + 2] in _DECIMAL
             ):
-                tok = self._read_number()
-                prev_allows_regex = False
-                yield tok
+                yield self._read_number()
                 continue
 
             if _at_identifier_start(src, self.pos):
-                tok = self._read_identifier_or_keyword()
-                prev_allows_regex = tok.kind not in _EXPR_END_KINDS
-                yield tok
+                yield self._read_identifier_or_keyword()
                 continue
 
             if c == '#':
                 if _at_identifier_start(src, self.pos + 1):
                     self.pos += 1
                     name = self._read_identifier_or_keyword()
-                    prev_allows_regex = False
                     yield JsToken(JsTokenKind.PRIVATE_IDENTIFIER, '#' + name.value, start)
                     continue
-
-            if c == '/':
-                if prev_allows_regex:
-                    text = self._read_regexp()
-                    prev_allows_regex = False
-                    yield JsToken(JsTokenKind.REGEXP, text, start)
-                    continue
-                c2_slash = src[self.pos:self.pos + 2]
-                if c2_slash == '/=':
-                    self.pos += 2
-                    prev_allows_regex = True
-                    yield JsToken(JsTokenKind.SLASH_ASSIGN, '/=', start)
-                    continue
-                self.pos += 1
-                prev_allows_regex = True
-                yield JsToken(JsTokenKind.SLASH, '/', start)
-                continue
 
             c4 = src[self.pos:self.pos + 4]
             if c4 in _FOUR_CHAR_OPS:
                 self.pos += 4
-                kind = _FOUR_CHAR_OPS[c4]
-                prev_allows_regex = True
-                yield JsToken(kind, c4, start)
+                yield JsToken(_FOUR_CHAR_OPS[c4], c4, start)
                 continue
 
             c3 = src[self.pos:self.pos + 3]
             if c3 in _THREE_CHAR_OPS:
                 self.pos += 3
-                kind = _THREE_CHAR_OPS[c3]
-                prev_allows_regex = True
-                yield JsToken(kind, c3, start)
+                yield JsToken(_THREE_CHAR_OPS[c3], c3, start)
                 continue
 
             if c2 in _TWO_CHAR_OPS:
                 self.pos += 2
-                kind = _TWO_CHAR_OPS[c2]
-                if kind in (JsTokenKind.INC, JsTokenKind.DEC):
-                    pass
-                else:
-                    prev_allows_regex = True
-                yield JsToken(kind, c2, start)
+                yield JsToken(_TWO_CHAR_OPS[c2], c2, start)
                 continue
 
             if c in _ONE_CHAR_OPS:
                 self.pos += 1
                 kind = _ONE_CHAR_OPS[c]
-                if kind in (
-                    JsTokenKind.RPAREN,
-                    JsTokenKind.RBRACKET,
-                ):
-                    prev_allows_regex = False
-                elif kind == JsTokenKind.RBRACE:
-                    prev_allows_regex = True
-                else:
-                    prev_allows_regex = kind not in _EXPR_END_KINDS
                 if kind == JsTokenKind.LBRACE and self._brace_stack:
                     self._brace_stack[-1] += 1
                 yield JsToken(kind, c, start)
                 continue
 
             self.pos += 1
-            prev_allows_regex = True
             yield JsToken(JsTokenKind.ERROR, c, start)
 
 

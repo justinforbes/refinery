@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from refinery.lib.scripts.js.lexer import JsLexer, decode_js_string_body
+from refinery.lib.scripts.js.lexer import JsLexer, JsLexerState, decode_js_string_body
 from refinery.lib.scripts.js.model import (
     Expression,
     JsArrayExpression,
@@ -154,6 +154,7 @@ class JsParser:
         self._preceded_by_newline: bool = False
         self._ahead: JsToken | None = None
         self._ahead_newline: bool = False
+        self._ahead_state: tuple[JsLexerState, int] | None = None
         self._no_in: bool = False
         self._in_async: bool = top_level_await
         self._in_generator: bool = False
@@ -179,6 +180,7 @@ class JsParser:
             self._current = self._ahead
             self._preceded_by_newline = self._ahead_newline
             self._ahead = None
+            self._ahead_state = None
             return prev
         self._current, self._preceded_by_newline = self._pull_token()
         return prev
@@ -193,8 +195,33 @@ class JsParser:
 
     def _peek_next(self) -> JsToken:
         if self._ahead is None:
+            self._ahead_state = self._lexer.capture(), len(self._pending_comments)
             self._ahead, self._ahead_newline = self._pull_token()
         return self._ahead
+
+    def _rescan_as_regexp(self) -> JsToken:
+        """
+        Read the slash the parser is holding again, as the regular expression it begins. A slash is
+        the one character whose token depends on where the grammar stands rather than on what the
+        text says, and the lexer is not standing anywhere: it spells every slash as an operator, and
+        this is the single place that knows that an expression is about to begin. Rewinding is what
+        makes that affordable — reading a division that was a regular expression costs one token,
+        whereas the other way around has already swallowed the rest of the line.
+
+        Everything scanned since the slash is given back, because a lookahead token may have opened
+        or closed a template hole and a skipped comment would otherwise be collected twice.
+        """
+        if self._ahead_state is None:
+            state, comments = self._lexer.capture(), len(self._pending_comments)
+        else:
+            state, comments = self._ahead_state
+        del self._pending_comments[comments:]
+        self._ahead = None
+        self._ahead_state = None
+        self._lexer.rewind(self._current.offset, state)
+        self._current = self._lexer.scan_regexp()
+        self._tokens = self._lexer.tokenize()
+        return self._current
 
     def _at(self, *kinds: JsTokenKind) -> bool:
         return self._current.kind in kinds
@@ -211,16 +238,17 @@ class JsParser:
         self._advance()
         return JsToken(kind, tok.value, tok.offset)
 
-    def _at_binding_identifier(self) -> bool:
+    def _is_binding_identifier(self, token: JsToken) -> bool:
         """
-        Whether the current token can serve as an ordinary binding or reference name. Several contextual
+        Whether the token can serve as an ordinary binding or reference name. Several contextual
         keywords (`as`, `from`, `of`, `let`, `async`) are always valid names, and `await` and `yield` are
         valid names except inside an async function or a generator respectively. This mirrors the identifier
         acceptance of `_parse_primary_expression`, so a name-reading site accepts exactly the tokens the
         expression grammar would treat as a reference.
         """
+        kind = token.kind
         return (
-            self._at(
+            kind in (
                 JsTokenKind.IDENTIFIER,
                 JsTokenKind.AS,
                 JsTokenKind.FROM,
@@ -228,8 +256,29 @@ class JsParser:
                 JsTokenKind.LET,
                 JsTokenKind.ASYNC,
             )
-            or (self._at(JsTokenKind.AWAIT) and not self._in_async)
-            or (self._at(JsTokenKind.YIELD) and not self._in_generator)
+            or (kind is JsTokenKind.AWAIT and not self._in_async)
+            or (kind is JsTokenKind.YIELD and not self._in_generator)
+        )
+
+    def _at_binding_identifier(self) -> bool:
+        return self._is_binding_identifier(self._current)
+
+    def _at_variable_declaration(self) -> bool:
+        """
+        Whether a variable declaration begins here, rather than an expression that merely opens with
+        the same word. ECMA-262 reserves `let` in strict code only, so wherever a statement may also
+        be read as an expression, a `let` declares nothing unless a binding follows it: it is a name
+        being called in `let(1)`, divided in `let / 2` and read in `let.a`, and only `let [` is the
+        spelling a statement is forbidden to take as an expression.
+        """
+        if self._at(JsTokenKind.VAR, JsTokenKind.CONST):
+            return True
+        if not self._at(JsTokenKind.LET):
+            return False
+        ahead = self._peek_next()
+        return (
+            self._is_binding_identifier(ahead)
+            or ahead.kind in (JsTokenKind.LBRACKET, JsTokenKind.LBRACE)
         )
 
     def _eat_semicolon(self) -> bool:
@@ -300,7 +349,7 @@ class JsParser:
         if kind == JsTokenKind.SEMICOLON:
             self._advance()
             return JsEmptyStatement(offset=offset)
-        if kind in (JsTokenKind.VAR, JsTokenKind.LET, JsTokenKind.CONST):
+        if self._at_variable_declaration():
             return self._parse_variable_declaration()
         if kind == JsTokenKind.IF:
             return self._parse_if_statement()
@@ -525,7 +574,7 @@ class JsParser:
             self._advance()
             return self._parse_for_rest(None, offset)
 
-        if self._at(JsTokenKind.VAR, JsTokenKind.LET, JsTokenKind.CONST):
+        if self._at_variable_declaration():
             decl_offset = self._current.offset
             kind_tok = self._advance()
             kind = _VAR_KIND_MAP[kind_tok.kind]
@@ -1423,6 +1472,9 @@ class JsParser:
 
         if self._at(JsTokenKind.STRING_SINGLE, JsTokenKind.STRING_DOUBLE):
             return self._parse_string_literal()
+
+        if self._at(JsTokenKind.SLASH, JsTokenKind.SLASH_ASSIGN):
+            tok = self._rescan_as_regexp()
 
         if self._at(JsTokenKind.REGEXP):
             self._advance()

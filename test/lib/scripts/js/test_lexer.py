@@ -156,35 +156,12 @@ class TestJsLexer(TestBase):
             JsTokenKind.TEMPLATE_TAIL,
         ])
 
-    def test_regexp(self):
-        tokens = self._tokens('/abc/gi')
-        self.assertEqual(tokens, [(JsTokenKind.REGEXP, '/abc/gi')])
-
-    def test_regexp_with_class(self):
-        tokens = self._tokens('/[a-z]+/i')
-        self.assertEqual(tokens, [(JsTokenKind.REGEXP, '/[a-z]+/i')])
-
     def test_regexp_vs_division(self):
         kinds = self._token_kinds('x / y')
         self.assertEqual(kinds, [
             JsTokenKind.IDENTIFIER,
             JsTokenKind.SLASH,
             JsTokenKind.IDENTIFIER,
-        ])
-
-    def test_regexp_after_equals(self):
-        kinds = self._token_kinds('x = /re/')
-        self.assertEqual(kinds, [
-            JsTokenKind.IDENTIFIER,
-            JsTokenKind.EQUALS,
-            JsTokenKind.REGEXP,
-        ])
-
-    def test_regexp_after_return(self):
-        kinds = self._token_kinds('return /re/')
-        self.assertEqual(kinds, [
-            JsTokenKind.RETURN,
-            JsTokenKind.REGEXP,
         ])
 
     def test_all_keywords(self):
