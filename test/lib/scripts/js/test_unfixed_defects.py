@@ -52,6 +52,9 @@ from refinery.units.scripting.js import js
 _ASTRAL = chr(0x1F600)
 
 
+_ASTRAL_LETTER = chr(0x1D465)
+
+
 def _printed(source: str) -> str:
     return JsSynthesizer().convert(JsParser(source).parse())
 
@@ -316,10 +319,10 @@ class TestStringIsASequenceOfUtf16CodeUnits(TestBase):
 class TestARuntimeProducedStringIsUtf16CodeUnits(TestBase):
     """
     A string a built-in hands back at run time is the same sequence of UTF-16 code units as the same
-    string written as a literal, so its length, the code unit at a position, and the pieces it splits
-    into are read exactly as they are read for the literal, and exactly as Node reports them. One
-    character above the basic multilingual plane occupies two code units however the string that
-    holds it was produced.
+    string written as a literal, so its length, the code unit at a position, and the pieces it
+    splits into are read exactly as they are read for the literal, and exactly as Node reports
+    them. One character above the basic multilingual plane occupies two code units however the
+    string that holds it was produced.
     """
 
     @unittest.expectedFailure
@@ -354,6 +357,37 @@ class TestARuntimeProducedStringIsUtf16CodeUnits(TestBase):
             F"{produced}.charCodeAt(1), {produced}.split('').length);"
         )
         self.assertEqual(_folded(source), 'console.log(2, 55357, 56832, 2);')
+
+
+class TestAnIdentifierNamedKeyReadsAsUtf16CodeUnits(TestBase):
+    """
+    An object property key written as a bare identifier is a JavaScript string when it is read
+    back, and it is the same sequence of UTF-16 code units as the identical key written as a string
+    literal. One character above the basic multilingual plane occupies two code units, so a key
+    named by a bare identifier spelled with U+1D465 and the same key named by a string literal are
+    read alike, and each is read as Node reads it. The identifier-named key is read as one code
+    point instead, so the two spellings of the one key disagree.
+    """
+
+    @unittest.expectedFailure
+    def test_a_bare_identifier_key_reads_the_same_code_units_as_its_literal(self):
+        """
+        Node answers `55349` and `56421`, the high and low surrogate of U+1D465, for
+        `Object.keys({K: 1})[0].charCodeAt(0)` and `.charCodeAt(1)` when `K` is that character
+        written as a bare identifier, and answers the same two when `K` is written as the string
+        literal `'K'`: the property key read back is a string of two code units however the key was
+        spelled. The literal-named key is folded to those two, so the identifier-named key has to
+        fold to the same two.
+        """
+        def program(key: str) -> str:
+            return F'console.log({key}.charCodeAt(0), {key}.charCodeAt(1));'
+        identifier_key = F'Object.keys({{{_ASTRAL_LETTER}: 1}})[0]'
+        literal_key = F"Object.keys({{'{_ASTRAL_LETTER}': 1}})[0]"
+        reads_as_the_two_surrogates = 'console.log(55349, 56421);'
+        self.assertEqual(
+            (_folded(program(identifier_key)), _folded(program(literal_key))),
+            (reads_as_the_two_surrogates, reads_as_the_two_surrogates),
+        )
 
 
 class TestRecoveryKeepsTheSourceText(TestBase):
@@ -711,10 +745,10 @@ ARGUMENTS_WITH_A_MALFORMED_PERCENT_ESCAPE = ('100%', '%', '%A', '%GG')
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAThrowingDecodeIsNotFoldedToAString(TestBase):
     """
-    `decodeURIComponent` throws a `URIError` when its argument holds a percent-escape that no pair of
-    hexadecimal digits follows, so a program that evaluates such a call produces no value and aborts.
-    A fold that answers the call with a string invents a value for a file that has none, and the
-    program it hands back runs to completion where the file it came from threw.
+    `decodeURIComponent` throws a `URIError` when its argument holds a percent-escape that no pair
+    of hexadecimal digits follows, so a program that evaluates such a call produces no value and
+    aborts. A fold that answers the call with a string invents a value for a file that has none,
+    and the program it hands back runs to completion where the file it came from threw.
     """
 
     @unittest.expectedFailure

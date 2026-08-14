@@ -13,11 +13,11 @@ absolute answers, established below by running each snippet in a real engine.
 For the astral string `'a' + U+1F600 + 'b'` Node reports the code units 97, 55357, 56832, 98 and:
 
   ('a' + U+1F600 + 'b').length          === 4
-  ('a' + U+1F600 + 'b')[2]                   is the lone low surrogate, char code 56832
+  ('a' + U+1F600 + 'b')[2]              is the lone low surrogate, char code 56832
   ('a' + U+1F600 + 'b').charCodeAt(1)   === 55357
   ('a' + U+1F600 + 'b').charCodeAt(2)   === 56832
-  ('a' + U+1F600 + 'b').slice(1, 3)          is the two surrogates, char codes 55357, 56832
-  ('a' + U+1F600 + 'b').split('')            is ['a', high, low, 'b'], char codes 97, 55357, 56832, 98
+  ('a' + U+1F600 + 'b').slice(1, 3)     is the two surrogates, char codes 55357, 56832
+  ('a' + U+1F600 + 'b').split('')       is ['a', high, low, 'b'], char codes 97, 55357, 56832, 98
 
 The tool reduces `charCodeAt`, `slice`, and `split` to a constant and leaves `.length` and the
 index expression standing; which of the two happens was discovered by measuring, not decided here.
