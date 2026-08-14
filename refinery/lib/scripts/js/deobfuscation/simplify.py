@@ -16,6 +16,7 @@ from refinery.lib.scripts.js.analysis.model import (
     BindingKind,
     SemanticModel,
     is_invocation_target,
+    is_member_write_target,
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
@@ -668,6 +669,7 @@ class JsSimplifications(Transformer):
 
     def visit_JsMemberExpression(self, node: JsMemberExpression):
         self.generic_visit(node)
+        in_read_position = not is_member_write_target(node)
         if (
             not node.computed
             and isinstance(node.object, JsIdentifier)
@@ -676,15 +678,13 @@ class JsSimplifications(Transformer):
             and not self._resolves_to_local(node, node.property.name)
             and self._alias_property_defined(node, node.property.name)
         ):
-            p = node.parent
-            if isinstance(p, JsAssignmentExpression) and p.left is node:
-                return None
-            if is_invocation_target(node):
-                return None
-            return node.property
+            if in_read_position and not is_invocation_target(node):
+                return node.property
+            return None
         if node.computed and node.object is not None and node.property is not None:
             if (
-                isinstance(node.object, JsArrayExpression)
+                in_read_position
+                and isinstance(node.object, JsArrayExpression)
                 and isinstance(node.property, JsNumericLiteral)
             ):
                 idx = exact_integer(node.property.value)
