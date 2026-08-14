@@ -12,6 +12,10 @@ from refinery.lib.scripts.js.token import (
     JsToken,
     JsTokenKind,
 )
+from refinery.lib.scripts.js.utf16 import (
+    code_units,
+    to_code_units,
+)
 
 _ESCAPE_MAP: dict[str, str] = {
     'b'  : '\b',
@@ -54,28 +58,6 @@ The zero width non-joiner and the zero width joiner, which are IdentifierPart an
 may stand inside a name but not open one. They carry no width, so a name written with one reads as
 the same name, which is exactly what makes them worth writing in an obfuscated file.
 """
-
-
-_ABOVE_THE_BASIC_PLANE = re.compile('[\U00010000-\U0010FFFF]')
-
-
-def _as_code_units(text: str) -> str:
-    return _ABOVE_THE_BASIC_PLANE.sub(lambda m: code_units(ord(m.group())), text)
-
-
-def code_units(value: int) -> str:
-    """
-    The UTF-16 code units a code point is written with, held as the characters Python spells those
-    units with. A JavaScript string is a sequence of code units and a Python string a sequence of
-    code points, so a value above the basic plane is two characters here and not one: `\\u{1F600}`
-    and `\\uD83D\\uDE00` are one string written two ways, and it is the pair of surrogates they
-    share. Naming the code point instead would make them two strings, and would answer one short
-    for every question a program asks about the length of that string or the units inside it.
-    """
-    if value <= 0xFFFF:
-        return chr(value)
-    value -= 0x10000
-    return chr(0xD800 + (value >> 10)) + chr(0xDC00 + (value & 0x3FF))
 
 
 def _begins_unicode_escape(src: str, pos: int) -> bool:
@@ -644,7 +626,7 @@ def _decode_body(text: str) -> tuple[str, bool]:
     may invent the partner it lacks.
     """
     if '\\' not in text:
-        return _as_code_units(text), True
+        return to_code_units(text), True
     parts: list[str] = []
     valid = True
     i = 0
@@ -659,7 +641,7 @@ def _decode_body(text: str) -> tuple[str, bool]:
         valid = valid and ok
         if decoded:
             parts.append(decoded)
-    return _as_code_units(''.join(parts)), valid
+    return to_code_units(''.join(parts)), valid
 
 
 def decode_js_string_body(text: str) -> str:

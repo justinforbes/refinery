@@ -51,7 +51,7 @@ from refinery.lib.scripts.js.analysis.model import (
     is_use_position,
     reference_role,
 )
-from refinery.lib.scripts.js.lexer import code_units
+from refinery.lib.scripts.js.utf16 import code_units
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
