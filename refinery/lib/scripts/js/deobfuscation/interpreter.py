@@ -57,6 +57,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     utf16_code_units,
     walk_scope,
 )
+from refinery.lib.scripts.js.utf16 import to_code_units
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
@@ -226,9 +227,25 @@ def js_strict_equal(a: Value, b: Value) -> bool:
 BUILTIN_REGISTRY: dict[tuple, Callable] = {}
 
 
+def _in_code_units(fn: Callable) -> Callable:
+    """
+    Wrap a builtin so a string it produces is held as UTF-16 code units before it enters the value
+    domain. This is the one place a runtime-produced string is normalized — every reader of the
+    registry, the interpreter and the simplifier alike, gets it without repeating the rule, and a
+    builtin added later is covered by being registered. It is idempotent, because `to_code_units`
+    leaves a string already in that form untouched, and a no-op on any non-string result.
+    """
+    def in_code_units(*args):
+        result = fn(*args)
+        if isinstance(result, str):
+            return to_code_units(result)
+        return result
+    return in_code_units
+
+
 def _register(key: tuple):
     def _decorator(fn: Callable):
-        BUILTIN_REGISTRY[key] = fn
+        BUILTIN_REGISTRY[key] = _in_code_units(fn)
         return fn
     return _decorator
 
@@ -486,17 +503,22 @@ def _string_from_char_code(args: list[Value]) -> Value:
     return ''.join(chr(_to_int(a) & 0xFFFF) for a in args)
 
 
-def _json_nulls_to_jsnull(value):
+def _json_to_value(value):
     """
-    Replace every decoded JSON `null` (Python `None`) with the `JS_NULL` sentinel, recursively, so
-    parsed JSON uses the interpreter's `null` representation rather than `undefined`.
+    The interpreter's value for a node `json.loads` decoded: a JSON `null` (Python `None`) becomes the
+    `JS_NULL` sentinel rather than `undefined`, and every string — an object key as much as a value —
+    becomes the UTF-16 code units the value domain counts, so an astral character `json.loads` read as
+    one code point is the surrogate pair a literal already is. It recurses, so a string nested in an
+    object or array is reached too.
     """
     if value is None:
         return JS_NULL
+    if isinstance(value, str):
+        return to_code_units(value)
     if isinstance(value, list):
-        return [_json_nulls_to_jsnull(v) for v in value]
+        return [_json_to_value(v) for v in value]
     if isinstance(value, dict):
-        return {k: _json_nulls_to_jsnull(v) for k, v in value.items()}
+        return {to_code_units(k): _json_to_value(v) for k, v in value.items()}
     return value
 
 
@@ -512,7 +534,7 @@ def _json_parse(args: list[Value]) -> Value:
         parsed = json.loads(s, parse_int=float, parse_constant=_reject_constant)
     except Exception:
         raise InterpreterError
-    return _json_nulls_to_jsnull(parsed)
+    return _json_to_value(parsed)
 
 
 @_register((list, 'push'))

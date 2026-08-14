@@ -700,3 +700,37 @@ class TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten(TestBase):
             ],
             [(eight, eight)] * len(spellings),
         )
+
+
+#: Arguments to `decodeURIComponent` whose percent-escapes are malformed: a `%` that no pair of
+#: hexadecimal digits follows, at the end of the text, standing alone, short a digit, or written
+#: with characters that are not hexadecimal. Node rejects every one of them.
+ARGUMENTS_WITH_A_MALFORMED_PERCENT_ESCAPE = ('100%', '%', '%A', '%GG')
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAThrowingDecodeIsNotFoldedToAString(TestBase):
+    """
+    `decodeURIComponent` throws a `URIError` when its argument holds a percent-escape that no pair of
+    hexadecimal digits follows, so a program that evaluates such a call produces no value and aborts.
+    A fold that answers the call with a string invents a value for a file that has none, and the
+    program it hands back runs to completion where the file it came from threw.
+    """
+
+    @unittest.expectedFailure
+    def test_a_malformed_percent_escape_is_not_folded_to_a_string(self):
+        """
+        Node aborts each of `console.log(decodeURIComponent('100%'))`, `... '%'`, `... '%A'`, and
+        `... '%GG'` with a `URIError` and prints nothing, the malformed escape refusing to decode
+        before `console.log` is reached. The deobfuscation of each has to abort the same way, so the
+        two agree that no output is written and a `URIError` is raised.
+        """
+        programs = [
+            F"console.log(decodeURIComponent('{argument}'));"
+            for argument in ARGUMENTS_WITH_A_MALFORMED_PERCENT_ESCAPE
+        ]
+        threw = (('', 'URIError'), ('', 'URIError'))
+        self.assertEqual(
+            [_before_and_after(program) for program in programs],
+            [threw] * len(programs),
+        )
