@@ -17,14 +17,14 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: are the migration's work in the order it is worth doing. This is a ratchet — the numbers come
 #: down as the domain learns to answer, and a commit that raises one has removed a fold.
 GAP: dict[str, int] = {
-    'System.String': 1466,
+    'System.String': 1448,
     'System.Object[]': 1519,
-    'System.Char': 1087,
-    'System.Int64': 1104,
+    'System.Char': 1081,
+    'System.Int64': 1000,
     'System.Int32': 670,
     'System.Double': 590,
     'System.Byte': 402,
-    'System.Boolean': 390,
+    'System.Boolean': 236,
     'System.Void': 157,
 }
 

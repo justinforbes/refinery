@@ -1886,6 +1886,63 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\t1e4001',
             'OUT\tSystem.String\t1e4001',
         ),
+    '$t = $true + 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    '$t = 1 + $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    '$t = $true - 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$t = 1 - $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$t = $true * 2; Write-Output (,$t); Write-Output $t':
+        ('THROW\tNotADefinedOperationForType\tSystem.Management.Automation.RuntimeException',),
+    '$t = 2 * $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    '$t = $true -band 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t1',
+            'OUT\tSystem.Int32\t1',
+        ),
+    '$t = $true + $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    '$t = $false + 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t1',
+            'OUT\tSystem.Int32\t1',
+        ),
+    '$t = $true / 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t1',
+            'OUT\tSystem.Int32\t1',
+        ),
+    '$t = $true + 1.5; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t2.5',
+            'OUT\tSystem.Double\t2.5',
+        ),
+    '$t = $true -bxor $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t1',
+            'OUT\tSystem.Int32\t1',
+        ),
 }
 
 

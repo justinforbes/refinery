@@ -745,6 +745,18 @@ TYPES: tuple[str, ...] = (
     "$t = '10' -band 6; Write-Output (,$t); Write-Output $t",
     "$t = '5' / 2; Write-Output (,$t); Write-Output $t",
     "$t = '1e400' + 1; Write-Output (,$t); Write-Output $t",
+    '$t = $true + 1; Write-Output (,$t); Write-Output $t',
+    '$t = 1 + $true; Write-Output (,$t); Write-Output $t',
+    '$t = $true - 1; Write-Output (,$t); Write-Output $t',
+    '$t = 1 - $true; Write-Output (,$t); Write-Output $t',
+    '$t = $true * 2; Write-Output (,$t); Write-Output $t',
+    '$t = 2 * $true; Write-Output (,$t); Write-Output $t',
+    '$t = $true -band 1; Write-Output (,$t); Write-Output $t',
+    '$t = $true + $true; Write-Output (,$t); Write-Output $t',
+    '$t = $false + 1; Write-Output (,$t); Write-Output $t',
+    '$t = $true / 1; Write-Output (,$t); Write-Output $t',
+    '$t = $true + 1.5; Write-Output (,$t); Write-Output $t',
+    '$t = $true -bxor $false; Write-Output (,$t); Write-Output $t',
 )
 
 

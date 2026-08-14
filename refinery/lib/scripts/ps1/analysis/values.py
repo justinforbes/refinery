@@ -1992,10 +1992,12 @@ def _numeric_pair(left: Ps1Fact, right: Ps1Fact):
             kinds.append('i')
             values.append(_integer_payload(fact))
             continue
-        code = _char_code(fact)
-        if code is not None:
+        number = _char_code(fact)
+        if number is None:
+            number = _truth_value(fact)
+        if number is not None:
             kinds.append('i')
-            values.append(code)
+            values.append(number)
             continue
         if not isinstance(fact, Ps1Constant):
             return None
@@ -2120,12 +2122,29 @@ def _bitwise_operand(fact: Ps1Fact) -> int | None:
     code = _char_code(fact)
     if code is not None:
         return code
+    truth = _truth_value(fact)
+    if truth is not None:
+        return truth
     coerced = _coerced_numeral(fact)
     if coerced is None:
         return None
     if not isinstance(coerced, Ps1Constant):
         raise _Throws
     return _integer_payload(coerced) if _is_domain_integer(coerced) else None
+
+
+def _truth_value(fact: Ps1Fact) -> int | None:
+    """
+    The number a `Boolean` computes as, or `None` for a fact that is not one.
+
+    Measured, a Boolean is an ordinary number to arithmetic: `$true + 1` is the Int32 2, `$false +
+    1` is 1, `$true + $true` is 2 and `$true + 1.5` is the Double 2.5. The one operator it is not a
+    number to is `*` with the Boolean on its *left* — `$true * 2` throws where `2 * $true` is 2 —
+    and that is the cell's throw rather than a rule here, exactly as it is for a Char.
+    """
+    if not isinstance(fact, Ps1Constant) or fact.type != _BOOLEAN:
+        return None
+    return 1 if fact.payload else 0
 
 
 def _char_code(fact: Ps1Fact) -> int | None:

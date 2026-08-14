@@ -696,7 +696,7 @@ FOLDS: dict[str, str] = {
     "$t = 0 + '5'; Write-Output (,$t); Write-Output $t":
         'Write-Output (,5)\nWrite-Output 5',
     "$t = $true + ''; Write-Output (,$t); Write-Output $t":
-        "$t = $True + ''\nWrite-Output (,$t)\nWrite-Output $t",
+        'Write-Output (,1)\nWrite-Output 1',
     "$t = 1 + '0xFFFFFFFF'; Write-Output (,$t); Write-Output $t":
         'Write-Output (,0)\nWrite-Output 0',
     "$t = 1 + '1kb'; Write-Output (,$t); Write-Output $t":
@@ -712,13 +712,13 @@ FOLDS: dict[str, str] = {
     '$t = 1L -shl 64; Write-Output (,$t); Write-Output $t':
         'Write-Output (,1L)\nWrite-Output 1L',
     '$t = $true + 9223372036854775807L; Write-Output (,$t); Write-Output $t':
-        '$t = $True + 9223372036854775807L\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,9.223372036854776e+18)\nWrite-Output 9.223372036854776e+18',
     '$t = $null + $true; Write-Output (,$t); Write-Output $t':
         '$t = $Null + $True\nWrite-Output (,$t)\nWrite-Output $t',
     '$t = $null -band [uint32]1; Write-Output (,$t); Write-Output $t':
         '$t = $Null -BAnd [uint32]1\nWrite-Output (,$t)\nWrite-Output $t',
     '$t = $true * 1.5d; Write-Output (,$t); Write-Output $t':
-        '$t = $True * 1.5d\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,1.5d)\nWrite-Output 1.5d',
     '$v = [single]1.5; $t = $v -shl 1; Write-Output (,$t); Write-Output $t':
         '$v = [single]1.5\n$t = $v -Shl 1\nWrite-Output (,$t)\nWrite-Output $t',
     '$v = $null; $t = $v -band [uint32]1; Write-Output (,$t); Write-Output $t':
@@ -743,6 +743,30 @@ FOLDS: dict[str, str] = {
         'Write-Output (,2.5)\nWrite-Output 2.5',
     "$t = '1e400' + 1; Write-Output (,$t); Write-Output $t":
         "Write-Output (,'1e4001')\nWrite-Output '1e4001'",
+    '$t = $true + 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,2)\nWrite-Output 2',
+    '$t = 1 + $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,2)\nWrite-Output 2',
+    '$t = $true - 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0)\nWrite-Output 0',
+    '$t = 1 - $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0)\nWrite-Output 0',
+    '$t = $true * 2; Write-Output (,$t); Write-Output $t':
+        '$t = $True * 2\nWrite-Output (,$t)\nWrite-Output $t',
+    '$t = 2 * $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,2)\nWrite-Output 2',
+    '$t = $true -band 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1)\nWrite-Output 1',
+    '$t = $true + $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,2)\nWrite-Output 2',
+    '$t = $false + 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1)\nWrite-Output 1',
+    '$t = $true / 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1)\nWrite-Output 1',
+    '$t = $true + 1.5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,2.5)\nWrite-Output 2.5',
+    '$t = $true -bxor $false; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1)\nWrite-Output 1',
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':

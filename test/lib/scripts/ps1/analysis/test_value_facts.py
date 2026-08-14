@@ -600,6 +600,19 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    '$false + 1',
+    '$true * 1.5d',
+    '$true + $true',
+    "$true + ''",
+    '$true + 1',
+    '$true + 1.5',
+    '$true - 1',
+    '$true -band 1',
+    '$true -bxor $false',
+    '$true / 1',
+    '1 + $true',
+    '1 - $true',
+    '2 * $true',
     "'10' -band 6",
     "'1e400' + 1",
     "'5' - 1",
@@ -725,6 +738,7 @@ def _measured_complement_fact(expression: str) -> Ps1Fact:
 #: writes a Double as fifteen significant figures, and `512MB * 512MB` is 2 to the 58th exactly.
 #: What such a row measures is the widening, so the type is what the value is held against.
 ABBREVIATED_OPERATIONS: tuple[str, ...] = (
+    '$true + 9223372036854775807L',
     '0 - [uint64]18446744073709551615',
     '1 + [uint64]18446744073709551615',
     '1 / [uint64]18446744073709551615',
@@ -2206,13 +2220,14 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 100, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 112, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
             sorted(THROWN_OPERATIONS),
             [
                 '$null -band [uint32]1',
+                '$true * 2',
                 "'1_0' -band 15",
                 "'ab' * 0xFFFFFFFF",
                 "1 + '1e400'",
@@ -2756,7 +2771,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 63)
+        self.assertEqual(len(composed), 77)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -2856,7 +2871,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 1602)
+        self.assertEqual(len(compared), 1650)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2871,7 +2886,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1670)
+        self.assertEqual(len(compared), 1718)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2886,7 +2901,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1670)
+        self.assertEqual(len(compared), 1718)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2897,7 +2912,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 976)
+        self.assertEqual(len(STRINGS), 1000)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
@@ -2911,7 +2926,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 353)
+        self.assertEqual(len(NUMERALS), 362)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -2947,7 +2962,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 261)
+        self.assertEqual(len(consulted), 273)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -2997,7 +3012,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1331)
+        self.assertEqual(len(compared), 1365)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
@@ -3202,7 +3217,7 @@ class TestPs1OperatorCaseDoesNotChangeTheAnswer(unittest.TestCase):
             expression for expression in OPERATION_ROWS
             if any(character.isalpha() for character in _operator_of(expression))
         ]
-        self.assertEqual(len(lettered), 30)
+        self.assertEqual(len(lettered), 32)
         self.assertEqual(
             {expression: _cased(expression, str.upper) for expression in lettered},
             {expression: _cased(expression, str.lower) for expression in lettered},
