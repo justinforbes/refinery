@@ -51,7 +51,6 @@ from refinery.lib.scripts.js.analysis.model import (
     is_use_position,
     reference_role,
 )
-from refinery.lib.scripts.js.utf16 import code_units
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
@@ -96,6 +95,7 @@ from refinery.lib.scripts.js.numbers import (
     to_js_number,
 )
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
+from refinery.lib.scripts.js.utf16 import code_units
 
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_$][a-zA-Z_$0-9]*$')
 

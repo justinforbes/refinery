@@ -57,7 +57,6 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     utf16_code_units,
     walk_scope,
 )
-from refinery.lib.scripts.js.utf16 import to_code_units
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
@@ -107,6 +106,7 @@ from refinery.lib.scripts.js.numbers import (
     js_parse_int,
 )
 from refinery.lib.scripts.js.token import ASCII_WHITESPACE
+from refinery.lib.scripts.js.utf16 import to_code_units
 
 MAX_ITERATIONS = 100_000
 MAX_STRING_LEN = 1_000_000
@@ -229,11 +229,14 @@ BUILTIN_REGISTRY: dict[tuple, Callable] = {}
 
 def _in_code_units(fn: Callable) -> Callable:
     """
-    Wrap a builtin so a string it produces is held as UTF-16 code units before it enters the value
-    domain. This is the one place a runtime-produced string is normalized — every reader of the
-    registry, the interpreter and the simplifier alike, gets it without repeating the rule, and a
-    builtin added later is covered by being registered. It is idempotent, because `to_code_units`
-    leaves a string already in that form untouched, and a no-op on any non-string result.
+    Wrap a builtin so a bare string it produces is held as UTF-16 code units before it enters the
+    value domain, so a decode that introduces an astral code point yields the surrogate pair a
+    literal already is. Every reader of the registry — the interpreter and the simplifier — gets this
+    without repeating the rule, and a builtin added later is covered by being registered. It reaches
+    only a string the builtin returns directly: a string nested in a returned list or dict is the
+    producer's own to normalize (as `_json_to_value` does its keys and values). It is idempotent,
+    because `to_code_units` leaves a string already in code units untouched, and a no-op on any
+    non-string result.
     """
     def in_code_units(*args):
         result = fn(*args)
@@ -435,12 +438,12 @@ def _str_replace_all(s: str, args: list[Value]) -> Value:
 
 @_register((str, 'toLowerCase'))
 def _str_to_lower(s: str, args: list[Value]) -> Value:
-    return s.lower()
+    return spell_astral_characters(s).lower()
 
 
 @_register((str, 'toUpperCase'))
 def _str_to_upper(s: str, args: list[Value]) -> Value:
-    return s.upper()
+    return spell_astral_characters(s).upper()
 
 
 @_register((str, 'trim'))
@@ -505,11 +508,11 @@ def _string_from_char_code(args: list[Value]) -> Value:
 
 def _json_to_value(value):
     """
-    The interpreter's value for a node `json.loads` decoded: a JSON `null` (Python `None`) becomes the
-    `JS_NULL` sentinel rather than `undefined`, and every string — an object key as much as a value —
-    becomes the UTF-16 code units the value domain counts, so an astral character `json.loads` read as
-    one code point is the surrogate pair a literal already is. It recurses, so a string nested in an
-    object or array is reached too.
+    The interpreter's value for a node `json.loads` decoded: a JSON `null` (Python `None`) becomes
+    the `JS_NULL` sentinel rather than `undefined`, and every string — an object key as much as a
+    value — becomes the UTF-16 code units the value domain counts, so an astral character
+    `json.loads` read as one code point is the surrogate pair a literal already is. It recurses, so
+    a string nested in an object or array is reached too.
     """
     if value is None:
         return JS_NULL
