@@ -39,6 +39,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     STRING_PROTOTYPE_METHODS,
     UNARY_OPS,
     JsBuffer,
+    MemberRead,
     _array_element_string,
     _js_pow,
     _to_int,
@@ -50,6 +51,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     js_typeof,
     name_is_unbound,
     names_global_value,
+    read_data_property,
     spell_astral_characters,
     to_boolean,
     to_number,
@@ -2192,25 +2194,21 @@ class JsInterpreter:
         method itself, which this interpreter has no value domain for — a JS function value has an
         observable identity, `name`, `length`, and source text — so reading one aborts interpretation
         instead of guessing. Crucially it must not *invoke* the method: `typeof 'abc'.charAt` is
-        `'function'`, not the `typeof` of what `charAt()` would return. Only `length` and a canonical
-        index are data properties, and only they may answer with a value.
+        `'function'`, not the `typeof` of what `charAt()` would return.
+
+        Which keys the value itself decides is `read_data_property`'s to say, so that an emulated
+        execution and a fold read a property the same way by construction. What is left here is the
+        half that needs this interpreter: a nullish receiver throws before any key is looked at, and
+        a key the value does not own is `undefined` only while the prototype chain is intact. An
+        index past the end is answered without that question, the chain having no say over a slot the
+        program is far more likely to be reading off the value it just built.
         """
         if obj is None or obj is JS_NULL:
             _js_throw('TypeError', F"Cannot read properties of {to_string(obj)} (reading '{key}')")
-        if isinstance(obj, (str, list)):
-            if key in SEQUENCE_DATA_PROPERTIES:
-                return len(obj)
-            index = canonical_array_index(key)
-            if index is not None:
-                if 0 <= index < len(obj):
-                    return obj[index]
-                return None
-        elif isinstance(obj, dict):
-            if key in obj:
-                return obj[key]
-        else:
-            raise InterpreterError
-        if self._property_is_absent(obj, key):
+        outcome, value = read_data_property(obj, key)
+        if outcome is MemberRead.FOUND:
+            return value
+        if outcome is MemberRead.ABSENT or self._property_is_absent(obj, key):
             return None
         raise InterpreterError
 

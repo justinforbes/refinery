@@ -2,8 +2,8 @@
 Shared utilities for JavaScript deobfuscation transforms, and the runtime value domain they and the
 interpreter agree on: what a JavaScript value is (`Value`, `JS_NULL`, `JsBuffer`), the ECMA-262
 conversions between values (`to_number`, `to_string`, `to_boolean`, `js_typeof`), the operator tables
-over them (`UNARY_OPS`, `BINARY_OPS`), and the two bridges to the syntax tree
-(`extract_literal_value`, `value_to_node`).
+over them (`UNARY_OPS`, `BINARY_OPS`), the own-property read on them (`read_data_property`), and the
+two bridges to the syntax tree (`extract_literal_value`, `value_to_node`).
 
 That domain lives below the interpreter rather than inside it, because a static fold and an emulated
 execution must answer an operator the same way — if `~NaN` were implemented once for each, only one of
@@ -17,6 +17,7 @@ import operator
 import re
 
 from collections import Counter
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Callable, Iterator, Sequence
 
 if TYPE_CHECKING:
@@ -238,6 +239,55 @@ def canonical_array_index(key: str) -> int | None:
     if str(index) != key:
         return None
     return index
+
+
+class MemberRead(Enum):
+    """
+    What reading a key off a value found. `FOUND` carries the value the read answers with. `ABSENT`
+    is an index past the end of a string or array: the value holds no such slot, so the read is
+    `undefined` unless the prototype chain supplies one. `NOT_DATA` is every other key, which is a
+    name the chain has to be consulted about before anything can be said.
+
+    The two ways of not finding a value are kept apart because the callers part company on them. An
+    emulated execution answers `undefined` for an index past the end, having no reason to doubt the
+    chain of a value it is holding; a fold has to leave that read standing, because the file it is
+    rewriting may install an index on `String.prototype` before it runs. Reporting both as one
+    outcome would force the caller that cares to ask `canonical_array_index` a second time, which is
+    the duplication this function exists to remove.
+    """
+    FOUND = auto()
+    ABSENT = auto()
+    NOT_DATA = auto()
+
+
+def read_data_property(obj: Value, key: str) -> tuple[MemberRead, Value]:
+    """
+    Read *key* off *obj* as far as the value itself decides it: the own data properties of a string,
+    an array, and a plain object, which are `length`, a canonical index, and a present key. Every
+    other key is `NOT_DATA` — a method name, an inherited name, a missing key of an object, or any
+    key at all of a value with no own slots to read, such as a number.
+
+    The read is the *own* half of a property access and answers nothing about the prototype chain,
+    which is where the outcome is decided for a `NOT_DATA` key and is why this takes no model. What
+    it does answer, it answers alone: `length` and an index within range are own properties of a
+    string or array, so no prototype can be consulted for them and none can shadow them.
+
+    *obj* must hold a string the way JavaScript does, as UTF-16 code units — the form the lexer gives
+    a literal and the builtin registry gives a produced string. A string of code points read here
+    counts an astral character once where JavaScript counts it twice, and answers `length` and every
+    index after it one too low.
+    """
+    if isinstance(obj, (str, list)):
+        if key in SEQUENCE_DATA_PROPERTIES:
+            return MemberRead.FOUND, len(obj)
+        index = canonical_array_index(key)
+        if index is not None:
+            if 0 <= index < len(obj):
+                return MemberRead.FOUND, obj[index]
+            return MemberRead.ABSENT, None
+    elif isinstance(obj, dict) and key in obj:
+        return MemberRead.FOUND, obj[key]
+    return MemberRead.NOT_DATA, None
 
 
 def utf16_code_units(text: str) -> list[str]:

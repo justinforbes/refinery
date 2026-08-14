@@ -23,6 +23,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     OBJECT_PROTOTYPE_MEMBERS,
     RELATIONAL_OPS,
     UNARY_OPS,
+    MemberRead,
     access_key,
     allocated_object_type,
     denoted_value,
@@ -41,6 +42,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     make_numeric_literal,
     make_string_literal,
     numeric_value,
+    read_data_property,
     string_value,
     substitute_params,
     utf16_code_units,
@@ -681,6 +683,8 @@ class JsSimplifications(Transformer):
             if in_read_position and not is_invocation_target(node):
                 return node.property
             return None
+        if in_read_position and (folded := self._folded_string_property(node)) is not None:
+            return folded
         if node.computed and node.object is not None and node.property is not None:
             if (
                 in_read_position
@@ -733,6 +737,46 @@ class JsSimplifications(Transformer):
         if node is None:
             return None
         return kind if self.effects.is_side_effect_free(node, discarded=True) else None
+
+    def _member_key(self, node: JsMemberExpression) -> str | None:
+        """
+        The property name the access at *node* reads, or `None` when nothing decides it. A dot access
+        is named by its identifier and a computed one by the string its key converts to, which is the
+        rule the interpreter's `_member_key` applies to an evaluated key and the reason a numeric one
+        is asked with `denoted_value` rather than `string_value`: `'abc'[1]` reads the property named
+        `'1'`, and a reader that only recognized a string key would decide every index access to be
+        undecidable.
+        """
+        if not node.computed:
+            return node.property.name if isinstance(node.property, JsIdentifier) else None
+        known, key = denoted_value(node.property, self.model)
+        return to_string(key) if known else None
+
+    def _folded_string_property(self, node: JsMemberExpression) -> Expression | None:
+        """
+        The value a property read on a constant string denotes, as a node, or `None` when the read is
+        not one this decides. `'abc'.length` is `3` and `'abc'[1]` is `'b'`, both own properties of the
+        string that no prototype can shadow, so reading them needs no assumption about the chain.
+
+        Only a string is read here. An array literal's index is already answered by handing back the
+        element node, which keeps the spelling the file wrote it with, and its `length` is a function
+        of the literal's shape rather than of any value. A string has no such node to hand back: the
+        character at an index is a value the file never spelled.
+
+        The object is asked with `denoted_value`, which decides a literal, a global value name, and an
+        operator over either — every one of them free of effects — so nothing is discarded by
+        replacing the access with what it reads, and no separate effect gate is needed.
+        """
+        key = self._member_key(node)
+        if key is None:
+            return None
+        known, obj = denoted_value(node.object, self.model)
+        if not known or not isinstance(obj, str):
+            return None
+        outcome, value = read_data_property(obj, key)
+        if outcome is not MemberRead.FOUND:
+            return None
+        return value_to_node(value)
 
     def _node_to_value(self, node: Node | None) -> object:
         """

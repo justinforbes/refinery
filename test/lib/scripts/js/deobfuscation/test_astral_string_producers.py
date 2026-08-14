@@ -19,18 +19,17 @@ For the astral string `'a' + U+1F600 + 'b'` Node reports the code units 97, 5535
   ('a' + U+1F600 + 'b').slice(1, 3)     is the two surrogates, char codes 55357, 56832
   ('a' + U+1F600 + 'b').split('')       is ['a', high, low, 'b'], char codes 97, 55357, 56832, 98
 
-The tool reduces `charCodeAt`, `slice`, and `split` to a constant and leaves `.length` and the
-index expression standing; which of the two happens was discovered by measuring, not decided here.
-The invariance that a produced string reads like the literal carries the operations left standing,
-and the Node-anchored code-unit value carries the ones reduced to a constant.
+The tool reduces every one of these to a constant, `.length` and the index read among them, because
+both are own data properties of the string that no prototype can shadow; which of them happens was
+discovered by measuring, not decided here. The invariance that a produced string reads like the
+literal carries every probe, and the Node-anchored code-unit value carries each folded constant.
 """
 from __future__ import annotations
 
-import inspect
 import unittest
 
 from test import TestBase
-from test.lib.scripts.js.analysis.differential import behavior, node_executable
+from test.lib.scripts.js.analysis.differential import code_units, node_executable
 
 from refinery.units.scripting.js import js
 
@@ -64,23 +63,13 @@ _PROBES: dict[str, str] = {
 #: structure: a number verbatim, a string as `S[...codes...]`, an array as `A[...elements...]`. The
 #: rendering is spelling-independent, so it pins the value and not the tool's choice of escapes.
 _NODE_UNITS: dict[str, str] = {
+    'length'        : '4',
+    'index'         : 'S[56832]',
     'charcode_high' : '55357',
     'charcode_low'  : '56832',
     'slice'         : 'S[55357,56832]',
     'split'         : 'A[S[97],S[55357],S[56832],S[98]]',
 }
-
-_ENCODER = inspect.cleandoc(
-    """
-    function enc(x) {
-      if (typeof x === 'number' || typeof x === 'boolean') return JSON.stringify(x);
-      if (typeof x === 'string')
-        return 'S[' + Array.from({length: x.length}, (_, i) => x.charCodeAt(i)).join(',') + ']';
-      if (Array.isArray(x)) return 'A[' + x.map(enc).join(',') + ']';
-      return JSON.stringify(x);
-    }
-    """
-)
 
 
 def _fold(expression: str) -> str:
@@ -94,12 +83,9 @@ def _fold(expression: str) -> str:
 
 def _node_units(expression: str) -> str:
     """
-    Node's evaluation of *expression*, rendered as the code-unit structure produced by `_ENCODER`.
+    Node's evaluation of *expression*, rendered as its UTF-16 code-unit structure.
     """
-    stdout, error = behavior(F'{_ENCODER}\nconsole.log(enc({expression}));\n')
-    if error is not None:
-        raise AssertionError(F'node rejected {expression!r}: {error}')
-    return stdout.strip()
+    return code_units([expression])[0]
 
 
 class TestAstralStringProducers(TestBase):

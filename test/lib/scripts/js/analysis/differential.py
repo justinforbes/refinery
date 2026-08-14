@@ -24,6 +24,7 @@ import sys
 import tempfile
 
 from pathlib import Path
+from typing import Sequence
 
 from refinery.lib.scripts.js.deobfuscation import deobfuscate
 from refinery.lib.scripts.js.parser import JsParser
@@ -191,3 +192,40 @@ def behavior(source: str, *, timeout: float = 15.0) -> tuple[str, str | None]:
         )
     error = None if proc.returncode == 0 else _normalize_error(proc.stderr)
     return proc.stdout, error
+
+
+_CODE_UNIT_ENCODER = R'''
+function enc(x) {
+  if (x === undefined) return 'undefined';
+  if (x === null) return 'null';
+  if (typeof x === 'number') return Object.is(x, -0) ? '-0' : String(x);
+  if (typeof x === 'boolean') return String(x);
+  if (typeof x === 'function') return 'function';
+  if (typeof x === 'symbol') return 'symbol';
+  if (typeof x === 'string')
+    return 'S[' + Array.from({length: x.length}, function (_, i) {
+      return x.charCodeAt(i);
+    }).join(',') + ']';
+  if (Array.isArray(x)) return 'A[' + x.map(enc).join(',') + ']';
+  return 'O' + Object.prototype.toString.call(x);
+}
+'''
+
+
+def code_units(expressions: Sequence[str], *, timeout: float = 15.0) -> list[str]:
+    """
+    Node's value for each expression in *expressions*, rendered as the structure its UTF-16 code
+    units give it: a string as `S[...codes...]`, an array as `A[...elements...]`, and everything
+    else as a word naming it. The rendering is what makes a pinned value independent of how the
+    value is spelled — `'\\uD83D'`, a literal lone high surrogate, and a `String.fromCharCode` call
+    all render as `S[55357]` — so a test comparing two of these compares values and not escapes.
+
+    All of *expressions* are evaluated in one process, because a table of them otherwise costs one
+    Node start per row. They are therefore evaluated in one scope and in order, which is a scope any
+    of them can write to; keep them free of effects.
+    """
+    probes = '\n'.join(F'console.log(enc({expression}));' for expression in expressions)
+    stdout, error = behavior(F'{_CODE_UNIT_ENCODER}\n{probes}\n', timeout=timeout)
+    if error is not None:
+        raise AssertionError(F'node refused one of {len(expressions)} expressions: {error}')
+    return stdout.splitlines()
