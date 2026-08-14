@@ -2151,6 +2151,14 @@ def _collected_operand(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number 
     one, and `@(1, 2) + $null` is **three** elements rather than two, because appending `$null`
     appends an element. `@(1, 2) * 2` repeats and `@(1, 2) * 0` is empty. The collection has to be
     on the left: `5 + @(1, 2)` and `2 * @(1, 2)` both throw, and their cells record it.
+
+    **The repeat count is taken as an `Int32` and throws when it does not fit one.** Measured:
+    `@() * [uint64]18446744073709551615` throws an `InvalidCastIConvertible`, where `@() * 5000` is
+    the empty collection. The throw is the count's conversion and not the size of anything, which is
+    why an empty left operand does not escape it: nothing repeated is nothing, and 5.1 still refuses
+    the count before it can say so. `_MAX_COLLECTION` bounds what this builds and is a separate
+    question — it bounds the *product*, which is zero for every count when there is nothing to
+    repeat, so it is no bound at all here and never was the thing standing in the way.
     """
     elements = _elements(left)
     if elements is None:
@@ -2160,7 +2168,10 @@ def _collected_operand(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number 
         joined = elements + (tail if tail is not None else (right,))
         return None if len(joined) > _MAX_COLLECTION else joined
     count = _integer_payload(right) if _is_domain_integer(right) else None
-    if count is None or count < 0 or len(elements) * count > _MAX_COLLECTION:
+    if count is None:
+        return None
+    _within(_INTEGER_RANGE[_INT32], count)
+    if count < 0 or len(elements) * count > _MAX_COLLECTION:
         return None
     return elements * count
 
@@ -2254,11 +2265,11 @@ def _throws_are_modelled(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool:
     if operator in ('/', '%'):
         return True
     if operator == '*' and _elements(left) is not None:
-        # The cell records a throw because the capture repeated a collection `[uint32]::MaxValue`
-        # times and ran out of memory. Every way this throws is a size — a count too large, or a
-        # negative one that has no unsigned conversion — and `_collected_operand` declines both
-        # rather than computing them. So the kernel never answers where the host raises, which is
-        # what this gate asks; it merely answers less.
+        # The measured throw is the count's conversion rather than any size: a repeat count is taken
+        # as an `Int32`, and `@() * [uint64]18446744073709551615` throws an `InvalidCastIConvertible`
+        # for one that does not fit, an empty left operand included. `_collected_operand` raises for
+        # exactly that count and declines every size it will not build, so the kernel never answers
+        # where the host raises, which is what this gate asks; it merely answers less.
         return True
     if _STRING in (type_of(left), type_of(right)):
         return operator in _ARITHMETIC or operator in _BITWISE

@@ -899,6 +899,8 @@ FOLDS: dict[str, str] = {
         '$t = $True -and @()\nWrite-Output (,$t)\nWrite-Output $t',
     '$t = [char]65 -and $true; Write-Output (,$t); Write-Output $t':
         '$t = [char]65 -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+    '$t = @() * 5000; Write-Output (,$t); Write-Output $t.Count':
+        'Write-Output (,@())\nWrite-Output @().Count',
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':

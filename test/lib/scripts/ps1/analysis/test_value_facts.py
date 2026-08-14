@@ -2919,7 +2919,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 2077)
+        self.assertEqual(len(compared), 2086)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2934,7 +2934,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2134)
+        self.assertEqual(len(compared), 2141)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2949,7 +2949,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2134)
+        self.assertEqual(len(compared), 2141)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2960,12 +2960,12 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 1200)
+        self.assertEqual(len(STRINGS), 1204)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
     def test_the_bytes_the_array_reader_collects_are_the_numbers_the_elements_name(self):
-        self.assertEqual(len(BYTE_ARRAYS), 97)
+        self.assertEqual(len(BYTE_ARRAYS), 99)
         self.assertEqual(
             [row.source for row in BYTE_ARRAYS if list(row.collected) != row.payloads], [])
 
@@ -2974,7 +2974,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 429)
+        self.assertEqual(len(NUMERALS), 431)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -3010,7 +3010,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 361)
+        self.assertEqual(len(consulted), 364)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -3033,7 +3033,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
         weaker to fall back on either: an array shorter than the script builds is a different value.
         """
         named = [row for row in ARRAYS if row.named]
-        self.assertEqual(len(named), 134)
+        self.assertEqual(len(named), 136)
         self.assertEqual([row.source for row in named if not row.elements_named], [])
 
     def test_an_element_that_names_only_a_type_leaves_the_array_unknown(self):
@@ -3060,7 +3060,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1684)
+        self.assertEqual(len(compared), 1693)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 

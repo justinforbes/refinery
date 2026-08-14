@@ -2353,6 +2353,13 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Boolean\tTrue',
             'OUT\tSystem.Boolean\tTrue',
         ),
+    '$t = @() * [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t.Count':
+        ('THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',),
+    '$t = @() * 5000; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t',
+            'OUT\tSystem.Int32\t0',
+        ),
 }
 
 

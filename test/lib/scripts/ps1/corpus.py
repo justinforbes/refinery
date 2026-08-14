@@ -842,6 +842,8 @@ TYPES: tuple[str, ...] = (
     "$t = $true -and ''; Write-Output (,$t); Write-Output $t",
     '$t = $true -and @(); Write-Output (,$t); Write-Output $t',
     '$t = [char]65 -and $true; Write-Output (,$t); Write-Output $t',
+    '$t = @() * [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t.Count',
+    '$t = @() * 5000; Write-Output (,$t); Write-Output $t.Count',
 )
 
 

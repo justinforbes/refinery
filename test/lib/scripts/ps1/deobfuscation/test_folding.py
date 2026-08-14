@@ -1450,3 +1450,25 @@ class TestPs1AppendingToALiteralCollectionKeepsWhatWasAppended(TestPs1):
     def test_a_char_appended_through_the_array_operator_is_still_a_char(self):
         self.assertEqual(
             self._apply('$x = @(1, 2) + [char]65', Ps1ConstantFolding), '$x = 1, 2, [char]65')
+
+
+class TestPs1RepeatingACollectionByACountNoInt32Holds(TestPs1):
+    """
+    A repeat count is converted to an `Int32` before anything is repeated, so 5.1 refuses a count
+    that does not fit one however little the repetition would come to: measured,
+    `@() * [uint64]18446744073709551615` throws `InvalidCastIConvertible` where `@() * 5000` is the
+    empty collection. An empty left operand therefore folds to nothing rather than to `@()`, which
+    is a value the script it was folded out of never reaches.
+    """
+
+    def test_a_count_no_int32_holds_leaves_the_repetition_where_it_stands(self):
+        self._assertUnchanged('$x = @() * [uint64]18446744073709551615', Ps1ConstantFolding)
+        self._assertUnchanged('$x = @(1, 2) * [uint64]18446744073709551615', Ps1ConstantFolding)
+
+    def test_the_largest_count_an_int32_holds_is_the_last_one_that_folds(self):
+        self.assertEqual(self._apply('$x = @() * 2147483647', Ps1ConstantFolding), '$x = @()')
+        self._assertUnchanged('$x = @() * 2147483648', Ps1ConstantFolding)
+
+    def test_a_count_an_int32_holds_repeats_the_collection_it_counts(self):
+        self.assertEqual(self._apply('$x = @() * 5000', Ps1ConstantFolding), '$x = @()')
+        self.assertEqual(self._apply('$x = @(1, 2) * 2', Ps1ConstantFolding), '$x = 1, 2, 1, 2')
