@@ -338,6 +338,11 @@ def _spelled(fact: Ps1Fact) -> str:
 #: operand written against it. The selection is textual for the same reason the numeral one is, and
 #: an operand may not open with a colon, so that a read of a static member — `[double]::NaN` — is
 #: not taken for a value cast to `Double`.
+#:
+#: A text match alone is not enough, because the pattern is greedy where the language is not:
+#: `[byte]1 -shl 4` matches it with the operand `1 -shl 4`, which is a different expression from
+#: the one the host was asked about — the cast binds to the `1` and the shift is applied after. So
+#: the match is confirmed against the parse, which is the only thing that knows the precedence.
 _CAST = re.compile(r'\[(?P<target>[A-Za-z0-9_]+)\](?P<operand>[^:].*)')
 
 #: A row that measures `-as` instead. `X -as [T]` and `[T]X` are different expressions and the
@@ -353,7 +358,28 @@ class _Cast(NamedTuple):
     operand: str
 
 
-def _rows(pattern: re.Pattern[str]) -> dict[str, _Cast]:
+def _converts(expression: str, operator: str | None) -> bool:
+    """
+    Whether the whole of `expression` is the conversion the pattern took it for: a cast when
+    `operator` is `None`, and otherwise a binary application of that operator.
+
+    A row that does not parse is not caught: every measured row is PowerShell a host ran, so one
+    the parser refuses is a defect to be seen rather than a row to be quietly dropped from the
+    selection.
+    """
+    statements = [
+        node for node in Ps1Parser(expression).parse().walk()
+        if isinstance(node, Ps1ExpressionStatement)
+    ]
+    if len(statements) != 1:
+        return False
+    root = statements[0].expression
+    if operator is None:
+        return isinstance(root, Ps1CastExpression)
+    return isinstance(root, Ps1BinaryExpression) and root.operator.lower() == operator
+
+
+def _rows(pattern: re.Pattern[str], operator: str | None = None) -> dict[str, _Cast]:
     matched: dict[str, _Cast] = {}
     for row in TYPE_TRANSCRIPTS:
         outer = _ROW_PATTERN.fullmatch(row)
@@ -361,13 +387,13 @@ def _rows(pattern: re.Pattern[str]) -> dict[str, _Cast]:
             continue
         expression = outer.group('expression')
         inner = pattern.fullmatch(expression)
-        if inner is not None:
+        if inner is not None and _converts(expression, operator):
             matched[expression] = _Cast(inner.group('target'), inner.group('operand'))
     return matched
 
 
 CAST_ROWS = _rows(_CAST)
-AS_ROWS = _rows(_AS)
+AS_ROWS = _rows(_AS, '-as')
 
 #: The measured casts a host answered by throwing, which are therefore the rows that have no value
 #: to be held against.
@@ -574,6 +600,12 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    '-1 * [uint64]1',
+    '-1 -band [uint32]1',
+    '-2147483648 % -1',
+    '-2147483648 - 9223372036854775807L',
+    '-2147483648 / -1',
+    '1L -shl 64',
     '0xFFFFFFFF -bxor 0x5A',
     '0xFFFFFFFF + 0',
     '0xFFFFFFFFFFFFFFFF + 0',
@@ -670,6 +702,14 @@ def _measured_complement_fact(expression: str) -> Ps1Fact:
 #: writes a Double as fifteen significant figures, and `512MB * 512MB` is 2 to the 58th exactly.
 #: What such a row measures is the widening, so the type is what the value is held against.
 ABBREVIATED_OPERATIONS: tuple[str, ...] = (
+    '0 - [uint64]18446744073709551615',
+    '1 + [uint64]18446744073709551615',
+    '1 / [uint64]18446744073709551615',
+    '2147483647 * 2147483647',
+    '2147483647 * [uint32]4294967295',
+    '9223372036854775807L + 1',
+    '9223372036854775807L - -1L',
+    '[uint64]18446744073709551615 + 1',
     '512MB * 512MB',
     '9223372036854775807 + 2',
 )
@@ -2143,12 +2183,19 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 51, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 91, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
             sorted(THROWN_OPERATIONS),
-            ["'1_0' -band 15", "'ab' * 0xFFFFFFFF", "16 + 'file'", '[decimal]::MaxValue + 1'],
+            [
+                '$null -band [uint32]1',
+                "'1_0' -band 15",
+                "'ab' * 0xFFFFFFFF",
+                "1 + '1e400'",
+                "16 + 'file'",
+                '[decimal]::MaxValue + 1',
+            ],
         )
 
     def test_a_measured_operation_the_domain_pins_is_pinned_to_the_fact_the_host_printed(self):
@@ -2677,7 +2724,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 22)
+        self.assertEqual(len(composed), 40)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -2777,7 +2824,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 1372)
+        self.assertEqual(len(compared), 1566)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2792,7 +2839,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1439)
+        self.assertEqual(len(compared), 1634)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2807,7 +2854,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1439)
+        self.assertEqual(len(compared), 1634)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2818,7 +2865,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 854)
+        self.assertEqual(len(STRINGS), 949)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
@@ -2832,7 +2879,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 287)
+        self.assertEqual(len(NUMERALS), 344)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -2868,13 +2915,13 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 190)
+        self.assertEqual(len(consulted), 252)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
     def test_only_a_cast_names_anything_where_its_step_cannot_be_consulted(self):
         unconsulted = [step for step in STEPS if not step.consultable]
-        self.assertEqual(len(unconsulted), 19)
+        self.assertEqual(len(unconsulted), 25)
         self.assertEqual(
             [step.source for step in unconsulted if _names_a_value(step.answered.value)], [])
         self.assertEqual(
@@ -2918,7 +2965,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1147)
+        self.assertEqual(len(compared), 1319)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
@@ -3043,7 +3090,7 @@ class TestPs1EvaluateRefusesATypeLiteral(unittest.TestCase):
 
     def test_every_type_literal_the_corpus_writes_is_refused_here_and_typed_there(self):
         literals = [site for site in SITES if isinstance(site.node, Ps1TypeExpression)]
-        self.assertEqual(len(literals), 31)
+        self.assertEqual(len(literals), 33)
         self.assertEqual([site.source for site in literals if evaluate(site.node) != NOTHING], [])
         self.assertEqual(
             [site.source for site in literals if resolve_expression_type(site.node) is None], [])
@@ -3123,7 +3170,7 @@ class TestPs1OperatorCaseDoesNotChangeTheAnswer(unittest.TestCase):
             expression for expression in OPERATION_ROWS
             if any(character.isalpha() for character in _operator_of(expression))
         ]
-        self.assertEqual(len(lettered), 20)
+        self.assertEqual(len(lettered), 29)
         self.assertEqual(
             {expression: _cased(expression, str.upper) for expression in lettered},
             {expression: _cased(expression, str.lower) for expression in lettered},

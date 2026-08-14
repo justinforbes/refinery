@@ -1145,10 +1145,46 @@ def apply(operator: str, left: Ps1Fact, right: Ps1Fact) -> Ps1Outcome:
         except _Throws:
             return Ps1Outcome(True, UNKNOWN)
         if computed is not None:
-            stamped = _stamped(computed, cell.types)
+            stamped = _typed_result(operator, computed, left, right, cell.types)
             if stamped is not UNKNOWN:
                 return Ps1Outcome(False, stamped)
     return _from_binary_cell(cell, _spans(left, right))
+
+
+#: The operators whose result type the promotion decides rather than the grid. These are the five
+#: 5.1 runs through its numeric promotion, and the only ones a cell is a worse answer for: a cell
+#: over `Int32` and `UInt64` records `Decimal`, `Double` and `UInt64` together because the three are
+#: what different *values* produced, and `_promotion` is what says which of them any given pair
+#: takes. Every other operator keeps reading its type from the measurement.
+_PROMOTED_OPERATORS = frozenset({'+', '-', '*', '/', '%'})
+
+
+def _typed_result(
+    operator: str,
+    computed: _Number,
+    left: Ps1Fact,
+    right: Ps1Fact,
+    candidates: frozenset[Ps1TypeName],
+) -> Ps1Fact:
+    """
+    The fact a computed value carries. For an arithmetic application over two numbers that is the
+    type the promotion answers in; for everything else it is the one the measured cell allows.
+
+    The two are not alternatives that happen to agree. `0 - [uint64]::MaxValue` is measured a
+    `Double` on the host and the cell holds `Decimal` beside it, so reading the cell answered a
+    `Decimal` — a value of a type the operation never produced. A cell cannot do better, because
+    what separates the two is the sign of the signed operand.
+
+    An arithmetic pair the promotion does not cover falls back to the cell rather than being
+    refused, so a String, a collection or a `Single` operand is answered exactly as before.
+    """
+    if operator in _PROMOTED_OPERATORS:
+        promotion = _promotion(left, right)
+        if promotion is not None:
+            promoted = _promoted(computed, promotion)
+            if promoted is not UNKNOWN:
+                return promoted
+    return _stamped(computed, candidates)
 
 
 #: What `-bnot` complements at, keyed by the type of the operand it is given. The complement happens
@@ -1646,6 +1682,125 @@ def _from_conversion_cell(cell, spanned: bool) -> Ps1Outcome:
     return Ps1Outcome(True, named if isinstance(named, Ps1Typed) else UNKNOWN)
 
 
+#: The .NET `TypeCode` each type the domain computes in carries. The numbers are not an ordering
+#: this module chose: 5.1 promotes an arithmetic pair by taking the *larger of the two type codes*
+#: and running the application in the arithmetic that code selects, so the ordinals are the rule.
+#: `System.Void` has no entry because `$null` never reaches the promotion: `+` answers a null left
+#: operand with the right one *as it stands*, and `*` answers it with null, both decided before any
+#: promotion runs. `_promotion` refuses such a pair and the measured cell answers it.
+#:
+#: `System.Single` is absent although it has a code of 13, because no fact carries one: `render`
+#: cannot spell a Single, so nothing reaches here with that type and an entry would be a rule about
+#: a value this module never holds. A Single operand is refused by the lookup below, which is the
+#: same answer it gets today.
+_TYPE_CODE: dict[Ps1TypeName, int] = {
+    _BOOLEAN: 3,
+    _CHAR: 4,
+    _SBYTE: 5,
+    _BYTE: 6,
+    _INT16: 7,
+    _UINT16: 8,
+    _INT32: 9,
+    _UINT32: 10,
+    _INT64: 11,
+    _UINT64: 12,
+    _DOUBLE: 14,
+    _DECIMAL: 15,
+}
+
+#: The integer types whose values can be negative, which is the question the promotion asks when a
+#: signed operand meets an unsigned one wide enough to need the answer.
+_SIGNED_INTEGERS = frozenset({_SBYTE, _INT16, _INT32, _INT64})
+
+#: What each arithmetic produces, and what it produces instead when the result leaves that type.
+#: An integer arithmetic widens to a `Double` — never to a `Decimal`, whatever the grid cell holds,
+#: because the widening is `(double)result` in every one of the four integer kernels. A `Decimal`
+#: arithmetic does not widen at all: it raises, and the domain reports that as a throw.
+_PROMOTED_RESULT: dict[str, tuple[Ps1TypeName, Ps1TypeName | None]] = {
+    'int': (_INT32, _DOUBLE),
+    'uint': (_UINT32, _DOUBLE),
+    'long': (_INT64, _DOUBLE),
+    'ulong': (_UINT64, _DOUBLE),
+    'decimal': (_DECIMAL, None),
+    'double': (_DOUBLE, None),
+}
+
+
+def _promotion(left: Ps1Fact, right: Ps1Fact) -> str | None:
+    """
+    Which arithmetic 5.1 runs `left <op> right` in, or `None` where the pair is not one this
+    promotion covers.
+
+    The larger of the two type codes selects it, with one question left to the values: where the
+    wider operand is an unsigned integer and the other is a signed one, a *negative* signed value
+    cannot be represented there, so the application widens instead — to `Int64` beside a `UInt32`
+    and to `Decimal` beside a `UInt64`. That is the one place the answer depends on a value rather
+    than a type, and it is why the measured grid cannot carry it: the cell over `Int32` and
+    `UInt64` holds `Decimal`, `Double` and `UInt64` at once, and which of them a pair takes is
+    settled here.
+    """
+    if left is NULL or right is NULL:
+        # `$null` does not reach the promotion at all: `+` answers a null left with the *right
+        # operand itself*, so `$null + $true` is the Boolean `$true` and not the integer 1, and `*`
+        # answers a null left with null. Those are decided before any promotion runs, and the
+        # measured cell already carries them.
+        return None
+    codes = []
+    for fact in (left, right):
+        name = type_of(fact)
+        code = None if name is None else _TYPE_CODE.get(name)
+        if code is None:
+            return None
+        codes.append(code)
+    top = max(codes)
+    if top <= _TYPE_CODE[_INT32]:
+        return 'int'
+    if top == _TYPE_CODE[_UINT32]:
+        return 'long' if _is_negative(left) or _is_negative(right) else 'uint'
+    if top == _TYPE_CODE[_INT64]:
+        return 'long'
+    if top == _TYPE_CODE[_UINT64]:
+        return 'decimal' if _is_negative(left) or _is_negative(right) else 'ulong'
+    if top == _TYPE_CODE[_DECIMAL]:
+        return 'decimal'
+    return 'double'
+
+
+def _is_negative(fact: Ps1Fact) -> bool:
+    """
+    Whether a signed integer operand carries a negative value. Only a signed integer is asked,
+    because the promotion asks this of nothing else: an unsigned operand cannot be negative, and a
+    floating or `Decimal` one is already wider than the question.
+    """
+    if not isinstance(fact, Ps1Constant) or fact.type not in _SIGNED_INTEGERS:
+        return False
+    return isinstance(fact.payload, int) and fact.payload < 0
+
+
+def _promoted(value: _Number, promotion: str) -> Ps1Fact:
+    """
+    The fact an arithmetic produced, stamped with the type that arithmetic answers in rather than
+    with one read out of a grid cell. An integer that has left its own range is the widening the
+    kernel performs, and a `Decimal` that has left its range is not a fact at all — the host raises
+    there, and `_decimal_result` has already reported it.
+    """
+    natural, widened = _PROMOTED_RESULT[promotion]
+    if isinstance(value, bool):
+        return Ps1Constant(_BOOLEAN, value)
+    if isinstance(value, int) and natural in _INTEGER_RANGE:
+        low, high = _INTEGER_RANGE[natural]
+        if low <= value <= high:
+            return Ps1Constant(natural, value)
+        return UNKNOWN if widened is None else _double(value)
+    if isinstance(value, decimal.Decimal):
+        return Ps1Constant(_DECIMAL, value) if natural is _DECIMAL else UNKNOWN
+    if isinstance(value, float):
+        if natural is not _DOUBLE and widened is not _DOUBLE:
+            return UNKNOWN
+        return UNKNOWN if _finite(value) is None else Ps1Constant(_DOUBLE, value)
+    return UNKNOWN
+
+
 def _stamped(value: _Number, candidates: frozenset[Ps1TypeName]) -> Ps1Fact:
     """
     The fact a computed value has, given the types the grid recorded for the cell it came out of.
@@ -1757,7 +1912,7 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
             remainder = abs(a) % abs(b)
             return -remainder if a < 0 else remainder
         if isinstance(a, decimal.Decimal) and isinstance(b, decimal.Decimal):
-            return _decimal_result(a % b)
+            return _decimal_result(_decimal_remainder(a, b))
         return _finite(math.fmod(a, b))
     arithmetic = _ARITHMETIC.get(operator)
     return None if arithmetic is None else _decimal_result(arithmetic(a, b))
@@ -1837,6 +1992,24 @@ def _numeric_pair(left: Ps1Fact, right: Ps1Fact):
     if 'f' in kinds:
         return float(values[0]), float(values[1])
     return values[0], values[1]
+
+
+#: What a remainder of two `Decimal`s has to be computed at. Python reaches a remainder through the
+#: integer quotient and raises `InvalidOperation` where that quotient does not fit the context, so
+#: the default 28 digits refuse `[decimal]::MaxValue % 1.5d` — measured a `Decimal` 0 on the host,
+#: and raised out of `apply` and into the caller here until this was given room. Both operands are
+#: inside the `Decimal` range, so the quotient is at most the largest over the smallest and 60
+#: digits covers it. The remainder itself is smaller than the divisor and needs no room at all.
+_DECIMAL_QUOTIENT = decimal.Context(prec=60)
+
+
+def _decimal_remainder(a: decimal.Decimal, b: decimal.Decimal) -> decimal.Decimal:
+    """
+    `a % b` over two `Decimal`s, at the precision the intermediate quotient needs rather than the
+    one the result does.
+    """
+    with decimal.localcontext(_DECIMAL_QUOTIENT):
+        return a % b
 
 
 def _decimal_result(value: _Number) -> _Number | None:

@@ -1633,6 +1633,214 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Boolean\tFalse',
             'OUT\tSystem.Boolean\tFalse',
         ),
+    '$t = 2147483647 * 2147483647; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t4.61168601413242E+18',
+            'OUT\tSystem.Double\t4.61168601413242E+18',
+        ),
+    '$t = 9223372036854775807L + 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t9.22337203685478E+18',
+            'OUT\tSystem.Double\t9.22337203685478E+18',
+        ),
+    '$t = 9223372036854775807L - -1L; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t9.22337203685478E+18',
+            'OUT\tSystem.Double\t9.22337203685478E+18',
+        ),
+    '$t = -2147483648 - 9223372036854775807L; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t-9.22337203900226E+18',
+            'OUT\tSystem.Double\t-9.22337203900226E+18',
+        ),
+    '$t = -2147483648 % -1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$t = -2147483648 / -1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t2147483648',
+            'OUT\tSystem.Double\t2147483648',
+        ),
+    '$t = 0 - [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t-1.84467440737096E+19',
+            'OUT\tSystem.Double\t-1.84467440737096E+19',
+        ),
+    '$t = 1 + [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t1.84467440737096E+19',
+            'OUT\tSystem.Double\t1.84467440737096E+19',
+        ),
+    '$t = [uint64]18446744073709551615 + 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t1.84467440737096E+19',
+            'OUT\tSystem.Double\t1.84467440737096E+19',
+        ),
+    '$t = -1 * [uint64]1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t-1',
+            'OUT\tSystem.Decimal\t-1',
+        ),
+    '$t = 2147483647 * [uint32]4294967295; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t9.22337203041232E+18',
+            'OUT\tSystem.Double\t9.22337203041232E+18',
+        ),
+    '$t = -1 -band [uint32]1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.UInt32\t1',
+            'OUT\tSystem.UInt32\t1',
+        ),
+    '$t = 1 / [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t5.42101086242752E-20',
+            'OUT\tSystem.Double\t5.42101086242752E-20',
+        ),
+    '$t = 0 + [char]65; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t65',
+            'OUT\tSystem.Int32\t65',
+        ),
+    '$t = [char]48 -band [byte]255; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t48',
+            'OUT\tSystem.Int32\t48',
+        ),
+    '$t = [char]48 -bxor [char]48; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    '$t = 1.5 * [char]48; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t72',
+            'OUT\tSystem.Double\t72',
+        ),
+    '$t = [char]48 - 0.0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t48',
+            'OUT\tSystem.Double\t48',
+        ),
+    '$t = [char]65 -bxor 32; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t97',
+            'OUT\tSystem.Int32\t97',
+        ),
+    "$t = 0 + '5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t5',
+            'OUT\tSystem.Int32\t5',
+        ),
+    "$t = $true + ''; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t1',
+            'OUT\tSystem.Int32\t1',
+        ),
+    "$t = 1 + '0xFFFFFFFF'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    "$t = 1 + '1kb'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t1025',
+            'OUT\tSystem.Int32\t1025',
+        ),
+    "$t = 1 + '1.5L'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int64\t3',
+            'OUT\tSystem.Int64\t3',
+        ),
+    "$t = 1 + '1e400'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    '$t = [decimal]::MaxValue % 1.5d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t0',
+            'OUT\tSystem.Decimal\t0',
+        ),
+    '$t = [decimal]::MaxValue % 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t0',
+            'OUT\tSystem.Decimal\t0',
+        ),
+    '$t = 1d + 0.1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.1',
+            'OUT\tSystem.Decimal\t1.1',
+        ),
+    '$t = 1d - 0.1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t0.9',
+            'OUT\tSystem.Decimal\t0.9',
+        ),
+    '$t = [byte]1 -shl 4; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Byte\t16',
+            'OUT\tSystem.Byte\t16',
+        ),
+    '$t = [byte]1 -shl -1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Byte\t0',
+            'OUT\tSystem.Byte\t0',
+        ),
+    '$t = [single]1.5 -shl 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t4',
+            'OUT\tSystem.Int32\t4',
+        ),
+    '$t = 1L -shl 64; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int64\t1',
+            'OUT\tSystem.Int64\t1',
+        ),
+    '$t = $true + 9223372036854775807L; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t9.22337203685478E+18',
+            'OUT\tSystem.Double\t9.22337203685478E+18',
+        ),
+    '$t = $null + $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $null -band [uint32]1; Write-Output (,$t); Write-Output $t':
+        ('THROW\tSystem.InvalidCastException\tSystem.InvalidCastException',),
+    '$t = $true * 1.5d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.5',
+            'OUT\tSystem.Decimal\t1.5',
+        ),
+    '$t = 1.5 / -0.0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t-Infinity',
+            'OUT\tSystem.Double\t-Infinity',
+        ),
+    "$t = 'ab' * 1.5; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tabab',
+            'OUT\tSystem.String\tabab',
+        ),
+    '$v = [single]1.5; $t = $v -shl 1; Write-Output (,$t); Write-Output $t':
+        ('THROW\tSystem.InvalidCastException\tSystem.InvalidCastException',),
+    '$v = [single]1.5; $t = $v + 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t2.5',
+            'OUT\tSystem.Double\t2.5',
+        ),
+    '$t = [single]1.5 + 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t2.5',
+            'OUT\tSystem.Double\t2.5',
+        ),
+    '$v = $null; $t = $v -band [uint32]1; Write-Output (,$t); Write-Output $t':
+        ('THROW\tSystem.InvalidCastException\tSystem.InvalidCastException',),
+    '$l = [byte]1; $r = 4; $t = $l -shl $r; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Byte\t16',
+            'OUT\tSystem.Byte\t16',
+        ),
 }
 
 
