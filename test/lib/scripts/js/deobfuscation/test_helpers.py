@@ -12,12 +12,14 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     JS_NULL,
     JsBuffer,
     binding_has_references,
+    escape_js_string,
     extract_literal_value,
     make_numeric_literal,
     make_string_literal,
     value_to_node,
 )
-from refinery.lib.scripts.js.model import JsExpressionStatement
+from refinery.lib.scripts.js.lexer import decode_js_string_body
+from refinery.lib.scripts.js.model import JsExpressionStatement, JsStringLiteral
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
@@ -292,3 +294,62 @@ class TestNumericLiteralRoundTrip(TestJsDeobfuscator):
         the writer answers nothing rather than a spelling that would mean something else.
         """
         self.assertIsNone(make_numeric_literal(float('nan')))
+
+
+class TestNulFollowedByDigitSurvivesPrinting(TestJsDeobfuscator):
+    """
+    A NUL immediately before an ASCII digit is the one place the compact NUL escape cannot be used:
+    before a 0 through 7 it joins the digit into a single legacy octal escape, a different character
+    (Node reads a NUL written before a 7 that way as the one character U+0007), and before an 8 or 9
+    it is an escape strict code refuses. Printing the value must keep the NUL and the digit apart,
+    while a NUL that no digit follows keeps the compact escape it had.
+    """
+
+    def _printed_then_read(self, value: str) -> str:
+        printed = JsSynthesizer().convert(make_string_literal(value))
+        reparsed = JsParser(printed).parse()
+        statement = reparsed.body[0]
+        if not isinstance(statement, JsExpressionStatement):
+            self.fail(F'{printed!r} did not parse as an expression statement')
+        literal = statement.expression
+        if not isinstance(literal, JsStringLiteral):
+            self.fail(F'{printed!r} did not parse as a string literal')
+        return literal.value
+
+    def test_nul_before_seven_reads_back_as_a_nul_and_a_seven(self):
+        value = '\x00' + '7'
+        self.assertEqual(value, self._printed_then_read(value))
+
+    def test_nul_before_zero_reads_back_as_a_nul_and_a_zero(self):
+        value = '\x00' + '0'
+        self.assertEqual(value, self._printed_then_read(value))
+
+    def test_nul_before_a_letter_reads_back_as_a_nul_and_the_letter(self):
+        value = '\x00' + 'a'
+        self.assertEqual(value, self._printed_then_read(value))
+
+    def test_nul_before_a_letter_keeps_the_compact_escape(self):
+        self.assertEqual("'\\0a'", make_string_literal('\x00' + 'a').raw)
+
+
+class TestEscapeAndDecodeInvertOnNulFollowedByDigit(TestJsDeobfuscator):
+    """
+    Escaping a value into a literal body and decoding a literal body are inverse operations, so a
+    string put through both comes back unchanged. The case a naive escape would corrupt is a NUL
+    immediately before a digit, where the compact NUL escape would merge with the digit into one
+    character; every ASCII digit is checked here, the 8 and 9 that form no octal escape included.
+    """
+
+    def _round_trip(self, value: str) -> str:
+        return decode_js_string_body(escape_js_string(value))
+
+    def test_every_digit_after_a_nul_is_recovered(self):
+        values = [F'\x00{digit}' for digit in '0123456789']
+        self.assertEqual(
+            {value: value for value in values},
+            {value: self._round_trip(value) for value in values},
+        )
+
+    def test_a_letter_after_a_nul_is_recovered(self):
+        value = '\x00' + 'a'
+        self.assertEqual(value, self._round_trip(value))

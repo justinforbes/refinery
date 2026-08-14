@@ -45,10 +45,12 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     _to_int32,
     _to_uint32,
     canonical_array_index,
+    code_points,
     eval_binary_op,
     js_typeof,
     name_is_unbound,
     names_global_value,
+    spell_astral_characters,
     to_boolean,
     to_number,
     to_string,
@@ -945,7 +947,7 @@ def _global_decode_uri_component(args: list[Value]) -> Value:
 def _global_encode_uri_component(args: list[Value]) -> Value:
     if not args:
         raise InterpreterError
-    s = to_string(args[0])
+    s = spell_astral_characters(to_string(args[0]))
     try:
         return urllib.parse.quote(s, safe="!'()*~-._")
     except Exception:
@@ -978,7 +980,9 @@ def _array_from(args: list[Value]) -> Value:
     if not args:
         return []
     src = args[0]
-    if isinstance(src, (str, list)):
+    if isinstance(src, str):
+        return code_points(src)
+    if isinstance(src, list):
         return list(src)
     raise InterpreterError
 
@@ -1008,7 +1012,7 @@ def _buffer_from(args: list[Value]) -> Value:
             padded = padded + '=' * (-len(padded) % 4)
             return JsBuffer(base64.b64decode(padded))
         if encoding in ('utf8', 'utf-8'):
-            return JsBuffer(data.encode('utf-8'))
+            return JsBuffer(spell_astral_characters(data).encode('utf-8'))
         if encoding in ('latin1', 'binary'):
             return JsBuffer(data.encode('latin-1'))
         if encoding == 'hex':
@@ -1395,7 +1399,7 @@ class JsInterpreter:
         if isinstance(right, list):
             items = right
         elif isinstance(right, str):
-            items = list(right)
+            items = code_points(right)
         else:
             raise InterpreterError
         var_name = self._get_loop_var(node.left)

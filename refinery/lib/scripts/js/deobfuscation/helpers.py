@@ -575,18 +575,42 @@ def spell_astral_characters(value: str) -> str:
     return _SURROGATE_PAIR.sub(_combine_surrogate_pair, value)
 
 
+def code_points(value: str) -> list[str]:
+    """
+    The code points of a string, each kept as the code units that spell it. A JavaScript string is
+    indexed by code unit but iterated by code point — a `for ... of`, a spread, `Array.from` — so a
+    well-formed surrogate pair is one element here, and every other code unit is its own. A lone
+    surrogate stands as a code point of its own, because a string may hold one and the split may not
+    invent the partner it lacks.
+    """
+    points: list[str] = []
+    index = 0
+    length = len(value)
+    while index < length:
+        step = 2 if _SURROGATE_PAIR.match(value, index) else 1
+        points.append(value[index:index + step])
+        index += step
+    return points
+
+
 def escape_js_string(value: str, quote: str = "'") -> str:
     """
     Escape a string for use in a JavaScript string literal. Returns the escaped body without
     surrounding quotes. Backslash is escaped first to avoid double-escaping. Control characters
     not covered by named escapes are emitted as `\\xHH`; a surrogate that names no character on its
     own as `\\uXXXX`, and a pair of them as the character they name.
+
+    A NUL is `\\0`, except where a digit stands behind it: `\\0` followed by `0` through `7` is one
+    legacy octal escape and would swallow the digit into a different character, and followed by `8`
+    or `9` it is an escape strict code refuses. A NUL a digit follows is spelled `\\x00` instead, so
+    the character behind it stays the character the value held.
     """
     value = spell_astral_characters(value)
     value = value.replace('\\', r'\\')
     value = value.replace('\n', r'\n')
     value = value.replace('\r', r'\r')
     value = value.replace('\t', r'\t')
+    value = re.sub(r'\x00(?=[0-9])', r'\\x00', value)
     value = value.replace('\0', r'\0')
     value = value.replace(quote, F'\\{quote}')
     return re.sub(r'[\x01-\x1f\ud800-\udfff]', _escape_residue, value)

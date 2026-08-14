@@ -2354,3 +2354,30 @@ class TestHostEntrypointDefinitions(TestJsDeobfuscator):
             """
         )
         self.assertEqual('SINK(2);', self._evaluate_with(source, 'run'))
+
+
+class TestEvaluatorAstralStringEncoding(TestJsDeobfuscator):
+    """
+    Encoding a string reads the Unicode text it denotes, not the UTF-16 units it is stored as: the
+    single code point U+1F600 is four bytes in UTF-8 and four percent-escapes to
+    `encodeURIComponent`. Node: the UTF-8 bytes are `[240, 159, 152, 128]`, their hex is
+    `'f09f9880'`, and `encodeURIComponent('\U0001F600')` is `'%F0%9F%98%80'`.
+    """
+
+    def test_buffer_from_utf8_yields_the_four_utf8_bytes(self):
+        self.assertEqual(
+            'var x = [240, 159, 152, 128];',
+            self._fold("Array.from(Buffer.from('\U0001F600', 'utf8'))"),
+        )
+
+    def test_buffer_from_utf8_hex_encodes_the_character(self):
+        self.assertEqual(
+            "var x = 'f09f9880';",
+            self._fold("Buffer.from('\U0001F600', 'utf8').toString('hex')"),
+        )
+
+    def test_encode_uri_component_percent_encodes_the_character(self):
+        self.assertEqual(
+            "var x = '%F0%9F%98%80';",
+            self._fold("encodeURIComponent('\U0001F600')"),
+        )

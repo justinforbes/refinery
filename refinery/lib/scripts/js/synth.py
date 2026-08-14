@@ -91,6 +91,7 @@ from refinery.lib.scripts.js.precedence import (
     needs_parens,
     statement_needs_parens,
 )
+from refinery.lib.scripts.js.strict import spelling_states
 
 _WORD_UNARY_OPS = frozenset({'typeof', 'void', 'delete'})
 
@@ -250,8 +251,19 @@ class JsSynthesizer(Synthesizer):
 
     @staticmethod
     def _encode_string(value: str, raw: str) -> str:
+        """
+        Re-spell a literal from the text it denotes, unless the shorter spelling would state
+        something the source did not. Whether a literal spells the Use Strict Directive, or an
+        escape strict code refuses, is a fact about how it was written and not what it denotes:
+        unescaping `'use\\x20strict'` to `'use strict'` writes a directive nobody wrote and turns
+        the code behind it strict. Where either would move, the source spelling is kept, the same
+        rule the folding pass holds.
+        """
         quote = raw[0] if raw and raw[0] in ('"', "'") else "'"
-        return F'{quote}{escape_js_string(value, quote)}{quote}'
+        body = escape_js_string(value, quote)
+        if raw and spelling_states(body) != spelling_states(raw[1:-1]):
+            return raw
+        return F'{quote}{body}{quote}'
 
     def visit_JsRegExpLiteral(self, node: JsRegExpLiteral):
         self._write(node.raw)

@@ -946,3 +946,59 @@ class TestInterpreterNumericCoercion(TestJsDeobfuscator):
         self.assertEqual('var x = 16;', self._fold("parseInt('10', 2 ** 32 + 16)"))
         self.assertEqual('var x = 10;', self._fold("parseInt('10', 2 ** 32)"))
         self.assertEqual('var x = 255;', self._fold("parseInt('ff', -(2 ** 32) + 16)"))
+
+
+class TestAstralStringCodePointIterationAndCodeUnitIndexing(TestJsDeobfuscator):
+    """
+    A JavaScript string is stored as UTF-16 code units but iterated as Unicode code points, so a
+    character above the basic multilingual plane is one element to `Array.from` and to `for ... of`,
+    and two code units to `length`, an index, `charCodeAt`, and `String.fromCharCode`. Node:
+    `Array.from('\U0001F600').length` is `1`, `'\U0001F600'.length` is `2`, and the two units are
+    `55357` and `56832`.
+    """
+
+    def test_array_from_sees_one_element(self):
+        self.assertEqual('var x = 1;', self._fold("Array.from('\U0001F600').length"))
+
+    def test_for_of_iterates_once(self):
+        source = inspect.cleandoc(
+            """
+            function f() {
+                var n = 0;
+                for (const c of '\U0001F600') n = n + 1;
+                return n;
+            }
+            var x = f();
+            """
+        )
+        self.assertEqual('var x = 1;', self._evaluate(source))
+
+    def test_the_iterated_element_is_the_whole_character(self):
+        self.assertEqual(
+            'var x = true;',
+            self._fold("Array.from('\U0001F600')[0] === '\U0001F600'"),
+        )
+
+    def test_length_counts_two_code_units(self):
+        self.assertEqual('var x = 2;', self._fold("'\U0001F600'.length"))
+
+    def test_char_code_at_reads_the_high_surrogate(self):
+        self.assertEqual('var x = 55357;', self._fold("'\U0001F600'.charCodeAt(0)"))
+
+    def test_char_code_at_reads_the_low_surrogate(self):
+        self.assertEqual('var x = 56832;', self._fold("'\U0001F600'.charCodeAt(1)"))
+
+    def test_indexing_splits_into_the_two_code_units(self):
+        self.assertEqual(
+            'var x = true;',
+            self._fold("('\U0001F600'[0] + '\U0001F600'[1]) === '\U0001F600'"),
+        )
+
+    def test_from_char_code_rebuilds_the_character_from_its_code_units(self):
+        self.assertEqual(
+            'var x = true;',
+            self._fold(
+                "String.fromCharCode('\U0001F600'.charCodeAt(0), '\U0001F600'.charCodeAt(1)) "
+                "=== '\U0001F600'"
+            ),
+        )

@@ -37,3 +37,21 @@ class TestPPJscript(TestUnitBase):
         result = 'function foo(a,b){return a+b;}' | self.load() | str
         self.assertIn('function foo(a, b)', result)
         self.assertIn('return a + b;', result)
+
+    def test_escaped_use_strict_directive_is_not_turned_into_a_directive(self):
+        """
+        The first statement denotes the three words of the Use Strict Directive but writes the space
+        as a hex escape, so it is not the directive and the program is sloppy. Unescaping it to a
+        plain 'use strict' would put a directive where none was written and silently make the code
+        that follows strict, a change of meaning, so the escaped spelling has to stay. The ordinary
+        escaped string on the next line still unescapes, so this also pins that the default unescape
+        is otherwise unchanged.
+        """
+        program = (
+            "'use\\x20strict';\n"
+            "var marker = \"\\x41\\x42\";"
+        )
+        result = program | self.load() | str
+        self.assertNotIn("'use strict'", result)
+        self.assertNotIn('"use strict"', result)
+        self.assertIn('"AB"', result)
