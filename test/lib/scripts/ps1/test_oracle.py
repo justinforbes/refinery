@@ -2006,6 +2006,353 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Decimal\t1.5',
             'OUT\tSystem.Decimal\t1.5',
         ),
+    '$t = $true -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = 1 -and 2; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = 1 -and 0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 0 -or 0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $true -xor $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 5 -xor 0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'abc' -and $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = '' -or $false; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = '0' -and $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'false' -and $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = ' ' -and $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [char]0 -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = [char]'0' -and $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = 0.0 -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = -0.0 -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 0.0d -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [uint64]0 -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $null -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = @() -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = @(0) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = @(0, 0) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = @($false) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = @($null) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = @(@()) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = @(1, 2) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [bool][char]0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = [bool][char]'0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [bool]0.0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [bool]-0.0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [bool]0.0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [bool](0.0 / 0.0); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [bool]@(); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [bool]@(0); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [bool]@(0, 0); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [bool]@($false); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [bool]@($null); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [bool]@(@()); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = [bool]' '; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = [bool]'false'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = -not @(); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = -not @(0); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = -not '0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = -not [char]0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = if ([char]0) { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tno',
+            'OUT\tSystem.String\tno',
+        ),
+    "$t = if ('0') { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tyes',
+            'OUT\tSystem.String\tyes',
+        ),
+    "$t = if (@(@())) { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tno',
+            'OUT\tSystem.String\tno',
+        ),
+    '$t = (,(,0)) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = (,(,@())) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = (,[char]0) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = (,'') -and $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = (,' ') -and $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = (,0.0) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = (,0.0d) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [bool](,(,0)); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [bool](,[char]0); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = -not (,[char]0); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = if ((,[char]0)) { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tyes',
+            'OUT\tSystem.String\tyes',
+        ),
+    "$t = - '0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t0',
+            'OUT\tSystem.Int32\t0',
+        ),
+    "$t = - 'abc'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = - '5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t-5',
+            'OUT\tSystem.Int32\t-5',
+        ),
+    "$t = if (- '0') { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tno',
+            'OUT\tSystem.String\tno',
+        ),
+    '$t = (,@(1, 2)) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = (,$true) -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [byte]0 -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 0L -or $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 1.5d -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $true -and [char]0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = $true -and ''; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $true -and @(); Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [char]65 -and $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
 }
 
 

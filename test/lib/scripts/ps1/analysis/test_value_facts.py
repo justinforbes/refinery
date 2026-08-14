@@ -427,10 +427,29 @@ DECLINED: dict[str, tuple[str, ...]] = {
     'a Single is a width nothing here computes in': (
         '[single]1.5',
     ),
+    'a Char or a collection, which `_cast` reaches no Boolean arm for': (
+        '[bool][char]0',
+        "[bool][char]'0'",
+        '[bool]@()',
+        '[bool](,(,0))',
+        '[bool](,[char]0)',
+    ),
+    'an operand naming no value, so the cast is given nothing to convert': (
+        '[bool](0.0 / 0.0)',
+    ),
 }
 
 DECLINED_CASTS: tuple[str, ...] = tuple(
     expression for group in DECLINED.values() for expression in group
+)
+
+#: The declined casts that name no type either, because the *operand* names no value and so the
+#: conversion is never reached. `_evaluated_cast` falls back to the target's own column for those,
+#: and `_cast_names` answers only where the whole column names one type — which it does not for
+#: `System.Boolean`, although a host converts every value to one and throws for none. An entry is a
+#: **defect**: the type is one the domain could name and does not.
+UNREAD_OPERANDS: tuple[str, ...] = (
+    '[bool](0.0 / 0.0)',
 )
 
 #: The corpus rows where the readers below name a type and `evaluate` names a different one, which
@@ -1849,7 +1868,7 @@ class TestPs1MeasuredCasts(unittest.TestCase):
     """
 
     def test_every_cast_the_corpus_measures_is_selected(self):
-        self.assertEqual(len(CAST_ROWS), 82, 'a measured cast was added or withdrawn')
+        self.assertEqual(len(CAST_ROWS), 93, 'a measured cast was added or withdrawn')
         self.assertEqual(sorted(set(DECLINED_CASTS) - set(CAST_ROWS)), [])
         self.assertEqual(sorted(set(DECLINED_CASTS) & set(THROWN)), [])
 
@@ -1882,10 +1901,17 @@ class TestPs1MeasuredCasts(unittest.TestCase):
         and every declined cast whose operand is read has that type in the grid: `[int]'0x10'` is an
         Int32 whether or not this can say that .NET reads those digits as sixteen.
         """
-        for expression in sorted(DECLINED_CASTS):
+        for expression in sorted(set(DECLINED_CASTS) - set(UNREAD_OPERANDS)):
             with self.subTest(expression):
                 name, _ = _measured(expression)
                 self.assertEqual(_converted(expression).value, Ps1Typed(_type(name)))
+
+    def test_a_cast_over_an_unread_operand_names_no_type_only_where_recorded(self):
+        unnamed = [
+            expression for expression in DECLINED_CASTS
+            if _converted(expression).value is UNKNOWN
+        ]
+        self.assertEqual(sorted(unnamed), sorted(UNREAD_OPERANDS))
 
     def test_a_cast_of_a_cast_reaches_the_value_the_host_printed(self):
         """
@@ -2235,7 +2261,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 115, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 156, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
@@ -2770,7 +2796,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in CAST_ROWS
             if _read(CAST_ROWS[expression].operand) is not UNKNOWN
         }
-        self.assertEqual(len(composed), 81)
+        self.assertEqual(len(composed), 91)
         self.assertEqual(
             composed, {expression: _converted(expression) for expression in composed})
 
@@ -2793,7 +2819,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 80)
+        self.assertEqual(len(composed), 91)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -2893,7 +2919,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 1747)
+        self.assertEqual(len(compared), 2077)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2908,7 +2934,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1809)
+        self.assertEqual(len(compared), 2134)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2923,7 +2949,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1809)
+        self.assertEqual(len(compared), 2134)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2934,12 +2960,12 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 1032)
+        self.assertEqual(len(STRINGS), 1200)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
     def test_the_bytes_the_array_reader_collects_are_the_numbers_the_elements_name(self):
-        self.assertEqual(len(BYTE_ARRAYS), 71)
+        self.assertEqual(len(BYTE_ARRAYS), 97)
         self.assertEqual(
             [row.source for row in BYTE_ARRAYS if list(row.collected) != row.payloads], [])
 
@@ -2948,7 +2974,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 395)
+        self.assertEqual(len(NUMERALS), 429)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -2984,7 +3010,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 289)
+        self.assertEqual(len(consulted), 361)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -3007,7 +3033,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
         weaker to fall back on either: an array shorter than the script builds is a different value.
         """
         named = [row for row in ARRAYS if row.named]
-        self.assertEqual(len(named), 92)
+        self.assertEqual(len(named), 134)
         self.assertEqual([row.source for row in named if not row.elements_named], [])
 
     def test_an_element_that_names_only_a_type_leaves_the_array_unknown(self):
@@ -3034,7 +3060,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1426)
+        self.assertEqual(len(compared), 1684)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
@@ -3239,7 +3265,7 @@ class TestPs1OperatorCaseDoesNotChangeTheAnswer(unittest.TestCase):
             expression for expression in OPERATION_ROWS
             if any(character.isalpha() for character in _operator_of(expression))
         ]
-        self.assertEqual(len(lettered), 32)
+        self.assertEqual(len(lettered), 73)
         self.assertEqual(
             {expression: _cased(expression, str.upper) for expression in lettered},
             {expression: _cased(expression, str.lower) for expression in lettered},
