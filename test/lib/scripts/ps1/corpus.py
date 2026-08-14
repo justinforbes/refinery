@@ -736,6 +736,15 @@ TYPES: tuple[str, ...] = (
     '$t = [single]1.5 + 1; Write-Output (,$t); Write-Output $t',
     '$v = $null; $t = $v -band [uint32]1; Write-Output (,$t); Write-Output $t',
     '$l = [byte]1; $r = 4; $t = $l -shl $r; Write-Output (,$t); Write-Output $t',
+    "$t = 1 + ' 7 '; Write-Output (,$t); Write-Output $t",
+    "$t = 1 + '+5'; Write-Output (,$t); Write-Output $t",
+    "$t = 1 + '  '; Write-Output (,$t); Write-Output $t",
+    "$t = '5' - 1; Write-Output (,$t); Write-Output $t",
+    "$t = 1 - '5'; Write-Output (,$t); Write-Output $t",
+    "$t = '5' * 2; Write-Output (,$t); Write-Output $t",
+    "$t = '10' -band 6; Write-Output (,$t); Write-Output $t",
+    "$t = '5' / 2; Write-Output (,$t); Write-Output $t",
+    "$t = '1e400' + 1; Write-Output (,$t); Write-Output $t",
 )
 
 

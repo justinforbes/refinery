@@ -1747,7 +1747,11 @@ def _promotion(left: Ps1Fact, right: Ps1Fact) -> str | None:
         return None
     codes = []
     for fact in (left, right):
-        name = type_of(fact)
+        # The promotion is over what a string *coerces to*, not over `String`: measured,
+        # `1 + '2147483648'` is an Int64 and `1 + '1.5L'` is an Int64 3, because the numeral the
+        # string spells is the operand the type codes are compared over.
+        coerced = _coerced_numeral(fact)
+        name = type_of(fact if coerced is None else coerced)
         code = None if name is None else _TYPE_CODE.get(name)
         if code is None:
             return None
@@ -1886,10 +1890,7 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         count = _integer_payload(right) & (width - 1)
         return _shifted(_integer_payload(left), count, width, operator == '-shl')
     if operator in _BITWISE:
-        operands = [
-            _integer_payload(fact) if _is_domain_integer(fact) else _char_code(fact)
-            for fact in (left, right)
-        ]
+        operands = [_bitwise_operand(fact) for fact in (left, right)]
         if operands[0] is None or operands[1] is None:
             return None
         return _BITWISE[operator](operands[0], operands[1])
@@ -1897,6 +1898,11 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         joined = _concatenated(left, right)
         if joined is not None:
             return joined
+    if operator == '*' and _replicated(left):
+        # A String or a collection on the left of `*` is repeated, not multiplied: `'5' * 2` is the
+        # String `55` and not the number 10. Nothing here computes a repetition — its size is an
+        # operand rather than a bound — so the pair is declined before it can be read as arithmetic.
+        return None
     operands = _numeric_pair(left, right)
     if operands is None:
         return None
@@ -1975,7 +1981,13 @@ def _numeric_pair(left: Ps1Fact, right: Ps1Fact):
     """
     kinds = []
     values: list[int | float | decimal.Decimal] = []
-    for fact in (left, right):
+    for operand in (left, right):
+        coerced = _coerced_numeral(operand)
+        if coerced is not None:
+            if not isinstance(coerced, Ps1Constant):
+                raise _Throws
+            operand = coerced
+        fact = operand
         if _is_domain_integer(fact):
             kinds.append('i')
             values.append(_integer_payload(fact))
@@ -2054,6 +2066,68 @@ def _integer_payload(fact: Ps1Fact) -> int:
     return 0 if fact is NULL else typing.cast(int, typing.cast(Ps1Constant, fact).payload)
 
 
+#: What a string is trimmed of before it is read as a number, which is what 5.1 trims: `1 + ' 7 '`
+#: is the Int32 8, measured.
+_COERCE_TRIM = ' \t\r\n\v\f'
+
+
+def _coerced_numeral(fact: Ps1Fact) -> Ps1Fact | None:
+    """
+    The number a `String` operand computes as in an arithmetic context, or `None` for a fact that
+    is not a String, or `UNKNOWN` for one that spells no number.
+
+    This is not `convert` to a numeric type and the two genuinely disagree: a coerced string is
+    *re-lexed as a numeric literal*, so it keeps that literal's own type and honours the suffixes
+    and multipliers a literal has. Measured: `1 + '1kb'` is the Int32 1025 and `1 + '1.5L'` is the
+    Int64 3, neither of which a conversion to a named type produces. It is the same reading
+    `_numeral` gives a literal in the source, which is what keeps one numeral rule in the module
+    rather than two.
+
+    Two things the literal reading does not do on its own. A string is trimmed first, and one that
+    is empty or all whitespace is the integer zero rather than nothing — `1 + '  '` is 1. And an
+    infinite Double is refused, because a literal may spell one and the coercion may not: measured,
+    `1 + '1e400'` throws where `'1e400' + 1` joins text.
+    """
+    if not isinstance(fact, Ps1Constant) or fact.type != _STRING:
+        return None
+    if not isinstance(fact.payload, str):
+        return UNKNOWN
+    trimmed = fact.payload.strip(_COERCE_TRIM)
+    if not trimmed:
+        return Ps1Constant(_INT32, 0)
+    read_as = _numeral(trimmed)
+    if isinstance(read_as, Ps1Constant) and isinstance(read_as.payload, float):
+        if _finite(read_as.payload) is None:
+            return UNKNOWN
+    return read_as
+
+
+def _replicated(fact: Ps1Fact) -> bool:
+    """
+    Whether a left operand of `*` is repeated rather than multiplied.
+    """
+    return isinstance(fact, Ps1Constant) and fact.type in (_STRING, _OBJECT_ARRAY)
+
+
+def _bitwise_operand(fact: Ps1Fact) -> int | None:
+    """
+    The integer a bitwise operator computes over, or `None` for an operand it does not reach one
+    from. A Char is its code point and a String is the numeral it spells, both measured:
+    `[char]48 -band [byte]255` is 48 and `'10' -band 6` is 2.
+    """
+    if _is_domain_integer(fact):
+        return _integer_payload(fact)
+    code = _char_code(fact)
+    if code is not None:
+        return code
+    coerced = _coerced_numeral(fact)
+    if coerced is None:
+        return None
+    if not isinstance(coerced, Ps1Constant):
+        raise _Throws
+    return _integer_payload(coerced) if _is_domain_integer(coerced) else None
+
+
 def _char_code(fact: Ps1Fact) -> int | None:
     """
     The number a `Char` computes as, or `None` for a fact that is not one.
@@ -2096,9 +2170,18 @@ def _throws_are_modelled(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool:
     Addition, subtraction and multiplication throw only where a `Decimal` result leaves the range of
     a `Decimal`, which `_decimal_result` raises for; over the other numeric types they do not throw
     at all, and a cell of theirs that recorded one is recording something this does not model.
+
+    A `String` operand is the other case, and it is why these cells throw at all: a string reaching
+    arithmetic is read as a numeral and one that spells no number raises — `16 + 'file'` throws and
+    `1 + '5'` does not, out of the same cell. `_coerced_numeral` is what sees it, so the throw is
+    modelled wherever that runs, which is every operator the kernel reads a number for. Without
+    this the cell's recorded throw stops the kernel being consulted and every string in arithmetic
+    is refused, including the ones the host answers.
     """
     if operator in ('/', '%'):
         return True
+    if _STRING in (type_of(left), type_of(right)):
+        return operator in _ARITHMETIC or operator in _BITWISE
     if operator in _ARITHMETIC:
         return _DECIMAL in (type_of(left), type_of(right))
     return False

@@ -1841,6 +1841,51 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Byte\t16',
             'OUT\tSystem.Byte\t16',
         ),
+    "$t = 1 + ' 7 '; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t8',
+            'OUT\tSystem.Int32\t8',
+        ),
+    "$t = 1 + '+5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t6',
+            'OUT\tSystem.Int32\t6',
+        ),
+    "$t = 1 + '  '; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t1',
+            'OUT\tSystem.Int32\t1',
+        ),
+    "$t = '5' - 1; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t4',
+            'OUT\tSystem.Int32\t4',
+        ),
+    "$t = 1 - '5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t-4',
+            'OUT\tSystem.Int32\t-4',
+        ),
+    "$t = '5' * 2; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\t55',
+            'OUT\tSystem.String\t55',
+        ),
+    "$t = '10' -band 6; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    "$t = '5' / 2; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Double\t2.5',
+            'OUT\tSystem.Double\t2.5',
+        ),
+    "$t = '1e400' + 1; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\t1e4001',
+            'OUT\tSystem.String\t1e4001',
+        ),
 }
 
 

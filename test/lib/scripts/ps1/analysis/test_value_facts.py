@@ -600,6 +600,23 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    "'10' -band 6",
+    "'1e400' + 1",
+    "'5' - 1",
+    "'5' / 2",
+    "0 + '5'",
+    "1 + '  '",
+    "1 + ' 7 '",
+    "1 + '+5'",
+    "1 + '0xFFFFFFFF'",
+    "1 + '1.5L'",
+    "1 + '1e3'",
+    "1 + '1kb'",
+    "1 + '2147483648'",
+    "1 + '5'",
+    "1 - '5'",
+    "12 + '0xabc'",
+    "5 + '5'",
     '0 + [char]65',
     '1.5 * [char]48',
     '[char]48 - 0.0',
@@ -2189,7 +2206,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 91, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 100, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
@@ -2580,13 +2597,20 @@ class TestPs1CellsTheWitnessesReach(unittest.TestCase):
         What an addition does to a string is decided by which string, and the ledger holds one the
         capture never wrote out: measured, `1 + '2147483648'` is an Int64, which is a type the cell
         an Int32 and a String index does not carry at all.
+
+        The domain answers it anyway, and that is the point. The type comes from promoting the two
+        operands — the string coerced to the numeral it spells, which is an Int64 — and not from
+        the cell, so an answer the measurement never wrote down is still the one the host gives.
         """
         self.assertEqual(_measured("1 + '2147483648'"), ('System.Int64', '2147483649'))
         self.assertEqual(
             sorted(str(one) for one in _cell('+', INT32, STRING).types),
             ['System.Double', 'System.Int32'],
         )
-        self.assertEqual(_applied("1 + '2147483648'"), NOTHING)
+        self.assertEqual(
+            _applied("1 + '2147483648'"),
+            Ps1Outcome(False, Ps1Constant(INT64, 2147483649)),
+        )
 
     def test_a_cell_over_operands_the_witnesses_reach_is_still_the_answer(self):
         """
@@ -2677,15 +2701,14 @@ class TestPs1CastNamesItsTargetWhereAnOperatorNamesNothing(unittest.TestCase):
     def test_an_operator_over_the_same_source_is_left_without_an_answer(self):
         """
         Measured, `[int]'1e3'` is Int32 1000 and `1 + '1e3'` is Double 1001, so the two read the
-        same String by different rules and reach different types doing it. The cast still names the
-        Int32 the host stamped it with, where the operator names nothing: what `+` produces over a
-        String was measured to depend on which string, and `[int]` of one is an Int32 or a throw
-        whichever string it is handed.
+        same String by different rules and reach different types doing it, and both are answered
+        here by the rule that belongs to them: the cast converts to the type it names, and the
+        operator re-reads the string as the numeral it spells and promotes over that.
         """
         self.assertEqual(_measured("[int]'1e3'"), ('System.Int32', '1000'))
         self.assertEqual(_converted("[int]'1e3'"), Ps1Outcome(True, Ps1Typed(INT32)))
         self.assertEqual(_measured("1 + '1e3'"), ('System.Double', '1001'))
-        self.assertEqual(_applied("1 + '1e3'"), NOTHING)
+        self.assertEqual(_applied("1 + '1e3'"), Ps1Outcome(False, Ps1Constant(DOUBLE, 1001.0)))
 
 
 class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
@@ -2733,7 +2756,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 46)
+        self.assertEqual(len(composed), 63)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -2833,7 +2856,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 1566)
+        self.assertEqual(len(compared), 1602)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2848,7 +2871,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1634)
+        self.assertEqual(len(compared), 1670)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2863,7 +2886,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1634)
+        self.assertEqual(len(compared), 1670)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2874,7 +2897,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 949)
+        self.assertEqual(len(STRINGS), 976)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
@@ -2888,7 +2911,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 344)
+        self.assertEqual(len(NUMERALS), 353)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -2924,7 +2947,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 252)
+        self.assertEqual(len(consulted), 261)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -2974,7 +2997,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1312)
+        self.assertEqual(len(compared), 1331)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
@@ -3179,7 +3202,7 @@ class TestPs1OperatorCaseDoesNotChangeTheAnswer(unittest.TestCase):
             expression for expression in OPERATION_ROWS
             if any(character.isalpha() for character in _operator_of(expression))
         ]
-        self.assertEqual(len(lettered), 29)
+        self.assertEqual(len(lettered), 30)
         self.assertEqual(
             {expression: _cased(expression, str.upper) for expression in lettered},
             {expression: _cased(expression, str.lower) for expression in lettered},

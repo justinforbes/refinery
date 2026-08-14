@@ -135,15 +135,14 @@ class TestPs1ACommandArgumentIsReadInCommandModeAllTheWayDown(TestPs1):
 
 class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
     """
-    Every expression here has one answer on 5.1 that never depends on session state, and the tool
-    computes none of them.
+    Every expression here has one answer on 5.1 that never depends on session state. The ones still
+    marked as expected failures are the ones the tool does not compute; a test here that loses its
+    mark has had its answer built, and is kept as the pin for it rather than deleted.
     """
 
-    @unittest.expectedFailure
     def test_a_number_plus_a_string_is_addition_because_the_left_operand_decides(self):
         self.assertEqual(self._deobfuscate("$x = 5 + '5'"), '$x = 10')
 
-    @unittest.expectedFailure
     def test_a_number_plus_a_hex_string_parses_the_string_as_a_hex_number(self):
         self.assertEqual(self._deobfuscate("$x = 12 + '0xabc'"), '$x = 2760')
 

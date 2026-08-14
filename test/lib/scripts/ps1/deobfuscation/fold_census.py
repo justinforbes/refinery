@@ -395,6 +395,10 @@ FOLDS: dict[str, str] = {
         'Write-Output (,10000000000000000000000000000d)\nWrite-Output 10000000000000000000000000000d',
     '$t = 1E+28d; Write-Output (,$t); Write-Output $t':
         'Write-Output (,1E+28d)\nWrite-Output 1E+28d',
+    "$t = 12 + '0xabc'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,2760)\nWrite-Output 2760',
+    "$t = 5 + '5'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,10)\nWrite-Output 10',
     "$t = '5' + 5; Write-Output (,$t); Write-Output $t":
         "Write-Output (,'55')\nWrite-Output '55'",
     "$t = [int]'0x10'; Write-Output (,$t); Write-Output $t":
@@ -425,6 +429,12 @@ FOLDS: dict[str, str] = {
         'Write-Output (,48)\nWrite-Output 48',
     "$t = [int]'0'; Write-Output (,$t); Write-Output $t":
         'Write-Output (,0)\nWrite-Output 0',
+    "$t = 1 + '2147483648'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,2147483649L)\nWrite-Output 2147483649L',
+    "$t = 1 + '5'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,6)\nWrite-Output 6',
+    "$t = 1 + '1e3'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,1001.0)\nWrite-Output 1001.0',
     '$t = -bnot 0xFFFFFFFF; Write-Output (,$t); Write-Output $t':
         'Write-Output (,0)\nWrite-Output 0',
     '$t = -bnot 0xFF; Write-Output (,$t); Write-Output $t':
@@ -683,8 +693,16 @@ FOLDS: dict[str, str] = {
         'Write-Output (,48.0)\nWrite-Output 48.0',
     '$t = [char]65 -bxor 32; Write-Output (,$t); Write-Output $t':
         'Write-Output (,97)\nWrite-Output 97',
+    "$t = 0 + '5'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,5)\nWrite-Output 5',
     "$t = $true + ''; Write-Output (,$t); Write-Output $t":
         "$t = $True + ''\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = 1 + '0xFFFFFFFF'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,0)\nWrite-Output 0',
+    "$t = 1 + '1kb'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,1025)\nWrite-Output 1025',
+    "$t = 1 + '1.5L'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,3L)\nWrite-Output 3L',
     '$t = [byte]1 -shl 4; Write-Output (,$t); Write-Output $t':
         '$t = [byte]1 -Shl 4\nWrite-Output (,$t)\nWrite-Output $t',
     '$t = [byte]1 -shl -1; Write-Output (,$t); Write-Output $t':
@@ -707,6 +725,24 @@ FOLDS: dict[str, str] = {
         '$t = $Null -BAnd [uint32]1\nWrite-Output (,$t)\nWrite-Output $t',
     '$l = [byte]1; $r = 4; $t = $l -shl $r; Write-Output (,$t); Write-Output $t':
         '$t = [byte]1 -Shl 4\nWrite-Output (,$t)\nWrite-Output $t',
+    "$t = 1 + ' 7 '; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,8)\nWrite-Output 8',
+    "$t = 1 + '+5'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,6)\nWrite-Output 6',
+    "$t = 1 + '  '; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,1)\nWrite-Output 1',
+    "$t = '5' - 1; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,4)\nWrite-Output 4',
+    "$t = 1 - '5'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,-4)\nWrite-Output (-4)',
+    "$t = '5' * 2; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'55')\nWrite-Output '55'",
+    "$t = '10' -band 6; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,2)\nWrite-Output 2',
+    "$t = '5' / 2; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,2.5)\nWrite-Output 2.5',
+    "$t = '1e400' + 1; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'1e4001')\nWrite-Output '1e4001'",
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':
