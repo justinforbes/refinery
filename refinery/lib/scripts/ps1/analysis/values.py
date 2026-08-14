@@ -1886,9 +1886,13 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         count = _integer_payload(right) & (width - 1)
         return _shifted(_integer_payload(left), count, width, operator == '-shl')
     if operator in _BITWISE:
-        if not _is_domain_integer(left) or not _is_domain_integer(right):
+        operands = [
+            _integer_payload(fact) if _is_domain_integer(fact) else _char_code(fact)
+            for fact in (left, right)
+        ]
+        if operands[0] is None or operands[1] is None:
             return None
-        return _BITWISE[operator](_integer_payload(left), _integer_payload(right))
+        return _BITWISE[operator](operands[0], operands[1])
     if operator == '+':
         joined = _concatenated(left, right)
         if joined is not None:
@@ -1976,6 +1980,11 @@ def _numeric_pair(left: Ps1Fact, right: Ps1Fact):
             kinds.append('i')
             values.append(_integer_payload(fact))
             continue
+        code = _char_code(fact)
+        if code is not None:
+            kinds.append('i')
+            values.append(code)
+            continue
         if not isinstance(fact, Ps1Constant):
             return None
         if fact.type == _DECIMAL and isinstance(fact.payload, decimal.Decimal):
@@ -2043,6 +2052,22 @@ def _is_domain_integer(fact: Ps1Fact) -> bool:
 
 def _integer_payload(fact: Ps1Fact) -> int:
     return 0 if fact is NULL else typing.cast(int, typing.cast(Ps1Constant, fact).payload)
+
+
+def _char_code(fact: Ps1Fact) -> int | None:
+    """
+    The number a `Char` computes as, or `None` for a fact that is not one.
+
+    A Char is a number to every operator but two, and the two are the ones that claim it first:
+    `+` reads a Char *left* operand as text — `[char]65 + 1` is the String `A1` and `1 + [char]65`
+    is the Int32 66, both measured — and `_concatenated` answers that before anything here is
+    asked; `*` has no operator for a Char at all and its cell records the throw. Everywhere else
+    the code point is the operand, which is what makes `[char]65 -bxor 32` the Int32 97 rather than
+    a fold nobody takes.
+    """
+    if not isinstance(fact, Ps1Constant) or fact.type != _CHAR:
+        return None
+    return ord(fact.payload) if isinstance(fact.payload, str) and len(fact.payload) == 1 else None
 
 
 def _shifted(value: int, count: int, width: int, left: bool) -> int:

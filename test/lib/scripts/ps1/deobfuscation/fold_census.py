@@ -229,6 +229,8 @@ FOLDS: dict[str, str] = {
         "Write-Output 'r5'\nWrite-Output 'r5'",
     "Write-Output ([char]65 + 1); Write-Output ('A' + 1)":
         "Write-Output 'A1'\nWrite-Output 'A1'",
+    "Write-Output (1 + [char]65); Write-Output (1 + 'A')":
+        "Write-Output 66\nWrite-Output (1 + 'A')",
     "Write-Output ('A' * 3)":
         "Write-Output 'AAA'",
     "Write-Output (([char]65).ToString()); Write-Output (('A').ToString())":
@@ -669,12 +671,18 @@ FOLDS: dict[str, str] = {
         'Write-Output (,[uint32]1)\nWrite-Output ([uint32]1)',
     '$t = 1 / [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
         'Write-Output (,5.421010862427522e-20)\nWrite-Output 5.421010862427522e-20',
+    '$t = 0 + [char]65; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,65)\nWrite-Output 65',
     '$t = [char]48 -band [byte]255; Write-Output (,$t); Write-Output $t':
-        '$t = [char]48 -BAnd [byte]255\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,48)\nWrite-Output 48',
     '$t = [char]48 -bxor [char]48; Write-Output (,$t); Write-Output $t':
-        '$t = [char]48 -BXor [char]48\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,0)\nWrite-Output 0',
+    '$t = 1.5 * [char]48; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,72.0)\nWrite-Output 72.0',
+    '$t = [char]48 - 0.0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,48.0)\nWrite-Output 48.0',
     '$t = [char]65 -bxor 32; Write-Output (,$t); Write-Output $t':
-        '$t = [char]65 -BXor 32\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,97)\nWrite-Output 97',
     "$t = $true + ''; Write-Output (,$t); Write-Output $t":
         "$t = $True + ''\nWrite-Output (,$t)\nWrite-Output $t",
     '$t = [byte]1 -shl 4; Write-Output (,$t); Write-Output $t':

@@ -214,7 +214,6 @@ class TestPs1ConstantsThatAreComputedWrong(TestPs1):
         source = '$x = ([char]65) * 3'
         self.assertEqual(self._deobfuscate(source), source)
 
-    @unittest.expectedFailure
     def test_a_number_plus_a_char_is_addition(self):
         self.assertEqual(self._deobfuscate('$x = 1 + [char]65'), '$x = 66')
 

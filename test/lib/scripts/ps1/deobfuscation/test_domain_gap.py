@@ -19,13 +19,13 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 GAP: dict[str, int] = {
     'System.String': 2313,
     'System.Object[]': 1519,
-    'System.Char': 1307,
-    'System.Int64': 1212,
-    'System.Int32': 805,
-    'System.Double': 715,
-    'System.Byte': 483,
+    'System.Char': 1183,
+    'System.Int64': 1188,
+    'System.Int32': 775,
+    'System.Double': 690,
+    'System.Byte': 465,
     'System.Boolean': 390,
-    'System.Void': 177,
+    'System.Void': 174,
 }
 
 #: The witness spellings the reader cannot make a fact of, so the census is quantified over the

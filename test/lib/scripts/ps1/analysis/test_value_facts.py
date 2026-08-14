@@ -600,6 +600,12 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    '0 + [char]65',
+    '1.5 * [char]48',
+    '[char]48 - 0.0',
+    '[char]48 -band [byte]255',
+    '[char]48 -bxor [char]48',
+    '[char]65 -bxor 32',
     '-1 * [uint64]1',
     '-1 -band [uint32]1',
     '-2147483648 % -1',
@@ -2467,7 +2473,10 @@ class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
             apply('+', Ps1Constant(CHAR, 'A'), Ps1Constant(INT32, 1)),
             Ps1Outcome(False, Ps1Constant(STRING, 'A1')),
         )
-        self.assertEqual(apply('+', Ps1Constant(INT32, 1), Ps1Constant(CHAR, 'A')), NOTHING)
+        self.assertEqual(
+            apply('+', Ps1Constant(INT32, 1), Ps1Constant(CHAR, 'A')),
+            Ps1Outcome(False, Ps1Constant(INT32, 66)),
+        )
 
     def test_two_chars_join_into_the_two_character_string_the_host_printed(self):
         self.assertEqual(
@@ -2724,7 +2733,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 40)
+        self.assertEqual(len(composed), 46)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -2965,7 +2974,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1319)
+        self.assertEqual(len(compared), 1312)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
