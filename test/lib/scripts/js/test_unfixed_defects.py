@@ -736,35 +736,34 @@ class TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten(TestBase):
         )
 
 
-#: Arguments to `decodeURIComponent` whose percent-escapes are malformed: a `%` that no pair of
-#: hexadecimal digits follows, at the end of the text, standing alone, short a digit, or written
-#: with characters that are not hexadecimal. Node rejects every one of them.
-ARGUMENTS_WITH_A_MALFORMED_PERCENT_ESCAPE = ('100%', '%', '%A', '%GG')
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAThrowingDecodeIsNotFoldedToAString(TestBase):
+class TestADecodeReadsBackTheCharactersNoEscapeIntroduced(TestBase):
     """
-    `decodeURIComponent` throws a `URIError` when its argument holds a percent-escape that no pair
-    of hexadecimal digits follows, so a program that evaluates such a call produces no value and
-    aborts. A fold that answers the call with a string invents a value for a file that has none,
-    and the program it hands back runs to completion where the file it came from threw.
+    `decodeURIComponent` copies every character of its argument that no escape introduced straight
+    into its answer, and a character above the basic multilingual plane is two code units there as
+    it is anywhere else. For `C` the one character U+1F600, Node answers `decodeURIComponent(C)`
+    with `C` and `decodeURIComponent(C + '%41')` with `C` followed by an `A`; and for an argument
+    that is the lone high surrogate D800 it answers with that surrogate, an argument holding no
+    escape being one a decode has nothing to refuse about.
+
+    The fold refuses all three. A value is held as the code units a JavaScript string is made of, so
+    the surrogates the argument itself spells are read as though the decoded bytes had produced
+    them, and a call over an ordinary string is left standing for want of an answer.
     """
 
     @unittest.expectedFailure
-    def test_a_malformed_percent_escape_is_not_folded_to_a_string(self):
-        """
-        Node aborts each of `console.log(decodeURIComponent('100%'))`, `... '%'`, `... '%A'`, and
-        `... '%GG'` with a `URIError` and prints nothing, the malformed escape refusing to decode
-        before `console.log` is reached. The deobfuscation of each has to abort the same way, so the
-        two agree that no output is written and a `URIError` is raised.
-        """
+    def test_a_character_the_argument_already_holds_survives_the_decode(self):
+        backslash = chr(92)
+        lone_surrogate = F'{backslash}uD800'
         programs = [
-            F"console.log(decodeURIComponent('{argument}'));"
-            for argument in ARGUMENTS_WITH_A_MALFORMED_PERCENT_ESCAPE
+            F"console.log(decodeURIComponent('{_ASTRAL}'));",
+            F"console.log(decodeURIComponent('{_ASTRAL}%41'));",
+            F"console.log(decodeURIComponent('{lone_surrogate}'));",
         ]
-        threw = (('', 'URIError'), ('', 'URIError'))
         self.assertEqual(
-            [_before_and_after(program) for program in programs],
-            [threw] * len(programs),
+            [_folded(program) for program in programs],
+            [
+                F"console.log('{_ASTRAL}');",
+                F"console.log('{_ASTRAL}A');",
+                F"console.log('{lone_surrogate}');",
+            ],
         )

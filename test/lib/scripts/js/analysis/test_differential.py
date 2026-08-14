@@ -5774,6 +5774,369 @@ class TestAForgivingDecodeReadsTheLengthOfItsArgumentBeforeItsPadding(TestBase):
         self.assertEqual(deobfuscate_source(four_letters), "console.log('ABCD', 'ABCD');")
 
 
+_URI_FUNCTIONS = (
+    'decodeURIComponent',
+    'encodeURIComponent',
+    'unescape',
+)
+
+
+_URI_ARGUMENTS = [
+    '',
+    'abc',
+    "-_.!~*'()",
+    'a b',
+    '+',
+    'a+b',
+    '/?:@&=$,#[]',
+    '"<>\\^`{|}',
+    'é',
+    '€',
+    '%',
+    '100%',
+    'a%',
+    '%A',
+    '%4',
+    '%GG',
+    '%G0',
+    '%0G',
+    '%%41',
+    '%u0041',
+    '%uD83D',
+    '%41',
+    '%41%42',
+    '%4a',
+    '%25',
+    '%2541',
+    '%20',
+    '%2F',
+    '%23',
+    '%C3%A9',
+    '%c3%a9',
+    '%E2%82%AC',
+    '%F0%9F%98%80',
+    '%F4%8F%BF%BF',
+    '%80',
+    '%BF',
+    '%C2',
+    '%E2%82',
+    '%41%C0',
+    '%C3%28',
+    '%C0%80',
+    '%C1%BF',
+    '%E0%80%AF',
+    '%F0%82%82%AC',
+    '%ED%A0%80',
+    '%ED%BF%BF',
+    '%F4%90%80%80',
+    '%F5%80%80%80',
+    '%FE',
+    '%FF',
+]
+"""
+Arguments for the three functions that read and write percent escapes, chosen so that each of the
+two questions a decode asks its argument is asked on its own.
+
+The first question is about the text: a `%` is the start of an escape and two hexadecimal digits
+have to follow it, so the argument is asked with a `%` at its end, alone, one digit short, followed
+by characters that are not hexadecimal, followed by another `%`, and followed by the `u` a
+`%uXXXX` escape is written with.
+
+The second is about the bytes the escapes name, which have to be a UTF-8 encoding of a character:
+the argument is asked with a continuation byte standing alone, with a sequence cut short, with the
+overlong encodings of a character that has a shorter one, with the encodings of a surrogate, and
+with the encodings of a number above the last code point. `%F4%8F%BF%BF` is the last code point
+itself and `%F4%90%80%80` is the first number past it, so the two sit either side of that edge.
+
+The rest are arguments a decode reads: the empty text, letters, the characters no encode escapes,
+the reserved characters an encode escapes and a decode of a component gives back, an escape written
+in lowercase, and the `+` that is a plus here and not the space a form encoding reads it as.
+
+No argument here is written with a code unit in the surrogate range, which is a third question and
+not a third answer to these two. An encode is asked it below, a surrogate no partner completes
+being the one thing an encode refuses. A decode is not: Node hands such an argument straight back,
+there being no escape in it to read, and the fold refuses it instead — a defect
+`test.lib.scripts.js.test_unfixed_defects` holds, and these arguments join the corpus the day it
+comes off.
+"""
+
+
+_ASK_WHAT_THE_URI_FUNCTIONS_ANSWER = R'''
+const answers = [];
+for (const argument of ARGUMENTS) {
+    const row = [];
+    for (const fn of FUNCTIONS) {
+        try {
+            const value = fn(argument);
+            const units = [];
+            for (let index = 0; index < value.length; index++) {
+                units.push(value.charCodeAt(index));
+            }
+            row.push(units);
+        } catch (error) {
+            row.push(null);
+        }
+    }
+    answers.push(row);
+}
+console.log(JSON.stringify(answers));
+'''
+"""
+A program that reports what each function answers for each argument, and a null for each argument it
+refuses. An answer crosses as the numbers of its UTF-16 code units rather than as text, so that a
+unit naming no character on its own — which `unescape('%uD83D')` is — arrives as the unit it is
+instead of as whatever an encoding of the output stream would put in its place. A list of numbers is
+never a null, so an answer and a refusal cannot be confused for one another.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestTheUriFunctionsAnswerEveryArgumentTheWayNodeDoes(TestBase):
+    """
+    `decodeURIComponent`, `encodeURIComponent` and `unescape` are the functions this project models
+    for percent escapes, and they are asked one corpus of arguments together. Two of them are
+    partial — an argument they cannot read is a `URIError` and not a value — so the corpus decides
+    both what a call computes and whether it computes anything at all, and reading either function's
+    domain too widely turns a program that throws into one that has a value. Node names every answer
+    and every refusal.
+    """
+
+    def _node_answers(self) -> list[list[list[int] | None]]:
+        source = (
+            F'const ARGUMENTS = {json.dumps(_URI_ARGUMENTS)};'
+            F'const FUNCTIONS = [{", ".join(_URI_FUNCTIONS)}];'
+        )
+        output, error = behavior(source + _ASK_WHAT_THE_URI_FUNCTIONS_ANSWER)
+        self.assertIsNone(error)
+        return json.loads(output)
+
+    def _builtin_answers(self) -> list[list[list[int] | None]]:
+        answers: list[list[list[int] | None]] = []
+        for argument in _URI_ARGUMENTS:
+            row: list[list[int] | None] = []
+            for name in _URI_FUNCTIONS:
+                try:
+                    row.append([ord(unit) for unit in BUILTIN_REGISTRY[None, name]([argument])])
+                except InterpreterError:
+                    row.append(None)
+            answers.append(row)
+        return answers
+
+    def test_the_builtins_answer_every_argument_the_way_node_answers_it(self):
+        self.assertEqual(self._node_answers(), self._builtin_answers())
+
+
+_ARGUMENTS_NO_DECODE_READS = [
+    '%',
+    '100%',
+    'a%',
+    '%A',
+    '%4',
+    '%GG',
+    '%G0',
+    '%0G',
+    '%%41',
+    '%u0041',
+    '%80',
+    '%BF',
+    '%C2',
+    '%E2%82',
+    '%41%C0',
+    '%C3%28',
+    '%C0%80',
+    '%C1%BF',
+    '%E0%80%AF',
+    '%F0%82%82%AC',
+    '%ED%A0%80',
+    '%ED%BF%BF',
+    '%F4%90%80%80',
+    '%F5%80%80%80',
+    '%FE',
+    '%FF',
+]
+"""
+The arguments of `_URI_ARGUMENTS` that `decodeURIComponent` throws a `URIError` on, the ones whose
+text no escape can be read out of first and the ones whose escapes name bytes that are no UTF-8
+encoding of a character second.
+"""
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestADecodeThatRefusesItsArgumentIsNotFoldedToAString(TestBase):
+    """
+    `decodeURIComponent` produces no value for an argument it refuses: the call throws and the
+    program aborts there. A fold that answers such a call with a string invents a value for a file
+    that has none, and the program it hands back runs to completion where the file it came from
+    stopped.
+    """
+
+    def _calls_that_catch(self, arguments: list[str]) -> str:
+        return ''.join(
+            F'try {{ console.log(decodeURIComponent({json.dumps(argument)})); }}'
+            F' catch (error) {{ console.log(error.name); }}\n'
+            for argument in arguments
+        )
+
+    def test_every_argument_no_decode_reads_raises_the_error_node_raises(self):
+        """
+        Node prints `URIError` once for each argument and nothing else, so no call among them is one
+        that has a string. The deobfuscation of the same file has to print the same lines: a fold
+        that answered any of these calls would print what it decided the call was worth in place of
+        the error the line reports.
+        """
+        source = self._calls_that_catch(_ARGUMENTS_NO_DECODE_READS)
+        refused = ('URIError\n' * len(_ARGUMENTS_NO_DECODE_READS), None)
+        self.assertEqual(behavior(source), refused)
+        self.assertEqual(behavior(deobfuscate_source(source)), refused)
+
+    def test_a_refused_call_is_left_standing_and_the_program_still_aborts(self):
+        """
+        Node prints nothing and exits with the `URIError` uncaught, for a `%` no digits follow and
+        for an escape sequence naming the bytes of a surrogate. Nothing catches either one, so the
+        `console.log` around it is never reached and the call has to still be there afterwards.
+        """
+        for argument in ('100%', '%ED%A0%80'):
+            with self.subTest(argument=argument):
+                source = F'console.log(decodeURIComponent({json.dumps(argument)}));'
+                self.assertEqual(behavior(source), ('', 'URIError'))
+                self.assertEqual(deobfuscate_source(source), source)
+                self.assertEqual(behavior(deobfuscate_source(source)), ('', 'URIError'))
+
+    def test_a_dead_binding_whose_decode_is_refused_keeps_the_refusal(self):
+        """
+        Node prints nothing for the first program and `after` for the second. Nothing reads either
+        binding, and only the one whose decode has a value may be removed along with it.
+        """
+        refused = 'var value = decodeURIComponent("100%"); console.log("after");'
+        self.assertEqual(behavior(refused), ('', 'URIError'))
+        self.assertEqual(behavior(deobfuscate_source(refused)), ('', 'URIError'))
+        decoded = 'var value = decodeURIComponent("%41"); console.log("after");'
+        self.assertEqual(behavior(decoded), ('after\n', None))
+        self.assertEqual(deobfuscate_source(decoded), 'console.log("after");')
+
+    def test_an_argument_whose_escapes_are_whole_folds_to_the_text_it_names(self):
+        """
+        Node prints each of these, and a decode that refused everything would satisfy the cases
+        above and fail this one. The escapes are read whichever case their digits are written in,
+        `%25` is the `%` that stands for itself, a `+` is a plus and not a space, `%2F` is the
+        reserved character a decode of a component gives back, and the last two escape sequences
+        name characters above the basic plane, the second of them the last code point there is.
+        """
+        for argument, folded, printed in [
+            ('%41', "console.log('A');", 'A\n'),
+            ('100%25', "console.log('100%');", '100%\n'),
+            ('+', "console.log('+');", '+\n'),
+            ('%2F', "console.log('/');", '/\n'),
+            ('%c3%a9', "console.log('é');", 'é\n'),
+            ('%E2%82%AC', "console.log('€');", '€\n'),
+            ('%F0%9F%98%80', "console.log('\U0001F600');", '\U0001F600\n'),
+            ('%F4%8F%BF%BF', "console.log('\U0010FFFF');", '\U0010FFFF\n'),
+        ]:
+            with self.subTest(argument=argument):
+                source = F'console.log(decodeURIComponent({json.dumps(argument)}));'
+                self.assertEqual(behavior(source), (printed, None))
+                self.assertEqual(deobfuscate_source(source), folded)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestUnescapeReadsEveryArgumentNoDecodeReads(TestBase):
+    """
+    `unescape` is total where `decodeURIComponent` is partial: it reads a `%` that introduces no
+    escape as the character it is and never asks whether the bytes an escape names encode anything,
+    so no argument is a refusal. The two functions therefore do not share a contract, and the corpus
+    that decides one says nothing about the other.
+    """
+
+    def test_every_argument_a_decode_refuses_is_one_unescape_reads(self):
+        """
+        Node prints `URIError` and then `unescaped` for each argument: the same text that no decode
+        reads is one `unescape` hands a string back for. Both lines have to survive the
+        deobfuscation — the first because the throw is not a value to fold the call to, the second
+        because there is nothing there to throw.
+        """
+        source = ''.join(
+            F'try {{ decodeURIComponent({json.dumps(argument)}); console.log("decoded"); }}'
+            F' catch (error) {{ console.log(error.name); }}\n'
+            F'try {{ unescape({json.dumps(argument)}); console.log("unescaped"); }}'
+            F' catch (error) {{ console.log(error.name); }}\n'
+            for argument in _ARGUMENTS_NO_DECODE_READS
+        )
+        both = ('URIError\nunescaped\n' * len(_ARGUMENTS_NO_DECODE_READS), None)
+        self.assertEqual(behavior(source), both)
+        self.assertEqual(behavior(deobfuscate_source(source)), both)
+
+    def test_each_argument_folds_to_the_text_unescape_answers_with(self):
+        """
+        Node prints each of these. A `%` no pair of hexadecimal digits follows stands for itself,
+        `%41` and `%u0041` are both the letter `A`, and the bytes of an escape are code units and
+        not UTF-8: `%C3%A9` is two characters here where a decode of it is the one character those
+        two bytes encode.
+        """
+        for argument, folded, printed in [
+            ('100%', "console.log('100%');", '100%\n'),
+            ('%', "console.log('%');", '%\n'),
+            ('a%', "console.log('a%');", 'a%\n'),
+            ('%GG', "console.log('%GG');", '%GG\n'),
+            ('%%41', "console.log('%A');", '%A\n'),
+            ('%41', "console.log('A');", 'A\n'),
+            ('%u0041', "console.log('A');", 'A\n'),
+            ('%80', "console.log('\x80');", '\x80\n'),
+            ('%C3%A9', "console.log('\xc3\xa9');", '\xc3\xa9\n'),
+            ('%ED%A0%80', "console.log('\xed\xa0\x80');", '\xed\xa0\x80\n'),
+        ]:
+            with self.subTest(argument=argument):
+                source = F'console.log(unescape({json.dumps(argument)}));'
+                self.assertEqual(behavior(source), (printed, None))
+                self.assertEqual(deobfuscate_source(source), folded)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnEncodeRefusesASurrogateThatNamesNoCharacter(TestBase):
+    """
+    `encodeURIComponent` writes the UTF-8 of the characters its argument names, so it is refused by
+    an argument that names none: a code unit in the surrogate range that no partner completes is a
+    `URIError` wherever it stands. A pair that is whole names one character and is encoded, which is
+    the same question answered the other way.
+    """
+
+    def test_a_surrogate_no_partner_completes_is_refused(self):
+        """
+        Node prints nothing and exits with the `URIError` uncaught for a high surrogate alone, a low
+        surrogate alone, one standing between two letters, and a low surrogate written before a high
+        one — an order no pair is written in, so neither of the two completes the other.
+        """
+        for spelling in (R'\uD800', R'\uDFFF', R'a\uD83Db', R'\uDC00\uD800'):
+            with self.subTest(spelling=spelling):
+                source = F'console.log(encodeURIComponent("{spelling}"));'
+                self.assertEqual(behavior(source), ('', 'URIError'))
+                self.assertEqual(behavior(deobfuscate_source(source)), ('', 'URIError'))
+
+    def test_a_pair_that_is_whole_is_encoded_as_the_utf8_of_the_character_it_names(self):
+        """
+        Node prints `a%F0%9F%98%80b`, those four bytes being the UTF-8 of U+1F600, which the two
+        code units of the argument name together.
+        """
+        source = R'console.log(encodeURIComponent("a😀b"));'
+        self.assertEqual(behavior(source), ('a%F0%9F%98%80b\n', None))
+        self.assertEqual(deobfuscate_source(source), "console.log('a%F0%9F%98%80b');")
+
+    def test_the_characters_an_encode_writes_as_themselves_are_the_unreserved_ones(self):
+        """
+        Node prints the nine characters unchanged and then escapes every character of the second
+        argument that is not a letter, so the reserved characters a URI is punctuated with are
+        escaped by an encode of a component and are not the same set the letters and the nine are.
+        """
+        source = (
+            'console.log(encodeURIComponent("-_.!~*\'()"),'
+            ' encodeURIComponent("a b/c?d=e&f#g"));'
+        )
+        self.assertEqual(behavior(source), ("-_.!~*'() a%20b%2Fc%3Fd%3De%26f%23g\n", None))
+        self.assertEqual(
+            deobfuscate_source(source),
+            "console.log('-_.!~*\\'()', 'a%20b%2Fc%3Fd%3De%26f%23g');",
+        )
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAWellKnownObjectNameThatABindingHasClaimed(TestBase):
     """

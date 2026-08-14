@@ -944,6 +944,14 @@ byte order mark. Every character outside it is a character `atob` throws on, so 
 padding deletes a throw.
 """
 _RE_NON_BASE64 = re.compile(r'[^A-Za-z0-9+/=]')
+_RE_INCOMPLETE_ESCAPE = re.compile(r'%(?![0-9A-Fa-f]{2})')
+"""
+A percent sign that introduces no complete escape. `decodeURIComponent` scans its argument for `%` and
+throws a `URIError` unless two hexadecimal digits follow, so such a sign is not a character the decode
+passes through: `decodeURIComponent('100%')` throws where `urllib.parse.unquote` answers `'100%'`.
+Searching every `%` decides the whole argument, because the scan advances over the two digits of each
+escape it accepts and neither digit can itself be a `%`, so no sign it would have reached is skipped.
+"""
 
 
 @_register((None, 'unescape'))
@@ -959,6 +967,8 @@ def _global_decode_uri_component(args: list[Value]) -> Value:
     if not args:
         raise InterpreterError
     s = to_string(args[0])
+    if _RE_INCOMPLETE_ESCAPE.search(s):
+        raise InterpreterError
     try:
         result = urllib.parse.unquote(s, encoding='utf-8', errors='surrogatepass')
         if any('\uD800' <= c <= '\uDFFF' for c in result):
