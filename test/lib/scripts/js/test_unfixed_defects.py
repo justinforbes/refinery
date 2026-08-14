@@ -313,6 +313,49 @@ class TestStringIsASequenceOfUtf16CodeUnits(TestBase):
         self.assertEqual(_folded(source), R"console.log(2, 55357, '\uD83D', 2);")
 
 
+class TestARuntimeProducedStringIsUtf16CodeUnits(TestBase):
+    """
+    A string a built-in hands back at run time is the same sequence of UTF-16 code units as the same
+    string written as a literal, so its length, the code unit at a position, and the pieces it splits
+    into are read exactly as they are read for the literal, and exactly as Node reports them. One
+    character above the basic multilingual plane occupies two code units however the string that
+    holds it was produced.
+    """
+
+    @unittest.expectedFailure
+    def test_a_percent_decoded_string_reads_as_code_units(self):
+        """
+        Node answers `2`, `55357`, `56832`, and `2` for the length, the code at index 0, the code at
+        index 1, and the split length of `decodeURIComponent('%F0%9F%98%80')`, whose bytes are the
+        one astral character U+1F600. The two code units are its high and low surrogate, and each of
+        these four questions has to see them, the same as it would over the literal.
+        """
+        produced = "decodeURIComponent('%F0%9F%98%80')"
+        source = (
+            F'console.log({produced}.length, {produced}.charCodeAt(0), '
+            F"{produced}.charCodeAt(1), {produced}.split('').length);"
+        )
+        self.assertEqual(_folded(source), 'console.log(2, 55357, 56832, 2);')
+
+    @unittest.expectedFailure
+    def test_a_json_parsed_astral_escape_reads_as_code_units(self):
+        """
+        Node answers `2`, `55357`, `56832`, and `2` for the length, the code at index 0, the code at
+        index 1, and the split length of the string `JSON.parse` builds from a JSON text holding an
+        escaped surrogate pair, the high surrogate D83D followed by the low surrogate DE00, which
+        together denote the one astral character U+1F600. The parse produces the two code units, and
+        each question has to read them as the same string written as a literal would.
+        """
+        backslash = chr(92)
+        astral_escape = F'{backslash}uD83D{backslash}uDE00'
+        produced = F'''JSON.parse('"{astral_escape}"')'''
+        source = (
+            F'console.log({produced}.length, {produced}.charCodeAt(0), '
+            F"{produced}.charCodeAt(1), {produced}.split('').length);"
+        )
+        self.assertEqual(_folded(source), 'console.log(2, 55357, 56832, 2);')
+
+
 class TestRecoveryKeepsTheSourceText(TestBase):
     """
     `refinery.lib.scripts.js.model.JsErrorNode` promises that a span no parser could read is kept
