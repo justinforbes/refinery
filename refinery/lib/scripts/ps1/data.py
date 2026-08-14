@@ -991,6 +991,19 @@ def operand_witnesses() -> dict[str, tuple[str, ...]]:
     }
 
 
+def binary_operators() -> frozenset[str]:
+    """
+    Every operator the binary grid has a table for, lower case as the capture wrote them. Published
+    so that a caller quantifying over the measured operators reads the set rather than carrying one
+    of its own, which would go stale the next time the capture is widened.
+
+    A test that writes the set out *is* keeping a copy, and does so on purpose: it is the ratchet
+    that makes a regeneration fail loudly instead of quietly covering more. This is for the other
+    kind of caller, the one that wants to iterate and does not want to be told the answer.
+    """
+    return frozenset(_OPERATORS['binary'])
+
+
 def binary_outcome(
     operator: str,
     left: str | Ps1TypeName,
