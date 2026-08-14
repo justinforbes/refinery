@@ -1098,7 +1098,17 @@ _SPANNED = frozenset({
 #: only faithful carrier for it; a `bool` because a comparison is an operation like any other; a
 #: `str` because a conversion produces one and the `Ps1TypeName` the grid names is what tells a Char
 #: from a one-character String.
-_Number = int | float | bool | decimal.Decimal | str
+#:
+#: A `tuple` of facts is the collection a `+` or a `*` over one produces. It carries facts rather
+#: than payloads for the reason `Ps1Constant` does: the elements keep the types they had, so a
+#: collection of Chars stays one. `_stamped` has the arm that licenses it.
+_Number = int | float | bool | decimal.Decimal | str | tuple['Ps1Fact', ...]
+
+#: How long a collection an operator may build. A repetition's size is an operand rather than a
+#: bound, so `@(1, 2) * 0xFFFFFFFF` is an allocation and not an answer; above this the operation is
+#: declined and the caller keeps the expression it had. Matched to the bound the folding pass
+#: already applies to a string repetition, so the two cannot disagree about what is too large.
+_MAX_COLLECTION = 0x1000
 
 
 class _Throws(Exception):
@@ -1854,6 +1864,8 @@ def _stamped(value: _Number, candidates: frozenset[Ps1TypeName]) -> Ps1Fact:
         return Ps1Constant(holders[0], value) if len(holders) == 1 else UNKNOWN
     if isinstance(value, float):
         return Ps1Constant(_DOUBLE, value) if _DOUBLE in candidates else UNKNOWN
+    if isinstance(value, tuple):
+        return Ps1Constant(_OBJECT_ARRAY, value) if _OBJECT_ARRAY in candidates else UNKNOWN
     return UNKNOWN
 
 
@@ -1898,10 +1910,17 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         joined = _concatenated(left, right)
         if joined is not None:
             return joined
+    if operator == '+' and left is NULL and isinstance(right, Ps1Constant):
+        # `$null` on the left of `+` is answered with the right operand *as it stands*, so
+        # `$null + @(1, 2)` is that collection and not a longer one — measured two elements, where
+        # `@(1, 2) + $null` is three. Nothing is added and nothing is converted.
+        return right.payload
+    if _elements(left) is not None and operator in ('+', '*'):
+        return _collected_operand(operator, left, right)
     if operator == '*' and _replicated(left):
-        # A String or a collection on the left of `*` is repeated, not multiplied: `'5' * 2` is the
-        # String `55` and not the number 10. Nothing here computes a repetition — its size is an
-        # operand rather than a bound — so the pair is declined before it can be read as arithmetic.
+        # A String on the left of `*` is repeated, not multiplied: `'5' * 2` is the String `55` and
+        # not the number 10. Nothing here computes that repetition, so the pair is declined before
+        # it can be read as arithmetic.
         return None
     operands = _numeric_pair(left, right)
     if operands is None:
@@ -2111,6 +2130,41 @@ def _replicated(fact: Ps1Fact) -> bool:
     return isinstance(fact, Ps1Constant) and fact.type in (_STRING, _OBJECT_ARRAY)
 
 
+def _elements(fact: Ps1Fact) -> tuple[Ps1Fact, ...] | None:
+    """
+    The facts a collection holds, or `None` for one that is not a collection or does not name its
+    elements.
+    """
+    if not isinstance(fact, Ps1Constant) or fact.type != _OBJECT_ARRAY:
+        return None
+    payload = fact.payload
+    if not isinstance(payload, tuple) or not all(isinstance(one, Ps1Fact) for one in payload):
+        return None
+    return payload
+
+
+def _collected_operand(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
+    """
+    What a collection on the left of `+` or `*` produces, or `None` where this declines to say.
+
+    Measured: `@(1, 2) + @(3, 4)` is the four-element collection, `@(1, 2) + 5` the three-element
+    one, and `@(1, 2) + $null` is **three** elements rather than two, because appending `$null`
+    appends an element. `@(1, 2) * 2` repeats and `@(1, 2) * 0` is empty. The collection has to be
+    on the left: `5 + @(1, 2)` and `2 * @(1, 2)` both throw, and their cells record it.
+    """
+    elements = _elements(left)
+    if elements is None:
+        return None
+    if operator == '+':
+        tail = _elements(right)
+        joined = elements + (tail if tail is not None else (right,))
+        return None if len(joined) > _MAX_COLLECTION else joined
+    count = _integer_payload(right) if _is_domain_integer(right) else None
+    if count is None or count < 0 or len(elements) * count > _MAX_COLLECTION:
+        return None
+    return elements * count
+
+
 def _bitwise_operand(fact: Ps1Fact) -> int | None:
     """
     The integer a bitwise operator computes over, or `None` for an operand it does not reach one
@@ -2198,6 +2252,13 @@ def _throws_are_modelled(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool:
     is refused, including the ones the host answers.
     """
     if operator in ('/', '%'):
+        return True
+    if operator == '*' and _elements(left) is not None:
+        # The cell records a throw because the capture repeated a collection `[uint32]::MaxValue`
+        # times and ran out of memory. Every way this throws is a size — a count too large, or a
+        # negative one that has no unsigned conversion — and `_collected_operand` declines both
+        # rather than computing them. So the kernel never answers where the host raises, which is
+        # what this gate asks; it merely answers less.
         return True
     if _STRING in (type_of(left), type_of(right)):
         return operator in _ARITHMETIC or operator in _BITWISE

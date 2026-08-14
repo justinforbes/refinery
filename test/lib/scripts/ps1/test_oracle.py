@@ -1943,6 +1943,69 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t1',
             'OUT\tSystem.Int32\t1',
         ),
+    '$t = @(1, 2) + @(3, 4); Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1 2 3 4',
+            'OUT\tSystem.Int32\t4',
+        ),
+    '$t = @(1, 2) + 5; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1 2 5',
+            'OUT\tSystem.Int32\t3',
+        ),
+    '$t = 5 + @(1, 2); Write-Output (,$t); Write-Output $t.Count':
+        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = @(1, 2) * 2; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1 2 1 2',
+            'OUT\tSystem.Int32\t4',
+        ),
+    '$t = 2 * @(1, 2); Write-Output (,$t); Write-Output $t.Count':
+        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = @(1, 2) -band 1; Write-Output (,$t); Write-Output $t.Count':
+        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = @() + 1; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1',
+            'OUT\tSystem.Int32\t1',
+        ),
+    '$t = @(1, 2) + $null; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1 2 ',
+            'OUT\tSystem.Int32\t3',
+        ),
+    '$t = $null + @(1, 2); Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t1 2',
+            'OUT\tSystem.Int32\t2',
+        ),
+    "$t = @(1, 2) + 'a'; Write-Output (,$t); Write-Output $t.Count":
+        (
+            'OUT\tSystem.Object[]\t1 2 a',
+            'OUT\tSystem.Int32\t3',
+        ),
+    '$t = @(1, 2) - 1; Write-Output (,$t); Write-Output $t.Count':
+        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = @(1, 2) * 0; Write-Output (,$t); Write-Output $t.Count':
+        (
+            'OUT\tSystem.Object[]\t',
+            'OUT\tSystem.Int32\t0',
+        ),
+    "$t = $null + 'abc'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tabc',
+            'OUT\tSystem.String\tabc',
+        ),
+    '$t = $null + [char]65; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Char\tA',
+            'OUT\tSystem.Char\tA',
+        ),
+    '$t = $null + 1.5d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.5',
+            'OUT\tSystem.Decimal\t1.5',
+        ),
 }
 
 

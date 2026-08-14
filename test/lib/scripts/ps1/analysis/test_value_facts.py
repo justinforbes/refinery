@@ -600,6 +600,10 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    '$null + $true',
+    "$null + 'abc'",
+    '$null + 1.5d',
+    '$null + [char]65',
     '$false + 1',
     '$true * 1.5d',
     '$true + $true',
@@ -1806,13 +1810,24 @@ class TestPs1AComputedValueIsStampedOnlyByAnArmThatNamesItsKind(unittest.TestCas
 
     def test_a_payload_of_a_kind_no_arm_names_is_refused(self):
         """
-        A tuple of facts is the payload an array constant carries and a kind `values._Number` does
-        not name, so a type checker reads the refusal it reaches as unreachable. That is the
-        invariant and not dead code: widening `_Number` is the first thing a kernel arm over
-        collections does, and this is what such a payload lands on until an arm names its kind.
+        The guard has to fail closed for a kind nothing names, because stamping one would report a
+        value under a type it does not have. A `set` stands for that here — it is a payload no fact
+        carries and no kernel returns, so reaching the refusal is the whole of what it tests.
+        """
+        unnamed: Any = {1, 2}
+        self.assertEqual(_stamped(unnamed, self.CANDIDATES), UNKNOWN)
+
+    def test_a_collection_is_stamped_only_where_the_cell_recorded_the_array_type(self):
+        """
+        A tuple of facts is the payload an array constant carries, and the kernel returns one for
+        `@(1, 2) + 5`. It is stamped like every other kind: under the array type when the cell
+        recorded it, and refused when the cell did not, so the arm is licensed by the measurement
+        rather than by being written.
         """
         collection: Any = (Ps1Constant(INT32, 1), Ps1Constant(INT32, 2))
-        self.assertEqual(_stamped(collection, self.CANDIDATES), UNKNOWN)
+        self.assertEqual(
+            _stamped(collection, self.CANDIDATES), Ps1Constant(OBJECT_ARRAY, collection))
+        self.assertEqual(_stamped(collection, self.CANDIDATES - {OBJECT_ARRAY}), UNKNOWN)
 
     def test_a_payload_of_each_kind_an_arm_names_is_stamped_from_the_same_candidates(self):
         self.assertEqual(_stamped(True, self.CANDIDATES), Ps1Constant(BOOLEAN, True))
@@ -2220,7 +2235,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 112, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 115, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
@@ -2524,15 +2539,22 @@ class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
         """
         Measured, `1 + 'A'` throws, `1 + [char]65` is 66 and `5 + '5'` is 10: a number on the left
         never joins text, whatever stands on the right of it.
+
+        `$null` is excluded because it is not joining: a null left operand is answered with the
+        right operand exactly as it stands, so `$null + 'abc'` is that String and `$null + [char]65`
+        is a **Char** rather than the one-character String a join would have made of it. Both
+        measured.
         """
         joining = {
             type_of(left)
             for left in OPERANDS
             for right in OPERANDS
-            if type_of(apply('+', left, right).value) == STRING
+            if left is not NULL and type_of(apply('+', left, right).value) == STRING
         }
         self.assertEqual(
             sorted(str(one) for one in joining), ['System.Char', 'System.String'])
+        self.assertEqual(
+            apply('+', NULL, Ps1Constant(CHAR, 'A')), Ps1Outcome(False, Ps1Constant(CHAR, 'A')))
 
     def test_what_a_join_appends_is_what_a_cast_of_the_right_operand_to_string_names(self):
         """
@@ -2771,7 +2793,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 77)
+        self.assertEqual(len(composed), 80)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -2871,7 +2893,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 1650)
+        self.assertEqual(len(compared), 1747)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2886,7 +2908,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1718)
+        self.assertEqual(len(compared), 1809)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2901,7 +2923,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 1718)
+        self.assertEqual(len(compared), 1809)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2912,12 +2934,12 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 1000)
+        self.assertEqual(len(STRINGS), 1032)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
     def test_the_bytes_the_array_reader_collects_are_the_numbers_the_elements_name(self):
-        self.assertEqual(len(BYTE_ARRAYS), 46)
+        self.assertEqual(len(BYTE_ARRAYS), 71)
         self.assertEqual(
             [row.source for row in BYTE_ARRAYS if list(row.collected) != row.payloads], [])
 
@@ -2926,7 +2948,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 362)
+        self.assertEqual(len(NUMERALS), 395)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -2962,7 +2984,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 273)
+        self.assertEqual(len(consulted), 289)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -2985,7 +3007,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
         weaker to fall back on either: an array shorter than the script builds is a different value.
         """
         named = [row for row in ARRAYS if row.named]
-        self.assertEqual(len(named), 67)
+        self.assertEqual(len(named), 92)
         self.assertEqual([row.source for row in named if not row.elements_named], [])
 
     def test_an_element_that_names_only_a_type_leaves_the_array_unknown(self):
@@ -3012,7 +3034,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1365)
+        self.assertEqual(len(compared), 1426)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 

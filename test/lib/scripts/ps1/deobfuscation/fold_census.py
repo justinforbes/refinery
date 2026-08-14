@@ -714,7 +714,7 @@ FOLDS: dict[str, str] = {
     '$t = $true + 9223372036854775807L; Write-Output (,$t); Write-Output $t':
         'Write-Output (,9.223372036854776e+18)\nWrite-Output 9.223372036854776e+18',
     '$t = $null + $true; Write-Output (,$t); Write-Output $t':
-        '$t = $Null + $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = $null -band [uint32]1; Write-Output (,$t); Write-Output $t':
         '$t = $Null -BAnd [uint32]1\nWrite-Output (,$t)\nWrite-Output $t',
     '$t = $true * 1.5d; Write-Output (,$t); Write-Output $t':
@@ -767,6 +767,30 @@ FOLDS: dict[str, str] = {
         'Write-Output (,2.5)\nWrite-Output 2.5',
     '$t = $true -bxor $false; Write-Output (,$t); Write-Output $t':
         'Write-Output (,1)\nWrite-Output 1',
+    '$t = @(1, 2) + @(3, 4); Write-Output (,$t); Write-Output $t.Count':
+        'Write-Output (,(1, 2, 3, 4))\nWrite-Output 4',
+    '$t = @(1, 2) + 5; Write-Output (,$t); Write-Output $t.Count':
+        'Write-Output (,(1, 2, 5))\nWrite-Output 3',
+    '$t = @(1, 2) * 2; Write-Output (,$t); Write-Output $t.Count':
+        'Write-Output (,(1, 2, 1, 2))\nWrite-Output 4',
+    '$t = @(1, 2) -band 1; Write-Output (,$t); Write-Output $t.Count':
+        '$t = @(1, 2) -BAnd 1\nWrite-Output (,$t)\nWrite-Output $t.Count',
+    '$t = @() + 1; Write-Output (,$t); Write-Output $t.Count':
+        'Write-Output (,(,1))\nWrite-Output 1',
+    '$t = @(1, 2) + $null; Write-Output (,$t); Write-Output $t.Count':
+        'Write-Output (,(1, 2, $Null))\nWrite-Output 3',
+    '$t = $null + @(1, 2); Write-Output (,$t); Write-Output $t.Count':
+        'Write-Output (,(1, 2))\nWrite-Output 2',
+    "$t = @(1, 2) + 'a'; Write-Output (,$t); Write-Output $t.Count":
+        "Write-Output (,(1, 2, 'a'))\nWrite-Output 3",
+    '$t = @(1, 2) * 0; Write-Output (,$t); Write-Output $t.Count':
+        'Write-Output (,@())\nWrite-Output @().Count',
+    "$t = $null + 'abc'; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'abc')\nWrite-Output 'abc'",
+    '$t = $null + [char]65; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,[char]65)\nWrite-Output ([char]65)',
+    '$t = $null + 1.5d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.5d)\nWrite-Output 1.5d',
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':

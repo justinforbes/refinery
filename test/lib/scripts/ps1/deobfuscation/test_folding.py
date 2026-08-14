@@ -1447,7 +1447,6 @@ class TestPs1AppendingToALiteralCollectionKeepsWhatWasAppended(TestPs1):
     def test_a_string_appended_to_a_literal_collection_is_still_a_string(self):
         self.assertEqual(self._apply("$x = 1, 2 + 'A'", Ps1ConstantFolding), "$x = 1, 2, 'A'")
 
-    @unittest.expectedFailure
     def test_a_char_appended_through_the_array_operator_is_still_a_char(self):
         self.assertEqual(
             self._apply('$x = @(1, 2) + [char]65', Ps1ConstantFolding), '$x = 1, 2, [char]65')

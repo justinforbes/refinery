@@ -757,6 +757,21 @@ TYPES: tuple[str, ...] = (
     '$t = $true / 1; Write-Output (,$t); Write-Output $t',
     '$t = $true + 1.5; Write-Output (,$t); Write-Output $t',
     '$t = $true -bxor $false; Write-Output (,$t); Write-Output $t',
+    '$t = @(1, 2) + @(3, 4); Write-Output (,$t); Write-Output $t.Count',
+    '$t = @(1, 2) + 5; Write-Output (,$t); Write-Output $t.Count',
+    '$t = 5 + @(1, 2); Write-Output (,$t); Write-Output $t.Count',
+    '$t = @(1, 2) * 2; Write-Output (,$t); Write-Output $t.Count',
+    '$t = 2 * @(1, 2); Write-Output (,$t); Write-Output $t.Count',
+    '$t = @(1, 2) -band 1; Write-Output (,$t); Write-Output $t.Count',
+    '$t = @() + 1; Write-Output (,$t); Write-Output $t.Count',
+    '$t = @(1, 2) + $null; Write-Output (,$t); Write-Output $t.Count',
+    '$t = $null + @(1, 2); Write-Output (,$t); Write-Output $t.Count',
+    "$t = @(1, 2) + 'a'; Write-Output (,$t); Write-Output $t.Count",
+    '$t = @(1, 2) - 1; Write-Output (,$t); Write-Output $t.Count',
+    '$t = @(1, 2) * 0; Write-Output (,$t); Write-Output $t.Count',
+    "$t = $null + 'abc'; Write-Output (,$t); Write-Output $t",
+    '$t = $null + [char]65; Write-Output (,$t); Write-Output $t',
+    '$t = $null + 1.5d; Write-Output (,$t); Write-Output $t',
 )
 
 
