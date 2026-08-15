@@ -61,6 +61,7 @@ from refinery.lib.scripts.js.model import (
     JsImportSpecifier,
     JsLabeledStatement,
     JsMemberExpression,
+    JsNewExpression,
     JsObjectExpression,
     JsObjectPattern,
     JsParenthesizedExpression,
@@ -562,8 +563,30 @@ def is_invocation_target(node: Node) -> bool:
     `` node`...` `` — looking through parentheses around both *node* and the operator that governs it.
     The shared primitive for "is this reference actually being called", replacing the hand-rolled
     `parent.callee is node` checks that a parenthesized or tagged callee slips past.
+
+    A `new` is not one of them, because what makes these two positions special is the receiver a call
+    reads off a member and the scope a direct `eval` runs in, and a construction has neither. A caller
+    that asks instead whether the value it is about to write down will be invoked at all wants
+    `is_constructed_or_invoked`.
     """
     return _is_invocation_of(_enclosing_operator(node), node)
+
+
+def is_constructed_or_invoked(node: Node) -> bool:
+    """
+    Whether the value *node* produces is immediately applied — called, tagged, or constructed with
+    `new` — looking through parentheses around *node* and around the operator that governs it.
+
+    This is the question a fold asks before writing a constant in place of an expression. A constant
+    is not callable and not a constructor, so the application throws either way; but a `TypeError`
+    names the thing that could not be applied, and `new (3)()` reports the `3` a file never wrote
+    where `new ('abc'.length)()` reported the access it did. Nothing is gained by folding a value
+    into the one position where it can only fail, so the access is left as the file spelled it.
+    """
+    if is_invocation_target(node):
+        return True
+    operator = _enclosing_operator(node)
+    return isinstance(operator, JsNewExpression) and strip_parens(operator.callee) is node
 
 
 def is_member_write_target(member: Node) -> bool:

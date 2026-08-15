@@ -139,6 +139,9 @@ _CALLING_WHAT_THE_STRING_DECIDES: dict[str, tuple[str, str]] = {
     "'abc'['1']()"       : ("'abc'['1']()", '"abc".1 is not a function'),
     "'abc'.length?.()"   : ("'abc'.length?.()", '"abc".length is not a function'),
     "'abc'.length`x`"    : ("'abc'.length`x`", '"abc".length is not a function'),
+    "new ('abc'.length)()": ("new ('abc'.length)()", '"abc".length is not a constructor'),
+    "new ('abc'[0])()"   : ("new ('abc'[0])()", '"abc"[0] is not a constructor'),
+    "new ('abc'.length)" : ("new ('abc'.length)()", '"abc".length is not a constructor'),
 }
 
 #: A statement that a Directive Prologue would take in were it written as a string literal, mapped

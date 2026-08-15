@@ -15,6 +15,7 @@ from refinery.lib.scripts.js.analysis.model import (
     Binding,
     BindingKind,
     SemanticModel,
+    is_constructed_or_invoked,
     is_invocation_target,
     is_member_write_target,
 )
@@ -677,14 +678,19 @@ class JsSimplifications(Transformer):
         Replace an access by what it reads, where that is decided and standing in its place means the
         same thing.
 
-        Two positions are not such a place, and every arm below is refused in both. A target that is
-        assigned, updated, deleted, or destructured is a place to store into, and a constant is not
-        one, so folding there turns a running program into a syntax error. A callee is read for its
-        value *and* for the receiver it is read off, so replacing it drops the `this` an invocation
-        would have bound and renames the `TypeError` a value that is not callable throws.
+        A target that is assigned, updated, deleted, or destructured is not such a place at all: it
+        is somewhere to store into, a constant is not, and every arm below is refused there.
+
+        Where the value is applied, the arms part company, because they write down different things.
+        The alias arm writes another way of naming the same function, so it has only to keep the
+        receiver a call reads off a member and the scope a direct `eval` needs. The arms that write a
+        constant have nothing to keep: a constant is neither callable nor a constructor, so the
+        application throws whatever they do, and folding only changes which text the `TypeError`
+        names — which is why they refuse a `new` the alias arm is free to fold under.
         """
         self.generic_visit(node)
-        reads_a_value = not is_member_write_target(node) and not is_invocation_target(node)
+        in_read_position = not is_member_write_target(node)
+        reads_a_value = in_read_position and not is_constructed_or_invoked(node)
         if (
             not node.computed
             and isinstance(node.object, JsIdentifier)
@@ -693,7 +699,9 @@ class JsSimplifications(Transformer):
             and not self._resolves_to_local(node, node.property.name)
             and self._alias_property_defined(node, node.property.name)
         ):
-            return node.property if reads_a_value else None
+            if in_read_position and not is_invocation_target(node):
+                return node.property
+            return None
         if reads_a_value:
             if (folded := self._folded_string_property(node)) is not None:
                 return folded

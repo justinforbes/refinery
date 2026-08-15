@@ -780,24 +780,3 @@ class TestALiteralNoElementOfWhichRunsIsCounted(TestBase):
         )
 
 
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAConstructedCalleeIsReadForItsReceiverToo(TestBase):
-    """
-    A `new` reads its callee for the value it constructs and for the receiver that value was read
-    off, exactly as a call does, and the `TypeError` a value that is no constructor throws names the
-    access rather than the value. `refinery.lib.scripts.js.analysis.model.is_invocation_target`
-    answers for a call and for a tagged template and for neither of the two `new` forms, so a `new`
-    is the one invocation whose callee is still replaced by the constant it reads.
-    """
-
-    @unittest.expectedFailure
-    def test_a_new_over_an_own_property_keeps_the_access_it_reads(self):
-        """
-        Node refuses `new ('abc'.length)()` with `TypeError: "abc".length is not a constructor`, and
-        refuses `new (3)()` — which is what the fold leaves behind — with `TypeError: 3 is not a
-        constructor`. The file is told about a number it never wrote and not about the property it
-        read.
-        """
-        source = "try { new ('abc'.length)(); } catch (e) { console.log(e.message); }"
-        said = ('"abc".length is not a constructor\n', None)
-        self.assertEqual(_before_and_after(source), (said, said))
