@@ -101,15 +101,15 @@ class _Coverage(NamedTuple):
 #: into a refusal moves a number here rather than quietly leaving the comparison below.
 COVERAGE: dict[str, _Coverage] = {
     ''               : _Coverage(3, 1),
-    'System.Boolean' : _Coverage(88, 56),
+    'System.Boolean' : _Coverage(98, 56),
     'System.Byte'    : _Coverage(5, 5),
     'System.Char'    : _Coverage(8, 6),
-    'System.Double'  : _Coverage(33, 17),
+    'System.Double'  : _Coverage(39, 20),
     'System.Int16'   : _Coverage(1, 0),
-    'System.Int32'   : _Coverage(100, 69),
-    'System.Int64'   : _Coverage(26, 19),
+    'System.Int32'   : _Coverage(110, 74),
+    'System.Int64'   : _Coverage(27, 20),
     'System.SByte'   : _Coverage(2, 0),
-    'System.String'  : _Coverage(31, 18),
+    'System.String'  : _Coverage(32, 18),
     'System.UInt16'  : _Coverage(2, 0),
     'System.UInt32'  : _Coverage(4, 0),
     'System.UInt64'  : _Coverage(2, 0),
@@ -119,7 +119,7 @@ COVERAGE: dict[str, _Coverage] = {
 #: population. `Decimal` is not a `float` — 5.1 computes it exactly and to a different precision —
 #: and `Single` is not one either, so a row carrying one has nothing here to be right about.
 TYPES_OUTSIDE_THE_CURRENCY: dict[str, int] = {
-    'System.Decimal' : 17,
+    'System.Decimal' : 18,
     'System.Single'  : 1,
 }
 
@@ -129,7 +129,7 @@ TYPES_OUTSIDE_THE_CURRENCY: dict[str, int] = {
 COLLECTION_ROWS: int = 5
 
 #: How many measured rows 5.1 answered by throwing. The population `ANSWERED_THROWS` is drawn from.
-THROWING_ROWS: int = 35
+THROWING_ROWS: int = 36
 
 #: Where the interpreter computes a value 5.1 did not. Each entry is a constant the deobfuscator
 #: folds wrongly into the script it emits.
@@ -146,6 +146,7 @@ DIVERGENCES: dict[str, _Divergence] = {
     '9223372036854775807L - -1L'         : _Divergence(9.22337203685478e+18, 9223372036854775808),
     '$true + 9223372036854775807L'       : _Divergence(9.22337203685478e+18, 9223372036854775808),
     '-2147483648 - 9223372036854775807L' : _Divergence(-9.22337203900226e+18, -9223372039002259455),
+    '- (-2147483648)'                    : _Divergence(2147483648.0, 2147483648),
 
     # The left operand decides the operation and the right one is converted to its type, so a
     # number on the left reads whatever stands on the right as a number; a Boolean the operator has

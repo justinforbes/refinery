@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import re
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
+from test.lib.scripts.ps1.test_oracle import TYPE_TRANSCRIPTS
 
 from refinery.lib.scripts.pipeline import DeobfuscationTimeout
 from refinery.lib.scripts.ps1.deobfuscation import deobfuscate
@@ -595,16 +598,109 @@ class TestPs1NameTrustSurvivesRewriting(TestPs1):
         self.assertIn('Start-Process calc', out)
 
 
-#: The six spellings that ask what a negated String counts as, each written the way the synthesizer
-#: writes it, so that the source stands in for the expected output as well.
-NEGATED_STRINGS: tuple[str, ...] = (
+#: A measured row that runs an `if` over a condition and prints the branch it selected. The script
+#: a host ran is the script the pipeline is asked about here, so the expectation is the host's own
+#: output rather than a rewriting chosen here.
+_BRANCH_ROW = re.compile(
+    r"\$t = (?P<script>if \(.+\) \{ 'yes' \} else \{ 'no' \})"
+    r'; Write-Output \(,\$t\); Write-Output \$t'
+)
+
+
+def _measured_line(expression: str) -> str:
+    """
+    The text a 5.1 host printed for the measured row that assigns `expression` to `$t` and writes
+    it. A row this module asks for and the corpus does not hold is a `KeyError` naming it: nothing
+    here runs a host, so a case has to be measured in `test.lib.scripts.ps1.corpus` before it can
+    be asked about.
+    """
+    row = F'$t = {expression}; Write-Output (,$t); Write-Output $t'
+    kind, _, rendered = TYPE_TRANSCRIPTS[row][0].split('\t')
+    assert kind == 'OUT', row
+    return rendered
+
+
+def _branch_rows() -> dict[str, str]:
+    """
+    Every measured `if`, keyed by the script a host ran and mapped to the branch it printed.
+    """
+    rows: dict[str, str] = {}
+    for row in TYPE_TRANSCRIPTS:
+        match = _BRANCH_ROW.fullmatch(row)
+        if match is not None:
+            script = match.group('script')
+            rows[script] = _measured_line(script)
+    return rows
+
+
+BRANCHES: dict[str, str] = _branch_rows()
+
+
+class TestPs1MeasuredBranch(TestPs1):
+    """
+    The `if` scripts a 5.1 host ran, put through the whole pipeline: what is left has to be the
+    branch the host printed. A condition counted the other way is not a shorter script, it is a
+    different one, and a Char, a collection and a negated String were each counted wrongly or not
+    at all — `[char]0`, `@(@())` and `- '0'` are all false.
+
+    Junk removal is off so that the bare strings the branches hold stay where they are written.
+    """
+
+    def test_every_measured_if_reduces_to_the_branch_the_host_printed(self):
+        self.assertEqual(len(BRANCHES), 6, 'a measured branch was added or withdrawn')
+        self.assertEqual(
+            {
+                script: self._deobfuscate_iterative(script, remove_junk=False)
+                for script in BRANCHES
+            },
+            {script: F"'{branch}'" for script, branch in BRANCHES.items()},
+        )
+
+
+#: Two conditions the domain must not settle, each in a statement that branches or loops on it and
+#: in a logical operator that reads it, and each written the way the deobfuscator writes it so that
+#: the source stands in for the expected output as well.
+UNSETTLED_SOURCES: tuple[str, ...] = (
     cleandoc("""
-        if (-'0') {
+        if ($Null * [int]'abc') {
           'A'
         } else {
           'B'
         }
     """),
+    cleandoc("""
+        while (@() + (0 -Shl $True)) {
+          'A'
+        }
+    """),
+    "$x = -Not ($Null * [int]'abc')",
+    "$x = (@() + (0 -Shl $True)) -and $True",
+)
+
+
+class TestPs1UnsettledConditionIsLeftStanding(TestPs1):
+    """
+    A condition whose truth the domain cannot name is left where it stands, and the two below are
+    unsettled for reasons that have nothing to do with each other.
+
+    `$Null * [int]'abc'` is a definite `$Null`, which is false, and a host never reaches it: the
+    cast throws. Counting the condition false would prune the branch and take the throw with it.
+
+    `@() + (0 -Shl $True)` is a collection of exactly one element whose type is known and whose
+    value is not. The rule 5.1 uses inside a one-element collection ends in *otherwise true*, so a
+    copy of it would count the whole collection true on the strength of an element nothing is known
+    about.
+    """
+
+    def test_a_condition_the_domain_cannot_settle_is_left_where_it_stands(self):
+        for source in UNSETTLED_SOURCES:
+            with self.subTest(source):
+                self.assertEqual(self._deobfuscate_iterative(source, remove_junk=False), source)
+
+
+#: The two spellings that ask what a String no number reads out of counts as, each written the way
+#: the synthesizer writes it, so that the source stands in for the expected output as well.
+THROWING_NEGATIONS: tuple[str, ...] = (
     cleandoc("""
         if (-'abc') {
           'A'
@@ -612,31 +708,66 @@ NEGATED_STRINGS: tuple[str, ...] = (
           'B'
         }
     """),
-    cleandoc("""
-        do {
-          'A'
-        } until (-'0')
-    """),
-    "$x = -Not (-'0')",
-    "$x = (-'0') -and $True",
     "$x = (-'abc') -or $False",
 )
+
+#: The spellings a negated zero is folded in, each with the measured expression that settles what a
+#: host makes of it. The Boolean such a row prints is the value the fold has to write, spelled as
+#: the variable that holds it.
+NEGATED_ZERO_FOLDS: dict[str, str] = {
+    "$x = -Not (-'0')"       : "-not (- '0')",
+    "$x = (-'0') -and $True" : "(- '0') -and $true",
+}
 
 
 class TestPs1NegatedStringTruth(TestPs1):
     """
     A minus sign in front of a String converts the String to a number, so negating one changes what
-    it counts as: measured, the text `'0'` is true where `- '0'` is the Int32 zero, and a host over
-    `if (- '0')` ran the else branch. `- 'abc'` throws and counts as nothing at all.
+    it counts as: measured, the text `'0'` is true where `- '0'` is the Int32 zero. A truth carried
+    through the minus made every spelling below a different script — the logical ones folded to the
+    Boolean a host does not print, and `do { 'A' } until (- '0')` a body a host never stops
+    repeating.
 
-    A truth carried through the minus rewrote every spelling below: each `if` to the branch a host
-    does not run, and `do { 'A' } until (- '0')` to a body a host never stops repeating.
+    `- 'abc'` throws and counts as nothing at all, which is why the two spellings over it are left
+    exactly where they stand.
 
     Junk removal is off so that the bare strings stay where they are written and what is compared
     is the branches themselves.
     """
 
-    def test_a_condition_over_a_negated_string_is_left_where_it_stands(self):
-        for source in NEGATED_STRINGS:
+    def test_a_negated_string_the_host_threw_on_is_left_where_it_stands(self):
+        for source in THROWING_NEGATIONS:
             with self.subTest(source):
                 self.assertEqual(self._deobfuscate_iterative(source, remove_junk=False), source)
+
+    def test_a_negated_zero_is_folded_to_the_value_the_host_printed_for_it(self):
+        self.assertEqual(
+            {
+                source: self._deobfuscate_iterative(source, remove_junk=False)
+                for source in NEGATED_ZERO_FOLDS
+            },
+            {
+                source: F'$x = ${_measured_line(row)}'
+                for source, row in NEGATED_ZERO_FOLDS.items()
+            },
+        )
+
+    def test_a_loop_whose_condition_is_never_met_is_kept_with_its_body(self):
+        """
+        An `until` runs its body again for as long as the condition counts false, so a loop over
+        the Int32 zero is one a host never leaves. A truth carried through the minus would have
+        ended it after the first pass and left the body behind as a statement that runs once.
+        """
+        self.assertEqual(_measured_line("- '0'"), '0')
+        self.assertEqual(
+            self._deobfuscate_iterative(cleandoc("""
+                do {
+                  'A'
+                } until (-'0')
+            """), remove_junk=False),
+            cleandoc("""
+                do {
+                  'A'
+                } until (0)
+            """),
+        )

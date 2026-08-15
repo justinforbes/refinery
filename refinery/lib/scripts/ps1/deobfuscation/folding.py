@@ -705,7 +705,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         op = node.operator.lower()
         if op == '-join':
             return self._handle_unary_join(node)
-        if op == '-bnot':
+        if op in ('-', '-bnot'):
             return _folded(apply_unary(op, read(node.operand)))
         if op in ('-not', '!'):
             truth = is_truthy(node.operand)

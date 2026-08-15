@@ -360,9 +360,13 @@ FOLDS: dict[str, str] = {
     '$t = 2.5L; Write-Output (,$t); Write-Output $t':
         'Write-Output (,2.5L)\nWrite-Output 2.5L',
     '$t = -(2147483648); Write-Output (,$t); Write-Output $t':
-        '$t = - 2147483648\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,-2147483648L)\nWrite-Output (-2147483648L)',
     '$t = -(2147483647); Write-Output (,$t); Write-Output $t':
-        '$t = - 2147483647\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,-2147483647)\nWrite-Output (-2147483647)',
+    '$t = - 2147483648; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-2147483648L)\nWrite-Output (-2147483648L)',
+    '$t = - 2147483647; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-2147483647)\nWrite-Output (-2147483647)',
     '$t = 1.5kb; Write-Output (,$t); Write-Output $t':
         'Write-Output (,1.5kb)\nWrite-Output 1.5kb',
     '$t = 0xFFkb; Write-Output (,$t); Write-Output $t':
@@ -895,6 +899,12 @@ FOLDS: dict[str, str] = {
         'Write-Output (,$True)\nWrite-Output $True',
     '$t = -not (,[char]0); Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
+    "$t = - '0'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,0)\nWrite-Output 0',
+    "$t = - '5'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,-5)\nWrite-Output (-5)',
+    "$t = if (- '0') { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        "$t = if (0) {\n  'yes'\n} else {\n  'no'\n}\nWrite-Output (,$t)\nWrite-Output $t",
     '$t = (,@(1, 2)) -and $true; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
     '$t = (,$true) -and $true; Write-Output (,$t); Write-Output $t':
@@ -931,6 +941,62 @@ FOLDS: dict[str, str] = {
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = [bool](,1); Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
+    '$t = - 0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0)\nWrite-Output 0',
+    '$t = - 5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-5)\nWrite-Output (-5)',
+    '$t = - 0.0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-0.0)\nWrite-Output (-0.0)',
+    '$t = - 1.5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-1.5)\nWrite-Output (-1.5)',
+    '$t = - $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0)\nWrite-Output 0',
+    '$t = - $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-1)\nWrite-Output (-1)',
+    '$t = - $false; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0)\nWrite-Output 0',
+    '$t = - [char]65; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-65)\nWrite-Output (-65)',
+    '$t = - [char]0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0)\nWrite-Output 0',
+    '$t = - 1.5d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-1.5d)\nWrite-Output (-1.5d)',
+    '$t = - [byte]5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-5)\nWrite-Output (-5)',
+    '$t = - [uint32]1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-1.0)\nWrite-Output (-1.0)',
+    '$t = - (-2147483648); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,2147483648.0)\nWrite-Output 2147483648.0',
+    '$t = - 9223372036854775807L; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-9223372036854775807L)\nWrite-Output (-9223372036854775807L)',
+    '$t = - [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-1.8446744073709552e+19)\nWrite-Output (-1.8446744073709552e+19)',
+    "$t = - ' 5 '; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,-5)\nWrite-Output (-5)',
+    "$t = - ''; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,0)\nWrite-Output 0',
+    '$t = [bool][sbyte]0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool][int16]0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool][uint16]0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool][uint32]0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool]1.5d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = [bool](,$null); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool](,@(1, 2)); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = [bool]@(0, 0, 0); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = -not (- '0'); Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = (- '0') -and $true; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = if (- '5') { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
+        "$t = if (-5) {\n  'yes'\n} else {\n  'no'\n}\nWrite-Output (,$t)\nWrite-Output $t",
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':

@@ -66,6 +66,7 @@ from refinery.lib.scripts.ps1.data import (
     resolve_member_type,
     resolve_type,
     static_overloads,
+    unary_outcome,
 )
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
@@ -89,6 +90,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1TypeExpression,
+    Ps1UnaryExpression,
     Ps1Variable,
 )
 from refinery.lib.scripts.ps1.token import BACKTICK_ENCODE
@@ -122,18 +124,21 @@ def is_truthy(node: Node | None) -> bool | None:
     number it negates to is false. The rule read the minus as leaving truth alone — which holds for
     a number and for nothing else — and answered `True` where a host answers `False`.
 
-    Refusing on `may_throw` is what keeps a conversion the host never reaches from being reported:
-    `[byte]300` and `[int]'abc'` name no value, and an expression that throws has no truth.
+    **Both throws are refused, and they are two.** `evaluate` says whether reaching the value may
+    throw and `convert` says whether making a Boolean of it may, and the second does not carry the
+    first: `$null * [int]'abc'` evaluates to a definite `$null` that may throw, and converting that
+    `$null` alone is a `$False` that cannot. Reading only the conversion would report a truth for an
+    expression a host never finishes, and a caller that prunes on it would delete the throw.
     """
     if node is None:
         return None
-    fact = read(node)
-    if fact is UNKNOWN:
+    outcome = evaluate(node, None)
+    if outcome.may_throw or outcome.value is UNKNOWN:
         return None
-    outcome = convert(fact, _BOOLEAN)
-    if outcome.may_throw or not isinstance(outcome.value, Ps1Constant):
+    converted = convert(outcome.value, _BOOLEAN)
+    if converted.may_throw or not isinstance(converted.value, Ps1Constant):
         return None
-    return outcome.value.payload if isinstance(outcome.value.payload, bool) else None
+    return converted.value.payload if isinstance(converted.value.payload, bool) else None
 
 
 def unwrap_to_array_literal(node: Node) -> Ps1ArrayLiteral | None:
@@ -1237,22 +1242,80 @@ _BNOT_WIDTH: dict[Ps1TypeName, Ps1TypeName] = {
 }
 
 
+def _negated(operand: Ps1Fact) -> Ps1Outcome:
+    """
+    What `- operand` produces, from the measured unary grid and a kernel checked against it.
+
+    A collection is the one row that names no type at all and only throws — `- @()` raises a
+    `MethodNotFound`, measured — so the cell refuses it before any of this runs.
+
+    **A cell this cannot compute a value in is refused outright rather than answered with its
+    type.** The unary capture is a witnessed lower bound like every other, and it is short here: the
+    `String` row names `Int32` alone, yet `- '1e3'` is measured a `Double`, because no witness spelled
+    an exponent. Reporting *an Int32 or a throw* off that cell would be a wrong type rather than a
+    weak one, and there is no spanning claim for the unary grid to license it.
+    """
+    source = _grid_type(operand)
+    cell = None if source is None else unary_outcome('-', source)
+    if cell is None:
+        return NOTHING
+    number = _negatable(operand)
+    if number is None:
+        return NOTHING
+    stamped = _stamped(-number, cell.types)
+    return NOTHING if stamped is UNKNOWN else Ps1Outcome(False, stamped)
+
+
+def _negatable(operand: Ps1Fact) -> int | float | decimal.Decimal | None:
+    """
+    The number `- operand` negates, or `None` where this module computes nothing for it. `$null`
+    negates as the integer zero and a String as the numeral it spells, both measured: `- $null` is
+    the Int32 0 and `- ' 5 '` the Int32 -5.
+    """
+    if operand is NULL:
+        return 0
+    coerced = _coerced_numeral(operand)
+    if coerced is not None:
+        operand = coerced
+    if not isinstance(operand, Ps1Constant):
+        return None
+    truth = _truth_value(operand)
+    if truth is not None:
+        return truth
+    code = _char_code(operand)
+    if code is not None:
+        return code
+    payload = operand.payload
+    return payload if isinstance(payload, (int, float, decimal.Decimal)) else None
+
+
 def apply_unary(operator: str, operand: Ps1Fact) -> Ps1Outcome:
     """
-    What `<operator> operand` produces, for the one unary operator that produces a number.
+    What `<operator> operand` produces.
 
-    It is not read from the measured grid, because the capture is over binary applications only; the
-    table it reads instead is `_BNOT_WIDTH`, measured the same way and for the same reason. What
-    makes that safe where a rule written out usually is not: the *value* is a complement at a width
-    the operand converts to, and the conversion is `convert`, so the only thing stated here is which
-    width — which is exactly what was measured.
+    **Unary minus reads the measured grid**, exactly as `apply` reads the binary one: the *type* is
+    what a host was observed to produce and the *value* comes from a kernel checked against it. The
+    capture covers `-` over all sixteen operand rows, and the cells where it names two types are the
+    ones the value decides between — `Int32` negates to an `Int32` or, where the result leaves that
+    width, to a `Double`. Measured: `- 5` is the Int32 -5 and `- (-2147483648)` the Double
+    2147483648, `- [uint32]1` the Double -1 and `- [char]65` the Int32 -65. `_stamped` is what picks
+    among a cell's types by which of them holds the number, so nothing here states that rule twice.
+
+    A String is negated by being read as a numeral first, which is where the `String` row's recorded
+    throw comes from: `- '5'` is -5, `- ' 5 '` is -5, `- ''` is 0 and `- 'abc'` throws. That is the
+    same coercion arithmetic performs, so the same reader sees it and the same throws are modelled.
 
     `-not` is absent because it is not this question: it negates a truth value, which `convert` to
-    a `Boolean` already answers. Unary minus is absent because the parser puts a sign written
-    against a numeral inside the numeral, so what would reach here is `- 5` with a space, and what
-    that does to a value nothing measured.
+    a `Boolean` already answers, and `is_truthy` is what asks.
+
+    `-bnot` keeps a table of its own, `_BNOT_WIDTH`, because what it needs is not the result type
+    but the *width the complement happens at*, and that is a different measurement. Reading the grid
+    for its result type as well is recorded work, not done here.
     """
-    if operator.lower() != '-bnot':
+    operator = operator.lower()
+    if operator == '-':
+        return _negated(operand)
+    if operator != '-bnot':
         return NOTHING
     source = _grid_type(operand)
     width = None if source is None else _BNOT_WIDTH.get(source)
@@ -1326,10 +1389,9 @@ def evaluate(
     what asks it is a member lookup, and the type a literal *names* is what a lookup needs; the
     value one *is* is a `System.RuntimeType`, and no measurement here covers it.
 
-    A unary operator is refused by having no arm, which is not an omission: `apply` has no unary
-    counterpart, and reading `- $x` as `0 - $x` would answer from a composition where nothing was
-    measured. A sign written against a numeral is not this case — the parser puts it in the
-    numeral's own spelling, so `-1` is a literal and reaches `read`.
+    A unary operator is `apply_unary`, which reads a grid of its own. A sign written against a
+    numeral does not reach it — the parser puts that sign inside the numeral's spelling, so `-1` is
+    a literal and `read` answers it; what reaches here is `- 1` with a space, and `- $x`.
 
     `type_of_variable` is what the caller can say about a variable occurrence, exactly as
     `resolve_expression_type` takes it. Nothing here invents a variable's value, so a variable the
@@ -1348,6 +1410,8 @@ def evaluate(
         return _evaluated_cast(node, type_of_variable)
     if isinstance(node, Ps1BinaryExpression):
         return _evaluated_binary(node, type_of_variable)
+    if isinstance(node, Ps1UnaryExpression):
+        return _evaluated_unary(node, type_of_variable)
     if isinstance(node, Ps1TypeExpression) or not isinstance(node, Expression):
         return NOTHING
     named = resolve_expression_type(node, type_of_variable)
@@ -1380,6 +1444,18 @@ def _evaluated_cast(
         return Ps1Outcome(operand.may_throw or converted.may_throw, converted.value)
     named = _cast_names(target)
     return NOTHING if named is None else Ps1Outcome(True, named)
+
+
+def _evaluated_unary(
+    node: Ps1UnaryExpression,
+    type_of_variable: Ps1VariableTyping | None,
+) -> Ps1Outcome:
+    """
+    A unary operator, which is `apply_unary` over whatever its operand evaluates to.
+    """
+    operand = evaluate(node.operand, type_of_variable)
+    applied = apply_unary(node.operator, operand.value)
+    return Ps1Outcome(operand.may_throw or applied.may_throw, applied.value)
 
 
 def _evaluated_binary(
