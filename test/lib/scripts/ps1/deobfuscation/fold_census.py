@@ -946,7 +946,7 @@ FOLDS: dict[str, str] = {
     '$t = - 5; Write-Output (,$t); Write-Output $t':
         'Write-Output (,-5)\nWrite-Output (-5)',
     '$t = - 0.0; Write-Output (,$t); Write-Output $t':
-        'Write-Output (,-0.0)\nWrite-Output (-0.0)',
+        'Write-Output (,0.0)\nWrite-Output 0.0',
     '$t = - 1.5; Write-Output (,$t); Write-Output $t':
         'Write-Output (,-1.5)\nWrite-Output (-1.5)',
     '$t = - $null; Write-Output (,$t); Write-Output $t':
@@ -971,6 +971,8 @@ FOLDS: dict[str, str] = {
         'Write-Output (,-9223372036854775807L)\nWrite-Output (-9223372036854775807L)',
     '$t = - [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
         'Write-Output (,-1.8446744073709552e+19)\nWrite-Output (-1.8446744073709552e+19)',
+    "$t = - '1e3'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,-1000.0)\nWrite-Output (-1000.0)',
     "$t = - ' 5 '; Write-Output (,$t); Write-Output $t":
         'Write-Output (,-5)\nWrite-Output (-5)',
     "$t = - ''; Write-Output (,$t); Write-Output $t":
@@ -997,6 +999,30 @@ FOLDS: dict[str, str] = {
         'Write-Output (,$False)\nWrite-Output $False',
     "$t = if (- '5') { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t":
         "$t = if (-5) {\n  'yes'\n} else {\n  'no'\n}\nWrite-Output (,$t)\nWrite-Output $t",
+    '$t = $null -eq 0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = 0 -eq $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $null -eq $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = '' -eq 0; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = '' -eq '0'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = $null -eq ''; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = '' -eq $null; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = '0' -eq 0; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = 0 -eq '0'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = '1.0' -eq 1; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = 1 -eq '1.0'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $null -lt 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':

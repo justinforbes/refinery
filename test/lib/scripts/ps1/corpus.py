@@ -882,6 +882,18 @@ TYPES: tuple[str, ...] = (
     "$t = -not (- '0'); Write-Output (,$t); Write-Output $t",
     "$t = (- '0') -and $true; Write-Output (,$t); Write-Output $t",
     "$t = if (- '5') { 'yes' } else { 'no' }; Write-Output (,$t); Write-Output $t",
+    '$t = $null -eq 0; Write-Output (,$t); Write-Output $t',
+    '$t = 0 -eq $null; Write-Output (,$t); Write-Output $t',
+    '$t = $null -eq $null; Write-Output (,$t); Write-Output $t',
+    "$t = '' -eq 0; Write-Output (,$t); Write-Output $t",
+    "$t = '' -eq '0'; Write-Output (,$t); Write-Output $t",
+    "$t = $null -eq ''; Write-Output (,$t); Write-Output $t",
+    "$t = '' -eq $null; Write-Output (,$t); Write-Output $t",
+    "$t = '0' -eq 0; Write-Output (,$t); Write-Output $t",
+    "$t = 0 -eq '0'; Write-Output (,$t); Write-Output $t",
+    "$t = '1.0' -eq 1; Write-Output (,$t); Write-Output $t",
+    "$t = 1 -eq '1.0'; Write-Output (,$t); Write-Output $t",
+    '$t = $null -lt 1; Write-Output (,$t); Write-Output $t',
 )
 
 

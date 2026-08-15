@@ -1230,8 +1230,10 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         Fold the logical operators `-and`, `-or`, and `-xor` when both operands are constant.
         """
         left = is_truthy(node.left)
+        if left is None:
+            return None
         right = is_truthy(node.right)
-        if left is None or right is None:
+        if right is None:
             return None
         if op == '-and':
             result = left and right

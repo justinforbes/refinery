@@ -1472,3 +1472,37 @@ class TestPs1RepeatingACollectionByACountNoInt32Holds(TestPs1):
     def test_a_count_an_int32_holds_repeats_the_collection_it_counts(self):
         self.assertEqual(self._apply('$x = @() * 5000', Ps1ConstantFolding), '$x = @()')
         self.assertEqual(self._apply('$x = @(1, 2) * 2', Ps1ConstantFolding), '$x = 1, 2, 1, 2')
+
+
+class TestPs1AJoinIsFoldedOnlyWhereTheTextItAppendsIsWritten(TestPs1):
+    """
+    A String or a Char on the left of `+` makes it join, whatever stands on the right of it.
+    Measured, `'5' + 5` is `55` and `'a' + 1.5` is `a1.5`, so a left operand that happens to spell a
+    number is still text and the join is still a join. The text of a Double is .NET's to write and
+    is not written here, so a join with one on its right has to be left where it stands: folding it
+    as arithmetic makes `'5' + 1.5` the Double 6.5, which is neither the value nor the type a run of
+    the script produces.
+    """
+
+    def test_a_string_that_spells_a_number_joined_with_a_double_is_left_where_it_stands(self):
+        self._assertUnchanged("$x = '5' + 1.5", Ps1ConstantFolding)
+
+    def test_the_empty_string_joined_with_a_double_is_left_where_it_stands(self):
+        self._assertUnchanged("$x = '' + 1.5", Ps1ConstantFolding)
+
+    def test_a_char_joined_with_a_double_is_left_where_it_stands(self):
+        self._assertUnchanged('$x = [char]65 + 1.5', Ps1ConstantFolding)
+
+    def test_a_string_joined_with_a_number_written_here_is_the_text_of_both(self):
+        self.assertEqual(self._apply("$x = '5' + 5", Ps1ConstantFolding), "$x = '55'")
+
+    def test_a_char_joined_with_a_number_written_here_is_the_text_of_both(self):
+        self.assertEqual(self._apply('$x = [char]65 + 1', Ps1ConstantFolding), "$x = 'A1'")
+
+    def test_the_pipeline_folds_the_join_it_writes_and_keeps_the_one_it_does_not(self):
+        kept = inspect.cleandoc("""
+            $x = '5' + 1.5
+            Write-Output $x
+        """)
+        self.assertEqual(self._deobfuscate("$x = '5' + 1.5; Write-Output $x"), kept)
+        self.assertEqual(self._deobfuscate("$x = '5' + 5; Write-Output $x"), "Write-Output '55'")

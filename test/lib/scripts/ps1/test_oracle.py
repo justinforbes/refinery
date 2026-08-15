@@ -2547,6 +2547,66 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tyes',
             'OUT\tSystem.String\tyes',
         ),
+    '$t = $null -eq 0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 0 -eq $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $null -eq $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = '' -eq 0; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = '' -eq '0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = $null -eq ''; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = '' -eq $null; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = '0' -eq 0; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 0 -eq '0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = '1.0' -eq 1; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = 1 -eq '1.0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $null -lt 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
 }
 
 

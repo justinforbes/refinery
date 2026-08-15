@@ -101,7 +101,7 @@ class _Coverage(NamedTuple):
 #: into a refusal moves a number here rather than quietly leaving the comparison below.
 COVERAGE: dict[str, _Coverage] = {
     ''               : _Coverage(3, 1),
-    'System.Boolean' : _Coverage(98, 56),
+    'System.Boolean' : _Coverage(110, 61),
     'System.Byte'    : _Coverage(5, 5),
     'System.Char'    : _Coverage(8, 6),
     'System.Double'  : _Coverage(39, 20),
@@ -189,6 +189,11 @@ DIVERGENCES: dict[str, _Divergence] = {
 
     # `-contains` converts each element to the type of the value it is asked about before comparing
     # it. The interpreter compares the Python objects, for which a string is never an integer.
+    # An absent value is equal to nothing but another absent value, and 5.1 answers that before it
+    # converts anything. The interpreter converts first, so the zero and the `$null` meet as numbers.
+    '$null -eq 0'                        : _Divergence(False, True),
+    '0 -eq $null'                        : _Divergence(False, True),
+
     "@('1') -contains 1"                 : _Divergence(True, False),
     "@(1) -contains '1'"                 : _Divergence(True, False),
 

@@ -674,7 +674,7 @@ UNSETTLED_SOURCES: tuple[str, ...] = (
         }
     """),
     "$x = -Not ($Null * [int]'abc')",
-    "$x = (@() + (0 -Shl $True)) -and $True",
+    '$x = (@() + (0 -Shl $True)) -and $True',
 )
 
 

@@ -16,10 +16,16 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: The four largest rows are the four types the domain refuses to read a grid cell over, and they
 #: are the migration's work in the order it is worth doing. This is a ratchet — the numbers come
 #: down as the domain learns to answer, and a commit that raises one has removed a fold.
+#:
+#: The `String` and `Char` rows were raised once, by 25 and 15, and what was withdrawn there was a
+#: wrong answer rather than a fold: `+` over a String or a Char on its left joins text, and a Double
+#: on the right is a text `_rendered` refuses because the spelling is .NET's. Those pairs were
+#: falling through to the arithmetic and answering `'5' + 1.5` with the number 6.5 where a host
+#: writes `51.5`. They come back down by teaching the domain to spell a Double, not by computing.
 GAP: dict[str, int] = {
-    'System.String': 1448,
+    'System.String': 1473,
     'System.Object[]': 1463,
-    'System.Char': 1081,
+    'System.Char': 1096,
     'System.Int64': 1000,
     'System.Int32': 670,
     'System.Double': 590,

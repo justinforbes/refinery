@@ -14,6 +14,7 @@ from __future__ import annotations
 import dataclasses
 import decimal
 import inspect
+import math
 import re
 import unittest
 
@@ -40,6 +41,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Fact,
     Ps1Outcome,
     Ps1Typed,
+    _coerced_numeral,
     _stamped,
     apply,
     apply_unary,
@@ -613,6 +615,20 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    '$null -eq $null',
+    "$null -eq ''",
+    '$null -eq 0',
+    '$null -lt 1',
+    "'' -eq $null",
+    "'' -eq '0'",
+    "'' -eq 0",
+    "'0' -eq 0",
+    "'1.0' -eq 1",
+    "'A' -ceq 'a'",
+    "'A' -ieq 'a'",
+    '0 -eq $null',
+    "0 -eq '0'",
+    "1 -eq '1.0'",
     '$null + $true',
     "$null + 'abc'",
     '$null + 1.5d',
@@ -678,6 +694,16 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     "'a' + $null",
     "'a' + $true",
     "'a' + 1.50d",
+)
+
+#: A join with a Double on its right, over each kind of left operand `+` joins on: a String that
+#: spells a number, the empty String, and a Char. What each comes to is the text of the left operand
+#: followed by the text .NET writes the Double as, so an answer that added the two numbers instead
+#: would be a Double where a host produces a String.
+UNSPELLED_JOINS: tuple[str, ...] = (
+    "'5' + 1.5",
+    "'' + 1.5",
+    '[char]65 + 1.5',
 )
 
 
@@ -806,6 +832,16 @@ def _negated(expression: str) -> Ps1Outcome:
     return apply_unary(applied.operator, read(applied.operand))
 
 
+def _negated_as_subtraction(expression: str) -> Ps1Outcome:
+    """
+    What the same negation comes to when it is asked as the subtraction 5.1 compiles it into: `-`
+    over an Int32 zero and the fact `read` makes of the operand the minus stands before.
+    """
+    applied = _negation(expression)
+    assert applied is not None, expression
+    return apply('-', Ps1Constant(INT32, 0), read(applied.operand))
+
+
 def _measured_negation(expression: str) -> tuple[str, str]:
     """
     The .NET type and the rendered value a host printed for a measured negation.
@@ -815,6 +851,57 @@ def _measured_negation(expression: str) -> tuple[str, str]:
 
 def _measured_negation_fact(expression: str) -> Ps1Fact:
     return _witnessed_fact(_measured_negation(expression))
+
+
+def _coerced(text: str) -> Ps1Fact:
+    """
+    The number a String computes as where an operator wants one, which keeps the type the numeral
+    written inside it spells. A text this reader answers nothing for is a broken selection here
+    rather than a case to pass over: every one of `NEGATED_STRINGS` spells a number 5.1 reads.
+    """
+    coerced = _coerced_numeral(Ps1Constant(STRING, text))
+    assert coerced is not None, text
+    return coerced
+
+
+def _sign_of(fact: Ps1Fact) -> float:
+    """
+    The sign a floating payload carries, which is the only thing that tells `+0.0` from `-0.0`: the
+    two compare equal, so a negation that produced the other one is invisible to `==`.
+    """
+    payload = _payload(fact)
+    assert isinstance(payload, float), payload
+    return math.copysign(1.0, payload)
+
+
+#: The String operands a negation is asked over. Between them they spell a number of every width
+#: 5.1 reads out of a String — the `L` suffix over an integer and over a real, two decimals no Int32
+#: holds, a binary multiplier, a real, an exponent and the `D` suffix — and the last four spell one
+#: an Int32 does hold, so that a width kept and a width lost are told apart.
+NEGATED_STRINGS: tuple[str, ...] = (
+    '5L',
+    '1.5L',
+    '2147483648',
+    '3000000000',
+    '5gb',
+    '1.5',
+    '1e3',
+    '5d',
+    '5',
+    '1kb',
+    '0xabc',
+    '',
+)
+
+#: Two magnitudes at the widest a .NET `System.Decimal` reaches. Such a value is a 96 bit integer
+#: scaled by a power of ten, so `2**96 - 1` is the largest it holds at scale zero and carries the 29
+#: significant digits the type is worth; the second is those same digits at a scale of one. Python
+#: keeps 28 by default and rounds every `decimal` result to whatever `decimal.getcontext().prec`
+#: says, so either magnitude comes back a different number from arithmetic that consults it.
+WIDEST_DECIMALS: tuple[decimal.Decimal, ...] = (
+    decimal.Decimal((1 << 96) - 1),
+    decimal.Decimal(F'{(1 << 96) - 1}E-1'),
+)
 
 
 #: The shapes a measured row settles an expression's truth in. They are one question written down
@@ -2424,7 +2511,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 163, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 175, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
@@ -2718,20 +2805,18 @@ class TestPs1MeasuredNegation(unittest.TestCase):
             },
         )
 
-    def test_the_measured_negations_the_domain_leaves_unpinned_are_the_throws_and_one_double(self):
+    def test_the_measured_negations_the_domain_leaves_unpinned_are_the_throws(self):
         """
-        `- '1e3'` is the one negation a host answers and the domain does not: 5.1 reads the exponent
-        and prints a Double, which the grid's String row does not name, so the number the kernel
-        computed is refused rather than stamped with a type no measurement carries.
+        Every negation a host answered is one the domain names a value for, and the two it leaves
+        are the two the host refused as well.
         """
         self.assertEqual(
             sorted(
                 expression for expression in NEGATION_ROWS
                 if not isinstance(_negated(expression).value, Ps1Constant)
             ),
-            ["- '1e3'", "- 'abc'", '- @()'],
+            sorted(THROWN_NEGATIONS),
         )
-        self.assertEqual(_measured_negation("- '1e3'"), ('System.Double', '-1000'))
 
     def test_a_negation_the_host_threw_on_names_no_value_and_reports_the_throw(self):
         self.assertEqual(
@@ -2766,6 +2851,77 @@ class TestPs1MeasuredNegation(unittest.TestCase):
         for operand in (UNKNOWN, Ps1Typed(INT32), Ps1Typed(DOUBLE), Ps1Typed(STRING)):
             with self.subTest(repr(operand)):
                 self.assertEqual(apply_unary('-', operand), NOTHING)
+
+    def test_a_negation_is_the_subtraction_from_an_int32_zero_it_is_compiled_into(self):
+        """
+        `VisitUnaryExpression` in `src/System.Management.Automation/engine/parser/Compiler.cs` of
+        the 5.1 sources compiles `- x` into a binary subtraction whose left operand is the Int32
+        zero of `ExpressionCache.Constant(0)`. The unary answer and the binary one are therefore one
+        answer, over every operand a host was measured negating.
+        """
+        self.assertEqual(
+            {expression: _negated(expression) for expression in NEGATION_ROWS},
+            {expression: _negated_as_subtraction(expression) for expression in NEGATION_ROWS},
+        )
+
+    def test_a_string_operand_negates_at_the_width_the_numeral_inside_it_takes(self):
+        """
+        A String is read as a number before it is negated, and that number takes the width its own
+        spelling asks for rather than the Int32 an unsuffixed numeral would take. `_coerced_numeral`
+        is the reader that answers the same question where a binary operator wants a number out of
+        a String, so a negation typed by the String itself disagrees with it.
+        """
+        negated = {
+            text: apply_unary('-', Ps1Constant(STRING, text)) for text in NEGATED_STRINGS
+        }
+        self.assertEqual(
+            {text: type_of(outcome.value) for text, outcome in negated.items()},
+            {text: type_of(_coerced(text)) for text in NEGATED_STRINGS},
+        )
+        self.assertEqual(
+            negated,
+            {
+                text: apply('-', Ps1Constant(INT32, 0), Ps1Constant(STRING, text))
+                for text in NEGATED_STRINGS
+            },
+        )
+
+    def test_a_decimal_at_the_widest_magnitude_negates_exactly_under_any_decimal_context(self):
+        """
+        Python rounds every `decimal` result to `decimal.getcontext().prec`, which is 28 by default
+        and which anything else sharing the process may set to anything at all. A `System.Decimal`
+        carries 29 significant digits, so a negation reached through that arithmetic hands back a
+        different number from the one it was given — under the default context as much as under a
+        narrower one, and a host changes no digit of a value it negates.
+        """
+        for precision in (1, 28, 60):
+            for value in WIDEST_DECIMALS:
+                negated = decimal.Decimal(F'-{value}')
+                with self.subTest(precision=precision, value=str(value)):
+                    with decimal.localcontext() as context:
+                        context.prec = precision
+                        answered = apply_unary('-', Ps1Constant(DECIMAL, value))
+                        restored = apply_unary('-', Ps1Constant(DECIMAL, negated))
+                    self.assertEqual(answered, Ps1Outcome(False, Ps1Constant(DECIMAL, negated)))
+                    self.assertEqual(restored, Ps1Outcome(False, Ps1Constant(DECIMAL, value)))
+
+    def test_a_floating_zero_negates_to_the_zero_a_subtraction_from_zero_produces(self):
+        """
+        IEEE-754 subtraction under round to nearest answers `0 - 0.0` and `0 - -0.0` with `+0.0`
+        alike, and `VisitUnaryExpression` in
+        `src/System.Management.Automation/engine/parser/Compiler.cs` compiles the unary minus into
+        exactly that subtraction. Python's own minus answers `-0.0` for the first of the two, and a
+        comparison counts the two zeros equal, so what is read here is the sign they carry.
+        """
+        for operand in (0.0, -0.0):
+            with self.subTest(repr(operand)):
+                answered = apply_unary('-', Ps1Constant(DOUBLE, operand))
+                self.assertEqual(answered, Ps1Outcome(False, Ps1Constant(DOUBLE, 0.0)))
+                self.assertEqual(_sign_of(answered.value), 1.0)
+                self.assertEqual(
+                    _sign_of(apply('-', Ps1Constant(INT32, 0), Ps1Constant(DOUBLE, operand)).value),
+                    1.0,
+                )
 
 
 class TestPs1MeasuredTruth(unittest.TestCase):
@@ -2961,6 +3117,25 @@ class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
         self.assertEqual(_applied("'a' + @(1, 2)"), NOTHING)
         self.assertEqual(_applied("'a' + 1.5"), NOTHING)
 
+    def test_a_join_whose_appended_text_is_unwritable_names_no_value_rather_than_a_sum(self):
+        """
+        Measured, `'5' + 5` is the String `55`: a numeral spelled inside the left operand is text
+        like any other and never an addend, so the operand that decides between joining and adding
+        is still the left one when both of them read as numbers. The text a Double contributes to
+        such a join is .NET's to write and no value here, so each join below is one this names
+        nothing for — where the sum of its two numbers would be a Double no run of the script ever
+        produces.
+        """
+        self.assertEqual(_measured("'5' + 5"), ('System.String', '55'))
+        self.assertEqual(
+            {expression: _applied(expression) for expression in UNSPELLED_JOINS},
+            {expression: NOTHING for expression in UNSPELLED_JOINS},
+        )
+
+    def test_a_right_operand_whose_text_is_written_here_is_joined_all_the_same(self):
+        self.assertEqual(_applied("'5' + 5"), Ps1Outcome(False, Ps1Constant(STRING, '55')))
+        self.assertEqual(_applied('[char]65 + 1'), Ps1Outcome(False, Ps1Constant(STRING, 'A1')))
+
 
 class TestPs1CellsTheWitnessesReach(unittest.TestCase):
     """
@@ -2972,9 +3147,16 @@ class TestPs1CellsTheWitnessesReach(unittest.TestCase):
     """
 
     def test_the_operand_types_an_answered_cell_stands_on_are_the_ones_reached(self):
+        """
+        `-eq` and `-ne` stand outside this, because an absent operand is answered by a rule rather
+        than by a cell: `$null -eq <anything>` is `$False` and `$null -eq $null` is `$True`, so the
+        pair is settled without the grid being read at all and it witnesses nothing about how far
+        the witnesses reached. Including them would make every operand type look spanned.
+        """
         answered = {
             (operator, left, right)
             for operator in GRID_OPERATORS
+            if operator not in ('-eq', '-ne')
             for left in GRID_WITNESSES
             for right in GRID_WITNESSES
             if apply(operator, _grid_operand(left), _grid_operand(right)) != NOTHING
@@ -3162,7 +3344,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 91)
+        self.assertEqual(len(composed), 105)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -3262,7 +3444,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 2253)
+        self.assertEqual(len(compared), 2301)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -3277,7 +3459,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2313)
+        self.assertEqual(len(compared), 2354)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -3292,7 +3474,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2313)
+        self.assertEqual(len(compared), 2354)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -3303,7 +3485,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 1289)
+        self.assertEqual(len(STRINGS), 1322)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
@@ -3317,7 +3499,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 456)
+        self.assertEqual(len(NUMERALS), 464)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -3353,7 +3535,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 391)
+        self.assertEqual(len(consulted), 403)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -3403,7 +3585,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1789)
+        self.assertEqual(len(compared), 1821)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
@@ -3608,7 +3790,7 @@ class TestPs1OperatorCaseDoesNotChangeTheAnswer(unittest.TestCase):
             expression for expression in OPERATION_ROWS
             if any(character.isalpha() for character in _operator_of(expression))
         ]
-        self.assertEqual(len(lettered), 80)
+        self.assertEqual(len(lettered), 92)
         self.assertEqual(
             {expression: _cased(expression, str.upper) for expression in lettered},
             {expression: _cased(expression, str.lower) for expression in lettered},
