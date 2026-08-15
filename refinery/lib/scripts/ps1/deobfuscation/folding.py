@@ -1201,39 +1201,21 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         return Ps1Variable(name='True' if result else 'False')
 
     def _handle_comparison(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
-        compared = _folded(apply(op, read(node.left), read(node.right)))
-        if compared is not None:
-            return compared
-        return self._handle_string_equality(node, op)
-
-    def _handle_string_equality(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
         """
-        Fold an equality comparison between two constant strings. Only equality operators are folded
-        (`-eq`/`-ne` and their case-sensitive `-ceq`/`-cne` and explicit case-insensitive `-ieq`/`-ine`
-        variants); ordering comparisons follow culture-dependent rules and are left untouched.
+        Fold a comparison, which the value domain answers alone: the equality of two texts, the case
+        a spelling counts and what an absent operand compares as all live in
+        `refinery.lib.scripts.ps1.analysis.values`, so that one reader decides what a comparison is
+        and a measurement that moves it moves in one place.
         """
-        base = op[2:] if op[:2] in ('-c', '-i') else op[1:]
-        if base not in ('eq', 'ne'):
-            return None
-        left = text_of(read(node.left))
-        right = text_of(read(node.right))
-        if left is None or right is None:
-            return None
-        if op.startswith('-c'):
-            equal = left == right
-        else:
-            equal = left.lower() == right.lower()
-        return self._bool_literal(equal if base == 'eq' else not equal)
+        return _folded(apply(op, read(node.left), read(node.right)))
 
     def _handle_logical(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
         """
         Fold the logical operators `-and`, `-or`, and `-xor` when both operands are constant.
         """
         left = is_truthy(node.left)
-        if left is None:
-            return None
         right = is_truthy(node.right)
-        if right is None:
+        if left is None or right is None:
             return None
         if op == '-and':
             result = left and right

@@ -973,6 +973,11 @@ def _decimal_numeral(text: str, sign: int, multiplier: int) -> Ps1Fact:
     and `10^32` Double. A `L` or `D` suffix names the type instead, and over a real that is a
     conversion rather than a refusal: `1.5L` is Int64 2 and `2.5L` is Int64 2, which is the
     half-to-even rounding a cast performs.
+
+    A real `Decimal` takes its sign by `copy_negate` rather than by a multiplication, which is a
+    *context* operation in Python and rounds to the ambient 28 digits where the type holds 29: the
+    literal `7922816251426433759354395033.5d` was read as `7922816251426433759354395034`, a number
+    the source does not spell, and every reader of the constant inherited it.
     """
     suffix = text[-1:].lower()
     if suffix in ('l', 'd'):
@@ -991,7 +996,8 @@ def _decimal_numeral(text: str, sign: int, multiplier: int) -> Ps1Fact:
     if suffix and multiplier != 1:
         return UNKNOWN
     if suffix == 'd':
-        return Ps1Constant(_DECIMAL, sign * decimal.Decimal(text))
+        spelled = decimal.Decimal(text)
+        return Ps1Constant(_DECIMAL, spelled.copy_negate() if sign < 0 else spelled)
     if suffix == 'l':
         return _long(sign * round(decimal.Decimal(text)))
     return _double(sign * float(text) * multiplier)
@@ -1278,16 +1284,15 @@ def _negated(operand: Ps1Fact) -> Ps1Outcome:
     `-(0.0)` is a negative one, and a sign this domain invented travels into every quotient taken
     from it.
 
-    A `Decimal` is the exception and uses `copy_negate`, because arithmetic on a `Decimal` is a
-    *context* operation in Python and rounds to the ambient precision, which is 28 digits where a
-    Decimal holds 29: `- 79228162514264337593543950335d` came back as
-    `-79228162514264337593543950340`, a wrong value reported as a definite one, and any other code
-    in the process moving `decimal.getcontext().prec` moved it again. A sign flip has no zero to
-    disagree about, so it is the exact reading here and the subtraction is not.
+    A `Decimal` is subtracted like every other number, and by the same `_computed` a binary `-`
+    reaches, so that the one operation is computed one way. A sign flip through `copy_negate` stood
+    here and is the reading that does *not* agree with 5.1 on a zero — Python's `Decimal` has a
+    signed zero too, so `- 0d` came back as `-0` where a host writes `0`.
 
     The result reaches `_decimal_result` for the same reason every binary kernel result does: a
-    number that has left the range a `Decimal` holds is the throw a host raises, and one that has
-    overflowed to an infinity is a value this domain does not carry.
+    number that has left the range a `Decimal` holds is the throw a host raises, one that has
+    overflowed to an infinity is a value this domain does not carry, and one the type holds only a
+    rounding of is not a value this can report.
     """
     coerced = _coerced_numeral(operand)
     if coerced is not None:
@@ -1302,8 +1307,7 @@ def _negated(operand: Ps1Fact) -> Ps1Outcome:
     if number is None:
         return NOTHING
     try:
-        computed = _decimal_result(
-            number.copy_negate() if isinstance(number, decimal.Decimal) else 0 - number)
+        computed = _computed(operator_module.sub, 0, number)
     except _Throws:
         return Ps1Outcome(True, UNKNOWN)
     if computed is None:
@@ -1440,36 +1444,42 @@ def evaluate(
     again at *its* parent: the recursion below is proportional to the subtree, so the walk as a
     whole is quadratic in the depth of an expression, and a chain of two hundred operands the pass
     refuses to fold is where that stops being theoretical. What is remembered is keyed on the node's
-    identity and on the `type_of_variable` that was asked with, and it is discarded the moment
-    `refinery.lib.scripts.mutation_epoch` moves — so an entry can only ever be read back over the
-    same tree that produced it, and this stays a function of its arguments.
+    identity, and the whole table is dropped the moment `refinery.lib.scripts.mutation_epoch` moves
+    — so an entry can only ever be read back over the same tree that produced it, and this stays a
+    function of its arguments.
+
+    **Only the query that types no variable is remembered**, which is the one that descent makes. A
+    caller-supplied typing is state this module does not own: two callers that type an occurrence
+    differently may not share an answer, so an entry would have to be keyed on the callable, which
+    is comparable only by identity — and a bound method fails that against itself, so the table
+    would be written and never read. Keeping one alive to compare against is worse than useless: a
+    typing reaches the pass that wrote it and so the tree, and a table whose keys are weak so that a
+    tree it answered for can be collected would then hold that tree through its own values.
     """
     if node is None:
         return NOTHING
-    remembered = _EVALUATIONS.get(node)
+    if type_of_variable is not None:
+        return _evaluated(node, type_of_variable)
+    global _EVALUATED_AT
     epoch = mutation_epoch()
-    if remembered is not None and remembered.epoch == epoch:
-        if remembered.type_of_variable is type_of_variable:
-            return remembered.outcome
-    outcome = _evaluated(node, type_of_variable)
-    _EVALUATIONS[node] = _Evaluation(epoch, type_of_variable, outcome)
+    if epoch != _EVALUATED_AT:
+        _EVALUATIONS.clear()
+        _EVALUATED_AT = epoch
+    remembered = _EVALUATIONS.get(node)
+    if remembered is not None:
+        return remembered
+    outcome = _evaluated(node, None)
+    if mutation_epoch() == epoch:
+        _EVALUATIONS[node] = outcome
     return outcome
 
 
-class _Evaluation(typing.NamedTuple):
-    """
-    What `evaluate` answered for one node, and what makes that answer still the current one: the
-    mutation counter no tree had moved past when it was computed, and the typing it was computed
-    under. Both are compared rather than assumed, so a caller that types variables differently from
-    the last one never reads the last one's answer.
-    """
-
-    epoch: int
-    type_of_variable: Ps1VariableTyping | None
-    outcome: Ps1Outcome
-
-
-_EVALUATIONS: WeakKeyDictionary[Node, _Evaluation] = WeakKeyDictionary()
+#: What `evaluate` has already answered for a node, and the mutation counter those answers stand on.
+#: The counter is one number for the whole table rather than one per entry because it invalidates
+#: every entry at once, and the table is emptied rather than left to be stepped over. Keys are weak
+#: so that a tree nothing else holds is still collected; nothing here refers back to one.
+_EVALUATIONS: WeakKeyDictionary[Node, Ps1Outcome] = WeakKeyDictionary()
+_EVALUATED_AT = -1
 
 
 def _evaluated(
@@ -1681,11 +1691,11 @@ def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
         elements = _elements(fact)
         if elements is not None:
             return _collection_is_true(elements)
-        truth = _numeric_source(fact)
-        return None if truth is None else truth != 0
     number = _numeric_source(fact)
     if number is None:
         return None
+    if target == _BOOLEAN:
+        return number != 0
     if target == _CHAR:
         rounded = _rounded(number)
         return None if rounded is None else _character(rounded)
@@ -1805,6 +1815,10 @@ def _rendered(fact: Ps1Constant) -> str | None:
     measured, `'a' + $true` is `aTrue` and `'a' + 1.50d` is `a1.50`, each the same as writing
     `[string]` against the operand. See `_concatenated`.
 
+    A `Decimal` is written in plain notation rather than by `str`, which switches to an exponent
+    wherever the number is spelled with a positive one: `[string]1e3d` is `1000` on the host and was
+    `1E+3` here, which is a text no `Decimal` .NET writes ever takes.
+
     A `Double` and an `Object[]` are absent for the same reason in two shapes: what a host writes is
     not what this module could compute. `[string]0.5` is `0.5` and `[string]'9223372036854775808'`
     cast to a Double is `9.22337203685478E+18`, which is .NET's formatting rather than Python's, and
@@ -1812,7 +1826,9 @@ def _rendered(fact: Ps1Constant) -> str | None:
     """
     if fact.type == _STRING:
         return fact.payload if isinstance(fact.payload, str) else None
-    if fact.type in _INTEGER_RANGE or fact.type in (_CHAR, _BOOLEAN, _DECIMAL):
+    if fact.type == _DECIMAL:
+        return format(fact.payload, 'f') if isinstance(fact.payload, decimal.Decimal) else None
+    if fact.type in _INTEGER_RANGE or fact.type in (_CHAR, _BOOLEAN):
         return str(fact.payload)
     return None
 
@@ -2123,16 +2139,13 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
             return None
         return _BITWISE[operator](operands[0], operands[1])
     if operator == '+':
-        joined = _concatenated(left, right)
-        if joined is not None:
-            return joined
         if _concatenates(left):
-            return None
-    if operator == '+' and left is NULL and isinstance(right, Ps1Constant):
-        # `$null` on the left of `+` is answered with the right operand *as it stands*, so
-        # `$null + @(1, 2)` is that collection and not a longer one — measured two elements, where
-        # `@(1, 2) + $null` is three. Nothing is added and nothing is converted.
-        return right.payload
+            return _concatenated(left, right)
+        if left is NULL and isinstance(right, Ps1Constant):
+            # `$null` on the left of `+` is answered with the right operand *as it stands*, so
+            # `$null + @(1, 2)` is that collection and not a longer one — measured two elements,
+            # where `@(1, 2) + $null` is three. Nothing is added and nothing is converted.
+            return right.payload
     if _elements(left) is not None and operator in ('+', '*'):
         return _collected_operand(operator, left, right)
     if operator == '*' and _replicated(left):
@@ -2140,28 +2153,20 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         # not the number 10. Nothing here computes that repetition, so the pair is declined before
         # it can be read as arithmetic.
         return None
-    base = _equality_base(operator)
-    if base is not None:
-        settled = _equality(base, operator, left, right)
-        if settled is not None:
-            return settled
-        if type_of(left) == _STRING:
-            # A String on the left compares as text or not at all, and never falls through to the
-            # arithmetic below. Reaching `_numeric_pair` here is what made `'' -eq '0'` `$True`.
-            # A String on the *right* of a number is a different question — there the number
-            # decides and the text is read as one, which is what `_numeric_pair` already does.
-            return None
+    if operator in _COMPARISON_SPELLINGS:
+        return _compared(operator, left, right)
     operands = _numeric_pair(left, right)
     if operands is None:
         return None
     a, b = operands
-    if operator in _COMPARISONS:
-        return _COMPARISONS[operator](a, b)
     if operator == '/':
         if b == 0:
             return _divided_by_zero(b)
         if isinstance(a, int) and isinstance(b, int) and a % b == 0:
             return a // b
+        if isinstance(a, decimal.Decimal) and isinstance(b, decimal.Decimal):
+            quotient = _decimal_quotient(a, b)
+            return None if quotient is None else _decimal_result(quotient)
         return _decimal_result(operator_module.truediv(a, b))
     if operator == '%':
         if b == 0:
@@ -2173,7 +2178,7 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
             return _decimal_result(_decimal_remainder(a, b))
         return _finite(math.fmod(a, b))
     arithmetic = _ARITHMETIC.get(operator)
-    return None if arithmetic is None else _decimal_result(arithmetic(a, b))
+    return None if arithmetic is None else _computed(arithmetic, a, b)
 
 
 def _divided_by_zero(divisor: _Number) -> _Number | None:
@@ -2193,11 +2198,25 @@ def _divided_by_zero(divisor: _Number) -> _Number | None:
     raise _Throws
 
 
+#: The types a value is a text of. A `Char` is one of them wherever an operator's *left* operand
+#: decides what the operation is: `'a' + 1` is the String `a1` and `[char]65 + 1` is `A1`, measured,
+#: where `1 + 'a'` throws and `1 + [char]65` is the number 66. That a Char is a text on one side of
+#: an operator and a number on the other is the whole of what makes the Char erasure a wrong *value*
+#: rather than only a wrong type.
+_TEXTUAL = (_STRING, _CHAR)
+
+
+def _is_text(fact: Ps1Fact) -> typing.TypeGuard[Ps1Constant]:
+    """
+    Whether a fact is a text this module holds.
+    """
+    return isinstance(fact, Ps1Constant) and fact.type in _TEXTUAL
+
+
 def _concatenates(fact: Ps1Fact) -> typing.TypeGuard[Ps1Constant]:
     """
     Whether a left operand of `+` joins text rather than adding, which is the counterpart of
-    `_replicated` for the other operator its left operand decides. Measured: `'a' + 1` is the String
-    `a1` and `[char]65 + 1` is `A1`, where `1 + 'a'` throws and `1 + [char]65` is the number 66.
+    `_replicated` for the other operator its left operand decides.
 
     It is a question of its own rather than a line inside `_concatenated`, because a concatenation
     that function *declines to spell* is not an addition: `'a' + 1.5` is the String `a1.5`,
@@ -2205,23 +2224,20 @@ def _concatenates(fact: Ps1Fact) -> typing.TypeGuard[Ps1Constant]:
     refusal as *this is not a concatenation* let `'5' + 1.5` fall through to the arithmetic and fold
     to the number 6.5, a wrong value where a host writes `51.5`.
     """
-    return isinstance(fact, Ps1Constant) and fact.type in (_STRING, _CHAR)
+    return _is_text(fact)
 
 
-def _concatenated(left: Ps1Fact, right: Ps1Fact) -> str | None:
+def _concatenated(left: Ps1Constant, right: Ps1Fact) -> str | None:
     """
     The text `+` joins when its *left* operand is a String or a Char, or `None` where this module
-    computes nothing for it. Which operands those are is `_concatenates`, and a Char being a text on
-    this side of the operator and a number on the other is the whole of what makes the Char erasure
-    a wrong *value* rather than only a wrong type.
+    computes nothing for it. Which operands those are is `_concatenates`, which the caller has
+    already asked.
 
     The right operand contributes what a cast of it to `String` would, `$null` contributing nothing:
     `'a' + $null` is `a`, measured. A value `_rendered` refuses is refused here for its own reason —
     a `Double` because the text is .NET's formatting, an `Object[]` because `$OFS` separates it and
     lives in the session.
     """
-    if not _concatenates(left):
-        return None
     head = _rendered(left)
     if head is None:
         return None
@@ -2279,22 +2295,43 @@ def _numeric_pair(left: Ps1Fact, right: Ps1Fact):
     return values[0], values[1]
 
 
-#: What a remainder of two `Decimal`s has to be computed at. Python reaches a remainder through the
-#: integer quotient and raises `InvalidOperation` where that quotient does not fit the context, so
-#: the default 28 digits refuse `[decimal]::MaxValue % 1.5d` — measured a `Decimal` 0 on the host,
-#: and raised out of `apply` and into the caller here until this was given room. Both operands are
-#: inside the `Decimal` range, so the quotient is at most the largest over the smallest and 60
-#: digits covers it. The remainder itself is smaller than the divisor and needs no room at all.
-_DECIMAL_QUOTIENT = decimal.Context(prec=60)
-
-
 def _decimal_remainder(a: decimal.Decimal, b: decimal.Decimal) -> decimal.Decimal:
     """
-    `a % b` over two `Decimal`s, at the precision the intermediate quotient needs rather than the
-    one the result does.
+    `a % b` over two `Decimal`s, at the precision the intermediate quotient needs rather than the one
+    the result does. Python reaches a remainder through that quotient and raises `InvalidOperation`
+    where it does not fit the context, so the ambient 28 digits refuse `[decimal]::MaxValue % 1.5d` —
+    measured a `Decimal` 0 on the host, and raised out of `apply` and into the caller here until this
+    was given room. The remainder itself is smaller than the divisor and needs no room at all.
     """
-    with decimal.localcontext(_DECIMAL_QUOTIENT):
+    with decimal.localcontext(_DECIMAL_ARITHMETIC):
         return a % b
+
+
+#: What an operation over two `Decimal`s has to be computed at. Python's operators are *context*
+#: operations and the ambient precision is 28 digits, where a `System.Decimal` is a 96-bit
+#: coefficient and holds 29: at the default context `79228162514264337593543950335d + 0d` came back
+#: as `79228162514264337593543950340`, a wrong value reported as a definite one, and anything else
+#: in the process moving `decimal.getcontext().prec` moved it again. The room here is for the
+#: *exact* result, so that what the type holds is decided by `_decimal_result` and
+#: `_decimal_quotient` rather than by a rounding whose rule nothing here measured. Both operands are
+#: inside the `Decimal` range, so a product is at most 58 digits, a sum at most 58 places, and the
+#: intermediate quotient a remainder is reached through at most the largest over the smallest.
+_DECIMAL_ARITHMETIC = decimal.Context(prec=120)
+
+
+def _computed(
+    arithmetic: Callable[[typing.Any, typing.Any], _Number],
+    a: _Number,
+    b: _Number,
+) -> _Number | None:
+    """
+    An arithmetic result, with a `Decimal` operand computed at the precision the type has rather
+    than the one the process happens to be set to. See `_DECIMAL_ARITHMETIC`.
+    """
+    if not isinstance(a, decimal.Decimal) and not isinstance(b, decimal.Decimal):
+        return _decimal_result(arithmetic(a, b))
+    with decimal.localcontext(_DECIMAL_ARITHMETIC):
+        return _decimal_result(arithmetic(a, b))
 
 
 def _decimal_result(value: _Number) -> _Number | None:
@@ -2302,10 +2339,70 @@ def _decimal_result(value: _Number) -> _Number | None:
     A computed number, with a `Decimal` that has left the range of a `Decimal` reported as the throw
     it is. Python carries such a value without complaint; .NET does not have it, so neither does the
     domain, and calling it a throw is what the host does rather than a refusal.
+
+    A `Decimal` the type cannot hold *exactly* is refused instead. .NET rounds such a result to the
+    96 bits and 28 places it has, by a rule no measurement here covers, so computing it at a
+    precision that carries the exact answer and then reporting whatever Python's own rounding made
+    of it would be a value of our invention. See `_holds_exactly`.
     """
-    if isinstance(value, decimal.Decimal) and not _DECIMAL_MIN <= value <= _DECIMAL_MAX:
-        raise _Throws
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            return None
+        if not _DECIMAL_MIN <= value <= _DECIMAL_MAX:
+            raise _Throws
+        if not _holds_exactly(value):
+            return None
     return _finite(value)
+
+
+def _holds_exactly(value: decimal.Decimal) -> bool:
+    """
+    Whether a `System.Decimal` is the number this `Decimal` is, rather than a rounding of it. The
+    type is a coefficient of at most 96 bits scaled by a power of ten between zero and twenty-eight,
+    and both halves of that are asked here: a result computed at `_DECIMAL_ARITHMETIC`'s precision
+    can carry more places than the type has, and one inside the range the caller already tested can
+    still spell more digits than the coefficient holds — `9.9999999999999999999999999999` is smaller
+    than a `Decimal`'s largest value and is not a `Decimal`.
+    """
+    spelling = value.as_tuple()
+    if not isinstance(spelling.exponent, int) or spelling.exponent < -28:
+        return False
+    coefficient = 0
+    for digit in spelling.digits:
+        coefficient = coefficient * 10 + digit
+    return coefficient <= _DECIMAL_MAX
+
+
+#: The smallest step a `System.Decimal` takes, which is what a quotient the type cannot hold exactly
+#: has to be rounded onto.
+_DECIMAL_STEP = decimal.Decimal(1).scaleb(-28)
+
+
+def _decimal_quotient(a: decimal.Decimal, b: decimal.Decimal) -> decimal.Decimal | None:
+    """
+    `a / b` over two `Decimal`s, or `None` where this module computes nothing for it.
+
+    A quotient the type holds exactly is that quotient — measured, `79228162514264337593543950335d /
+    1d` prints in full. One it does not is rounded onto the twenty-eight places the type has, which
+    is what a host does with `1d / 3d` and its `0.3333333333333333333333333333`. Both are computed
+    at `_DECIMAL_ARITHMETIC` rather than at the ambient precision: dividing under
+    `decimal.getcontext()` made `1d / 3d` the number `0.3` in a process that had set `prec` to one,
+    a wrong constant folded into a script by a setting that has nothing to do with PowerShell.
+
+    **A quotient that lands exactly between two of those places is refused**, because which way .NET
+    breaks that tie is not something anything here measured. Asking is cheap and exact: round it both
+    ways, and answer only where the two agree, which is every quotient whose discarded remainder is
+    not a half.
+    """
+    with decimal.localcontext(_DECIMAL_ARITHMETIC):
+        exact = a / b
+        if not _DECIMAL_MIN <= exact <= _DECIMAL_MAX:
+            raise _Throws
+        if _holds_exactly(exact):
+            return exact
+        down = exact.quantize(_DECIMAL_STEP, rounding=decimal.ROUND_HALF_DOWN)
+        up = exact.quantize(_DECIMAL_STEP, rounding=decimal.ROUND_HALF_UP)
+    return down if down == up else None
 
 
 def _finite(value: _Number) -> _Number | None:
@@ -2503,7 +2600,12 @@ def _throws_are_modelled(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool:
     modelled wherever that runs, which is every operator the kernel reads a number for. Without
     this the cell's recorded throw stops the kernel being consulted and every string in arithmetic
     is refused, including the ones the host answers.
+
+    Neither licence is given where the operator throws for what its operands *are*, which is a throw
+    no reading of their numbers can see; see `_throws_for_what_the_operands_are`.
     """
+    if _throws_for_what_the_operands_are(operator, left, right):
+        return False
     if operator in ('/', '%'):
         return True
     if operator == '*' and _elements(left) is not None:
@@ -2521,6 +2623,26 @@ def _throws_are_modelled(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool:
     return False
 
 
+def _throws_for_what_the_operands_are(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool:
+    """
+    Whether an operation throws for what its operands *are* rather than for the values they carry.
+    Such a throw is invisible to a kernel that reads numbers out of them, so a cell that recorded
+    one may not be computed in however well the conversions are modelled.
+
+    Two are measured. A Boolean or a Char on the left of `*` has no multiplication at all — `$true *
+    2` and `[char]48 * 2` both raise, where `2 * $true` is 2 and `2 * [char]48` is 96. And a Boolean
+    on the left of a `Decimal` raises for `+`, `-`, `/` and `%` — `$true - 1.0d` throws where
+    `1.0d - $true` is 0 and `$true - 1.5` is -0.5.
+
+    Both reached the kernel on the licence the *other* operand gave, and both were answered: the
+    String licence made `[char]48 * '1'` the number 48 and the `Decimal` licence made `$true - 1.0d`
+    a `Decimal` zero, each a value standing where the host aborts the script.
+    """
+    if operator == '*':
+        return type_of(left) in (_BOOLEAN, _CHAR)
+    return type_of(left) == _BOOLEAN and type_of(right) == _DECIMAL
+
+
 _ARITHMETIC = {
     '+': operator_module.add,
     '-': operator_module.sub,
@@ -2533,48 +2655,187 @@ _BITWISE: dict[str, Callable[[int, int], int]] = {
     '-bxor': int.__xor__,
 }
 
-#: The equality operators, by the spelling that remains once the case prefix is taken off. 5.1 has
-#: three spellings of each — `-eq`, `-ceq` and `-ieq` — and the bare one is the case-insensitive one.
-_EQUALITY: dict[str, bool] = {'eq': False, 'ne': True}
 
-
-def _equality_base(operator: str) -> str | None:
+class _Comparison(typing.NamedTuple):
     """
-    The `eq` or `ne` an equality operator spells, or `None` for an operator that is not one.
+    How one spelling of a comparison operator compares: what it makes of an ordering, whether it is
+    an equality — the two an absent or a textual operand are answered for by a rule of their own —
+    whether a matching pair is the answer or its negation, and whether the case a text was written
+    in counts.
     """
-    stripped = operator[2:] if operator[:2] in ('-c', '-i') else operator[1:]
-    return stripped if stripped in _EQUALITY else None
+
+    decides: Callable[[int, int], bool]
+    equality: bool
+    negated: bool
+    cased: bool
 
 
-def _equality(base: str, operator: str, left: Ps1Fact, right: Ps1Fact) -> bool | None:
+#: Every spelling of a comparison operator, which is a closed set: 5.1 writes each of the six with a
+#: `-c` prefix for the comparison the case counts in and an `-i` prefix for the one it does not, and
+#: the bare spelling is the case-insensitive one.
+_COMPARISON_SPELLINGS: dict[str, _Comparison] = {
+    F'-{prefix}{base}': _Comparison(decides, base in ('eq', 'ne'), base == 'ne', prefix == 'c')
+    for base, decides in (
+        ('eq', operator_module.eq),
+        ('ne', operator_module.ne),
+        ('lt', operator_module.lt),
+        ('le', operator_module.le),
+        ('gt', operator_module.gt),
+        ('ge', operator_module.ge),
+    )
+    for prefix in ('', 'c', 'i')
+}
+
+
+def _compared(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool | None:
     """
-    What `-eq` and `-ne` produce where the arithmetic below is the wrong question, or `None` where
-    this says nothing and the caller decides what that means.
+    What a comparison produces, or `None` where this module computes nothing for it. Every spelling
+    is decided here and none of them reaches the arithmetic on its own, because what a comparison
+    compares is settled by its operands before any number is read out of them.
+    """
+    comparison = _COMPARISON_SPELLINGS[operator]
+    if left is NULL or right is NULL:
+        return _compared_to_absent(comparison, left, right)
+    if _compares_as_text(comparison, left, right):
+        return _compared_as_text(comparison, left, right)
+    if type_of(left) == _BOOLEAN:
+        return _compared_as_truth(comparison, left, right)
+    numeric = _COMPARISONS.get(operator)
+    if numeric is None:
+        return None
+    operands = _numeric_pair(left, right)
+    return None if operands is None else numeric(*operands)
 
-    **The left operand decides**, and the measured pair that proves it is `'1.0' -eq 1`, which is
-    `$False`, against `1 -eq '1.0'`, which is `$True`: a String on the left compares as *text*, so
-    `1` is written `1` and does not match `1.0`, while a number on the left reads the String as a
-    number and 1 does equal 1.0.
+
+def _compared_to_absent(comparison: _Comparison, left: Ps1Fact, right: Ps1Fact) -> bool | None:
+    """
+    What a comparison with `$null` on one side produces, or `None` where this module computes
+    nothing for it.
 
     **An absent value compares by presence and never by conversion.** `$null -eq $null` is `$True`
     while `$null -eq 0`, `$null -eq ''`, `0 -eq $null` and `'' -eq $null` are all `$False`, measured
     — 5.1 answers a null on either side before it converts anything, so the empty String is not the
     absent value and neither is the zero.
+
+    An *ordering* is the same answer read as an order rather than as a match, and what it orders is
+    presence and not the zero a conversion would put there: measured, `$null -lt 0` is `$True` where
+    `0 -lt 0` is `$False`, and `$null -ge 100` is `$False`. Where the other operand sits is
+    `_sorts_below_absent`.
     """
-    negated = _EQUALITY[base]
-    if left is NULL or right is NULL:
-        return (left is NULL and right is NULL) != negated
-    if type_of(left) != _STRING:
+    if not _is_scalar_value(left) or not _is_scalar_value(right):
+        return None
+    if left is NULL and right is NULL:
+        order = 0
+    elif left is NULL:
+        order = 1 if _sorts_below_absent(right) else -1
+    else:
+        order = -1 if _sorts_below_absent(left) else 1
+    return comparison.decides(order, 0)
+
+
+def _sorts_below_absent(fact: Ps1Fact) -> bool:
+    """
+    Whether a value sorts below `$null` rather than above it, which is what 5.1 asks of the operand
+    an absent one is compared against. A *negative* number is below it and everything else is above
+    — a zero, a positive number, a text, a truth, an unsigned integer. Measured: `$null -lt 0` is
+    `$True` while `$null -lt -5` is `$False` and `$null -gt -5` is `$True`, and `$null -lt ''` is
+    `$True`.
+    """
+    payload = fact.payload if isinstance(fact, Ps1Constant) else None
+    return isinstance(payload, (int, float, decimal.Decimal)) and payload < 0
+
+
+def _is_scalar_value(fact: Ps1Fact) -> bool:
+    """
+    Whether a fact names one value this module holds. A `Ps1Typed` names a type and no value, so
+    whether it is the absent one is exactly what is not known about it; a collection is a value and
+    is not one value, and an equality against it filters rather than compares — `@(1, 2) -eq $null`
+    is the empty collection, measured, and not `$False`.
+    """
+    return fact is NULL or (isinstance(fact, Ps1Constant) and fact.type != _OBJECT_ARRAY)
+
+
+def _compared_as_truth(comparison: _Comparison, left: Ps1Fact, right: Ps1Fact) -> bool | None:
+    """
+    What a comparison with a Boolean on the left produces, or `None` where this module computes
+    nothing for it.
+
+    A Boolean on the left converts the right operand to a Boolean and compares the two truths, which
+    is neither the number a Boolean is to arithmetic nor the text it writes: measured, `$true -eq 2`
+    and `$true -eq '0'` are both `$True` — every non-zero number and every non-empty text is the
+    truth the left operand already is — while `$true -lt 2` is `$False`, because two operands that
+    convert to the same truth are neither below nor above one another. Reading the Boolean as its
+    number answered all three the other way round.
+    """
+    here = _truth_value(left)
+    if here is None or not isinstance(right, Ps1Constant):
+        return None
+    try:
+        there = _cast(_BOOLEAN, right)
+    except _Throws:
+        return None
+    return None if not isinstance(there, bool) else comparison.decides(here, int(there))
+
+
+def _compares_as_text(comparison: _Comparison, left: Ps1Fact, right: Ps1Fact) -> bool:
+    """
+    Whether a comparison joins two texts rather than two numbers, which its *left* operand decides.
+
+    A String on the left converts the right operand to a String, so it is a text comparison whatever
+    that operand is: measured, `'1.0' -eq 1` is `$False` — `1` is written `1` and does not match
+    `1.0` — against `1 -eq '1.0'`, which is `$True` because there the number decides and the text is
+    read as one.
+
+    A Char on the left is a text only where the question is whether the two are equal. 5.1 answers
+    that by their characters and ignores the case unless the spelling says otherwise —
+    `[char]65 -eq [char]97` is `$True` and `[char]65 -ceq [char]97` is `$False`, measured — where it
+    *orders* two Chars by their code points, so `[char]97 -lt [char]66` is `$False` and a collation
+    of `a` against `B` would answer `$True`. What a Char converts the right operand to is a Char,
+    which is the character a number spells and not the text it writes: `[char]48 -eq 48` is `$True`,
+    measured, so only a Char beside another text is compared as one.
+    """
+    if not _is_text(left):
+        return False
+    if left.type == _STRING:
+        return True
+    return comparison.equality and _is_text(right)
+
+
+def _compared_as_text(comparison: _Comparison, left: Ps1Fact, right: Ps1Fact) -> bool | None:
+    """
+    What a comparison of two texts produces, or `None` where this module computes nothing for it.
+
+    An *ordering* is refused. 5.1 orders two texts by `CompareInfo.Compare`, which is a collation and
+    not the arithmetic below: measured, `'10' -lt '9'` is `$True` and `'2' -lt '10'` is `$False`,
+    both of which reading the numerals answers the other way.
+
+    An equality is answered from the text each operand writes, with the case counting only where the
+    spelling says it does: `[char]48 -eq '0'` and `[char]65 -eq [char]97` are both `$True` while
+    `[char]65 -ceq [char]97` is `$False`, measured.
+
+    **A pair this decides is not equal is refused where either text leaves ASCII**, because the
+    comparison 5.1 makes is a collation there too and it calls texts equal that no reading of their
+    code points does: `'ss' -eq [char]0x00DF` is `$True`, measured, and so is a text against the
+    same text with a soft hyphen in it. Equality the other way round survives the boundary — two
+    texts this reads as the same are the same text or a case variant of it, which a collation under
+    `IgnoreCase` agrees with — so what the boundary costs is a refusal and never an answer.
+    """
+    if not comparison.equality:
         return None
     if not isinstance(left, Ps1Constant) or not isinstance(right, Ps1Constant):
         return None
     head, tail = _rendered(left), _rendered(right)
     if head is None or tail is None:
         return None
-    same = head == tail if operator.startswith('-c') else head.lower() == tail.lower()
-    return same != negated
+    same = head == tail if comparison.cased else head.lower() == tail.lower()
+    if not same and not (head.isascii() and tail.isascii()):
+        return None
+    return same != comparison.negated
 
 
+#: The comparisons two numbers are computed under, which are the bare spellings alone. A case prefix
+#: cannot change what two numbers compare as, and nothing here measured one doing so either, so a
+#: pair that reaches this table under `-ceq` or `-ilt` is left to the cell rather than answered.
 _COMPARISONS = {
     '-eq': operator_module.eq,
     '-ne': operator_module.ne,

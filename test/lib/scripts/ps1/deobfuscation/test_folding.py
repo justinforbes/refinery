@@ -225,9 +225,15 @@ class TestPs1StringEqualityFolding(TestPs1):
         # Only equality is folded for strings; culture-dependent ordering is left untouched.
         self.assertEqual(self._apply("'a' -lt 'b'", Ps1ConstantFolding), "'a' -lt 'b'")
 
-    def test_sharp_s_not_equal_ss(self):
-        self.assertEqual(self._apply("'ß'  -eq 'SS'", Ps1ConstantFolding), '$False')
-        self.assertEqual(self._apply("'ß' -ieq 'ss'", Ps1ConstantFolding), '$False')
+    def test_a_text_equality_no_reading_of_code_points_decides_is_left_alone(self):
+        """
+        Measured on Windows PowerShell 5.1, both of these are `$True`: the comparison is
+        `CompareInfo.Compare` under the invariant culture, which expands the sharp s.
+        """
+        source = "'ß' -eq 'SS'"
+        self.assertEqual(self._apply(source, Ps1ConstantFolding), source)
+        insensitive = "'ß' -ieq 'ss'"
+        self.assertEqual(self._apply(insensitive, Ps1ConstantFolding), insensitive)
 
 
 class TestPs1LogicalFolding(TestPs1):

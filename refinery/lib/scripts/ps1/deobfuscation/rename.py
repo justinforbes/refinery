@@ -3,7 +3,7 @@ Rename obfuscated variable names to short sequential identifiers.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Node, Transformer
+from refinery.lib.scripts import Node, Transformer, set_value
 from refinery.lib.scripts.ps1.ast import assignment_target_variables
 from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _PS1_SKIP_VARIABLES,
@@ -71,7 +71,7 @@ class Ps1VariableRenaming(Transformer):
             if isinstance(n, Ps1Variable) and _is_user_variable(n):
                 key = n.name.lower()
                 if key in mapping:
-                    n.name = mapping[key]
-                    n.braced = False
+                    set_value(n, 'name', mapping[key])
+                    set_value(n, 'braced', False)
                     self.mark_changed()
         return None

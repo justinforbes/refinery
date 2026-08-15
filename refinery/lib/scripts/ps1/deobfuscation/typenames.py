@@ -3,7 +3,7 @@
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Node, Transformer
+from refinery.lib.scripts import Node, Transformer, set_value
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow
 from refinery.lib.scripts.ps1.analysis.values import (
@@ -241,7 +241,7 @@ class Ps1TypeSystemSimplifications(VariableTypeAwareTransformer):
             return
         canonical = canonical_member_name(obj_type, member_name)
         if canonical is not None and canonical != member_name:
-            node.member = canonical
+            set_value(node, 'member', canonical)
             self.mark_changed()
 
     def _try_strip_name_on_string(

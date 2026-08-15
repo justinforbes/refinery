@@ -22,8 +22,14 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: on the right is a text `_rendered` refuses because the spelling is .NET's. Those pairs were
 #: falling through to the arithmetic and answering `'5' + 1.5` with the number 6.5 where a host
 #: writes `51.5`. They come back down by teaching the domain to spell a Double, not by computing.
+#:
+#: The `String` row was raised a second time, by 160, and again what was withdrawn was a wrong
+#: answer: 5.1 *orders* two texts by `CompareInfo.Compare`, so a String on the left of `-lt`, `-le`,
+#: `-gt` or `-ge` is not the numerals its operands spell — measured, `'10' -lt '9'` is `$True` and
+#: `'2' -lt '10'` is `$False`, both of which reading them as numbers answers the other way. This row
+#: comes back down by a collation and not by an arithmetic.
 GAP: dict[str, int] = {
-    'System.String': 1473,
+    'System.String': 1633,
     'System.Object[]': 1463,
     'System.Char': 1096,
     'System.Int64': 1000,

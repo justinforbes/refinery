@@ -2607,6 +2607,590 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Boolean\tTrue',
             'OUT\tSystem.Boolean\tTrue',
         ),
+    "$t = '10' -lt '9'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = '10' -lt 9; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 10 -lt '9'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = '10' -ge 9; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = 10 -ge '9'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = '10' -ne 10; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = 10 -ne '10'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = 'B' -gt 'a'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'B' -cgt 'a'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'B' -igt 'a'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = '10' -cle '9'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $true -eq 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $true -eq 2; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = 2 -eq $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = $true -eq 'abc'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'abc' -eq $true; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = $true -eq ''; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $false -eq 0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $true -ne 2; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $true -gt $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $false -lt 5; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = $true -ge 'abc'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $null -ne 0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $null -ne $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = $null -lt 'abc'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $null -gt 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $null -ge 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $null -le 1; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = 1 -lt $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 1 -gt $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = 1 -le $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 1 -ge $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = 1 -ne $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'abc' -lt $null; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $false -eq $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $null -eq $false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $true -eq $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 0 -gt $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $null -lt 0; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = '' -gt $null; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = $null -lt ''; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $false -gt $null; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 1 -lt 'abc'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = 1 -gt 'abc'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = 1 -eq 'abc'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = 1 -ne 'abc'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 1 -lt '5'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = 79228162514264337593543950335d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+        ),
+    '$t = -79228162514264337593543950335d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t-79228162514264337593543950335',
+            'OUT\tSystem.Decimal\t-79228162514264337593543950335',
+        ),
+    '$t = - 79228162514264337593543950335d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t-79228162514264337593543950335',
+            'OUT\tSystem.Decimal\t-79228162514264337593543950335',
+        ),
+    '$t = 7922816251426433759354395033.5d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t7922816251426433759354395033.5',
+            'OUT\tSystem.Decimal\t7922816251426433759354395033.5',
+        ),
+    '$t = 1.2345678901234567890123456789d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.2345678901234567890123456789',
+            'OUT\tSystem.Decimal\t1.2345678901234567890123456789',
+        ),
+    '$t = 79228162514264337593543950335d - 1d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t79228162514264337593543950334',
+            'OUT\tSystem.Decimal\t79228162514264337593543950334',
+        ),
+    '$t = 79228162514264337593543950334d + 1d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+        ),
+    '$t = 79228162514264337593543950335d + 1d; Write-Output (,$t); Write-Output $t':
+        ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
+    '$t = 79228162514264337593543950335d * 1d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+        ),
+    '$t = 79228162514264337593543950335d / 1d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+        ),
+    '$t = 79228162514264337593543950335d - -1d; Write-Output (,$t); Write-Output $t':
+        ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
+    '$t = 1.2345678901234567890123456789d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.2345678901234567890123456789',
+            'OUT\tSystem.Decimal\t1.2345678901234567890123456789',
+        ),
+    '$t = 1.50d + 1.50d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t3.00',
+            'OUT\tSystem.Decimal\t3.00',
+        ),
+    '$t = 1d / 3d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t0.3333333333333333333333333333',
+            'OUT\tSystem.Decimal\t0.3333333333333333333333333333',
+        ),
+    '$t = 1d / 0d; Write-Output (,$t); Write-Output $t':
+        ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
+    '$t = [string]1.50d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1.50',
+            'OUT\tSystem.String\t1.50',
+        ),
+    '$t = [string]0.5d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t0.5',
+            'OUT\tSystem.String\t0.5',
+        ),
+    "$t = 'a' + 0.5d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta0.5',
+            'OUT\tSystem.String\ta0.5',
+        ),
+    "$t = 'a' + $false; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\taFalse',
+            'OUT\tSystem.String\taFalse',
+        ),
+    '$t = [string]$false; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\tFalse',
+            'OUT\tSystem.String\tFalse',
+        ),
+    "$t = 'a' + 1L; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta1',
+            'OUT\tSystem.String\ta1',
+        ),
+    '$t = [string]1L; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1',
+            'OUT\tSystem.String\t1',
+        ),
+    "$t = 'a' + 79228162514264337593543950335d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta79228162514264337593543950335',
+            'OUT\tSystem.String\ta79228162514264337593543950335',
+        ),
+    '$t = [string]79228162514264337593543950335d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t79228162514264337593543950335',
+            'OUT\tSystem.String\t79228162514264337593543950335',
+        ),
+    "$t = 'a' + [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta18446744073709551615',
+            'OUT\tSystem.String\ta18446744073709551615',
+        ),
+    '$t = [string][uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t18446744073709551615',
+            'OUT\tSystem.String\t18446744073709551615',
+        ),
+    "$t = 'a' + -1.50d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta-1.50',
+            'OUT\tSystem.String\ta-1.50',
+        ),
+    '$t = [string]-1.50d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t-1.50',
+            'OUT\tSystem.String\t-1.50',
+        ),
+    "$t = 'a' + [char]65; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\taA',
+            'OUT\tSystem.String\taA',
+        ),
+    '$t = - 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t0',
+            'OUT\tSystem.Decimal\t0',
+        ),
+    '$t = - 0.0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t0',
+            'OUT\tSystem.Decimal\t0',
+        ),
+    '$t = 79228162514264337593543950335d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+            'OUT\tSystem.Decimal\t79228162514264337593543950335',
+        ),
+    "$t = '1000' -eq 1e3d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'a' + 1e3d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\ta1000',
+            'OUT\tSystem.String\ta1000',
+        ),
+    "$t = 'x' + 1.0d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1',
+            'OUT\tSystem.String\tx1',
+        ),
+    "$t = [char]48 * '1'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    "$t = $true * '1'; Write-Output (,$t); Write-Output $t":
+        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = [char]48 * 2; Write-Output (,$t); Write-Output $t':
+        ('THROW\tNotADefinedOperationForType\tSystem.Management.Automation.RuntimeException',),
+    '$t = 2 * [char]48; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Int32\t96',
+            'OUT\tSystem.Int32\t96',
+        ),
+    '$t = $true - 1.0d; Write-Output (,$t); Write-Output $t':
+        ('THROW\tSystem.InvalidOperationException\tSystem.InvalidOperationException',),
+    '$t = $true + 1.0d; Write-Output (,$t); Write-Output $t':
+        ('THROW\tSystem.InvalidOperationException\tSystem.InvalidOperationException',),
+    '$t = 1.0d - $true; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t0',
+            'OUT\tSystem.Decimal\t0',
+        ),
+    "$t = [char]48 - '1'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Int32\t47',
+            'OUT\tSystem.Int32\t47',
+        ),
+    '$t = $true - 1.5; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Double\t-0.5',
+            'OUT\tSystem.Double\t-0.5',
+        ),
+    '$t = $true / 1.0d; Write-Output (,$t); Write-Output $t':
+        ('THROW\tSystem.InvalidOperationException\tSystem.InvalidOperationException',),
+    "$t = [char]48 -eq '0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [char]48 -eq 48; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [char]65 -eq [char]97; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = [char]65 -ceq [char]97; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [char]97 -lt [char]66; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = [char]65 -lt [char]97; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = 'ss' -eq [char]0x00DF; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = [char]0x00DF -eq 'ss'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $true -lt 2; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $true -gt 2; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = $true -eq '0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $null -lt -5; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = $null -gt -5; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    '$t = $null -le -5; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = @(1, 2) -eq $null; Write-Output (,$t); Write-Output $t':
+        ('OUT\tSystem.Object[]\t',),
+    "$t = '2' -lt '10'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    "$t = '10' -le '9'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tTrue',
+            'OUT\tSystem.Boolean\tTrue',
+        ),
+    "$t = '10' -gt 9; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.Boolean\tFalse',
+            'OUT\tSystem.Boolean\tFalse',
+        ),
+    '$t = 9.9999999999999999999999999999d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t10',
+            'OUT\tSystem.Decimal\t10',
+        ),
+    '$t = 1.0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.0',
+            'OUT\tSystem.Decimal\t1.0',
+        ),
+    '$t = [string]1.0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1.0',
+            'OUT\tSystem.String\t1.0',
+        ),
+    '$t = 1.0d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1',
+            'OUT\tSystem.Decimal\t1',
+        ),
+    "$t = 'x' + 1.10d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.10',
+            'OUT\tSystem.String\tx1.10',
+        ),
+    '$t = [string]1.10d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1.10',
+            'OUT\tSystem.String\t1.10',
+        ),
+    '$t = 1.10d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.10',
+            'OUT\tSystem.Decimal\t1.10',
+        ),
+    '$t = [string]1.000d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1.000',
+            'OUT\tSystem.String\t1.000',
+        ),
+    "$t = 'x' + 2.0d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx2',
+            'OUT\tSystem.String\tx2',
+        ),
+    '$t = [string]2.0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t2.0',
+            'OUT\tSystem.String\t2.0',
+        ),
+    '$t = [string]0.0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t0.0',
+            'OUT\tSystem.String\t0.0',
+        ),
+    "$z = 1.0d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.0',
+            'OUT\tSystem.String\tx1.0',
+        ),
+    "$z = 1.10d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.10',
+            'OUT\tSystem.String\tx1.10',
+        ),
+    '$z = 1.0d; $t = $z + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.0',
+            'OUT\tSystem.Decimal\t1.0',
+        ),
 }
 
 
@@ -2646,6 +3230,25 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: So the Char erasure is a wrong type, a wrong value (`[int][char]48`), a wrong lookup (a Char
 #: hashtable key), and a throw that does not happen — and this ledger holds only the first two.
 TYPE_DEFECTS: dict[str, str] = {
+    "$t = 'x' + 1.0d; Write-Output (,$t); Write-Output $t":
+        'A Decimal spelled with a trailing zero is written one way where 5.1 folds the expression '
+        'producing it at parse time and another where the same operation runs, so the domain '
+        'computes the run-time spelling for a source the host folds. Measured both ways round: '
+        "`'x' + 1.0d` is `x1` while `$z = 1.0d; 'x' + $z` is `x1.0`, and `1.0d + 0d` is `1` while "
+        '`$z = 1.0d; $z + 0d` is `1.0`. Refusing the fold is not the fix, because the run-time '
+        'spelling is the right answer for the second of each pair and inlining is what hands the '
+        "parser an expression to fold. Nor is dropping the zero: two trailing places survive, `'x' "
+        "+ 1.10d` is `x1.10` and `1.50d + 1.50d` is `3.00`, so what separates them is unmeasured. "
+        'The wrong values themselves are held in '
+        '`test.lib.scripts.ps1.analysis.test_value_facts.MISFOLDED_OPERATIONS`.',
+    "$t = 'x' + 2.0d; Write-Output (,$t); Write-Output $t":
+        'The same, to record that it is the shape of the numeral and not the digit one.',
+    '$t = - 0.0d; Write-Output (,$t); Write-Output $t':
+        'The same normalisation reached through a negation rather than a concatenation.',
+    '$t = 1.0d + 0d; Write-Output (,$t); Write-Output $t':
+        'The same, with the value staying a Decimal rather than becoming text.',
+    '$t = 1.0d - $true; Write-Output (,$t); Write-Output $t':
+        'The same, with the operand that carries the trailing zero on the left.',
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
         'The count is right and the elements are not: the interpreter has no Char in the values '
         'it computes with, so a [char] cast reaches the tree as a one-character String.',

@@ -58,6 +58,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     render,
     resolve_expression_type,
     type_of,
+    text_of,
 )
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.ast import in_evaluation_order, string_value
@@ -615,6 +616,27 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    '$null -gt -5',
+    '$null -le -5',
+    '$null -lt -5',
+    '$true - 1.5',
+    "$true -eq '0'",
+    '$true -gt 2',
+    '$true -lt 2',
+    "'1000' -eq 1e3d",
+    "'a' + 1e3d",
+    "'x' + 1.10d",
+    '1.0d + 0d',
+    '1.0d - $true',
+    '2 * [char]48',
+    '79228162514264337593543950335d + 0d',
+    "[char]48 - '1'",
+    "[char]48 -eq '0'",
+    '[char]48 -eq 48',
+    '[char]65 -ceq [char]97',
+    '[char]65 -eq [char]97',
+    '[char]65 -lt [char]97',
+    '[char]97 -lt [char]66',
     '$null -eq $null',
     "$null -eq ''",
     '$null -eq 0',
@@ -629,6 +651,39 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     '0 -eq $null',
     "0 -eq '0'",
     "1 -eq '1.0'",
+    '$null -eq $false',
+    '$null -ne $null',
+    '$null -ne 0',
+    '$null -ge 1',
+    '$null -gt 1',
+    '$null -le 1',
+    '$null -lt 0',
+    "$null -lt ''",
+    "$null -lt 'abc'",
+    '$false -eq $null',
+    '$false -gt $null',
+    '$true -eq $null',
+    '0 -gt $null',
+    '1 -ge $null',
+    '1 -gt $null',
+    '1 -le $null',
+    '1 -lt $null',
+    '1 -ne $null',
+    "'' -gt $null",
+    "'abc' -lt $null",
+    '$false -eq 0',
+    '$false -lt 5',
+    '$true -eq 1',
+    '$true -eq 2',
+    "$true -eq ''",
+    "$true -eq 'abc'",
+    "$true -ge 'abc'",
+    '$true -gt $false',
+    '$true -ne 2',
+    '2 -eq $true',
+    "'abc' -eq $true",
+    "'10' -ne 10",
+    "10 -ne '10'",
     '$null + $true',
     "$null + 'abc'",
     '$null + 1.5d',
@@ -688,12 +743,26 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     '$null * 1',
     '2147483647 + 1',
     '100000000000000d * 100000000000000d',
+    '1.2345678901234567890123456789d + 0d',
+    '1.50d + 1.50d',
+    '1d / 3d',
+    '79228162514264337593543950334d + 1d',
+    '79228162514264337593543950335d - 1d',
+    '79228162514264337593543950335d * 1d',
+    '79228162514264337593543950335d / 1d',
     '-2147483647 - 1',
     '10 -ne 20',
     "'5' + 5",
     "'a' + $null",
     "'a' + $true",
+    "'a' + $false",
     "'a' + 1.50d",
+    "'a' + -1.50d",
+    "'a' + 0.5d",
+    "'a' + 1L",
+    "'a' + 79228162514264337593543950335d",
+    "'a' + [char]65",
+    "'a' + [uint64]18446744073709551615",
 )
 
 #: A join with a Double on its right, over each kind of left operand `+` joins on: a String that
@@ -705,6 +774,211 @@ UNSPELLED_JOINS: tuple[str, ...] = (
     "'' + 1.5",
     '[char]65 + 1.5',
 )
+
+#: A measured join beside the measured cast of the same value to String. `+` with a text on its left
+#: appends the text its right operand writes, so the two rows of a pair ask one question twice and
+#: an answer that is right at one of them and wrong at the other is not one answer.
+JOINED_AGAINST_ITS_TEXT: tuple[tuple[str, str], ...] = (
+    ("'a' + $true", '[string]$true'),
+    ("'a' + $false", '[string]$false'),
+    ("'a' + 1L", '[string]1L'),
+    ("'a' + 1.50d", '[string]1.50d'),
+    ("'a' + 0.5d", '[string]0.5d'),
+    ("'a' + -1.50d", '[string]-1.50d'),
+    ("'a' + 79228162514264337593543950335d", '[string]79228162514264337593543950335d'),
+    ("'a' + [uint64]18446744073709551615", '[string][uint64]18446744073709551615'),
+)
+
+#: The six comparisons, in each of the three ways one may be spelled: bare, `-c` for a comparison
+#: that minds case and `-i` for one that ignores it. Written out rather than harvested off the
+#: language tables, so that a spelling the lexer stopped reading takes rows out of the population
+#: below and is caught there rather than shrinking it quietly.
+COMPARISON_OPERATORS: frozenset[str] = frozenset(
+    F'-{case}{name}'
+    for name in ('eq', 'ne', 'lt', 'le', 'gt', 'ge')
+    for case in ('', 'c', 'i')
+)
+
+
+def _is_comparison(expression: str) -> bool:
+    applied = _application(expression)
+    return applied is not None and applied.operator.lower() in COMPARISON_OPERATORS
+
+
+#: Every measured operation that applies one of them, selected by the parse so that a comparison
+#: measured after this was written is one the laws over it are quantified over too.
+COMPARISON_ROWS: tuple[str, ...] = tuple(
+    expression for expression in OPERATION_ROWS if _is_comparison(expression)
+)
+
+#: The measured comparisons the domain settles a Boolean for, grouped by what settles them. 5.1
+#: reads the operand on the *left* to decide what kind of comparison happens and converts the other
+#: one into it, except that an absent operand on either side is settled before any conversion — so
+#: the group a row is in is a claim about the language and not about the values in it.
+DECIDED_COMPARISONS: dict[str, tuple[str, ...]] = {
+    'a text on the left, so the right operand is read as text': (
+        "'' -eq 0",
+        "'' -eq '0'",
+        "'0' -eq 0",
+        "'1.0' -eq 1",
+        "'10' -ne 10",
+        "'A' -ceq 'a'",
+        "'A' -ieq 'a'",
+        "'abc' -eq $true",
+        "'1000' -eq 1e3d",
+    ),
+    'a number on the left, so the right operand is read as a number': (
+        '10 -ne 20',
+        "0 -eq '0'",
+        "1 -eq '1.0'",
+        "10 -ne '10'",
+        '2 -eq $true',
+    ),
+    'a Boolean on the left, so the right operand is read as a truth': (
+        '$true -eq 1',
+        '$true -eq 2',
+        "$true -eq ''",
+        "$true -eq 'abc'",
+        "$true -ge 'abc'",
+        '$true -gt $false',
+        '$true -ne 2',
+        '$false -eq 0',
+        '$false -lt 5',
+        "$true -eq '0'",
+        '$true -gt 2',
+        '$true -lt 2',
+    ),
+    'an absent operand on one side, so the two are compared by presence': (
+        '$null -eq $null',
+        '$null -ne $null',
+        '$null -eq $false',
+        '$null -eq 0',
+        "$null -eq ''",
+        '$null -ne 0',
+        '$null -ge 1',
+        '$null -gt 1',
+        '$null -le 1',
+        '$null -lt 0',
+        '$null -lt 1',
+        "$null -lt ''",
+        "$null -lt 'abc'",
+        '$true -eq $null',
+        '$false -eq $null',
+        '$false -gt $null',
+        '0 -eq $null',
+        '0 -gt $null',
+        '1 -ge $null',
+        '1 -gt $null',
+        '1 -le $null',
+        '1 -lt $null',
+        '1 -ne $null',
+        "'' -eq $null",
+        "'' -gt $null",
+        "'abc' -lt $null",
+        '$null -gt -5',
+        '$null -le -5',
+        '$null -lt -5',
+    ),
+    'a Char on the left, so an equality reads the right operand as a character': (
+        "[char]48 -eq '0'",
+        '[char]48 -eq 48',
+        '[char]65 -eq [char]97',
+        '[char]65 -ceq [char]97',
+        '[char]65 -lt [char]97',
+        '[char]97 -lt [char]66',
+    ),
+}
+
+DECIDED_COMPARISON_ROWS: tuple[str, ...] = tuple(
+    expression for group in DECIDED_COMPARISONS.values() for expression in group
+)
+
+#: The measured comparisons the domain settles no value for. Refusing is allowed — ordering two
+#: texts is a culture's question, ordering a number against a text may abort, a case-marked
+#: spelling over two numbers is a question about text asked of values that have none, and a
+#: comparison against a collection answers with the elements that match rather than with a truth.
+#: Answering one of them differently from a host is not allowed. An entry leaving this tuple is an
+#: answer gained and one joining it an answer lost, so neither can happen without this being
+#: rewritten.
+UNDECIDED_COMPARISONS: tuple[str, ...] = (
+    '1 -ceq 1',
+    "'10' -lt '9'",
+    "'10' -lt 9",
+    "'10' -ge 9",
+    "'10' -cle '9'",
+    "'B' -gt 'a'",
+    "'B' -cgt 'a'",
+    "'B' -igt 'a'",
+    "10 -lt '9'",
+    "10 -ge '9'",
+    "1 -lt '5'",
+    "1 -eq 'abc'",
+    "1 -ne 'abc'",
+    '10, 20, 30 -eq 20',
+    '10, 20, 30, 20, 10 -ne 20',
+    "'10' -gt 9",
+    "'10' -le '9'",
+    "'2' -lt '10'",
+    '@(1, 2) -eq $null',
+    "'ss' -eq [char]0x00DF",
+    "[char]0x00DF -eq 'ss'",
+)
+
+#: The measured Decimal literals at the extremes of the type. A `System.Decimal` is a 96 bit
+#: coefficient with a scale of at most 28, so `2**96 - 1` is the largest magnitude it holds and
+#: carries the 29 significant digits the type is worth; the other three are that magnitude at a
+#: scale of one, its negative, and 29 significant digits at the widest scale.
+WIDEST_DECIMAL_LITERALS: tuple[str, ...] = (
+    '79228162514264337593543950335d',
+    '-79228162514264337593543950335d',
+    '7922816251426433759354395033.5d',
+    '1.2345678901234567890123456789d',
+)
+
+#: The measured Decimal arithmetic the domain answers, at magnitudes and scales Python's default
+#: 28 digit context cannot hold. `79228162514264337593543950334d + 1d` lands exactly on the largest
+#: value the type holds and `1.50d + 1.50d` keeps the scale both addends were written with.
+EXACT_DECIMAL_OPERATIONS: tuple[str, ...] = (
+    '10d + 0',
+    '100000000000000d * 100000000000000d',
+    '1.2345678901234567890123456789d + 0d',
+    '1.50d + 1.50d',
+    '79228162514264337593543950334d + 1d',
+    '79228162514264337593543950335d - 1d',
+    '79228162514264337593543950335d * 1d',
+)
+
+#: The measured Decimal divisions, which are asked about separately from the other operations
+#: because a quotient is the one that need not be exact: `1d / 3d` is rounded onto the places the
+#: type has, where `79228162514264337593543950335d / 1d` is answered whole.
+DECIMAL_DIVISIONS: tuple[str, ...] = (
+    '1d / 3d',
+    '79228162514264337593543950335d / 1d',
+)
+
+#: The measured cast of a Decimal to String, which is where the scale a value was written with
+#: becomes text.
+DECIMAL_TEXTS: tuple[str, ...] = (
+    '[string]1.50d',
+    '[string]0.5d',
+    '[string]-1.50d',
+    '[string]10d',
+)
+
+#: The precisions the questions about a Decimal are asked under. 28 is Python's default and the
+#: others stand for what anything else sharing the process may set it to: one digit, a handful, and
+#: more than the type has.
+DECIMAL_PRECISIONS: tuple[int, ...] = (1, 5, 28, 60)
+
+
+def _digits(fact: Ps1Fact) -> str | None:
+    """
+    The digits a fact writes its value with, or `None` where it names no value. The two outcomes are
+    spelled apart because they are different outcomes, and the digits are read off the payload
+    rather than compared as numbers: `Decimal('3.00')` and `Decimal('3')` are equal and are not the
+    same text, and the scale a Decimal carries is exactly what its rows measure.
+    """
+    return str(_payload(fact)) if isinstance(fact, Ps1Constant) else None
 
 
 def _complement(expression: str) -> Ps1UnaryExpression | None:
@@ -1010,6 +1284,21 @@ ELEMENT_PAIRS: tuple[tuple[str, str], ...] = (
 #: The measured operations whose result a host printed to fewer digits than the value has: 5.1
 #: writes a Double as fifteen significant figures, and `512MB * 512MB` is 2 to the 58th exactly.
 #: What such a row measures is the widening, so the type is what the value is held against.
+#: The measured operations the domain answers with a value the host did not print. Each is a wrong
+#: constant the folding pass writes into the emitted script, held here so that it cannot be added to
+#: without saying so and cannot be fixed without this shrinking.
+#:
+#: All of them are one defect. 5.1 folds a constant expression at parse time and writes a `Decimal`
+#: carrying a trailing zero differently there than the same operation writes it at run time —
+#: measured, `'x' + 1.0d` is `x1` while `$z = 1.0d; 'x' + $z` is `x1.0` — and the domain computes the
+#: run-time spelling for both. Two trailing places survive the parse-time fold where one does not, so
+#: what separates them is not the zero and is not measured; `test_oracle.TYPE_DEFECTS` carries the
+#: same defect as the behaviour it changes.
+MISFOLDED_OPERATIONS: dict[str, str] = {
+    "'x' + 1.0d": 'x1.0',
+    "'x' + 2.0d": 'x2.0',
+}
+
 ABBREVIATED_OPERATIONS: tuple[str, ...] = (
     '$true + 9223372036854775807L',
     '0 - [uint64]18446744073709551615',
@@ -1414,7 +1703,7 @@ class TestPs1MeasuredNumerals(unittest.TestCase):
 
     def test_every_numeral_the_corpus_measures_is_selected(self):
         self.assertEqual(
-            len(_NUMERAL_ROWS), 38, 'a measured numeral was added or withdrawn')
+            len(_NUMERAL_ROWS), 44, 'a measured numeral was added or withdrawn')
         self.assertEqual(sorted(REFUSED), ['0xFFFFFFFFFFFFFFFFF', '1_0'])
         self.assertEqual(
             sorted(set(UNANSWERED) - set(MEASURED)), [], 'a spelling named here is not measured')
@@ -2118,7 +2407,7 @@ class TestPs1MeasuredCasts(unittest.TestCase):
     """
 
     def test_every_cast_the_corpus_measures_is_selected(self):
-        self.assertEqual(len(CAST_ROWS), 101, 'a measured cast was added or withdrawn')
+        self.assertEqual(len(CAST_ROWS), 113, 'a measured cast was added or withdrawn')
         self.assertEqual(sorted(set(DECLINED_CASTS) - set(CAST_ROWS)), [])
         self.assertEqual(sorted(set(DECLINED_CASTS) & set(THROWN)), [])
 
@@ -2511,18 +2800,29 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 175, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 275, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
             sorted(THROWN_OPERATIONS),
             [
                 '$null -band [uint32]1',
+                "$true * '1'",
                 '$true * 2',
+                '$true + 1.0d',
+                '$true - 1.0d',
+                '$true / 1.0d',
                 "'1_0' -band 15",
                 "'ab' * 0xFFFFFFFF",
                 "1 + '1e400'",
+                "1 -gt 'abc'",
+                "1 -lt 'abc'",
                 "16 + 'file'",
+                '1d / 0d',
+                '79228162514264337593543950335d + 1d',
+                '79228162514264337593543950335d - -1d',
+                "[char]48 * '1'",
+                '[char]48 * 2',
                 '[decimal]::MaxValue + 1',
             ],
         )
@@ -2549,7 +2849,29 @@ class TestPs1MeasuredOperators(unittest.TestCase):
             and render(_applied(expression).value) is not None
         ]
         self.assertEqual(
-            sorted(rewritten), sorted(PINNED_OPERATIONS + ABBREVIATED_OPERATIONS))
+            sorted(rewritten),
+            sorted(PINNED_OPERATIONS + ABBREVIATED_OPERATIONS + tuple(MISFOLDED_OPERATIONS)))
+
+    def test_every_operation_recorded_as_folded_wrongly_still_is(self):
+        """
+        The ledger only ratchets in one direction on its own: the partition above stops a new wrong
+        fold being added silently, and this stops a fixed one being left behind, so an entry here
+        can only leave by the defect leaving with it.
+        """
+        self.assertEqual(
+            {
+                expression: text_of(_applied(expression).value)
+                for expression in MISFOLDED_OPERATIONS
+            },
+            MISFOLDED_OPERATIONS,
+        )
+        self.assertEqual(
+            {
+                expression: text_of(_measured_operation_fact(expression)) == folded
+                for expression, folded in MISFOLDED_OPERATIONS.items()
+            },
+            {expression: False for expression in MISFOLDED_OPERATIONS},
+        )
 
     def test_no_measured_operation_is_answered_with_a_type_the_host_did_not_print(self):
         """
@@ -2786,7 +3108,7 @@ class TestPs1MeasuredNegation(unittest.TestCase):
     """
 
     def test_every_measured_negation_is_selected(self):
-        self.assertEqual(len(NEGATION_ROWS), 26, 'a measured negation was added or withdrawn')
+        self.assertEqual(len(NEGATION_ROWS), 29, 'a measured negation was added or withdrawn')
         self.assertEqual(sorted(THROWN_NEGATIONS), ["- 'abc'", '- @()'])
         self.assertEqual(sorted(set(ABBREVIATED_NEGATIONS) - set(NEGATION_ROWS)), [])
 
@@ -2854,10 +3176,9 @@ class TestPs1MeasuredNegation(unittest.TestCase):
 
     def test_a_negation_is_the_subtraction_from_an_int32_zero_it_is_compiled_into(self):
         """
-        `VisitUnaryExpression` in `src/System.Management.Automation/engine/parser/Compiler.cs` of
-        the 5.1 sources compiles `- x` into a binary subtraction whose left operand is the Int32
-        zero of `ExpressionCache.Constant(0)`. The unary answer and the binary one are therefore one
-        answer, over every operand a host was measured negating.
+        5.1 compiles `- x` into a binary subtraction from an Int32 zero and has no unary arm for it
+        at all, so the unary answer and the binary one are one answer, over every operand a host was
+        measured negating.
         """
         self.assertEqual(
             {expression: _negated(expression) for expression in NEGATION_ROWS},
@@ -2908,10 +3229,9 @@ class TestPs1MeasuredNegation(unittest.TestCase):
     def test_a_floating_zero_negates_to_the_zero_a_subtraction_from_zero_produces(self):
         """
         IEEE-754 subtraction under round to nearest answers `0 - 0.0` and `0 - -0.0` with `+0.0`
-        alike, and `VisitUnaryExpression` in
-        `src/System.Management.Automation/engine/parser/Compiler.cs` compiles the unary minus into
-        exactly that subtraction. Python's own minus answers `-0.0` for the first of the two, and a
-        comparison counts the two zeros equal, so what is read here is the sign they carry.
+        alike, and 5.1 compiles the unary minus into exactly that subtraction. Python's own minus
+        answers `-0.0` for the first of the two, and a comparison counts the two zeros equal, so
+        what is read here is the sign they carry.
         """
         for operand in (0.0, -0.0):
             with self.subTest(repr(operand)):
@@ -3137,6 +3457,406 @@ class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
         self.assertEqual(_applied('[char]65 + 1'), Ps1Outcome(False, Ps1Constant(STRING, 'A1')))
 
 
+class TestPs1AComparisonIsDecidedByItsLeftOperand(unittest.TestCase):
+    """
+    A comparison does not compare two values of one kind. The operand written on the *left* settles
+    what kind of comparison happens and the other one is read into it, so the same two values in the
+    other order are a different question with a different answer: measured, `'10' -lt 9` is True and
+    `10 -lt '9'` is False, because the first orders the texts `10` and `9` and the second the
+    numbers. An absent operand is settled ahead of all of it, by presence rather than by conversion.
+
+    A comparison folds into a Boolean and a Boolean decides a branch, so a comparison answered the
+    way 5.1 does not answer it is a script rewritten into a different script. Refusing to answer one
+    is always allowed.
+    """
+
+    def test_every_measured_comparison_is_decided_refused_or_one_the_host_aborted_on(self):
+        self.assertEqual(len(COMPARISON_ROWS), 84, 'a measured comparison was added or withdrawn')
+        self.assertEqual(
+            sorted(COMPARISON_ROWS),
+            sorted(
+                DECIDED_COMPARISON_ROWS
+                + UNDECIDED_COMPARISONS
+                + tuple(row for row in COMPARISON_ROWS if row in THROWN_OPERATIONS)
+            ),
+        )
+        self.assertEqual(
+            sorted(row for row in COMPARISON_ROWS if row in THROWN_OPERATIONS),
+            ["1 -gt 'abc'", "1 -lt 'abc'"],
+        )
+
+    def test_a_comparison_this_decides_is_the_boolean_the_host_printed(self):
+        self.assertEqual(
+            {expression: _applied(expression) for expression in DECIDED_COMPARISON_ROWS},
+            {
+                expression: Ps1Outcome(False, _measured_operation_fact(expression))
+                for expression in DECIDED_COMPARISON_ROWS
+            },
+        )
+
+    def test_a_comparison_this_does_not_decide_names_no_value_rather_than_a_guess(self):
+        """
+        Naming the `System.Boolean` such a comparison produces is not deciding it, and is what
+        `1 -ceq 1` is answered with: a type is a bound on the value and only a value is folded.
+        """
+        self.assertEqual(
+            {
+                expression: _applied(expression).value
+                for expression in UNDECIDED_COMPARISONS
+                if _names_a_value(_applied(expression).value)
+            },
+            {},
+        )
+
+    def test_no_measured_comparison_is_counted_a_truth_the_host_did_not_print(self):
+        """
+        `is_truthy` is what an `if` over a comparison asks, and it composes two steps that each may
+        refuse — so it is asked here as well as `apply`, over every measured comparison including
+        the two a host aborted on.
+        """
+        counted = {
+            expression: is_truthy(_slot(expression))
+            for expression in COMPARISON_ROWS
+            if is_truthy(_slot(expression)) is not None
+        }
+        self.assertEqual(
+            counted,
+            {
+                expression: _boolean(_measured_operation(expression)[1])
+                for expression in counted
+            },
+        )
+        self.assertEqual(sorted(counted), sorted(DECIDED_COMPARISON_ROWS))
+
+    def test_the_same_two_values_compare_as_text_one_way_round_and_as_numbers_the_other(self):
+        """
+        Ordering the texts `10` and `9` puts `10` first where ordering the numbers puts `9` first,
+        and the text `1.0` is not the text `1` where the number 1.0 is the number 1. So each pair
+        below is one operator over one pair of values, and answers the opposite of its mirror.
+        """
+        self.assertEqual(
+            {
+                expression: _measured_operation(expression)[1] for expression in (
+                    "'10' -lt 9",
+                    "10 -lt '9'",
+                    "'10' -ge 9",
+                    "10 -ge '9'",
+                    "'1.0' -eq 1",
+                    "1 -eq '1.0'",
+                )
+            },
+            {
+                "'10' -lt 9"  : 'True',
+                "10 -lt '9'"  : 'False',
+                "'10' -ge 9"  : 'False',
+                "10 -ge '9'"  : 'True',
+                "'1.0' -eq 1" : 'False',
+                "1 -eq '1.0'" : 'True',
+            },
+        )
+        self.assertEqual(
+            _applied("'1.0' -eq 1"), Ps1Outcome(False, Ps1Constant(BOOLEAN, False)))
+        self.assertEqual(
+            _applied("1 -eq '1.0'"), Ps1Outcome(False, Ps1Constant(BOOLEAN, True)))
+
+    def test_a_boolean_on_the_left_asks_whether_the_right_operand_is_true_and_not_whether_it_is_one(
+        self,
+    ):
+        self.assertEqual(
+            {
+                expression: _measured_operation(expression)[1] for expression in (
+                    '$true -eq 2',
+                    '2 -eq $true',
+                    "$true -eq 'abc'",
+                    "'abc' -eq $true",
+                    "$true -eq ''",
+                )
+            },
+            {
+                '$true -eq 2'     : 'True',
+                '2 -eq $true'     : 'False',
+                "$true -eq 'abc'" : 'True',
+                "'abc' -eq $true" : 'False',
+                "$true -eq ''"    : 'False',
+            },
+        )
+        self.assertEqual(
+            _applied('$true -eq 2'), Ps1Outcome(False, Ps1Constant(BOOLEAN, True)))
+        self.assertEqual(
+            _applied('2 -eq $true'), Ps1Outcome(False, Ps1Constant(BOOLEAN, False)))
+
+    def test_an_absent_operand_is_settled_by_presence_rather_than_converted_to_the_other_side(self):
+        """
+        A `$null` converted into the type standing opposite it would be a zero against a number, the
+        empty text against a text and `$false` against a Boolean, and each of those three compares
+        *equal* to what it was converted from. Measured, all three are greater than `$null` and none
+        of them equals it, so the conversion never happens.
+        """
+        self.assertEqual(
+            {
+                expression: _measured_operation(expression)[1] for expression in (
+                    '0 -gt $null',
+                    "'' -gt $null",
+                    '$false -gt $null',
+                    '$false -eq $null',
+                    '$null -lt 0',
+                    "$null -lt ''",
+                    '$null -eq $false',
+                )
+            },
+            {
+                '0 -gt $null'      : 'True',
+                "'' -gt $null"     : 'True',
+                '$false -gt $null' : 'True',
+                '$false -eq $null' : 'False',
+                '$null -lt 0'      : 'True',
+                "$null -lt ''"     : 'True',
+                '$null -eq $false' : 'False',
+            },
+        )
+        self.assertEqual(
+            _applied('$false -gt $null'), Ps1Outcome(False, Ps1Constant(BOOLEAN, True)))
+        self.assertEqual(
+            _applied('$false -eq $null'), Ps1Outcome(False, Ps1Constant(BOOLEAN, False)))
+
+    def test_the_case_sensitive_spelling_of_a_comparison_is_a_different_question(self):
+        self.assertEqual(
+            {
+                expression: _measured_operation(expression)[1] for expression in (
+                    "'A' -ceq 'a'",
+                    "'A' -ieq 'a'",
+                )
+            },
+            {
+                "'A' -ceq 'a'" : 'False',
+                "'A' -ieq 'a'" : 'True',
+            },
+        )
+        self.assertEqual(
+            _applied("'A' -ceq 'a'"), Ps1Outcome(False, Ps1Constant(BOOLEAN, False)))
+        self.assertEqual(
+            _applied("'A' -ieq 'a'"), Ps1Outcome(False, Ps1Constant(BOOLEAN, True)))
+
+
+class TestPs1TheDecimalTypeKeepsItsDigits(unittest.TestCase):
+    """
+    A `System.Decimal` is a 96 bit coefficient with a scale of at most 28, so it carries 29
+    significant digits and keeps the trailing zeros it was written with. Python's `decimal` carries
+    both and rounds the result of every *operation* to `decimal.getcontext().prec`, which is 28 by
+    default and which anything else sharing the process may set to anything at all. So an answer
+    that consults the context is one that changes with what some other library did, and 5.1 changes
+    no digit of a value it was handed.
+
+    Every expectation below is read out of the digits a host printed rather than out of a
+    `decimal.Decimal` built here, because two of those compare equal while writing different text:
+    `Decimal('3.00') == Decimal('3')`, and only one of them is what `1.50d + 1.50d` produces.
+    """
+
+    #: The negation a Decimal at the widest magnitude is measured under.
+    NEGATION = '- 79228162514264337593543950335d'
+
+    def _measured_digits(self) -> dict[str, str]:
+        """
+        The digits a host printed for every Decimal subject: the literals it read, the arithmetic it
+        computed, the negation it took and the text it cast each of them to.
+        """
+        return {
+            **{expression: _measured(expression)[1] for expression in WIDEST_DECIMAL_LITERALS},
+            **{
+                expression: _measured_operation(expression)[1]
+                for expression in EXACT_DECIMAL_OPERATIONS
+            },
+            **{expression: _measured(expression)[1] for expression in DECIMAL_TEXTS},
+            self.NEGATION: _measured_negation(self.NEGATION)[1],
+        }
+
+    def _answered_digits(self) -> dict[str, str | None]:
+        return {
+            **{expression: _digits(_read(expression)) for expression in WIDEST_DECIMAL_LITERALS},
+            **{
+                expression: _digits(_applied(expression).value)
+                for expression in EXACT_DECIMAL_OPERATIONS
+            },
+            **{
+                expression: _digits(_converted(expression).value)
+                for expression in DECIMAL_TEXTS
+            },
+            self.NEGATION: _digits(_negated(self.NEGATION).value),
+        }
+
+    def test_a_decimal_literal_at_the_extremes_of_the_type_is_typed_a_decimal(self):
+        self.assertEqual(
+            {str(type_of(_read(expression))) for expression in WIDEST_DECIMAL_LITERALS},
+            {'System.Decimal'},
+        )
+
+    def test_reading_negating_computing_and_writing_a_decimal_are_the_digits_the_host_printed(self):
+        self.assertEqual(self._answered_digits(), self._measured_digits())
+
+    def test_none_of_those_moves_with_the_precision_python_is_set_to(self):
+        answered = {}
+        for precision in DECIMAL_PRECISIONS:
+            with decimal.localcontext() as context:
+                context.prec = precision
+                for expression, digits in self._answered_digits().items():
+                    answered[precision, expression] = digits
+        self.assertEqual(
+            answered,
+            {
+                (precision, expression): digits
+                for precision in DECIMAL_PRECISIONS
+                for expression, digits in self._measured_digits().items()
+            },
+        )
+
+    def test_dividing_two_decimals_does_not_move_with_it_either(self):
+        """
+        Refusing under a precision is allowed, which is why what is collected here is the digits
+        that are not the host's rather than every answer.
+        """
+        wrong = {}
+        for precision in DECIMAL_PRECISIONS:
+            with decimal.localcontext() as context:
+                context.prec = precision
+                computed = {
+                    expression: _digits(_applied(expression).value)
+                    for expression in DECIMAL_DIVISIONS
+                }
+            for expression, digits in computed.items():
+                if digits is not None and digits != _measured_operation(expression)[1]:
+                    wrong[precision, expression] = digits
+        self.assertEqual(wrong, {})
+
+
+class TestPs1TheTextAValueWrites(unittest.TestCase):
+    """
+    Two questions with one answer: what `[string]` makes of a value, and what a `+` with a text on
+    its left appends. Measured, `'a' + <value>` is `a` followed by exactly what `[string] <value>`
+    writes, so a value whose text is got wrong is wrong at both.
+    """
+
+    def test_a_join_appends_exactly_the_text_a_cast_to_string_writes(self):
+        self.assertEqual(
+            {join: _measured_operation(join)[1] for join, _ in JOINED_AGAINST_ITS_TEXT},
+            {join: F'a{_measured(cast)[1]}' for join, cast in JOINED_AGAINST_ITS_TEXT},
+        )
+        self.assertEqual(
+            {join: _applied(join) for join, _ in JOINED_AGAINST_ITS_TEXT},
+            {
+                join: Ps1Outcome(False, Ps1Constant(STRING, F'a{_measured(cast)[1]}'))
+                for join, cast in JOINED_AGAINST_ITS_TEXT
+            },
+        )
+        self.assertEqual(
+            {cast: _converted(cast) for _, cast in JOINED_AGAINST_ITS_TEXT},
+            {cast: Ps1Outcome(False, _measured_fact(cast)) for _, cast in JOINED_AGAINST_ITS_TEXT},
+        )
+
+    def test_a_cast_to_string_writes_the_scale_a_decimal_was_written_with(self):
+        """
+        `1.50d` and `1.5d` are one number written two ways, and only the first writes `1.50`. A
+        Decimal carried as its numeric value alone, or normalized on the way in, could write only
+        one of the two.
+        """
+        self.assertEqual(
+            {expression: _measured(expression) for expression in DECIMAL_TEXTS},
+            {
+                '[string]1.50d'  : ('System.String', '1.50'),
+                '[string]0.5d'   : ('System.String', '0.5'),
+                '[string]-1.50d' : ('System.String', '-1.50'),
+                '[string]10d'    : ('System.String', '10'),
+            },
+        )
+        self.assertEqual(
+            {expression: _converted(expression) for expression in DECIMAL_TEXTS},
+            {
+                expression: Ps1Outcome(False, _measured_fact(expression))
+                for expression in DECIMAL_TEXTS
+            },
+        )
+
+    def test_a_char_writes_its_one_character_and_a_boolean_the_name_of_its_truth(self):
+        self.assertEqual(_measured_operation("'a' + [char]65"), ('System.String', 'aA'))
+        self.assertEqual(_measured('[string]$true'), ('System.String', 'True'))
+        self.assertEqual(_measured('[string]$false'), ('System.String', 'False'))
+        self.assertEqual(
+            _applied("'a' + [char]65"), Ps1Outcome(False, Ps1Constant(STRING, 'aA')))
+        self.assertEqual(
+            _converted('[string]$true'), Ps1Outcome(False, Ps1Constant(STRING, 'True')))
+        self.assertEqual(
+            _converted('[string]$false'), Ps1Outcome(False, Ps1Constant(STRING, 'False')))
+
+
+class TestPs1AnOperandShapeTheHostAbortsOnIsNeverGivenAValue(unittest.TestCase):
+    """
+    There are operand shapes 5.1 raises on rather than producing a value, and each of them is a
+    place a script stops. A value answered for one of those is folded into the emitted script, and
+    what comes out runs on where the original could not — so none of them may be answered, whatever
+    the answer would have been.
+    """
+
+    def test_every_operation_the_host_aborted_on_names_no_value_and_reports_the_throw(self):
+        self.assertEqual(
+            {expression: _evaluated(expression) for expression in THROWN_OPERATIONS},
+            {expression: NOTHING for expression in THROWN_OPERATIONS},
+        )
+
+    def test_no_condition_the_host_aborted_on_is_counted_true_or_false(self):
+        self.assertEqual(
+            {expression: is_truthy(_slot(expression)) for expression in THROWN_OPERATIONS},
+            {expression: None for expression in THROWN_OPERATIONS},
+        )
+
+    def test_ordering_a_number_against_a_text_that_spells_none_aborts_where_equality_does_not(self):
+        """
+        The same two operands, one operator apart: equality answers False without reading `abc` as a
+        number and ordering cannot, so `1 -eq 'abc'` is a value and `1 -lt 'abc'` is the end of the
+        script. The domain refuses both, which is allowed; answering the ordering would not be.
+        """
+        compared = ("1 -lt 'abc'", "1 -gt 'abc'", "1 -eq 'abc'", "1 -ne 'abc'")
+        self.assertEqual(
+            {expression: _throws(_transcript(expression)) for expression in compared},
+            {
+                "1 -lt 'abc'" : True,
+                "1 -gt 'abc'" : True,
+                "1 -eq 'abc'" : False,
+                "1 -ne 'abc'" : False,
+            },
+        )
+        self.assertEqual(_measured_operation("1 -eq 'abc'"), ('System.Boolean', 'False'))
+        self.assertEqual(
+            {expression: _applied(expression) for expression in compared},
+            {expression: NOTHING for expression in compared},
+        )
+
+    def test_a_decimal_that_leaves_its_range_or_is_divided_by_zero_aborts(self):
+        """
+        `79228162514264337593543950334d + 1d` lands exactly on the largest value the type holds and
+        is a number; one more than that, and a subtraction that reaches the same place, are not.
+        """
+        computed = (
+            '79228162514264337593543950334d + 1d',
+            '79228162514264337593543950335d + 1d',
+            '79228162514264337593543950335d - -1d',
+            '1d / 0d',
+        )
+        self.assertEqual(
+            {expression: _throws(_transcript(expression)) for expression in computed},
+            {
+                '79228162514264337593543950334d + 1d'  : False,
+                '79228162514264337593543950335d + 1d'  : True,
+                '79228162514264337593543950335d - -1d' : True,
+                '1d / 0d'                              : True,
+            },
+        )
+        self.assertEqual(
+            {expression: _applied(expression) for expression in computed[1:]},
+            {expression: NOTHING for expression in computed[1:]},
+        )
+        self.assertEqual(
+            str(_payload(_applied(computed[0]).value)), _measured_operation(computed[0])[1])
+
+
 class TestPs1CellsTheWitnessesReach(unittest.TestCase):
     """
     A grid cell records what some values were observed to do, which is a lower bound. Reading one
@@ -3147,16 +3867,9 @@ class TestPs1CellsTheWitnessesReach(unittest.TestCase):
     """
 
     def test_the_operand_types_an_answered_cell_stands_on_are_the_ones_reached(self):
-        """
-        `-eq` and `-ne` stand outside this, because an absent operand is answered by a rule rather
-        than by a cell: `$null -eq <anything>` is `$False` and `$null -eq $null` is `$True`, so the
-        pair is settled without the grid being read at all and it witnesses nothing about how far
-        the witnesses reached. Including them would make every operand type look spanned.
-        """
         answered = {
             (operator, left, right)
             for operator in GRID_OPERATORS
-            if operator not in ('-eq', '-ne')
             for left in GRID_WITNESSES
             for right in GRID_WITNESSES
             if apply(operator, _grid_operand(left), _grid_operand(right)) != NOTHING
@@ -3321,7 +4034,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in CAST_ROWS
             if _read(CAST_ROWS[expression].operand) is not UNKNOWN
         }
-        self.assertEqual(len(composed), 99)
+        self.assertEqual(len(composed), 111)
         self.assertEqual(
             composed, {expression: _converted(expression) for expression in composed})
 
@@ -3344,7 +4057,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 105)
+        self.assertEqual(len(composed), 175)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -3444,7 +4157,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 2301)
+        self.assertEqual(len(compared), 2798)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -3459,7 +4172,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2354)
+        self.assertEqual(len(compared), 2838)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -3474,7 +4187,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2354)
+        self.assertEqual(len(compared), 2838)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -3485,12 +4198,12 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 1322)
+        self.assertEqual(len(STRINGS), 1625)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
     def test_the_bytes_the_array_reader_collects_are_the_numbers_the_elements_name(self):
-        self.assertEqual(len(BYTE_ARRAYS), 114)
+        self.assertEqual(len(BYTE_ARRAYS), 116)
         self.assertEqual(
             [row.source for row in BYTE_ARRAYS if list(row.collected) != row.payloads], [])
 
@@ -3499,7 +4212,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 464)
+        self.assertEqual(len(NUMERALS), 524)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -3535,13 +4248,13 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 403)
+        self.assertEqual(len(consulted), 534)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
     def test_only_a_cast_names_anything_where_its_step_cannot_be_consulted(self):
         unconsulted = [step for step in STEPS if not step.consultable]
-        self.assertEqual(len(unconsulted), 25)
+        self.assertEqual(len(unconsulted), 28)
         self.assertEqual(
             [step.source for step in unconsulted if _names_a_value(step.answered.value)], [])
         self.assertEqual(
@@ -3558,7 +4271,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
         weaker to fall back on either: an array shorter than the script builds is a different value.
         """
         named = [row for row in ARRAYS if row.named]
-        self.assertEqual(len(named), 156)
+        self.assertEqual(len(named), 158)
         self.assertEqual([row.source for row in named if not row.elements_named], [])
 
     def test_an_element_that_names_only_a_type_leaves_the_array_unknown(self):
@@ -3585,7 +4298,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1821)
+        self.assertEqual(len(compared), 2231)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
@@ -3790,7 +4503,7 @@ class TestPs1OperatorCaseDoesNotChangeTheAnswer(unittest.TestCase):
             expression for expression in OPERATION_ROWS
             if any(character.isalpha() for character in _operator_of(expression))
         ]
-        self.assertEqual(len(lettered), 92)
+        self.assertEqual(len(lettered), 158)
         self.assertEqual(
             {expression: _cased(expression, str.upper) for expression in lettered},
             {expression: _cased(expression, str.lower) for expression in lettered},

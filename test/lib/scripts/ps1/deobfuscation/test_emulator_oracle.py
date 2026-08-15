@@ -101,15 +101,15 @@ class _Coverage(NamedTuple):
 #: into a refusal moves a number here rather than quietly leaving the comparison below.
 COVERAGE: dict[str, _Coverage] = {
     ''               : _Coverage(3, 1),
-    'System.Boolean' : _Coverage(110, 61),
+    'System.Boolean' : _Coverage(173, 99),
     'System.Byte'    : _Coverage(5, 5),
     'System.Char'    : _Coverage(8, 6),
-    'System.Double'  : _Coverage(39, 20),
+    'System.Double'  : _Coverage(40, 21),
     'System.Int16'   : _Coverage(1, 0),
-    'System.Int32'   : _Coverage(110, 74),
+    'System.Int32'   : _Coverage(112, 74),
     'System.Int64'   : _Coverage(27, 20),
     'System.SByte'   : _Coverage(2, 0),
-    'System.String'  : _Coverage(32, 18),
+    'System.String'  : _Coverage(55, 23),
     'System.UInt16'  : _Coverage(2, 0),
     'System.UInt32'  : _Coverage(4, 0),
     'System.UInt64'  : _Coverage(2, 0),
@@ -119,17 +119,17 @@ COVERAGE: dict[str, _Coverage] = {
 #: population. `Decimal` is not a `float` — 5.1 computes it exactly and to a different precision —
 #: and `Single` is not one either, so a row carrying one has nothing here to be right about.
 TYPES_OUTSIDE_THE_CURRENCY: dict[str, int] = {
-    'System.Decimal' : 18,
+    'System.Decimal' : 38,
     'System.Single'  : 1,
 }
 
 #: How many measured rows write a collection rather than one value. Such a row's two witnesses
 #: disagree by design — writing a collection unrolls it, so the container's type stands on the first
 #: line and its elements' on the rest — and the population is the rows whose witnesses agree.
-COLLECTION_ROWS: int = 5
+COLLECTION_ROWS: int = 6
 
 #: How many measured rows 5.1 answered by throwing. The population `ANSWERED_THROWS` is drawn from.
-THROWING_ROWS: int = 36
+THROWING_ROWS: int = 47
 
 #: Where the interpreter computes a value 5.1 did not. Each entry is a constant the deobfuscator
 #: folds wrongly into the script it emits.
@@ -187,13 +187,38 @@ DIVERGENCES: dict[str, _Divergence] = {
     '$true -and [char]0'                 : _Divergence(False, True),
     '-not [char]0'                       : _Divergence(True, False),
 
-    # `-contains` converts each element to the type of the value it is asked about before comparing
-    # it. The interpreter compares the Python objects, for which a string is never an integer.
-    # An absent value is equal to nothing but another absent value, and 5.1 answers that before it
-    # converts anything. The interpreter converts first, so the zero and the `$null` meet as numbers.
+    # An absent value is equal to nothing but another absent value, and orders before every value
+    # there is; 5.1 answers both before it converts anything. The interpreter converts first, so the
+    # zero and the `$null` meet as numbers and the Boolean and the `$null` meet as Booleans.
     '$null -eq 0'                        : _Divergence(False, True),
     '0 -eq $null'                        : _Divergence(False, True),
+    '$null -ne 0'                        : _Divergence(True, False),
+    '$null -eq $false'                   : _Divergence(False, True),
+    '$false -eq $null'                   : _Divergence(False, True),
+    '$null -lt 0'                        : _Divergence(True, False),
+    '0 -gt $null'                        : _Divergence(True, False),
+    '$false -gt $null'                   : _Divergence(True, False),
 
+    # A Boolean on the left of a comparison converts the right operand to a Boolean, so every truthy
+    # value on the right is equal to `$true`. The interpreter compares the Python objects, for which
+    # `True` is the number one and nothing else.
+    '$true -eq 2'                        : _Divergence(True, False),
+    '$true -ne 2'                        : _Divergence(False, True),
+    '$true -lt 2'                        : _Divergence(False, True),
+
+    # 5.1 orders two Chars by their code points and compares them for equality ignoring case. The
+    # interpreter has no Char and holds both as one-character Python strings, which it orders the
+    # way it orders text — case-insensitively — so the two Chars whose order the case decides come
+    # out reversed.
+    '[char]65 -lt [char]97'              : _Divergence(True, False),
+    '[char]97 -lt [char]66'              : _Divergence(False, True),
+
+    # Two texts 5.1 counts equal by collating them rather than by their code points. The
+    # interpreter compares the code points, which no expansion of the sharp s reaches.
+    "'ss' -eq [char]0x00DF"              : _Divergence(True, False),
+
+    # `-contains` converts each element to the type of the value it is asked about before comparing
+    # it. The interpreter compares the Python objects, for which a string is never an integer.
     "@('1') -contains 1"                 : _Divergence(True, False),
     "@(1) -contains '1'"                 : _Divergence(True, False),
 
@@ -251,6 +276,11 @@ ANSWERED_THROWS: dict[str, _Value] = {
     # A Char carries none of the String methods, so asking for one is a MethodNotFound.
     '([char]65).ToUpper()'          : 'A',
     '([char]65).Substring(0)'       : 'A',
+
+    # A Char on the left of `*` has no multiplication at all on 5.1. The interpreter holds it as a
+    # one-character Python string, for which `*` is repetition, so a script that stops folds to the
+    # character written twice.
+    '[char]48 * 2'                  : '00',
 
     # A repeat count of four billion is a string .NET will not allocate.
     "'ab' * 0xFFFFFFFF"             : '',

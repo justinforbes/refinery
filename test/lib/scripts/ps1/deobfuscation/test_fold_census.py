@@ -34,12 +34,12 @@ def census() -> dict[str, str]:
 #: no expandable string that survives hoisting into the output — and they are pinned at zero so that
 #: a corpus row which starts exercising one is noticed.
 _CONTRIBUTION: dict[str, tuple[int, int]] = {
-    'Ps1ConstantFolding': (122, 150),
+    'Ps1ConstantFolding': (147, 201),
     'Ps1DeadCodeElimination': (1, 12),
     'Ps1ControlFlowDeflattening': (0, 0),
-    'Ps1ConstantInlining': (67, 313),
+    'Ps1ConstantInlining': (74, 400),
     'Ps1ExpandableStringHoist': (0, 0),
-    'Ps1TypeCasts': (61, 15),
+    'Ps1TypeCasts': (72, 18),
 }
 
 

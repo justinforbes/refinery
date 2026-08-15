@@ -254,7 +254,7 @@ FOLDS: dict[str, str] = {
     "Write-Output (([char]65).Count); Write-Output (('A').Count)":
         'Write-Output 1\nWrite-Output 1',
     "Write-Output ([char]65 -eq 'A'); Write-Output ('A' -eq 'A')":
-        "Write-Output ([char]65 -Eq 'A')\nWrite-Output ($True)",
+        'Write-Output ($True)\nWrite-Output ($True)',
     '$c = [char]65; foreach ($e in $c) { Write-Output $e }':
         'foreach ($e in [char]65) {\n  Write-Output $e\n}',
     "$t = 'AB'.Count; Write-Output (,$t); Write-Output $t":
@@ -394,7 +394,7 @@ FOLDS: dict[str, str] = {
     '$t = 9223372036854775807 + 2; Write-Output (,$t); Write-Output $t':
         'Write-Output (,9.223372036854776e+18)\nWrite-Output 9.223372036854776e+18',
     '$t = 100000000000000d * 100000000000000d; Write-Output (,$t); Write-Output $t':
-        'Write-Output (,1.000000000000000000000000000E+28d)\nWrite-Output 1.000000000000000000000000000E+28d',
+        'Write-Output (,10000000000000000000000000000d)\nWrite-Output 10000000000000000000000000000d',
     '$t = 10000000000000000000000000000d; Write-Output (,$t); Write-Output $t':
         'Write-Output (,10000000000000000000000000000d)\nWrite-Output 10000000000000000000000000000d',
     '$t = 1E+28d; Write-Output (,$t); Write-Output $t':
@@ -1023,6 +1023,236 @@ FOLDS: dict[str, str] = {
         'Write-Output (,$True)\nWrite-Output $True',
     '$t = $null -lt 1; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
+    "$t = '10' -lt '9'; Write-Output (,$t); Write-Output $t":
+        "$t = '10' -LT '9'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = '10' -lt 9; Write-Output (,$t); Write-Output $t":
+        "$t = '10' -LT 9\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = 10 -lt '9'; Write-Output (,$t); Write-Output $t":
+        "$t = 10 -LT '9'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = '10' -ge 9; Write-Output (,$t); Write-Output $t":
+        "$t = '10' -GE 9\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = 10 -ge '9'; Write-Output (,$t); Write-Output $t":
+        "$t = 10 -GE '9'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = '10' -ne 10; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = 10 -ne '10'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = 'B' -gt 'a'; Write-Output (,$t); Write-Output $t":
+        "$t = 'B' -GT 'a'\nWrite-Output (,$t)\nWrite-Output $t",
+    '$t = $true -eq 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $true -eq 2; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = 2 -eq $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = $true -eq 'abc'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = 'abc' -eq $true; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = $true -eq ''; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $false -eq 0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $true -ne 2; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $true -gt $false; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $false -lt 5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = $true -ge 'abc'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $null -ne 0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $null -ne $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = $null -lt 'abc'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $null -gt 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $null -ge 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $null -le 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = 1 -lt $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = 1 -gt $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = 1 -le $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = 1 -ge $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = 1 -ne $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = 'abc' -lt $null; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $false -eq $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $null -eq $false; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $true -eq $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = 0 -gt $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $null -lt 0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = '' -gt $null; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = $null -lt ''; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $false -gt $null; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = 1 -lt 'abc'; Write-Output (,$t); Write-Output $t":
+        "$t = 1 -LT 'abc'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = 1 -gt 'abc'; Write-Output (,$t); Write-Output $t":
+        "$t = 1 -GT 'abc'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = 1 -eq 'abc'; Write-Output (,$t); Write-Output $t":
+        "$t = 1 -Eq 'abc'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = 1 -ne 'abc'; Write-Output (,$t); Write-Output $t":
+        "$t = 1 -NE 'abc'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = 1 -lt '5'; Write-Output (,$t); Write-Output $t":
+        "$t = 1 -LT '5'\nWrite-Output (,$t)\nWrite-Output $t",
+    '$t = 79228162514264337593543950335d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,79228162514264337593543950335d)\nWrite-Output 79228162514264337593543950335d',
+    '$t = -79228162514264337593543950335d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-79228162514264337593543950335d)\nWrite-Output (-79228162514264337593543950335d)',
+    '$t = - 79228162514264337593543950335d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-79228162514264337593543950335d)\nWrite-Output (-79228162514264337593543950335d)',
+    '$t = 7922816251426433759354395033.5d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,7922816251426433759354395033.5d)\nWrite-Output 7922816251426433759354395033.5d',
+    '$t = 1.2345678901234567890123456789d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.2345678901234567890123456789d)\nWrite-Output 1.2345678901234567890123456789d',
+    '$t = 79228162514264337593543950335d - 1d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,79228162514264337593543950334d)\nWrite-Output 79228162514264337593543950334d',
+    '$t = 79228162514264337593543950334d + 1d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,79228162514264337593543950335d)\nWrite-Output 79228162514264337593543950335d',
+    '$t = 79228162514264337593543950335d * 1d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,79228162514264337593543950335d)\nWrite-Output 79228162514264337593543950335d',
+    '$t = 79228162514264337593543950335d / 1d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,79228162514264337593543950335d)\nWrite-Output 79228162514264337593543950335d',
+    '$t = 1.2345678901234567890123456789d + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.2345678901234567890123456789d)\nWrite-Output 1.2345678901234567890123456789d',
+    '$t = 1.50d + 1.50d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,3.00d)\nWrite-Output 3.00d',
+    '$t = 1d / 3d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0.3333333333333333333333333333d)\nWrite-Output 0.3333333333333333333333333333d',
+    '$t = [string]1.50d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.50')\nWrite-Output '1.50'",
+    '$t = [string]0.5d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'0.5')\nWrite-Output '0.5'",
+    "$t = 'a' + 0.5d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'a0.5')\nWrite-Output 'a0.5'",
+    "$t = 'a' + $false; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'aFalse')\nWrite-Output 'aFalse'",
+    '$t = [string]$false; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'False')\nWrite-Output 'False'",
+    "$t = 'a' + 1L; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'a1')\nWrite-Output 'a1'",
+    '$t = [string]1L; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1')\nWrite-Output '1'",
+    "$t = 'a' + 79228162514264337593543950335d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'a79228162514264337593543950335')\nWrite-Output 'a79228162514264337593543950335'",
+    '$t = [string]79228162514264337593543950335d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'79228162514264337593543950335')\nWrite-Output '79228162514264337593543950335'",
+    "$t = 'a' + [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'a18446744073709551615')\nWrite-Output 'a18446744073709551615'",
+    '$t = [string][uint64]18446744073709551615; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'18446744073709551615')\nWrite-Output '18446744073709551615'",
+    "$t = 'a' + -1.50d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'a-1.50')\nWrite-Output 'a-1.50'",
+    '$t = [string]-1.50d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'-1.50')\nWrite-Output '-1.50'",
+    "$t = 'a' + [char]65; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'aA')\nWrite-Output 'aA'",
+    '$t = - 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0d)\nWrite-Output 0d',
+    '$t = - 0.0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0.0d)\nWrite-Output 0.0d',
+    '$t = 79228162514264337593543950335d + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,79228162514264337593543950335d)\nWrite-Output 79228162514264337593543950335d',
+    "$t = '1000' -eq 1e3d; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = 'a' + 1e3d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'a1000')\nWrite-Output 'a1000'",
+    "$t = 'x' + 1.0d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.0')\nWrite-Output 'x1.0'",
+    "$t = $true * '1'; Write-Output (,$t); Write-Output $t":
+        "$t = $True * '1'\nWrite-Output (,$t)\nWrite-Output $t",
+    '$t = 2 * [char]48; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,96)\nWrite-Output 96',
+    '$t = $true - 1.0d; Write-Output (,$t); Write-Output $t':
+        '$t = $True - 1.0d\nWrite-Output (,$t)\nWrite-Output $t',
+    '$t = $true + 1.0d; Write-Output (,$t); Write-Output $t':
+        '$t = $True + 1.0d\nWrite-Output (,$t)\nWrite-Output $t',
+    '$t = 1.0d - $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,0.0d)\nWrite-Output 0.0d',
+    "$t = [char]48 - '1'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,47)\nWrite-Output 47',
+    '$t = $true - 1.5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-0.5)\nWrite-Output (-0.5)',
+    '$t = $true / 1.0d; Write-Output (,$t); Write-Output $t':
+        '$t = $True / 1.0d\nWrite-Output (,$t)\nWrite-Output $t',
+    "$t = [char]48 -eq '0'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = [char]48 -eq 48; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = [char]65 -eq [char]97; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = [char]65 -ceq [char]97; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [char]97 -lt [char]66; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [char]65 -lt [char]97; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = 'ss' -eq [char]0x00DF; Write-Output (,$t); Write-Output $t":
+        "$t = 'ss' -Eq [char]223\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = [char]0x00DF -eq 'ss'; Write-Output (,$t); Write-Output $t":
+        "$t = [char]223 -Eq 'ss'\nWrite-Output (,$t)\nWrite-Output $t",
+    '$t = $true -lt 2; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $true -gt 2; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    "$t = $true -eq '0'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $null -lt -5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = $null -gt -5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = $null -le -5; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = @(1, 2) -eq $null; Write-Output (,$t); Write-Output $t':
+        '$t = @(1, 2) -Eq $Null\nWrite-Output (,$t)\nWrite-Output $t',
+    "$t = '2' -lt '10'; Write-Output (,$t); Write-Output $t":
+        "$t = '2' -LT '10'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = '10' -le '9'; Write-Output (,$t); Write-Output $t":
+        "$t = '10' -LE '9'\nWrite-Output (,$t)\nWrite-Output $t",
+    "$t = '10' -gt 9; Write-Output (,$t); Write-Output $t":
+        "$t = '10' -GT 9\nWrite-Output (,$t)\nWrite-Output $t",
+    '$t = 1.0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.0d)\nWrite-Output 1.0d',
+    '$t = [string]1.0d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.0')\nWrite-Output '1.0'",
+    '$t = 1.0d + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.0d)\nWrite-Output 1.0d',
+    "$t = 'x' + 1.10d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.10')\nWrite-Output 'x1.10'",
+    '$t = [string]1.10d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.10')\nWrite-Output '1.10'",
+    '$t = 1.10d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.10d)\nWrite-Output 1.10d',
+    '$t = [string]1.000d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.000')\nWrite-Output '1.000'",
+    "$t = 'x' + 2.0d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x2.0')\nWrite-Output 'x2.0'",
+    '$t = [string]2.0d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'2.0')\nWrite-Output '2.0'",
+    '$t = [string]0.0d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'0.0')\nWrite-Output '0.0'",
+    "$z = 1.0d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.0')\nWrite-Output 'x1.0'",
+    "$z = 1.10d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.10')\nWrite-Output 'x1.10'",
+    '$z = 1.0d; $t = $z + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.0d)\nWrite-Output 1.0d',
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':
