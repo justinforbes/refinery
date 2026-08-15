@@ -15,8 +15,11 @@ from refinery.lib.scripts import (
     Statement,
     Transformer,
     _replace_in_parent,
+    mutation_epoch,
+    set_body,
     set_child,
     set_child_list,
+    set_value,
     tree_version,
 )
 
@@ -108,6 +111,98 @@ class TestTreeVersionContract(unittest.TestCase):
         before = tree_version(other)
         set_child_list(script, 'body', [_Leaf(name='c')])
         self.assertEqual(tree_version(other), before)
+
+
+class TestMutationEpochContract(unittest.TestCase):
+    """
+    The epoch is what a cache reads that holds answers about nodes rather than about one tree: such
+    a cache cannot ask `tree_version` of a root it does not have, and an edit to a tree it never
+    looked at can still be an edit to a node it answered for. It therefore has to move for every
+    mutation made anywhere, which is the one way it differs from `tree_version`.
+    """
+
+    def test_replacing_a_child_node_advances_the_epoch(self):
+        holder = _Holder(child=_Leaf(name='a'))
+        before = mutation_epoch()
+        set_child(holder, 'child', _Leaf(name='b'))
+        self.assertGreater(mutation_epoch(), before)
+
+    def test_replacing_a_child_list_advances_the_epoch(self):
+        holder = _Holder()
+        before = mutation_epoch()
+        set_child_list(holder, 'items', [_Leaf(name='a')])
+        self.assertGreater(mutation_epoch(), before)
+
+    def test_replacing_a_body_advances_the_epoch(self):
+        script = _script('a')
+        before = mutation_epoch()
+        set_body(script, [_Leaf(name='b')])
+        self.assertEqual(_names(script), ['b'])
+        self.assertGreater(mutation_epoch(), before)
+
+    def test_replacing_a_value_field_advances_the_epoch(self):
+        script = _script('a')
+        before = mutation_epoch()
+        set_value(script.body[0], 'name', 'b')
+        self.assertEqual(_names(script), ['b'])
+        self.assertGreater(mutation_epoch(), before)
+
+    def test_a_batch_of_removals_advances_the_epoch_once(self):
+        script = _script('a', 'b', 'c', 'd')
+        before = mutation_epoch()
+        edit = BodyEdit(script)
+        edit.splice(script.body[0], [])
+        edit.splice(script.body[2], [])
+        self.assertTrue(edit.apply())
+        self.assertEqual(_names(script), ['b', 'd'])
+        self.assertEqual(mutation_epoch(), before + 1)
+
+    def test_a_visitor_replacement_advances_the_epoch(self):
+        class _Rename(Transformer):
+            def visit__Leaf(self, node: _Leaf):
+                return _Leaf(name=node.name.upper())
+
+        script = _script('a', 'b')
+        before = mutation_epoch()
+        _Rename().visit(script)
+        self.assertEqual(_names(script), ['A', 'B'])
+        self.assertGreater(mutation_epoch(), before)
+
+    def test_an_edit_to_one_tree_advances_the_epoch_of_a_reader_of_another(self):
+        script = _script('a')
+        other = _script('b')
+        version = tree_version(other)
+        epoch = mutation_epoch()
+        set_child_list(script, 'body', [_Leaf(name='c')])
+        self.assertEqual(tree_version(other), version)
+        self.assertGreater(mutation_epoch(), epoch)
+
+    def test_a_visitor_that_replaces_nothing_leaves_the_epoch_alone(self):
+        class _Nothing(Transformer):
+            def visit__Leaf(self, node: _Leaf):
+                return None
+
+        script = _script('a', 'b')
+        before = mutation_epoch()
+        _Nothing().visit(script)
+        self.assertEqual(mutation_epoch(), before)
+
+    def test_reading_a_tree_leaves_the_epoch_alone(self):
+        script = _script('a', 'b')
+        before = mutation_epoch()
+        self.assertEqual(_names(script), ['a', 'b'])
+        self.assertEqual(len(list(script.walk())), 3)
+        self.assertEqual(script.children(), tuple(script.body))
+        self.assertEqual(tree_version(script), tree_version(script))
+        self.assertEqual(mutation_epoch(), before)
+
+    def test_building_nodes_that_are_attached_to_nothing_leaves_the_epoch_alone(self):
+        before = mutation_epoch()
+        leaf = _Leaf(name='a')
+        holder = _Holder(child=leaf, items=[_Leaf(name='b')])
+        self.assertIs(holder.child, leaf)
+        self.assertIsInstance(Script(), Script)
+        self.assertEqual(mutation_epoch(), before)
 
 
 class TestReplaceInParent(unittest.TestCase):

@@ -23,7 +23,10 @@ claims an operation cannot throw; not knowing is `Ps1Outcome(True, UNKNOWN)`.
 `read` is what the source pins an expression to, `convert` a cast, `apply` an operator and `render`
 the way back, and each of those answers about one step. `evaluate` is the composition over a whole
 expression and the entry a caller with a tree wants: it refuses wherever a step does, and it never
-answers something a step would have answered differently.
+answers something a step would have answered differently. It is also the one thing here that keeps
+state — what it last answered for a node, discarded as soon as any tree is mutated, so that being
+the entry a caller with a tree wants does not cost that caller a walk per node. Nothing else here
+remembers anything, and remembering does not make `evaluate` answer differently; see there for why.
 
 The type side has two views over one engine. `resolve_expression_type` is the single-type core: one
 expression, one `refinery.lib.scripts.ps1.dotnet.Ps1TypeName` or `None`. `candidate_types` is the
@@ -43,8 +46,9 @@ import re
 import typing
 
 from typing import Callable, TypeAlias, TypeVar
+from weakref import WeakKeyDictionary
 
-from refinery.lib.scripts import Node
+from refinery.lib.scripts import Node, mutation_epoch
 from refinery.lib.scripts.ps1.ast import (
     extract_first_positional_string,
     get_command_name,
@@ -1429,6 +1433,53 @@ def evaluate(
     `type_of_variable` is what the caller can say about a variable occurrence, exactly as
     `resolve_expression_type` takes it. Nothing here invents a variable's value, so a variable the
     caller cannot type names nothing.
+
+    **The answer for a node is remembered until some tree changes**, because being the one entry a
+    caller with a tree needs is only affordable if it is. What asks this is a visitor descending the
+    tree, and a visitor asks about a node's operand at the operand, then again at its parent, then
+    again at *its* parent: the recursion below is proportional to the subtree, so the walk as a
+    whole is quadratic in the depth of an expression, and a chain of two hundred operands the pass
+    refuses to fold is where that stops being theoretical. What is remembered is keyed on the node's
+    identity and on the `type_of_variable` that was asked with, and it is discarded the moment
+    `refinery.lib.scripts.mutation_epoch` moves — so an entry can only ever be read back over the
+    same tree that produced it, and this stays a function of its arguments.
+    """
+    if node is None:
+        return NOTHING
+    remembered = _EVALUATIONS.get(node)
+    epoch = mutation_epoch()
+    if remembered is not None and remembered.epoch == epoch:
+        if remembered.type_of_variable is type_of_variable:
+            return remembered.outcome
+    outcome = _evaluated(node, type_of_variable)
+    _EVALUATIONS[node] = _Evaluation(epoch, type_of_variable, outcome)
+    return outcome
+
+
+class _Evaluation(typing.NamedTuple):
+    """
+    What `evaluate` answered for one node, and what makes that answer still the current one: the
+    mutation counter no tree had moved past when it was computed, and the typing it was computed
+    under. Both are compared rather than assumed, so a caller that types variables differently from
+    the last one never reads the last one's answer.
+    """
+
+    epoch: int
+    type_of_variable: Ps1VariableTyping | None
+    outcome: Ps1Outcome
+
+
+_EVALUATIONS: WeakKeyDictionary[Node, _Evaluation] = WeakKeyDictionary()
+
+
+def _evaluated(
+    node: Node,
+    type_of_variable: Ps1VariableTyping | None,
+) -> Ps1Outcome:
+    """
+    `evaluate` itself, with the remembering stripped off. Every recursive step goes back through
+    `evaluate` rather than calling this directly, because an operand asked about here is the same
+    operand a caller asks about on its own, and the two must share what they found.
     """
     literal = read(node)
     if literal is not UNKNOWN:

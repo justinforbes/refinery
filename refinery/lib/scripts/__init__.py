@@ -467,7 +467,35 @@ def tree_root(node: Node) -> Node:
     return node
 
 
+_mutation_epoch = 0
+
+
+def mutation_epoch() -> int:
+    """
+    How many mutations have been made to *any* tree, which is what a cache keyed on a single node
+    rather than on a root watches. Every mutation that advances a `tree_version` advances this too.
+
+    The two are not redundant and neither replaces the other; they answer for caches with opposite
+    cost profiles. A `tree_version` reader holds a root already and pays nothing to ask, so it can
+    afford the precision of being told about its own tree only — and it must have it, because what
+    it rebuilds is a whole-script model. A reader keyed on a node holds no root and would have to
+    walk `tree_root` to find one, which is itself proportional to the node's depth and so turns the
+    query it was meant to make cheap back into a walk. This is the counter such a reader can ask in
+    constant time, and it is *coarser on purpose*: a mutation to some unrelated tree drops entries
+    that were still good, and what that costs is recomputing one node's answer rather than
+    rebuilding a model. `refinery.lib.scripts.ps1.analysis.values.evaluate` is the reader it exists
+    for.
+
+    A pass that assigns a field directly instead of through `set_child`, `set_child_list` or
+    `set_value` opts out of this counter exactly as it opts out of `tree_version`, and the entries
+    keyed on it go stale in the same way the models do.
+    """
+    return _mutation_epoch
+
+
 def _bump_tree_version(site: Node) -> None:
+    global _mutation_epoch
+    _mutation_epoch += 1
     root = tree_root(site)
     _tree_versions[root] = _tree_versions.get(root, 0) + 1
 
