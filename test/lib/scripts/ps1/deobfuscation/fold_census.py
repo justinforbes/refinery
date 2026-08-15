@@ -814,9 +814,9 @@ FOLDS: dict[str, str] = {
     "$t = ' ' -and $true; Write-Output (,$t); Write-Output $t":
         'Write-Output (,$True)\nWrite-Output $True',
     '$t = [char]0 -or $false; Write-Output (,$t); Write-Output $t':
-        '$t = [char]0 -or $False\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     "$t = [char]'0' -and $true; Write-Output (,$t); Write-Output $t":
-        '$t = [char]48 -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = 0.0 -or $false; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = -0.0 -or $false; Write-Output (,$t); Write-Output $t':
@@ -824,83 +824,113 @@ FOLDS: dict[str, str] = {
     '$t = 0.0d -or $false; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = [uint64]0 -or $false; Write-Output (,$t); Write-Output $t':
-        '$t = [uint64]0 -or $False\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = $null -or $false; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = @() -or $false; Write-Output (,$t); Write-Output $t':
-        '$t = @() -or $False\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = @(0) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = @(0) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = @(0, 0) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = @(0, 0) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = @($false) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = @($False) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = @($null) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = @($Null) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = @(@()) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = @(@()) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = @(1, 2) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = @(1, 2) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = [bool][char]0; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
     "$t = [bool][char]'0'; Write-Output (,$t); Write-Output $t":
-        '$t = [bool][char]48\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = [bool]0.0; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = [bool]-0.0; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = [bool]0.0d; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool]@(); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool]@(0); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool]@(0, 0); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = [bool]@($false); Write-Output (,$t); Write-Output $t':
-        '$t = [bool]@($False)\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = [bool]@($null); Write-Output (,$t); Write-Output $t':
-        '$t = [bool]@($Null)\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool]@(@()); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
     "$t = [bool]' '; Write-Output (,$t); Write-Output $t":
         'Write-Output (,$True)\nWrite-Output $True',
     "$t = [bool]'false'; Write-Output (,$t); Write-Output $t":
         'Write-Output (,$True)\nWrite-Output $True',
     '$t = -not @(); Write-Output (,$t); Write-Output $t':
-        '$t = -Not @()\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = -not @(0); Write-Output (,$t); Write-Output $t':
-        '$t = -Not @(0)\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     "$t = -not '0'; Write-Output (,$t); Write-Output $t":
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = -not [char]0; Write-Output (,$t); Write-Output $t':
-        '$t = -Not [char]0\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = (,(,0)) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = (,(,0)) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = (,(,@())) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = (,(,@())) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = (,[char]0) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = (,[char]0) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     "$t = (,'') -and $true; Write-Output (,$t); Write-Output $t":
-        "$t = (,'') -and $True\nWrite-Output (,$t)\nWrite-Output $t",
+        'Write-Output (,$False)\nWrite-Output $False',
     "$t = (,' ') -and $true; Write-Output (,$t); Write-Output $t":
-        "$t = (,' ') -and $True\nWrite-Output (,$t)\nWrite-Output $t",
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = (,0.0) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = (,0.0) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = (,0.0d) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = (,0.0d) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool](,(,0)); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = [bool](,[char]0); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = -not (,[char]0); Write-Output (,$t); Write-Output $t':
-        '$t = -Not (,[char]0)\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = (,@(1, 2)) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = (,@(1, 2)) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = (,$true) -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = (,$True) -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = [byte]0 -or $false; Write-Output (,$t); Write-Output $t':
-        '$t = [byte]0 -or $False\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = 0L -or $false; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = 1.5d -and $true; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
     '$t = $true -and [char]0; Write-Output (,$t); Write-Output $t':
-        '$t = $True -and [char]0\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     "$t = $true -and ''; Write-Output (,$t); Write-Output $t":
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = $true -and @(); Write-Output (,$t); Write-Output $t':
-        '$t = $True -and @()\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$False)\nWrite-Output $False',
     '$t = [char]65 -and $true; Write-Output (,$t); Write-Output $t':
-        '$t = [char]65 -and $True\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,$True)\nWrite-Output $True',
     '$t = @() * 5000; Write-Output (,$t); Write-Output $t.Count':
         'Write-Output (,@())\nWrite-Output @().Count',
+    '$t = (,@()) -and $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = (,(,(,0))) -and $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = (,1) -and $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    "$t = (,'a') -and $true; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = (,[char]65) -and $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = @(1, 2, 3) -and $true; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = [bool](,@()); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$False)\nWrite-Output $False',
+    '$t = [bool](,1); Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':

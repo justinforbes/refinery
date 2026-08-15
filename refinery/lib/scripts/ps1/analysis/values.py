@@ -89,7 +89,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1TypeExpression,
-    Ps1UnaryExpression,
     Ps1Variable,
 )
 from refinery.lib.scripts.ps1.token import BACKTICK_ENCODE
@@ -110,24 +109,31 @@ _NONPRINT_CONTROL = frozenset(BACKTICK_ENCODE) - {'\n'}
 
 def is_truthy(node: Node | None) -> bool | None:
     """
-    Determine the boolean truth value of a constant expression using PowerShell semantics. Returns
-    `None` for non-constant or unrecognized expressions.
+    Whether an expression counts as true to PowerShell, or `None` where this cannot say.
+
+    This is 5.1's conversion to a `Boolean` and nothing else, which is the one predicate `if`,
+    `while`, `for`, `do`, `-and`, `-or`, `-xor`, `-not` and a `[bool]` cast all reach. It is answered
+    by reading the value the expression names and converting *that*, rather than by a rule spelled
+    out here, so that a spelling this module has never seen is refused instead of being given a
+    truth of its own invention.
+
+    A rule spelled out here is what this used to be, and `- '0'` is the case that ended it: a minus
+    sign in front of a String converts the String to a number, so the text `'0'` is true while the
+    number it negates to is false. The rule read the minus as leaving truth alone — which holds for
+    a number and for nothing else — and answered `True` where a host answers `False`.
+
+    Refusing on `may_throw` is what keeps a conversion the host never reaches from being reported:
+    `[byte]300` and `[int]'abc'` name no value, and an expression that throws has no truth.
     """
-    node = unwrap_parens(node) if isinstance(node, Expression) else node
     if node is None:
         return None
-    if is_builtin_variable(node):
-        lower = node.name.lower()
-        if lower == 'true':
-            return True
-        if lower in ('false', 'null'):
-            return False
+    fact = read(node)
+    if fact is UNKNOWN:
         return None
-    if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral, Ps1StringLiteral)):
-        return bool(node.value)
-    if isinstance(node, Ps1UnaryExpression) and node.operator == '-':
-        return is_truthy(node.operand)
-    return None
+    outcome = convert(fact, _BOOLEAN)
+    if outcome.may_throw or not isinstance(outcome.value, Ps1Constant):
+        return None
+    return outcome.value.payload if isinstance(outcome.value.payload, bool) else None
 
 
 def unwrap_to_array_literal(node: Node) -> Ps1ArrayLiteral | None:
@@ -1430,14 +1436,60 @@ def _cast_throws_are_modelled(target: Ps1TypeName) -> bool:
     return target in _INTEGER_RANGE or target == _CHAR
 
 
+def _collection_is_true(elements: tuple[Ps1Fact, ...]) -> bool | None:
+    """
+    Whether a collection counts as true, or `None` where this cannot say.
+
+    How many elements it holds decides it, and only a collection of exactly one asks what is inside.
+    Measured: `@()` is `$False`, `@(0, 0)` is `$True` although both of its elements are zero, and
+    `@(0)` is `$False` because a collection of one is as true as the thing it holds.
+    """
+    if len(elements) != 1:
+        return len(elements) > 0
+    return _element_is_true(elements[0])
+
+
+def _element_is_true(fact: Ps1Fact) -> bool | None:
+    """
+    Whether the single element of a one-element collection counts as true, or `None` where this
+    cannot say.
+
+    **This is not the same question as `[bool]` of that element**, and two measured pairs say so:
+    `(,[char]0)` is `$True` where `[char]0` is `$False`, and `(,(,0))` is `$True` where `(,0)` is
+    `$False`. 5.1 reaches a different function here, one with no `Char` arm at all — so every Char
+    is true to it — and one that answers a collection by whether it holds anything rather than by
+    asking this question again. The 5.1 source says in a comment that it declines to recurse on
+    purpose, to bound the work.
+
+    Everything else is the ordinary conversion, which is why this asks `_cast` for it rather than
+    spelling a second copy of it out.
+
+    An element that is not a value is refused rather than guessed at. A collection's payload does
+    not guarantee its elements are values — `@() + (0 -shl $true)` holds a type and no value — and
+    the function 5.1 uses here ends in `return true`, which would report such an element as true.
+    """
+    if fact is NULL:
+        return False
+    if not isinstance(fact, Ps1Constant):
+        return None
+    nested = _elements(fact)
+    if nested is not None:
+        return len(nested) >= 1
+    if fact.type == _CHAR:
+        return True
+    truth = _cast(_BOOLEAN, fact)
+    return truth if isinstance(truth, bool) else None
+
+
 def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
     """
     The value a cast produces, or `None` where this module computes nothing for it.
 
     A `Char` is a number to everything that reads one — `[int][char]65` is 65, measured — and it is
-    a value to everything that renders one, `[string][char]65` being `A`. It is *not* fed to the
-    remaining targets, because what those do with a Char has no row: `[bool]` of one is the case
-    that would be invented.
+    a value to everything that renders one, `[string][char]65` being `A`. It is fed to `Boolean` as
+    that number and to no other remaining target: `[bool][char]0` is `$False` and `[bool][char]65`
+    and `[bool][char]'0'` are `$True`, all measured, which is the code point against zero and so is
+    what the number already answers. The rest still have no row and are still refused.
 
     A real is rounded half to even on its way to an integer, which is what a host does rather than
     what a truncation would: `[int]1.5` and `[int]2.5` are both 2, `[int]1.4` is 1 and `[int]-1.5`
@@ -1465,6 +1517,10 @@ def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
         return _rendered(fact)
     if fact.type == _STRING and isinstance(fact.payload, str):
         return _from_string(target, fact.payload)
+    if target == _BOOLEAN:
+        elements = _elements(fact)
+        if elements is not None:
+            return _collection_is_true(elements)
     number = _numeric_source(fact)
     if number is None:
         return None
@@ -1474,7 +1530,7 @@ def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
     if target in _INTEGER_RANGE:
         rounded = _rounded(number)
         return None if rounded is None else _within(_INTEGER_RANGE[target], rounded)
-    if fact.type == _CHAR:
+    if fact.type == _CHAR and target != _BOOLEAN:
         return None
     if target == _BOOLEAN:
         return number != 0

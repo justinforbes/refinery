@@ -101,7 +101,7 @@ class _Coverage(NamedTuple):
 #: into a refusal moves a number here rather than quietly leaving the comparison below.
 COVERAGE: dict[str, _Coverage] = {
     ''               : _Coverage(3, 1),
-    'System.Boolean' : _Coverage(80, 50),
+    'System.Boolean' : _Coverage(88, 56),
     'System.Byte'    : _Coverage(5, 5),
     'System.Char'    : _Coverage(8, 6),
     'System.Double'  : _Coverage(33, 17),
@@ -180,6 +180,7 @@ DIVERGENCES: dict[str, _Divergence] = {
     '@($false) -and $true'               : _Divergence(False, True),
     "(,'') -and $true"                   : _Divergence(False, True),
     '(,0.0) -and $true'                  : _Divergence(False, True),
+    '(,@()) -and $true'                  : _Divergence(False, True),
     '-not @(0)'                          : _Divergence(True, False),
     '[char]0 -or $false'                 : _Divergence(False, True),
     '$true -and [char]0'                 : _Divergence(False, True),

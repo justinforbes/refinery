@@ -844,6 +844,14 @@ TYPES: tuple[str, ...] = (
     '$t = [char]65 -and $true; Write-Output (,$t); Write-Output $t',
     '$t = @() * [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t.Count',
     '$t = @() * 5000; Write-Output (,$t); Write-Output $t.Count',
+    '$t = (,@()) -and $true; Write-Output (,$t); Write-Output $t',
+    '$t = (,(,(,0))) -and $true; Write-Output (,$t); Write-Output $t',
+    '$t = (,1) -and $true; Write-Output (,$t); Write-Output $t',
+    "$t = (,'a') -and $true; Write-Output (,$t); Write-Output $t",
+    '$t = (,[char]65) -and $true; Write-Output (,$t); Write-Output $t',
+    '$t = @(1, 2, 3) -and $true; Write-Output (,$t); Write-Output $t',
+    '$t = [bool](,@()); Write-Output (,$t); Write-Output $t',
+    '$t = [bool](,1); Write-Output (,$t); Write-Output $t',
 )
 
 

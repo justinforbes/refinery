@@ -50,6 +50,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     evaluate,
     fact_of,
     integer_of,
+    is_truthy,
     make_string_literal,
     read,
     render,
@@ -427,13 +428,6 @@ DECLINED: dict[str, tuple[str, ...]] = {
     'a Single is a width nothing here computes in': (
         '[single]1.5',
     ),
-    'a Char or a collection, which `_cast` reaches no Boolean arm for': (
-        '[bool][char]0',
-        "[bool][char]'0'",
-        '[bool]@()',
-        '[bool](,(,0))',
-        '[bool](,[char]0)',
-    ),
     'an operand naming no value, so the cast is given nothing to convert': (
         '[bool](0.0 / 0.0)',
     ),
@@ -755,6 +749,56 @@ def _measured_complement(expression: str) -> tuple[str, str]:
 
 def _measured_complement_fact(expression: str) -> Ps1Fact:
     return _witnessed_fact(_measured_complement(expression))
+
+
+#: The two shapes a measured row settles an expression's truth in. They are one question written
+#: down two ways: `[bool] $x` prints the Boolean the conversion produced, and `if ($x)` prints the
+#: branch that same conversion selected.
+_BOOLEAN_CAST_ROW = re.compile(
+    r'\$t = (?P<expression>\[bool\](?P<condition>.+))'
+    r'; Write-Output \(,\$t\); Write-Output \$t'
+)
+_BRANCH_ROW = re.compile(
+    r"\$t = (?P<expression>if \((?P<condition>.+)\) \{ 'yes' \} else \{ 'no' \})"
+    r'; Write-Output \(,\$t\); Write-Output \$t'
+)
+
+#: What the branch a host ran says about the condition it ran on. A rendering neither name covers
+#: is a `KeyError` naming it rather than a truth read out of a word this does not know.
+_BRANCH_TAKEN = {'yes': True, 'no': False}
+
+
+def _truth_rows() -> dict[str, str]:
+    """
+    The measured expression that settles a truth, keyed by the condition whose truth it settles.
+    """
+    rows: dict[str, str] = {}
+    for row in TYPE_TRANSCRIPTS:
+        for pattern in (_BOOLEAN_CAST_ROW, _BRANCH_ROW):
+            match = pattern.fullmatch(row)
+            if match is not None:
+                rows[match.group('condition')] = match.group('expression')
+    return rows
+
+
+def _measured_truth(expression: str) -> bool:
+    """
+    What a host counted a measured expression as, read out of whichever witness its row prints.
+    """
+    carried, rendered = _measured(expression)
+    return _boolean(rendered) if carried == 'System.Boolean' else _BRANCH_TAKEN[rendered]
+
+
+#: The truth a 5.1 host counted each measured condition as.
+TRUTHS: dict[str, bool] = {
+    condition: _measured_truth(expression)
+    for condition, expression in _truth_rows().items()
+}
+
+#: The measured conditions this has to settle rather than refuse: a string, an empty string, a
+#: number, zero and `$null`. A module that answered nothing at all would agree with every host
+#: there is, so the agreement above is held over these too.
+PLAIN_CONDITIONS: tuple[str, ...] = ("'a'", "''", "'0'", '1', '0', '$null')
 
 
 #: The measured operations whose result a host printed to fewer digits than the value has: 5.1
@@ -1868,7 +1912,7 @@ class TestPs1MeasuredCasts(unittest.TestCase):
     """
 
     def test_every_cast_the_corpus_measures_is_selected(self):
-        self.assertEqual(len(CAST_ROWS), 93, 'a measured cast was added or withdrawn')
+        self.assertEqual(len(CAST_ROWS), 95, 'a measured cast was added or withdrawn')
         self.assertEqual(sorted(set(DECLINED_CASTS) - set(CAST_ROWS)), [])
         self.assertEqual(sorted(set(DECLINED_CASTS) & set(THROWN)), [])
 
@@ -1989,12 +2033,12 @@ class TestPs1CharConversions(unittest.TestCase):
 
     def test_a_char_reaches_no_target_the_corpus_does_not_measure(self):
         """
-        The corpus measures a Char cast to Int32 and to String, and to nothing else. What
-        `[bool][char]0` is remains a .NET rule no row records, so the type the grid names is the
-        whole answer and the value is left where the measurement left it.
+        The corpus measures a Char cast to Int32, to String and to Boolean, and to nothing else.
+        What `[double][char]65` is remains a .NET rule no row records, so there the type the grid
+        names is the whole answer and the value is left where the measurement left it.
         """
-        self.assertEqual(convert(Ps1Constant(CHAR, 'A'), BOOLEAN).value, Ps1Typed(BOOLEAN))
         self.assertEqual(convert(Ps1Constant(CHAR, 'A'), DOUBLE).value, Ps1Typed(DOUBLE))
+        self.assertEqual(convert(Ps1Constant(CHAR, 'A'), DECIMAL).value, Ps1Typed(DECIMAL))
 
 
 class TestPs1CastsThatReadAString(unittest.TestCase):
@@ -2261,7 +2305,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 156, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 162, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
@@ -2523,6 +2567,32 @@ class TestPs1MeasuredComplement(unittest.TestCase):
         for operator in ('-not', '!', '-', '+', '-bxor', '-join'):
             with self.subTest(operator):
                 self.assertEqual(apply_unary(operator, MEASURED['0xFF']), NOTHING)
+
+
+class TestPs1MeasuredTruth(unittest.TestCase):
+    """
+    What `is_truthy` answers, held against what a host counted the same expression as. Refusing is
+    always allowed and a disagreement never is: every caller of it drops a branch or a loop on the
+    answer, so a truth that is not the host's is a script rewritten into a different one.
+
+    `- '0'` is the expression that makes this a measurement rather than a rule. A minus sign in
+    front of a String converts the String to a number, so the text `'0'` is true while the Int32 it
+    negates to is false, and a host measured over `if (- '0')` ran the else branch.
+    """
+
+    def test_a_measured_condition_this_answers_is_answered_the_truth_the_host_counted(self):
+        answers = {condition: is_truthy(_slot(condition)) for condition in TRUTHS}
+        answered = {
+            condition: truth for condition, truth in answers.items() if truth is not None
+        }
+        self.assertEqual(len(TRUTHS), 25, 'a measured truth was added or withdrawn')
+        self.assertEqual(answered, {condition: TRUTHS[condition] for condition in answered})
+
+    def test_a_condition_whose_truth_is_its_own_value_is_answered_rather_than_refused(self):
+        self.assertEqual(
+            {condition: is_truthy(_slot(condition)) for condition in PLAIN_CONDITIONS},
+            {condition: TRUTHS[condition] for condition in PLAIN_CONDITIONS},
+        )
 
 
 class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
@@ -2796,7 +2866,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in CAST_ROWS
             if _read(CAST_ROWS[expression].operand) is not UNKNOWN
         }
-        self.assertEqual(len(composed), 91)
+        self.assertEqual(len(composed), 93)
         self.assertEqual(
             composed, {expression: _converted(expression) for expression in composed})
 
@@ -2919,7 +2989,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 2086)
+        self.assertEqual(len(compared), 2139)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2934,7 +3004,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2141)
+        self.assertEqual(len(compared), 2194)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2949,7 +3019,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2141)
+        self.assertEqual(len(compared), 2194)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -2960,12 +3030,12 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 1204)
+        self.assertEqual(len(STRINGS), 1221)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
     def test_the_bytes_the_array_reader_collects_are_the_numbers_the_elements_name(self):
-        self.assertEqual(len(BYTE_ARRAYS), 99)
+        self.assertEqual(len(BYTE_ARRAYS), 109)
         self.assertEqual(
             [row.source for row in BYTE_ARRAYS if list(row.collected) != row.payloads], [])
 
@@ -2974,7 +3044,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         The two come apart only where 5.1 does: the node reads the digits it was written with, and
         the host printed something else for exactly three of the corpus spellings.
         """
-        self.assertEqual(len(NUMERALS), 431)
+        self.assertEqual(len(NUMERALS), 438)
         self.assertEqual(
             sorted({one.raw for one in NUMERALS if one.named.payload != one.reported}),
             sorted(MISREAD_SPELLINGS),
@@ -3010,7 +3080,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 364)
+        self.assertEqual(len(consulted), 373)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
@@ -3033,7 +3103,7 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
         weaker to fall back on either: an array shorter than the script builds is a different value.
         """
         named = [row for row in ARRAYS if row.named]
-        self.assertEqual(len(named), 136)
+        self.assertEqual(len(named), 149)
         self.assertEqual([row.source for row in named if not row.elements_named], [])
 
     def test_an_element_that_names_only_a_type_leaves_the_array_unknown(self):
@@ -3060,7 +3130,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 1693)
+        self.assertEqual(len(compared), 1713)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
@@ -3265,7 +3335,7 @@ class TestPs1OperatorCaseDoesNotChangeTheAnswer(unittest.TestCase):
             expression for expression in OPERATION_ROWS
             if any(character.isalpha() for character in _operator_of(expression))
         ]
-        self.assertEqual(len(lettered), 73)
+        self.assertEqual(len(lettered), 79)
         self.assertEqual(
             {expression: _cased(expression, str.upper) for expression in lettered},
             {expression: _cased(expression, str.lower) for expression in lettered},

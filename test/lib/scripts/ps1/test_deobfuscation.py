@@ -593,3 +593,50 @@ class TestPs1NameTrustSurvivesRewriting(TestPs1):
             """
         ))
         self.assertIn('Start-Process calc', out)
+
+
+#: The six spellings that ask what a negated String counts as, each written the way the synthesizer
+#: writes it, so that the source stands in for the expected output as well.
+NEGATED_STRINGS: tuple[str, ...] = (
+    cleandoc("""
+        if (-'0') {
+          'A'
+        } else {
+          'B'
+        }
+    """),
+    cleandoc("""
+        if (-'abc') {
+          'A'
+        } else {
+          'B'
+        }
+    """),
+    cleandoc("""
+        do {
+          'A'
+        } until (-'0')
+    """),
+    "$x = -Not (-'0')",
+    "$x = (-'0') -and $True",
+    "$x = (-'abc') -or $False",
+)
+
+
+class TestPs1NegatedStringTruth(TestPs1):
+    """
+    A minus sign in front of a String converts the String to a number, so negating one changes what
+    it counts as: measured, the text `'0'` is true where `- '0'` is the Int32 zero, and a host over
+    `if (- '0')` ran the else branch. `- 'abc'` throws and counts as nothing at all.
+
+    A truth carried through the minus rewrote every spelling below: each `if` to the branch a host
+    does not run, and `do { 'A' } until (- '0')` to a body a host never stops repeating.
+
+    Junk removal is off so that the bare strings stay where they are written and what is compared
+    is the branches themselves.
+    """
+
+    def test_a_condition_over_a_negated_string_is_left_where_it_stands(self):
+        for source in NEGATED_STRINGS:
+            with self.subTest(source):
+                self.assertEqual(self._deobfuscate_iterative(source, remove_junk=False), source)
