@@ -6866,6 +6866,23 @@ text. Node runs every program opening with one of these as sloppy code too, and 
 of them is pinned in `test.lib.scripts.js.test_unfixed_defects`.
 """
 
+SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING = [
+    "('abc'[0]);",
+    "atob('YQ==');",
+    "'a' + 'b';",
+    "['a', 'b'].join('');",
+    "'A'.toLowerCase();",
+]
+"""
+Statements that are not string literals and that a fold rewrites as one. None of them denotes `use
+strict`, so none becomes a directive itself: what each does is continue the Directive Prologue it
+should have ended, which hands a `'use strict'` written below it the directive position it never
+had. The first of them is a read a fold already declines in this position, written inside a bracket:
+the refusal reads the tree, where the bracket stands between the statement and the read, and the
+printer does not write that bracket back. What the tool makes of them is pinned in
+`test.lib.scripts.js.test_unfixed_defects`.
+"""
+
 _SPELLINGS_THAT_ONLY_DENOTE_THE_TEXT_OF_A_DIRECTIVE = [
     R"'use\u0020strict';",
 ]
@@ -6889,6 +6906,10 @@ def a_function_body_opening_with(head: str) -> str:
 
 def a_file_holding_an_octal_literal_opening_with(head: str) -> str:
     return F'{head} console.log(010);'
+
+
+def a_script_whose_directive_stands_below(head: str) -> str:
+    return F"{head} 'use strict'; {A_PROGRAM_THAT_REPORTS_ITS_MODE}"
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
@@ -6938,3 +6959,17 @@ class TestWhetherAStatementIsADirectiveIsDecidedByHowItIsWritten(TestBase):
             with self.subTest(head=head):
                 self._prints(
                     a_file_holding_an_octal_literal_opening_with(head), '8' + chr(10))
+
+    def test_a_use_strict_below_a_statement_that_is_no_directive_is_none_either(self):
+        """
+        Node prints `false` for each of these files. The head is not a string literal, so the
+        Directive Prologue ends at it, and the `'use strict'` on the line below is an expression
+        statement that computes a string and discards it. What the tool makes of these files is
+        pinned in `test.lib.scripts.js.test_unfixed_defects`.
+        """
+        for head in SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING:
+            with self.subTest(head=head):
+                self.assertEqual(
+                    behavior(a_script_whose_directive_stands_below(head)),
+                    ('false' + chr(10), None),
+                )

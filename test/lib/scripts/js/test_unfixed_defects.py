@@ -28,10 +28,15 @@ from test.lib.scripts.js.analysis.differential import (
     node_executable,
 )
 from test.lib.scripts.js.analysis.test_differential import (
+    SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING,
     SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE,
     a_file_holding_an_octal_literal_opening_with,
     a_function_body_opening_with,
     a_script_opening_with,
+    a_script_whose_directive_stands_below,
+)
+from test.lib.scripts.js.deobfuscation.test_array_length_reads import (
+    A_COUNT_THE_FOLD_DOES_NOT_REACH,
 )
 from test.lib.scripts.js.test_for_statement_head import (
     HEADS_THE_TOOL_MISREADS,
@@ -669,6 +674,24 @@ class TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten(TestBase):
             [(eight, eight)] * len(spellings),
         )
 
+    @unittest.expectedFailure
+    def test_a_statement_folded_to_a_plain_string_does_not_extend_the_prologue(self):
+        """
+        Node prints `false` for each of the five files
+        `test.lib.scripts.js.analysis.test_differential.SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING`
+        builds: none of the heads is a string literal, so the prologue ends at it and the
+        `'use strict'` below it governs nothing. Each fold writes a string literal there, and Node
+        prints `true` for what comes back, having read a directive two statements after the file
+        stopped offering one. The read among them is one a fold already declines in this position,
+        written inside a bracket the printer removes.
+        """
+        sloppy = ('false\n', None)
+        spellings = SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING
+        self.assertEqual(
+            [_before_and_after(a_script_whose_directive_stands_below(head)) for head in spellings],
+            [(sloppy, sloppy)] * len(spellings),
+        )
+
 
 class TestADecodeReadsBackTheCharactersNoEscapeIntroduced(TestBase):
     """
@@ -706,33 +729,75 @@ class TestADecodeReadsBackTheCharactersNoEscapeIntroduced(TestBase):
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAnAllocationThatCannotBeBuiltAnswersNothing(TestBase):
     """
-    A question the shape of an allocation answers — how many elements a literal holds, what `typeof`
-    calls it, whether it is truthy — is answered without the allocation, which is then discarded
-    along with every element in it. It may be discarded only if building it does nothing that can be
-    observed, and resolving a name is such a thing: a reference no binding resolves throws a
-    `ReferenceError`, and so does one to a `let` the program has not reached yet. The gate that asks
-    whether an allocation is free of effects answers yes for all of them, so the answer is printed
-    where the file threw.
+    A question the shape of an allocation answers — what `typeof` calls it, whether it is truthy —
+    is answered without the allocation, which is then discarded along with every element in it. It
+    may be discarded only if building it does nothing that can be observed, and resolving a name is
+    such a thing: a reference no binding resolves throws a `ReferenceError`. The gate that asks
+    whether an allocation is free of effects answers yes all the same, so the answer is printed
+    where the file threw. Counting an array literal asked that same gate and no longer does; those
+    reads are law in `test.lib.scripts.js.deobfuscation.test_array_length_reads`.
     """
 
     @unittest.expectedFailure
     def test_a_literal_holding_a_name_that_does_not_resolve_still_throws(self):
         """
-        Node refuses each of these five programs with a `ReferenceError` and prints nothing. Each
-        deobfuscation prints instead: `1` and `3` for the first two counts, `object` for the
-        `typeof`, `1` for the branch a truthy object picks, and `1` again for the last count, whose
-        name is a `let` read from above its own declaration and refused for the reason a name with
-        no binding at all is.
+        Node refuses both of these programs with a `ReferenceError` and prints nothing. Each
+        deobfuscation prints instead: `object` for the `typeof`, and `1` for the branch a truthy
+        object picks.
         """
         refused = ('', 'ReferenceError')
         sources = [
-            'console.log([zzz].length);',
-            'console.log([1, zzz, 3].length);',
             'console.log(typeof [zzz]);',
             'console.log({p: zzz} ? 1 : 2);',
-            'console.log([q].length); let q = 1;',
         ]
         self.assertEqual(
             [_before_and_after(source) for source in sources],
             [(refused, refused)] * len(sources),
         )
+
+
+class TestALiteralNoElementOfWhichRunsIsCounted(TestBase):
+    """
+    An array literal's `length` is the number of positions it was written with, and reading it
+    discards the array, so the count may replace the read whenever evaluating every element does
+    nothing that can be observed. What the fold asks instead is whether every element is written as
+    a literal or is an elision, which is narrower: the four reads of
+    `test.lib.scripts.js.deobfuscation.test_array_length_reads.A_COUNT_THE_FOLD_DOES_NOT_REACH` hold
+    a global value name, a function expression, an object and an array literal, and a getter that is
+    defined rather than called, and not one of them runs while the array is built.
+    """
+
+    @unittest.expectedFailure
+    def test_a_literal_whose_elements_are_not_written_as_literals_is_counted(self):
+        """
+        Node answers those four reads with `3`, `2`, `1`, and `2`, which the law in that module pins
+        against the engine; each is the number of commas the literal is written with.
+        """
+        counts = A_COUNT_THE_FOLD_DOES_NOT_REACH
+        self.assertEqual(
+            [_folded(F'console.log({read});') for read in counts],
+            [F'console.log({count});' for count in counts.values()],
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAConstructedCalleeIsReadForItsReceiverToo(TestBase):
+    """
+    A `new` reads its callee for the value it constructs and for the receiver that value was read
+    off, exactly as a call does, and the `TypeError` a value that is no constructor throws names the
+    access rather than the value. `refinery.lib.scripts.js.analysis.model.is_invocation_target`
+    answers for a call and for a tagged template and for neither of the two `new` forms, so a `new`
+    is the one invocation whose callee is still replaced by the constant it reads.
+    """
+
+    @unittest.expectedFailure
+    def test_a_new_over_an_own_property_keeps_the_access_it_reads(self):
+        """
+        Node refuses `new ('abc'.length)()` with `TypeError: "abc".length is not a constructor`, and
+        refuses `new (3)()` — which is what the fold leaves behind — with `TypeError: 3 is not a
+        constructor`. The file is told about a number it never wrote and not about the property it
+        read.
+        """
+        source = "try { new ('abc'.length)(); } catch (e) { console.log(e.message); }"
+        said = ('"abc".length is not a constructor\n', None)
+        self.assertEqual(_before_and_after(source), (said, said))

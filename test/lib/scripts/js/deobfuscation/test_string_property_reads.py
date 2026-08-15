@@ -12,15 +12,24 @@ read runs. An index past the end, an index below zero, a key that merely looks l
 therefore left standing; the cases below run a file that installs each of them through Node to show
 the read still finds it.
 
+Which key is being read is itself a question with an answer only the engine has whenever the key is
+not already a primitive. Naming a property converts the key, and an array or an object converts
+through `Array.prototype.join` or `Object.prototype.toString`, either of which a file may replace
+before the read runs: `'abc'[[1]]` reads `'b'` in an untouched engine and `'c'` in one where `join`
+was made to answer `'2'`.
+
 The string need not be spelled in the file. `atob`, `unescape`, `decodeURIComponent`, `JSON.parse`,
 `repeat`, and `toLowerCase` all hand one back, and a read off the result is the same read off the
 same value — including for a character above the basic multilingual plane, which is two code units
 however the string holding it was built.
 
 A property access is finally not always a read. Assigned, updated, deleted, or destructured, it is a
-target that must survive as one. In callee position it may be replaced, because what these two keys
-answer is a string or a number and never a function, so the call throws a `TypeError` before and
-after alike.
+target that must survive as one. In callee position it is read for its value and for the receiver
+that value was read off, and the `TypeError` a value that is not callable throws names the access
+rather than the value, so replacing the access renames the error the file reports. Standing alone at
+the top of a script or of a function body it is a statement a Directive Prologue ends at, and an
+index answers a string, so replacing it there writes a string literal into a prologue that had
+already ended and hands every string literal below it the directive position it never had.
 
 Node is the authority for every absolute value here. A string is pinned as its UTF-16 code units so
 that what is fixed is the value and not the tool's choice of escapes.
@@ -100,14 +109,98 @@ _LEFT_STANDING: dict[str, str] = {
     F'{_ASTRAL_LITERAL}[4]'   : F'{_ASTRAL_LITERAL}[4]',
 }
 
+#: A read whose key is not a primitive, mapped to the text it is left standing as and to the
+#: code-unit structure Node answers it with in an engine nothing has touched. What the key spells is
+#: decided by a prototype method rather than by the element, so reading it off the element names a
+#: property the engine need not have named.
+_A_KEY_A_PROTOTYPE_METHOD_CONVERTS: dict[str, tuple[str, str]] = {
+    "'abc'[[1]]"    : ("'abc'[[1]]", 'S[98]'),
+    "'abc'[['1']]"  : ("'abc'[['1']]", 'S[98]'),
+    "'abc'[[1, 2]]" : ("'abc'[[1, 2]]", 'undefined'),
+    "'abc'[{}]"     : ("'abc'[{}]", 'undefined'),
+}
+
+#: A program that replaces the method a key's conversion runs, paired with what Node prints for it.
+#: Every one of them answers with a character other than the one the element spells, which is what
+#: makes the replaced method and not the element the authority on which property was named.
+_A_REPLACED_CONVERSION_DECIDES_THE_KEY: dict[str, str] = {
+    "Array.prototype.join = function () { return '2'; }; console.log('abc'[[1]]);": 'c\n',
+    "Array.prototype.toString = function () { return '2'; }; console.log('abc'[[1]]);": 'c\n',
+    "Object.prototype.toString = function () { return '1'; }; console.log('abc'[{}]);": 'b\n',
+}
+
+#: A call whose callee is a read the string decides, mapped to the text the tool leaves it as and to
+#: the message Node's `TypeError` carries. The message names the access, so a callee replaced by the
+#: value it reads reports about that value and says nothing about the property the file asked for.
+_CALLING_WHAT_THE_STRING_DECIDES: dict[str, tuple[str, str]] = {
+    "'abc'.length()"     : ("'abc'.length()", '"abc".length is not a function'),
+    "'abc'['length']()"  : ("'abc'.length()", '"abc".length is not a function'),
+    "'abc'[0]()"         : ("'abc'[0]()", '"abc"[0] is not a function'),
+    "'abc'['1']()"       : ("'abc'['1']()", '"abc".1 is not a function'),
+    "'abc'.length?.()"   : ("'abc'.length?.()", '"abc".length is not a function'),
+    "'abc'.length`x`"    : ("'abc'.length`x`", '"abc".length is not a function'),
+}
+
+#: A statement that a Directive Prologue would take in were it written as a string literal, mapped
+#: to the text the tool leaves it as. The receiver of the read may still fold, since the string it
+#: denotes is a string either way; the read itself may not, because the statement would then be a
+#: string literal and the prologue it ended would run on past it.
+_A_READ_AT_THE_TOP_OF_A_BODY: dict[str, str] = {
+    "'abc'[0];"                     : "'abc'[0];",
+    "'abc'['0'];"                   : "'abc'['0'];",
+    "'abc'[1 - 1];"                 : "'abc'[0];",
+    "atob('YQ==')[0];"              : "'a'[0];",
+    "decodeURIComponent('%61')[0];" : "'a'[0];",
+    "'ABC'.toLowerCase()[0];"       : "'abc'[0];",
+}
+
+#: A program that reports whether the code it is compiled with runs strict. A plain call passes no
+#: receiver, so `this` in the body is the global object where the code is sloppy and `undefined`
+#: where it is strict.
+_REPORTS_ITS_MODE = 'function probe() { return this; } console.log(probe() === undefined);'
+
+
+def _deobfuscated(source: str) -> str:
+    """
+    The script `refinery.js` emits for *source*.
+    """
+    return source.encode('utf8') | js() | str
+
 
 def _fold(expression: str) -> str:
     """
     The expression `refinery.js` folds *expression* to. It is placed in a `console.log` argument,
     which survives as a side effect, so nothing but the fold decides what comes back.
     """
-    printed = F'console.log({expression});'.encode('utf8') | js() | str
+    printed = _deobfuscated(F'console.log({expression});')
     return printed.removeprefix('console.log(').removesuffix(');')
+
+
+def _caught_message(call: str) -> str:
+    """
+    A program that runs *call* and prints the message of whatever it throws, which is the only way
+    the message reaches a comparison: `test.lib.scripts.js.analysis.differential.behavior` reports
+    the type of an uncaught exception and nothing else.
+    """
+    return F'try {{ {call}; }} catch (e) {{ console.log(e.message); }}'
+
+
+def _a_script_whose_directive_stands_below(head: str) -> str:
+    """
+    A script opening with *head*, followed by `'use strict';` and by a probe that reports which mode
+    the file was compiled in. The head is not a string literal, so it ends the Directive Prologue,
+    and the `'use strict'` below it is an ordinary statement: Node compiles the whole file sloppy.
+    """
+    return F"{head}\n'use strict';\n{_REPORTS_ITS_MODE}"
+
+
+def _the_head_it_is_left_as(head: str) -> str:
+    """
+    The first line of the script `refinery.js` emits for `_a_script_whose_directive_stands_below`
+    applied to *head*. Each head is one statement and the printer writes one statement to a line, so
+    that line is what became of it.
+    """
+    return _deobfuscated(_a_script_whose_directive_stands_below(head)).splitlines()[0]
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
@@ -154,6 +247,35 @@ class TestAReadTheStringDoesNotDecide(TestBase):
     def test_a_method_that_is_only_a_name_when_read_still_folds_when_called(self):
         self.assertEqual(_fold("'abc'['charAt'](1)"), "'b'")
         self.assertEqual(_fold("'abc'.toUpperCase()"), "'ABC'")
+
+
+class TestAKeyThatIsNotAPrimitive(TestBase):
+
+    def test_a_key_a_prototype_method_converts_is_left_standing(self):
+        for expression, (standing, _) in _A_KEY_A_PROTOTYPE_METHOD_CONVERTS.items():
+            with self.subTest(expression=expression):
+                self.assertEqual(_fold(expression), standing)
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_answers_each_read_with_what_the_untouched_conversion_names(self):
+        reads = _A_KEY_A_PROTOTYPE_METHOD_CONVERTS
+        self.assertEqual(
+            code_units(list(reads)),
+            [answer for _, answer in reads.values()],
+        )
+
+
+class TestAReplacedConversionDecidesWhichPropertyIsNamed(_NodeDecides):
+
+    def test_node_reads_the_property_the_replaced_conversion_names(self):
+        for source, printed in _A_REPLACED_CONVERSION_DECIDES_THE_KEY.items():
+            with self.subTest(source=source):
+                self.assertEqual(behavior(source), (printed, None))
+
+    def test_a_replaced_conversion_still_decides_after_deobfuscation(self):
+        for source in _A_REPLACED_CONVERSION_DECIDES_THE_KEY:
+            with self.subTest(source=source):
+                self._preserves(source)
 
 
 class TestNoPrototypeCanShadowAnOwnProperty(_NodeDecides):
@@ -268,3 +390,48 @@ class TestAnAccessThatIsNotARead(_NodeDecides):
         ]:
             with self.subTest(source=source):
                 self._preserves(source)
+
+
+class TestACalleeIsReadForItsReceiverToo(TestBase):
+
+    def test_a_callee_survives_deobfuscation_as_an_access(self):
+        for call, (standing, _) in _CALLING_WHAT_THE_STRING_DECIDES.items():
+            with self.subTest(call=call):
+                self.assertEqual(_fold(call), standing)
+
+    def test_a_read_inside_a_callee_is_folded(self):
+        self.assertEqual(_fold("'abc'.length.toFixed()"), '(3).toFixed()')
+        self.assertEqual(_fold("'abc'[0].toUpperCase()"), "'A'")
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_the_type_error_names_the_access_and_not_the_value_it_reads(self):
+        for call, (_, message) in _CALLING_WHAT_THE_STRING_DECIDES.items():
+            source = _caught_message(call)
+            said = (F'{message}\n', None)
+            with self.subTest(call=call):
+                self.assertEqual((behavior(source), behavior(_deobfuscated(source))), (said, said))
+
+
+class TestAReadThatWouldOpenADirectivePrologue(TestBase):
+
+    def test_a_read_standing_at_the_top_of_a_script_is_left_standing(self):
+        for head, standing in _A_READ_AT_THE_TOP_OF_A_BODY.items():
+            with self.subTest(head=head):
+                self.assertEqual(_the_head_it_is_left_as(head), standing)
+
+    def test_a_read_below_a_statement_that_is_no_directive_still_folds(self):
+        self.assertEqual(
+            _deobfuscated("console.log(1);\n'abc'[0];\nconsole.log(2);"),
+            "console.log(1);\n'a';\nconsole.log(2);",
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_the_use_strict_below_the_read_is_no_directive_before_or_after(self):
+        for head in _A_READ_AT_THE_TOP_OF_A_BODY:
+            source = _a_script_whose_directive_stands_below(head)
+            sloppy = ('false\n', None)
+            with self.subTest(head=head):
+                self.assertEqual(
+                    (behavior(source), behavior(_deobfuscated(source))),
+                    (sloppy, sloppy),
+                )

@@ -2199,9 +2199,14 @@ class JsInterpreter:
         Which keys the value itself decides is `read_data_property`'s to say, so that an emulated
         execution and a fold read a property the same way by construction. What is left here is the
         half that needs this interpreter: a nullish receiver throws before any key is looked at, and
-        a key the value does not own is `undefined` only while the prototype chain is intact. An
-        index past the end is answered without that question, the chain having no say over a slot the
-        program is far more likely to be reading off the value it just built.
+        a key the value does not own is `undefined` only while the prototype chain is intact.
+
+        An index past the end answers `undefined` without asking that, which is not a rule but a
+        known unsoundness kept for now: `Array.prototype[5] = 'X'` puts a value where this reports
+        there is none, exactly as it does for the names `_property_is_absent` refuses to decide
+        without the chain. It is preserved rather than fixed here because closing it changes what
+        every emulated read of a sparse index answers; `MemberRead.ABSENT` is what a caller
+        unwilling to inherit it — the folder — declines on.
         """
         if obj is None or obj is JS_NULL:
             _js_throw('TypeError', F"Cannot read properties of {to_string(obj)} (reading '{key}')")

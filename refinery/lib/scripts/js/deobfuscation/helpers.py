@@ -241,6 +241,19 @@ def canonical_array_index(key: str) -> int | None:
     return index
 
 
+def converts_uninterceptably(value: Value) -> bool:
+    """
+    Whether converting *value* to a string — or to the key of a property access, which converts it
+    the same way — is an internal operation no program can replace. Every primitive is: `String(1)`
+    and `o[1]` answer what the specification says whatever the file did to the prototypes. An array
+    and an object are not, because their conversion runs `Array.prototype.join` and
+    `Object.prototype.toString`, so a file that replaces either decides what `o[[1]]` reads. This is
+    the rule `concat_string` states for the operand of a `+`, asked of a value rather than a node,
+    and a fold that converts a value without asking it computes a key the engine never would.
+    """
+    return value is None or value is JS_NULL or isinstance(value, (str, int, float, bool))
+
+
 class MemberRead(Enum):
     """
     What reading a key off a value found. `FOUND` carries the value the read answers with. `ABSENT`
@@ -271,6 +284,13 @@ def read_data_property(obj: Value, key: str) -> tuple[MemberRead, Value]:
     which is where the outcome is decided for a `NOT_DATA` key and is why this takes no model. What
     it does answer, it answers alone: `length` and an index within range are own properties of a
     string or array, so no prototype can be consulted for them and none can shadow them.
+
+    One list element breaks that: an array literal's elision is held as the `None` an explicit
+    `undefined` element is also held as, and only the first of the two is a hole the prototype
+    answers for. `[1, , 3][1]` reads `Array.prototype[1]` where `[1, undefined, 3][1]` reads the
+    element, and this reports `FOUND` for both. Telling them apart needs a hole the value domain
+    does not have, so a caller that may not read through a polluted prototype — a fold, unlike an
+    emulated execution — must not accept `FOUND` from a list it did not build itself.
 
     *obj* must hold a string the way JavaScript does, as UTF-16 code units — the form the lexer gives
     a literal and the builtin registry gives a produced string. A string of code points read here

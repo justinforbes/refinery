@@ -257,12 +257,7 @@ class TestBasicSimplifications(TestJsDeobfuscator):
         self.assertEqual("'hello'.unknownMethod();", self._simplify("'hello'.unknownMethod();"))
 
     def test_no_fold_length_as_callable(self):
-        """
-        `length` is a data property, not a method, so the receiver folds to the number it reads but
-        the call has to remain a call: `'hello'.length()` throws a `TypeError` in Node and so does
-        `5()`, whereas folding the call itself to `5` would answer where the program throws.
-        """
-        self.assertEqual('5();', self._simplify("'hello'.length();"))
+        self.assertEqual("'hello'.length();", self._simplify("'hello'.length();"))
 
     def test_no_fold_void_with_side_effect(self):
         self.assertEqual("atob(void f());", self._simplify("atob(void f());"))

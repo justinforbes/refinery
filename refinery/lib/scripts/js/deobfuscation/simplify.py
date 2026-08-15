@@ -26,6 +26,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     MemberRead,
     access_key,
     allocated_object_type,
+    converts_uninterceptably,
     denoted_value,
     escape_js_string,
     eval_binary_op,
@@ -64,6 +65,7 @@ from refinery.lib.scripts.js.model import (
     JsClassDeclaration,
     JsClassExpression,
     JsConditionalExpression,
+    JsExpressionStatement,
     JsFunctionExpression,
     JsIdentifier,
     JsLogicalExpression,
@@ -671,8 +673,18 @@ class JsSimplifications(Transformer):
         return inner
 
     def visit_JsMemberExpression(self, node: JsMemberExpression):
+        """
+        Replace an access by what it reads, where that is decided and standing in its place means the
+        same thing.
+
+        Two positions are not such a place, and every arm below is refused in both. A target that is
+        assigned, updated, deleted, or destructured is a place to store into, and a constant is not
+        one, so folding there turns a running program into a syntax error. A callee is read for its
+        value *and* for the receiver it is read off, so replacing it drops the `this` an invocation
+        would have bound and renames the `TypeError` a value that is not callable throws.
+        """
         self.generic_visit(node)
-        in_read_position = not is_member_write_target(node)
+        reads_a_value = not is_member_write_target(node) and not is_invocation_target(node)
         if (
             not node.computed
             and isinstance(node.object, JsIdentifier)
@@ -681,17 +693,15 @@ class JsSimplifications(Transformer):
             and not self._resolves_to_local(node, node.property.name)
             and self._alias_property_defined(node, node.property.name)
         ):
-            if in_read_position and not is_invocation_target(node):
-                return node.property
-            return None
-        if in_read_position:
+            return node.property if reads_a_value else None
+        if reads_a_value:
             if (folded := self._folded_string_property(node)) is not None:
                 return folded
             if (folded := self._folded_array_length(node)) is not None:
                 return folded
         if node.computed and node.object is not None and node.property is not None:
             if (
-                in_read_position
+                reads_a_value
                 and isinstance(node.object, JsArrayExpression)
                 and isinstance(node.property, JsNumericLiteral)
             ):
@@ -750,11 +760,18 @@ class JsSimplifications(Transformer):
         is asked with `denoted_value` rather than `string_value`: `'abc'[1]` reads the property named
         `'1'`, and a reader that only recognized a string key would decide every index access to be
         undecidable.
+
+        A key that is not a primitive is refused however well its value is known, because naming the
+        property is what converts it and an array or an object converts through a prototype method
+        the file can replace. `Array.prototype.join = () => '2'` makes `'abc'[[1]]` read `'c'`, so a
+        reader that spelled the key `'1'` from the element would answer with the wrong character.
         """
         if not node.computed:
             return node.property.name if isinstance(node.property, JsIdentifier) else None
         known, key = denoted_value(node.property, self.model)
-        return to_string(key) if known else None
+        if not known or not converts_uninterceptably(key):
+            return None
+        return to_string(key)
 
     def _folded_string_property(self, node: JsMemberExpression) -> Expression | None:
         """
@@ -770,6 +787,11 @@ class JsSimplifications(Transformer):
         The object is asked with `denoted_value`, which decides a literal, a global value name, and an
         operator over either — every one of them free of effects — so nothing is discarded by
         replacing the access with what it reads, and no separate effect gate is needed.
+
+        An index answers a string, and a string is the one value whose spelling a statement position
+        reads: standing alone at the top of a body it is a directive. `'abc'[0];` is an ordinary
+        statement that ends a Directive Prologue, and `'a';` continues one, which would make a
+        `'use strict'` below it govern the file it merely stood in. Such a read is left alone.
         """
         key = self._member_key(node)
         if key is None:
@@ -780,7 +802,42 @@ class JsSimplifications(Transformer):
         outcome, value = read_data_property(obj, key)
         if outcome is not MemberRead.FOUND:
             return None
+        if isinstance(value, str) and self._stands_in_a_directive_prologue(node):
+            return None
         return value_to_node(value)
+
+    def _stands_in_a_directive_prologue(self, node: Node) -> bool:
+        """
+        Whether *node* is the whole of a statement that a Directive Prologue would take in if it were
+        spelled as a string literal — one no statement precedes but string-literal statements. The
+        prologue is the run of them a body opens with, and it ends at the first statement that is
+        anything else, so replacing that statement's expression with a string literal hands the
+        prologue every string-literal statement that followed it.
+
+        The brackets a read stands in are climbed through rather than trusted to keep it out of the
+        prologue: `('abc'[0]);` is not a directive, but nothing keeps the printer from spelling the
+        folded literal without them, and then it is.
+        """
+        cursor: Node = node
+        statement = cursor.parent
+        while isinstance(statement, JsParenthesizedExpression):
+            cursor, statement = statement, statement.parent
+        if not isinstance(statement, JsExpressionStatement):
+            return False
+        if strip_parens(statement.expression) is not node:
+            return False
+        body = statement.parent
+        if body is None:
+            return False
+        for sibling in body.children():
+            if sibling is statement:
+                return True
+            if not (
+                isinstance(sibling, JsExpressionStatement)
+                and isinstance(sibling.expression, JsStringLiteral)
+            ):
+                return False
+        return False
 
     def _folded_array_length(self, node: JsMemberExpression) -> Expression | None:
         """
@@ -792,11 +849,18 @@ class JsSimplifications(Transformer):
         as no element at all, exactly as the language counts them.
 
         A spread is the one element whose count is not the literal's to know — `[...'abc']` is three
-        elements from one — so a literal holding any is declined rather than counted wrong.
+        elements from one — so a literal holding any is declined rather than counted wrong. That
+        stays stated here even though the effect gate below happens to refuse a spread too: what
+        makes a spread wrong is the count, not the iterating, and a later effect model that learned
+        to trust iterating an array would otherwise start answering `[...[1, 2]].length` with `1`.
 
-        Only the length survives the fold, so the array and every element in it is discarded, and the
-        literal may be counted only if building it does nothing observable. That is the same question
-        `_fresh_object_type` asks before answering `typeof` from an allocation, asked the same way.
+        Only the length survives, so the array and every element in it is discarded, and evaluating
+        an element may therefore do nothing at all. Every element must be a literal or an elision,
+        which is the strongest thing the folder can say and the only one that is true: asking
+        `is_side_effect_free` instead — the question `_fresh_object_type` asks of an allocation —
+        answers yes for a name no binding resolves and for an operator that runs `valueOf`, so
+        `[zzz].length` would print `1` where the file threw a `ReferenceError` and `[+o].length`
+        would swallow what reading `o` writes.
         """
         if self._member_key(node) != 'length':
             return None
@@ -805,7 +869,7 @@ class JsSimplifications(Transformer):
             return None
         if any(isinstance(element, JsSpreadElement) for element in array.elements):
             return None
-        if not self.effects.is_side_effect_free(array, discarded=True):
+        if not all(element is None or is_literal(element) for element in array.elements):
             return None
         return value_to_node(len(array.elements))
 
