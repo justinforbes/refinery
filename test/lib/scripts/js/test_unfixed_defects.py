@@ -293,72 +293,6 @@ class TestAStringLiteralReadsOnlyTheEscapesTheGrammarHas(TestBase):
         )
 
 
-class TestStringIsASequenceOfUtf16CodeUnits(TestBase):
-    """
-    A JavaScript string is a sequence of UTF-16 code units, so one character above the basic
-    multilingual plane occupies two of them and every operation that counts or indexes sees two.
-    """
-
-    @unittest.expectedFailure
-    def test_length_index_char_code_and_split_all_read_code_units(self):
-        """
-        Node answers `2`, `55357`, the lone high surrogate, and `2` for these four questions about
-        one astral character. Two of the four come back answered: `charCodeAt` names the high
-        surrogate and `split` cuts between the two code units. The other two are not answered at
-        all — a `length` read and an index read are left standing over the literal, on any string
-        and not only on this one — so what is printed still asks the questions the source asked
-        and holds the character as the two units it is.
-        """
-        source = (
-            F"console.log('{_ASTRAL}'.length, '{_ASTRAL}'.charCodeAt(0), "
-            F"'{_ASTRAL}'[0], '{_ASTRAL}'.split('').length);"
-        )
-        self.assertEqual(_folded(source), R"console.log(2, 55357, '\uD83D', 2);")
-
-
-class TestARuntimeProducedStringIsUtf16CodeUnits(TestBase):
-    """
-    A string a built-in hands back at run time is the same sequence of UTF-16 code units as the same
-    string written as a literal, so its length, the code unit at a position, and the pieces it
-    splits into are read exactly as they are read for the literal, and exactly as Node reports
-    them. One character above the basic multilingual plane occupies two code units however the
-    string that holds it was produced.
-    """
-
-    @unittest.expectedFailure
-    def test_a_percent_decoded_string_reads_as_code_units(self):
-        """
-        Node answers `2`, `55357`, `56832`, and `2` for the length, the code at index 0, the code at
-        index 1, and the split length of `decodeURIComponent('%F0%9F%98%80')`, whose bytes are the
-        one astral character U+1F600. The two code units are its high and low surrogate, and each of
-        these four questions has to see them, the same as it would over the literal.
-        """
-        produced = "decodeURIComponent('%F0%9F%98%80')"
-        source = (
-            F'console.log({produced}.length, {produced}.charCodeAt(0), '
-            F"{produced}.charCodeAt(1), {produced}.split('').length);"
-        )
-        self.assertEqual(_folded(source), 'console.log(2, 55357, 56832, 2);')
-
-    @unittest.expectedFailure
-    def test_a_json_parsed_astral_escape_reads_as_code_units(self):
-        """
-        Node answers `2`, `55357`, `56832`, and `2` for the length, the code at index 0, the code at
-        index 1, and the split length of the string `JSON.parse` builds from a JSON text holding an
-        escaped surrogate pair, the high surrogate D83D followed by the low surrogate DE00, which
-        together denote the one astral character U+1F600. The parse produces the two code units, and
-        each question has to read them as the same string written as a literal would.
-        """
-        backslash = chr(92)
-        astral_escape = F'{backslash}uD83D{backslash}uDE00'
-        produced = F'''JSON.parse('"{astral_escape}"')'''
-        source = (
-            F'console.log({produced}.length, {produced}.charCodeAt(0), '
-            F"{produced}.charCodeAt(1), {produced}.split('').length);"
-        )
-        self.assertEqual(_folded(source), 'console.log(2, 55357, 56832, 2);')
-
-
 class TestAnIdentifierNamedKeyReadsAsUtf16CodeUnits(TestBase):
     """
     An object property key written as a bare identifier is a JavaScript string when it is read
@@ -766,4 +700,39 @@ class TestADecodeReadsBackTheCharactersNoEscapeIntroduced(TestBase):
                 F"console.log('{_ASTRAL}A');",
                 F"console.log('{lone_surrogate}');",
             ],
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnAllocationThatCannotBeBuiltAnswersNothing(TestBase):
+    """
+    A question the shape of an allocation answers — how many elements a literal holds, what `typeof`
+    calls it, whether it is truthy — is answered without the allocation, which is then discarded
+    along with every element in it. It may be discarded only if building it does nothing that can be
+    observed, and resolving a name is such a thing: a reference no binding resolves throws a
+    `ReferenceError`, and so does one to a `let` the program has not reached yet. The gate that asks
+    whether an allocation is free of effects answers yes for all of them, so the answer is printed
+    where the file threw.
+    """
+
+    @unittest.expectedFailure
+    def test_a_literal_holding_a_name_that_does_not_resolve_still_throws(self):
+        """
+        Node refuses each of these five programs with a `ReferenceError` and prints nothing. Each
+        deobfuscation prints instead: `1` and `3` for the first two counts, `object` for the
+        `typeof`, `1` for the branch a truthy object picks, and `1` again for the last count, whose
+        name is a `let` read from above its own declaration and refused for the reason a name with
+        no binding at all is.
+        """
+        refused = ('', 'ReferenceError')
+        sources = [
+            'console.log([zzz].length);',
+            'console.log([1, zzz, 3].length);',
+            'console.log(typeof [zzz]);',
+            'console.log({p: zzz} ? 1 : 2);',
+            'console.log([q].length); let q = 1;',
+        ]
+        self.assertEqual(
+            [_before_and_after(source) for source in sources],
+            [(refused, refused)] * len(sources),
         )

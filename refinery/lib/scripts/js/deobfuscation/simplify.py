@@ -76,6 +76,7 @@ from refinery.lib.scripts.js.model import (
     JsReturnStatement,
     JsScript,
     JsSequenceExpression,
+    JsSpreadElement,
     JsStringLiteral,
     JsUnaryExpression,
     strip_parens,
@@ -683,8 +684,11 @@ class JsSimplifications(Transformer):
             if in_read_position and not is_invocation_target(node):
                 return node.property
             return None
-        if in_read_position and (folded := self._folded_string_property(node)) is not None:
-            return folded
+        if in_read_position:
+            if (folded := self._folded_string_property(node)) is not None:
+                return folded
+            if (folded := self._folded_array_length(node)) is not None:
+                return folded
         if node.computed and node.object is not None and node.property is not None:
             if (
                 in_read_position
@@ -777,6 +781,33 @@ class JsSimplifications(Transformer):
         if outcome is not MemberRead.FOUND:
             return None
         return value_to_node(value)
+
+    def _folded_array_length(self, node: JsMemberExpression) -> Expression | None:
+        """
+        The `length` of an array literal, as a node, or `None` when the literal does not decide it.
+        This is the one property a value domain cannot answer: `[a, b, c]` and `[1, , 3]` denote no
+        value the folder can hold, because an element is not a literal or is not there at all, yet
+        each is three elements long whatever those elements turn out to be. The count is read off the
+        syntax, where the parser records an elision as an element that is absent and a trailing comma
+        as no element at all, exactly as the language counts them.
+
+        A spread is the one element whose count is not the literal's to know — `[...'abc']` is three
+        elements from one — so a literal holding any is declined rather than counted wrong.
+
+        Only the length survives the fold, so the array and every element in it is discarded, and the
+        literal may be counted only if building it does nothing observable. That is the same question
+        `_fresh_object_type` asks before answering `typeof` from an allocation, asked the same way.
+        """
+        if self._member_key(node) != 'length':
+            return None
+        array = strip_parens(node.object)
+        if not isinstance(array, JsArrayExpression):
+            return None
+        if any(isinstance(element, JsSpreadElement) for element in array.elements):
+            return None
+        if not self.effects.is_side_effect_free(array, discarded=True):
+            return None
+        return value_to_node(len(array.elements))
 
     def _node_to_value(self, node: Node | None) -> object:
         """

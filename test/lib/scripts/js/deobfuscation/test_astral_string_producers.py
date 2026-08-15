@@ -3,7 +3,8 @@ A string is a sequence of UTF-16 code units, so an astral character such as U+1F
 of them: a high surrogate and a low surrogate. Such a string can be written as a literal, but it
 can also be *produced* at runtime by a built-in operation — percent-decoding with
 `decodeURIComponent`, decoding UTF-8 bytes with `Buffer.from(...).toString('utf8')`, or parsing
-JSON with `JSON.parse` (both as a value and as an object key reached through `Object.keys`).
+JSON with `JSON.parse`, from a text holding the character itself, from one spelling it as the
+escaped surrogate pair D83D DE00, and from an object key reached through `Object.keys`.
 
 The law formalized here is that a produced astral string is indistinguishable from the same string
 written as a literal: for every operation that reveals a string's code-unit structure, folding the
@@ -18,11 +19,15 @@ For the astral string `'a' + U+1F600 + 'b'` Node reports the code units 97, 5535
   ('a' + U+1F600 + 'b').charCodeAt(2)   === 56832
   ('a' + U+1F600 + 'b').slice(1, 3)     is the two surrogates, char codes 55357, 56832
   ('a' + U+1F600 + 'b').split('')       is ['a', high, low, 'b'], char codes 97, 55357, 56832, 98
+  ('a' + U+1F600 + 'b').split('').length === 4
 
-The tool reduces every one of these to a constant, `.length` and the index read among them, because
-both are own data properties of the string that no prototype can shadow; which of them happens was
-discovered by measuring, not decided here. The invariance that a produced string reads like the
-literal carries every probe, and the Node-anchored code-unit value carries each folded constant.
+The tool reduces every one of these to a constant: `.length` and the index read because both are own
+data properties of the string that no prototype can shadow, and the length of the split because the
+array it hands back is counted by the commas it comes back written with, which
+`test.lib.scripts.js.deobfuscation.test_array_length_reads` states for an array literal of any
+provenance. Which of them happens was discovered by measuring, not decided here. The invariance that
+a produced string reads like the literal carries every probe, and the Node-anchored code-unit value
+carries each folded constant.
 """
 from __future__ import annotations
 
@@ -38,14 +43,18 @@ _ASTRAL = chr(0x1F600)
 
 _LITERAL = "'a" + _ASTRAL + "b'"
 
+_ESCAPED_PAIR = chr(92) + 'uD83D' + chr(92) + 'uDE00'
+
 #: Expressions that each evaluate, in Node, to the same string as `_LITERAL`, but build it at
 #: runtime rather than spelling it. `decodeURIComponent` percent-decodes the UTF-8 of the astral
 #: character (F0 9F 98 80), `Buffer.from` decodes the same bytes, and `JSON.parse` reaches the
-#: character once through a string value and once through an object key.
+#: character through a string value that holds it, through a string value that spells it as an
+#: escaped surrogate pair, and through an object key.
 _PRODUCERS: dict[str, str] = {
     'decode_uri_component' : "decodeURIComponent('a%F0%9F%98%80b')",
     'buffer_from_utf8'     : "Buffer.from([0x61,0xf0,0x9f,0x98,0x80,0x62]).toString('utf8')",
     'json_parse_value'     : "JSON.parse('\"a" + _ASTRAL + "b\"')",
+    'json_parse_escape'    : "JSON.parse('\"a" + _ESCAPED_PAIR + "b\"')",
     'json_parse_key'       : "Object.keys(JSON.parse('{\"a" + _ASTRAL + "b\":1}'))[0]",
 }
 
@@ -57,6 +66,7 @@ _PROBES: dict[str, str] = {
     'charcode_low'  : '({S}).charCodeAt(2)',
     'slice'         : '({S}).slice(1, 3)',
     'split'         : "({S}).split('')",
+    'split_length'  : "({S}).split('').length",
 }
 
 #: The probes the tool folds to a constant, each mapped to Node's answer rendered as its code-unit
@@ -69,6 +79,7 @@ _NODE_UNITS: dict[str, str] = {
     'charcode_low'  : '56832',
     'slice'         : 'S[55357,56832]',
     'split'         : 'A[S[97],S[55357],S[56832],S[98]]',
+    'split_length'  : '4',
 }
 
 
