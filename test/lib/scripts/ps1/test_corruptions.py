@@ -24,6 +24,9 @@ The scoping facts the entries rest on, all measured:
   - writing a caller's variable needs `$script:`, `$global:` or a dot-invocation
   - `Invoke-Expression` runs a string that may carry such a write, so it may change any variable
   - a script block is not a closure: it reads the variables of whoever invokes it
+  - a .NET call may write through an argument or through its receiver, changing an array in place
+    rather than returning a new one, so a call whose result is discarded is still a store
+  - assigning one variable to another gives both names the same array rather than a copy of it
 """
 from __future__ import annotations
 
@@ -49,6 +52,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ExpressionStatement,
     Ps1FileRedirection,
     Ps1ForEachLoop,
+    Ps1IndexExpression,
     Ps1InputRedirection,
     Ps1IntegerLiteral,
     Ps1InvokeMember,
@@ -72,6 +76,7 @@ from refinery.lib.scripts.ps1.model import (
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 _WRITE_HOST = frozenset({'write-host'})
+_WRITE_OUTPUT = frozenset({'write-output', 'echo', 'write'})
 _REMOVE_VARIABLE = frozenset({'remove-variable', 'rv'})
 _NEW_VARIABLE = frozenset({'new-variable', 'nv'})
 _SET_VARIABLE = frozenset({'set-variable', 'sv', 'set'})
@@ -137,6 +142,40 @@ def _target_variables(target: Node | None) -> list[Ps1Variable]:
     return []
 
 
+def _reads_variable(node: Node | None, key: str) -> bool:
+    """
+    Whether `node` still fetches from the variable under `key` when it runs, either by naming it or
+    by indexing it. Both reach the array the variable holds, so both are how a mutating call is
+    handed it and how a later read observes what the call did.
+    """
+    node = _unwrap(node)
+    if isinstance(node, Ps1IndexExpression):
+        return _reads_variable(node.object, key)
+    return isinstance(node, Ps1Variable) and _binding_key(node) == key
+
+
+def _emitted_constants(node: Node | None) -> list | None:
+    """
+    The values `node` writes to the output stream, one entry per value: an array writes its elements
+    one after another, `$null` writes an empty line and is reported as `None`, and any other
+    constant writes itself. The whole answer is `None` when the text does not decide what is
+    written, which is what anything read out of a variable leaves open.
+    """
+    node = _unwrap(node)
+    if isinstance(node, Ps1ArrayLiteral):
+        emitted: list = []
+        for element in node.elements:
+            values = _emitted_constants(element)
+            if values is None:
+                return None
+            emitted.extend(values)
+        return emitted
+    if isinstance(node, Ps1Variable):
+        return [None] if _binding_key(node) == 'null' else None
+    value = _literal_value(node)
+    return None if value is None else [value]
+
+
 def _stores(root: Node, key: str) -> list[Ps1AssignmentExpression]:
     return [
         node for node in root.walk()
@@ -149,8 +188,25 @@ def _stores_value(root: Node, key: str, value) -> bool:
     return any(_literal_value(store.value) == value for store in _stores(root, key))
 
 
+def _element_stores(root: Node, key: str) -> list[Ps1AssignmentExpression]:
+    """
+    Every assignment in `root` writing into an element of the array the variable under `key` holds.
+    Such a store changes the array itself rather than rebinding the name, so every other name for
+    that array observes it, which is why `_stores` deliberately does not report it.
+    """
+    return [
+        node for node in root.walk()
+        if isinstance(node, Ps1AssignmentExpression)
+        and isinstance(target := _unwrap(node.target), Ps1IndexExpression)
+        and _reads_variable(target.object, key)
+    ]
+
+
 def _commands(root: Node) -> list[Ps1CommandInvocation]:
-    return [node for node in root.walk() if isinstance(node, Ps1CommandInvocation)]
+    """
+    Every command invocation in `root`, in the order the source spells them.
+    """
+    return [node for node in root.walk_in_order() if isinstance(node, Ps1CommandInvocation)]
 
 
 def _invocations(root: Node, names: frozenset[str]) -> list[Ps1CommandInvocation]:
@@ -175,6 +231,29 @@ def _static_calls(root: Node, type_name: str, member: str) -> list[Ps1InvokeMemb
         and node.access is Ps1AccessKind.STATIC
         and isinstance(node.object, Ps1TypeExpression)
         and node.object.name.lower().rpartition('.')[2] == type_name
+        and isinstance(node.member, str)
+        and node.member.lower() == member
+    ]
+
+
+def _mutates_through_argument(root: Node, type_name: str, member: str, key: str) -> bool:
+    """
+    Whether a static call to `member` of `type_name` in `root` is still handed the array the
+    variable under `key` holds. Such a call writes through the argument, which is how the array a
+    variable names changes without anything ever being assigned to that variable.
+    """
+    return any(
+        _reads_variable(argument, key)
+        for call in _static_calls(root, type_name, member)
+        for argument in call.arguments
+    )
+
+
+def _instance_calls(root: Node, member: str) -> list[Ps1InvokeMember]:
+    return [
+        node for node in root.walk()
+        if isinstance(node, Ps1InvokeMember)
+        and node.access is Ps1AccessKind.INSTANCE
         and isinstance(node.member, str)
         and node.member.lower() == member
     ]
@@ -306,6 +385,25 @@ def _printed_values(root: Node, nested: bool | None = None) -> set:
     }
 
 
+def _output_writes(root: Node) -> list[list | None]:
+    """
+    What each `Write-Output` in `root` writes, one entry per invocation and in the order the source
+    spells them: the values its arguments enumerate, or `None` where the text does not decide them.
+    """
+    writes: list[list | None] = []
+    for command in _invocations(root, _WRITE_OUTPUT):
+        emitted: list = []
+        for value in _argument_values(command):
+            values = _emitted_constants(value)
+            if values is None:
+                writes.append(None)
+                break
+            emitted.extend(values)
+        else:
+            writes.append(emitted)
+    return writes
+
+
 def _inside_short_circuit(node: Node) -> bool:
     """
     Whether `node` sits in the right operand of `-and` or `-or`, which is the position PowerShell
@@ -394,6 +492,21 @@ class TestPs1Corruptions(TestPs1):
         self.assertTrue(
             printed in values or _stores_value(tree, key, printed),
             F'nothing left in the output can give ${key} the value {printed!r}',
+        )
+
+    def _assertWrites(self, tree: Ps1Script, written: list, corrupt: list, mutated: bool) -> None:
+        """
+        The output must still be able to write `written`, which is what 5.1 was measured to write:
+        either its `Write-Output` invocations already spell exactly that, or `mutated` reports that
+        the call producing it still reaches the array the read observes. `corrupt` is what the
+        output writes in its place when it does neither.
+        """
+        writes = _output_writes(tree)
+        self.assertNotEqual(
+            writes, corrupt, F'the output writes {corrupt}, which the script never writes')
+        self.assertTrue(
+            writes == written or mutated,
+            F'nothing left in the output can write {written}',
         )
 
     def test_dot_sourced_remove_variable_unsets_the_callers_variable(self):
@@ -979,3 +1092,219 @@ class TestPs1Corruptions(TestPs1):
         tree = self._deobfuscated_tree(
             "$env:z = '7'; $ok = [int]::TryParse('42', [ref]$env:z); Write-Host $env:z")
         self._assertPrints(tree, 'env:z', '7', '42')
+
+    @unittest.expectedFailure
+    def test_two_names_for_one_array_both_see_it_reversed(self):
+        """
+        `$x = 1, 2, 3; $y = $x; Write-Output $y[0]; [Array]::Reverse($x); Write-Output $y[0]` writes
+        `1` and then `3` under 5.1: the assignment gives both names the one array, so reversing it
+        through `$x` changes what `$y[0]` reads afterwards.
+        """
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; $y = $x; Write-Output $y[0]; [Array]::Reverse($x); Write-Output $y[0]')
+        aliased = any(_reads_variable(store.value, 'x') for store in _stores(tree, 'y'))
+        self._assertWrites(
+            tree,
+            [[1], [3]],
+            [[3], [3]],
+            aliased and _mutates_through_argument(tree, 'array', 'reverse', 'x'),
+        )
+
+    @unittest.expectedFailure
+    def test_invoke_expression_rebinds_the_array_that_is_reversed_after_it(self):
+        """
+        `$x = 1, 2, 3; $c = '$x = 7, 8, 9'; iex $c; [Array]::Reverse($x); Write-Output $x` writes
+        `9`, `8` and `7` under 5.1: the string rebinds `$x`, and the reversal turns around the array
+        that store left behind rather than the one the first store did.
+        """
+        tree = self._deobfuscated_tree(
+            "$x = 1, 2, 3; $c = '$x = 7, 8, 9'; iex $c; [Array]::Reverse($x); Write-Output $x")
+        self._assertWrites(
+            tree,
+            [[9, 8, 7]],
+            [[7, 8, 9]],
+            _mutates_through_argument(tree, 'array', 'reverse', 'x'),
+        )
+
+    @unittest.expectedFailure
+    def test_function_body_reverses_the_callers_array_in_place(self):
+        """
+        `function f { [Array]::Reverse($x) }; $x = 1, 2, 3; f; Write-Output $x` writes `3`, `2` and
+        `1` under 5.1: the body reads the caller's `$x` and reverses the array it holds. With that
+        store gone the call is handed nothing and throws ArgumentNullException instead.
+        """
+        tree = self._deobfuscated_tree(
+            'function f { [Array]::Reverse($x) }; $x = 1, 2, 3; f; Write-Output $x')
+        stores_the_array = any(
+            _emitted_constants(store.value) == [1, 2, 3] for store in _stores(tree, 'x'))
+        self._assertWrites(
+            tree,
+            [[3, 2, 1]],
+            [[1, 2, 3]],
+            stores_the_array and _mutates_through_argument(tree, 'array', 'reverse', 'x'),
+        )
+
+    @unittest.expectedFailure
+    def test_reversal_does_not_reorder_the_effects_that_build_the_array(self):
+        """
+        `$x = $(Write-Host 'a'; 1), $(Write-Host 'b'; 2); [Array]::Reverse($x); Write-Output $x`
+        writes `a` and then `b` to the information stream under 5.1 and afterwards writes `2` and
+        `1`: the elements are evaluated where they stand, and only the finished array is turned
+        around.
+        """
+        tree = self._deobfuscated_tree(
+            "$x = $(Write-Host 'a'; 1), $(Write-Host 'b'; 2); [Array]::Reverse($x); Write-Output $x")
+        self.assertEqual(
+            [_literal_value(expression) for expression in _printed_expressions(tree)],
+            ['a', 'b'],
+            'the reversal was applied to the effects building the array instead of to the array',
+        )
+        self.assertNotEqual(
+            _output_writes(tree),
+            [[1, 2]],
+            'the array was written in the order it held before the reversal',
+        )
+
+    @unittest.expectedFailure
+    def test_reverse_mutates_its_argument_even_when_its_result_is_stored(self):
+        """
+        `$x = 1, 2, 3; $r = [Array]::Reverse($x); Write-Output $x` writes `3`, `2` and `1` under
+        5.1: the call returns nothing and does its work by writing through the argument, so binding
+        its result changes neither what it does nor that it is done.
+        """
+        tree = self._deobfuscated_tree('$x = 1, 2, 3; $r = [Array]::Reverse($x); Write-Output $x')
+        self._assertWrites(
+            tree,
+            [[3, 2, 1]],
+            [[1, 2, 3]],
+            _mutates_through_argument(tree, 'array', 'reverse', 'x'),
+        )
+
+    @unittest.expectedFailure
+    def test_clear_blanks_the_range_of_the_array_the_variable_holds(self):
+        """
+        `$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x` writes an empty line and then `2`
+        and `3` under 5.1: the call replaces the first element of the array `$x` holds by `$null`.
+        """
+        tree = self._deobfuscated_tree('$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x')
+        self._assertWrites(
+            tree,
+            [[None, 2, 3]],
+            [[1, 2, 3]],
+            _mutates_through_argument(tree, 'array', 'clear', 'x'),
+        )
+
+    @unittest.expectedFailure
+    def test_copy_writes_through_its_destination_argument(self):
+        """
+        `$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y` writes `1`, `2` and
+        `3` under 5.1: the call fills the array `$y` holds and returns nothing.
+        """
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y')
+        copies_into_the_variable = any(
+            len(call.arguments) == 3
+            and _reads_variable(call.arguments[0], 'x')
+            and _reads_variable(call.arguments[1], 'y')
+            for call in _static_calls(tree, 'array', 'copy')
+        )
+        self._assertWrites(tree, [[1, 2, 3]], [[0, 0, 0]], copies_into_the_variable)
+
+    @unittest.expectedFailure
+    def test_reverse_with_a_range_turns_around_only_that_part(self):
+        """
+        `$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x` writes `2`, `1` and `3` under
+        5.1: this overload reverses the elements the index and the length name and leaves the rest
+        of the array where it was.
+        """
+        tree = self._deobfuscated_tree('$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x')
+        reverses_the_range = any(
+            _reads_variable(call.arguments[0], 'x')
+            and [_literal_value(argument) for argument in call.arguments[1:]] == [0, 2]
+            for call in _static_calls(tree, 'array', 'reverse')
+            if call.arguments
+        )
+        self._assertWrites(tree, [[2, 1, 3]], [[1, 2, 3]], reverses_the_range)
+
+    @unittest.expectedFailure
+    def test_set_value_writes_through_the_receiver(self):
+        """
+        `$x = 1, 2, 3; $x.SetValue(9, 0); Write-Output $x` writes `9`, `2` and `3` under 5.1: the
+        method stores into the array it is called on rather than returning a changed copy of it.
+        """
+        tree = self._deobfuscated_tree('$x = 1, 2, 3; $x.SetValue(9, 0); Write-Output $x')
+        writes_into_the_variable = any(
+            _reads_variable(call.object, 'x') for call in _instance_calls(tree, 'setvalue'))
+        self._assertWrites(tree, [[9, 2, 3]], [[1, 2, 3]], writes_into_the_variable)
+
+    @unittest.expectedFailure
+    def test_copy_to_writes_through_its_destination_argument(self):
+        """
+        `$x = 1, 2, 3; $y = 0, 0, 0; $x.CopyTo($y, 0); Write-Output $y` writes `1`, `2` and `3`
+        under 5.1: the method fills the array `$y` holds and returns nothing.
+        """
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; $y = 0, 0, 0; $x.CopyTo($y, 0); Write-Output $y')
+        copies_into_the_variable = any(
+            _reads_variable(call.object, 'x')
+            and any(_reads_variable(argument, 'y') for argument in call.arguments)
+            for call in _instance_calls(tree, 'copyto')
+        )
+        self._assertWrites(tree, [[1, 2, 3]], [[0, 0, 0]], copies_into_the_variable)
+
+    @unittest.expectedFailure
+    def test_element_store_through_one_name_is_seen_through_the_other(self):
+        """
+        `$x = 1, 2, 3; $y = $x; $y[0] = 9; Write-Output $x[0]` writes `9` under 5.1: the assignment
+        hands over the array rather than a copy of it, so a store into an element through `$y` is a
+        store into the array `$x` reads.
+        """
+        tree = self._deobfuscated_tree('$x = 1, 2, 3; $y = $x; $y[0] = 9; Write-Output $x[0]')
+        aliased = any(_reads_variable(store.value, 'x') for store in _stores(tree, 'y'))
+        self._assertWrites(tree, [[9]], [[1]], aliased and bool(_element_stores(tree, 'y')))
+
+    @unittest.expectedFailure
+    def test_loop_reads_the_array_the_previous_iteration_reversed(self):
+        """
+        `$x = 1, 2, 3; for ($i = 0; $i -lt 2; $i++) { Write-Output $x[0]; [Array]::Reverse($x) }`
+        writes `1` and then `3` under 5.1: one read in the source produces two different values,
+        because the reversal ending the first iteration changes the array the second one reads.
+        """
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; for ($i = 0; $i -lt 2; $i++) { Write-Output $x[0]; [Array]::Reverse($x) }')
+        self.assertEqual(
+            _output_writes(tree),
+            [None],
+            'a read whose value differs between the iterations was folded to one constant',
+        )
+        self.assertTrue(
+            _mutates_through_argument(tree, 'array', 'reverse', 'x'),
+            'the reversal that makes the two iterations differ no longer reaches the array',
+        )
+
+    @unittest.expectedFailure
+    def test_parentheses_around_the_argument_do_not_stop_the_reversal(self):
+        """
+        `$x = 1, 2, 3; [Array]::Reverse(($x)); Write-Output $x` writes `3`, `2` and `1` under 5.1:
+        the parentheses group the expression and change nothing about what is handed to the call,
+        so the array reversed is still the one `$x` holds.
+        """
+        tree = self._deobfuscated_tree('$x = 1, 2, 3; [Array]::Reverse(($x)); Write-Output $x')
+        self._assertWrites(
+            tree,
+            [[3, 2, 1]],
+            [[1, 2, 3]],
+            _mutates_through_argument(tree, 'array', 'reverse', 'x'),
+        )
+
+    @unittest.expectedFailure
+    def test_reversing_an_element_of_an_array_of_arrays_mutates_that_element(self):
+        """
+        `$p = @(@(1, 2), @(3, 4)); [Array]::Reverse($p[0]); Write-Output $p[0]` writes `2` and then
+        `1` under 5.1: the index fetches the inner array itself, so reversing it changes what the
+        first element of the outer array holds.
+        """
+        tree = self._deobfuscated_tree(
+            '$p = @(@(1, 2), @(3, 4)); [Array]::Reverse($p[0]); Write-Output $p[0]')
+        self._assertWrites(
+            tree, [[2, 1]], [[1, 2]], _mutates_through_argument(tree, 'array', 'reverse', 'p'))
