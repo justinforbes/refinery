@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
@@ -1645,3 +1646,111 @@ class TestPs1AJoinIsFoldedOnlyWhereTheTextItAppendsIsWritten(TestPs1):
         """)
         self.assertEqual(self._deobfuscate("$x = '5' + 1.5; Write-Output $x"), kept)
         self.assertEqual(self._deobfuscate("$x = '5' + 5; Write-Output $x"), "Write-Output '55'")
+
+
+class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(TestPs1):
+    """
+    Where a call turns around, orders or empties an array whose elements are all known, the array it
+    leaves behind is determined and the reads below it can be answered. Measured on 5.1, the three
+    scripts here print `2` and `1`, then `a`, then an empty line and `2` and `3`.
+
+    None of the three is answered today, and each is a refusal rather than a wrong answer: the
+    emitted script is the input. The entries are marked so that a rule taking one of these folds
+    reports an unexpected success, and so that none of them can quietly stop being true meanwhile.
+    """
+
+    @unittest.expectedFailure
+    def test_a_reversal_reached_through_an_array_element_is_computed_for_that_element(self):
+        # The call reaches part of what `$p` holds, so what `$p` holds afterwards is the outer array
+        # with its first element replaced by the reversal of that element.
+        source = inspect.cleandoc("""
+            $p = @(@(1, 2), @(3, 4))
+            [Array]::Reverse($p[0])
+            Write-Output $p[0]
+        """)
+        expected = inspect.cleandoc("""
+            $p = @(@(1, 2), @(3, 4))
+            [Array]::Reverse($p[0])
+            Write-Output (2, 1)
+        """)
+        self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+    @unittest.expectedFailure
+    def test_a_sort_of_elements_that_share_a_type_orders_the_array_it_is_handed(self):
+        # `[Array]::Sort` throws where the elements do not compare, so a value for it rests on the
+        # elements being of one type and not merely on all of them being known.
+        source = inspect.cleandoc("""
+            $x = @('b', 'a')
+            [Array]::Sort($x)
+            Write-Output $x[0]
+        """)
+        expected = inspect.cleandoc("""
+            $x = @('b', 'a')
+            [Array]::Sort($x)
+            Write-Output 'a'
+        """)
+        self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+    @unittest.expectedFailure
+    def test_a_clear_over_a_range_that_fits_empties_the_elements_it_covers(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Clear($x, 0, 1)
+            Write-Output $x
+        """)
+        expected = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Clear($x, 0, 1)
+            Write-Output ($Null, 2, 3)
+        """)
+        self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+
+class TestPs1AMutatingCallAndItsStoreGoWhereNoReadObservesThem(TestPs1):
+    """
+    Measured on 5.1, this script prints `3`, `2` and `1`, and so does the one line it could be
+    folded to. The store feeds nothing but the reversal and the reversal writes an array that no
+    read below it names, so both are work the emitted script can stop doing.
+
+    The value is folded today and the two statements that produced it are kept, so the entry is
+    marked. The class above pins that the read is answered at all; this pins what is left standing.
+    """
+
+    @unittest.expectedFailure
+    def test_a_store_and_the_reversal_of_it_are_dropped_below_a_folded_read(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse($x)
+            Write-Output $x
+        """)
+        self.assertEqual(self._deobfuscate(source), 'Write-Output (3, 2, 1)')
+
+
+class TestPs1AConstraintOnAVariableConvertsWhatIsWrittenToIt(TestPs1):
+    """
+    `[string]$q = 5` constrains the variable rather than that one assignment, so every later write
+    to `$q` arrives converted to a String. Measured on 5.1, `$q = 1, 2, 3` leaves the String `1 2 3`
+    whose `Length` is 5, and `$q += 'a'` leaves the String `5a`.
+
+    Neither is answered today, so both entries are marked.
+    """
+
+    @unittest.expectedFailure
+    def test_a_later_write_to_a_constrained_variable_arrives_as_the_constrained_type(self):
+        source = inspect.cleandoc("""
+            [string]$q = 5
+            $q = 1, 2, 3
+            Write-Output $q.Length
+        """)
+        self.assertEqual(self._deobfuscate(source), 'Write-Output 5')
+
+    @unittest.expectedFailure
+    def test_a_compound_write_to_a_constrained_variable_arrives_as_the_constrained_type(self):
+        # The comma keeps the one object it wraps, so what 5.1 writes there is the String itself
+        # and not the elements a collection would have been unrolled into.
+        source = inspect.cleandoc("""
+            [string]$q = 5
+            $q += 'a'
+            Write-Output (,$q)
+        """)
+        self.assertEqual(self._deobfuscate(source), "Write-Output (,'5a')")
