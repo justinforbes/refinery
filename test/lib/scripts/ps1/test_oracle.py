@@ -150,6 +150,10 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":
         'The read is folded to `b`, but 5.1 never evaluates the right operand of `-and` when the '
         'left one is false, so the store never happens and the snippet prints `a`.',
+    "$x = 'a'; $true -or ($x = 'b'); Write-Host $x":
+        'The same rule spelled with the other operator: 5.1 never evaluates the right operand of '
+        '`-or` when the left one is true. Held apart from the `-and` entry because the two are '
+        'separate spellings and a fix that reaches one need not reach the other.',
     "$x = 'a'; & { Write-Host $script:x }; $x = 'b'":
         'The store is removed and the read prints nothing. A child scope resolves `$script:x` to '
         'the caller, where the store put `a`.',
@@ -193,6 +197,8 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('INFO\tb',),
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":
         ('OUT\tSystem.Boolean\tFalse', 'INFO\ta'),
+    "$x = 'a'; $true -or ($x = 'b'); Write-Host $x":
+        ('OUT\tSystem.Boolean\tTrue', 'INFO\ta'),
     "$x = @('b', 'a'); [Array]::Sort($x); Write-Host $x[0]":
         ('INFO\ta',),
     "trap { continue }; throw 'e'; Write-Host 'after'":
@@ -219,6 +225,24 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('INFO\ta',),
     "$x = 'a'; $c = 'Write-Host $x'; function f { iex $c }; f; $x = 'c'":
         ('INFO\ta',),
+    "$script:y = 'b'; Write-Output $script:y":
+        ('OUT\tSystem.String\tb',),
+    "$global:y = 'b'; Write-Output $global:y":
+        ('OUT\tSystem.String\tb',),
+    "$s = 'x'; Write-Output $script:s":
+        ('OUT\tSystem.String\tx',),
+    "$script:s = 'x'; Write-Output $s":
+        ('OUT\tSystem.String\tx',),
+    '$n = 1; $n += 2; Write-Output $n':
+        ('OUT\tSystem.Int32\t3',),
+    "$s = 'a'; $s += 'b'; $s += 'c'; Write-Output $s":
+        ('OUT\tSystem.String\tabc',),
+    '$n = 1; $n++; Write-Output $n':
+        ('OUT\tSystem.Int32\t2',),
+    '$n = 5; $n -= 2; Write-Output $n':
+        ('OUT\tSystem.Int32\t3',),
+    "$c = 'Write-Out'; $c += 'put 5'; Invoke-Expression $c":
+        ('OUT\tSystem.Int32\t5',),
     "$x = 'a'; function f { Write-Host (Get-Variable x -ValueOnly) }; f; $x = 'c'":
         ('INFO\ta',),
     "$x = 'a'; Write-Host (Get-Variable x* | ForEach-Object Value); $x = 'c'":

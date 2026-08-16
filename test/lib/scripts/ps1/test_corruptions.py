@@ -616,6 +616,21 @@ class TestPs1Corruptions(TestPs1):
                     'the store from the unevaluated operand is now reached unconditionally',
                 )
 
+    @unittest.expectedFailure
+    def test_short_circuited_or_operand_never_stores(self):
+        """
+        `$x = 'a'; $true -or ($x = 'b'); Write-Host $x` prints `a` under 5.1: the right operand of
+        `-or` is not evaluated when the left one is true, so the store of `b` never happens.
+        """
+        tree = self._deobfuscated_tree("$x = 'a'; $true -or ($x = 'b'); Write-Host $x")
+        self._assertPrints(tree, 'x', 'a', 'b')
+        for store in _stores(tree, 'x'):
+            if _literal_value(store.value) == 'b':
+                self.assertTrue(
+                    _inside_short_circuit(store),
+                    'the store from the unevaluated operand is now reached unconditionally',
+                )
+
     def test_array_sort_sorts_the_variable_in_place(self):
         """
         `$x = @('b', 'a'); [Array]::Sort($x); Write-Host $x[0]` prints `a` under 5.1: the call

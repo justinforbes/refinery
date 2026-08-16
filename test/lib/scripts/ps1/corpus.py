@@ -319,10 +319,11 @@ BEHAVIOURS: tuple[str, ...] = (
     "$x = 'a'; function f { Write-Host (variable x -ValueOnly) }; f; $x = 'c'",
     "$x = 'a'; function f { Write-Host (item variable:x).Value }; f; $x = 'c'",
     "$x = 'a'; function f { Write-Host (Get-Item variable:x).Value }; f; $x = 'c'",
+    "$env:z = 'v'; Write-Output $env:z",
 )
 
 
-#: The scripts the corruption ledger's beliefs about 5.1 rest on, each of which is run so that the
+#: The scripts a host-free ledger's beliefs about 5.1 rest on, each of which is run so that the
 #: belief is measured rather than remembered. Same rule as `BEHAVIOURS`: synthetic, small, safe, and
 #: the deobfuscation differential is quantified over these too, since a script written to catch a
 #: change of meaning is the last one that should go unchecked for it.
@@ -332,12 +333,18 @@ BEHAVIOURS: tuple[str, ...] = (
 #: possibility rather than an outcome, such as "the string `Invoke-Expression` runs may carry a
 #: write". A witness makes the mechanism happen instead of leaving it open, which is the part a
 #: host can answer.
+#:
+#: A fold the tool does not take belongs here as much as a corruption does. Such an entry states
+#: what the folded script would have to write, and the value it names is only worth asserting in a
+#: host-free test once a host has said it — so the backlog entries of
+#: `test/lib/scripts/ps1/deobfuscation/test_folding.py` are carried here beside the ledger's.
 CLAIMS: tuple[str, ...] = (
     "$x = 'a'; . { Remove-Variable x }; Write-Host $x",
     "$x = 'a'; . { New-Variable x 'b' -Force }; Write-Host $x",
     "$x = 'a'; . { Write-Output 'b' -OutVariable x }; Write-Host $x",
     "Set-Variable global:y 'b'; Write-Host $global:y",
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x",
+    "$x = 'a'; $true -or ($x = 'b'); Write-Host $x",
     "$x = @('b', 'a'); [Array]::Sort($x); Write-Host $x[0]",
     "trap { continue }; throw 'e'; Write-Host 'after'",
     "$x = 'a'; function f { Write-Host $x }; f; $x = 'c'",
@@ -351,6 +358,15 @@ CLAIMS: tuple[str, ...] = (
     "$x = 'a'; 1..2 | ForEach-Object { Write-Host $x }; $x = 'c'",
     "$x = 'a'; $ExecutionContext.InvokeCommand.InvokeScript('Write-Host $x'); $x = 'c'",
     "$x = 'a'; $c = 'Write-Host $x'; function f { iex $c }; f; $x = 'c'",
+    "$script:y = 'b'; Write-Output $script:y",
+    "$global:y = 'b'; Write-Output $global:y",
+    "$s = 'x'; Write-Output $script:s",
+    "$script:s = 'x'; Write-Output $s",
+    '$n = 1; $n += 2; Write-Output $n',
+    "$s = 'a'; $s += 'b'; $s += 'c'; Write-Output $s",
+    '$n = 1; $n++; Write-Output $n',
+    '$n = 5; $n -= 2; Write-Output $n',
+    "$c = 'Write-Out'; $c += 'put 5'; Invoke-Expression $c",
     "$x = 'a'; function f { Write-Host (Get-Variable x -ValueOnly) }; f; $x = 'c'",
     "$x = 'a'; Write-Host (Get-Variable x* | ForEach-Object Value); $x = 'c'",
     "$x = 'a'; Get-Variable x; $x = 'c'",

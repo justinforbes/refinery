@@ -1754,3 +1754,106 @@ class TestPs1AConstraintOnAVariableConvertsWhatIsWrittenToIt(TestPs1):
             Write-Output (,$q)
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output (,'5a')")
+
+
+class TestPs1AScopeQualifierNamesTheBindingItsBareSpellingNames(TestPs1):
+    """
+    At script scope `$x`, `$script:x` and `$global:x` are one variable, so a value written under any
+    of the three spellings is the value a read under any other observes. What 5.1 writes for each of
+    these four scripts is measured in `corpus.CLAIMS`: `b`, `b`, `x`, `x`.
+
+    No read through a qualifier is folded today, and the cause is that no such read is an occurrence
+    of anything. `Ps1SemanticModel._attribute_qualified_read` files none, setting
+    `Binding.dynamic_or_qualified` instead, and `Ps1VariableFlow` turns that flag into
+    `Ps1FlowUnknown.REACHED_BY_QUALIFIER` — an unknown over the whole binding, so one qualified read
+    anywhere withholds every value of the name everywhere. `$env:` is the one qualifier whose reads
+    are filed, and `test_an_environment_variable_is_folded_through_its_qualifier` below is the
+    control that says so.
+
+    Each entry is marked so that wiring a qualifier through reports an unexpected success.
+    """
+
+    def test_an_environment_variable_is_folded_through_its_qualifier(self):
+        self.assertEqual(
+            self._deobfuscate("$env:z = 'v'; Write-Output $env:z"), "Write-Output 'v'")
+
+    @unittest.expectedFailure
+    def test_a_read_of_a_script_qualified_name_is_the_value_written_under_it(self):
+        self.assertEqual(
+            self._deobfuscate("$script:y = 'b'; Write-Output $script:y"), "Write-Output 'b'")
+
+    @unittest.expectedFailure
+    def test_a_read_of_a_global_qualified_name_is_the_value_written_under_it(self):
+        self.assertEqual(
+            self._deobfuscate("$global:y = 'b'; Write-Output $global:y"), "Write-Output 'b'")
+
+    @unittest.expectedFailure
+    def test_a_qualified_read_observes_what_the_bare_spelling_wrote(self):
+        self.assertEqual(
+            self._deobfuscate("$s = 'x'; Write-Output $script:s"), "Write-Output 'x'")
+
+    @unittest.expectedFailure
+    def test_a_bare_read_observes_what_the_qualified_spelling_wrote(self):
+        self.assertEqual(
+            self._deobfuscate("$script:s = 'x'; Write-Output $s"), "Write-Output 'x'")
+
+
+class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
+    """
+    `$x op= e` stores what `$x = $x op e` stores, and the long spelling is folded today while the
+    short one is not: `$s = 'a'; $s = $s + 'b'; Write-Output $s` comes back as `Write-Output 'ab'`
+    and `$s = 'a'; $s += 'b'; Write-Output $s` comes back as it was written. What 5.1 writes for
+    each of these scripts is measured in `corpus.CLAIMS`: `3`, `abc`, `2`, `3` and `5`.
+
+    The model already reads a compound write as one that observes the value it replaces, and the
+    flow layer already orders and kills it; what is missing is the value.
+    `_ConstantTable._collect_writes` takes only `operator == '='`, so a compound write is a write
+    the inliner has nothing to say about and every read below it is withheld.
+
+    The last entry is why this is worth having: accumulating a command into a string and running it
+    is what the short spelling is used for, and the tool recovers the long spelling of it and not
+    the short.
+    """
+
+    def test_the_long_spelling_of_an_accumulation_is_folded(self):
+        source = inspect.cleandoc("""
+            $s = 'a'
+            $s = $s + 'b'
+            $s = $s + 'c'
+            Write-Output $s
+        """)
+        self.assertEqual(self._deobfuscate(source), "Write-Output 'abc'")
+
+    @unittest.expectedFailure
+    def test_an_added_number_is_the_sum(self):
+        self.assertEqual(
+            self._deobfuscate('$n = 1; $n += 2; Write-Output $n'), 'Write-Output 3')
+
+    @unittest.expectedFailure
+    def test_a_subtracted_number_is_the_difference(self):
+        self.assertEqual(
+            self._deobfuscate('$n = 5; $n -= 2; Write-Output $n'), 'Write-Output 3')
+
+    @unittest.expectedFailure
+    def test_an_incremented_number_is_the_next_one(self):
+        self.assertEqual(
+            self._deobfuscate('$n = 1; $n++; Write-Output $n'), 'Write-Output 2')
+
+    @unittest.expectedFailure
+    def test_appended_text_is_the_text_of_every_append(self):
+        source = inspect.cleandoc("""
+            $s = 'a'
+            $s += 'b'
+            $s += 'c'
+            Write-Output $s
+        """)
+        self.assertEqual(self._deobfuscate(source), "Write-Output 'abc'")
+
+    @unittest.expectedFailure
+    def test_a_command_accumulated_by_appending_is_run_where_it_was_built(self):
+        source = inspect.cleandoc("""
+            $c = 'Write-Out'
+            $c += 'put 5'
+            Invoke-Expression $c
+        """)
+        self.assertEqual(self._deobfuscate(source), 'Write-Output 5')

@@ -185,10 +185,14 @@ FOLDS: dict[str, str] = {
         "$x = 'a'\nfunction f {\n  Write-Host $x\n}\nf",
     "$x = 'a'; function f { Write-Host (Get-Item variable:x).Value }; f; $x = 'c'":
         "$x = 'a'\nfunction f {\n  Write-Host $x\n}\nf",
+    "$env:z = 'v'; Write-Output $env:z":
+        "Write-Output 'v'",
     "Set-Variable global:y 'b'; Write-Host $global:y":
         'Write-Host $global:y',
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":
         "$False -and ($x = 'b')\nWrite-Host 'b'",
+    "$x = 'a'; $true -or ($x = 'b'); Write-Host $x":
+        "$True -or ($x = 'b')\nWrite-Host 'b'",
     "$x = 'a'; function f { Write-Host $x }; f; $x = 'c'":
         "$x = 'a'\nfunction f {\n  Write-Host $x\n}\nf",
     "$v = 'a'; & { Write-Host $v }; $v = 'c'":
