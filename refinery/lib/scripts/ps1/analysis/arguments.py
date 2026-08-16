@@ -46,16 +46,24 @@ class Ps1WrittenSlots(typing.NamedTuple):
     *every* slot that could be written and none that could not. `settled` says whether the arity
     picked out a single overload: only then is `slots` the set that call actually writes, which is
     what a rule computing the value the call leaves behind has to have.
+
+    An empty `slots` therefore means two different things and the difference is `settled`.
+    Exact and empty is a claim: this call writes nothing. Unsettled and empty is a refusal: the
+    table names the member but not this call, so nothing is claimed about it either way. A
+    consumer that reads the pair as one truth value collapses them, which is why there is no
+    `__bool__` here.
     """
     slots: frozenset[int]
     settled: bool
 
-    def __bool__(self) -> bool:
-        return bool(self.slots)
-
 
 #: Nothing is written and the answer is exact: the member is not one that writes through a slot.
 NOTHING = Ps1WrittenSlots(frozenset(), True)
+
+#: The table names the member but no overload of it takes this many arguments, so which slots the
+#: call writes is not a question this can answer — 5.1 binds no overload and raises. Distinct from
+#: `NOTHING`, which is the claim that a call was found and writes nothing.
+UNBOUND = Ps1WrittenSlots(frozenset(), False)
 
 
 def _floored(
@@ -66,12 +74,18 @@ def _floored(
     """
     A written-slot table keyed by canonical type, with every row checked against the collected
     metadata: the type must resolve, the member must carry overloads on the side the row is about,
-    and each arity must be one some overload of it has.
+    each arity must be one some overload of it has, and each slot must address a part that call
+    has.
 
     The flooring is what stops a row rotting into silence. Two entries this replaces named
     `[Array]::Fill` and a *static* `[Array]::SetValue`, neither of which 5.1 carries at all — the
     first arrived in .NET Core — so both had been granting purity to a call the host answers with
     `MethodNotFound`.
+
+    The slot check is the one that keeps a typo from flipping the polarity. A row naming a slot the
+    arity does not reach is skipped by every consumer that indexes the arguments by it, so the call
+    reads as writing nothing shared and the whole statement becomes removable — the deny table
+    failing open, which is the one failure this module exists to prevent.
     """
     table: dict[tuple[Ps1TypeName, str], dict[int, frozenset[int]]] = {}
     for (type_name, member), by_arity in entries.items():
@@ -93,6 +107,15 @@ def _floored(
                 F'{sorted(available)}; a row is answered by arity, so one short of what the type '
                 F'offers would answer an uncovered call with silence rather than with doubt.'
             )
+        for arity, slots in by_arity.items():
+            unreachable = [slot for slot in slots if not (slot == RECEIVER or 0 <= slot < arity)]
+            if unreachable:
+                raise ValueError(
+                    F'the written-slot table gives {type_name}::{member} at {arity} arguments the '
+                    F'slots {sorted(unreachable)}, which that call has no part at; a slot nothing '
+                    F'can address is one every consumer skips, and the row would grant what it was '
+                    F'written to deny.'
+                )
         table[(key, member.lower())] = {
             arity: frozenset(slots) for arity, slots in by_arity.items()
         }
@@ -112,16 +135,36 @@ _STATIC_WRITES = _floored({
     ('array', 'copy')               : {3: (1,), 5: (2,)},
     ('array', 'reverse')            : {1: (0,), 3: (0,)},
     ('array', 'sort')               : {1: (0,), 2: (0, 1), 3: (0, 1), 4: (0, 1), 5: (0, 1)},
+    ('buffer', 'blockcopy')         : {5: (2,)},
+    ('buffer', 'setbyte')           : {3: (0,)},
     ('convert', 'tobase64chararray'): {5: (3,), 6: (3,)},
 }, static=True)
 
 #: What each call on a *value* writes through. `SetValue` writes the array it is called on, which is
 #: the receiver rather than any argument; `CopyTo` writes an argument, and which one depends on the
 #: type it is called on — `System.Array` fills the first, `System.String` the second.
+#:
+#: A row is answered by member *name* here, because `written_slots` is asked where no receiver type
+#: is known — so one row per name is what the union needs and a second type spelling the same name
+#: adds nothing. `System.IO.Stream` stands for every reader that fills a buffer at three arguments,
+#: `System.Collections.ArrayList` for every collection that fills one at one, and
+#: `System.Security.Cryptography.ICryptoTransform` for `HashAlgorithm` as well.
+#:
+#: `[Text.Encoding]::ASCII.GetBytes($s)` is why the encoders carry an empty row at every arity but
+#: the last: the name they share with `RNGCryptoServiceProvider::GetBytes`, which fills its *first*
+#: slot, cannot be told apart without a receiver type, and a row for that member would refuse the
+#: single most-folded call in an obfuscated script. It is left out deliberately, and it is the one
+#: written slot this module knows of and does not answer — see `written_slots`.
 _INSTANCE_WRITES = _floored({
-    ('array', 'copyto')  : {2: (0,)},
-    ('array', 'setvalue'): {2: (RECEIVER,), 3: (RECEIVER,), 4: (RECEIVER,)},
-    ('string', 'copyto') : {4: (1,)},
+    ('array', 'copyto')                 : {2: (0,)},
+    ('array', 'setvalue')               : {2: (RECEIVER,), 3: (RECEIVER,), 4: (RECEIVER,)},
+    ('collections.arraylist', 'copyto') : {1: (0,), 2: (0,), 4: (1,)},
+    ('io.stream', 'read')               : {3: (0,)},
+    ('random', 'nextbytes')             : {1: (0,)},
+    ('security.cryptography.icryptotransform', 'transformblock'): {5: (3,)},
+    ('string', 'copyto')                : {4: (1,)},
+    ('text.encoding', 'getbytes')       : {1: (), 3: (), 4: (), 5: (3,)},
+    ('text.encoding', 'getchars')       : {1: (), 3: (), 4: (), 5: (3,)},
 }, static=False)
 
 
@@ -139,6 +182,12 @@ def written_slots(
     `type_name` is `None` where the type is not known, which is the ordinary case for a call on a
     value: the answer is then the union over every type carrying a member of that name, since which
     of them it is cannot be decided here. That answer is never `settled`.
+
+    **One written slot is knowingly unanswered.** `RNGCryptoServiceProvider::GetBytes` fills its
+    first argument and shares its name with `Encoding::GetBytes`, which fills none at that arity;
+    with no receiver type to separate them a row would refuse every `[Text.Encoding]::UTF8
+    .GetBytes($s)` in the corpus. Answering it needs the receiver's type, which is what
+    `_across_every_type` exists because this layer does not have.
     """
     if type_name is None:
         return _across_every_type(member, arity, static=static)
@@ -146,17 +195,17 @@ def written_slots(
     by_arity = table.get((type_name.generic_definition, member.lower()))
     if by_arity is None:
         return NOTHING
+    slots = by_arity.get(arity)
+    if slots is None:
+        # A row covers every arity its member has — `_floored` refuses to build one that does not —
+        # so an arity with no entry is an arity no overload takes. 5.1 binds none of them and
+        # raises, which is neither a write to lose nor a call to reason about.
+        return UNBOUND
     overloads = (
         data.static_overloads(type_name, member) if static
         else data.instance_overloads(type_name, member)
     )
     matched = sum(1 for one in overloads if len(one.get('parameters') or ()) == arity)
-    slots = by_arity.get(arity)
-    if slots is None:
-        # A row covers every arity its member has — `_floored` refuses to build one that does not —
-        # so an arity with no entry is an arity no overload takes. 5.1 binds none of them and
-        # answers `MethodException`, and there is no write to lose because there is no call.
-        return NOTHING
     return Ps1WrittenSlots(slots, matched == 1)
 
 

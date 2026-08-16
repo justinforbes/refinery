@@ -394,11 +394,16 @@ def _writes_shared_storage(written: Ps1WrittenSlots, arguments: Sequence[Express
     Only the slots the call actually writes are looked at, so `[Array]::Copy($live, $scratch, 3)` is
     pure and `[Array]::Copy($scratch, $live, 3)` is not. The table this replaces asked the question
     of every argument at once and called both of them impure.
+
+    A slot this cannot address is answered `True` and not skipped. The receiver is one — it is
+    `refinery.lib.scripts.ps1.analysis.arguments.RECEIVER` rather than a position, and the receiver
+    is not among *arguments* — and so is a slot outside the call's arity. Skipping either would
+    leave a call whose only written slot this cannot see reading as one that writes nothing, and a
+    deny table that grants on the slot it failed to read has the polarity of an allow-list.
     """
     return any(
-        _denotes_shared_storage(arguments[slot])
+        not 0 <= slot < len(arguments) or _denotes_shared_storage(arguments[slot])
         for slot in written.slots
-        if 0 <= slot < len(arguments)
     )
 
 
@@ -843,9 +848,14 @@ def is_side_effect_free(node, world: Ps1TypeWorld) -> bool:
                         return False
                     written = written_slots(
                         resolved, member, len(node.arguments), static=True)
-                    if written:
+                    if written.slots:
                         return _grant(
                             not _writes_shared_storage(written, node.arguments), node, world)
+                    if not written.settled:
+                        # The table names the member and no overload takes this many arguments, so
+                        # 5.1 binds none and raises. Granting purity here would let the junk remover
+                        # delete a statement that writes an error record and stops the pipeline.
+                        return False
                     if _writes_through_out_parameter(obj.name, member, node.arguments):
                         return False
                     if type_key in _PURE_STATIC_METHOD_TYPES:

@@ -177,6 +177,12 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
     "$x = 'a'; &('i' + 'ex') '$x = \"b\"'; Write-Host $x":
         'The same write, reached through a computed command name, and here the call itself is '
         'deleted as well.',
+    '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y':
+        'The read is folded to the reversal. A subexpression collects a fresh array rather than '
+        'handing the object over, so the two names hold two arrays and the snippet writes `1 2 3`. '
+        '`Ps1Simplifications` rewrites `$($x)` to `$x` before the alias relation is built, minting '
+        'a share the script does not have, so the defect is in that pass rather than in the '
+        'aliasing.',
 }
 
 

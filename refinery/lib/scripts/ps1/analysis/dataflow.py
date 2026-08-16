@@ -91,6 +91,7 @@ from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, Ps1BlockReach
 from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
+    Occurrence,
     Ps1SemanticModel,
     Scope,
     scope_local_nodes,
@@ -192,6 +193,14 @@ class Ps1VariableFlow:
         write between them may have changed the value — so a caller may treat a returned occurrence
         as the one and only value the read can see, and must treat `None` as knowing nothing.
 
+        A write the binding only *may* receive is one of those doubts, and `_alias_holds_at` is what
+        settles it. `Occurrence.shared_through` marks a store filed against this name because
+        another name for the same object carries it; it always kills, and it names a value only
+        where the definitions that made the two names one are still standing at the store.
+        Answering with one that is not is how `$x = 1, 2, 3; $y = $x; $y = 9, 9, 9;
+        [Array]::Reverse($x); $y` came to print the reversal of an array `$y` had already stopped
+        holding.
+
         A read in another body is asked at the point that body runs, or not at all — see
         `_position_of`.
         """
@@ -219,7 +228,57 @@ class Ps1VariableFlow:
             return None
         if not self._observes_completed_store(graph, placed[id(found)][1], use):
             return None
+        for write in binding.writes:
+            if write.may_define and write.node is found:
+                if not self._alias_holds_at(write, graph):
+                    return None
         return found
+
+    def _alias_holds_at(self, shared: Occurrence, graph: ControlFlowGraph) -> bool:
+        """
+        Whether every definition *shared* reaches its binding through is still standing where the
+        store runs, so that the name really does hold the object the store changed.
+
+        One link holds when it certainly handed the object over, its definition runs first on every
+        path to the store, and neither of the two names it joins is *rebound* between the two. A
+        store through either name does not end the link — that is the whole point of the
+        distinction: `$y = $x; $x[0] = 9; [Array]::Reverse($x)` leaves both names on the one array
+        throughout. A replacing write does end it, on either side: `$y = 9, 9, 9` gives `$y` an
+        array of its own, and `$x = 9, 9, 9` gives one to `$x` and leaves `$y` on what it had.
+
+        A link the model marked uncertain never holds here. `$y = [array]$x` shares where the cast
+        converts nothing and copies where it converts, so the store has to keep killing — a read
+        below it must not be answered from above — while naming no value for either name.
+
+        Nothing is ordered across bodies here, and nothing is ordered within a statement: a rebind
+        the graphs place at the store's own node is refused rather than guessed at, which is the
+        same rule `reaching_definition` follows for a definition sharing its use's statement.
+        """
+        store = self.flow.locate(shared.node)
+        if store is None or store[0] is not graph:
+            return False
+        for link in shared.shared_through:
+            if not link.certain:
+                return False
+            placed = self.flow.locate(link.definition)
+            if placed is None or placed[0] is not graph or placed[1] is store[1]:
+                return False
+            if not self.dominators.dominates_node(graph, placed[1], store[1]):
+                return False
+            rebinds: set[int] = set()
+            for side in (link.first, link.second):
+                for write in side.writes:
+                    if write.role.through or write.node is link.definition:
+                        continue
+                    where = self.flow.locate(write.node)
+                    if where is None or where[0] is not graph:
+                        return False
+                    if where[1] is store[1]:
+                        return False
+                    rebinds.add(id(where[1]))
+            if self._between.any_between(placed[1], store[1], rebinds):
+                return False
+        return True
 
     def write_observed_at(self, key: str, site: Node) -> Node | Ps1ObservedWrite:
         """
@@ -273,6 +332,11 @@ class Ps1VariableFlow:
         found = self._between.reaching_definition(graph, use, definitions, kills)
         if found is not None:
             if not self._observes_completed_store(graph, placed[id(found)], use):
+                return Ps1ObservedWrite.UNKNOWN
+            if binding is not None and any(
+                write.may_define and write.node is found and not self._alias_holds_at(write, graph)
+                for write in binding.writes
+            ):
                 return Ps1ObservedWrite.UNKNOWN
             return found
         blocking = kills | frozenset(id(node) for _, node in definitions)
@@ -858,15 +922,21 @@ def _shadows_a_wider_scope(binding: Binding) -> bool:
     consumer that asked for itself is one more consumer that could forget. `reaching_definition`
     refuses on any unknown at all and inherits it that way.
 
+    Only writes this name is *spelled* on count, in the ratio as well as in the tally. A store
+    shared in from another name for the same object carries that other name's qualifier and has
+    nothing to say about which scope a read of this one resolves to, and counting it would make
+    a binding with a single `$global:` write read as one written through two scopes.
+
     A command that writes a name in a wider scope — `Set-Variable x 'v' -Scope Global` — is not
     caught, because the occurrence records no qualifier to read. That is a recorded hole rather than
     a claim; it lands on `Scope.writes_unreadable_names` instead, which is a refusal of its own.
     """
+    spelled = [write for write in binding.writes if not write.may_define]
     qualified = sum(
         isinstance(write.node, Ps1Variable) and write.node.scope in _WIDER_SCOPES
-        for write in binding.writes
+        for write in spelled
     )
-    return 0 < qualified < len(binding.writes)
+    return 0 < qualified < len(spelled)
 
 
 def _scopes_of(scope: Scope) -> Iterator[Scope]:

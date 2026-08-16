@@ -17,11 +17,18 @@ it fits in throws for no input, which is why it is the one rule here.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Expression
+from typing import Sequence
+
+from refinery.lib.scripts import Expression, _clone_node
+from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.analysis.model import written_call_slot
 from refinery.lib.scripts.ps1.analysis.values import integer_of, read, unwrap_to_array_literal
-from refinery.lib.scripts.ps1.model import Ps1ArrayLiteral, Ps1Variable
-from refinery.lib.scripts.ps1 import data
+from refinery.lib.scripts.ps1.model import (
+    Ps1AccessKind,
+    Ps1ArrayLiteral,
+    Ps1TypeExpression,
+    Ps1Variable,
+)
 
 #: The one member whose effect on its slot is written down here, as a canonical type key and a
 #: lowercased member name.
@@ -33,12 +40,13 @@ def value_after(occurrence: Ps1Variable, previous: Expression) -> Expression | N
     The value the name *occurrence* stands for holds once the call around it has run, given the
     value `previous` it held before it, or `None` where no rule names one.
 
-    `None` is the answer to every kind of doubt: a member with no rule, an overload the arity does
-    not settle, a call that writes more than the one slot, an operand this cannot read as a
-    collection, and a range that would throw. A caller must fold nothing on it.
+    `None` is the answer to every kind of doubt: a member with no rule, an overload the arity
+    does not settle, a call that writes more than the one slot, a conversion standing between
+    the name and the slot, an operand this cannot read as a collection, and a range that would
+    throw. A caller must fold nothing on it.
     """
     found = written_call_slot(occurrence)
-    if found is None or not found.written.settled or len(found.written.slots) != 1:
+    if found is None or not found.written.settled or found.written.slots != {found.slot}:
         return None
     if found.through_a_part:
         # `[Array]::Reverse($p[0])` turns around the array `$p`'s first element is, so what `$p`
@@ -47,19 +55,25 @@ def value_after(occurrence: Ps1Variable, previous: Expression) -> Expression | N
         # unshared; until it is built, answering the *slot* here would report the inner array's new
         # order as the outer array's.
         return None
+    if found.through_a_conversion:
+        # A cast between the name and the slot may hand the callee a fresh value built from what the
+        # name holds rather than the value itself — measured, `[Array]::Reverse([int[]]$x)` over an
+        # `Object[]` reverses a temporary and leaves `$x` in its original order. Which of the two a
+        # cast is depends on the operand's runtime type, so the pair is refused rather than read.
+        return None
     call = found.call
-    if not isinstance(call.member, str):
+    if call.access is not Ps1AccessKind.STATIC or not isinstance(call.member, str):
         return None
-    named = getattr(call.object, 'name', None)
-    resolved = data.resolve_type(named) if isinstance(named, str) else None
-    if resolved is None:
+    named = call.object
+    if not isinstance(named, Ps1TypeExpression):
         return None
-    if (resolved.generic_definition, call.member.lower()) != _REVERSE:
+    resolved = data.resolve_type(named.name)
+    if resolved is None or (resolved.generic_definition, call.member.lower()) != _REVERSE:
         return None
-    return _reversed(previous, call.arguments[1:])
+    return _reversed(previous, call.arguments[found.slot + 1:])
 
 
-def _reversed(previous: Expression, bounds: list) -> Expression | None:
+def _reversed(previous: Expression, bounds: Sequence[Expression]) -> Expression | None:
     """
     The collection `previous` names with a run of it turned around, or `None` where this names none.
 
@@ -73,21 +87,29 @@ def _reversed(previous: Expression, bounds: list) -> Expression | None:
     to a one-element `object[]` holding the string, which the call turns around and discards, so the
     variable is left holding exactly what it held — measured, and a fact about the *conversion*
     rather than about reversal, which is why it is refused here rather than answered.
+
+    The elements are copied before the answer is built out of them. A node adopts the children
+    it is handed, so building the answer over the ones still standing in the tree would leave
+    the array the script wrote with children naming a node that is nowhere in it — and every
+    guard that asks what encloses a statement climbs out of the tree from there. This answer is
+    a value, not a rewrite, and a value has to be free of the tree it was read from whether the
+    caller installs it or not.
     """
     array = unwrap_to_array_literal(previous)
     if array is None:
         return None
-    elements = list(array.elements)
-    if not bounds:
-        return Ps1ArrayLiteral(elements=elements[::-1])
-    if len(bounds) != 2:
-        return None
-    start = integer_of(read(bounds[0]))
-    length = integer_of(read(bounds[1]))
-    if start is None or length is None:
-        return None
-    if start < 0 or length < 0 or start + length > len(elements):
-        return None
+    if bounds:
+        if len(bounds) != 2:
+            return None
+        start = integer_of(read(bounds[0]))
+        length = integer_of(read(bounds[1]))
+        if start is None or length is None:
+            return None
+        if start < 0 or length < 0 or start + length > len(array.elements):
+            return None
+    else:
+        start, length = 0, len(array.elements)
     stop = start + length
+    elements = [_clone_node(element) for element in array.elements]
     return Ps1ArrayLiteral(
         elements=[*elements[:start], *elements[start:stop][::-1], *elements[stop:]])

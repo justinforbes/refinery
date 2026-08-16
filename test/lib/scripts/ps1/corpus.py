@@ -320,6 +320,22 @@ BEHAVIOURS: tuple[str, ...] = (
     "$x = 'a'; function f { Write-Host (item variable:x).Value }; f; $x = 'c'",
     "$x = 'a'; function f { Write-Host (Get-Item variable:x).Value }; f; $x = 'c'",
     "$env:z = 'v'; Write-Output $env:z",
+    '$x = 1, 2, 3; $y = $x; $y = 9, 9, 9; [Array]::Reverse($x); Write-Output $y',
+    '$x = 1, 2, 3; $y = $x; $z = $y; [Array]::Reverse($z); Write-Output $x',
+    "$s = 'abcd'; $t = $s; $t = 1, 2, 3; [Array]::Reverse($t); Write-Output $s.Length",
+    '$x = 1, 2, 3; $y = [array]$x; $y[0] = 9; Write-Output $x',
+    '$x = 1, 2, 3; $y = $x -as [array]; $y[0] = 9; Write-Output $x',
+    '$x = 1, 2, 3; [int[]]$y = $x; $y[0] = 9; Write-Output $x',
+    '$x = 1, 2, 3; [Array]::Reverse([int[]]$x); Write-Output $x',
+    '$x = 1, 2, 3; [Array]::Reverse($x -as [array]); Write-Output $x',
+    "$x = 1, 2, 3; $h = @{}; $h['k'] = $x; $x[0] = 9; Write-Output $h['k'][0]",
+    '$x = 1, 2, 3; $a = @($Null); $a[0] = $x; $x[0] = 9; Write-Output $a[0][0]',
+    "$m = 'Reverse'; $x = 1, 2, 3; [Array]::$m($x); Write-Output $x[0]",
+    '$s = [byte[]](1, 2, 3); $d = [byte[]](0, 0, 0); '
+    '[Buffer]::BlockCopy($s, 0, $d, 0, 3); Write-Output $d',
+    "[Convert]::ToBase64CharArray(1, 2, 3, 4); Write-Output 'after'",
+    "[string]$q = 5; [System.String]$q = 'ab'; Write-Output $q",
+    '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y',
 )
 
 

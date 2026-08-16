@@ -187,6 +187,20 @@ FOLDS: dict[str, str] = {
         "$x = 'a'\nfunction f {\n  Write-Host $x\n}\nf",
     "$env:z = 'v'; Write-Output $env:z":
         "Write-Output 'v'",
+    '$x = 1, 2, 3; $y = $x; $y = 9, 9, 9; [Array]::Reverse($x); Write-Output $y':
+        '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output (9, 9, 9)',
+    "$s = 'abcd'; $t = $s; $t = 1, 2, 3; [Array]::Reverse($t); Write-Output $s.Length":
+        '$t = 1, 2, 3\n[Array]::Reverse($t)\nWrite-Output 4',
+    '$x = 1, 2, 3; $y = $x -as [array]; $y[0] = 9; Write-Output $x':
+        '$x = 1, 2, 3\n$y = $x -As [array]\n$y[0] = 9\nWrite-Output $x',
+    '$x = 1, 2, 3; [Array]::Reverse($x -as [array]); Write-Output $x':
+        '$x = 1, 2, 3\n[Array]::Reverse($x -As [array])\nWrite-Output $x',
+    "$m = 'Reverse'; $x = 1, 2, 3; [Array]::$m($x); Write-Output $x[0]":
+        '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output 3',
+    "[string]$q = 5; [System.String]$q = 'ab'; Write-Output $q":
+        "Write-Output 'ab'",
+    '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y':
+        '$x = 1, 2, 3\n$y = $x\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)',
     "Set-Variable global:y 'b'; Write-Host $global:y":
         'Write-Host $global:y',
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":

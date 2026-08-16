@@ -1857,3 +1857,479 @@ class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
             Invoke-Expression $c
         """)
         self.assertEqual(self._deobfuscate(source), 'Write-Output 5')
+
+
+class TestPs1ASharedArrayIsOneOnlyBetweenTheAliasAndTheNextRebinding(TestPs1):
+    """
+    `$y = $x` gives one array a second name rather than a copy, so `[Array]::Reverse($x)` is a write
+    that a read of `$y` below it observes. The share runs from the definition that made it to the
+    next rebinding of either name, and a name aliased after the reversal, or only on a branch that
+    does not run, was never on the array the call turned around at all.
+
+    Measured on 5.1, the six scripts here write `3 2 1`, `9 9 9`, `7 7 7`, `1 2 3`, `1 2 3` and
+    `3 2 1`. Three of them are refused rather than answered, and what none of them may do is report
+    the reversal of an array the name being read had already stopped holding.
+    """
+
+    def test_a_name_taken_before_the_reversal_observes_it(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = $x
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        expected = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = $x
+            [Array]::Reverse($x)
+            Write-Output (3, 2, 1)
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_name_rebound_between_the_alias_and_the_reversal_holds_what_rebound_it(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = $x
+            $y = 9, 9, 9
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        expected = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse($x)
+            Write-Output (9, 9, 9)
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_name_aliased_only_on_a_branch_that_may_not_run_is_not_answered(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = 7, 7, 7
+            if ($env:A) {
+              $y = $x
+            }
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_name_aliased_after_the_reversal_keeps_the_order_it_was_handed(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = 4, 5, 6
+            [Array]::Reverse($y)
+            $y = $x
+            Write-Output $x
+        """)
+        expected = inspect.cleandoc("""
+            $y = 4, 5, 6
+            [Array]::Reverse($y)
+            Write-Output (1, 2, 3)
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_name_whose_source_was_rebound_before_the_reversal_is_not_answered(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = $x
+            $x = 9, 9, 9
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_reversal_through_a_third_name_is_not_answered_with_the_order_from_above(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = $x
+            $z = $y
+            [Array]::Reverse($z)
+            Write-Output $x
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1AConversionThatAllocatesIsNotTheArrayItWasBuiltFrom(TestPs1):
+    """
+    A conversion standing between a name and a slot may hand the callee a fresh array built out of
+    what the name holds rather than the array itself, and which of the two it is depends on the
+    operand's runtime type. Measured on 5.1, `[Array]::Reverse([int[]]$x)` over an `Object[]` turns
+    around a temporary and leaves `$x` writing `1 2 3`, as do `[string[]]` over the same array and
+    `[char[]]` over `'a','b','c'`; `[int[]]$y = $x` converts on the way in, so a reversal through
+    `$x` leaves `$y` writing `1 2 3` as well.
+
+    `-as` is the same question and the opposite answer: a value already of the target type is
+    converted by nothing, so `[Array]::Reverse($x -As [array])` turns `$x` itself around and writes
+    `3 2 1`. The spelling settles neither case, so no value may be installed where the name stands
+    and none may be computed for what the call left behind.
+    """
+
+    def test_a_reversal_through_an_int_array_cast_is_not_answered(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse([int[]]$x)
+            Write-Output $x
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_reversal_through_a_string_array_cast_is_not_answered(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse([string[]]$x)
+            Write-Output $x
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_reversal_through_a_char_array_cast_is_not_answered(self):
+        source = inspect.cleandoc("""
+            $x = 'a', 'b', 'c'
+            [Array]::Reverse([char[]]$x)
+            Write-Output $x
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_reversal_through_an_as_conversion_is_not_answered(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse($x -As [array])
+            Write-Output $x
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_name_taken_through_an_as_conversion_is_not_handed_the_arrays_value(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = $x -as [array]
+            $x[0] = 9
+            Write-Output $y[0]
+        """)
+        self._assertUnchanged(source, Ps1ConstantInlining)
+
+    def test_a_constrained_target_takes_a_copy_the_reversal_does_not_reach(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [int[]]$y = $x
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1AConversionBetweenTwoNamesSharesInBothDirections(TestPs1):
+    """
+    `[array]$x` over an `Object[]`, `$x -as [array]` and an `[array]` constraint on the target each
+    convert nothing, so the two names are left on the one array and a store through either is one a
+    read of the other observes. Measured on 5.1 over `$x = 1, 2, 3`, each of `$y = [array]$x`,
+    `$y = $x -As [array]` and `[array]$y = $x` makes `$y[0] = 9; Write-Output $x` write `9 2 3`,
+    `[Array]::Reverse($y); Write-Output $x` write `3 2 1`, and `$x[0] = 9; Write-Output $y` write
+    `9 2 3`.
+
+    Whether a conversion allocates is a question about the operand's runtime type, and nothing that
+    reads the source can answer it, so `[int[]]` is covered by the one rule from the other side:
+    `[int[]]$y = $x` does build a new array, and `[Array]::Reverse($x); Write-Output $y` writes
+    `1 2 3` there. Both are therefore refused, in both directions, and what neither may do is answer
+    a read with the array as it stood before the store.
+    """
+
+    _DEFINITIONS = (
+        '$y = [array]$x',
+        '$y = $x -As [array]',
+        '[array]$y = $x',
+        '[int[]]$y = $x',
+        '$y = [int[]]$x',
+    )
+
+    def _assertNoConversionAnswersTheRead(self, tail: str) -> None:
+        for definition in self._DEFINITIONS:
+            with self.subTest(definition):
+                source = F'$x = 1, 2, 3\n{definition}\n{tail}'
+                self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_store_through_the_second_name_is_not_answered_for_the_first(self):
+        self._assertNoConversionAnswersTheRead('$y[0] = 9\nWrite-Output $x')
+
+    def test_a_reversal_through_the_second_name_is_not_answered_for_the_first(self):
+        self._assertNoConversionAnswersTheRead('[Array]::Reverse($y)\nWrite-Output $x')
+
+    def test_a_store_through_the_first_name_is_not_answered_for_the_second(self):
+        self._assertNoConversionAnswersTheRead('$x[0] = 9\nWrite-Output $y')
+
+    def test_a_reversal_through_the_first_name_is_not_answered_for_the_second(self):
+        self._assertNoConversionAnswersTheRead('[Array]::Reverse($x)\nWrite-Output $y')
+
+    def test_the_same_reversal_under_a_definition_that_certainly_shares_is_answered(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = $x
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        expected = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = $x
+            [Array]::Reverse($x)
+            Write-Output (3, 2, 1)
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+
+class TestPs1ACallWhoseMemberCannotBeNamedWritesEverySlotItIsHanded(TestPs1):
+    """
+    `[Array]::$m($x)` names no member until `$m` is resolved, so which slots the callee writes is
+    unknown and the read below the call may not be answered by the write above it. Measured on 5.1,
+    `$m = 'Reverse'; $x = 1, 2, 3; [Array]::$m($x); $x[0]` is `3`, which is what the whole
+    deobfuscation recovers once the member has been spelled out.
+    """
+
+    def test_a_read_below_a_call_spelled_through_a_variable_is_not_answered_from_above(self):
+        source = inspect.cleandoc("""
+            $m = 'Reverse'
+            $x = 1, 2, 3
+            [Array]::$m($x)
+            Write-Output $x[0]
+        """)
+        expected = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::'Reverse'($x)
+            Write-Output $x[0]
+        """)
+        self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+    def test_the_read_is_answered_by_the_reversal_once_the_member_is_spelled_out(self):
+        source = inspect.cleandoc("""
+            $m = 'Reverse'
+            $x = 1, 2, 3
+            [Array]::$m($x)
+            Write-Output $x[0]
+        """)
+        expected = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse($x)
+            Write-Output 3
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+
+class TestPs1APositionThatStoresTheObjectIsNotHandedACopyOfIt(TestPs1):
+    """
+    Every position here keeps the array beyond the statement it stands in, so the name it is stored
+    under observes what a later write through `$x` does to it. Measured on 5.1, each of these eight
+    scripts writes `9`; writing `1, 2, 3` where `$x` stands would store a second array instead and
+    leave the read below reporting `1`.
+
+    Each is refused rather than answered, and the refusal is the whole claim: the read of the other
+    name is not one this can resolve either way.
+    """
+
+    def test_an_array_stored_under_a_hashtable_key_is_the_one_the_write_reaches(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $h = @{}
+            $h['k'] = $x
+            $x[0] = 9
+            Write-Output $h['k'][0]
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_an_array_stored_in_a_property_is_the_one_the_write_reaches(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $o.P = $x
+            $x[0] = 9
+            Write-Output $o.P[0]
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_an_array_stored_in_an_element_of_another_array_is_the_one_the_write_reaches(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $a = 0, 0
+            $a[0] = $x
+            $x[0] = 9
+            Write-Output $a[0][0]
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_an_array_written_into_a_hashtable_literal_is_the_one_the_write_reaches(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $h = @{
+              k = $x
+            }
+            $x[0] = 9
+            Write-Output $h['k'][0]
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_an_array_a_collection_retains_is_the_one_the_write_reaches(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $list.Add($x)
+            $x[0] = 9
+            Write-Output $list[0][0]
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_an_array_handed_on_through_a_cast_that_converts_nothing_is_still_shared(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $y = [array]$x
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_an_array_taken_by_one_target_of_a_multi_assignment_is_the_one_the_write_reaches(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $a, $b = $x, 9
+            $x[0] = 9
+            Write-Output $a[0]
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_an_array_given_to_a_name_by_a_command_is_the_one_the_write_reaches(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            New-Variable y $x
+            $x[0] = 9
+            Write-Output $y[0]
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1ACallFillingABufferArgumentDoesNotGetTheBuffersValue(TestPs1):
+    """
+    A callee that fills an array it is handed writes the variable that hands it over, exactly as
+    `[Array]::Reverse` does, so the buffer's own value may not stand in that slot while the value in
+    a slot the callee only reads still may. `[Text.Encoding]::ASCII.GetBytes($s)` at one argument
+    fills nothing at all and is the control: it is the single most-folded call in an obfuscated
+    script and it has to keep folding.
+    """
+
+    def test_the_destination_of_a_block_copy_keeps_its_name_while_the_source_folds(self):
+        source = inspect.cleandoc("""
+            $s = 1, 2, 3
+            $d = 0, 0, 0
+            [Buffer]::BlockCopy($s, 0, $d, 0, 3)
+            Write-Output $d
+        """)
+        expected = inspect.cleandoc("""
+            $d = 0, 0, 0
+            [Buffer]::BlockCopy((1, 2, 3), 0, $d, 0, 3)
+            Write-Output $d
+        """)
+        self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+    def test_the_output_of_a_transform_keeps_its_name_while_the_input_folds(self):
+        source = inspect.cleandoc("""
+            $s = 1, 2, 3
+            $o = 0, 0, 0
+            $transform.TransformBlock($s, 0, 3, $o, 0)
+            Write-Output $o
+        """)
+        expected = inspect.cleandoc("""
+            $o = 0, 0, 0
+            $transform.TransformBlock((1, 2, 3), 0, 3, $o, 0)
+            Write-Output $o
+        """)
+        self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+    def test_the_output_of_an_encoding_at_five_arguments_keeps_its_name(self):
+        source = inspect.cleandoc("""
+            $c = 'a', 'b'
+            $o = 0, 0
+            [Text.Encoding]::ASCII.GetBytes($c, 0, 2, $o, 0)
+            Write-Output $o
+        """)
+        expected = inspect.cleandoc("""
+            $o = 0, 0
+            [Text.Encoding]::ASCII.GetBytes(('a', 'b'), 0, 2, $o, 0)
+            Write-Output $o
+        """)
+        self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+    def test_an_encoding_at_one_argument_fills_nothing_and_still_folds_what_it_is_handed(self):
+        source = inspect.cleandoc("""
+            $s = 'ab'
+            Write-Output ([Text.Encoding]::ASCII.GetBytes($s))
+        """)
+        self.assertEqual(
+            self._deobfuscate(source), "Write-Output ([Text.Encoding]::ASCII.GetBytes('ab'))")
+
+
+class TestPs1ACallBindingNoOverloadRaisesRatherThanRunning(TestPs1):
+    """
+    `[Array]::Reverse($x, 0)` binds no overload — `Reverse` takes one argument or three — so 5.1
+    writes a `MethodException` and reverses nothing. Measured, the array is left in the order it was
+    built in and the statement is one the script performs, so it may not be removed as work nothing
+    observes.
+    """
+
+    def test_a_reversal_at_an_arity_no_overload_takes_is_not_removed_as_junk(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse($x, 0)
+        """)
+        self.assertEqual(self._deobfuscate(source), '[Array]::Reverse((1, 2, 3), 0)')
+
+    def test_a_sort_at_an_arity_no_overload_takes_leaves_the_array_in_the_order_it_had(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Sort($x, 0, 1, 2, 3, 4)
+            Write-Output $x
+        """)
+        expected = inspect.cleandoc("""
+            [Array]::Sort((1, 2, 3), 0, 1, 2, 3, 4)
+            Write-Output (1, 2, 3)
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+
+class TestPs1ComputingAReversalLeavesTheTreeItReadTheArrayFrom(TestPs1):
+    """
+    The array a reversal leaves behind is a value built out of the elements the assignment above it
+    wrote. A node adopts the children it is handed, so building that value over the elements still
+    standing in the tree would leave the assignment's array holding children that name a node
+    nowhere in the script, and every guard that climbs out of a statement to ask what encloses it
+    would climb into the answer instead.
+    """
+
+    def test_every_child_still_names_its_parent_where_a_reversal_answers_a_read(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse($x)
+            Write-Output $x[0]
+        """)
+        expected = inspect.cleandoc("""
+            $x = 1, 2, 3
+            [Array]::Reverse($x)
+            Write-Output 3
+        """)
+        self._assertTreeIsIntact(source, expected, Ps1ConstantInlining)
+
+
+class TestPs1ATypeSpelledTwoWaysIsOneConstraintOnTheVariable(TestPs1):
+    """
+    `[string]$q = 5` constrains the variable rather than the assignment, and `[System.String]` names
+    that same type. Measured on 5.1, `[string]$q = 5; [System.String]$q = 'ab'; Write-Output $q`
+    writes `ab`, and so does the script that spells the constraint the same way twice. A name
+    constrained twice over is one a value may not be read out of, so reading the two spellings as
+    two constraints costs the fold that the one-spelling script already gets.
+    """
+
+    def test_a_constraint_spelled_by_an_accelerator_and_by_its_full_name_is_one_constraint(self):
+        source = inspect.cleandoc("""
+            [string]$q = 5
+            [System.String]$q = 'ab'
+            Write-Output $q
+        """)
+        self.assertEqual(self._deobfuscate(source), "Write-Output 'ab'")
+
+    def test_the_same_script_spelling_the_constraint_one_way_folds_to_the_same_value(self):
+        source = inspect.cleandoc("""
+            [string]$q = 5
+            [string]$q = 'ab'
+            Write-Output $q
+        """)
+        self.assertEqual(self._deobfuscate(source), "Write-Output 'ab'")

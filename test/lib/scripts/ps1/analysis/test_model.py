@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from test import TestBase
 
+from refinery.lib.scripts.ps1.analysis.arguments import RECEIVER, _floored
 from refinery.lib.scripts.ps1.analysis.model import (
     Ps1OccurrenceRole,
     ScopeKind,
@@ -521,3 +522,192 @@ class TestPs1NamedReferenceAttribution(TestBase):
         """
         model = self._model("function f { Set-Variable x 'b' -Scope 1 }")
         self.assertTrue(model.script_scope.writes_unreadable_names)
+
+
+class TestPs1AConversionBetweenTwoNamesIsAnAliasThisCannotBeSureOf(TestBase):
+    """
+    A definition whose whole value is a bare variable read hands the object over: `$y = $x`, and
+    `$y = ($x)`, since a parenthesis hands over what it wraps. A conversion on either side of the
+    `=` hands over the very object where nothing needs converting and a fresh one where something
+    does — measured on 5.1, `$x = 1, 2, 3; $y = [array]$x; $y[0] = 9` leaves `$x` reading `9 2 3`,
+    where the same script written with `[int[]]` leaves it reading `1 2 3` — and which of the two
+    ran is a question about the operand's runtime type that no reading of the source settles.
+
+    The store is therefore filed against both names either way, which is what stops a read below it
+    being answered from above, and the link records whether it may also be read as naming a value.
+    A subexpression is not a conversion but a copy: `$y = $($x)` unrolls the array to the pipeline
+    and collects a fresh one, and `[object]::ReferenceEquals($x, $y)` is `False`, so that shape
+    mints no link at all and costs no fold.
+    """
+
+    _HANDED_OVER = ('$y = $x', '$y = ($x)')
+
+    _CONVERTED = (
+        '$y = [array]$x',
+        '$y = $x -as [array]',
+        '[array]$y = $x',
+        '[int[]]$y = $x',
+        '$y = [int[]]$x',
+    )
+
+    @staticmethod
+    def _shared(definition: str, store: str, name: str):
+        source = F'$x = 1, 2, 3\n{definition}\n{store}'
+        model = build_semantic_model(Ps1Parser(source).parse())
+        return [
+            write for write in model.script_scope.bindings[name].writes if write.may_define
+        ]
+
+    def test_a_store_through_either_name_is_filed_against_the_other(self):
+        for definition in (*self._HANDED_OVER, *self._CONVERTED):
+            for store, name in (('$y[0] = 9', 'x'), ('$x[0] = 9', 'y')):
+                with self.subTest(F'{definition}; {store}'):
+                    self.assertEqual(len(self._shared(definition, store, name)), 1)
+
+    def test_a_definition_that_hands_the_object_over_is_a_link_this_is_sure_of(self):
+        for definition in self._HANDED_OVER:
+            with self.subTest(definition):
+                shared, = self._shared(definition, '$y[0] = 9', 'x')
+                self.assertEqual([link.certain for link in shared.shared_through], [True])
+
+    def test_a_definition_with_a_conversion_on_either_side_is_a_link_this_is_not_sure_of(self):
+        for definition in self._CONVERTED:
+            with self.subTest(definition):
+                shared, = self._shared(definition, '$y[0] = 9', 'x')
+                self.assertEqual([link.certain for link in shared.shared_through], [False])
+
+    def test_a_definition_that_certainly_copies_is_no_link_at_all(self):
+        for store, name in (('$y[0] = 9', 'x'), ('$x[0] = 9', 'y')):
+            with self.subTest(store):
+                self.assertEqual(self._shared('$y = $($x)', store, name), [])
+
+
+class TestPs1EveryOccurrenceRoleAnswersUnlikeEveryOther(TestBase):
+    """
+    A role's four answers are its value, so two members answering alike are one member wearing two
+    names: the second folds into the first, dispatch picks whichever was declared earlier, and every
+    `is` test against the name that vanished still passes.
+    """
+
+    def test_no_two_roles_carry_the_same_four_answers(self):
+        answers = {
+            (role.stores, role.observes, role.substitutable, role.through)
+            for role in Ps1OccurrenceRole
+        }
+        self.assertEqual(len(answers), len(Ps1OccurrenceRole.__members__))
+
+
+class TestPs1ACallThatFillsAnArgumentWritesTheNameThatFilledIt(TestBase):
+    """
+    A callee that fills an array it is handed changes what the variable holding that array names,
+    exactly as `[Array]::Reverse` turns one around, and no marker in the signature says so. The
+    occurrence is therefore a store through the value and not a read, while a slot the same call
+    only reads stays a read — which is what keeps the source of a copy folding.
+
+    `[Text.Encoding]::ASCII.GetBytes($s)` at one argument is the control the whole table is shaped
+    around: it fills nothing, it is the most-folded call in an obfuscated script, and a row that
+    denied it would cost more than the one written slot it would catch.
+    """
+
+    @staticmethod
+    def _occurrence(source: str, name: str = 'x') -> Ps1Variable:
+        found = [
+            node for node in Ps1Parser(source).parse().walk()
+            if isinstance(node, Ps1Variable) and node.name.lower() == name
+        ]
+        if not found:
+            raise AssertionError(F'no occurrence of ${name} in {source!r}')
+        return found[0]
+
+    def test_a_filled_buffer_is_a_store_through_the_name_that_hands_it_over(self):
+        for source in (
+            '[Buffer]::BlockCopy($s, 0, $x, 0, 3)',
+            '[Buffer]::SetByte($x, 0, 9)',
+            '$stream.Read($x, 0, 3)',
+            '$random.NextBytes($x)',
+            '$arrayList.CopyTo($x)',
+            '$transform.TransformBlock($s, 0, 3, $x, 0)',
+            '[Text.Encoding]::ASCII.GetBytes($c, 0, 2, $x, 0)',
+        ):
+            with self.subTest(source):
+                occurrence = self._occurrence(source)
+                self.assertIs(occurrence_role(occurrence), Ps1OccurrenceRole.WRITE_THROUGH)
+                self.assertFalse(is_substitutable_position(occurrence))
+
+    def test_a_slot_the_same_call_only_reads_is_a_position_a_value_may_stand_in(self):
+        for source in (
+            '[Buffer]::BlockCopy($x, 0, $d, 0, 3)',
+            '$arrayList.CopyTo($d, 0, $x, 3)',
+            '[Text.Encoding]::ASCII.GetBytes($x)',
+            '[Text.Encoding]::ASCII.GetString($x)',
+        ):
+            with self.subTest(source):
+                occurrence = self._occurrence(source)
+                self.assertIs(occurrence_role(occurrence), Ps1OccurrenceRole.READ)
+                self.assertTrue(is_substitutable_position(occurrence))
+
+    def test_a_call_whose_member_cannot_be_named_is_a_store_through_every_slot(self):
+        for source in ('[Array]::$m($x)', '$obj.$m($x)'):
+            with self.subTest(source):
+                self.assertIs(
+                    occurrence_role(self._occurrence(source)), Ps1OccurrenceRole.WRITE_THROUGH)
+
+    def test_a_conversion_between_the_name_and_a_written_slot_does_not_free_the_name(self):
+        for source in (
+            '[Array]::Reverse([int[]]$x)',
+            '[Array]::Reverse($x -as [array])',
+            '[Array]::Reverse(($x))',
+        ):
+            with self.subTest(source):
+                self.assertIs(
+                    occurrence_role(self._occurrence(source)), Ps1OccurrenceRole.WRITE_THROUGH)
+
+    def test_an_arity_no_overload_takes_writes_nothing_because_the_call_raises(self):
+        self.assertIs(
+            occurrence_role(self._occurrence('[Array]::Reverse($x, 0)')),
+            Ps1OccurrenceRole.READ)
+
+
+class TestPs1TheWrittenSlotTableIsFlooredAgainstTheCollectedMetadata(TestBase):
+    """
+    The written-slot table is a deny table: a slot it fails to name is one a caller puts a value in,
+    and the callee's write is then lost. A row naming a slot the call has no part at is skipped by
+    every consumer that indexes the arguments by it, and a row short of an arity the member offers
+    answers that call with silence rather than with doubt. Both fail open, so both are refused where
+    the table is built rather than where it is read.
+
+    `System.Array.Reverse` is the member the rows are written against here: the collected metadata
+    carries it at one argument and at three, and its written slot is the first.
+    """
+
+    def test_a_row_naming_a_slot_beyond_the_last_argument_is_refused(self):
+        with self.assertRaises(ValueError):
+            _floored({('array', 'reverse'): {1: (7,), 3: (0,)}}, static=True)
+
+    def test_a_row_naming_the_slot_one_past_the_last_argument_is_refused(self):
+        with self.assertRaises(ValueError):
+            _floored({('array', 'reverse'): {1: (0,), 3: (3,)}}, static=True)
+
+    def test_a_row_leaving_an_arity_of_the_member_uncovered_is_refused(self):
+        with self.assertRaises(ValueError):
+            _floored({('array', 'reverse'): {1: (0,)}}, static=True)
+
+    def test_a_row_covering_an_arity_no_overload_takes_is_refused(self):
+        with self.assertRaises(ValueError):
+            _floored({('array', 'reverse'): {1: (0,), 2: (0,), 3: (0,)}}, static=True)
+
+    def test_a_row_naming_a_member_the_metadata_does_not_carry_is_refused(self):
+        with self.assertRaises(ValueError):
+            _floored({('array', 'fill'): {2: (0,)}}, static=True)
+
+    def test_a_row_covering_every_arity_with_slots_the_call_has_is_built(self):
+        built = _floored({('array', 'reverse'): {1: (0,), 3: (0,)}}, static=True)
+        self.assertEqual([member for _, member in built], ['reverse'])
+        self.assertEqual(list(built.values()), [{1: frozenset({0}), 3: frozenset({0})}])
+
+    def test_the_receiver_is_a_slot_every_arity_can_address(self):
+        built = _floored(
+            {('array', 'setvalue'): {2: (RECEIVER,), 3: (RECEIVER,), 4: (RECEIVER,)}}, static=False)
+        self.assertEqual(
+            list(built.values()),
+            [{arity: frozenset({RECEIVER}) for arity in (2, 3, 4)}])

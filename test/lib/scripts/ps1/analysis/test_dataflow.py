@@ -876,3 +876,55 @@ class TestPs1WrittenBeforeAtAnOccurrenceThatObservesWhatItWrites(TestPs1WrittenB
         for source in ['$x = 1; $x += 1', '$x = 1; $x++']:
             with self.subTest(source):
                 self.assertTrue(self._written_before_its_own_store(source))
+
+
+class TestPs1AnAliasThroughAConversionKillsWithoutNamingAValue(TestBase):
+    """
+    `$y = [array]$x` leaves the two names on the one array where the cast converts nothing and on
+    two arrays where it converts, and which of the two ran depends on the operand's runtime type.
+    So a store through either name has to keep a read of the other from being answered by the value
+    from above it, while naming no value of its own — the array the store left is that name's only
+    where the two really were one.
+
+    Three definitions and three different answers. `$y = $x` hands the object over with no doubt
+    and the read below the store observes the store. `$y = $($x)` collects a fresh array through
+    the pipeline and shares nothing, so the read is still answered by the write the name carries.
+    A conversion is neither, and the answer is that there is none.
+    """
+
+    @staticmethod
+    def _occurrences(tree, name: str) -> list[Ps1Variable]:
+        return [
+            node for node in _in_source_order(tree)
+            if isinstance(node, Ps1Variable) and node.name.lower() == name
+        ]
+
+    def test_a_read_below_a_store_through_a_conversion_shared_name_has_no_definition(self):
+        for definition in (
+            '$y = [array]$x',
+            '$y = $x -as [array]',
+            '[array]$y = $x',
+            '[int[]]$y = $x',
+            '$y = [int[]]$x',
+        ):
+            for store, name in (('$y[0] = 9', 'x'), ('$x[0] = 9', 'y')):
+                with self.subTest(F'{definition}; {store}'):
+                    source = F'$x = 1, 2, 3\n{definition}\n{store}\nWrite-Output ${name}'
+                    tree, _, flow = _models(source)
+                    read = self._occurrences(tree, name)[-1]
+                    self.assertIsNone(flow.reaching_definition(read))
+
+    def test_a_read_below_a_store_through_a_name_handed_the_object_observes_that_store(self):
+        for definition in ('$y = $x', '$y = ($x)'):
+            with self.subTest(definition):
+                source = F'$x = 1, 2, 3\n{definition}\n$y[0] = 9\nWrite-Output $x'
+                tree, _, flow = _models(source)
+                store = self._occurrences(tree, 'y')[1]
+                read = self._occurrences(tree, 'x')[-1]
+                self.assertIs(flow.reaching_definition(read), store)
+
+    def test_a_read_below_a_store_through_a_copy_still_observes_the_names_own_write(self):
+        source = '$x = 1, 2, 3\n$y = $($x)\n$y[0] = 9\nWrite-Output $x'
+        tree, _, flow = _models(source)
+        occurrences = self._occurrences(tree, 'x')
+        self.assertIs(flow.reaching_definition(occurrences[-1]), occurrences[0])

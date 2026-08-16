@@ -461,6 +461,37 @@ class TestPs1Purity(Ps1EffectsTest):
                 self.assertFalse(self._pure(self._expression(source)))
 
 
+class TestPs1ACallBindingNoOverloadIsWorkTheScriptStillPerforms(Ps1EffectsTest):
+    """
+    `[Convert]::ToBase64CharArray` takes five arguments or six, so a call at any other count binds
+    none of them: 5.1 fills nothing and writes a `MethodException` the pipeline carries on. Purity
+    would delete the statement and the error record with it.
+
+    `System.Convert` is the type where a miss is felt, because the rest of its static surface is
+    trusted wholesale: an arity the written-slot table does not cover reaches that grant unless the
+    miss is reported as doubt rather than as the claim that this call writes nothing.
+    """
+
+    def test_an_arity_no_overload_of_the_member_takes_is_not_pure(self):
+        for source in (
+            '[Convert]::ToBase64CharArray($a, 0, 2, $b)',
+            '[Convert]::ToBase64CharArray($a, 0, 2, $b, 0, 9, 9)',
+        ):
+            with self.subTest(source):
+                self.assertFalse(self._pure(self._expression(source)))
+
+    def test_an_arity_the_member_takes_is_judged_by_what_stands_in_the_slot_it_fills(self):
+        for source, pure in (
+            ('[Convert]::ToBase64CharArray($a, 0, 2, $b, 0)', False),
+            ('[Convert]::ToBase64CharArray($a, 0, 2, $b, 0, 9)', False),
+            ('[Convert]::ToBase64CharArray($a, 0, 2, (1, 2, 3), 0)', True),
+            ('[Buffer]::BlockCopy($s, 0, $d, 0, 3)', False),
+            ('[Buffer]::BlockCopy($s, 0, (1, 2, 3), 0, 3)', True),
+        ):
+            with self.subTest(source):
+                self.assertIs(self._pure(self._expression(source)), pure)
+
+
 class TestPs1MemberGateWorld(Ps1EffectsTest):
     """
     Position A: a present-member purity grant — a property read, a static or instance method call, a

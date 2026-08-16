@@ -518,10 +518,21 @@ class TestPs1Corruptions(TestPs1):
         either its `Write-Output` invocations already spell exactly that, or `mutated` reports that
         the call producing it still reaches the array the read observes. `corrupt` is what the
         output writes in its place when it does neither.
+
+        The corrupt half is checked per invocation and not against the whole list. `_output_writes`
+        answers `None` for an invocation whose argument the output does not decide, so a rewrite
+        that corrupts one read and leaves the next unanswered never reproduces `corrupt` entire —
+        and comparing the lists would pass on exactly the partial corruption these rows exist to
+        catch. Only the positions where `corrupt` and `written` disagree carry a claim; where the
+        two spell the same thing the corrupt run writes what the script writes.
         """
         writes = _output_writes(tree)
-        self.assertNotEqual(
-            writes, corrupt, F'the output writes {corrupt}, which the script never writes')
+        for position, (value, wrong, right) in enumerate(zip(writes, corrupt, written)):
+            if wrong == right:
+                continue
+            self.assertNotEqual(
+                value, wrong,
+                F'output {position} writes {wrong}, which the script never writes there')
         self.assertTrue(
             writes == written or mutated,
             F'nothing left in the output can write {written}',
@@ -1299,6 +1310,23 @@ class TestPs1Corruptions(TestPs1):
         tree = self._deobfuscated_tree('$x = 1, 2, 3; $y = $x; $y[0] = 9; Write-Output $x[0]')
         aliased = any(_reads_variable(store.value, 'x') for store in _stores(tree, 'y'))
         self._assertWrites(tree, [[9]], [[1]], aliased and bool(_element_stores(tree, 'y')))
+
+    @unittest.expectedFailure
+    def test_a_subexpression_between_two_names_gives_each_its_own_array(self):
+        """
+        `$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y` writes `1 2 3` under 5.1:
+        a subexpression collects what it evaluates into a fresh array, so `$y` does not name the
+        array `$x` holds and reversing that array leaves `$y` alone.
+
+        The store is not the defect. `Ps1Simplifications` rewrites `$($x)` to `$x` before anything
+        reads the alias relation, so the share is minted by a pass that never asked whether the
+        wrapper was carrying a copy.
+        """
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y')
+        copies_the_array = any(
+            isinstance(store.value, Ps1SubExpression) for store in _stores(tree, 'y'))
+        self._assertWrites(tree, [[1, 2, 3]], [[3, 2, 1]], copies_the_array)
 
     def test_loop_reads_the_array_the_previous_iteration_reversed(self):
         """

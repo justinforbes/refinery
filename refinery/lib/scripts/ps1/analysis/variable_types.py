@@ -248,19 +248,20 @@ def constraint_converts(binding: Binding | None, value: Expression) -> bool:
 
     `[string]$q = 5` stores an `ArgumentTypeConverterAttribute` on the *variable* rather than on the
     statement, so every later write is converted through it too: measured, `[string]$q = 5;
-    $q = 1, 2, 3; Write-Output $q.Length` prints 5, because `$q` holds the String `1 2 3` and not the
-    array. A value whose own type is already the constrained one passes through untouched, which is
-    what keeps `[string]$q = 'abc'` answering.
+    $q = 1, 2, 3; Write-Output $q.Length` prints 5, because `$q` holds the String `1 2 3` rather
+    than the array. A value whose own type is already the constrained one passes through untouched,
+    which is what keeps `[string]$q = 'abc'` answering.
 
     Two constraints on one name are refused without asking which: which of them is in force at a
     given write is an ordering question, and the answer would have to be the value under whichever
-    ran.
+    ran. `Binding.constraints` holds resolved types rather than spellings, so `[string]` written
+    beside `[System.String]` is the one constraint it is and not two.
     """
     if binding is None or not binding.constraints:
         return False
     if len(binding.constraints) > 1:
         return True
-    constrained = resolve_type(next(iter(binding.constraints)))
+    constrained = next(iter(binding.constraints))
     return constrained is None or resolve_expression_type(value) != constrained
 
 
