@@ -6858,12 +6858,14 @@ SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE = [
     "'use' + ' ' + 'strict';",
     "['use', 'strict'].join(' ');",
     "'USE STRICT'.toLowerCase();",
+    "'a', 'use strict';",
 ]
 """
 Statements that denote the same text and are not directives either: a bracket around the literal, an
 operator beside it, or a call that computes it each leaves a statement that merely evaluates to the
-text. Node runs every program opening with one of these as sloppy code too, and what the tool makes
-of them is pinned in `test.lib.scripts.js.test_unfixed_defects`.
+text. The last of them denotes it without computing anything at all, a sequence expression being
+worth its final operand. Node runs every program opening with one of these as sloppy code too, and
+what the tool makes of them is pinned in `test.lib.scripts.js.test_unfixed_defects`.
 """
 
 SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING = [
@@ -6872,12 +6874,15 @@ SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING = [
     "'a' + 'b';",
     "['a', 'b'].join('');",
     "'A'.toLowerCase();",
+    "'use strict', 'a';",
 ]
 """
 Statements that are not string literals and that a fold rewrites as one. None of them denotes `use
-strict`, so none becomes a directive itself: what each does is continue the Directive Prologue it
-should have ended, which hands a `'use strict'` written below it the directive position it never
-had. The first of them is a read a fold already declines in this position, written inside a bracket:
+strict`, so none becomes a directive itself — not even the last, which spells the text and discards
+it, a sequence expression being worth its final operand. What each does is continue the Directive
+Prologue it should have ended, which hands a `'use strict'` written below it the directive position
+it never had. The first of them is a read a fold already declines in this position, written inside a
+bracket:
 the refusal reads the tree, where the bracket stands between the statement and the read, and the
 printer does not write that bracket back. What the tool makes of them is pinned in
 `test.lib.scripts.js.test_unfixed_defects`.

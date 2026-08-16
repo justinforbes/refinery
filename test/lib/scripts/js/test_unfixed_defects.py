@@ -631,26 +631,46 @@ class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
         )
 
 
-def _a_directive_standing_below_a_fold_in(parameters: str, call: str, read: str) -> str:
+#: A parameter list that holds a default value, a rest element, or a destructuring pattern, mapped
+#: to a call that reaches a body reading it, the expression such a body returns, and what Node
+#: prints for that call. A parameter list written any of those ways is not a simple one, and a
+#: function with such a list may hold no Use Strict Directive at all.
+_A_PARAMETER_LIST_NO_DIRECTIVE_MAY_STAND_UNDER = {
+    'a = 1': ('f()', 'a', '1\n'),
+    '...a': ('f(1, 2)', 'a.length', '2\n'),
+    '{a}': ('f({a: 5})', 'a', '5\n'),
+}
+
+
+def _a_function_whose_body_opens_with(head: str, parameters: str, call: str, read: str) -> str:
     """
-    A program calling a function written with *parameters* as *call*, whose body reads *read* below
-    a `'use strict'` that stands one statement into it. The statement above it is the `atob` call of
-    `test.lib.scripts.js.analysis.test_differential.SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING`,
-    which is not a string literal and therefore ends the prologue in front of the directive.
+    A program calling a function written with *parameters* as *call*, whose body opens with *head*
+    and reads *read* below it.
     """
     return (
-        F"function f({parameters}) {{ atob('YQ=='); 'use strict'; return {read}; }}\n"
+        F'function f({parameters}) {{ {head} return {read}; }}\n'
         F'console.log({call});\n'
     )
 
 
-#: A function whose parameter list holds a default value, a rest element, or a destructuring
-#: pattern, mapped to what Node prints for it. A parameter list written any of those ways is not a
-#: simple one, and a function with such a list may hold no Use Strict Directive at all.
+#: A function whose parameter list forbids a directive, whose body holds a `'use strict'` one
+#: statement in, mapped to what Node prints for it. The statement above the directive is the `atob`
+#: call of
+#: `test.lib.scripts.js.analysis.test_differential.SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING`, which
+#: is not a string literal and therefore ends the prologue in front of the directive.
 A_FUNCTION_WHOSE_PARAMETER_LIST_FORBIDS_A_DIRECTIVE = {
-    _a_directive_standing_below_a_fold_in('a = 1', 'f()', 'a'): '1\n',
-    _a_directive_standing_below_a_fold_in('...a', 'f(1, 2)', 'a.length'): '2\n',
-    _a_directive_standing_below_a_fold_in('{a}', 'f({a: 5})', 'a'): '5\n',
+    _a_function_whose_body_opens_with(
+        "atob('YQ=='); 'use strict';", parameters, call, read): prints
+    for parameters, (call, read, prints) in _A_PARAMETER_LIST_NO_DIRECTIVE_MAY_STAND_UNDER.items()
+}
+
+
+#: A function whose parameter list forbids a directive, whose body opens with a statement that is
+#: none but that a fold writes as the plain spelling of one, mapped to what Node prints for it.
+A_FUNCTION_WHOSE_BODY_OPENS_WITH_A_FOLD_TO_THE_DIRECTIVE = {
+    _a_function_whose_body_opens_with(head, parameters, call, read): prints
+    for parameters, (call, read, prints) in _A_PARAMETER_LIST_NO_DIRECTIVE_MAY_STAND_UNDER.items()
+    for head in SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE
 }
 
 
@@ -741,6 +761,27 @@ class TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten(TestBase):
         body that reports the wrong mode but a file that is no longer a program at all.
         """
         rows = A_FUNCTION_WHOSE_PARAMETER_LIST_FORBIDS_A_DIRECTIVE
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+    @unittest.expectedFailure
+    def test_a_fold_writes_no_directive_into_a_function_that_can_hold_none(self):
+        """
+        Node prints `1`, `2`, and `5` for the programs of
+        `A_FUNCTION_WHOSE_BODY_OPENS_WITH_A_FOLD_TO_THE_DIRECTIVE`, one for each way of writing a
+        parameter list that is not simple, crossed with every spelling that denotes the text of the
+        directive without being one. Each body opens with a statement that is evaluated and
+        discarded, so each function is sloppy code that a parameter list of that shape is welcome
+        in. The fold writes the plain `'use strict'` in that statement's place, which a function
+        whose parameter list is not simple may not hold under any circumstances: Node refuses every
+        one of these with a SyntaxError. What the whole file is worth is lost here, and not merely
+        the mode of the one body — the same fold in a function whose parameters are simple is
+        pinned by `test_a_statement_that_only_denotes_the_text_leaves_the_function_body_sloppy`,
+        where the file that comes back still runs and reports the wrong mode.
+        """
+        rows = A_FUNCTION_WHOSE_BODY_OPENS_WITH_A_FOLD_TO_THE_DIRECTIVE
         self.assertEqual(
             {source: _before_and_after(source) for source in rows},
             _each_program_still_prints(rows),
