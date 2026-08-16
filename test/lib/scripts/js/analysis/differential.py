@@ -3,11 +3,18 @@ Differential testing support for JavaScript deobfuscation: run a snippet and its
 a real Node.js engine and compare observable behavior. This is the strongest available oracle for the
 invariant that deobfuscation preserves semantics — the engine, not our own interpreter, decides.
 
-Two execution models are available, because they disagree about what a top-level declaration means.
+Three execution models are available, because they disagree about what a top-level declaration means.
 `behavior` runs the snippet as `node <file>`, a CommonJS module, where a top-level `var`/`function` is
 scoped to the module. `host_behavior` runs it as a classic global script and can additionally call a
 name through `globalThis` afterwards, which is the only way to observe a declaration that reaches the
 global object — and therefore the only way to observe whether an entrypoint a host would call survived.
+`behavior(source, module=True)` runs it as an ECMAScript module, which is the only one of the three
+that is strict code without a directive saying so, and the only one where `import`, `export`, and
+`import.meta` are available at all.
+
+What a program prints is not all of it: a program also has a value, and `completion_values` reports
+that one. `eval` hands it back to its caller and so does a script run as a unit, so a rewrite that
+leaves every print in place can still change what a payload was worth to whoever ran it.
 
 SECURITY: this executes JavaScript in Node.js. It must only ever be given benign, hand-authored
 snippets. Never point it at the repository's malware test corpus or any untrusted sample — executing
@@ -23,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 
+from enum import Enum
 from pathlib import Path
 from typing import Sequence
 
@@ -160,7 +168,7 @@ def host_behavior(
     return behavior(_as_global_script(source, calls), timeout=timeout)
 
 
-def behavior(source: str, *, timeout: float = 15.0) -> tuple[str, str | None]:
+def behavior(source: str, *, module: bool = False, timeout: float = 15.0) -> tuple[str, str | None]:
     """
     Execute *source* in Node.js and return its observable behavior as a pair: the captured standard
     output, and the error type (`TypeError`, `ReferenceError`, …) when execution terminated with an
@@ -169,6 +177,11 @@ def behavior(source: str, *, timeout: float = 15.0) -> tuple[str, str | None]:
     (e.g. folding `(function(){})(x)` to `void 0` turns "(intermediate value) is not a function" into
     "(void 0) is not a function" — the same `TypeError`). Stack traces and file paths are dropped too,
     so an original snippet and its deobfuscation compare equal whenever they throw the same way.
+
+    *module* writes the snippet to a `.mjs` file, which is what makes Node read it as an ECMAScript
+    module rather than as a CommonJS one. The extension is the whole of the difference: it decides
+    the goal symbol the source is parsed under, and module code is strict code whether or not any
+    directive says so.
 
     The snippet reaches the file untranslated, because which characters end a line is a question
     the engine is asked here: the platform default rewrites every `\\n` on the way out, so a case
@@ -179,7 +192,7 @@ def behavior(source: str, *, timeout: float = 15.0) -> tuple[str, str | None]:
     if node is None:
         raise RuntimeError('node.js is not available')
     with tempfile.TemporaryDirectory() as folder:
-        path = os.path.join(folder, 'snippet.js')
+        path = os.path.join(folder, 'snippet.mjs' if module else 'snippet.js')
         with open(path, 'w', encoding='utf-8', newline='') as stream:
             stream.write(source)
         proc = subprocess.run(
@@ -229,3 +242,87 @@ def code_units(expressions: Sequence[str], *, timeout: float = 15.0) -> list[str
     if error is not None:
         raise AssertionError(F'node refused one of {len(expressions)} expressions: {error}')
     return stdout.splitlines()
+
+
+class JsEvaluation(str, Enum):
+    """
+    The way a program is handed to the engine when the question is what it evaluates to.
+
+    `EVAL` is the payload model: the program is the argument of a call to `eval`, which returns the
+    value, and that is how a stage of a malware chain reaches this tool. `SCRIPT` is the unit model:
+    the program is compiled and run whole, the way `vm.runInThisContext` and any host that embeds an
+    engine run one, and the value is the script's own. Both are asked because they need not agree.
+    """
+    EVAL = 'eval'
+    SCRIPT = 'script'
+
+
+_COMPLETION_DRIVER = R'''
+const fs = require('fs');
+const vm = require('vm');
+
+function named(x) {
+  if (x === undefined) return 'undefined';
+  if (x === null) return 'null';
+  if (typeof x === 'number') return Object.is(x, -0) ? '-0' : String(x);
+  if (typeof x === 'bigint') return String(x) + 'n';
+  if (typeof x === 'boolean') return String(x);
+  if (typeof x === 'string') return JSON.stringify(x);
+  if (typeof x === 'function') return 'function';
+  if (typeof x === 'symbol') return 'symbol';
+  if (Object.prototype.toString.call(x) === '[object Error]') return x.name;
+  return Object.prototype.toString.call(x);
+}
+
+function evaluated(source, host) {
+  const context = vm.createContext({});
+  try {
+    if (host === 'eval') {
+      return named(vm.runInContext('(0, eval)(' + JSON.stringify(source) + ')', context));
+    }
+    return named(vm.runInContext(source, context));
+  } catch (error) {
+    return 'throw ' + named(error);
+  }
+}
+
+function report(request) {
+  const values = request.programs.map(function (source) {
+    return evaluated(source, request.host);
+  });
+  fs.writeFileSync(request.report, JSON.stringify(values), 'utf8');
+}
+'''
+
+
+def completion_values(
+    programs: Sequence[str],
+    evaluation: JsEvaluation = JsEvaluation.EVAL,
+    *,
+    timeout: float = 15.0,
+) -> list[str]:
+    """
+    The value each program in *programs* evaluates to under *evaluation*, named the way a reader can
+    check by eye: a string as its JSON spelling, a number, `null`, `undefined`, `function`, and the
+    class of anything else. A program that ends abruptly has no value at all, and is reported as
+    `throw` and the name of what it threw, so that an ending is never confused with a result.
+
+    Each program gets a context of its own. Programs would otherwise share one global, where a
+    second `let` of the same name is a syntax error and a leftover `var` is a value the next program
+    can see, and a table of programs is meant to be read one row at a time.
+
+    The values come back through a file rather than through standard output, because a program in
+    *programs* may print, and what it prints must not be mistaken for what it evaluates to.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, 'values.json')
+        request = json.dumps({
+            'programs': list(programs),
+            'host': evaluation.value,
+            'report': path,
+        })
+        _, error = behavior(F'{_COMPLETION_DRIVER}\nreport({request});\n', timeout=timeout)
+        if error is not None:
+            raise AssertionError(F'node refused a table of {len(programs)} programs: {error}')
+        with open(path, 'r', encoding='utf-8') as stream:
+            return json.load(stream)
