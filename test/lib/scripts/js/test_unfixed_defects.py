@@ -1038,6 +1038,65 @@ class TestTheEvaluatorRunsABodyInTheModeItDeclares(TestBase):
         )
 
 
+#: A strict region assigning to one of the global names that is not writable, mapped to the behavior
+#: Node gives it: the pair of what it prints and what it throws. The write is refused in every row,
+#: so the statement does exactly one thing and that thing is throw. What varies is where the mode
+#: comes from, how the assignment is spelled, and whether anything catches what it throws.
+A_STRICT_REGION_ASSIGNING_TO_A_NON_WRITABLE_GLOBAL = {
+    "'use strict';\nNaN = 1;\nconsole.log(1);\n": ('', 'TypeError'),
+    "'use strict';\nundefined = 1;\nconsole.log(1);\n": ('', 'TypeError'),
+    "'use strict';\nInfinity = 1;\nconsole.log(1);\n": ('', 'TypeError'),
+    "'use strict';\n(NaN) = 1;\nconsole.log(1);\n": ('', 'TypeError'),
+    "'use strict';\n[NaN] = [1];\nconsole.log(1);\n": ('', 'TypeError'),
+    "'use strict';\n({p: undefined} = {p: 1});\nconsole.log(1);\n": ('', 'TypeError'),
+    "(function () { 'use strict'; NaN = 1; console.log(1); })();\n": ('', 'TypeError'),
+    "var out = 'L';\nclass C { static { NaN = 1; } }\nconsole.log(out);\n": ('', 'TypeError'),
+    "'use strict';\ntry { NaN = 1; console.log('L'); }"
+    " catch (e) { console.log(e.constructor.name); }\n": ('TypeError\n', None),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWriteTheModeRefusesIsNotAWriteThatDoesNothing(TestBase):
+    """
+    `undefined`, `NaN` and `Infinity` name properties of the global object that no program may
+    replace. An assignment to one of them is discarded where the assignment is sloppy code and is a
+    `TypeError` where it is strict code, so in a strict region the statement has exactly one effect
+    and throwing is it. It is removed in both, and everything the throw stood in front of then runs.
+
+    Which region is strict is not what is misread: the mode is taken from wherever the file puts it
+    and the removal follows it everywhere. A directive at the head of the script, one at the head of
+    the function body holding the write, and a class static block, which is strict with no directive
+    anywhere in the file, are all removed alike.
+
+    Neither is this the removal of a statement that does nothing. The same write to `Object`, `Math`
+    or `globalThis` — writable, every one of them — is removed from the same strict position, and
+    Node prints `1` for those programs before and after; so is the same write to `NaN` behind a
+    `var NaN` that binds the name locally; and so is every one of these writes in a file with no
+    directive in it at all. `delete Object.prototype` in that position is left standing, with both
+    sides refused by a `TypeError`.
+    """
+
+    @unittest.expectedFailure
+    def test_an_assignment_to_a_non_writable_global_throws_in_a_strict_region(self):
+        """
+        Node refuses the first eight programs of
+        `A_STRICT_REGION_ASSIGNING_TO_A_NON_WRITABLE_GLOBAL` with a `TypeError` having printed
+        nothing, and prints `TypeError` for the last, which catches what the write throws. Every
+        deobfuscation goes on past the statement its program stopped at, printing `1` for the first
+        seven and `L` for the last two.
+
+        The extent stops at the plain write. `NaN += 1`, `NaN++`, `NaN ||= 1` and `var q = NaN = 1`
+        in the same strict position are all left standing and refused on both sides, and so is
+        `NaN = 1, 0`, which is the same write with something behind it in the same statement.
+        """
+        rows = A_STRICT_REGION_ASSIGNING_TO_A_NON_WRITABLE_GLOBAL
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
+        )
+
+
 #: A program whose function reads its variables out of a stack hanging off an object rather than out
 #: of the rest parameter it declares, mapped to what Node prints for it. The truncation is written on
 #: the qualified name and the rest parameter is named nowhere but in the parameter list, so it is the
@@ -1101,6 +1160,107 @@ class TestAStackHangingOffAnObjectIsNotTheArgumentsOfACall(TestBase):
         `s.length = 1` and called as `f(5)`, prints `10` on both sides.
         """
         rows = A_STACK_REACHED_THROUGH_A_QUALIFIED_NAME
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
+#: A program whose function stores into a stack reached through a qualified name under a key that is
+#: no parameter's index, mapped to what Node prints for it. The stack starts empty and the call
+#: passes nothing in all but one, where the one index key is a parameter the call is handed the very
+#: value the object holds: no element ever has to cross the call boundary, so what any of these
+#: reports is the name the rewrite writes and nothing about where a value came from. The keys are an
+#: identifier, a string, a negative index, and a decimal that is not the canonical spelling of the
+#: one it resembles; the chain is two names long or one; and the last two ask, in a file with no
+#: directive in it, how many properties the run left on the global object.
+A_QUALIFIED_STACK_KEY_THAT_NAMES_NO_PARAMETER = {
+    "'use strict';\n"
+    'var NS = { F: { stk: [] } };\n'
+    'function f(...r) { NS.F.stk.length = 0; NS.F.stk.a = 3; return NS.F.stk.a; }\n'
+    'console.log(f());\n': '3\n',
+
+    "'use strict';\n"
+    'var NS = { F: { stk: [] } };\n'
+    "function f(...r) { NS.F.stk.length = 0; NS.F.stk['zz'] = 3; return NS.F.stk['zz']; }\n"
+    'console.log(f());\n': '3\n',
+
+    "'use strict';\n"
+    'var NS = { F: { stk: [] } };\n'
+    'function f(...r) { NS.F.stk.length = 0; NS.F.stk[-1] = 3; return NS.F.stk[-1]; }\n'
+    'console.log(f());\n': '3\n',
+
+    "'use strict';\n"
+    'var NS = { F: { stk: [] } };\n'
+    "function f(...r) { NS.F.stk.length = 0; NS.F.stk['01'] = 3; return NS.F.stk['01']; }\n"
+    'console.log(f());\n': '3\n',
+
+    "'use strict';\n"
+    'var NS = { stk: [] };\n'
+    'function f(...r) { NS.stk.length = 0; NS.stk.a = 3; return NS.stk.a; }\n'
+    'console.log(f());\n': '3\n',
+
+    "'use strict';\n"
+    'var NS = { F: { stk: [] } };\n'
+    'function f(...r) { NS.F.stk.length = 0; NS.F.stk.a = 3; NS.F.stk.b = 4;'
+    ' return NS.F.stk.a * NS.F.stk.b; }\n'
+    'console.log(f());\n': '12\n',
+
+    "'use strict';\n"
+    'var NS = { F: { stk: [4] } };\n'
+    'function f(...r) { NS.F.stk.length = 1; NS.F.stk.a = 3; return NS.F.stk[0] + NS.F.stk.a; }\n'
+    'console.log(f(4));\n': '7\n',
+
+    'var NS = { F: { stk: [] } };\n'
+    'function f(...r) { NS.F.stk.length = 0; NS.F.stk.a = 3; return NS.F.stk.a; }\n'
+    'var before = Object.getOwnPropertyNames(globalThis).length;\n'
+    'f();\n'
+    'console.log(Object.getOwnPropertyNames(globalThis).length - before);\n': '0\n',
+
+    'var NS = { stk: [] };\n'
+    'function f(...r) { NS.stk.length = 0; NS.stk.a = 3; return NS.stk.a; }\n'
+    'var before = Object.getOwnPropertyNames(globalThis).length;\n'
+    'f();\n'
+    'console.log(Object.getOwnPropertyNames(globalThis).length - before);\n': '0\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnUnpackedStackDeclaresTheLocalsItMints(TestBase):
+    """
+    Unpacking a rest-array stack turns each key into an identifier, and a key that names no
+    parameter turns into an identifier the program never had. Such a name is the rewrite's to
+    introduce: a binding for it exists only if the rewrite writes one.
+
+    `refinery.lib.scripts.js.deobfuscation.restunpack.JsRestArrayUnpacking` writes it where the
+    stack is a plain local, and writes none where the stack is reached through a qualified name.
+    Every key of a qualified stack that is not an index the parameter list covers therefore comes
+    back as a bare assignment to a name nothing declares, which is an implicit global where the
+    function is sloppy code and a `ReferenceError` where it is strict code.
+
+    This is the second thing that branch gets wrong and it is not the first. What
+    `TestAStackHangingOffAnObjectIsNotTheArgumentsOfACall` pins is where a value comes from, an
+    element the object held being sought in an argument the call never passed; here every value
+    stays inside the body that computes it and only the binding is missing. Declaring the locals
+    would leave that entry exactly as it is, and supplying the elements would leave this one exactly
+    as it is.
+    """
+
+    @unittest.expectedFailure
+    def test_a_key_that_names_no_parameter_is_declared_where_it_is_written(self):
+        """
+        Node prints `3`, `3`, `3`, `3`, `3`, `12` and `7` for the seven strict programs of
+        `A_QUALIFIED_STACK_KEY_THAT_NAMES_NO_PARAMETER`, and `0` for the two sloppy ones, which run
+        leaving the global object with the properties it already had. Each strict deobfuscation
+        throws a `ReferenceError` having printed nothing, the body coming back as `v0 = 3;` and a
+        read of `v0` with `v0` declared nowhere in the file; each sloppy one prints `1`, that same
+        write having put the name on the global object.
+
+        The same computations with the stack written as the rest parameter itself — `f(...s)` with
+        `s.length = 0` and `s.a = 3` — reach the branch that declares what it mints, and print `3`
+        and `0` on both sides.
+        """
+        rows = A_QUALIFIED_STACK_KEY_THAT_NAMES_NO_PARAMETER
         self.assertEqual(
             {source: _before_and_after(source) for source in rows},
             _each_program_still_prints(rows),
