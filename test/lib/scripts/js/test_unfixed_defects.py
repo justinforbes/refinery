@@ -641,46 +641,6 @@ class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
         )
 
 
-#: A sloppy function that writes a parameter and reads the same position back off its `arguments`
-#: object, mapped to what Node prints for it.
-A_SLOPPY_BODY_WHOSE_ARGUMENTS_ALIAS_ITS_PARAMETERS = {
-    'function f(a) { a = 2; return arguments[0]; }\nconsole.log(f(1));': '2\n',
-    'function f(a, b) { b = 2; return arguments[1]; }\nconsole.log(f(1, 5));': '2\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAWriteToAParameterIsAWriteToTheArgumentsObject(TestBase):
-    """
-    A regular function with a simple parameter list, in sloppy code, gets an `arguments` object
-    whose elements alias its parameters: writing `a` writes `arguments[0]`, and writing
-    `arguments[0]` writes `a`. Strict code gets an independent copy, and so does a list holding a
-    default, a rest element or a destructuring pattern, so the mode and
-    `refinery.lib.scripts.js.strict.has_simple_parameters` decide it together.
-
-    A write to a parameter is therefore read back under a name no sweep over that parameter's uses
-    can see, and a write with no read is one the sweep drops. The write in the other direction is
-    kept, so the aliasing is honoured going one way and not the other.
-    """
-
-    @unittest.expectedFailure
-    def test_a_write_a_sloppy_arguments_object_reads_back_is_not_a_dead_store(self):
-        """
-        Node prints `2` for both programs of `A_SLOPPY_BODY_WHOSE_ARGUMENTS_ALIAS_ITS_PARAMETERS`,
-        which is the value each parameter was written with and not the one the call passed. Each
-        deobfuscation drops the write and prints the argument, `1` and `5`. The first program with
-        `'use strict'` at the head of its body prints `1` on both sides, which is what an unaliased
-        `arguments` answers and why the mode decides the rule; and
-        `function f(a) { arguments[0] = 9; return a; }` prints `9` on both sides, the write in the
-        other direction being one nothing drops.
-        """
-        rows = A_SLOPPY_BODY_WHOSE_ARGUMENTS_ALIAS_ITS_PARAMETERS
-        self.assertEqual(
-            {source: _before_and_after(source) for source in rows},
-            _each_program_still_prints(rows),
-        )
-
-
 class TestADecodeReadsBackTheCharactersNoEscapeIntroduced(TestBase):
     """
     `decodeURIComponent` copies every character of its argument that no escape introduced straight

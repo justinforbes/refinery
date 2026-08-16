@@ -91,7 +91,7 @@ class ReflectedScope(enum.Enum):
     DIRECT_EVAL = enum.auto()
 
 
-def _try_parse(code: str, *, top_level_await: bool) -> JsScript | None:
+def _try_parse(code: str, *, top_level_await: bool, strict: bool) -> JsScript | None:
     """
     The tree the reflected code spells, or `None` where it spells no program. Inlining is the one
     place a parse has to be believed rather than merely used: what comes back is printed into the
@@ -109,13 +109,17 @@ def _try_parse(code: str, *, top_level_await: bool) -> JsScript | None:
     is refused here, which leaves the `eval` or `Function` call standing to throw exactly what it threw
     before.
 
-    The mode is seeded sloppy on purpose. The rules that fire under a sloppy seed are the ones that
-    hold in either mode, or that hold because the offending code sits in a region — a class body, a
-    body whose own prologue declares it — that is strict wherever the text ends up. None of them
-    depends on the destination, which is what lets the question be asked here, before there is a
-    destination to consult. A strict destination is checked again and more strictly by
-    `diverges_under_strict`, whose report is a superset of this one, so neither call subsumes the
-    other away.
+    *strict* is the mode at the destination, and it is the mode the text has to be legal in, whichever
+    mode it would have run in where it stood. A body a `Function` constructor builds runs sloppy in the
+    global scope, but inlining it puts its text where the destination's mode governs; a direct `eval`
+    already runs in the destination's mode, and a text that mode refuses is a `SyntaxError` the call
+    site catches and carries on from. The two arrive by different routes at the same requirement, which
+    is why one seed answers for every surface.
+
+    Refusing is free: the `eval` or `Function` call is left standing to throw exactly what it threw
+    before. Whether such a body would additionally *behave* differently at a strict destination is a
+    separate question, and one only the surfaces that run sloppy have to ask; `diverges_under_strict`
+    owns it.
     """
     try:
         from refinery.lib.scripts.js.parser import JsParser
@@ -124,7 +128,7 @@ def _try_parse(code: str, *, top_level_await: bool) -> JsScript | None:
         return None
     if not parsed.body or not is_well_formed(parsed):
         return None
-    if collect_strict_violations(parsed):
+    if collect_strict_violations(parsed, strict=strict):
         return None
     return parsed
 
@@ -517,7 +521,7 @@ def _try_unpack_function_constructor(
     if mapping is None:
         return None
     getters, setters = mapping
-    parsed = _try_parse(code, top_level_await=False)
+    parsed = _try_parse(code, top_level_await=False, strict=strict_mode_at(node))
     if parsed is None:
         return None
     if param_name and not _substitute_proxy_accesses(parsed, param_name, getters, setters):
@@ -996,10 +1000,11 @@ class JsReflectionInlining(ScriptLevelTransformer):
             return None
         resolves_globally = scope is not ReflectedScope.DIRECT_EVAL
         top_level_await = not resolves_globally and _site_in_async_function(site)
-        parsed = _try_parse(code, top_level_await=top_level_await)
+        site_is_strict = strict_mode_at(site)
+        parsed = _try_parse(code, top_level_await=top_level_await, strict=site_is_strict)
         if parsed is None:
             return None
-        if declares_use_strict(parsed) and (resolves_globally or not strict_mode_at(site)):
+        if declares_use_strict(parsed) and (resolves_globally or not site_is_strict):
             return None
         if resolves_globally:
             rewrite_receiver_this_to_global(parsed)
@@ -1008,11 +1013,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         if scope is not ReflectedScope.FUNCTION_CONSTRUCTOR and _has_top_level_return(parsed.body):
             return None
         body_model = build_semantic_model(parsed)
-        if (
-            resolves_globally
-            and strict_mode_at(site)
-            and diverges_under_strict(parsed, body_model)
-        ):
+        if resolves_globally and site_is_strict and diverges_under_strict(parsed, body_model):
             return None
         free = _body_free_names(body_model, parsed)
         if resolves_globally and 'arguments' in free:

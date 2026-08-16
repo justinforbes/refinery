@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
+from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.deobfuscation.restunpack import JsRestArrayUnpacking
@@ -315,4 +317,228 @@ class TestStackKeysThatOnlyLookLikeIndices(TestJsDeobfuscator):
                 'var f = function(...s) {'
                 " s.length = 2; s['01'] = 9; return s[1] + s['01']; };"
             ),
+        )
+
+
+#: A sloppy program whose single rest parameter would become a list of plain names, mapped to the
+#: program that rewrite would produce and to what Node prints for each of the two. A rest parameter
+#: is not a simple parameter list, so the `arguments` object such a function has holds a copy of the
+#: call's arguments; a list of plain names makes its elements alias the parameters instead, and the
+#: write each program makes is then read back under the other name. No pair here agrees, which is
+#: what the refusal is worth.
+_A_REWRITE_THE_ARGUMENTS_OBJECT_WOULD_OBSERVE: dict[str, tuple[str, str, str]] = {
+    'function f(...s) { s.length = 1; s[0] = 9; return arguments[0]; } console.log(f(3));': (
+        'function f(p0) { p0 = 9; return arguments[0]; } console.log(f(3));',
+        '3\n',
+        '9\n',
+    ),
+    'function f(...s) { s.length = 1; arguments[0] = 9; return s[0]; } console.log(f(3));': (
+        'function f(p0) { arguments[0] = 9; return p0; } console.log(f(3));',
+        '3\n',
+        '9\n',
+    ),
+    'function f(...s) { s.length = 2; s[1] = 9; return arguments[1]; } console.log(f(3, 4));': (
+        'function f(p0, p1) { p1 = 9; return arguments[1]; } console.log(f(3, 4));',
+        '4\n',
+        '9\n',
+    ),
+    'function f(...s) { s.length = 1; var b = arguments; s[0] = 9; return b[0]; }'
+    ' console.log(f(3));': (
+        'function f(p0) { var b = arguments; p0 = 9; return b[0]; } console.log(f(3));',
+        '3\n',
+        '9\n',
+    ),
+    'function g(x) { return x[0]; }'
+    ' function f(...s) { s.length = 1; s[0] = 9; return g(arguments); } console.log(f(3));': (
+        'function g(x) { return x[0]; }'
+        ' function f(p0) { p0 = 9; return g(arguments); } console.log(f(3));',
+        '3\n',
+        '9\n',
+    ),
+    'function f(...s) { s.length = 1; s[0] = 9; return [...arguments][0]; } console.log(f(3));': (
+        'function f(p0) { p0 = 9; return [...arguments][0]; } console.log(f(3));',
+        '3\n',
+        '9\n',
+    ),
+    'function f(...s) { s.length = 1; s[0] = 9; return (() => arguments[0])(); }'
+    ' console.log(f(3));': (
+        'function f(p0) { p0 = 9; return (() => arguments[0])(); } console.log(f(3));',
+        '3\n',
+        '9\n',
+    ),
+}
+
+#: A program whose rest array the pass unpacks, mapped to the text it writes for it and to what Node
+#: prints for the program either way. Every function here either runs in a mode where no `arguments`
+#: object aliases anything, or names none of its own, so a list of plain names observes nothing the
+#: rest parameter did not.
+_A_REST_ARRAY_THE_PASS_UNPACKS: dict[str, tuple[str, str]] = {
+    "'use strict';"
+    ' function f(...s) { s.length = 1; s[0] = 9; return arguments[0] + s[0]; }'
+    ' console.log(f(3));': (
+        inspect.cleandoc(
+            """
+            'use strict';
+            function f(p0) {
+              p0 = 9;
+              return arguments[0] + p0;
+            }
+            console.log(f(3));
+            """
+        ),
+        '12\n',
+    ),
+    "function o() { 'use strict';"
+    ' function f(...s) { s.length = 1; s[0] = 9; return arguments[0] + s[0]; }'
+    ' return f(3); } console.log(o());': (
+        inspect.cleandoc(
+            """
+            function o() {
+              'use strict';
+              function f(p0) {
+                p0 = 9;
+                return arguments[0] + p0;
+              }
+              return f(3);
+            }
+            console.log(o());
+            """
+        ),
+        '12\n',
+    ),
+    'class C { m(...s) { s.length = 1; s[0] = 9; return arguments[0] + s[0]; } }'
+    ' console.log(new C().m(3));': (
+        inspect.cleandoc(
+            """
+            class C {
+              m(p0) {
+                p0 = 9;
+                return arguments[0] + p0;
+              }
+            }
+            console.log(new C().m(3));
+            """
+        ),
+        '12\n',
+    ),
+    'function f(...s) { s.length = 1; s[0] = 9;'
+    ' return (function () { return arguments[0]; })(7) + s[0]; } console.log(f(3));': (
+        inspect.cleandoc(
+            """
+            function f(p0) {
+              p0 = 9;
+              return (function() {
+                return arguments[0];
+              })(7) + p0;
+            }
+            console.log(f(3));
+            """
+        ),
+        '16\n',
+    ),
+    'function f(...s) { s.length = 0; s.a = arguments[0]; return s.a; } console.log(f(3));': (
+        inspect.cleandoc(
+            """
+            function f() {
+              var v0;
+              v0 = arguments[0];
+              return v0;
+            }
+            console.log(f(3));
+            """
+        ),
+        '3\n',
+    ),
+    'function f(...s) { s.length = 1; var argumentsx = [7]; s[0] = 9;'
+    ' return argumentsx[0] + s[0]; } console.log(f(3));': (
+        inspect.cleandoc(
+            """
+            function f(p0) {
+              var argumentsx = [7];
+              p0 = 9;
+              return argumentsx[0] + p0;
+            }
+            console.log(f(3));
+            """
+        ),
+        '16\n',
+    ),
+    'function f(...s) { s.length = 2; return s[0] + s[1]; } console.log(f(3, 4));': (
+        inspect.cleandoc(
+            """
+            function f(p0, p1) {
+              return p0 + p1;
+            }
+            console.log(f(3, 4));
+            """
+        ),
+        '7\n',
+    ),
+    'function f(...s) { s.length = 2; s.t = s[0] * s[1]; return s.t; } console.log(f(3, 4));': (
+        inspect.cleandoc(
+            """
+            function f(p0, p1) {
+              var v0;
+              v0 = p0 * p1;
+              return v0;
+            }
+            console.log(f(3, 4));
+            """
+        ),
+        '12\n',
+    ),
+}
+
+
+class TestARestParameterTheArgumentsObjectWouldObserve(TestJsDeobfuscator):
+
+    def _demask(self, source: str) -> str:
+        return self._run_transformer(source, JsRestArrayUnpacking)
+
+    def test_the_pass_hands_each_program_back_as_the_printer_writes_it(self):
+        rows = _A_REWRITE_THE_ARGUMENTS_OBJECT_WOULD_OBSERVE
+        self.assertEqual(
+            {source: self._demask(source) for source in rows},
+            {source: self._run_transformers(source) for source in rows},
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_reads_the_two_spellings_of_each_program_differently(self):
+        rows = _A_REWRITE_THE_ARGUMENTS_OBJECT_WOULD_OBSERVE
+        self.assertEqual(
+            {
+                source: (behavior(source), behavior(unpacked))
+                for source, (unpacked, _, _) in rows.items()
+            },
+            {
+                source: ((kept, None), (changed, None))
+                for source, (_, kept, changed) in rows.items()
+            },
+        )
+
+
+class TestARestArrayThePassUnpacks(TestJsDeobfuscator):
+
+    def _demask(self, source: str) -> str:
+        return self._run_transformer(source, JsRestArrayUnpacking)
+
+    def test_the_rest_parameter_becomes_the_named_list_the_row_records(self):
+        rows = _A_REST_ARRAY_THE_PASS_UNPACKS
+        self.assertEqual(
+            {source: self._demask(source) for source in rows},
+            {source: unpacked for source, (unpacked, _) in rows.items()},
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_prints_the_same_before_and_after_the_unpacking(self):
+        rows = _A_REST_ARRAY_THE_PASS_UNPACKS
+        self.assertEqual(
+            {
+                source: (behavior(source), behavior(self._demask(source)))
+                for source in rows
+            },
+            {
+                source: ((printed, None), (printed, None))
+                for source, (_, printed) in rows.items()
+            },
         )

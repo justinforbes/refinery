@@ -584,8 +584,14 @@ class JsExportAllDeclaration(Statement):
 
 
 @dataclass(repr=False, eq=False)
-class JsScript(Statement):
+class JsScript(Statement, spelling='module'):
     body: list[Statement] = field(default_factory=list)
+    #: Whether the source is module code, which the host decides (§16.1) and the syntax only reports:
+    #: an `import` or `export` declaration, or `import.meta`, can appear in nothing else. It is a
+    #: spelling field because two scripts differing only here hold the same text — what differs is how
+    #: a host loads it — and because a pass that cuts the last import out of a body does not turn a
+    #: module into a script.
+    module: bool = False
 
 
 def strip_parens(node: Node | None) -> Node | None:

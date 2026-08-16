@@ -39,6 +39,9 @@ from refinery.lib.scripts.js.model import (
     JsCatchClause,
     JsClassDeclaration,
     JsClassExpression,
+    JsExportAllDeclaration,
+    JsExportDefaultDeclaration,
+    JsExportNamedDeclaration,
     JsExpressionStatement,
     JsForInStatement,
     JsForOfStatement,
@@ -46,11 +49,13 @@ from refinery.lib.scripts.js.model import (
     JsFunctionExpression,
     JsIdentifier,
     JsIfStatement,
+    JsImportDeclaration,
     JsImportDefaultSpecifier,
     JsImportNamespaceSpecifier,
     JsImportSpecifier,
     JsLabeledStatement,
     JsMemberExpression,
+    JsMetaProperty,
     JsMethodDefinition,
     JsMethodKind,
     JsNumericLiteral,
@@ -197,12 +202,13 @@ def declares_use_strict(host: Node | None) -> bool:
     Whether the Directive Prologue of *host* holds the Use Strict Directive, which makes the code
     *host* encloses strict. The directive need not open the prologue: every string-literal statement
     ahead of it is a directive too, and one the language does not recognize is simply inert.
+
+    It is the same directive `is_use_strict_directive` names, which is what keeps the mode this reports
+    and the mode the printer writes from parting company. A string an edit lifted to the head of a body
+    declares nothing — the printer puts it in a bracket precisely so that it cannot — and a body read as
+    strict on the strength of one would be reasoned about in a mode the text will not have.
     """
-    for statement in directive_prologue(host):
-        expression = statement.expression
-        if isinstance(expression, JsStringLiteral) and is_use_strict(expression):
-            return True
-    return False
+    return any(is_use_strict_directive(statement) for statement in directive_prologue(host))
 
 
 def mark_directives(root: Node) -> None:
@@ -220,6 +226,39 @@ def mark_directives(root: Node) -> None:
         if is_prologue_host(node):
             for statement in directive_prologue(node):
                 statement.directive = True
+
+
+def names_module_syntax(root: Node) -> bool:
+    """
+    Whether the tree at *root* holds syntax only module code may hold: an `import` or `export`
+    declaration, or `import.meta`. A dynamic `import()` is not among them — it is available to a script
+    as well — and neither is a top-level `await`, which the parser reads as a name followed by a call
+    and which would therefore fire on any program that happens to use `await` as an ordinary
+    identifier.
+
+    The answer is a lower bound and never a refutation. §16.1 leaves module-ness to the host, so a
+    module that spells none of this syntax is one nothing in the text distinguishes from a script.
+    """
+    for node in root.walk():
+        if isinstance(node, (
+            JsImportDeclaration,
+            JsExportAllDeclaration,
+            JsExportDefaultDeclaration,
+            JsExportNamedDeclaration,
+        )):
+            return True
+        if isinstance(node, JsMetaProperty) and node.meta == 'import' and node.property == 'meta':
+            return True
+    return False
+
+
+def mark_module(script: JsScript) -> None:
+    """
+    Record on *script* whether its source is module code, as `names_module_syntax` observes it. A parser
+    calls this once over the finished tree, beside `mark_directives`: both record what the source was,
+    at the one point where the whole source is in hand and no edit has moved anything yet.
+    """
+    script.module = names_module_syntax(script)
 
 
 def is_use_strict_directive(statement: Statement) -> bool:
@@ -323,11 +362,16 @@ def strict_mode_at(node: Node) -> bool:
     and `function f(eval) {}` is a program. Neither stands inside the body, so the whole function is
     asked, not only the host.
 
-    Module code is strict as well; that is not decided here, because module-ness is a fact about the
-    whole program rather than about any node in it.
+    Module code is strict throughout (§11.2.2), whatever any body in it declares, so the climb ends by
+    asking the script it arrives at. What it asks is `mark_module`'s observation of the source, which
+    only ever reports a module and never denies one: a program the host loads as a module while its
+    text names no import, export or `import.meta` is read here as a script, and the mode it is given is
+    the weaker of the two.
     """
     cursor: Node | None = node
     while cursor is not None:
+        if isinstance(cursor, JsScript) and cursor.module:
+            return True
         if isinstance(cursor, (JsClassDeclaration, JsClassExpression)):
             return True
         if is_prologue_host(cursor) and declares_use_strict(cursor):

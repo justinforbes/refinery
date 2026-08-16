@@ -15,7 +15,7 @@ from typing import NamedTuple
 
 from refinery.lib.scripts import Node, _replace_in_parent, set_body
 from refinery.lib.scripts.js.analysis.cache import model_cache
-from refinery.lib.scripts.js.analysis.model import SemanticModel
+from refinery.lib.scripts.js.analysis.model import SemanticModel, references_own_arguments
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
     canonical_array_index,
@@ -40,6 +40,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
 )
 from refinery.lib.scripts.js.numbers import exact_integer, js_number_to_string
+from refinery.lib.scripts.js.strict import strict_mode_at
 
 
 _MAX_PARAMETERS = 65535
@@ -380,6 +381,8 @@ class JsRestArrayUnpacking(ScriptLevelTransformer):
             return True
         taken = _mentioned_names(fn.body)
         names = _generate_names(param_count, set(accesses.keys()), taken)
+        if names.params and self._would_map_arguments(fn):
+            return False
         for key, nodes in accesses.items():
             name = names.of_key[key]
             for access_node in nodes:
@@ -392,6 +395,23 @@ class JsRestArrayUnpacking(ScriptLevelTransformer):
         if stack_chain is None:
             self._add_local_declarations(fn.body, names.local_names)
         return True
+
+    @staticmethod
+    def _would_map_arguments(fn: JsFunctionExpression | JsFunctionDeclaration) -> bool:
+        """
+        Whether unpacking *fn* would give it an `arguments` object aliasing the parameters it does not
+        have yet. A rest parameter is not a simple list, so the object *fn* has now is an independent
+        copy; the plain identifiers this pass puts in its place make the list simple, and a sloppy body
+        then reads and writes its parameters through that object as well as by name. A write the pass
+        leaves standing therefore means something afterwards that it did not mean before.
+
+        The question is about the function this pass would produce, and it is asked before that function
+        exists, because `_demask_function` rewrites in place with nothing to roll back to. It is
+        answerable early: the mode and whether the body reads its own `arguments` are both untouched by
+        the rewrite, and the result's parameter list is simple by construction, so the only part left to
+        the caller is whether the result keeps a parameter at all.
+        """
+        return not strict_mode_at(fn) and references_own_arguments(fn)
 
     def _add_local_declarations(
         self,

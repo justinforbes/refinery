@@ -93,7 +93,7 @@ from refinery.lib.scripts.js.model import (
     JsYieldExpression,
     Statement,
 )
-from refinery.lib.scripts.js.strict import mark_directives
+from refinery.lib.scripts.js.strict import mark_directives, mark_module
 from refinery.lib.scripts.js.token import JsToken, JsTokenKind
 
 _PREC_EXPONENTIATION = 15
@@ -326,6 +326,7 @@ class JsParser:
     def parse(self) -> JsScript:
         script = self._parse_program()
         mark_directives(script)
+        mark_module(script)
         return script
 
     def _parse_statement_list(self, *stop: JsTokenKind) -> list[Statement]:
