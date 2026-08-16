@@ -22,14 +22,16 @@ from typing import TypeGuard
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1FlowUnknown, Ps1VariableFlow
-from refinery.lib.scripts.ps1.analysis.model import is_mutated_in_place
+from refinery.lib.scripts.ps1.analysis.model import Binding, is_mutated_in_place
 from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
-from refinery.lib.scripts.ps1.data import named_type
+from refinery.lib.scripts.ps1.ast import assignment_of, unwrap_parens
+from refinery.lib.scripts.ps1.data import named_type, resolve_type
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
+    Ps1CastExpression,
     Ps1ForEachLoop,
     Ps1HereString,
     Ps1StringLiteral,
@@ -135,13 +137,13 @@ def _installed_by(
     what it reads — so `while ($c) { $x.P = 1 }` is a write whose reaching definition is itself.
     """
     if not _stores_through(write):
-        return _established_by(write)
+        return _established_by(write, flow)
     if id(write) in chased:
         return None
     return _type_at(write, flow, chased | {id(write)})
 
 
-def _established_by(write: Node) -> Ps1TypeName | None:
+def _established_by(write: Node, flow: Ps1VariableFlow) -> Ps1TypeName | None:
     """
     The type a write occurrence puts into the name, or `None` for a write whose type this cannot
     name.
@@ -156,16 +158,118 @@ def _established_by(write: Node) -> Ps1TypeName | None:
     The assigned expression is typed with no variable typing of its own, so `$b = $a` leaves `$b`
     untyped rather than chasing `$a`'s write in turn. That is what the scan did as well, and the
     chase is a recursion this would have to bound — `$x = $x` inside a loop is a cycle in it.
+
+    Which occurrences are assignment targets is `refinery.lib.scripts.ps1.ast.assignment_of`'s to
+    say, and asking it is what brings the two spellings a test of `write.parent` cannot see: a
+    constrained target, whose type the constraint decides rather than the value — measured,
+    `[string]$q = 'abc'` used to leave `$q` untyped and take the member spellings below it with it —
+    and a multi-assignment slot, where the value is the element standing opposite it.
     """
+    if isinstance(write, Ps1Variable):
+        assignment = assignment_of(write)
+        if assignment is not None:
+            return _assigned_type(write, assignment, flow)
     parent = write.parent
-    if isinstance(parent, Ps1AssignmentExpression):
-        if parent.target is not write or parent.operator != '=':
-            return None
-        value = parent.value
-        return None if not isinstance(value, Expression) else resolve_expression_type(value)
     if isinstance(parent, Ps1ForEachLoop) and parent.variable is write:
         return _element_type(parent.iterable)
     return None
+
+
+def _assigned_type(
+    write: Ps1Variable,
+    assignment: Ps1AssignmentExpression,
+    flow: Ps1VariableFlow,
+) -> Ps1TypeName | None:
+    """
+    The type `assignment` puts into *write*, or `None` where it names none.
+
+    The walk from the occurrence up to the assignment is what reads the target apart: a cast passed
+    on the way is a type constraint, and PowerShell converts to it rather than storing what was
+    written — `[string]$q = 5` leaves a String. An array literal passed on the way is a
+    multi-assignment, and the slot's own value is the element opposite it, which only holds where
+    the two sides have the same number of elements: `$a, $b = 1, 2, 3` gives `$b` the *rest* as an
+    array, and `$a, $b = 1` gives it `$null`.
+    """
+    if assignment.operator != '=':
+        return None
+    cursor: Node = write
+    parent = cursor.parent
+    constraint: str | None = None
+    slot: int | None = None
+    while parent is not None and parent is not assignment:
+        if isinstance(parent, Ps1CastExpression) and constraint is None:
+            constraint = parent.type_name
+        elif isinstance(parent, Ps1ArrayLiteral):
+            if slot is not None:
+                return None
+            slot = next(
+                (at for at, element in enumerate(parent.elements) if element is cursor), None)
+            if slot is None:
+                return None
+        cursor = parent
+        parent = cursor.parent
+    if constraint is not None:
+        return resolve_type(constraint)
+    value = assignment.value
+    if not isinstance(value, Expression):
+        return None
+    if slot is None:
+        return _stored_type(value, flow.semantic.binding_of(write))
+    written = unwrap_parens(value)
+    if not isinstance(written, Ps1ArrayLiteral):
+        return None
+    targets = _multi_assignment_targets(assignment.target)
+    if targets is None or len(targets) != len(written.elements):
+        return None
+    element = written.elements[slot]
+    if not isinstance(element, Expression):
+        return None
+    return _stored_type(element, flow.semantic.binding_of(write))
+
+
+def _stored_type(value: Expression, binding: Binding | None) -> Ps1TypeName | None:
+    """
+    The type an unconstrained write of *value* leaves under the name, or `None` where it names none.
+
+    Where the binding carries no constraint that is just the value's own type. Where it carries one,
+    the value is converted on the way in and the answer is the constraint's — but only from the
+    point the constraint runs, which the ordering here does not settle, so the two are separated
+    only where they disagree: a value already of the constrained type is stored unchanged whether or
+    not the constraint is yet in force, and one of any other type is refused.
+    """
+    named = resolve_expression_type(value)
+    return named if not constraint_converts(binding, value) else None
+
+
+def constraint_converts(binding: Binding | None, value: Expression) -> bool:
+    """
+    Whether the binding's type constraint changes *value* before it is stored, so that what the name
+    holds is not what the source wrote.
+
+    `[string]$q = 5` stores an `ArgumentTypeConverterAttribute` on the *variable* rather than on the
+    statement, so every later write is converted through it too: measured, `[string]$q = 5;
+    $q = 1, 2, 3; Write-Output $q.Length` prints 5, because `$q` holds the String `1 2 3` and not the
+    array. A value whose own type is already the constrained one passes through untouched, which is
+    what keeps `[string]$q = 'abc'` answering.
+
+    Two constraints on one name are refused without asking which: which of them is in force at a
+    given write is an ordering question, and the answer would have to be the value under whichever
+    ran.
+    """
+    if binding is None or not binding.constraints:
+        return False
+    if len(binding.constraints) > 1:
+        return True
+    constrained = resolve_type(next(iter(binding.constraints)))
+    return constrained is None or resolve_expression_type(value) != constrained
+
+
+def _multi_assignment_targets(target: Node | None) -> list[Node] | None:
+    """
+    The slots a multi-assignment target holds, or `None` where the target is not one.
+    """
+    target = unwrap_parens(target) if target is not None else None
+    return list(target.elements) if isinstance(target, Ps1ArrayLiteral) else None
 
 
 #: What `foreach` yields from a string: the string itself, not its characters.

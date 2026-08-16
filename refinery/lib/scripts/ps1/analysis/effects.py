@@ -176,8 +176,9 @@ def _canonical_sealed_value_type_set(names: set[str]) -> frozenset[Ps1TypeName]:
 #: Types whose entire static surface is granted purity at once. Listing a type here asserts that no
 #: static member of it writes anything — a bet re-checked against the real .NET surface whenever an
 #: entry is added, because a single writing member makes every call on the type removable.
-#: `_IMPURE_STATIC_METHODS` and `_MUTATING_STATIC_METHODS` carve out the members where the bet is
-#: wrong but the type is still worth granting wholesale, and out-parameters are handled generically,
+#: `_IMPURE_STATIC_METHODS` and the written-slot table in
+#: `refinery.lib.scripts.ps1.analysis.arguments` carve out the members where the bet is wrong but
+#: the type is still worth granting wholesale, and out-parameters are handled generically,
 #: from the collected signature in `_writes_through_out_parameter` and syntactically in
 #: `_is_writable_reference`, rather than per method. The readable source spellings are resolved to
 #: canonical `FullName` keys at import, so a spelling variant is one entry and an unresolvable name
@@ -226,9 +227,9 @@ _PURE_STATIC_METHODS = data.required_member_keys({
 })
 
 #: Members that do something observable whatever they are handed, on a type whose remaining static
-#: surface is pure enough to keep granting wholesale. Unlike `_MUTATING_STATIC_METHODS` these are
-#: not saved by being called on a temporary: `[IO.Path]::GetTempFileName()` takes no arguments and
-#: still creates a file on disk.
+#: surface is pure enough to keep granting wholesale. Unlike a member that writes through a slot,
+#: these are not saved by being called on a temporary: `[IO.Path]::GetTempFileName()` takes no
+#: arguments and still creates a file on disk.
 _IMPURE_STATIC_METHODS = data.required_member_keys({
     ('io.path', 'gettempfilename'),
 })

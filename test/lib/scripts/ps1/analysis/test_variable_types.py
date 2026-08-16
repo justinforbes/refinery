@@ -505,6 +505,363 @@ class TestPs1ATypeIsNotCarriedPastABlockThatWritesItsCallersName(TestPs1TypeAt):
                 self.assertEqual(self._type_at(source), 'System.Net.WebClient')
 
 
+class TestPs1AConstrainedTargetTypesTheNameFromItsConstraint(TestPs1TypeAt):
+    """
+    `[string]$q = 5` constrains the variable, and PowerShell converts what is assigned to the
+    constraint rather than storing it as written, so 5.1 leaves `$q` holding a `System.String`. The
+    type below such a write is the constraint's whatever the assigned value's own type is.
+    """
+
+    def test_the_constraint_and_not_the_assigned_value_names_the_type(self):
+        self.assertEqual(self._type_at(cleandoc("""
+            [string]$q = 5
+            $q.substring(0, 1)
+        """)), 'System.String')
+
+    def test_a_constraint_naming_the_type_the_value_already_has_carries_it_too(self):
+        self.assertEqual(self._type_at(cleandoc("""
+            [Net.WebClient]$q = New-Object Net.WebClient
+            $q.downloadstring('u')
+        """)), 'System.Net.WebClient')
+
+    def test_a_constraint_types_the_name_where_the_assigned_value_has_no_type_of_its_own(self):
+        """
+        Whatever `$unknown` holds, converting it to `[string]` yields a String — `$null` converts to
+        the empty string — so the name holds one however the read of `$unknown` answers.
+        """
+        self.assertEqual(self._type_at(cleandoc("""
+            [string]$q = $unknown
+            $q.substring(0, 1)
+        """)), 'System.String')
+
+    def test_a_constraint_naming_no_type_this_layer_knows_is_refused(self):
+        self.assertIsNone(self._type_at(cleandoc("""
+            [NoSuchType]$q = 5
+            $q.tostring()
+        """)))
+
+    def test_each_read_carries_the_constraint_of_the_write_it_observes(self):
+        source = cleandoc("""
+            [string]$q = 5
+            $q.substring(0, 1)
+            [int]$q = '5'
+            $q.tostring()
+        """)
+        self.assertEqual(self._type_at(source, read=0), 'System.String')
+        self.assertEqual(self._type_at(source, read=1), 'System.Int32')
+
+    def test_a_constrained_and_a_plain_write_agreeing_type_a_read_neither_of_them_reaches(self):
+        self.assertEqual(self._type_at(cleandoc("""
+            $q = 'abc'
+            if ($c) {
+              [string]$q = 5
+            }
+            $q.substring(0, 1)
+        """)), 'System.String')
+
+    def test_a_constraint_disagreeing_with_a_plain_write_refuses_the_read_neither_reaches(self):
+        """
+        The two writes store the same `5` and the constraint is the whole difference between them:
+        one leaves an `Int32` and the other the `String` it converts that `5` to.
+        """
+        self.assertIsNone(self._type_at(cleandoc("""
+            $q = 5
+            if ($c) {
+              [string]$q = 5
+            }
+            $q.tostring()
+        """)))
+
+    def test_a_constrained_write_and_a_read_inside_one_subexpression_are_typed(self):
+        self.assertEqual(
+            self._type_at('$([string]$q = 5; $q.substring(0, 1))'), 'System.String')
+
+    def test_the_constraint_is_the_type_its_name_resolves_to(self):
+        for constraint, expected in [
+            ('System.String', 'System.String'),
+            ('STRING', 'System.String'),
+            ('int32', 'System.Int32'),
+            ('long', 'System.Int64'),
+            ('char', 'System.Char'),
+            ('bool', 'System.Boolean'),
+            ('decimal', 'System.Decimal'),
+        ]:
+            with self.subTest(constraint):
+                self.assertEqual(self._type_at(cleandoc(F"""
+                    [{constraint}]$q = 1
+                    $q.tostring()
+                """)), expected)
+
+    def test_a_constraint_naming_an_array_type_leaves_the_name_holding_the_array(self):
+        self.assertEqual(self._type_at(cleandoc("""
+            [string[]]$q = 1, 2
+            $q.Length
+        """)), 'System.String[]')
+
+    def test_a_constraint_converts_the_object_a_read_would_otherwise_reach_a_member_on(self):
+        self.assertEqual(self._type_at(cleandoc("""
+            [string]$q = New-Object Net.WebClient
+            $q.substring(0, 1)
+        """)), 'System.String')
+
+    def test_a_cast_on_the_assigned_value_constrains_nothing_and_the_write_below_it_answers(self):
+        """
+        `$q = [string]5` converts what is stored that once and leaves the variable free, so the
+        array the next write stores is what stands at the read. Written `[string]$q = 5`, the same
+        cast would convert that array on its way in as well.
+        """
+        self.assertEqual(self._type_at(cleandoc("""
+            $q = [string]5
+            $q = 1, 2, 3
+            $q.Length
+        """)), 'System.Object[]')
+
+    def test_a_later_plain_write_the_constraint_leaves_alone_types_the_name(self):
+        """
+        The constraint is stored on the variable and not on the statement carrying it, so it
+        converts what every later write stores too. `'abc'` is already a String and is therefore
+        stored as written, so the name holds one whether or not that conversion runs.
+        """
+        self.assertEqual(self._type_at(cleandoc("""
+            [string]$q = 5
+            $q = 'abc'
+            $q.substring(0, 1)
+        """)), 'System.String')
+
+    def test_a_constrained_write_is_bound_by_every_rule_a_plain_write_is(self):
+        for source in [
+            cleandoc("""
+                function f {
+                  [string]$q = 5
+                }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                [string]$q = 5
+                Invoke-Expression $code
+                $q.substring(0, 1)
+            """),
+            cleandoc("""
+                [string]$q = 5
+                . { $q = New-Object Net.WebClient }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                try {
+                  [string]$q = 5
+                } catch {}
+                ($q | Get-Member)[0].Name
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertIsNone(self._type_at(source))
+
+
+class TestPs1AMultiAssignmentSlotTypesTheNameFromTheElementOppositeIt(TestPs1TypeAt):
+    """
+    `$q, $r = 'abc', 'd'` stores `abc` into `$q` and `d` into `$r`, so a slot carries the type of
+    the element standing opposite it. Measured on 5.1 that only holds where the two sides have the
+    same number of elements: `$a, $b = 1, 2, 3` leaves `$b` holding the array `2, 3`, and
+    `$a, $b = 1` leaves `$b` holding `$null`.
+    """
+
+    def test_each_slot_carries_the_element_standing_opposite_it(self):
+        source = cleandoc("""
+            $q, $r, $s = 'abc', 1, (New-Object Net.WebClient)
+            $q.substring(0, 1)
+            $r.tostring()
+            $s.downloadstring('u')
+        """)
+        self.assertEqual(self._type_at(source, name='q'), 'System.String')
+        self.assertEqual(self._type_at(source, name='r'), 'System.Int32')
+        self.assertEqual(self._type_at(source, name='s'), 'System.Net.WebClient')
+
+    def test_a_slot_whose_element_has_no_type_leaves_the_slot_beside_it_typed(self):
+        source = cleandoc("""
+            $q, $r = 'abc', $unknown
+            $q.substring(0, 1)
+            $r.tostring()
+        """)
+        self.assertEqual(self._type_at(source, name='q'), 'System.String')
+        self.assertIsNone(self._type_at(source, name='r'))
+
+    def test_a_slot_a_shorter_right_hand_side_leaves_empty_carries_no_type(self):
+        self.assertIsNone(self._type_at(cleandoc("""
+            $a, $q = 1
+            $q.tostring()
+        """)))
+
+    def test_a_slot_swallowing_the_rest_of_a_longer_right_hand_side_is_not_typed_from_one(self):
+        self.assertIsNone(self._type_at(cleandoc("""
+            $a, $q = 1, 2, 3
+            $q.tostring()
+        """)))
+
+    def test_a_slot_with_an_element_opposite_it_is_refused_where_another_slot_has_none(self):
+        """
+        The same store that leaves the last slot `$null` puts the `1` into `$q`, so the refusal here
+        is weaker than 5.1 rather than agreeing with it: it falls on the whole assignment and not on
+        the slot whose element is missing.
+        """
+        for source in [
+            cleandoc("""
+                $q, $a = 1
+                $q.tostring()
+            """),
+            cleandoc("""
+                $q, $a, $b = 1, 2
+                $q.tostring()
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertIsNone(self._type_at(source))
+
+    def test_the_two_sides_are_read_through_the_parentheses_around_either_of_them(self):
+        for source in [
+            cleandoc("""
+                ($q, $r) = 'abc', 1
+                $q.substring(0, 1)
+                $r.tostring()
+            """),
+            cleandoc("""
+                $q, $r = ('abc', 1)
+                $q.substring(0, 1)
+                $r.tostring()
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._type_at(source, name='q'), 'System.String')
+                self.assertEqual(self._type_at(source, name='r'), 'System.Int32')
+
+    def test_a_constrained_slot_carries_its_constraint_and_the_slot_beside_it_its_element(self):
+        source = cleandoc("""
+            [string]$q, $r = 5, 6
+            $q.substring(0, 1)
+            $r.tostring()
+        """)
+        self.assertEqual(self._type_at(source, name='q'), 'System.String')
+        self.assertEqual(self._type_at(source, name='r'), 'System.Int32')
+
+    def test_a_slot_and_a_plain_write_agreeing_type_a_read_neither_of_them_reaches(self):
+        self.assertEqual(self._type_at(cleandoc("""
+            $q = 5
+            if ($c) {
+              $q, $r = 5, 6
+            }
+            $q.tostring()
+        """)), 'System.Int32')
+
+    def test_a_slot_whose_element_is_an_array_carries_the_array_and_not_its_first_item(self):
+        source = cleandoc("""
+            $q, $r = (1, 2), 3
+            $q.Length
+            $r.tostring()
+        """)
+        self.assertEqual(self._type_at(source, name='q'), 'System.Object[]')
+        self.assertEqual(self._type_at(source, name='r'), 'System.Int32')
+
+    def test_a_right_hand_side_whose_elements_cannot_be_counted_types_no_slot(self):
+        """
+        A slot carries the element opposite it only where the two sides have the same number of
+        elements, and neither a name nor a command says how many elements it stands for.
+        """
+        for source in [
+            cleandoc("""
+                $q, $r = $pair
+                $q.tostring()
+            """),
+            cleandoc("""
+                $q, $r = Get-Pair
+                $q.tostring()
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertIsNone(self._type_at(source))
+
+    def test_each_read_carries_the_slot_of_the_multi_assignment_it_observes(self):
+        source = cleandoc("""
+            $q, $r = 'abc', 1
+            $q.substring(0, 1)
+            $q, $r = 1, 'abc'
+            $q.tostring()
+        """)
+        self.assertEqual(self._type_at(source, read=0), 'System.String')
+        self.assertEqual(self._type_at(source, read=1), 'System.Int32')
+
+    def test_a_multi_assignment_write_is_bound_by_every_rule_a_plain_write_is(self):
+        for source in [
+            cleandoc("""
+                function f {
+                  $q, $r = 'abc', 'd'
+                }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                $q, $r = 'abc', 'd'
+                Invoke-Expression $code
+                $q.substring(0, 1)
+            """),
+            cleandoc("""
+                $q, $r = 'abc', 'd'
+                . { $q = 5 }
+                ($q | Get-Member)[0].Name
+            """),
+            cleandoc("""
+                ($q | Get-Member)[0].Name
+                $q, $r = 'abc', 'd'
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertIsNone(self._type_at(source))
+
+
+class TestPs1NeitherNewSpellingDecidesWhichWriteAReadObserves(TestPs1TypeAt):
+    """
+    A constrained target and a multi-assignment slot are writes like any other, so which of them a
+    read observes stays the ordering's to answer: a read at the top of a loop body precedes the
+    write below it on the first visit, and carries a write standing before the loop once there is
+    one.
+    """
+
+    def test_a_read_at_the_top_of_a_loop_body_precedes_either_spelling_below_it(self):
+        for source in [
+            cleandoc("""
+                while ($c) {
+                  ($q | Get-Member)[0].Name
+                  [string]$q = 5
+                }
+            """),
+            cleandoc("""
+                while ($c) {
+                  ($q | Get-Member)[0].Name
+                  $q, $r = 'abc', 'd'
+                }
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertIsNone(self._type_at(source))
+
+    def test_either_spelling_before_a_loop_types_the_read_at_the_top_of_its_body(self):
+        for source in [
+            cleandoc("""
+                [string]$q = 5
+                while ($c) {
+                  $q.substring(0, 1)
+                  [string]$q = 6
+                }
+            """),
+            cleandoc("""
+                $q, $r = 'abc', 'd'
+                while ($c) {
+                  $q.substring(0, 1)
+                  $q, $r = 'e', 'f'
+                }
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._type_at(source), 'System.String')
+
+
 if __name__ == '__main__':
     import unittest
     unittest.main()

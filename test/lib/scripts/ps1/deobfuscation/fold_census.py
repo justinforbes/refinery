@@ -159,6 +159,16 @@ FOLDS: dict[str, str] = {
         '$x = 1, 2, 3\n[Array]::Reverse($script:x)\nWrite-Output (3, 2, 1)',
     '$x = 1, 2, 3; $y = $x; $x = 9, 9, 9; Write-Output $y':
         'Write-Output (1, 2, 3)',
+    "[string]$q = 'abc'; Write-Output $q.Substring(1, 1)":
+        "Write-Output 'b'",
+    '[int]$q = 5; Write-Output $q.ToString()':
+        "Write-Output '5'",
+    "$q, $r = 'abc', 'd'; Write-Output $q.SUBSTRING(1, 1); Write-Output $r":
+        "$q, $r = 'abc', 'd'\nWrite-Output $q.Substring(1, 1)\nWrite-Output $r",
+    '$q = [string]5; $q = 1, 2, 3; Write-Output (,$q)':
+        'Write-Output (,(1, 2, 3))',
+    "$q = 'abc'; [int]$q = 5; Write-Output $q.GetType().FullName":
+        'Write-Output (5).GetType().FullName',
     "function Get-Zqfrob { Write-Output 'hit' }; Zqfrob":
         "function Get-Zqfrob {\n  Write-Output 'hit'\n}\nGet-zqfrob",
     "function Get-Zqfrob { Write-Output 'p' }; function Zqfrob { Write-Output 'b' }; Zqfrob":

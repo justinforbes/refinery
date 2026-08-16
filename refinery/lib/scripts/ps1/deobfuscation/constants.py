@@ -24,6 +24,7 @@ from refinery.lib.scripts.ps1.analysis.model import (
 )
 from refinery.lib.scripts.ps1.analysis.mutation import value_after
 from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
+from refinery.lib.scripts.ps1.analysis.variable_types import constraint_converts
 from refinery.lib.scripts.ps1.analysis.values import (
     UNKNOWN,
     integer_of,
@@ -519,7 +520,8 @@ class _Inlining:
         if write is None:
             return None
         if not isinstance(write, Ps1Variable) or not is_mutated_in_place(write):
-            return self.table.by_write.get(id(write))
+            value = self.table.by_write.get(id(write))
+            return None if value is None or constraint_converts(binding, value) else value
         if id(write) in chased:
             return None
         previous = self._value_at(write, key, chased | {id(write)})

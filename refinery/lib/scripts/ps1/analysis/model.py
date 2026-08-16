@@ -338,6 +338,27 @@ def written_call_slot(var: Ps1Variable) -> Ps1CallSlot | None:
     return Ps1CallSlot(parent, slot, written, part)
 
 
+def _constraint_on(var: Ps1Variable) -> str | None:
+    """
+    The type a constrained assignment target names for *var* — the `string` of `[string]$q = 5` and
+    of `$a, [string]$q = 1, 5` — or `None` where the occurrence is not one.
+
+    Only a cast between the occurrence and the assignment counts, so `$q = [string]5` is not a
+    constraint: it converts what is stored once and leaves the variable free.
+    """
+    assignment = assignment_of(var)
+    if assignment is None:
+        return None
+    cursor: Node = var
+    parent = cursor.parent
+    while parent is not None and parent is not assignment:
+        if isinstance(parent, Ps1CastExpression):
+            return parent.type_name
+        cursor = parent
+        parent = cursor.parent
+    return None
+
+
 def _climbed_operand(node: Node) -> Node | None:
     """
     The part of *node* a store reaching through it has to have come from: what a cast converts, and
@@ -443,6 +464,11 @@ class Binding:
     reads: list[Occurrence] = field(default_factory=list)
     writes: list[Occurrence] = field(default_factory=list)
     dynamic_or_qualified: bool = False
+    #: Every type a constrained write of this binding names — the `string` of `[string]$q = 5`.
+    #: PowerShell stores the constraint on the *variable*, not on the write, so it converts what
+    #: every later write stores as well: measured, `[string]$q = 5; $q = 1, 2, 3; $q.Length` is 5,
+    #: because `$q` holds the String `1 2 3` and not the array. Empty for a name no write constrains.
+    constraints: set[str] = field(default_factory=set)
 
     @property
     def is_read(self) -> bool:
@@ -738,6 +764,31 @@ class Ps1SemanticModel:
             else:
                 self._attribute_reference(node, scope)
         self._share_stores_through_aliases()
+        self._record_type_constraints()
+
+    def _record_type_constraints(self):
+        """
+        File the type each constrained write names against the binding it writes.
+
+        The constraint outlives the statement that carries it: `[string]$q = 5` stores an
+        `ArgumentTypeConverterAttribute` on the variable, and every later write is converted through
+        it. So this is a fact about the binding rather than about the occurrence, and a caller
+        reading a value out of an *unconstrained* write of a constrained name has to know.
+        """
+        for binding in self._every_binding():
+            for write in binding.writes:
+                if not isinstance(write.node, Ps1Variable):
+                    continue
+                named = _constraint_on(write.node)
+                if named is not None:
+                    binding.constraints.add(named.lower())
+
+    def _every_binding(self) -> Iterator[Binding]:
+        stack = [self.root_scope]
+        while stack:
+            scope = stack.pop()
+            stack.extend(scope.children)
+            yield from scope.bindings.values()
 
     def _share_stores_through_aliases(self):
         """
