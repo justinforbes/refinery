@@ -351,12 +351,12 @@ class _ConstantTable:
     fold and `if ($c) { $x = $y }` refuse.
     """
 
-    def __init__(self, root: Node, flow: Ps1VariableFlow):
+    def __init__(self, root: Node):
         self.by_write: dict[int, Expression] = {}
         self.ambient: dict[str, Expression] = {}
         self.values: defaultdict[str, list[Expression]] = defaultdict(list)
         self._collect_writes(root)
-        self._collect_ambient(root, flow)
+        self._collect_ambient(root)
 
     def _collect_writes(self, root: Node):
         for node in root.walk():
@@ -381,12 +381,13 @@ class _ConstantTable:
             self.by_write[id(targets[0])] = value
             self.values[key].append(value)
 
-    def _collect_ambient(self, root: Node, flow: Ps1VariableFlow):
+    def _collect_ambient(self, root: Node):
         """
         A default the engine supplies is only this name's value while the script leaves the name
-        alone. Any write of it anywhere, and any statement that reaches into its value, replaces the
-        default with something this table has no claim on — including a write inside a block, which
-        `Ps1SemanticModel` binds locally but `. { }` performs on the caller.
+        alone. Any write of it anywhere replaces the default with something this table has no claim
+        on — including a write inside a block, which `Ps1SemanticModel` binds locally but `. { }`
+        performs on the caller, and a write that reaches *through* the name, which
+        `is_write_occurrence` counts as the write it is.
 
         A write nobody can attribute is *not* collected here, because it is not a fact about the
         whole script: it lands at a point, and an ambient default is a definition at the script's
@@ -394,7 +395,7 @@ class _ConstantTable:
         asks that per read — silencing every default here instead was measured, and it costs the
         `$PSHome` unpacking that an obfuscated loader's first stage is built out of.
         """
-        touched = set(flow.mutated_in_place)
+        touched: set[str] = set()
         for node in root.walk():
             if isinstance(node, Ps1Variable) and is_write_occurrence(node):
                 touched.add(binding_key(node))
@@ -488,7 +489,7 @@ class Ps1ConstantInlining(Transformer):
         # of the whole script once per inlined variable. Nothing this pass adds or removes is a
         # statement, so the graphs it would rebuild are the graphs it already has.
         flow = model_cache(self, node).variable_flow
-        table = _ConstantTable(node, flow)
+        table = _ConstantTable(node)
         if not table:
             return None
         state = _Inlining(table, flow, self._blocked_by_expansion(node, table))
@@ -558,10 +559,10 @@ class Ps1ConstantInlining(Transformer):
         Which positions may hold a value at all is
         `refinery.lib.scripts.ps1.analysis.model.is_substitutable_position`, asked once here rather
         than reassembled from the positional predicates it is made of. It is a fact about the
-        *position*, not about the binding: the flow model refuses a name stored through as well,
-        via `Ps1FlowUnknown.MUTATED_IN_PLACE`, but the ambient table answers with no binding at all
-        and would otherwise install a constant where `$x[0] = 'z'` names a place rather than a
-        value.
+        *position*, not about the binding: a store through is a write occurrence carrying no value,
+        so the flow model already names none for a read below one, but the ambient table answers
+        with no binding at all and would otherwise install a constant where `$x[0] = 'z'` names a
+        place rather than a value.
         """
         for node in list(_walk_outer_scope(root)):
             if isinstance(node, Ps1IndexExpression):

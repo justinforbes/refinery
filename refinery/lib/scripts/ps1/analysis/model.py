@@ -80,7 +80,8 @@ class Ps1OccurrenceRole(enum.Enum):
     store back through the wrapper it is handed.
     `WRITE_THROUGH` — reads the variable to reach a place inside it that is written: the `$x` of
     `$x[0] = 'z'` or `$x.Length = 5`. The name still holds whatever it held, so this observes the
-    value like a read, but no value may be installed in its place.
+    value like a read and installs none of its own; but *what* it holds is no longer what it held,
+    so it is a write of the binding all the same and no value may be installed in its place.
 
     Each member carries the four answers a consumer needs, in the order the fields are declared
     below, rather than being compared against a list of members at every site. A question answered
@@ -91,7 +92,7 @@ class Ps1OccurrenceRole(enum.Enum):
     READ            = (False, True, True, False)    # noqa
     WRITE_REPLACING = (True, False, False, False)
     WRITE_OBSERVING = (True, True, False, False)
-    WRITE_THROUGH   = (False, True, False, True)    # noqa
+    WRITE_THROUGH   = (True, True, False, True)     # noqa
 
     #: Whether the occurrence is filed among the binding's writes, because it changes what a read
     #: below it observes.
@@ -212,8 +213,10 @@ def is_mutated_in_place(var: Ps1Variable) -> bool:
     Whether an assignment stores *through* `var` rather than into it — the `$x` of `$x[0] = 'z'`, of
     `$x.Length = 5`, of `$x[0][1] = 'z'` and of the multi-assignment `$x[0], $x[1] = 'p', 'q'`.
 
-    Such an occurrence reads the variable in order to reach the part that is written, so
-    `is_write_occurrence` calls it a read and no occurrence of the name records the change.
+    Such an occurrence reads the variable in order to reach the part that is written, and the value
+    it installs is no value at all: what a read below it observes is the object the name was already
+    bound to, changed. So it is a write with a position and no value, which is what
+    `Ps1SemanticModel` files it as.
     """
     return occurrence_role(var).through
 
@@ -253,11 +256,13 @@ def is_write_occurrence(var: Ps1Variable) -> bool:
     """
     Whether `var` occurs in a position that writes it: the target of an assignment (including a
     multi-assignment slot), the operand of a `++`/`--` update, the loop variable of a `foreach`, a
-    parameter declaration, or the operand of a `[ref]` cast. Every other occurrence reads the
-    variable.
+    parameter declaration, the operand of a `[ref]` cast, or a position an assignment stores
+    *through*. Every other occurrence reads the variable.
 
-    An occurrence an assignment stores *through* is not one of these: `$x[0] = 'z'` leaves `$x`
-    holding what it held, so the name records no change and the occurrence counts as a read.
+    A store through is one of these although it installs nothing. `$x[0] = 'z'` leaves the name
+    bound to the object it was bound to, but a read below it observes a different value, and that
+    is the whole of what a write is to the layer that orders reads against writes. Counting it a
+    read instead is what forced `Ps1VariableFlow` to give up on every occurrence of the name.
     """
     return occurrence_role(var).stores
 
@@ -612,12 +617,15 @@ class Ps1SemanticModel:
                 continue
             if not isinstance(node, Ps1Variable) or _is_member_declaration(node):
                 continue
-            if is_reference_cast(node.parent):
-                self._attribute_reference(node, scope)
-            elif is_write_occurrence(node):
+            role = occurrence_role(node)
+            if not role.stores:
+                self._attribute_read(node, scope)
+            elif role.through:
+                self._attribute_write_through(node, scope)
+            elif declares_binding(node):
                 self._attribute_write(node, scope)
             else:
-                self._attribute_read(node, scope)
+                self._attribute_reference(node, scope)
 
     def _attribute_write(self, var: Ps1Variable, scope: Scope):
         binding = self._lookup_write_binding(var, scope)
@@ -639,13 +647,51 @@ class Ps1SemanticModel:
         if var.scope is not Ps1ScopeModifier.NONE:
             self._attribute_read(var, scope)
             return
+        for binding in self._bindings_a_read_reaches(var, scope):
+            self._record(binding, var, binding.writes)
+
+    def _attribute_write_through(self, var: Ps1Variable, scope: Scope):
+        """
+        Attribute an occurrence a store reaches *through* — the `$x` of `$x[0] = 'z'`: resolved the
+        way a read is, recorded the way a write is, and declaring nothing.
+
+        Resolving it as a write would look for a binding in the scope the occurrence is written in
+        and declare one PowerShell never creates, hiding the outer binding the store actually
+        reaches. What it does to that binding is change the value under it, so it is recorded among
+        the writes, where it kills whatever stood before it and leaves a read below it with a value
+        nothing here can name.
+
+        Unlike `[ref]`, a scope qualifier does not stop it. Measured: `[Array]::Reverse($script:x)`
+        and `$script:x[0] = 9` both reach the script scope's array, so a qualified occurrence is
+        recorded against the bindings the qualifier names rather than dropped to a read.
+        """
+        for binding in self._bindings_a_read_reaches(var, scope):
+            self._record(binding, var, binding.writes)
+
+    def _bindings_a_read_reaches(self, var: Ps1Variable, scope: Scope) -> Iterator[Binding]:
+        """
+        Every binding an ordinary read of *var* written in *scope* could observe: the binding of the
+        name in each enclosing scope for a bare reference, and the scopes `_qualified_read_scopes`
+        names for a qualified one.
+
+        Which one of several a reference resolves to depends on what ran, so every one of them is
+        yielded and the caller records against all of them. For a write that is the conservative
+        direction: a binding credited with a write it did not receive answers nothing about the
+        values below it, where one that missed a write it did receive answers the value from before.
+        """
         name = binding_key(var)
-        cursor: Scope | None = scope
-        while cursor is not None:
-            binding = cursor.bindings.get(name)
+        if var.scope is Ps1ScopeModifier.NONE:
+            cursor: Scope | None = scope
+            while cursor is not None:
+                binding = cursor.bindings.get(name)
+                if binding is not None:
+                    yield binding
+                cursor = cursor.parent
+            return
+        for target in self._qualified_read_scopes(var, scope):
+            binding = target.bindings.get(name)
             if binding is not None:
-                self._record(binding, var, binding.writes)
-            cursor = cursor.parent
+                yield binding
 
     def _attribute_named(self, cmd: Ps1CommandInvocation, scope: Scope):
         """

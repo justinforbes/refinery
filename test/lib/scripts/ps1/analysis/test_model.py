@@ -205,7 +205,7 @@ class TestPs1WriteOccurrenceKinds(TestBase):
             "$x[0] += 'z'",
         ):
             with self.subTest(source):
-                self.assertTrue(is_mutated_in_place(self._read(source)))
+                self.assertTrue(is_mutated_in_place(self._write(source)))
 
     def test_a_variable_an_assignment_does_not_store_through_is_not_mutated_in_place(self):
         for source in (
@@ -365,6 +365,61 @@ class TestPs1ReferenceAttribution(TestBase):
         self.assertEqual(len(binding.reads), 0)
         self.assertEqual(len(binding.uses), 1)
         self.assertFalse(binding.is_dead)
+
+
+class TestPs1StoreThroughAttribution(TestBase):
+    """
+    Where the `$x` of `$x[0] = 'z'` lands in the model. It is resolved the way a read is — the name
+    is looked up to reach the object, and nothing is created — and recorded the way a write is,
+    because a read below it observes an object that is no longer what it was.
+    """
+
+    @staticmethod
+    def _model(source: str):
+        return build_semantic_model(Ps1Parser(source).parse())
+
+    def test_a_store_through_is_a_write_of_the_binding_and_not_a_read(self):
+        model = self._model("$x = @('a', 'b')\n$x[0] = 'z'")
+        binding = model.script_scope.bindings['x']
+        self.assertEqual(len(binding.writes), 2)
+        self.assertEqual(len(binding.reads), 0)
+
+    def test_a_store_through_observes_the_value_it_reaches_into(self):
+        """
+        The array has to exist for the slot to be written, so the assignment that put it there is
+        still wanted although `Binding.reads` holds nothing.
+        """
+        binding = self._model("$x = @('a', 'b')\n$x[0] = 'z'").script_scope.bindings['x']
+        self.assertEqual(len(binding.uses), 1)
+        self.assertFalse(binding.is_dead)
+
+    def test_a_store_through_inside_a_body_is_a_write_of_the_enclosing_binding(self):
+        model = self._model("$x = @('a', 'b')\nfunction f { $x[0] = 'z' }")
+        function_scope = model.script_scope.children[0]
+        self.assertEqual(function_scope.bindings, {})
+        self.assertEqual(len(model.script_scope.bindings['x'].writes), 2)
+
+    def test_a_store_through_declares_nothing_where_no_scope_binds_the_name(self):
+        """
+        A bare assignment in a body binds there, and a store through does not: it needs a value to
+        reach into, so the binding it names is whichever one already exists.
+        """
+        stored = self._model("function f { $x[0] = 'z' }")
+        self.assertEqual(stored.script_scope.bindings, {})
+        self.assertEqual(stored.script_scope.children[0].bindings, {})
+        assigned = self._model("function f { $x = 'z' }")
+        self.assertEqual(list(assigned.script_scope.children[0].bindings), ['x'])
+
+    def test_a_scope_qualified_store_through_is_a_write_where_a_reference_is_not(self):
+        """
+        `$script:x[0] = 9` reaches the script scope's object and changes it, so the qualifier leaves
+        it the write it is. `[ref]$script:x` is where the two part: 5.1 does not wire that up to the
+        variable, and the model reads it as the qualified read it resolves to.
+        """
+        stored = self._model("$x = @('a', 'b')\n$script:x[0] = 9")
+        self.assertEqual(len(stored.script_scope.bindings['x'].writes), 2)
+        referenced = self._model("$x = 0\n[void][int]::TryParse('7', [ref]$script:x)")
+        self.assertEqual(len(referenced.script_scope.bindings['x'].writes), 1)
 
 
 class TestPs1NamedReferenceAttribution(TestBase):

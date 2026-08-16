@@ -18,8 +18,11 @@ away beside the one that does not.
 """
 from __future__ import annotations
 
+from typing import TypeGuard
+
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1FlowUnknown, Ps1VariableFlow
+from refinery.lib.scripts.ps1.analysis.model import is_mutated_in_place
 from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
 from refinery.lib.scripts.ps1.data import named_type
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
@@ -39,9 +42,8 @@ from refinery.lib.scripts.ps1.model import (
 #: `SHADOWS_A_WIDER_SCOPE`, which is the opposite shape and has the same consequence: the writes are
 #: all in view, and some of them land on a name a bare read never resolves to, so
 #: `$q = 'text'; $global:q = 5` reads as one name typed twice where the language has two.
-#: A write nothing can place and a store through a member are not among them — they say which write
-#: ran cannot be settled, and where the writes agree that question has no bearing on the type;
-#: `$x.Length = 5` leaves `$x` naming the object it already named. Writes spread over several
+#: A write nothing can place is not among them — it says which write ran cannot be settled, and
+#: where the writes agree that question has no bearing on the type. Writes spread over several
 #: bodies are of that kind too, and `type_at` refuses them on its own account rather than
 #: here, because its first rule can still name one of them.
 _INSTALLS_ANY_TYPE = (
@@ -72,7 +74,22 @@ def type_at(var: Ps1Variable, flow: Ps1VariableFlow) -> Ps1TypeName | None:
     into the caller's scope from a binding of its own, so agreement among the writes this binding
     holds is no claim about the ones it does not. Writes spread over several bodies are refused
     there too, because whether one body runs before another is what this layer does not answer.
+
+    **A store through the name is not one of the writes the second rule agrees over.** It installs
+    no value, and what it does to the one already there cannot change its type: `$q.Proxy = $null`
+    leaves `$q` naming the object it named before. Counting it in the set instead makes it
+    contribute the refusal it is and takes the whole agreement down with it, which costs the member
+    spellings inside a `$( ... )` — where the graphs hold the writes and the read as one point, so
+    the second rule is the only one answering at all.
     """
+    return _type_at(var, flow, frozenset())
+
+
+def _type_at(
+    var: Ps1Variable,
+    flow: Ps1VariableFlow,
+    chased: frozenset[int],
+) -> Ps1TypeName | None:
     binding = flow.semantic.binding_of(var)
     if binding is None or not binding.writes:
         return None
@@ -80,13 +97,48 @@ def type_at(var: Ps1Variable, flow: Ps1VariableFlow) -> Ps1TypeName | None:
         return None
     observed = flow.reaching_definition(var)
     if observed is not None:
-        return _established_by(observed)
+        return _installed_by(observed, flow, chased)
     if flow.unknowns(binding) & Ps1FlowUnknown.WRITES_IN_SEVERAL_BODIES:
         return None
     if flow.foreign_write_before(var) or not flow.written_before(var):
         return None
-    named = {_established_by(write.node) for write in binding.writes}
+    named = {
+        _installed_by(write.node, flow, chased)
+        for write in binding.writes
+        if not _stores_through(write.node)
+    }
     return named.pop() if len(named) == 1 else None
+
+
+def _stores_through(write: Node) -> TypeGuard[Ps1Variable]:
+    """
+    Whether *write* changes the value under the name without installing one of its own.
+    """
+    return isinstance(write, Ps1Variable) and is_mutated_in_place(write)
+
+
+def _installed_by(
+    write: Node,
+    flow: Ps1VariableFlow,
+    chased: frozenset[int],
+) -> Ps1TypeName | None:
+    """
+    The type the name holds once *write* has run.
+
+    A write that stores *through* the name installs no value of its own: `$q.Proxy = $null` leaves
+    `$q` naming the object it already named, so the type is the one whichever write put that object
+    there established. It is chased rather than refused because refusing it costs every member
+    spelling below the first store through, which was measured on a real sample.
+
+    `chased` bounds the chase, and the bound is not decoration. A store through does not observe
+    itself where the statement runs once, but inside a loop it does — the previous visit's store is
+    what it reads — so `while ($c) { $x.P = 1 }` is a write whose reaching definition is itself.
+    """
+    if not _stores_through(write):
+        return _established_by(write)
+    if id(write) in chased:
+        return None
+    return _type_at(write, flow, chased | {id(write)})
 
 
 def _established_by(write: Node) -> Ps1TypeName | None:

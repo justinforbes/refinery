@@ -507,6 +507,7 @@ CONTRIBUTION: dict[str, Contribution] = {
             '$x = 1, 2, 3; $y = $x; $y[0] = 9; Write-Output $x[0]',
             '$x = 1, 2, 3; $y = 0, 0, 0; $x.CopyTo($y, 0); Write-Output $y',
             '$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y',
+            '$x = 1, 2, 3; Write-Output $x[0]; $x[0] = 9; Write-Output $x[0]',
             '$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x',
             '$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x',
             '$x = 1, 2, 3; [Array]::Reverse(($x)); Write-Output $x',

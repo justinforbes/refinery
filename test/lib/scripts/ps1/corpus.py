@@ -281,6 +281,7 @@ BEHAVIOURS: tuple[str, ...] = (
     "$s = 'abc'; [Array]::Reverse($s); Write-Output $s",
     "$x = 1, 2, 3; Write-Output $x[0]; [Array]::Reverse($x); Write-Output $x[0]",
     "$x = 1, 2, 3; $x[0] = 9; [Array]::Reverse($x); Write-Output $x",
+    "$x = 1, 2, 3; Write-Output $x[0]; $x[0] = 9; Write-Output $x[0]",
     "$x = 1, 2, 3; $y = $x; Write-Output $y[0]; [Array]::Reverse($x); Write-Output $y[0]",
     "$x = 1, 2, 3; $c = '$x = 7, 8, 9'; iex $c; [Array]::Reverse($x); Write-Output $x",
     "function f { [Array]::Reverse($x) }; $x = 1, 2, 3; f; Write-Output $x",

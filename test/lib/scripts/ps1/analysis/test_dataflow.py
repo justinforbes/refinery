@@ -245,6 +245,44 @@ class TestPs1VariableFlow(TestBase):
         """
         self.assertEqual(self._observed("$x, $y = 1, 2; Write-Host $x"), 0)
 
+    def test_a_store_through_the_name_is_the_write_a_read_below_it_observes(self):
+        """
+        The store is the second write of `$x` in each of these, and it is the one the read below it
+        observes rather than the assignment above: the name is bound to the object it was bound to,
+        and that object is no longer the one that was stored.
+        """
+        for source in (
+            "$x = @('a', 'b'); $x[0] = 'z'; Write-Host $x",
+            "$x = 'hello'; $x.Length = 5; Write-Host $x",
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._observed(source), 1)
+
+    def test_a_store_through_the_name_leaves_a_read_above_it_with_the_write_before_it(self):
+        """
+        The floor under the rule above, and what the flag this replaces could not express: the store
+        happens at a point, so it changes what is read below it and nothing about what is read above
+        it.
+        """
+        self.assertEqual(self._observed("$x = @('a', 'b'); Write-Host $x; $x[0] = 'z'"), 0)
+
+    def test_a_store_through_the_name_on_one_branch_leaves_the_read_below_it_unanswered(self):
+        self.assertIsNone(
+            self._observed("$x = @('a', 'b'); if ($c) { $x[0] = 'z' }; Write-Host $x"))
+
+    def test_a_store_through_the_name_a_loop_returns_to_leaves_the_read_unanswered(self):
+        self.assertIsNone(
+            self._observed("$x = @('a', 'b'); while ($c) { Write-Host $x; $x[0] = 'z' }"))
+
+    def test_a_child_scope_storing_through_the_name_reaches_its_callers_value(self):
+        """
+        `& { $x = 'b' }` binds the block's own `$x` and leaves the caller's standing, which is why
+        the write before it is still what the read observes. A store through declares nothing: it
+        reaches the caller's array exactly as a bare read would, and changes what is in it.
+        """
+        self.assertEqual(self._observed("$x = @('a', 'b'); & { $x = 'b' }; Write-Host $x"), 0)
+        self.assertIsNone(self._observed("$x = @('a', 'b'); & { $x[0] = 'z' }; Write-Host $x"))
+
 
 class TestPs1FlowUnknowns(TestBase):
 
@@ -288,20 +326,6 @@ class TestPs1FlowUnknowns(TestBase):
             Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY,
             self._unknowns("$x = 'a'; $b = { $x = 'b' }"))
 
-    def test_an_index_assignment_changes_the_value_without_writing_the_name(self):
-        """
-        `$x[0] = 'z'` writes no occurrence of `$x` — the name is read to reach the slot — so every
-        occurrence lands in `reads` and the value the binding holds changes with nothing to order.
-        """
-        self.assertIn(
-            Ps1FlowUnknown.MUTATED_IN_PLACE,
-            self._unknowns("$x = @('a', 'b'); $x[0] = 'z'"))
-
-    def test_a_member_assignment_changes_the_value_without_writing_the_name(self):
-        self.assertIn(
-            Ps1FlowUnknown.MUTATED_IN_PLACE,
-            self._unknowns("$x = 'hello'; $x.Length = 5"))
-
     def test_reading_through_an_index_leaves_the_binding_trackable(self):
         """
         The floor: refusing every name an index expression mentions refuses every array this layer
@@ -309,6 +333,16 @@ class TestPs1FlowUnknowns(TestBase):
         """
         self.assertIs(
             self._unknowns("$x = @('a', 'b'); Write-Host $x[0]"), Ps1FlowUnknown.NONE)
+
+    def test_storing_through_an_index_leaves_the_binding_trackable(self):
+        """
+        The store is one of the binding's writes and has a position, so it is ordered where it
+        stands. Nothing about the name as a whole is unknown, which is what the flag this replaces
+        claimed of every occurrence of it.
+        """
+        for source in ("$x = @('a', 'b'); $x[0] = 'z'", "$x = 'hello'; $x.Length = 5"):
+            with self.subTest(source):
+                self.assertIs(self._unknowns(source), Ps1FlowUnknown.NONE)
 
 
 class TestPs1VariableFlowRegressions(TestPs1VariableFlow):
@@ -335,6 +369,32 @@ class TestPs1VariableFlowRegressions(TestPs1VariableFlow):
         """
         self.assertEqual(self._observed("try { $x = 'a'; Write-Host $x } catch { }"), 0)
 
+    def test_every_receiver_chain_an_assignment_stores_through_kills_the_write_before_it(self):
+        """
+        The whole chain between the name and the assignment is climbed, so each of these is the
+        second write of `$x` and the one the read observes. Stopping at the innermost step answers
+        the first spelling and reads the rest as plain reads, which publishes `@('a', 'b')` below a
+        statement that replaced it.
+        """
+        for source in (
+            "$x = @(@('a', 'b')); $x[0][1] = 'z'; Write-Host $x",
+            "$x = 'abc'; $x.A.B = 5; Write-Host $x",
+            "$x = @('a', 'b'); ($x)[0] = 'z'; Write-Host $x",
+            "$x = @('a', 'b'); ([array]$x)[0] = 'z'; Write-Host $x",
+            "$x = @('a', 'b'); $x[0] += 'z'; Write-Host $x",
+        ):
+            with self.subTest(source):
+                self.assertEqual(self._observed(source), 1)
+
+    def test_two_stores_through_one_name_in_one_statement_name_no_single_write(self):
+        """
+        Both slots are written by the one statement, which the graphs hold as a single point, so
+        which of the two occurrences is the last write of `$x` cannot be decided here. The refusal
+        is what is pinned; the one answer that would be wrong is the assignment above them.
+        """
+        self.assertIsNone(
+            self._observed("$x = @('a', 'b'); $x[0], $x[1] = 'p', 'q'; Write-Host $x"))
+
 
 class TestPs1FlowUnknownRegressions(TestPs1FlowUnknowns):
 
@@ -350,16 +410,6 @@ class TestPs1FlowUnknownRegressions(TestPs1FlowUnknowns):
         self.assertIn(
             Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY,
             flow.unknowns(inner.bindings['x']))
-
-    def test_a_receiver_chain_an_assignment_stores_through_mutates_the_binding_in_place(self):
-        for source in (
-            "$x = @(@('a','b'))\n$x[0][1] = 'z'",
-            "$x = 'abc'\n$x.A.B = 5",
-            "$x = @('a','b')\n($x)[0] = 'z'",
-            "$x = @('a','b')\n$x[0], $x[1] = 'p', 'q'",
-        ):
-            with self.subTest(source):
-                self.assertIn(Ps1FlowUnknown.MUTATED_IN_PLACE, self._unknowns(source))
 
 
 class TestPs1UnattributableWrites(TestPs1VariableFlow):

@@ -93,8 +93,6 @@ from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
     Ps1SemanticModel,
     Scope,
-    binding_key,
-    is_mutated_in_place,
     scope_local_nodes,
 )
 from refinery.lib.scripts.ps1.analysis.opaque import writes_nobody_can_attribute
@@ -135,10 +133,6 @@ class Ps1FlowUnknown(enum.Flag):
     #: `REACHED_BY_QUALIFIER`, which says a *known* name is reachable another way: these are
     #: different reasons and a caller may be able to live with one.
     WRITTEN_BY_UNREADABLE_NAME = enum.auto()
-    #: A statement changes the binding's value through a part of it rather than by replacing it —
-    #: `$x[0] = 'z'`, `$x.Length = 5`. No occurrence of the name writes it, so every occurrence is in
-    #: `reads` and the change is invisible to the ordering above.
-    MUTATED_IN_PLACE = enum.auto()
     #: The binding holds writes through two scopes a read resolves in order — see
     #: `_shadows_a_wider_scope`. One name here is two names in the language, and every write of the
     #: wider one is a write a bare read never observes.
@@ -189,7 +183,6 @@ class Ps1VariableFlow:
         self._any_placed: bool | None = None
         self._blocks_by_owner: dict[int, list[Ps1ScriptBlock]] = {}
         self._deferred_writes: dict[tuple[str, int], bool] = {}
-        self._mutated: frozenset[str] | None = None
 
     def reaching_definition(self, read: Ps1Variable) -> Ps1Variable | None:
         """
@@ -254,7 +247,7 @@ class Ps1VariableFlow:
         graph = self.flow.graph_of(self.semantic.root)
         if graph is None or self._doubt_without_a_point():
             return Ps1ObservedWrite.UNKNOWN
-        if key in self.mutated_in_place or self._deferred_body_writes(key, self.semantic.root):
+        if self._deferred_body_writes(key, self.semantic.root):
             return Ps1ObservedWrite.UNKNOWN
         located = self.flow.locate(site)
         if located is None or located[0] is not graph:
@@ -443,29 +436,7 @@ class Ps1VariableFlow:
             found |= Ps1FlowUnknown.WRITTEN_BY_DEFERRED_BODY
         if binding.scope.writes_unreadable_names or self.deferred_unattributable_writes:
             found |= Ps1FlowUnknown.WRITTEN_BY_UNREADABLE_NAME
-        if binding.name in self.mutated_in_place:
-            found |= Ps1FlowUnknown.MUTATED_IN_PLACE
         return found
-
-    @property
-    def mutated_in_place(self) -> frozenset[str]:
-        """
-        The binding keys some assignment writes through rather than to — the `$x` of `$x[0] = 'z'`
-        and of `$x.Length = 5`. Nothing here is a write occurrence, so `Ps1SemanticModel` files each
-        of them in `Binding.reads` and the ordering above sees a name whose value never changes.
-
-        Keyed by name over the whole script rather than per scope: which of two same-named bindings
-        an in-place write reaches is the question this layer cannot answer for it, and answering it
-        by scope would pick one of them and leave the other reading a value the statement replaced.
-        """
-        if self._mutated is None:
-            self._mutated = frozenset(self._iter_mutated_in_place())
-        return self._mutated
-
-    def _iter_mutated_in_place(self):
-        for node in self.semantic.root.walk():
-            if isinstance(node, Ps1Variable) and is_mutated_in_place(node):
-                yield binding_key(node)
 
     def _position_of(self, read: Ps1Variable, graph: ControlFlowGraph) -> CfgNode | None:
         """
