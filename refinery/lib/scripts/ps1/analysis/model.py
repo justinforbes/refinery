@@ -31,11 +31,18 @@ is never reported dead.
 from __future__ import annotations
 
 import enum
+import typing
 
 from dataclasses import dataclass, field
 from typing import Iterator
 
 from refinery.lib.scripts import Node
+from refinery.lib.scripts.ps1 import data
+from refinery.lib.scripts.ps1.analysis.arguments import (
+    RECEIVER,
+    Ps1WrittenSlots,
+    written_slots,
+)
 from refinery.lib.scripts.ps1.analysis.naming import (
     Ps1NamedReference,
     Ps1NameRole,
@@ -43,8 +50,14 @@ from refinery.lib.scripts.ps1.analysis.naming import (
     named_references,
     unreadable_name_target,
 )
-from refinery.lib.scripts.ps1.ast import assignment_of, binding_key, is_reference_cast
+from refinery.lib.scripts.ps1.ast import (
+    assignment_of,
+    binding_key,
+    is_reference_cast,
+    unwrap_parens,
+)
 from refinery.lib.scripts.ps1.model import (
+    Ps1AccessKind,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
     Ps1CastExpression,
@@ -52,6 +65,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ForEachLoop,
     Ps1FunctionDefinition,
     Ps1IndexExpression,
+    Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1ParenExpression,
     Ps1ParameterDeclaration,
@@ -59,6 +73,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ScopeModifier,
     Ps1Script,
     Ps1ScriptBlock,
+    Ps1TypeExpression,
     Ps1UnaryExpression,
     Ps1Variable,
 )
@@ -124,7 +139,7 @@ def occurrence_role(var: Ps1Variable) -> Ps1OccurrenceRole:
     """
     if _is_member_declaration(var):
         return Ps1OccurrenceRole.NOT_A_REFERENCE
-    if _stores_through(var):
+    if _stores_through(var) or _fills_a_call_slot(var):
         return Ps1OccurrenceRole.WRITE_THROUGH
     assignment = assignment_of(var)
     if assignment is not None:
@@ -250,6 +265,102 @@ def _stores_through(var: Ps1Variable) -> bool:
         cursor = parent
         parent = cursor.parent
     return False
+
+
+class Ps1CallSlot(typing.NamedTuple):
+    """
+    A slot of a .NET call that the callee writes through, and what is known about the call's other
+    slots. `slot` is `refinery.lib.scripts.ps1.analysis.arguments.RECEIVER` for a call's receiver
+    and the argument's position otherwise.
+    """
+    call: Ps1InvokeMember
+    slot: int
+    written: Ps1WrittenSlots
+    #: Whether the slot holds a *part* of what the name holds rather than the whole of it — the `$p`
+    #: of `[Array]::Reverse($p[0])`. The name is written through either way, but what the call
+    #: leaves under it is the outer value with one element changed, which is a different question
+    #: from what it leaves in the slot.
+    through_a_part: bool
+
+
+def _fills_a_call_slot(var: Ps1Variable) -> bool:
+    return written_call_slot(var) is not None
+
+
+def written_call_slot(var: Ps1Variable) -> Ps1CallSlot | None:
+    """
+    The slot of a .NET call *var* fills that the callee writes through — the `$x` of
+    `[Array]::Reverse($x)`, of `$x.SetValue(9, 0)`, of `[Array]::Copy($src, $x, 3)` — or `None`
+    where it fills none. Which slots those are is
+    `refinery.lib.scripts.ps1.analysis.arguments.written_slots`.
+
+    The receiver's type is not asked for. This is a question about a *position*, answered wherever
+    an occurrence stands and long before any flow model exists, so a call on a value is answered by
+    the union over every type carrying a member of that name. That is the deny-side answer and the
+    only one available here: `$x.CopyTo($y, 0)` refuses without knowing what `$x` is, and
+    `$x.Substring(1, 2)` is left alone because no row of the table mentions `Substring`.
+
+    Four things are climbed on the way out, and each for its own reason. A parenthesis is
+    transparent to PowerShell's binding — measured, `[Array]::Reverse(($x))` reverses the array `$x`
+    holds. A cast is climbed because whether it allocates is a question about the operand's type:
+    `[Array]::Reverse([char[]]$s)` converts a String and never reaches `$s`, while
+    `[Array]::Reverse([array]$x)` hands over the very array, and climbing costs the first a
+    substitution rather than making the second a wrong answer. An index and a member access are
+    climbed because what they fetch out of the name is still part of what the name holds:
+    `[Array]::Reverse($p[0])` turns around the inner array `$p`'s first element *is*, so a value
+    written where `$p` stands loses it.
+    """
+    cursor: Node = var
+    parent = cursor.parent
+    part = False
+    while isinstance(
+        parent, (Ps1ParenExpression, Ps1CastExpression, Ps1IndexExpression, Ps1MemberAccess)
+    ):
+        if not isinstance(parent, Ps1ParenExpression) and _climbed_operand(parent) is not cursor:
+            return None
+        part = part or isinstance(parent, (Ps1IndexExpression, Ps1MemberAccess))
+        cursor = parent
+        parent = cursor.parent
+    if not isinstance(parent, Ps1InvokeMember) or not isinstance(parent.member, str):
+        return None
+    slot = _call_slot_of(parent, cursor)
+    if slot is None:
+        return None
+    static = parent.access is Ps1AccessKind.STATIC
+    named = parent.object
+    resolved = (
+        data.resolve_type(named.name)
+        if static and isinstance(named, Ps1TypeExpression) else None
+    )
+    written = written_slots(resolved, parent.member, len(parent.arguments), static=static)
+    if slot not in written.slots:
+        return None
+    return Ps1CallSlot(parent, slot, written, part)
+
+
+def _climbed_operand(node: Node) -> Node | None:
+    """
+    The part of *node* a store reaching through it has to have come from: what a cast converts, and
+    what an index or a member access is taken out of. An occurrence anywhere else under one of
+    these — the `$i` of `$p[$i]` — is read and not reached through.
+    """
+    if isinstance(node, Ps1CastExpression):
+        return node.operand
+    if isinstance(node, (Ps1IndexExpression, Ps1MemberAccess)):
+        return node.object
+    return None
+
+
+def _call_slot_of(call: Ps1InvokeMember, node: Node) -> int | None:
+    """
+    Which slot of *call* the expression *node* occupies, or `None` when it occupies none.
+    """
+    if call.object is node:
+        return RECEIVER
+    for position, argument in enumerate(call.arguments):
+        if argument is node:
+            return position
+    return None
 
 
 def is_write_occurrence(var: Ps1Variable) -> bool:
@@ -626,6 +737,62 @@ class Ps1SemanticModel:
                 self._attribute_write(node, scope)
             else:
                 self._attribute_reference(node, scope)
+        self._share_stores_through_aliases()
+
+    def _share_stores_through_aliases(self):
+        """
+        File every store-through against each binding that names the same object.
+
+        `$y = $x` does not copy the array; it gives the one array a second name. So
+        `[Array]::Reverse($x)` changes what a read of `$y` observes and `$y[0] = 9` changes what a
+        read of `$x` observes, and neither is an occurrence of the other name. This is Chow's χ —
+        a may-def filed against every member of an alias class — at the one depth a syntactic model
+        can see: a definition whose whole value is a bare variable.
+
+        **Only a store-through is shared, and that is what keeps it from corrupting.** A write that
+        installs a value rebinds the name it is written on and leaves every other name pointing at
+        the object from before, so `$x = 1, 2, 3; $y = $x; $x = 9, 9, 9` leaves `$y` holding
+        `1, 2, 3` — measured. Sharing those as well would give `$y` a value it never holds, where
+        sharing a store-through can only take a value away.
+        """
+        shared: list[tuple[Binding, Occurrence]] = []
+        for binding, neighbour in self._alias_pairs():
+            for write in binding.writes:
+                if write.role.through:
+                    shared.append(
+                        (neighbour, Occurrence(write.node, write.role, neighbour.name)))
+        for binding, occurrence in shared:
+            binding.writes.append(occurrence)
+
+    def _alias_pairs(self) -> Iterator[tuple[Binding, Binding]]:
+        """
+        Each ordered pair of bindings a definition gives one object to, in both directions. A
+        definition qualifies when its whole value is a bare variable read — `$y = $x`, and
+        `$y = ($x)`, since a parenthesis hands over what it wraps.
+        """
+        for write in self._every_write():
+            if not isinstance(write.node, Ps1Variable) or write.role.through:
+                continue
+            assignment = assignment_of(write.node)
+            if assignment is None or assignment.operator != '=' or assignment.value is None:
+                continue
+            source = unwrap_parens(assignment.value)
+            if not isinstance(source, Ps1Variable):
+                continue
+            target = self._binding_of.get(id(write.node))
+            named = self._binding_of.get(id(source))
+            if target is None or named is None or target is named:
+                continue
+            yield target, named
+            yield named, target
+
+    def _every_write(self) -> Iterator[Occurrence]:
+        stack = [self.root_scope]
+        while stack:
+            scope = stack.pop()
+            stack.extend(scope.children)
+            for binding in scope.bindings.values():
+                yield from binding.writes
 
     def _attribute_write(self, var: Ps1Variable, scope: Scope):
         binding = self._lookup_write_binding(var, scope)

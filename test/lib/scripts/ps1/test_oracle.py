@@ -140,12 +140,9 @@ BEHAVIOUR_DIVERGENCES: dict[str, str] = {
 #: An entry this table holds alone would not have that second witness, and every test in this file
 #: is skipped where no PowerShell host is available — so on a machine without one such an entry
 #: ratchets in neither direction, and a fix and a regression are alike invisible. Every entry needs
-#: a witness of its own shape somewhere host-free. Most are carried by `test_corruptions.py`, which
-#: asks whether a store survived in the tree and what the reads below it can still print; the three
-#: oldest `[Array]::Reverse` entries are carried by
-#: `test.lib.scripts.ps1.deobfuscation.test_folding.TestPs1ArrayReverseIsAppliedWhereItIsWritten`,
-#: which asks what the tool emits. Neither of those is evidence for what is written here, because
-#: this reaches its verdict by running both scripts.
+#: a witness of its own shape somewhere host-free. They are carried by `test_corruptions.py`, which
+#: asks whether a store survived in the tree and what the reads below it can still print. That is
+#: not evidence for what is written here, because this reaches its verdict by running both scripts.
 BEHAVIOUR_DEFECTS: dict[str, str] = {
     "Set-Variable global:y 'b'; Write-Host $global:y":
         'The store is dropped, so `b` becomes nothing: a command that writes a variable is not '
@@ -153,9 +150,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":
         'The read is folded to `b`, but 5.1 never evaluates the right operand of `-and` when the '
         'left one is false, so the store never happens and the snippet prints `a`.',
-    "$x = @('b', 'a'); [Array]::Sort($x); Write-Host $x[0]":
-        'The read is folded to `b`, the order from before the sort. `[Array]::Sort` reorders the '
-        'array the variable holds rather than returning a new one, so the snippet prints `a`.',
     "$x = 'a'; & { Write-Host $script:x }; $x = 'b'":
         'The store is removed and the read prints nothing. A child scope resolves `$script:x` to '
         'the caller, where the store put `a`.',
@@ -179,64 +173,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
     "$x = 'a'; &('i' + 'ex') '$x = \"b\"'; Write-Host $x":
         'The same write, reached through a computed command name, and here the call itself is '
         'deleted as well.',
-    "$s = 'abc'; [Array]::Reverse($s); Write-Output $s":
-        'The string is emitted reversed. 5.1 binds a String to the `System.Array` parameter by '
-        'converting it to a fresh `Char[]`, reverses that copy and discards it, so the variable is '
-        'left holding `abc`.',
-    "$x = 1, 2, 3; Write-Output $x[0]; [Array]::Reverse($x); Write-Output $x[0]":
-        'The reversal is folded back into the statement that built the array, so the read above it '
-        'reports the order that only holds below it: both reads emit 3 where 5.1 prints 1 and then '
-        '3.',
-    "$x = 1, 2, 3; $x[0] = 9; [Array]::Reverse($x); Write-Output $x":
-        'The same relocation, across a write rather than a read: the element written before the '
-        'reversal ends up at the near end instead of the far one, so `9 2 1` is emitted where 5.1 '
-        'leaves `3 2 9`.',
-    "$x = 1, 2, 3; $y = $x; Write-Output $y[0]; [Array]::Reverse($x); Write-Output $y[0]":
-        'The copy names the same array rather than a second one, so the reversal reaches the reads '
-        'through `$y`: 5.1 prints 1 and then 3, and both reads are folded to 3.',
-    "$x = 1, 2, 3; $c = '$x = 7, 8, 9'; iex $c; [Array]::Reverse($x); Write-Output $x":
-        'The string rebinds `$x` and the reversal then turns what it wrote around, so 5.1 prints '
-        '`9 8 7`. The whole of it is folded to the value the string wrote, in its own order.',
-    "function f { [Array]::Reverse($x) }; $x = 1, 2, 3; f; Write-Output $x":
-        'The body reverses the caller\'s array in place, so 5.1 prints `3 2 1`. The store is folded '
-        'into the read below the call, which leaves `$x` unset where the body reads it: the output '
-        'throws ArgumentNullException instead of printing anything.',
-    "$x = $(Write-Host 'a'; 1), $(Write-Host 'b'; 2); [Array]::Reverse($x); Write-Output $x":
-        'The reversal is applied to the elements as they are written rather than to the array they '
-        'build, so the two subexpressions change places and what they print comes out reversed '
-        'with them: 5.1 writes `a` before `b`.',
-    "$x = 1, 2, 3; $r = [Array]::Reverse($x); Write-Output $x":
-        'Binding the call to a variable hides it from the pass that would apply it, so the '
-        'reversal is dropped: 5.1 prints `3 2 1` and the output prints `1 2 3`.',
-    "$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x":
-        'The array is substituted into the slot the call clears, so the clear reaches a temporary '
-        'and the variable keeps its elements: 5.1 prints an empty first element, then 2 and 3.',
-    "$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y":
-        'The same substitution on the destination slot: the copy fills a temporary, so `0 0 0` is '
-        'printed where 5.1 prints `1 2 3`.',
-    "$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x":
-        'The three-argument overload reverses a range rather than the whole array. It is not the '
-        'one the pass recognises, so the array is substituted into the slot and the reversal is '
-        'lost: 5.1 prints `2 1 3`.',
-    "$x = 1, 2, 3; $x.SetValue(9, 0); Write-Output $x":
-        'The receiver is substituted, so the store writes an element of a temporary: 5.1 prints '
-        '`9 2 3` and the output prints `1 2 3`.',
-    "$x = 1, 2, 3; $y = 0, 0, 0; $x.CopyTo($y, 0); Write-Output $y":
-        'The same through an instance method\'s argument rather than a static method\'s: the '
-        'destination is substituted, so `0 0 0` is printed where 5.1 prints `1 2 3`.',
-    "$x = 1, 2, 3; $y = $x; $y[0] = 9; Write-Output $x[0]":
-        'The copy names the same array, so writing an element through `$y` is a write of `$x`: 5.1 '
-        'prints 9 and the read is folded to 1.',
-    "$x = 1, 2, 3; for ($i = 0; $i -lt 2; $i++) { Write-Output $x[0]; [Array]::Reverse($x) }":
-        'The read is folded to the value from before the loop, which only holds on the first pass: '
-        '5.1 prints 1 and then 3, and the output prints 1 twice.',
-    "$x = 1, 2, 3; [Array]::Reverse(($x)); Write-Output $x":
-        'Parentheses around an argument are transparent to 5.1\'s binding, so the reversal reaches '
-        '`$x` and it prints `3 2 1`. They are not transparent to the pass, which substitutes the '
-        'array and loses the reversal.',
-    "$p = @(@(1, 2), @(3, 4)); [Array]::Reverse($p[0]); Write-Output $p[0]":
-        'The element is substituted into the slot, so the reversal turns a temporary around: 5.1 '
-        'prints `2 1` and the output prints `1 2`.',
 }
 
 

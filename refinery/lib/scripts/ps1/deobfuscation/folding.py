@@ -34,7 +34,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     type_of,
     unwrap_to_array_literal,
 )
-from refinery.lib.scripts.ps1.ast import get_body, get_member_name, unwrap_parens
+from refinery.lib.scripts.ps1.ast import get_member_name, unwrap_parens
 from refinery.lib.scripts.ps1.data import ENCODING_MAP, instance_overloads, named_type, resolve_type
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.deobfuscation.constants import PS1_ENV_CONSTANTS
@@ -47,7 +47,6 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
-    is_array_reverse_call,
     is_pipeline_item,
     is_static_type_call,
     unwrap_single_paren,
@@ -62,7 +61,6 @@ from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ArrayExpression,
     Ps1ArrayLiteral,
-    Ps1AssignmentExpression,
     Ps1BinaryExpression,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
@@ -780,75 +778,6 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if array is not None:
             return self._selected(node, _index_into_array(array, indices))
         return None
-
-    def visit_Ps1ExpressionStatement(self, node: Ps1ExpressionStatement):
-        self.generic_visit(node)
-        var = is_array_reverse_call(node)
-        if var is not None and self._try_apply_array_reverse(node, var):
-            return node
-        return None
-
-    def _try_apply_array_reverse(
-        self, node: Ps1ExpressionStatement, var: Ps1Variable,
-    ) -> bool:
-        body = get_body(node.parent)
-        if body is None:
-            return False
-        try:
-            idx = body.index(node)
-        except ValueError:
-            return False
-        var_name = var.name.lower()
-        for i in range(idx - 1, -1, -1):
-            stmt = body[i]
-            if not isinstance(stmt, Ps1ExpressionStatement):
-                continue
-            expr = stmt.expression
-            if not isinstance(expr, Ps1AssignmentExpression):
-                continue
-            if expr.operator != '=':
-                continue
-            target = expr.target
-            if not isinstance(target, Ps1Variable):
-                continue
-            if target.name.lower() != var_name:
-                continue
-            value = expr.value
-            if isinstance(value, Ps1ArrayLiteral):
-                return self._reversed(node, substitute_list(
-                    value, 'elements', value.elements[::-1]))
-            if isinstance(value, Ps1ArrayExpression) and len(value.body) == 1:
-                inner = value.body[0]
-                if (
-                    isinstance(inner, Ps1ExpressionStatement)
-                    and isinstance(inner.expression, Ps1ArrayLiteral)
-                ):
-                    literal = inner.expression
-                    return self._reversed(node, substitute_list(
-                        literal, 'elements', literal.elements[::-1]))
-            sv = text_of(read(value))
-            if sv is not None:
-                return self._reversed(node, substitute_field(
-                    expr, 'value', make_string_literal(sv[::-1])))
-            return False
-        return False
-
-    def _reversed(self, node: Ps1ExpressionStatement, applied: bool) -> bool:
-        """
-        Drop the `[Array]::Reverse` call `node` holds once the reversal it asks for has landed, and
-        report whether the pair happened.
-
-        The order is the whole of it. Clearing the call first and reversing second leaves a refused
-        reversal beside a deleted call, so the emitted script reads the array in its original order
-        with nothing left to say it should not — a silent change of values rather than a rewrite
-        declined.
-        """
-        if not applied:
-            return False
-        if not substitute_field(node, 'expression', None):
-            return False
-        self.mark_changed()
-        return True
 
     def visit_Ps1InvokeMember(self, node: Ps1InvokeMember):
         self.generic_visit(node)

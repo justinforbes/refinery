@@ -603,6 +603,49 @@ def canonical_type(name: str) -> Ps1TypeName | None:
     return resolve_type(name)
 
 
+def required_type_key(name: str) -> Ps1TypeName:
+    """
+    Resolve a hand-kept table's type spelling to the lowercased canonical .NET `FullName` that table
+    keys on, raising when the collected metadata carries no such type. Building a table through this
+    at import time is a fail-loud floor: an entry naming a type the current data cannot resolve
+    stops the module from loading rather than going silently unmatched, which is how a stale table
+    used to fail open. A generic type is named by its arity-marked definition
+    (`collections.generic.list` `` `1 ``), the only spelling `resolve_type` resolves without its
+    type arguments.
+    """
+    resolved = resolve_type(name)
+    if resolved is None:
+        raise ValueError(
+            F'a PowerShell analysis table names {name!r}, which the collected metadata does not '
+            F'resolve to a type; the data and the table are out of step.'
+        )
+    return resolved.generic_definition
+
+
+def required_type_keys(names: set[str]) -> frozenset[Ps1TypeName]:
+    """
+    A frozenset of canonical type keys built from readable source spellings through
+    `required_type_key`. Spellings that name the same type collapse to one entry, retiring the
+    dual-spelling entries (`int` beside `int32`) the allow-lists carried before the data could
+    resolve them.
+    """
+    return frozenset(required_type_key(name) for name in names)
+
+
+def required_member_keys(
+    entries: set[tuple[str, str]],
+) -> frozenset[tuple[Ps1TypeName, str]]:
+    """
+    A frozenset of `(canonical type key, lowercased member)` pairs, the form a member-keyed table
+    looks up. Only the type half is resolved through the data and floored by it; the member name is
+    matched against a `refinery.lib.scripts.ps1.model.Ps1InvokeMember.member` at its own casing.
+    """
+    return frozenset(
+        (required_type_key(type_name), member.lower())
+        for type_name, member in entries
+    )
+
+
 #: Where an array type's members come from. .NET gives every array the surface of `System.Array`
 #: rather than one of its own, so `char[]` answers member questions off this and not off `Char`.
 _ARRAY_SURFACE = 'System.Array'

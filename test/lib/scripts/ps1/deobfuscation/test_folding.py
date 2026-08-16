@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import unittest
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
@@ -1070,40 +1069,174 @@ class TestPs1CountingAnArrayKeepsWhatBuildingItDid(TestPs1):
             '$r = [char]97, [char]97, [char]98')
 
 
-class TestPs1ArrayReverseIsAppliedWhereItIsWritten(TestPs1):
+class TestPs1ACallWritingThroughAnArgumentIsAWriteOfThatVariable(TestPs1):
     """
-    `[Array]::Reverse` reverses in place and returns nothing, so folding it away means moving its
-    effect back to the statement that built the array. That is only faithful where the array is
-    what was passed and where nothing observes it in between.
-
-    Every test here is a defect the tool still has, marked as a failure that is expected so that it
-    ratchets in both directions: the fix has to unmark them. Each is carried a second time by
-    `test/lib/scripts/ps1/corpus.py`, where the same three scripts are run on a 5.1 host and their
-    transcripts compared, so neither witness rests on the other. What is asserted here is the
-    conservative correct output — the transform declining — and a fold that reversed at the right
-    point would be correct too and would rewrite these.
+    `[Array]::Reverse($x)` turns around the very array `$x` holds and returns nothing, so that
+    occurrence of `$x` is a write of `$x`: it may not be replaced by the array's value, reads above
+    it still see the order the assignment built, and reads below it see the order the call left.
     """
 
-    @unittest.expectedFailure
-    def test_reversing_a_string_leaves_the_string_unchanged(self):
-        # 5.1 binds a String to the `System.Array` parameter by converting it to a fresh `Char[]`,
-        # reverses that copy and discards it, so the script prints `abc`.
-        source = "$s = 'abc'\n[Array]::Reverse($s)\nWrite-Output $s"
-        self.assertEqual(self._deobfuscate(source), source)
+    def test_the_written_argument_still_names_the_variable_below_a_folded_read(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output $x[0]', Ps1ConstantInlining),
+            '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output 3')
 
-    @unittest.expectedFailure
-    def test_a_read_between_the_assignment_and_the_reversal_sees_the_original_order(self):
+    def test_a_read_above_the_reversal_sees_the_order_the_assignment_built(self):
         # 5.1 prints 1 and then 3: the first read runs before the reversal does.
-        source = '$x = 1, 2, 3\nWrite-Output $x[0]\n[Array]::Reverse($x)\nWrite-Output $x[0]'
-        self.assertEqual(self._deobfuscate(source), source)
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\nWrite-Output $x[0]\n[Array]::Reverse($x)\nWrite-Output $x[0]',
+                Ps1ConstantInlining),
+            '$x = 1, 2, 3\nWrite-Output 1\n[Array]::Reverse($x)\nWrite-Output 3')
 
-    @unittest.expectedFailure
-    def test_an_element_written_between_the_assignment_and_the_reversal_is_reversed_with_the_rest(
-        self,
-    ):
-        # 5.1 leaves `3 2 9`: the write lands before the reversal, so it moves to the far end.
-        source = '$x = 1, 2, 3\n$x[0] = 9\n[Array]::Reverse($x)\nWrite-Output $x'
-        self.assertEqual(self._deobfuscate(source), source)
+    def test_a_second_reversal_returns_the_array_to_the_order_it_started_in(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output $x\n'
+                '[Array]::Reverse($x)\nWrite-Output $x',
+                Ps1ConstantInlining),
+            '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)\n'
+            '[Array]::Reverse($x)\nWrite-Output (1, 2, 3)')
+
+    def test_binding_the_void_result_of_the_reversal_changes_nothing(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n$r = [Array]::Reverse($x)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = 1, 2, 3\n$r = [Array]::Reverse($x)\nWrite-Output (3, 2, 1)')
+
+    def test_no_pass_of_the_whole_deobfuscation_replaces_the_written_argument(self):
+        self.assertEqual(
+            self._deobfuscate('$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output $x'),
+            '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)')
+
+    def test_a_reversal_of_a_variable_nothing_assigned_is_not_answered(self):
+        self._assertUnchanged('[Array]::Reverse($x)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_an_element_written_before_the_reversal_is_not_answered(self):
+        # 5.1 leaves `3`, `2` and `9`: the element write lands before the reversal, so it moves to
+        # the far end. Declining is the conservative answer; `Write-Output (3, 2, 9)` would be the
+        # complete one, and `Write-Output (3, 2, 1)` would be wrong.
+        self._assertUnchanged(
+            '$x = 1, 2, 3\n$x[0] = 9\n[Array]::Reverse($x)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_a_reversal_reached_through_an_array_element_is_not_answered(self):
+        # 5.1 prints `2` and then `1`: the call reverses the inner array that `$p[0]` selects.
+        self._assertUnchanged(
+            '$p = @(@(1, 2), @(3, 4))\n[Array]::Reverse($p[0])\nWrite-Output $p[0]',
+            Ps1ConstantInlining)
+
+    def test_a_sort_writes_through_its_argument_without_the_value_being_known(self):
+        # 5.1 prints `1`: `[Array]::Sort` reorders the array the variable holds. The slot is a
+        # write, so the read below it is not answered with the order from above.
+        self._assertUnchanged(
+            '$x = 3, 1, 2\n[Array]::Sort($x)\nWrite-Output $x[0]', Ps1ConstantInlining)
+
+    def test_a_reversal_under_a_condition_that_is_not_known_is_not_answered(self):
+        self._assertUnchanged(
+            '$x = 1, 2, 3\nif ($env:C) {\n  [Array]::Reverse($x)\n}\nWrite-Output $x',
+            Ps1ConstantInlining)
+
+    def test_a_reversal_inside_a_function_the_script_calls_is_not_answered(self):
+        # 5.1 prints `3`, `2` and `1`: the body writes the caller's `$x`.
+        self._assertUnchanged(
+            'function f {\n  [Array]::Reverse($x)\n}\n$x = 1, 2, 3\nf\nWrite-Output $x',
+            Ps1ConstantInlining)
+
+
+class TestPs1AReverseIsComputedWhereItsEffectIsKnownAndTotal(TestPs1):
+    """
+    Where the reversal covers the whole array, or a range that fits inside it, the array the call
+    leaves behind is computed and answers the reads below it. A range that does not fit throws
+    instead of reversing, and a bound that is not a known number is no range at all.
+    """
+
+    def test_a_whole_array_is_reversed(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)')
+
+    def test_a_range_inside_the_array_reverses_only_that_range(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n[Array]::Reverse($x, 0, 2)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = 1, 2, 3\n[Array]::Reverse($x, 0, 2)\nWrite-Output (2, 1, 3)')
+
+    def test_a_range_spanning_the_whole_array_reverses_all_of_it(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n[Array]::Reverse($x, 0, 3)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = 1, 2, 3\n[Array]::Reverse($x, 0, 3)\nWrite-Output (3, 2, 1)')
+
+    def test_a_range_of_one_element_leaves_the_order_alone(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n[Array]::Reverse($x, 1, 1)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = 1, 2, 3\n[Array]::Reverse($x, 1, 1)\nWrite-Output (1, 2, 3)')
+
+    def test_an_empty_range_at_the_far_end_of_the_array_still_fits_inside_it(self):
+        # An index one past the last element with a length of zero is the boundary that fits: what
+        # has to be inside the array is `index + length`, not `index`.
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n[Array]::Reverse($x, 3, 0)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = 1, 2, 3\n[Array]::Reverse($x, 3, 0)\nWrite-Output (1, 2, 3)')
+
+    def test_a_range_that_does_not_fit_inside_the_array_is_not_answered(self):
+        # 5.1 writes an error record and leaves `1`, `2` and `3`: the call throws where the range
+        # runs past the end, so nothing is reversed.
+        self._assertUnchanged(
+            '$x = 1, 2, 3\n[Array]::Reverse($x, 0, 99)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_a_range_whose_length_is_not_a_known_number_is_not_answered(self):
+        self._assertUnchanged(
+            '$x = 1, 2, 3\n[Array]::Reverse($x, 0, $n)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_reversing_a_string_does_not_reverse_the_string(self):
+        # 5.1 prints `abc`: a String bound to the `System.Array` parameter is converted to a fresh
+        # one-element `object[]`, and that copy is what gets reversed and discarded.
+        self._assertUnchanged(
+            "$s = 'abc'\n[Array]::Reverse($s)\nWrite-Output $s", Ps1ConstantInlining)
+
+
+class TestPs1AnArrayReachedByTwoNamesIsWrittenThroughEither(TestPs1):
+    """
+    `$y = $x` gives one array two names rather than two arrays, so a call writing through either
+    name is a write the other name's reads observe. Replacing the bare `$x` in `$y = $x` with the
+    array's value would turn that share into a copy, which no later write would reach.
+    """
+
+    def test_a_reversal_through_one_name_is_seen_by_a_read_of_the_other(self):
+        # 5.1 prints `3`, `2` and `1`.
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n$y = $x\n[Array]::Reverse($x)\nWrite-Output $y',
+                Ps1ConstantInlining),
+            '$x = 1, 2, 3\n$y = $x\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)')
+
+    def test_the_share_survives_a_read_of_it_that_cannot_be_answered(self):
+        self._assertUnchanged(
+            '$x = 1, 2, 3\n$y = $x\n[Array]::Reverse($x)\nWrite-Output $y[$env:I]',
+            Ps1ConstantInlining)
+
+    def test_a_reversal_through_the_second_name_is_not_answered_for_the_first(self):
+        # 5.1 prints `3`, `2` and `1`: `$y` and `$x` name the same array either way round.
+        self._assertUnchanged(
+            '$x = 1, 2, 3\n$y = $x\n[Array]::Reverse($y)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_an_element_written_through_the_second_name_is_not_answered_for_the_first(self):
+        # 5.1 prints `9`, `2` and `3`.
+        self._assertUnchanged(
+            '$x = 1, 2, 3\n$y = $x\n$y[0] = 9\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_rebinding_one_name_does_not_change_the_array_the_other_holds(self):
+        # 5.1 prints `1`, `2` and `3`: the third statement rebinds `$x` rather than writing to the
+        # array. Nothing writes through this array, so copying it into `$y` is faithful here.
+        self.assertEqual(
+            self._apply(
+                '$x = 1, 2, 3\n$y = $x\n$x = 9, 9, 9\nWrite-Output $y', Ps1ConstantInlining),
+            '$y = (1, 2, 3)\nWrite-Output $y')
 
 
 class TestPs1AMethodFoldsOnlyWhereItsReceiverCarriesTheOverload(TestPs1):

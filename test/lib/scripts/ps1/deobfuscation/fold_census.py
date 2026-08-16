@@ -135,42 +135,30 @@ FOLDS: dict[str, str] = {
         "Write-Host 'x'",
     "$h = @{ k = 'Set-Alias zzq Write-Host' }; Set-Alias zzq Write-Output; iex $h.k; zzq 'x'":
         "$h = @{\n  k = 'Set-Alias zzq Write-Host'\n}\nSet-Alias zzq Write-Output\nInvoke-Expression $h.k\nzzq 'x'",
-    "$s = 'abc'; [Array]::Reverse($s); Write-Output $s":
-        "Write-Output 'cba'",
     '$x = 1, 2, 3; Write-Output $x[0]; [Array]::Reverse($x); Write-Output $x[0]':
-        'Write-Output 3\nWrite-Output 3',
-    '$x = 1, 2, 3; $x[0] = 9; [Array]::Reverse($x); Write-Output $x':
-        '$x = 3, 2, 1\n$x[0] = 9\nWrite-Output $x',
+        '$x = 1, 2, 3\nWrite-Output 1\n[Array]::Reverse($x)\nWrite-Output 3',
     '$x = 1, 2, 3; Write-Output $x[0]; $x[0] = 9; Write-Output $x[0]':
         '$x = 1, 2, 3\nWrite-Output 1\n$x[0] = 9\nWrite-Output $x[0]',
     '$x = 1, 2, 3; $y = $x; Write-Output $y[0]; [Array]::Reverse($x); Write-Output $y[0]':
-        'Write-Output 3\nWrite-Output 3',
+        '$x = 1, 2, 3\n$y = $x\nWrite-Output $y[0]\n[Array]::Reverse($x)\nWrite-Output 3',
     "$x = 1, 2, 3; $c = '$x = 7, 8, 9'; iex $c; [Array]::Reverse($x); Write-Output $x":
-        'Write-Output (7, 8, 9)',
-    'function f { [Array]::Reverse($x) }; $x = 1, 2, 3; f; Write-Output $x':
-        'function f {\n  [Array]::Reverse($x)\n}\nf\nWrite-Output (1, 2, 3)',
-    "$x = $(Write-Host 'a'; 1), $(Write-Host 'b'; 2); [Array]::Reverse($x); Write-Output $x":
-        "$x = $(Write-Host 'b'\n2), $(Write-Host 'a'\n1)\nWrite-Output $x",
+        '$x = 7, 8, 9\n[Array]::Reverse($x)\nWrite-Output (9, 8, 7)',
     '$x = 1, 2, 3; $r = [Array]::Reverse($x); Write-Output $x':
-        'Write-Output (1, 2, 3)',
-    '$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x':
-        '[Array]::Clear((1, 2, 3), 0, 1)\nWrite-Output (1, 2, 3)',
+        '$x = 1, 2, 3\n$Null = [Array]::Reverse($x)\nWrite-Output (3, 2, 1)',
     '$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y':
-        '[Array]::Copy((1, 2, 3), (0, 0, 0), 3)\nWrite-Output (0, 0, 0)',
+        '$y = 0, 0, 0\n[Array]::Copy((1, 2, 3), $y, 3)\nWrite-Output $y',
     '$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x':
-        '[Array]::Reverse((1, 2, 3), 0, 2)\nWrite-Output (1, 2, 3)',
-    '$x = 1, 2, 3; $x.SetValue(9, 0); Write-Output $x':
-        '(1, 2, 3).SetValue(9, 0)\nWrite-Output (1, 2, 3)',
+        '$x = 1, 2, 3\n[Array]::Reverse($x, 0, 2)\nWrite-Output (2, 1, 3)',
     '$x = 1, 2, 3; $y = 0, 0, 0; $x.CopyTo($y, 0); Write-Output $y':
-        '(1, 2, 3).CopyTo((0, 0, 0), 0)\nWrite-Output (0, 0, 0)',
-    '$x = 1, 2, 3; $y = $x; $y[0] = 9; Write-Output $x[0]':
-        '$y = (1, 2, 3)\n$y[0] = 9\nWrite-Output 1',
+        '$y = 0, 0, 0\n(1, 2, 3).CopyTo($y, 0)\nWrite-Output $y',
     '$x = 1, 2, 3; for ($i = 0; $i -lt 2; $i++) { Write-Output $x[0]; [Array]::Reverse($x) }':
-        'for ($i = 0; $i -LT 2; $i++) {\n  Write-Output 1\n  [Array]::Reverse((1, 2, 3))\n}',
+        '$x = 1, 2, 3\nfor ($i = 0; $i -LT 2; $i++) {\n  Write-Output $x[0]\n  [Array]::Reverse($x)\n}',
     '$x = 1, 2, 3; [Array]::Reverse(($x)); Write-Output $x':
-        '[Array]::Reverse(((1, 2, 3)))\nWrite-Output (1, 2, 3)',
-    '$p = @(@(1, 2), @(3, 4)); [Array]::Reverse($p[0]); Write-Output $p[0]':
-        '[Array]::Reverse((1, 2))\nWrite-Output (1, 2)',
+        '$x = 1, 2, 3\n[Array]::Reverse(($x))\nWrite-Output (3, 2, 1)',
+    '$x = 1, 2, 3; [Array]::Reverse($script:x); Write-Output $x':
+        '$x = 1, 2, 3\n[Array]::Reverse($script:x)\nWrite-Output (3, 2, 1)',
+    '$x = 1, 2, 3; $y = $x; $x = 9, 9, 9; Write-Output $y':
+        'Write-Output (1, 2, 3)',
     "function Get-Zqfrob { Write-Output 'hit' }; Zqfrob":
         "function Get-Zqfrob {\n  Write-Output 'hit'\n}\nGet-zqfrob",
     "function Get-Zqfrob { Write-Output 'p' }; function Zqfrob { Write-Output 'b' }; Zqfrob":
@@ -191,8 +179,6 @@ FOLDS: dict[str, str] = {
         'Write-Host $global:y',
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":
         "$False -and ($x = 'b')\nWrite-Host 'b'",
-    "$x = @('b', 'a'); [Array]::Sort($x); Write-Host $x[0]":
-        "[Array]::Sort(('b', 'a'))\nWrite-Host 'b'",
     "$x = 'a'; function f { Write-Host $x }; f; $x = 'c'":
         "$x = 'a'\nfunction f {\n  Write-Host $x\n}\nf",
     "$v = 'a'; & { Write-Host $v }; $v = 'c'":

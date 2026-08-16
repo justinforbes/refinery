@@ -202,6 +202,24 @@ def _element_stores(root: Node, key: str) -> list[Ps1AssignmentExpression]:
     ]
 
 
+def _supplies_array(root: Node, node: Node | None, values: list) -> bool:
+    """
+    Whether `node` still hands on an array of `values`: either it spells them where it stands, or it
+    names a variable that `root` stores them into. An array that is only read for what it holds is
+    the same array to whoever receives it however the output spells it, so both are the one the call
+    was given; a variable written through is not, and `_reads_variable` is what asks after that.
+    """
+    if _emitted_constants(node) == values:
+        return True
+    operand = _unwrap(node)
+    if not isinstance(operand, Ps1Variable):
+        return False
+    return any(
+        _emitted_constants(store.value) == values
+        for store in _stores(root, _binding_key(operand))
+    )
+
+
 def _commands(root: Node) -> list[Ps1CommandInvocation]:
     """
     Every command invocation in `root`, in the order the source spells them.
@@ -598,7 +616,6 @@ class TestPs1Corruptions(TestPs1):
                     'the store from the unevaluated operand is now reached unconditionally',
                 )
 
-    @unittest.expectedFailure
     def test_array_sort_sorts_the_variable_in_place(self):
         """
         `$x = @('b', 'a'); [Array]::Sort($x); Write-Host $x[0]` prints `a` under 5.1: the call
@@ -1093,7 +1110,6 @@ class TestPs1Corruptions(TestPs1):
             "$env:z = '7'; $ok = [int]::TryParse('42', [ref]$env:z); Write-Host $env:z")
         self._assertPrints(tree, 'env:z', '7', '42')
 
-    @unittest.expectedFailure
     def test_two_names_for_one_array_both_see_it_reversed(self):
         """
         `$x = 1, 2, 3; $y = $x; Write-Output $y[0]; [Array]::Reverse($x); Write-Output $y[0]` writes
@@ -1110,7 +1126,6 @@ class TestPs1Corruptions(TestPs1):
             aliased and _mutates_through_argument(tree, 'array', 'reverse', 'x'),
         )
 
-    @unittest.expectedFailure
     def test_invoke_expression_rebinds_the_array_that_is_reversed_after_it(self):
         """
         `$x = 1, 2, 3; $c = '$x = 7, 8, 9'; iex $c; [Array]::Reverse($x); Write-Output $x` writes
@@ -1126,7 +1141,6 @@ class TestPs1Corruptions(TestPs1):
             _mutates_through_argument(tree, 'array', 'reverse', 'x'),
         )
 
-    @unittest.expectedFailure
     def test_function_body_reverses_the_callers_array_in_place(self):
         """
         `function f { [Array]::Reverse($x) }; $x = 1, 2, 3; f; Write-Output $x` writes `3`, `2` and
@@ -1144,7 +1158,6 @@ class TestPs1Corruptions(TestPs1):
             stores_the_array and _mutates_through_argument(tree, 'array', 'reverse', 'x'),
         )
 
-    @unittest.expectedFailure
     def test_reversal_does_not_reorder_the_effects_that_build_the_array(self):
         """
         `$x = $(Write-Host 'a'; 1), $(Write-Host 'b'; 2); [Array]::Reverse($x); Write-Output $x`
@@ -1165,7 +1178,6 @@ class TestPs1Corruptions(TestPs1):
             'the array was written in the order it held before the reversal',
         )
 
-    @unittest.expectedFailure
     def test_reverse_mutates_its_argument_even_when_its_result_is_stored(self):
         """
         `$x = 1, 2, 3; $r = [Array]::Reverse($x); Write-Output $x` writes `3`, `2` and `1` under
@@ -1180,7 +1192,6 @@ class TestPs1Corruptions(TestPs1):
             _mutates_through_argument(tree, 'array', 'reverse', 'x'),
         )
 
-    @unittest.expectedFailure
     def test_clear_blanks_the_range_of_the_array_the_variable_holds(self):
         """
         `$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x` writes an empty line and then `2`
@@ -1194,23 +1205,29 @@ class TestPs1Corruptions(TestPs1):
             _mutates_through_argument(tree, 'array', 'clear', 'x'),
         )
 
-    @unittest.expectedFailure
     def test_copy_writes_through_its_destination_argument(self):
         """
         `$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y` writes `1`, `2` and
-        `3` under 5.1: the call fills the array `$y` holds and returns nothing.
+        `3` under 5.1: the call fills the array `$y` holds and returns nothing. Only the destination
+        is written through, so the source is a value the call reads and may be spelled as one, while
+        the destination has to keep naming the variable the read below observes, the array that
+        variable is given has to keep room for what is copied into it, and the count has to stay the
+        three elements 5.1 was measured writing.
         """
         tree = self._deobfuscated_tree(
             '$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y')
+        holds_the_destination = any(
+            _emitted_constants(store.value) == [0, 0, 0] for store in _stores(tree, 'y'))
         copies_into_the_variable = any(
             len(call.arguments) == 3
-            and _reads_variable(call.arguments[0], 'x')
+            and _supplies_array(tree, call.arguments[0], [1, 2, 3])
             and _reads_variable(call.arguments[1], 'y')
+            and _literal_value(call.arguments[2]) == 3
             for call in _static_calls(tree, 'array', 'copy')
         )
-        self._assertWrites(tree, [[1, 2, 3]], [[0, 0, 0]], copies_into_the_variable)
+        self._assertWrites(
+            tree, [[1, 2, 3]], [[0, 0, 0]], holds_the_destination and copies_into_the_variable)
 
-    @unittest.expectedFailure
     def test_reverse_with_a_range_turns_around_only_that_part(self):
         """
         `$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x` writes `2`, `1` and `3` under
@@ -1226,7 +1243,6 @@ class TestPs1Corruptions(TestPs1):
         )
         self._assertWrites(tree, [[2, 1, 3]], [[1, 2, 3]], reverses_the_range)
 
-    @unittest.expectedFailure
     def test_set_value_writes_through_the_receiver(self):
         """
         `$x = 1, 2, 3; $x.SetValue(9, 0); Write-Output $x` writes `9`, `2` and `3` under 5.1: the
@@ -1237,22 +1253,28 @@ class TestPs1Corruptions(TestPs1):
             _reads_variable(call.object, 'x') for call in _instance_calls(tree, 'setvalue'))
         self._assertWrites(tree, [[9, 2, 3]], [[1, 2, 3]], writes_into_the_variable)
 
-    @unittest.expectedFailure
     def test_copy_to_writes_through_its_destination_argument(self):
         """
         `$x = 1, 2, 3; $y = 0, 0, 0; $x.CopyTo($y, 0); Write-Output $y` writes `1`, `2` and `3`
-        under 5.1: the method fills the array `$y` holds and returns nothing.
+        under 5.1: the method fills the array `$y` holds and returns nothing. The receiver is only
+        read, so it is a value the call reads and may be spelled as one, while the argument has to
+        keep naming the variable the read below observes, the array that variable is given has to
+        keep room for what is copied into it, and the copy has to keep starting where it did.
         """
         tree = self._deobfuscated_tree(
             '$x = 1, 2, 3; $y = 0, 0, 0; $x.CopyTo($y, 0); Write-Output $y')
+        holds_the_destination = any(
+            _emitted_constants(store.value) == [0, 0, 0] for store in _stores(tree, 'y'))
         copies_into_the_variable = any(
-            _reads_variable(call.object, 'x')
-            and any(_reads_variable(argument, 'y') for argument in call.arguments)
+            _supplies_array(tree, call.object, [1, 2, 3])
+            and len(call.arguments) == 2
+            and _reads_variable(call.arguments[0], 'y')
+            and _literal_value(call.arguments[1]) == 0
             for call in _instance_calls(tree, 'copyto')
         )
-        self._assertWrites(tree, [[1, 2, 3]], [[0, 0, 0]], copies_into_the_variable)
+        self._assertWrites(
+            tree, [[1, 2, 3]], [[0, 0, 0]], holds_the_destination and copies_into_the_variable)
 
-    @unittest.expectedFailure
     def test_element_store_through_one_name_is_seen_through_the_other(self):
         """
         `$x = 1, 2, 3; $y = $x; $y[0] = 9; Write-Output $x[0]` writes `9` under 5.1: the assignment
@@ -1263,7 +1285,6 @@ class TestPs1Corruptions(TestPs1):
         aliased = any(_reads_variable(store.value, 'x') for store in _stores(tree, 'y'))
         self._assertWrites(tree, [[9]], [[1]], aliased and bool(_element_stores(tree, 'y')))
 
-    @unittest.expectedFailure
     def test_loop_reads_the_array_the_previous_iteration_reversed(self):
         """
         `$x = 1, 2, 3; for ($i = 0; $i -lt 2; $i++) { Write-Output $x[0]; [Array]::Reverse($x) }`
@@ -1282,7 +1303,6 @@ class TestPs1Corruptions(TestPs1):
             'the reversal that makes the two iterations differ no longer reaches the array',
         )
 
-    @unittest.expectedFailure
     def test_parentheses_around_the_argument_do_not_stop_the_reversal(self):
         """
         `$x = 1, 2, 3; [Array]::Reverse(($x)); Write-Output $x` writes `3`, `2` and `1` under 5.1:
@@ -1297,7 +1317,6 @@ class TestPs1Corruptions(TestPs1):
             _mutates_through_argument(tree, 'array', 'reverse', 'x'),
         )
 
-    @unittest.expectedFailure
     def test_reversing_an_element_of_an_array_of_arrays_mutates_that_element(self):
         """
         `$p = @(@(1, 2), @(3, 4)); [Array]::Reverse($p[0]); Write-Output $p[0]` writes `2` and then

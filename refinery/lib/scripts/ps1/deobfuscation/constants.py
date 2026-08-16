@@ -18,9 +18,11 @@ from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
     binding_key,
     is_assignment_write_target,
+    is_mutated_in_place,
     is_substitutable_position,
     is_write_occurrence,
 )
+from refinery.lib.scripts.ps1.analysis.mutation import value_after
 from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
 from refinery.lib.scripts.ps1.analysis.values import (
     UNKNOWN,
@@ -36,10 +38,6 @@ from refinery.lib.scripts.ps1.ast import (
     unwrap_parens,
 )
 from refinery.lib.scripts.ps1.data import PS1_KNOWN_VARIABLES
-from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    is_array_reverse_call,
-    iter_variable_mutations,
-)
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlans
 from refinery.lib.scripts.ps1.deobfuscation.substitution import substitute, substitute_field
 from refinery.lib.scripts.ps1.model import (
@@ -157,21 +155,22 @@ _MIN_EXPANSION_BUDGET = 256
 
 def _collect_mutated_variables(root: Node) -> set[str]:
     """
-    Return the set of variable keys that are written to anywhere in the AST. This includes
-    assignment targets, ForEach loop variables, ++/-- operands, and parameter declarations.
+    Every variable key some occurrence in the tree writes: an assignment target, a `foreach`
+    variable, a `++`/`--` operand, a parameter, a `[ref]`, a store through a part of the value, and
+    a slot of a call the callee writes through.
+
+    That list is `refinery.lib.scripts.ps1.analysis.model.is_write_occurrence`'s to keep, and this
+    asks it rather than repeating it. The partial copy it replaces knew about assignments and
+    `[Array]::Reverse` and about nothing else, so a name only `[Array]::Sort` or `.CopyTo` ever
+    wrote read as never written at all.
     """
     mutated: set[str] = set()
-    for var, _kind, _node in iter_variable_mutations(root):
-        key = _candidate_key(var)
+    for node in root.walk():
+        if not isinstance(node, Ps1Variable) or not is_write_occurrence(node):
+            continue
+        key = _candidate_key(node)
         if key is not None:
             mutated.add(key)
-    for node in root.walk():
-        if isinstance(node, Ps1ExpressionStatement):
-            rv = is_array_reverse_call(node)
-            if rv is not None:
-                key = _candidate_key(rv)
-                if key is not None:
-                    mutated.add(key)
     return mutated
 
 
@@ -205,6 +204,57 @@ def _survives_this_position(value: Node, occurrence: Ps1Variable) -> bool:
         return True
     return not isinstance(
         _ancestor_past_parens(occurrence), (Ps1BinaryExpression, Ps1UnaryExpression))
+
+
+def _preserves_sharing(occurrence: Ps1Variable, state: _Inlining) -> bool:
+    """
+    Whether installing a value where *occurrence* stands leaves every other name for the object it
+    reads observing what it observed.
+
+    A bare read hands over the object the name holds rather than a copy of it, so `$y = $x` gives
+    one array two names. Writing the array's value where `$x` stands gives `$y` an array of its own
+    instead, and a `[Array]::Reverse($x)` below then reaches one of them and not the other — the
+    output prints an order the script never had. Measured: without this, `$x = 1, 2, 3; $y = $x;
+    $y[0] = 9; Write-Output $x[0]` emits `1` where 5.1 prints `9`.
+
+    It only bites where the object is changed in place. A binding nothing stores through holds the
+    same value under every name for it, so there a copy and a share are the same thing and the
+    substitution is what it always was — which is what keeps `$y = $x` folding in the ordinary case.
+    """
+    stored_into = _assignment_target_binding(occurrence, state)
+    if stored_into is None:
+        return True
+    read_from = state.binding_of(occurrence)
+    return not any(
+        write.role.through
+        for binding in (stored_into, read_from)
+        if binding is not None
+        for write in binding.writes
+    )
+
+
+def _assignment_target_binding(occurrence: Ps1Variable, state: _Inlining) -> Binding | None:
+    """
+    The binding a plain assignment stores *occurrence* into, where the occurrence is the whole of
+    what it stores, or `None` where it is not.
+
+    Parentheses and array literals are climbed, because both hand the object on: `$a = ,$x` builds a
+    fresh outer array whose one element is the array `$x` names, so a value written for `$x` there
+    is as much a copy as `$y = $x` would be.
+    """
+    cursor: Node = occurrence
+    parent = cursor.parent
+    while isinstance(parent, (Ps1ParenExpression, Ps1ArrayLiteral)):
+        cursor = parent
+        parent = cursor.parent
+    if not isinstance(parent, Ps1AssignmentExpression) or parent.operator != '=':
+        return None
+    if parent.value is not cursor:
+        return None
+    targets = assignment_target_variables(parent.target)
+    if len(targets) != 1:
+        return None
+    return state.binding_of(targets[0])
 
 
 def _ancestor_past_parens(node: Node) -> Node | None:
@@ -456,6 +506,9 @@ class _Inlining:
         """
         The constant *var* holds where it stands, or `None` when no single value does.
         """
+        return self._value_at(var, key, frozenset())
+
+    def _value_at(self, var: Ps1Variable, key: str, chased: frozenset[int]) -> Expression | None:
         binding = self.binding_of(var)
         if binding is None:
             value = self.table.ambient.get(key)
@@ -465,7 +518,12 @@ class _Inlining:
         write = self.flow.reaching_definition(var)
         if write is None:
             return None
-        return self.table.by_write.get(id(write))
+        if not isinstance(write, Ps1Variable) or not is_mutated_in_place(write):
+            return self.table.by_write.get(id(write))
+        if id(write) in chased:
+            return None
+        previous = self._value_at(write, key, chased | {id(write)})
+        return None if previous is None else value_after(write, previous)
 
     def binding_of(self, var: Ps1Variable) -> Binding | None:
         return self.flow.semantic.binding_of(var)
@@ -624,6 +682,8 @@ class Ps1ConstantInlining(Transformer):
     ) -> None:
         const_value = state.value_at(node, key)
         if const_value is None or not _survives_this_position(const_value, node):
+            return
+        if not _preserves_sharing(node, state):
             return
         if isinstance(node.parent, Ps1ExpandableString):
             replacement = _interpolated(const_value, node, state.flow)

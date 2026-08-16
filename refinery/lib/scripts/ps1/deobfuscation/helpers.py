@@ -3,11 +3,10 @@ Shared utilities for PowerShell deobfuscation transforms.
 """
 from __future__ import annotations
 
-import enum
 import math
 import re
 
-from typing import Callable, Generator, NamedTuple, TypeGuard
+from typing import Callable, TypeGuard
 
 from refinery.lib.scripts import Node, Transformer, set_value
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
@@ -18,12 +17,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     integer_of,
     make_string_literal,
 )
-from refinery.lib.scripts.ps1.ast import (
-    assignment_target_variables,
-    get_member_name,
-    string_value,
-    unwrap_assignment_target,
-)
+from refinery.lib.scripts.ps1.ast import get_member_name, string_value
 from refinery.lib.scripts.ps1.data import FOREACH_ALIASES, FORMAT_PATTERN, is_type
 from refinery.lib.scripts.ps1.deobfuscation.substitution import substitute_field
 from refinery.lib.scripts.ps1.model import (
@@ -35,35 +29,17 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1ExpressionStatement,
-    Ps1ForEachLoop,
     Ps1HereString,
-    Ps1IndexExpression,
     Ps1InvokeMember,
     Ps1MemberAccess,
-    Ps1ParameterDeclaration,
     Ps1ParenExpression,
     Ps1ScopeModifier,
     Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1TypeExpression,
-    Ps1UnaryExpression,
     Ps1Variable,
 )
-
-
-class MutationKind(enum.Enum):
-    ASSIGN = 'assign'
-    MEMBER_ASSIGN = 'member_assign'
-    FOREACH = 'foreach'
-    INCRDECR = 'incrdecr'
-    PARAM = 'param'
-
-
-class VariableMutation(NamedTuple):
-    variable: Ps1Variable
-    kind: MutationKind
-    node: Node
 
 
 def store_dropped_to_value(rhs: Expression) -> Ps1ExpressionStatement:
@@ -170,34 +146,6 @@ def detect_encoding_chain(node: Ps1InvokeMember) -> str | None:
     return enc_name
 
 
-def iter_variable_mutations(
-    root: Node,
-) -> Generator[VariableMutation, None, None]:
-    """
-    Walk the AST and yield a `VariableMutation` for every node that mutates a variable.
-    """
-    for node in root.walk():
-        if isinstance(node, Ps1AssignmentExpression):
-            variables = assignment_target_variables(node.target)
-            if variables:
-                for variable in variables:
-                    yield VariableMutation(variable, MutationKind.ASSIGN, node)
-            else:
-                target = unwrap_assignment_target(node.target)
-                if isinstance(target, (Ps1IndexExpression, Ps1MemberAccess)):
-                    if isinstance(target.object, Ps1Variable):
-                        yield VariableMutation(target.object, MutationKind.MEMBER_ASSIGN, node)
-        elif isinstance(node, Ps1ForEachLoop):
-            if isinstance(node.variable, Ps1Variable):
-                yield VariableMutation(node.variable, MutationKind.FOREACH, node)
-        elif isinstance(node, Ps1UnaryExpression):
-            if node.operator in ('++', '--') and isinstance(node.operand, Ps1Variable):
-                yield VariableMutation(node.operand, MutationKind.INCRDECR, node)
-        elif isinstance(node, Ps1ParameterDeclaration):
-            if isinstance(node.variable, Ps1Variable):
-                yield VariableMutation(node.variable, MutationKind.PARAM, node)
-
-
 def extract_foreach_scriptblock(expr: Expression) -> Ps1ScriptBlock | None:
     if not isinstance(expr, Ps1CommandInvocation):
         return None
@@ -227,30 +175,6 @@ def is_pipeline_item(node: Node | None) -> TypeGuard[Ps1Variable]:
         and node.scope == Ps1ScopeModifier.NONE
         and node.name.lower() in ('_', 'psitem')
     )
-
-
-def is_array_reverse_call(node: Ps1ExpressionStatement) -> Ps1Variable | None:
-    """
-    If the statement is `[Array]::Reverse($var)`, return the variable node.
-    """
-    expr = node.expression
-    if not isinstance(expr, Ps1InvokeMember):
-        return None
-    if expr.access != Ps1AccessKind.STATIC:
-        return None
-    if not isinstance(expr.object, Ps1TypeExpression):
-        return None
-    if not is_type(expr.object.name, 'System.Array'):
-        return None
-    member = get_member_name(expr.member)
-    if member is None or member.lower() != 'reverse':
-        return None
-    if len(expr.arguments) != 1:
-        return None
-    arg = expr.arguments[0]
-    if isinstance(arg, Ps1Variable):
-        return arg
-    return None
 
 
 def ps_divide(a: int | float, b: int | float) -> int | float:

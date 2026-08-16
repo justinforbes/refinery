@@ -35,6 +35,7 @@ from typing import Iterator, NamedTuple, Sequence, TypeGuard
 from refinery.lib.scripts import Block, Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
+from refinery.lib.scripts.ps1.analysis.arguments import Ps1WrittenSlots, written_slots
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
 from refinery.lib.scripts.ps1.analysis.values import candidate_types, integer_of, read
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
@@ -98,67 +99,23 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 
-def _canonical_type_name(name: str) -> Ps1TypeName:
-    """
-    Resolve a purity allow-list type spelling to the lowercased canonical .NET `FullName` the effect
-    checks key on, raising when the collected metadata carries no such type. Building the tables
-    through this at import time is the fail-loud floor the metadata rework exists to provide: an
-    entry that names a type the current data cannot resolve stops the module from loading rather
-    than going silently unmatched, which is how a stale allow-list used to fail open. A generic
-    type is named by its arity-marked definition (`collections.generic.list` `` `1 ``), the only
-    spelling `refinery.lib.scripts.ps1.data.resolve_type` resolves without its type arguments.
-    """
-    resolved = data.resolve_type(name)
-    if resolved is None:
-        raise ValueError(
-            F'the PowerShell purity allow-list names {name!r}, which the collected metadata does '
-            F'not resolve to a type; the data and the allow-list are out of step.'
-        )
-    return resolved.generic_definition
-
-
-def _canonical_type_set(names: set[str]) -> frozenset[Ps1TypeName]:
-    """
-    A frozenset of canonical type keys built from readable source spellings through
-    `_canonical_type_name`. Spellings that name the same type collapse to one entry, retiring the
-    dual-spelling entries (`int` beside `int32`) the allow-lists carried before the data could
-    resolve them.
-    """
-    return frozenset(_canonical_type_name(name) for name in names)
-
-
-def _canonical_method_set(
-    entries: set[tuple[str, str]],
-) -> frozenset[tuple[Ps1TypeName, str]]:
-    """
-    A frozenset of `(canonical type key, lowercased member)` pairs, the form the static-method
-    checks look up. Only the type half is resolved through the data and floored by it; the member
-    name is matched against a `refinery.lib.scripts.ps1.model.Ps1InvokeMember.member` at its own
-    casing.
-    """
-    return frozenset(
-        (_canonical_type_name(type_name), member.lower())
-        for type_name, member in entries
-    )
-
-
 def _canonical_read_set(
     entries: set[tuple[str, str]],
 ) -> frozenset[tuple[Ps1TypeName, str]]:
     """
-    A frozenset of `(canonical type key, lowercased member)` reads, each floored against the data the
-    way `_canonical_type_name` floors a type: the type must resolve, and the member must be collected
-    as a reflection property or field. An *instance* field needs no entry — reading a bare memory slot
-    runs no code — so this table is for a property (whose getter may run code) or a *static* field
-    (whose first read runs the declaring type's static constructor). An entry that names an Extended
-    Type System member (which runs code) or a member the type no longer carries fails the load rather
-    than silently granting a read the data cannot vouch for. It keys on the same canonical `FullName`
-    as the invoke-side tables, so the per-member effect data a later regeneration adds can replace it
-    without rekeying.
+    A frozenset of `(canonical type key, lowercased member)` reads, each floored against the
+    data the way `data.required_type_key` floors a type: the type must resolve, and the member
+    must be collected as a reflection property or field. An *instance* field needs no entry —
+    reading a bare memory slot runs no code — so this table is for a property (whose getter may run
+    code) or a *static* field (whose first read runs the declaring type's static constructor). An
+    entry that names an Extended Type System member (which runs code) or a member the type no longer
+    carries fails the load rather than silently granting a read the data cannot vouch for. It keys
+    on the same canonical `FullName` as the invoke-side tables, so the per-member effect data a
+    later regeneration adds can replace it without rekeying.
     """
     result: set[tuple[Ps1TypeName, str]] = set()
     for type_name, member in entries:
-        type_key = _canonical_type_name(type_name)
+        type_key = data.required_type_key(type_name)
         record = data.member_record(type_key, member)
         gated = isinstance(record, dict) and record['source'] == 'reflection' and (
             record['kind'] == 'property'
@@ -176,10 +133,10 @@ def _canonical_read_set(
 
 def _canonical_command_set(names: set[str]) -> frozenset[str]:
     """
-    A frozenset of lowercased command names, each floored against the collected metadata the way
-    `_canonical_type_name` floors a type: a name no capture host reported is a name this module has
-    no evidence about, and a table that keeps it fails open the moment the command is renamed or the
-    module holding it stops shipping. The load fails instead.
+    A frozenset of lowercased command names, each floored against the collected metadata the
+    way `data.required_type_key` floors a type: a name no capture host reported is a name this
+    module has no evidence about, and a table that keeps it fails open the moment the command is
+    renamed or the module holding it stops shipping. The load fails instead.
 
     This is for a table keyed on what a command *is*, never for a deny-list of what a script may do:
     `refinery.lib.scripts.ps1.analysis.world` names `start-threadjob` and `remove-alias`, which the
@@ -198,13 +155,14 @@ def _canonical_command_set(names: set[str]) -> frozenset[str]:
 
 def _canonical_sealed_value_type_set(names: set[str]) -> frozenset[Ps1TypeName]:
     """
-    A frozenset of canonical type keys like `_canonical_type_set`, additionally floored against the
-    shipped `sealed` flag. A type on the pure-read allow-list must be sealed: the whole-surface
-    grant bets that a value of the type carries exactly the members reflection reports, which a
-    subtype could violate. An entry the collected metadata does not mark sealed fails the load,
+    A frozenset of canonical type keys like `data.required_type_keys`, additionally floored
+    against the shipped `sealed` flag. A type on the pure-read allow-list must be sealed: the
+    whole-surface grant bets that a value of the type carries exactly the members reflection
+    reports, which a subtype could violate. An entry the collected metadata does not mark sealed
+    fails the load,
     retiring the sealedness the table used to assert by hand.
     """
-    keys = _canonical_type_set(names)
+    keys = data.required_type_keys(names)
     for key in keys:
         if not data.type_is_sealed(key):
             raise ValueError(
@@ -224,7 +182,7 @@ def _canonical_sealed_value_type_set(names: set[str]) -> frozenset[Ps1TypeName]:
 #: `_is_writable_reference`, rather than per method. The readable source spellings are resolved to
 #: canonical `FullName` keys at import, so a spelling variant is one entry and an unresolvable name
 #: fails the load.
-_PURE_STATIC_METHOD_TYPES = _canonical_type_set({
+_PURE_STATIC_METHOD_TYPES = data.required_type_keys({
     'bitconverter',
     'char',
     'collections.arraylist',
@@ -250,7 +208,7 @@ _PURE_STATIC_METHOD_TYPES = _canonical_type_set({
     'version',
 })
 
-_PURE_STATIC_METHODS = _canonical_method_set({
+_PURE_STATIC_METHODS = data.required_member_keys({
     ('diagnostics.process', 'getcurrentprocess'),
     ('threading.tasks.task', 'delay'),
     ('array', 'asreadonly'),
@@ -267,30 +225,11 @@ _PURE_STATIC_METHODS = _canonical_method_set({
     ('environment', 'getlogicaldrives'),
 })
 
-#: Static members that mutate an argument in place — `[Array]::Reverse($buffer)` rewrites the array
-#: it is handed — on a type whose remaining static surface is pure enough to keep granting
-#: wholesale. The mutation is invisible to the signature: the argument is passed by value, and an
-#: array is a reference the call writes through without an `out`/`byref` marker, so these cannot
-#: fold into `_writes_through_out_parameter` and stay a hand-kept table. Deleting the table would
-#: let `[Convert]::ToBase64CharArray(...)`, which writes its output array the same unmarked way,
-#: reach the `convert` whole-type grant and be removed. Each is pure only when handed a temporary
-#: nothing else can read; that is `_denotes_shared_storage`.
-_MUTATING_STATIC_METHODS = _canonical_method_set({
-    ('array', 'clear'),
-    ('array', 'constrainedcopy'),
-    ('array', 'copy'),
-    ('array', 'fill'),
-    ('array', 'reverse'),
-    ('array', 'setvalue'),
-    ('array', 'sort'),
-    ('convert', 'tobase64chararray'),
-})
-
 #: Members that do something observable whatever they are handed, on a type whose remaining static
 #: surface is pure enough to keep granting wholesale. Unlike `_MUTATING_STATIC_METHODS` these are
 #: not saved by being called on a temporary: `[IO.Path]::GetTempFileName()` takes no arguments and
 #: still creates a file on disk.
-_IMPURE_STATIC_METHODS = _canonical_method_set({
+_IMPURE_STATIC_METHODS = data.required_member_keys({
     ('io.path', 'gettempfilename'),
 })
 
@@ -442,6 +381,24 @@ def _denotes_shared_storage(node) -> bool:
         else:
             break
     return isinstance(node, (Ps1Variable, Ps1MemberAccess, Ps1IndexExpression))
+
+
+def _writes_shared_storage(written: Ps1WrittenSlots, arguments: Sequence[Expression]) -> bool:
+    """
+    Whether a call writes through a slot holding storage something outside the call can already
+    reach. Such a call is a side effect; one that writes only temporaries is not, which is what
+    separates `[Array]::Reverse('ab'.ToCharArray())` — a junk statement whose result nothing can
+    read — from `[Array]::Reverse($buffer)`, which rewrites a live variable.
+
+    Only the slots the call actually writes are looked at, so `[Array]::Copy($live, $scratch, 3)` is
+    pure and `[Array]::Copy($scratch, $live, 3)` is not. The table this replaces asked the question
+    of every argument at once and called both of them impure.
+    """
+    return any(
+        _denotes_shared_storage(arguments[slot])
+        for slot in written.slots
+        if 0 <= slot < len(arguments)
+    )
 
 
 def _is_writable_reference(node) -> bool:
@@ -883,9 +840,11 @@ def is_side_effect_free(node, world: Ps1TypeWorld) -> bool:
                     key = (type_key, member.lower())
                     if key in _IMPURE_STATIC_METHODS:
                         return False
-                    if key in _MUTATING_STATIC_METHODS:
-                        pure = not any(_denotes_shared_storage(a) for a in node.arguments)
-                        return _grant(pure, node, world)
+                    written = written_slots(
+                        resolved, member, len(node.arguments), static=True)
+                    if written:
+                        return _grant(
+                            not _writes_shared_storage(written, node.arguments), node, world)
                     if _writes_through_out_parameter(obj.name, member, node.arguments):
                         return False
                     if type_key in _PURE_STATIC_METHOD_TYPES:
