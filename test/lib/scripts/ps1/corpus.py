@@ -336,6 +336,21 @@ BEHAVIOURS: tuple[str, ...] = (
     "[Convert]::ToBase64CharArray(1, 2, 3, 4); Write-Output 'after'",
     "[string]$q = 5; [System.String]$q = 'ab'; Write-Output $q",
     '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y',
+    '$x = 1, 2, 3; $o.P = $x; $x[0] = 9; Write-Output $o.P[0]',
+    '$x = 1, 2, 3; $l.Add($x); $x[0] = 9; Write-Output $l[0][0]',
+    '$x = 1, 2, 3; $o = New-Object PSObject; $o.P = $x; $x[0] = 9; Write-Output $o.P[0]',
+    '$x = 1, 2, 3; $l = New-Object Collections.ArrayList; [void]$l.Add($x); '
+    '$x[0] = 9; Write-Output $l[0][0]',
+    '$x = 1, 2, 3; $h = @{ k = $x }; $x[0] = 9; Write-Output $h[\'k\'][0]',
+    '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; $x[0] = 9; Write-Output $a[0][0]',
+    '$x = 1, 2, 3; $a, $b = $x, 9; $a[0] = 7; Write-Output $x[0]',
+    '$x = 1, 2, 3; $y = $x; . { $y = 9, 9, 9 }; [Array]::Reverse($x); Write-Output $y',
+    '$x = 1, 2, 3; $y = $x; & { $y = 9, 9, 9 }; [Array]::Reverse($x); Write-Output $y',
+    '[string]$y = 0; $x = 1, 2, 3; $y = $x; [Array]::Reverse($x); Write-Output $y',
+    "$x = 1, 2, 3; $h = @{}; $h['k'] = $x; [Array]::Reverse($h['k']); Write-Output $x",
+    '$p = @(@(1, 2), @(3, 4)); foreach ($e in $p) { [Array]::Reverse($e) }; Write-Output $p[0]',
+    '$x = 1, 2, 3; $y = if ($True) { $x }; $x[0] = 9; Write-Output $y[0]',
+    'function f($a) { $script:k = $a }; $x = 1, 2, 3; f $x; $x[0] = 9; Write-Output $k[0]',
 )
 
 

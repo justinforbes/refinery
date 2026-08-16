@@ -177,6 +177,24 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
     "$x = 'a'; &('i' + 'ex') '$x = \"b\"'; Write-Host $x":
         'The same write, reached through a computed command name, and here the call itself is '
         'deleted as well.',
+    '$x = 1, 2, 3; $a, $b = $x, 9; $a[0] = 7; Write-Output $x[0]':
+        'The read is folded to `1`. A multi-assignment slot is handed the very object standing '
+        'against it, so `$a` and `$x` name one array and the store through `$a` is a store into it; '
+        'the snippet prints `7`. The alias relation is minted from an assignment whose value is a '
+        'bare variable, and the climb breaks on the array literal a multi-assignment stands on.',
+    "$x = 1, 2, 3; $h = @{}; $h['k'] = $x; [Array]::Reverse($h['k']); Write-Output $x":
+        'The read is folded to the array as written. A container holds the object rather than a '
+        'copy of it, so reversing what the key names reverses what `$x` names and the snippet '
+        'prints `3 2 1`. The alias relation joins two *variables*, so nothing relates a name to an '
+        'object a container is holding for it.',
+    '$p = @(@(1, 2), @(3, 4)); foreach ($e in $p) { [Array]::Reverse($e) }; Write-Output $p[0]':
+        'The read is folded to the element as written. A `foreach` variable is bound to the element '
+        'object itself, which is the same hand-off an assignment of a bare variable is, so '
+        'reversing `$e` reverses the element and the snippet prints `2 1`.',
+    'function f($a) { $script:k = $a }; $x = 1, 2, 3; f $x; $x[0] = 9; Write-Output $k[0]':
+        'The argument is substituted, so the callee stores a second array and the read prints `1`. '
+        'The body keeps what it was handed, so `$k` and `$x` name one array and the snippet prints '
+        '`9`. Nothing asks what a called body does with an argument it is given.',
     '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y':
         'The read is folded to the reversal. A subexpression collects a fresh array rather than '
         'handing the object over, so the two names hold two arrays and the snippet writes `1 2 3`. '

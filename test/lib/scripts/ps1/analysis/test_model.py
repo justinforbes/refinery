@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from test import TestBase
 
 from refinery.lib.scripts.ps1.analysis.arguments import RECEIVER, _floored
@@ -711,3 +713,56 @@ class TestPs1TheWrittenSlotTableIsFlooredAgainstTheCollectedMetadata(TestBase):
         self.assertEqual(
             list(built.values()),
             [{arity: frozenset({RECEIVER}) for arity in (2, 3, 4)}])
+
+
+class TestPs1AChainOfAliasesCostsAboutWhatItsLengthCosts(TestBase):
+    """
+    The input is written by whoever is being analysed, and a chain of names for one array with a
+    couple of mutating calls in it is one line of a generator. Such a chain may cost more than its
+    length and still be a model that finishes; what it may not do is cost so much more that making
+    the chain longer is a hang, which is exactly what an attacker writing the input is looking for.
+
+    The budget is a multiple of what the short chain cost in this same process rather than a number
+    of seconds, so that what is asserted is how the cost grows and not how fast the machine is, and
+    the shortest of several runs is taken at each length so that one stalled measurement cannot
+    decide it. Twenty times the cost for four times the input is generous: everything up to about
+    the square of the length passes.
+
+    The reversals are what the chain is written around: a chain carrying none of them, or one, is
+    answered a different way than a chain carrying two, and it was the second one that used to turn
+    the cost of the whole build superlinear.
+    """
+
+    _SHORT = 100
+    _LONG = 400
+    _BUDGET = 20
+    _RUNS = 3
+
+    @staticmethod
+    def _chain(length: int) -> str:
+        """
+        `length` definitions, each naming the one before it, with a reversal after the first third
+        and after the second. Every name is on the array the first line built, and every reversal
+        writes that array through whichever name it was handed.
+        """
+        lines = ['$a0 = 1, 2, 3']
+        for index in range(1, length):
+            lines.append(F'$a{index} = $a{index - 1}')
+            if index in (length // 3, length // 3 * 2):
+                lines.append(F'[Array]::Reverse($a{index})')
+        lines.append(F'Write-Output $a{length - 1}')
+        return '\n'.join(lines)
+
+    def _cost(self, length: int) -> float:
+        source = self._chain(length)
+        costs = []
+        for _ in range(self._RUNS + 1):
+            tree = Ps1Parser(source).parse()
+            start = time.perf_counter()
+            build_semantic_model(tree)
+            costs.append(time.perf_counter() - start)
+        return min(costs[1:])
+
+    def test_quadrupling_the_chain_does_not_cost_twenty_times_as_much(self):
+        short = self._cost(self._SHORT)
+        self.assertLess(self._cost(self._LONG), self._BUDGET * short)

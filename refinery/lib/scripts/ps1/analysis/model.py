@@ -33,12 +33,14 @@ from __future__ import annotations
 import enum
 import typing
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Iterator
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.analysis.arguments import (
+    NOTHING,
     RECEIVER,
     Ps1WrittenSlots,
     written_slots,
@@ -145,7 +147,7 @@ def occurrence_role(var: Ps1Variable) -> Ps1OccurrenceRole:
     """
     if _is_member_declaration(var):
         return Ps1OccurrenceRole.NOT_A_REFERENCE
-    if _stores_through(var) or _fills_a_call_slot(var) or fills_an_unreadable_call_slot(var):
+    if _stores_through(var) or _stores_through_a_call_slot(_enclosing_call_slot(var)):
         return Ps1OccurrenceRole.WRITE_THROUGH
     assignment = assignment_of(var)
     if assignment is not None:
@@ -299,8 +301,44 @@ class Ps1CallSlot(typing.NamedTuple):
     through_a_conversion: bool
 
 
-def _fills_a_call_slot(var: Ps1Variable) -> bool:
-    return written_call_slot(var) is not None
+def _stores_through_a_call_slot(found: _CallSlotPosition | None) -> bool:
+    """
+    Whether the callee may write the slot *found* names: because a row of the table says it does, or
+    because the member cannot be named and so no row can say it does not.
+
+    **A member nobody can read is a store-through and not merely a position no value may stand in.**
+    The table is keyed on a member name and `[Array]::$m($x)` has none to look up, so a miss there
+    means *no row was consulted* where a miss elsewhere means *no row claims this*. Refusing only
+    the substitution would leave the name looking unwritten and the read below the call answered by
+    the write above it — measured, `$m = 'Reverse'; $x = 1, 2, 3; [Array]::$m($x); $x[0]` is `3` on
+    5.1 and was folded to `1`. A member spelled indirectly is resolved by the next pass in almost
+    every script that has one, so what this costs is a fold delayed by an iteration.
+
+    The two questions share one climb because they are one question about one position, and asking
+    them separately made `occurrence_role` walk every occurrence's ancestors twice.
+    """
+    if found is None:
+        return False
+    if not isinstance(found.call.member, str):
+        return True
+    return found.slot in _written_slots_of(found.call).slots
+
+
+def _written_slots_of(call: Ps1InvokeMember) -> Ps1WrittenSlots:
+    """
+    Which slots of *call* the callee writes through, given only the call. The receiver's type is not
+    asked for; see `written_call_slot`.
+    """
+    member = call.member
+    if not isinstance(member, str):
+        return NOTHING
+    static = call.access is Ps1AccessKind.STATIC
+    named = call.object
+    resolved = (
+        data.resolve_type(named.name)
+        if static and isinstance(named, Ps1TypeExpression) else None
+    )
+    return written_slots(resolved, member, len(call.arguments), static=static)
 
 
 def written_call_slot(var: Ps1Variable) -> Ps1CallSlot | None:
@@ -317,48 +355,18 @@ def written_call_slot(var: Ps1Variable) -> Ps1CallSlot | None:
     `$x.Substring(1, 2)` is left alone because no row of the table mentions `Substring`.
 
     What stands between the name and the slot is `_enclosing_call_slot`'s to climb and to report.
-    A member this cannot name is not answered here at all — see `fills_an_unreadable_call_slot`,
-    which is the refusal that belongs to it.
+    A member this cannot name is not answered here at all: no row can be looked up for it, so no
+    row can be reported. That the occurrence is a write all the same is what
+    `_stores_through_a_call_slot` says, which is the refusal that belongs to it.
     """
     found = _enclosing_call_slot(var)
-    if found is None:
+    if found is None or not isinstance(found.call.member, str):
         return None
-    call = found.call
-    member = call.member
-    if not isinstance(member, str):
-        return None
-    static = call.access is Ps1AccessKind.STATIC
-    named = call.object
-    resolved = (
-        data.resolve_type(named.name)
-        if static and isinstance(named, Ps1TypeExpression) else None
-    )
-    written = written_slots(resolved, member, len(call.arguments), static=static)
+    written = _written_slots_of(found.call)
     if found.slot not in written.slots:
         return None
     return Ps1CallSlot(
-        call, found.slot, written, found.through_a_part, found.through_a_conversion)
-
-
-def fills_an_unreadable_call_slot(var: Ps1Variable) -> bool:
-    """
-    Whether *var* stands in a slot of a call whose member cannot be named — `[Array]::$m($x)`,
-    `$obj.$m($x)` — so that which member runs, and which slots it writes with it, is unknown.
-
-    `written_call_slot` answers `None` for such a call, because the table it consults is keyed on a
-    member name and there is none to look up. That answer means *no row claims this slot is
-    written*, which is right for a member the table does not mention and wrong for a member nobody
-    can read: measured, `$m = 'Reverse'; $x = 1, 2, 3; [Array]::$m($x); $x[0]` is `3` on 5.1 and
-    folded to `1`.
-
-    The occurrence is therefore a store-through, not merely a position no value may stand in.
-    Refusing only the substitution leaves the *name* looking unwritten, and the read below is then
-    answered by the write above the call — which is the wrong answer that was measured, reached by a
-    different route. A member spelled indirectly is resolved by the next pass in almost every script
-    that has one, so what this costs is a fold delayed by an iteration rather than a fold lost.
-    """
-    found = _enclosing_call_slot(var)
-    return found is not None and not isinstance(found.call.member, str)
+        found.call, found.slot, written, found.through_a_part, found.through_a_conversion)
 
 
 class _CallSlotPosition(typing.NamedTuple):
@@ -388,7 +396,7 @@ def _enclosing_call_slot(var: Ps1Variable) -> _CallSlotPosition | None:
     part = False
     converted = False
     while parent is not None:
-        conversion = isinstance(parent, Ps1CastExpression) or _is_conversion_operator(parent)
+        conversion = isinstance(parent, Ps1CastExpression) or is_conversion_operator(parent)
         reaching = isinstance(parent, (Ps1IndexExpression, Ps1MemberAccess))
         grouping = isinstance(parent, Ps1ParenExpression)
         if not conversion and not reaching and not grouping:
@@ -437,12 +445,12 @@ def _climbed_operand(node: Node) -> Node | None:
         return node.operand
     if isinstance(node, (Ps1IndexExpression, Ps1MemberAccess)):
         return node.object
-    if _is_conversion_operator(node):
+    if is_conversion_operator(node):
         return node.left
     return None
 
 
-def _is_conversion_operator(node: Node | None) -> typing.TypeGuard[Ps1BinaryExpression]:
+def is_conversion_operator(node: Node | None) -> typing.TypeGuard[Ps1BinaryExpression]:
     """
     Whether *node* is `-as`, which converts its left operand the way a cast does and hands over the
     very object where nothing needs converting: measured, `$x -as [array]` over an `Object[]` is the
@@ -541,33 +549,42 @@ class Ps1AliasLink(typing.NamedTuple):
         return self.first if binding is self.second else None
 
 
-def _alias_chain(
+def _alias_chains_from(
     links: list[Ps1AliasLink],
-    binding: Binding,
     source: Binding,
-) -> tuple[Ps1AliasLink, ...] | None:
+) -> dict[int, tuple[Ps1AliasLink, ...]]:
     """
-    A shortest run of *links* joining *binding* to *source*, or `None` where none does.
+    A shortest run of *links* joining *source* to every binding it reaches, keyed by the reached
+    binding's identity.
 
     Shortest because every link on the chain is a claim the ordering layer has to find intact, so a
-    detour is a refusal waiting to happen rather than extra evidence.
+    detour is a refusal waiting to happen rather than extra evidence. Which end the run is walked
+    from does not matter: `Ps1AliasLink` joins its two bindings without ordering them, and
+    `Ps1VariableFlow._alias_holds_at` asks the same question of every link on the run.
+
+    One walk per store and not one per pair of names. A walk from the name a store is spelled on
+    already reaches every other name on the way, so asking it again for each of them is the
+    difference between a class costing its own size and costing the square of it — measured, a
+    chain of eighty names took a second and a half to file and now takes a hundredth.
     """
-    if binding is source:
-        return ()
-    frontier: list[tuple[Binding, tuple[Ps1AliasLink, ...]]] = [(binding, ())]
-    seen = {id(binding)}
+    adjacent: dict[int, list[Ps1AliasLink]] = {}
+    for link in links:
+        adjacent.setdefault(id(link.first), []).append(link)
+        adjacent.setdefault(id(link.second), []).append(link)
+    reached: dict[int, tuple[Ps1AliasLink, ...]] = {}
+    frontier: deque[tuple[Binding, tuple[Ps1AliasLink, ...]]] = deque([(source, ())])
+    seen = {id(source)}
     while frontier:
-        here, chain = frontier.pop(0)
-        for link in links:
+        here, chain = frontier.popleft()
+        for link in adjacent.get(id(here), ()):
             there = link.across(here)
             if there is None or id(there) in seen:
                 continue
-            walked = (*chain, link)
-            if there is source:
-                return walked
             seen.add(id(there))
+            walked = (*chain, link)
+            reached[id(there)] = walked
             frontier.append((there, walked))
-    return None
+    return reached
 
 
 @dataclass(eq=False)
@@ -741,6 +758,7 @@ class Ps1SemanticModel:
         self._binding_of: dict[int, Binding] = {}
         self.root_scope = Scope(kind=ScopeKind.SCRIPT, node=root)
         self._node_scope[id(root)] = self.root_scope
+        self._changes_in_place: bool | None = None
         self._populate(self.root_scope)
         self._build_def_use()
 
@@ -751,6 +769,26 @@ class Ps1SemanticModel:
         script-level variables.
         """
         return self.root_scope
+
+    @property
+    def changes_an_object_in_place(self) -> bool:
+        """
+        Whether any occurrence in the script stores *through* a value rather than into a name — the
+        `$x` of `$x[0] = 9`, of `$h.k = 9` and of `[Array]::Reverse($x)`.
+
+        A script with none never changes an object after it is built, so there a copy of one and a
+        second name for it are indistinguishable, and a consumer weighing the two may stop asking.
+        That is the question every sharing guard is really about, and it is a fact about the script
+        rather than about the name a guard happens to be standing on: an object handed to a
+        hashtable key, to a property or to a callee is changed under a name the guard cannot see.
+        """
+        if self._changes_in_place is None:
+            self._changes_in_place = any(
+                write.role.through
+                for binding in self._every_binding()
+                for write in binding.writes
+            )
+        return self._changes_in_place
 
     def scope_of(self, node: Node) -> Scope | None:
         """
@@ -931,8 +969,8 @@ class Ps1SemanticModel:
                 self._attribute_write(node, scope)
             else:
                 self._attribute_reference(node, scope)
-        self._share_stores_through_aliases()
         self._record_type_constraints()
+        self._share_stores_through_aliases()
 
     def _record_type_constraints(self):
         """
@@ -991,12 +1029,18 @@ class Ps1SemanticModel:
                 for write in binding.writes
                 if write.role.through and not write.may_define
             ]
+            if not stores:
+                continue
+            reached = {
+                id(source): _alias_chains_from(links, source)
+                for source, _ in stores
+            }
             for binding in members:
                 filed = {id(write.node) for write in binding.writes}
                 for source, write in stores:
                     if source is binding or id(write.node) in filed:
                         continue
-                    chain = _alias_chain(links, binding, source)
+                    chain = reached[id(source)].get(id(binding))
                     if chain is None:
                         continue
                     filed.add(id(write.node))
@@ -1048,6 +1092,13 @@ class Ps1SemanticModel:
         `$y = [array]$x` and `$y = $x -as [array]` convert the value, `[int[]]$y = $x` constrains
         the variable — because the object either name ends up holding is the same question in all
         three. Measured: `$x = 1, 2, 3; $y = [array]$x; $y[0] = 9` leaves `$x` reading `9 2 3`.
+
+        A constraint the *binding* carries counts as much as one this occurrence spells, because
+        PowerShell stores it on the variable and converts every later write through it. Measured:
+        `[string]$y = 0; $x = 1, 2, 3; $y = $x; [Array]::Reverse($x); $y` writes `1 2 3`, because
+        `$y` was handed the String `1 2 3` and never the array — so the definition that reads as
+        the plainest of all is the one a constraint three statements above has already converted.
+        `Binding.constraints` is therefore filed before this runs; see `_build_def_use`.
         """
         for write in self._every_write():
             if write.may_define or not isinstance(write.node, Ps1Variable) or write.role.through:
@@ -1055,13 +1106,13 @@ class Ps1SemanticModel:
             assignment = assignment_of(write.node)
             if assignment is None or assignment.operator != '=' or assignment.value is None:
                 continue
-            certain = _constraint_on(write.node) is None
+            certain = True
             source: Node | None = assignment.value
             while source is not None and not isinstance(source, Ps1Variable):
                 if isinstance(source, Ps1ParenExpression):
                     source = source.expression
                     continue
-                if isinstance(source, Ps1CastExpression) or _is_conversion_operator(source):
+                if isinstance(source, Ps1CastExpression) or is_conversion_operator(source):
                     certain = False
                     source = _climbed_operand(source)
                     continue
@@ -1072,6 +1123,7 @@ class Ps1SemanticModel:
             named = self._binding_of.get(id(source))
             if target is None or named is None or target is named:
                 continue
+            certain = certain and not target.constraints and not named.constraints
             yield Ps1AliasLink(write.node, target, named, certain)
 
     def _every_write(self) -> Iterator[Occurrence]:

@@ -48,6 +48,12 @@ def value_after(occurrence: Ps1Variable, previous: Expression) -> Expression | N
     found = written_call_slot(occurrence)
     if found is None or not found.written.settled or found.written.slots != {found.slot}:
         return None
+    if found.slot < 0:
+        # The receiver is a slot too, and it is not among the arguments: the bounds below are the
+        # arguments *after* the written one, which for a receiver would be the whole list. No rule
+        # here is about a receiver yet, and reading one that way would take the first argument of
+        # `$x.SetValue(9, 0)` for a range.
+        return None
     if found.through_a_part:
         # `[Array]::Reverse($p[0])` turns around the array `$p`'s first element is, so what `$p`
         # holds afterwards is the outer array with that one element replaced. Naming it is Knobe

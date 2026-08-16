@@ -3,8 +3,10 @@ Inline constant variable references in PowerShell scripts.
 """
 from __future__ import annotations
 
+import enum
+
 from collections import defaultdict
-from typing import Iterator
+from typing import Iterator, TypeGuard
 
 from refinery.lib.scripts import (
     Expression,
@@ -16,9 +18,9 @@ from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow
 from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
-    _is_conversion_operator,
     binding_key,
     is_assignment_write_target,
+    is_conversion_operator,
     is_mutated_in_place,
     is_substitutable_position,
     is_write_occurrence,
@@ -38,6 +40,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
 from refinery.lib.scripts.ps1.ast import (
     assignment_of,
     assignment_target_variables,
+    unwrap_assignment_target,
     unwrap_parens,
 )
 from refinery.lib.scripts.ps1.data import PS1_KNOWN_VARIABLES
@@ -50,11 +53,11 @@ from refinery.lib.scripts.ps1.model import (
     Ps1BinaryExpression,
     Ps1CastExpression,
     Ps1ClassDefinition,
+    Ps1CommandInvocation,
     Ps1DoLoop,
     Ps1EnumDefinition,
     Ps1ExpandableString,
     Ps1ExpressionStatement,
-    Ps1CommandInvocation,
     Ps1ForLoop,
     Ps1FunctionDefinition,
     Ps1HashLiteral,
@@ -62,6 +65,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1IfStatement,
     Ps1IndexExpression,
     Ps1InvokeMember,
+    Ps1MemberAccess,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1PipelineElement,
@@ -223,32 +227,124 @@ def _preserves_sharing(occurrence: Ps1Variable, state: _Inlining) -> bool:
     output prints an order the script never had. Measured: without this, `$x = 1, 2, 3; $y = $x;
     $y[0] = 9; Write-Output $x[0]` emits `1` where 5.1 prints `9`.
 
-    **Two questions, asked in this order.** The first is about the *binding*: does anything store
-    through a name for this object at all? A binding nothing stores through holds the same value
-    under every name for it, so there a copy and a share are indistinguishable and the substitution
-    is what it always was — which is what keeps `$y = $x` folding in the ordinary case, and which is
-    the question that decides almost every occurrence.
+    **Three questions, asked in this order.** The first is about the *script*: does anything in it
+    change an object in place at all? A script with no store-through builds every object and leaves
+    it, so there a copy and a share are indistinguishable and the substitution is what it always was
+    — which is what keeps `$y = $x` folding in the ordinary case, and which is the question that
+    decides almost every script. `Ps1SemanticModel.changes_an_object_in_place` is where it lives,
+    because it is a fact about the script and not about the name this is standing on: asking only
+    whether *this* binding is stored through is what let `$h['k'] = $x; $h['k'][0] = 9` through,
+    where the store is spelled on the hashtable and never on `$x`.
 
-    The second is about the *position*, and it is asked deny-side because the list of places a value
-    can be stored is not one this can finish. A position that hands the object on gets a copy where
-    the script had a share; a position that reads it where it stands cannot tell the two apart. So
-    the substitution is refused wherever the occurrence reaches an assignment's value, a hash
-    literal's entry, an argument of a method call — because `$list.Add($x)` retains what it is
-    handed — or an argument of a command that binds a name, which is what `New-Variable y $x` is.
-    Asking instead whether the *target* is a nameable binding is what let `$h['k'] = $x`,
-    `$o.P = $x`, `$a[0] = $x` and `$a, $b = $x, 9` through: each names no target binding, and "no
-    binding to name" was read as "nothing is stored".
+    The second is about the *position*, and `_where_the_object_goes` is what answers it. A position
+    that stores the object gets a copy where the script had a share; a position that reads it where
+    it stands cannot tell the two apart.
+
+    The third narrows the refusal back where the object's new name can be read off the source. Where
+    a plain assignment stores the whole of the occurrence into one variable, the names that hold the
+    object are the two the assignment spells and it is enough that neither is stored through — which
+    is what keeps the ordinary `$y = $x` folding in a script that changes something else in place.
+    The assignment's own target occurrence is not one of those stores: the `$h` of `$h['k'] = $x`
+    reaches into the hashtable to put the object there, which is the hand-off itself and not a later
+    change to what was handed over. Where the object is stored somewhere this cannot name at all —
+    a hash literal's entry, a multi-assignment slot, a name the script never binds — the
+    substitution is refused outright.
+
+    A callee is the one destination that is a doubt rather than a claim, and it is paid for
+    accordingly: `$list.Add($x)` keeps what it is handed and `[Buffer]::BlockCopy($s, 0, $d, 0, 3)`
+    does not, and nothing here reads which. So an argument is refused only where the object it
+    reads is one something is known to change in place under a name this can see, which is what
+    keeps the buffer of a decode folding into the call that reads it.
     """
-    binding = state.binding_of(occurrence)
-    if binding is None or not any(write.role.through for write in binding.writes):
+    if not state.changes_an_object_in_place:
         return True
-    return not _hands_the_object_on(occurrence)
+    goes = _where_the_object_goes(occurrence)
+    if goes is _Destination.NOWHERE:
+        return True
+    if goes is _Destination.A_CALLEE:
+        return not _is_changed_in_place(state.binding_of(occurrence))
+    target = _assignment_target(occurrence)
+    if target is None:
+        return False
+    stored_into = state.binding_of(target)
+    if stored_into is None:
+        return False
+    read_from = state.binding_of(occurrence)
+    return not any(
+        write.role.through and write.node is not target
+        for binding in (stored_into, read_from)
+        if binding is not None
+        for write in binding.writes
+    )
 
 
-def _hands_the_object_on(occurrence: Ps1Variable) -> bool:
+def _is_changed_in_place(binding: Binding | None) -> bool:
     """
-    Whether what *occurrence* reads outlives the expression it stands in, because the position
-    stores it somewhere a later statement can reach.
+    Whether anything stores through a name for the object *binding* holds. `True` for a binding this
+    cannot name, because a name it cannot see is one it cannot clear.
+    """
+    return binding is None or any(write.role.through for write in binding.writes)
+
+
+def _assignment_target(occurrence: Ps1Variable) -> Ps1Variable | None:
+    """
+    The one variable a plain assignment stores *occurrence* into, where the occurrence is the whole
+    of what it stores, or `None` where the position names no single variable.
+
+    A target reaching into a value — `$h['k']`, `$o.P`, `$a[0]` — names the variable its chain is
+    rooted at, because that is the name every later store through the same place is spelled on and
+    so the name a caller has to watch. `None` is every position whose destination this cannot name
+    that way, and a caller reads it as such: a hash literal's entry, one slot of a multi-assignment,
+    an argument of a call or of a command. The wrappers `_where_the_object_goes` climbs are climbed
+    here too, because each hands its operand on unchanged.
+    """
+    cursor: Node = occurrence
+    parent = cursor.parent
+    while _is_transparent_to_the_object(parent):
+        cursor = parent
+        parent = cursor.parent
+    if not isinstance(parent, Ps1AssignmentExpression) or parent.operator != '=':
+        return None
+    if parent.value is not cursor:
+        return None
+    target = unwrap_assignment_target(parent.target)
+    while isinstance(target, (Ps1IndexExpression, Ps1MemberAccess)):
+        target = unwrap_assignment_target(target.object)
+    return target if isinstance(target, Ps1Variable) else None
+
+
+def _is_transparent_to_the_object(node: Node | None) -> TypeGuard[Node]:
+    """
+    Whether *node* hands the value under it on unchanged: a parenthesis, an array literal — the
+    `$a = ,$x` that builds a fresh outer array whose one element is the array `$x` names — and a
+    conversion, which converts nothing when the operand already is what it names.
+    """
+    return (
+        isinstance(node, (Ps1ParenExpression, Ps1ArrayLiteral, Ps1CastExpression))
+        or is_conversion_operator(node)
+    )
+
+
+class _Destination(enum.Enum):
+    """
+    Where the object an occurrence reads goes once the expression around it has run.
+
+    `NOWHERE` — nothing keeps it past the expression, so a copy and a share are the same thing.
+    `A_CALLEE` — it is handed to code this does not read, which *may* keep it. `$list.Add($x)` does
+    and `[Buffer]::BlockCopy($s, 0, $d, 0, 3)` does not, and no reading of the call says which, so
+    this is a doubt and not a claim — the caller pays it only where the object is one something is
+    known to change in place.
+    `STORED` — it is certainly put somewhere a later statement can reach: an assignment's value, an
+    entry of a hash literal, a slot of a multi-assignment.
+    """
+    NOWHERE  = enum.auto()  # noqa
+    A_CALLEE = enum.auto()  # noqa
+    STORED   = enum.auto()  # noqa
+
+
+def _where_the_object_goes(occurrence: Ps1Variable) -> _Destination:
+    """
+    Where what *occurrence* reads goes once the expression it stands in has run.
 
     Parentheses, array literals and conversions are climbed on the way, because each hands its
     operand on: `$a = ,$x` builds a fresh outer array whose one element is the array `$x` names, and
@@ -258,46 +354,57 @@ def _hands_the_object_on(occurrence: Ps1Variable) -> bool:
     A command is asked what it does to the names it addresses rather than assumed to read them.
     `Write-Output $x` writes the value out and keeps nothing; `New-Variable y $x` binds it to a
     name that outlives the statement, and `refinery.lib.scripts.ps1.analysis.naming` is what tells
-    the two apart.
+    the two apart. A pipeline is asked of the whole pipeline and not of the element the occurrence
+    stands in, because a command downstream is handed what an element upstream wrote: `$x |
+    Set-Variable z` binds the array to `z` with no argument of the element `$x` stands in naming it.
     """
     cursor: Node = occurrence
     parent = cursor.parent
-    while isinstance(
-        parent, (Ps1ParenExpression, Ps1ArrayLiteral, Ps1CastExpression)
-    ) or _is_conversion_operator(parent):
+    while _is_transparent_to_the_object(parent):
         cursor = parent
         parent = cursor.parent
     if isinstance(parent, Ps1AssignmentExpression):
-        return parent.value is cursor
+        return _Destination.STORED if parent.value is cursor else _Destination.NOWHERE
     if isinstance(parent, Ps1HashLiteral):
-        return any(value is cursor for _, value in parent.pairs)
+        if any(value is cursor for _, value in parent.pairs):
+            return _Destination.STORED
+        return _Destination.NOWHERE
     if isinstance(parent, Ps1InvokeMember):
-        return any(argument is cursor for argument in parent.arguments)
-    return _binds_a_name(_enclosing_command(cursor))
+        if any(argument is cursor for argument in parent.arguments):
+            return _Destination.A_CALLEE
+        return _Destination.NOWHERE
+    if any(_binds_a_name(cmd) for cmd in _commands_handed_the_value(cursor)):
+        return _Destination.A_CALLEE
+    return _Destination.NOWHERE
 
 
-def _enclosing_command(node: Node) -> Ps1CommandInvocation | None:
+def _commands_handed_the_value(node: Node) -> Iterator[Ps1CommandInvocation]:
     """
-    The command invocation whose argument list *node* stands in, or `None` where it stands in none.
+    Every command invocation the value at *node* may reach: the one whose argument list it stands
+    in, and — where it stands in a pipeline — every element of that pipeline, since each is handed
+    what the one before it wrote.
     """
     cursor: Node | None = node
-    while cursor is not None and not isinstance(cursor, Ps1CommandInvocation):
+    while cursor is not None:
+        if isinstance(cursor, Ps1CommandInvocation):
+            yield cursor
+            return
+        if isinstance(cursor, Ps1Pipeline):
+            for element in cursor.elements:
+                if isinstance(element.expression, Ps1CommandInvocation):
+                    yield element.expression
+            return
         if isinstance(cursor, (Ps1ScriptBlock, Ps1ExpressionStatement)):
-            return None
+            return
         cursor = cursor.parent
-    return cursor
 
 
-def _binds_a_name(cmd: Ps1CommandInvocation | None) -> bool:
+def _binds_a_name(cmd: Ps1CommandInvocation) -> bool:
     """
-    Whether *cmd* gives one of its arguments to a name that outlives it.
+    Whether *cmd* gives one of the values it is handed to a name that outlives it.
     """
-    if cmd is None:
-        return False
     return any(
-        reference.role is not Ps1NameRole.READS
-        for reference in named_references(cmd)
-    )
+        reference.role is not Ps1NameRole.READS for reference in named_references(cmd))
 
 
 def _ancestor_past_parens(node: Node) -> Node | None:
@@ -571,6 +678,10 @@ class _Inlining:
 
     def binding_of(self, var: Ps1Variable) -> Binding | None:
         return self.flow.semantic.binding_of(var)
+
+    @property
+    def changes_an_object_in_place(self) -> bool:
+        return self.flow.semantic.changes_an_object_in_place
 
     def installed(self, var: Ps1Variable, replacement: Node):
         binding = self.binding_of(var)

@@ -184,6 +184,7 @@ class Ps1VariableFlow:
         self._any_placed: bool | None = None
         self._blocks_by_owner: dict[int, list[Ps1ScriptBlock]] = {}
         self._deferred_writes: dict[tuple[str, int], bool] = {}
+        self._alias_holds: dict[tuple[int, int], bool] = {}
 
     def reaching_definition(self, read: Ps1Variable) -> Ps1Variable | None:
         """
@@ -228,11 +229,28 @@ class Ps1VariableFlow:
             return None
         if not self._observes_completed_store(graph, placed[id(found)][1], use):
             return None
-        for write in binding.writes:
-            if write.may_define and write.node is found:
-                if not self._alias_holds_at(write, graph):
-                    return None
+        if not self._shared_write_names_a_value(binding, found, graph):
+            return None
         return found
+
+    def _shared_write_names_a_value(
+        self,
+        binding: Binding,
+        found: Node,
+        graph: ControlFlowGraph,
+    ) -> bool:
+        """
+        Whether a value may be read out of the write standing at *found*: either it is spelled on
+        *binding*'s own name, or it was shared in and every definition it came through still holds.
+
+        The two orderings this stands between — a read of an occurrence and a read of a point —
+        ask the same question, so it is asked once here rather than spelled twice.
+        """
+        return all(
+            self._alias_holds_at(write, graph)
+            for write in binding.writes
+            if write.may_define and write.node is found
+        )
 
     def _alias_holds_at(self, shared: Occurrence, graph: ControlFlowGraph) -> bool:
         """
@@ -253,7 +271,22 @@ class Ps1VariableFlow:
         Nothing is ordered across bodies here, and nothing is ordered within a statement: a rebind
         the graphs place at the store's own node is refused rather than guessed at, which is the
         same rule `reaching_definition` follows for a definition sharing its use's statement.
+
+        **A rebind no occurrence spells ends the link too.** A dot-sourced block writes the caller's
+        scope, so `$y = $x; . { $y = 9, 9, 9 }; [Array]::Reverse($x)` leaves `$y` on an array of its
+        own — measured, 5.1 writes `9 9 9` — and the write is one statement to this graph with no
+        occurrence of `$y` in the tree around it. `_block_kills` is where the block model already
+        answers that, and it is asked of both names; `unknowns` is asked of both bindings for the
+        same reason, since a name a qualifier, a deferred body or an unreadable spelling can reach
+        is one this cannot say is unrebound.
         """
+        key = (id(shared), id(graph))
+        found = self._alias_holds.get(key)
+        if found is None:
+            found = self._alias_holds[key] = self._compute_alias_holds_at(shared, graph)
+        return found
+
+    def _compute_alias_holds_at(self, shared: Occurrence, graph: ControlFlowGraph) -> bool:
         store = self.flow.locate(shared.node)
         if store is None or store[0] is not graph:
             return False
@@ -267,6 +300,9 @@ class Ps1VariableFlow:
                 return False
             rebinds: set[int] = set()
             for side in (link.first, link.second):
+                if self.unknowns(side) is not Ps1FlowUnknown.NONE:
+                    return False
+                rebinds.update(self._block_kills(graph, side.name))
                 for write in side.writes:
                     if write.role.through or write.node is link.definition:
                         continue
@@ -333,10 +369,7 @@ class Ps1VariableFlow:
         if found is not None:
             if not self._observes_completed_store(graph, placed[id(found)], use):
                 return Ps1ObservedWrite.UNKNOWN
-            if binding is not None and any(
-                write.may_define and write.node is found and not self._alias_holds_at(write, graph)
-                for write in binding.writes
-            ):
+            if binding is not None and not self._shared_write_names_a_value(binding, found, graph):
                 return Ps1ObservedWrite.UNKNOWN
             return found
         blocking = kills | frozenset(id(node) for _, node in definitions)

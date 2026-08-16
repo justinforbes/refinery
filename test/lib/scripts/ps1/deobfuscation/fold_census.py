@@ -201,6 +201,18 @@ FOLDS: dict[str, str] = {
         "Write-Output 'ab'",
     '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y':
         '$x = 1, 2, 3\n$y = $x\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)',
+    '$x = 1, 2, 3; $a, $b = $x, 9; $a[0] = 7; Write-Output $x[0]':
+        '$x = 1, 2, 3\n$a, $b = $x, 9\n$a[0] = 7\nWrite-Output 1',
+    '$x = 1, 2, 3; $y = $x; & { $y = 9, 9, 9 }; [Array]::Reverse($x); Write-Output $y':
+        '$x = 1, 2, 3\n$y = $x\n& {\n  $y = 9, 9, 9\n}\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)',
+    "$x = 1, 2, 3; $h = @{}; $h['k'] = $x; [Array]::Reverse($h['k']); Write-Output $x":
+        "$x = 1, 2, 3\n$h = @{}\n$h['k'] = $x\n[Array]::Reverse($h['k'])\nWrite-Output (1, 2, 3)",
+    '$p = @(@(1, 2), @(3, 4)); foreach ($e in $p) { [Array]::Reverse($e) }; Write-Output $p[0]':
+        'foreach ($e in (@(1, 2), @(3, 4))) {\n  [Array]::Reverse($e)\n}\nWrite-Output (1, 2)',
+    '$x = 1, 2, 3; $y = if ($True) { $x }; $x[0] = 9; Write-Output $y[0]':
+        '$x = 1, 2, 3\n$y = if ($True) {\n  (1, 2, 3)\n}\n$x[0] = 9\nWrite-Output $y[0]',
+    'function f($a) { $script:k = $a }; $x = 1, 2, 3; f $x; $x[0] = 9; Write-Output $k[0]':
+        'function f {\n  Param($a)\n  $script:k = $a\n}\n$x = 1, 2, 3\nf (1, 2, 3)\n$x[0] = 9\nWrite-Output $k[0]',
     "Set-Variable global:y 'b'; Write-Host $global:y":
         'Write-Host $global:y',
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":

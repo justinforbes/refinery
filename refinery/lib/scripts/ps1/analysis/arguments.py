@@ -85,7 +85,9 @@ def _floored(
     The slot check is the one that keeps a typo from flipping the polarity. A row naming a slot the
     arity does not reach is skipped by every consumer that indexes the arguments by it, so the call
     reads as writing nothing shared and the whole statement becomes removable — the deny table
-    failing open, which is the one failure this module exists to prevent.
+    failing open, which is the one failure this module exists to prevent. `RECEIVER` is a part only
+    a call on a *value* has, so it is a reachable slot only on the instance side: a static row
+    naming it addresses the type expression the call is written on, which no occurrence stands at.
     """
     table: dict[tuple[Ps1TypeName, str], dict[int, frozenset[int]]] = {}
     for (type_name, member), by_arity in entries.items():
@@ -108,7 +110,10 @@ def _floored(
                 F'offers would answer an uncovered call with silence rather than with doubt.'
             )
         for arity, slots in by_arity.items():
-            unreachable = [slot for slot in slots if not (slot == RECEIVER or 0 <= slot < arity)]
+            unreachable = [
+                slot for slot in slots
+                if not (0 <= slot < arity or (slot == RECEIVER and not static))
+            ]
             if unreachable:
                 raise ValueError(
                     F'the written-slot table gives {type_name}::{member} at {arity} arguments the '

@@ -2119,6 +2119,12 @@ class TestPs1APositionThatStoresTheObjectIsNotHandedACopyOfIt(TestPs1):
 
     Each is refused rather than answered, and the refusal is the whole claim: the read of the other
     name is not one this can resolve either way.
+
+    Every holder is given a value it can actually hold a property or an element on. A bare `$o.P = `
+    on an unbound name raises `PropertyNotFound` and `$l.Add(...)` on one raises
+    `InvokeMethodOnNull`, and `New-Object PSObject` mints no note property either, so each of those
+    spellings halts before it reaches the shape the test is about — a refusal asserted over a script
+    that throws is a refusal asserted over nothing.
     """
 
     def test_an_array_stored_under_a_hashtable_key_is_the_one_the_write_reaches(self):
@@ -2134,6 +2140,9 @@ class TestPs1APositionThatStoresTheObjectIsNotHandedACopyOfIt(TestPs1):
     def test_an_array_stored_in_a_property_is_the_one_the_write_reaches(self):
         source = inspect.cleandoc("""
             $x = 1, 2, 3
+            $o = [pscustomobject]@{
+              P = 0
+            }
             $o.P = $x
             $x[0] = 9
             Write-Output $o.P[0]
@@ -2164,7 +2173,8 @@ class TestPs1APositionThatStoresTheObjectIsNotHandedACopyOfIt(TestPs1):
     def test_an_array_a_collection_retains_is_the_one_the_write_reaches(self):
         source = inspect.cleandoc("""
             $x = 1, 2, 3
-            $list.Add($x)
+            $list = New-Object Collections.ArrayList
+            [void]$list.Add($x)
             $x[0] = 9
             Write-Output $list[0][0]
         """)
