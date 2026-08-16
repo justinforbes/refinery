@@ -6865,7 +6865,7 @@ Statements that denote the same text and are not directives either: a bracket ar
 operator beside it, or a call that computes it each leaves a statement that merely evaluates to the
 text. The last of them denotes it without computing anything at all, a sequence expression being
 worth its final operand. Node runs every program opening with one of these as sloppy code too, and
-what the tool makes of them is pinned in `test.lib.scripts.js.test_unfixed_defects`.
+what the tool makes of them is law in `test.lib.scripts.js.test_directive_prologue`.
 """
 
 SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING = [
@@ -6884,8 +6884,8 @@ Prologue it should have ended, which hands a `'use strict'` written below it the
 it never had. The first of them is a read a fold already declines in this position, written inside a
 bracket:
 the refusal reads the tree, where the bracket stands between the statement and the read, and the
-printer does not write that bracket back. What the tool makes of them is pinned in
-`test.lib.scripts.js.test_unfixed_defects`.
+printer does not write that bracket back. What the tool makes of them is law in
+`test.lib.scripts.js.test_directive_prologue`.
 """
 
 _SPELLINGS_THAT_ONLY_DENOTE_THE_TEXT_OF_A_DIRECTIVE = [
@@ -6970,7 +6970,7 @@ class TestWhetherAStatementIsADirectiveIsDecidedByHowItIsWritten(TestBase):
         Node prints `false` for each of these files. The head is not a string literal, so the
         Directive Prologue ends at it, and the `'use strict'` on the line below is an expression
         statement that computes a string and discards it. What the tool makes of these files is
-        pinned in `test.lib.scripts.js.test_unfixed_defects`.
+        law in `test.lib.scripts.js.test_directive_prologue`.
         """
         for head in SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING:
             with self.subTest(head=head):

@@ -362,8 +362,14 @@ class JsStaticBlock(Node):
 
 
 @dataclass(repr=False, eq=False)
-class JsExpressionStatement(Statement):
+class JsExpressionStatement(Statement, spelling='directive'):
     expression: Expression | None = None
+    #: Whether the source wrote this statement into a Directive Prologue. It records where the
+    #: statement came from and not what it computes, which is why it is a spelling field: two trees
+    #: that differ only here spell the same program. A clone carries it, deliberately — a directive
+    #: that is copied elsewhere was still written as one, and whether it *is* one is decided by
+    #: `refinery.lib.scripts.js.strict.is_prologue_host` at wherever it now stands.
+    directive: bool = False
 
 
 @dataclass(repr=False, eq=False)

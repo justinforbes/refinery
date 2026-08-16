@@ -197,3 +197,78 @@ class TestIIFEAccessorPromoter(TestJsDeobfuscator):
             ),
             result,
         )
+
+    def test_the_closure_declarations_are_written_behind_the_inner_prologue(self):
+        """
+        The promoted function keeps the mode its inner body declared: the closure's declarations go
+        below the Directive Prologue that body opens with, since a declaration written above the
+        `'use strict'` would end the prologue and leave the function sloppy.
+        """
+        source = inspect.cleandoc(
+            """
+            var get = function () {
+                var data = [[72, 105]];
+                return function (i) { 'use strict'; return data[i]; };
+            }();
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function get(i) {
+                  'use strict';
+                  var data = [[72, 105]];
+                  return data[i];
+                }
+                """
+            ),
+            self._promote(source),
+        )
+
+    def test_the_whole_prologue_is_stepped_over_and_not_the_directive_alone(self):
+        """
+        A directive the language does not recognize is one all the same, and a declaration wedged in
+        front of it would end the run for the `'use strict'` standing ahead of it as well.
+        """
+        source = inspect.cleandoc(
+            """
+            var get = function () {
+                var data = [[72, 105]];
+                return function (i) { 'use strict'; 'other'; return data[i]; };
+            }();
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function get(i) {
+                  'use strict';
+                  'other';
+                  var data = [[72, 105]];
+                  return data[i];
+                }
+                """
+            ),
+            self._promote(source),
+        )
+
+    def test_a_body_that_opens_with_no_prologue_takes_the_declarations_at_its_head(self):
+        source = inspect.cleandoc(
+            """
+            var get = function () {
+                var data = [[72, 105]];
+                return function (i) { return data[i]; };
+            }();
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function get(i) {
+                  var data = [[72, 105]];
+                  return data[i];
+                }
+                """
+            ),
+            self._promote(source),
+        )

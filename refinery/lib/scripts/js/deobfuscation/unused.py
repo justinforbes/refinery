@@ -25,7 +25,7 @@ This transformer performs four phases:
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Node, _remove_from_parent, set_body
+from refinery.lib.scripts import Node, _remove_from_parent
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel, object_member_access_runs_accessor
 from refinery.lib.scripts.js.analysis.liveness import LivenessModel
@@ -43,6 +43,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     GLOBAL_OBJECT_ALIASES,
     BodyProcessingTransformer,
     collect_identifier_names,
+    insert_after_prologue,
     is_binding_site,
     remove_declarator,
     walk_scope,
@@ -71,6 +72,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     Statement,
 )
+from refinery.lib.scripts.js.strict import is_use_strict_directive
 
 
 def _const_global_alias_names(root: Node) -> frozenset[str]:
@@ -433,7 +435,7 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
                 kind=JsVarKind.VAR,
                 declarations=[JsVariableDeclarator(id=JsIdentifier(name=name)) for name in names],
             )
-            set_body(body, [declaration, *body.body])
+            insert_after_prologue(body, [declaration])
         self.mark_changed()
 
     @staticmethod
@@ -858,6 +860,13 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         that would be side-effect-free if the function were defunct. A reference that *calls* the
         function only counts as removable when the function is itself pure — dropping a call to an
         impure function would discard its effect — whereas a bare reference is removable regardless.
+
+        A Use Strict Directive is the one statement here that computes nothing and yet cannot go. Its
+        effect is on the code around it rather than on any value, so every test this loop applies says
+        it is dead; dropping it leaves a body that runs in the other mode, where an assignment to an
+        undeclared name silently creates a global instead of throwing. Deleting a directive that is
+        *not* `use strict` is safe, and shortening a prefix-closed run from the front cannot change
+        what any statement behind it is.
         """
         functions: dict[str, JsFunctionDeclaration] = {}
         for stmt in body:
@@ -914,6 +923,8 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
             if stmt.expression is None:
                 continue
             if isinstance(stmt.expression, JsAssignmentExpression):
+                continue
+            if is_use_strict_directive(stmt):
                 continue
             if self._is_removable(stmt.expression, defunct):
                 _remove_from_parent(stmt)

@@ -64,6 +64,7 @@ from refinery.lib.scripts.js.model import (
     JsWhileStatement,
     JsWithStatement,
 )
+from refinery.lib.scripts.js.strict import keeping_directives
 
 if TYPE_CHECKING:
     _StateEnv = dict[str, int | float]
@@ -2704,6 +2705,7 @@ def _resolve_shared_wrappers(
             target = _wrapper_arg_param_name(match, wrapper_info, recovered)
             if match.arg_var_name and target and match.arg_var_name != target:
                 recovered = _rebind_free_arg_var(recovered, match.arg_var_name, target)
+            recovered = keeping_directives(node.body, recovered)
             node.body = JsBlockStatement(body=recovered)
             node.body.parent = node
             for s in recovered:

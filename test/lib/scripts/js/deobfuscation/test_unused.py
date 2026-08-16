@@ -1654,3 +1654,96 @@ class TestHostEntrypoints(TestJsDeobfuscator):
             """
         )
         self.assertEqual(source, self._remove_unused(source, 'run'))
+
+    def test_a_relocated_declaration_is_written_behind_the_directive(self):
+        """
+        The pseudo-global `t` is relocated into the one function that uses it, and the declaration
+        goes below the `'use strict'` that opens that body rather than above it. Written above, it
+        would end the Directive Prologue before the directive is reached, and the assignment below
+        would create a global instead of throwing.
+        """
+        source = inspect.cleandoc(
+            """
+            var t;
+            function f(n) {
+              'use strict';
+              t = n * 2;
+              console.log(t);
+            }
+            f(3);
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f(n) {
+                  'use strict';
+                  var t;
+                  t = n * 2;
+                  console.log(t);
+                }
+                f(3);
+                """
+            ),
+            self._remove_unused(source),
+        )
+
+    def test_a_directive_is_not_swept_with_the_binding_beside_it(self):
+        """
+        Nothing reads `q`, so the declaration and the store both go, and the sweep that removes them
+        passes over every statement of the body which only evaluates a literal. The directive is
+        written in that shape and is not one of those statements: dropping it would leave the body
+        running under the other mode.
+        """
+        source = inspect.cleandoc(
+            """
+            function f(a) {
+              'use strict';
+              var q;
+              q = a;
+              return 1;
+            }
+            f(1);
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f(a) {
+                  'use strict';
+                  return 1;
+                }
+                f(1);
+                """
+            ),
+            self._remove_unused(source),
+        )
+
+    def test_a_string_that_declares_no_mode_is_swept_with_it(self):
+        """
+        The same body with a directive the language does not recognize. It declares nothing, so
+        nothing turns on whether it stands there, and it goes the way every other statement that
+        only evaluates a literal goes.
+        """
+        source = inspect.cleandoc(
+            """
+            function f(a) {
+              'use loose';
+              var q;
+              q = a;
+              return 1;
+            }
+            f(1);
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f(a) {
+                  return 1;
+                }
+                f(1);
+                """
+            ),
+            self._remove_unused(source),
+        )

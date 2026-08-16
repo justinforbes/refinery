@@ -95,6 +95,11 @@ from refinery.lib.scripts.js.numbers import (
     js_string_to_number,
     to_js_number,
 )
+from refinery.lib.scripts.js.strict import (
+    directive_prologue,
+    is_prologue_host,
+    keeping_directives,
+)
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
 from refinery.lib.scripts.js.utf16 import code_units
 
@@ -1157,6 +1162,31 @@ def is_nullish(node: Node, model: SemanticModel) -> bool | None:
     return value is None or value is JS_NULL
 
 
+def insert_after_prologue(host: Node, statements: list[Statement]) -> None:
+    """
+    Insert *statements* into the body of *host* directly behind its Directive Prologue, adopting them
+    and advancing the tree's mutation counter the one way every splice does.
+
+    Index zero is where a hoisted declaration wants to go and the one place a directive cannot
+    survive: a statement written ahead of `'use strict'` ends the prologue before it is reached, and
+    the body quietly becomes sloppy — an assignment to an undeclared name stops throwing and starts
+    creating a global instead. Behind the prologue is the same position for every purpose a hoist has,
+    a directive declaring a mode and binding nothing.
+
+    The whole prologue is stepped over and not merely the Use Strict Directive. A directive the
+    language does not recognize is a directive all the same, and a statement wedged in front of one
+    ends the run for everything standing behind it.
+
+    *host* is taken rather than its statement list precisely so that this cannot be called the raw
+    way: a caller holding only the list can reach `insert` and would not be asking this question.
+    """
+    body = get_body(host)
+    if body is None:
+        return
+    index = len(directive_prologue(host)) if is_prologue_host(host) else 0
+    set_body(host, [*body[:index], *statements, *body[index:]])
+
+
 def get_body(node: Node) -> list[Statement] | None:
     """
     Return the statement body list of a node if it has one (JsScript or JsBlockStatement).
@@ -1647,8 +1677,15 @@ class BodyProcessingTransformer(Transformer):
         Replace the body of *parent* with *replacement* through `refinery.lib.scripts.set_body`, so
         the adoption of the new statements and the advance of the tree's mutation counter happen the
         one way every splice performs them, and mark the transformer as changed.
+
+        A Use Strict Directive the old body opened with is carried over to the head of the new one. A
+        replacement drops a directive without removing anything — nothing is deleted, the statement
+        simply is not among the statements handed in — so the rule that no removal may drop one has to
+        be stated here as well, and stated as a repair rather than a refusal: a pass that has already
+        rewritten the references it is about to install cannot be declined at this point without
+        shipping a half-edited tree.
         """
-        set_body(parent, list(replacement))
+        set_body(parent, keeping_directives(parent, replacement))
         self.mark_changed()
 
 

@@ -12,7 +12,9 @@ question of the same names — a pass that re-derives the rules is a pass that g
 
 The second is the early errors: `collect_strict_violations` walks a parsed tree, threading strictness
 down through function bodies, class bodies and prologues, and records a `StrictViolation` at every
-construct a strict region would refuse. The tree is never altered.
+construct the language refuses. The tree is never altered. Most of those constructs are refused only
+by a strict region, which is what the seeded mode is for; several are refused whatever mode the program
+runs in, and are named at `StrictViolation`.
 
 The intended consumer is the reflection transform, which inlines payloads from always-sloppy surfaces
 (`Function`, indirect `eval`, string timers) and must refuse an inlining that a strict destination would
@@ -21,14 +23,17 @@ diverge at runtime, so `collect_strict_violations` is necessary but not sufficie
 """
 from __future__ import annotations
 
+import enum
+
 from dataclasses import dataclass
 
-from refinery.lib.scripts import Expression, Node, Statement
+from refinery.lib.scripts import Node, Statement
 from refinery.lib.scripts.js.lexer import has_legacy_numeric_escape
 from refinery.lib.scripts.js.model import (
     JsArrayPattern,
     JsArrowFunctionExpression,
     JsAssignmentExpression,
+    JsAwaitExpression,
     JsAssignmentPattern,
     JsBlockStatement,
     JsCatchClause,
@@ -47,10 +52,12 @@ from refinery.lib.scripts.js.model import (
     JsLabeledStatement,
     JsMemberExpression,
     JsMethodDefinition,
+    JsMethodKind,
     JsNumericLiteral,
     JsObjectPattern,
     JsProperty,
     JsPropertyDefinition,
+    JsPropertyKind,
     JsRestElement,
     JsScript,
     JsStaticBlock,
@@ -61,6 +68,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
     JsWithStatement,
+    JsYieldExpression,
     strip_parens,
 )
 
@@ -68,10 +76,16 @@ from refinery.lib.scripts.js.model import (
 @dataclass(frozen=True)
 class StrictViolation:
     """
-    A single strict-mode early error found in an otherwise sloppy-parsed tree. `rule` is a stable slug
-    naming the violated restriction; `name` carries the offending identifier for the name-based rules and
-    is empty otherwise. A violation only records that the code at `offset` would be a `SyntaxError` if its
-    enclosing region ran in strict mode; the parse tree is never changed.
+    A single early error found in an otherwise sloppy-parsed tree. `rule` is a stable slug naming the
+    violated restriction; `name` carries the offending identifier for the name-based rules and is empty
+    otherwise. The parse tree is never changed.
+
+    Most rules record that the code at `offset` would be a `SyntaxError` if its enclosing region ran in
+    strict mode. Four do not: a Use Strict Directive under a parameter list that is not simple, a
+    repeated name in a list the grammar requires to be unique, the arity of an accessor, and a name
+    reserved by the kind of function it stands in are refused in *either* mode, so a caller that treats
+    an empty result as "sloppy code is safe" is reading it right, and one that treats a non-empty
+    result as "only strict code would refuse this" is not.
     """
     offset: int
     rule: str
@@ -159,14 +173,23 @@ def directive_prologue(host: Node | None) -> list[JsExpressionStatement]:
     *host* is taken to be a prologue host; where a caller must find the host from a statement inside
     it, `is_prologue_host` decides that.
     """
-    prologue: list[JsExpressionStatement] = []
-    for statement in _statement_list(host) or ():
+    return leading_string_statements(_statement_list(host) or [])
+
+
+def leading_string_statements(statements: list[Statement]) -> list[JsExpressionStatement]:
+    """
+    The opening run of *statements* that consist of nothing but a string literal. Where *statements*
+    is a prologue host's own list this is its Directive Prologue; a caller holding the list rather
+    than the host — the printer, which is handed a body — asks here.
+    """
+    run: list[JsExpressionStatement] = []
+    for statement in statements:
         if not isinstance(statement, JsExpressionStatement):
             break
         if not isinstance(statement.expression, JsStringLiteral):
             break
-        prologue.append(statement)
-    return prologue
+        run.append(statement)
+    return run
 
 
 def declares_use_strict(host: Node | None) -> bool:
@@ -180,6 +203,96 @@ def declares_use_strict(host: Node | None) -> bool:
         if isinstance(expression, JsStringLiteral) and is_use_strict(expression):
             return True
     return False
+
+
+def mark_directives(root: Node) -> None:
+    """
+    Record on every statement of every Directive Prologue in the tree at *root* that the source wrote
+    it where a directive stands. A parser calls this once over the finished tree, which is the only
+    point at which the question can be answered: a statement is a directive by virtue of the list it
+    sits in and the statements ahead of it, and neither is known while it is being built.
+
+    The mark is provenance and never a conclusion. Whether a marked statement still *is* a directive
+    is asked of where it stands now; what the mark adds is the other half, that a statement standing
+    at the head of a body today was not merely put there by an edit.
+    """
+    for node in root.walk():
+        if is_prologue_host(node):
+            for statement in directive_prologue(node):
+                statement.directive = True
+
+
+def is_use_strict_directive(statement: Statement) -> bool:
+    """
+    Whether *statement* is the Use Strict Directive, and so the reason some body runs in strict mode.
+    Three things must hold and each rules out a different mistake.
+
+    The source must have written it where a directive stands, or an edit that moved a string here is
+    credited with a mode the file never declared. It must still stand in a prologue host's opening
+    run, or a directive carried somewhere else by a clone or a splice is credited with a mode it no
+    longer declares. And it must spell `use strict`, because every other directive is inert and
+    deleting one changes nothing.
+
+    This is the predicate a removal asks before dropping a statement and an insertion asks before
+    stepping over one, so that the two cannot disagree about which statement is at stake.
+    """
+    if not isinstance(statement, JsExpressionStatement) or not statement.directive:
+        return False
+    expression = statement.expression
+    if not isinstance(expression, JsStringLiteral) or not is_use_strict(expression):
+        return False
+    host = statement.parent
+    if not is_prologue_host(host):
+        return False
+    return any(member is statement for member in directive_prologue(host))
+
+
+def keeping_directives(host: Node, replacement: list[Statement]) -> list[Statement]:
+    """
+    *replacement* with any Use Strict Directive that *host* currently opens with put back at its head,
+    for a caller about to install *replacement* as *host*'s whole body. A directive already among the
+    replacement statements is left where it is rather than doubled.
+
+    Whole-body replacement is the one way a directive is lost without a removal: nothing is deleted,
+    the statement is simply absent from the list handed in, so a rule phrased over removals cannot see
+    it. It is repaired rather than refused because a pass reaches this point having already rewritten
+    what it is about to install, and declining here would leave those rewrites standing over a body
+    that never received them.
+    """
+    if not is_prologue_host(host):
+        return replacement
+    carried = [
+        statement for statement in directive_prologue(host)
+        if is_use_strict_directive(statement)
+        and not any(kept is statement for kept in replacement)
+    ]
+    return carried + replacement if carried else replacement
+
+
+def promoted_use_strict(statements: list[Statement]) -> list[JsExpressionStatement]:
+    """
+    Which statements of *statements* would be read as the Use Strict Directive without ever having
+    been written as one. *statements* is a prologue host's own list, so its opening run of
+    string-literal statements is a Directive Prologue: a member of that run spelling `use strict` and
+    carrying no mark came to stand there through an edit, and writing it plain makes the body strict
+    where the source left it sloppy.
+
+    None are reported once the run holds a directive the source did write. The body is strict either
+    way, so there is no mode to save, and a parenthesis there would end the run and eject every real
+    directive standing behind it — which is how a repair becomes a second defect.
+
+    Only `use strict` is reported. Every other promoted string is inert wherever it lands: it declares
+    no mode, and parenthesizing it would end the run for nothing.
+    """
+    promoted: list[JsExpressionStatement] = []
+    for statement in leading_string_statements(statements):
+        expression = statement.expression
+        if not isinstance(expression, JsStringLiteral) or not is_use_strict(expression):
+            continue
+        if statement.directive:
+            return []
+        promoted.append(statement)
+    return promoted
 
 
 def joins_directive_prologue(statement: Statement) -> bool:
@@ -238,6 +351,51 @@ def has_simple_parameters(fn: _FunctionNode) -> bool:
     return all(isinstance(param, JsIdentifier) for param in fn.params)
 
 
+class ParameterGrammar(enum.Enum):
+    """
+    The grammar a function's parameter list is read through, which decides how many parameters it may
+    hold and whether a name may repeat among them. It is a fact about the *position* the function
+    stands in rather than about the function: `function (a, a) {}` is a program as the value of a
+    property and a Syntax Error as a method, and the two are the same node.
+    """
+    #: `FormalParameters`. A repeated name is legal, and only sloppy mode and a simple list keep it so.
+    FORMAL = enum.auto()
+    #: `UniqueFormalParameters`. A repeated name is a Syntax Error in either mode.
+    UNIQUE = enum.auto()
+    #: A getter, which takes no parameters at all.
+    GETTER = enum.auto()
+    #: `PropertySetParameterList`. Exactly one parameter, and never a rest element.
+    SETTER = enum.auto()
+
+
+_PROPERTY_ACCESSORS = {
+    JsPropertyKind.GET: ParameterGrammar.GETTER,
+    JsPropertyKind.SET: ParameterGrammar.SETTER,
+}
+
+_METHOD_ACCESSORS = {
+    JsMethodKind.GET: ParameterGrammar.GETTER,
+    JsMethodKind.SET: ParameterGrammar.SETTER,
+}
+
+
+def parameter_grammar(fn: _FunctionNode) -> ParameterGrammar:
+    """
+    Which grammar *fn* takes its parameters through. An arrow always takes `UniqueFormalParameters`;
+    a method, a getter and a setter take theirs through the member that holds them, so the member is
+    what is asked. A function standing anywhere else — including as the plain value of a property,
+    which is the shape a method is easily confused with — takes `FormalParameters`.
+    """
+    if isinstance(fn, JsArrowFunctionExpression):
+        return ParameterGrammar.UNIQUE
+    parent = fn.parent
+    if isinstance(parent, JsProperty) and parent.value is fn and parent.method:
+        return _PROPERTY_ACCESSORS.get(parent.kind, ParameterGrammar.UNIQUE)
+    if isinstance(parent, JsMethodDefinition) and parent.value is fn:
+        return _METHOD_ACCESSORS.get(parent.kind, ParameterGrammar.UNIQUE)
+    return ParameterGrammar.FORMAL
+
+
 _STRICT_RESERVED = frozenset({
     'implements',
     'interface',
@@ -264,6 +422,65 @@ def _child_strictness(node: Node, strict: bool) -> bool:
     if isinstance(body, JsBlockStatement):
         return strict or declares_use_strict(body)
     return strict
+
+
+def _reserved_by_own_kind(fn: _FunctionNode) -> frozenset[str]:
+    """
+    The names *fn* reserves by being the kind of function it is: a generator reserves `yield` and an
+    async function reserves `await`, because inside one the word is an operator and cannot also name
+    anything.
+    """
+    names: set[str] = set()
+    if isinstance(fn, (JsFunctionDeclaration, JsFunctionExpression)) and fn.generator:
+        names.add('yield')
+    if fn.is_async:
+        names.add('await')
+    return frozenset(names)
+
+
+def reserved_by_function_kind(node: Node) -> frozenset[str]:
+    """
+    The names that may name nothing at *node*, because of the kind of function whose code *node* is.
+    Unlike the strict-mode reserved words this holds in either mode: `function* g(yield) {}` and
+    `async function h(await) {}` are texts no engine reads, sloppy file or not.
+
+    The region a function reserves for is its own parameter list and its own body, and it stops at
+    every function written inside it — `function* g() { function h(yield) {} }` is a program, because
+    `h`'s code is `h`'s and not the generator's. An arrow is the exception in half: its parameters are
+    still the enclosing function's code and inherit the reservation, while its body is its own and
+    does not, so `(yield) => {}` inside a generator is refused and `() => { var yield = 1; }` is not.
+
+    A function's own name is not part of what it reserves — `function* yield() {}` binds the name
+    outside itself and is read — but it is part of whatever encloses it, so the same declaration
+    written inside a generator is refused. That is why naming itself skips this function's own
+    reservation and keeps climbing rather than answering nothing.
+    """
+    reserved: set[str] = set()
+    cursor: Node = node
+    parent = cursor.parent
+    while parent is not None:
+        if isinstance(parent, _FUNCTION_NODES):
+            names_itself = (
+                isinstance(parent, (JsFunctionDeclaration, JsFunctionExpression))
+                and cursor is parent.id
+            )
+            if not names_itself:
+                reserved |= _reserved_by_own_kind(parent)
+                inherits = (
+                    isinstance(parent, JsArrowFunctionExpression)
+                    and any(cursor is param for param in parent.params)
+                )
+                if not inherits:
+                    break
+        cursor, parent = parent, parent.parent
+    return frozenset(reserved)
+
+
+def _check_kind_reserved(node: Node, out: list[StrictViolation]) -> None:
+    if not isinstance(node, JsIdentifier) or _is_property_name_position(node):
+        return
+    if node.name in reserved_by_function_kind(node):
+        out.append(StrictViolation(node.offset, 'reserved-by-function-kind', node.name))
 
 
 def _record_nested_function(stmt: Statement | None, out: list[StrictViolation]) -> None:
@@ -329,10 +546,21 @@ def _target_identifiers(target: Node | None) -> list[JsIdentifier]:
 
 
 def _is_property_name_position(node: JsIdentifier) -> bool:
+    """
+    Whether *node* only names a property and denotes nothing, so that a rule about which names a
+    program may use does not apply to it. `o.yield` and `{ yield: 1 }` name a property and are read
+    wherever a bare `yield` would be refused.
+
+    A shorthand property is not one of these even though it is written like one. `{ yield }` is the
+    key *and* the value, and the parser models both with the same node, so answering `True` for it
+    would excuse a reference that the language refuses just as it refuses a written-out one.
+    """
     parent = node.parent
     if isinstance(parent, JsMemberExpression):
         return parent.property is node and not parent.computed
-    if isinstance(parent, (JsProperty, JsMethodDefinition, JsPropertyDefinition)):
+    if isinstance(parent, JsProperty):
+        return parent.key is node and not parent.computed and not parent.shorthand
+    if isinstance(parent, (JsMethodDefinition, JsPropertyDefinition)):
         return parent.key is node and not parent.computed
     return False
 
@@ -351,23 +579,74 @@ def _flag_bound(target: Node | None, strict: bool, out: list[StrictViolation], h
             _flag_name(ident, out)
 
 
-def _check_parameters(
-    params: list[Expression],
+def _suspend_operator_in_parameters(fn: _FunctionNode) -> Node | None:
+    """
+    A `yield` or `await` operator written into *fn*'s parameter list, or `None` where none is. No
+    parameter list may hold either, in any kind of function and in either mode: a default value is
+    evaluated as the call is being entered, before there is anything to suspend.
+
+    A function written inside a parameter list is not descended into. Its parameters are its own, and
+    the walk reaches it in its own right; its body is a place where the operator can be perfectly
+    legal, `function f(a = function* () { yield 1; }) {}` being a program.
+    """
+    stack: list[Node] = list(fn.params)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (JsYieldExpression, JsAwaitExpression)):
+            return node
+        if isinstance(node, _FUNCTION_NODES):
+            continue
+        stack.extend(node.children())
+    return None
+
+
+def _check_function(
+    fn: _FunctionNode,
     strict: bool,
     out: list[StrictViolation],
     handled: set[int],
 ) -> None:
+    """
+    Every early error a function's signature carries. *strict* is the mode the function's own code
+    runs in, which its body may have declared; it decides the name rules and one of the three clauses
+    that forbid a repeated parameter. The other two, the arity of an accessor, and the directive rule
+    hold whatever mode the program is in.
+
+    A Use Strict Directive is illegal under a parameter list that is not simple (§15.2.1). The rule is
+    the body's own prologue against the list, and not the mode: in a body that is already strict the
+    directive changes nothing and the text is refused all the same, which is the shape a promoted
+    directive lands in.
+
+    A repeated name is a Syntax Error under three separate clauses, and reporting on any one of them
+    alone is wrong in one direction or the other. `UniqueFormalParameters` — every arrow and every
+    method definition — forbids it outright; `FormalParameters` forbids it in strict code, and forbids
+    it in either mode once the list holds anything that is not a plain identifier.
+    """
+    grammar = parameter_grammar(fn)
+    simple = has_simple_parameters(fn)
+    suspend = _suspend_operator_in_parameters(fn)
+    if suspend is not None:
+        out.append(StrictViolation(suspend.offset, 'suspend-in-parameters'))
+    if not simple and declares_use_strict(fn.body):
+        out.append(StrictViolation(fn.offset, 'use-strict-with-non-simple-parameters'))
+    if grammar is ParameterGrammar.GETTER and fn.params:
+        out.append(StrictViolation(fn.offset, 'accessor-arity'))
+    if grammar is ParameterGrammar.SETTER and (
+        len(fn.params) != 1
+        or isinstance(fn.params[0], JsRestElement)
+    ):
+        out.append(StrictViolation(fn.offset, 'accessor-arity'))
+    repeats_are_errors = strict or not simple or grammar is not ParameterGrammar.FORMAL
     seen: set[str] = set()
-    for param in params:
+    for param in fn.params:
         for ident in _target_identifiers(param):
             handled.add(id(ident))
-            if not strict:
-                continue
-            _flag_name(ident, out)
-            if ident.name in seen:
-                out.append(StrictViolation(ident.offset, 'duplicate-parameter', ident.name))
-            else:
+            if strict:
+                _flag_name(ident, out)
+            if ident.name not in seen:
                 seen.add(ident.name)
+            elif repeats_are_errors:
+                out.append(StrictViolation(ident.offset, 'duplicate-parameter', ident.name))
 
 
 def _check_names(
@@ -378,10 +657,10 @@ def _check_names(
     handled: set[int],
 ) -> None:
     if isinstance(node, (JsFunctionDeclaration, JsFunctionExpression)):
-        _check_parameters(node.params, child_strict, out, handled)
+        _check_function(node, child_strict, out, handled)
         _flag_bound(node.id, child_strict, out, handled)
     elif isinstance(node, JsArrowFunctionExpression):
-        _check_parameters(node.params, child_strict, out, handled)
+        _check_function(node, child_strict, out, handled)
     elif isinstance(node, (JsClassDeclaration, JsClassExpression)):
         _flag_bound(node.id, child_strict, out, handled)
     elif isinstance(node, JsVariableDeclarator):
@@ -409,12 +688,19 @@ def _check_names(
 
 def collect_strict_violations(node: Node, *, strict: bool = False) -> list[StrictViolation]:
     """
-    Every strict-mode early error in the tree rooted at *node*, in source order. *strict* seeds the
-    strictness of *node* itself; the pass then forces strict inside class bodies and inside any function
-    whose body opens with a `"use strict"` directive, so a violation is recorded even when the seed is
-    sloppy but the offending code sits in an inherently strict region. An empty result means the tree has
-    no strict-mode parse error; it does not imply the tree behaves identically in strict mode, since some
-    divergences surface only at runtime.
+    Every early error in the tree rooted at *node*, in source order. *strict* seeds the strictness of
+    *node* itself; the pass then forces strict inside class bodies and inside any function whose body
+    opens with a `"use strict"` directive, so a violation is recorded even when the seed is sloppy but
+    the offending code sits in an inherently strict region.
+
+    Not every rule asks about the mode. A Use Strict Directive under a parameter list that is not
+    simple, a repeated name where the grammar requires a unique list, the arity of an accessor, and a
+    name a generator or an async function reserves are refused whatever mode the program runs in, so a
+    sloppy seed can report on a tree with no `"use strict"` anywhere in it. That is what makes a sloppy
+    seed a usable gate on text about to be spliced into a destination whose mode is not yet known.
+
+    An empty result means the tree has no parse error under the seeded mode; it does not imply the tree
+    behaves identically in strict mode, since some divergences surface only at runtime.
     """
     out: list[StrictViolation] = []
     handled: set[int] = set()
@@ -423,6 +709,7 @@ def collect_strict_violations(node: Node, *, strict: bool = False) -> list[Stric
         current, current_strict = stack.pop()
         child_strict = _child_strictness(current, current_strict)
         _check_node(current, current_strict, out)
+        _check_kind_reserved(current, out)
         _check_names(current, current_strict, child_strict, out, handled)
         for child in current.children():
             stack.append((child, child_strict))

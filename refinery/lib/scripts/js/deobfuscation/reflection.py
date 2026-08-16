@@ -48,7 +48,11 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
 )
 from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.deobfuscation.strict_divergence import diverges_under_strict
-from refinery.lib.scripts.js.strict import declares_use_strict, strict_mode_at
+from refinery.lib.scripts.js.strict import (
+    collect_strict_violations,
+    declares_use_strict,
+    strict_mode_at,
+)
 from refinery.lib.scripts.js.model import (
     JsAssignmentExpression,
     JsAwaitExpression,
@@ -96,6 +100,22 @@ def _try_parse(code: str, *, top_level_await: bool) -> JsScript | None:
 
     Recovery makes the parser total, so raising is not the test. The test is whether the tree is
     well formed, which is precisely the domain over which printing it back means what it said.
+
+    Well formed is not the whole of it. A text can spell a tree the printer reproduces exactly and
+    still be one the language refuses to read — a repeated parameter where the grammar wants a unique
+    list, an accessor of the wrong arity, a Use Strict Directive under a parameter list that may hold
+    none. Evaluated, such a text is a `SyntaxError` the call site catches and the program carries on
+    from; spliced into the file, it takes the whole file down with it, and nothing runs at all. So it
+    is refused here, which leaves the `eval` or `Function` call standing to throw exactly what it threw
+    before.
+
+    The mode is seeded sloppy on purpose. The rules that fire under a sloppy seed are the ones that
+    hold in either mode, or that hold because the offending code sits in a region — a class body, a
+    body whose own prologue declares it — that is strict wherever the text ends up. None of them
+    depends on the destination, which is what lets the question be asked here, before there is a
+    destination to consult. A strict destination is checked again and more strictly by
+    `diverges_under_strict`, whose report is a superset of this one, so neither call subsumes the
+    other away.
     """
     try:
         from refinery.lib.scripts.js.parser import JsParser
@@ -103,6 +123,8 @@ def _try_parse(code: str, *, top_level_await: bool) -> JsScript | None:
     except Exception:
         return None
     if not parsed.body or not is_well_formed(parsed):
+        return None
+    if collect_strict_violations(parsed):
         return None
     return parsed
 

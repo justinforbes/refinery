@@ -91,7 +91,7 @@ from refinery.lib.scripts.js.precedence import (
     needs_parens,
     statement_needs_parens,
 )
-from refinery.lib.scripts.js.strict import spelling_states
+from refinery.lib.scripts.js.strict import promoted_use_strict, spelling_states
 
 _WORD_UNARY_OPS = frozenset({'typeof', 'void', 'delete'})
 
@@ -145,17 +145,49 @@ class JsSynthesizer(Synthesizer):
             self._write(comment)
             self._newline()
 
-    def _emit_block(self, body: list[Statement]):
+    def _emit_block(self, body: list[Statement], *, prologue: bool = False):
+        """
+        Write *body* as a braced block. *prologue* says that this block is a body a Directive
+        Prologue opens — a function body or a class static block — where a `'use strict'` standing
+        at the head is read as a directive and makes the body strict. Every other block holds
+        ordinary statements, and passing `True` for one of those would parenthesize a string that
+        governs nothing.
+        """
         self._write('{')
         self._depth += 1
-        for stmt in body:
-            self._newline()
-            self._emit_leading_comments(stmt)
-            self.visit(stmt)
+        self._emit_statements(body, prologue=prologue)
         self._depth -= 1
         if body:
             self._newline()
         self._write('}')
+
+    def _emit_statements(self, body: list[Statement], *, prologue: bool):
+        promoted = promoted_use_strict(body) if prologue else []
+        for stmt in body:
+            self._newline()
+            self._emit_leading_comments(stmt)
+            self._emit_body_statement(stmt, promoted)
+
+    def _emit_body_statement(self, stmt: Statement, promoted: list[JsExpressionStatement]):
+        """
+        Write one statement of a body, parenthesizing it when it is one of *promoted* — a
+        `'use strict'` an edit moved into the Directive Prologue rather than the source having
+        written it there.
+
+        The parenthesis is what keeps the mode where the file left it. A directive is a statement
+        whose expression *is* the literal, so `('use strict');` computes the same string and declares
+        nothing, and the run it stood in ends at it. That last part is why only a string which would
+        otherwise turn the body strict is worth writing this way: ending the run ejects every
+        directive behind it, and for an inert string that is a cost paid for nothing.
+        """
+        if isinstance(stmt, JsExpressionStatement) and any(p is stmt for p in promoted):
+            literal = stmt.expression
+            if isinstance(literal, JsStringLiteral):
+                self._write('(')
+                self.visit(literal)
+                self._write(');')
+                return
+        self.visit(stmt)
 
     def _emit_child(self, child: Node | None, parent: Node):
         """
@@ -415,7 +447,7 @@ class JsSynthesizer(Synthesizer):
                 self._emit_params(node.value.params)
                 self._write(' ')
                 if node.value.body:
-                    self._emit_block(node.value.body.body)
+                    self._emit_block(node.value.body.body, prologue=True)
             return
         if node.shorthand:
             if isinstance(node.value, JsAssignmentPattern):
@@ -535,7 +567,7 @@ class JsSynthesizer(Synthesizer):
         self._emit_params(node.params)
         self._write(' ')
         if node.body:
-            self._emit_block(node.body.body)
+            self._emit_block(node.body.body, prologue=True)
 
     visit_JsFunctionExpression = _emit_function
 
@@ -549,7 +581,7 @@ class JsSynthesizer(Synthesizer):
         self._write(' => ')
         if node.body:
             if isinstance(node.body, JsBlockStatement):
-                self._emit_block(node.body.body)
+                self._emit_block(node.body.body, prologue=True)
             elif isinstance(node.body, JsSequenceExpression) or statement_needs_parens(node.body):
                 self._write('(')
                 self.visit(node.body)
@@ -635,7 +667,7 @@ class JsSynthesizer(Synthesizer):
             self._emit_params(node.value.params)
             self._write(' ')
             if node.value.body:
-                self._emit_block(node.value.body.body)
+                self._emit_block(node.value.body.body, prologue=True)
 
     def visit_JsPropertyDefinition(self, node: JsPropertyDefinition):
         self._emit_decorators(node.decorators)
@@ -649,7 +681,7 @@ class JsSynthesizer(Synthesizer):
 
     def visit_JsStaticBlock(self, node: JsStaticBlock):
         self._write('static ')
-        self._emit_block(node.body)
+        self._emit_block(node.body, prologue=True)
 
     def visit_JsExpressionStatement(self, node: JsExpressionStatement):
         expr = node.expression
@@ -1030,8 +1062,9 @@ class JsSynthesizer(Synthesizer):
             self.visit(node.exported)
 
     def visit_JsScript(self, node: JsScript):
+        promoted = promoted_use_strict(node.body)
         for i, stmt in enumerate(node.body):
             if i > 0:
                 self._newline()
             self._emit_leading_comments(stmt)
-            self.visit(stmt)
+            self._emit_body_statement(stmt, promoted)

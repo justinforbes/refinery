@@ -1,8 +1,18 @@
 from __future__ import annotations
 
 import inspect
+import json
+import unittest
 
+from test.lib.scripts.js.analysis.differential import (
+    JsEvaluation,
+    behavior,
+    completion_values,
+    deobfuscate_source,
+    node_executable,
+)
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
+from test.lib.scripts.js.test_directive_prologue import NOT_A_PROGRAM
 
 from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
 from refinery.lib.scripts.js.deobfuscation.reflection import JsReflectionInlining
@@ -1069,3 +1079,163 @@ class TestReflectionInlining(TestJsDeobfuscator):
             """
         )
         self.assertEqual(source, self._reflect(source))
+
+
+#: A payload spelling an early error in a function's signature: a name repeated in a list the
+#: grammar requires to be unique, an accessor written with the wrong number of parameters, a Use
+#: Strict Directive under a parameter list that may hold none, a name repeated in a list that is not
+#: simple, and a word the kind of function reserves. Node reads none of them, under either mode.
+A_PAYLOAD_NO_ENGINE_READS = [
+    '((a, a) => 0);',
+    '({ m(a, a) {} });',
+    '({ get g(a) {} });',
+    '({ set s() {} });',
+    "(function (a = 1) { 'use strict'; });",
+    '(function (a, ...a) {});',
+    '(function* (yield) {});',
+    '(async function (await) {});',
+]
+
+#: The same signatures written the way the language permits, one for each rule above but the
+#: directive, whose control declares a mode and is therefore declined for a reason of its own. Each
+#: is spelled the way the printer spells it, so the text a site is replaced by is the payload
+#: itself.
+A_PAYLOAD_EVERY_ENGINE_READS = [
+    '((a, b) => 0);',
+    '({ m(a, b) {} });',
+    '({ get g() {} });',
+    '({ set s(v) {} });',
+    '(function(a, ...b) {});',
+    '(function*(a) {});',
+    '(async function(a) {});',
+]
+
+#: A surface that takes a payload as a string and evaluates it, as the template writing one there.
+#: All four run the payload in a scope of their own and hand a `SyntaxError` back to the call site.
+A_SURFACE_THAT_EVALUATES_A_STRING = {
+    'indirect eval'            : '(0, eval)({code});',
+    'direct eval'              : 'eval({code});',
+    'the Function constructor' : 'Function({code})();',
+    'a constructed Function'   : 'new Function({code})();',
+}
+
+#: The pack shape, whose payload reaches the proxy object beside it through a getter or a setter,
+#: mapped to the text `refinery.js` writes for it. Two of these payloads hold an early error, so
+#: those two calls are left standing; the other two differ from them in a single character and are
+#: unpacked as before.
+A_PACK_WHOSE_PAYLOAD_IS_READ_OR_REFUSED = {
+    'Function("p", "((a, a) => p.k);")({ get k() {\n  return x;\n} });':
+        'Function("p", "((a, a) => p.k);")({ get k() {\n  return x;\n} });',
+    'Function("p", "((a, b) => p.k);")({ get k() {\n  return x;\n} });':
+        '((a, b) => x);',
+    'Function("p", "p.k = ((a, a) => 0);")({ set k(v) {\n  x = v;\n} });':
+        'Function("p", "p.k = ((a, a) => 0);")({ set k(v) {\n  x = v;\n} });',
+    'Function("p", "p.k = ((a, b) => 0);")({ set k(v) {\n  x = v;\n} });':
+        'x = ((a, b) => 0);',
+}
+
+
+def _a_site_evaluating(template: str, payload: str) -> str:
+    return template.format(code=json.dumps(payload))
+
+
+def _a_program_catching_what_each_payload_throws(template: str) -> str:
+    """
+    A program that evaluates every payload of `A_PAYLOAD_NO_ENGINE_READS` through *template*, each
+    inside a `try` that names what came out of it, and reports that it reached the end.
+
+    That last line is the whole point of the shape. A payload the language refuses is a
+    `SyntaxError` the call site catches, and the program runs on; written into the file instead, it
+    is the file that no longer parses, and nothing runs at all.
+    """
+    attempts = [
+        F'try {{ {_a_site_evaluating(template, payload)} console.log(1); }}'
+        F' catch (e) {{ console.log(e.constructor.name); }}'
+        for payload in A_PAYLOAD_NO_ENGINE_READS
+    ]
+    return '\n'.join([*attempts, "console.log('done');"]) + '\n'
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestWhichPayloadsTheEngineReads(TestJsDeobfuscator):
+
+    def _refused(self, payloads: list[str]) -> dict[str, bool]:
+        values = completion_values(payloads, JsEvaluation.SCRIPT)
+        return {
+            payload: value == NOT_A_PROGRAM
+            for payload, value in zip(payloads, values)
+        }
+
+    def test_node_refuses_every_payload_recorded_as_unreadable(self):
+        rows = A_PAYLOAD_NO_ENGINE_READS
+        self.assertEqual(self._refused(rows), {payload: True for payload in rows})
+
+    def test_node_reads_every_payload_recorded_as_readable(self):
+        rows = A_PAYLOAD_EVERY_ENGINE_READS
+        self.assertEqual(self._refused(rows), {payload: False for payload in rows})
+
+
+class TestAPayloadTheLanguageRefusesIsNotInlined(TestJsDeobfuscator):
+    """
+    A payload that holds an early error is a `SyntaxError` wherever it is read, and where it is read
+    decides everything about what that costs. Evaluated, it throws at the one call site, which a
+    program is free to catch and go on from. Spliced into the file, it is the file that no engine
+    reads, and every statement in it is lost along with the payload.
+
+    The rules at stake hold in either mode, so no destination has to be consulted to see them, and
+    a payload the language does read is inlined exactly as before.
+    """
+
+    def _reflect(self, source: str) -> str:
+        return self._run_transformer(source, JsReflectionInlining)
+
+    def test_no_surface_inlines_a_payload_no_engine_reads(self):
+        for surface, template in A_SURFACE_THAT_EVALUATES_A_STRING.items():
+            sources = [
+                _a_site_evaluating(template, payload)
+                for payload in A_PAYLOAD_NO_ENGINE_READS
+            ]
+            with self.subTest(surface=surface):
+                self.assertEqual(
+                    {source: self._reflect(source) for source in sources},
+                    {source: source for source in sources},
+                )
+
+    def test_every_surface_inlines_a_payload_every_engine_reads(self):
+        for surface, template in A_SURFACE_THAT_EVALUATES_A_STRING.items():
+            rows = {
+                _a_site_evaluating(template, payload): payload
+                for payload in A_PAYLOAD_EVERY_ENGINE_READS
+            }
+            with self.subTest(surface=surface):
+                self.assertEqual({s: self._reflect(s) for s in rows}, dict(rows))
+
+    def test_the_pack_shape_answers_each_payload_the_way_the_corpus_records(self):
+        rows = A_PACK_WHOSE_PAYLOAD_IS_READ_OR_REFUSED
+        self.assertEqual({source: self._reflect(source) for source in rows}, dict(rows))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAProgramThatCatchesASyntaxErrorStillCatchesOne(TestJsDeobfuscator):
+
+    def _programs(self) -> list[str]:
+        return [
+            _a_program_catching_what_each_payload_throws(template)
+            for template in A_SURFACE_THAT_EVALUATES_A_STRING.values()
+        ]
+
+    def test_node_names_a_syntax_error_for_every_payload_and_reaches_the_end(self):
+        caught = 'SyntaxError\n' * len(A_PAYLOAD_NO_ENGINE_READS) + 'done\n'
+        sources = self._programs()
+        self.assertEqual(
+            {source: behavior(source) for source in sources},
+            {source: (caught, None) for source in sources},
+        )
+
+    def test_the_deobfuscation_of_each_program_does_the_same(self):
+        caught = 'SyntaxError\n' * len(A_PAYLOAD_NO_ENGINE_READS) + 'done\n'
+        sources = self._programs()
+        self.assertEqual(
+            {source: behavior(deobfuscate_source(source)) for source in sources},
+            {source: (caught, None) for source in sources},
+        )

@@ -25,16 +25,7 @@ from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
     behavior,
     deobfuscate_source,
-    host_behavior,
     node_executable,
-)
-from test.lib.scripts.js.analysis.test_differential import (
-    SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING,
-    SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE,
-    a_file_holding_an_octal_literal_opening_with,
-    a_function_body_opening_with,
-    a_script_opening_with,
-    a_script_whose_directive_stands_below,
 )
 from test.lib.scripts.js.deobfuscation.test_array_length_reads import (
     A_COUNT_THE_FOLD_DOES_NOT_REACH,
@@ -45,6 +36,7 @@ from test.lib.scripts.js.test_for_statement_head import (
     printed_from_the_parse,
     printed_without_the_brackets,
 )
+from test.lib.scripts.js.test_parameter_grammar import A_BINDING_THE_KIND_OF_FUNCTION_RESERVES
 from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_HAS
 from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
 
@@ -125,19 +117,6 @@ def _before_and_after(source: str) -> tuple[tuple[str, str | None], tuple[str, s
     return behavior(source), behavior(deobfuscate_source(source))
 
 
-def _before_and_after_as_a_script(
-    source: str,
-) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
-    """
-    The same pair as `_before_and_after`, with both programs run as classic global scripts.
-
-    `behavior` runs a file as a CommonJS module, which wraps the whole of it in a function, so the
-    top of the file is the top of a function body there and never the top of a script. A law about
-    what the first statement of a script is has to be witnessed where the file has one.
-    """
-    return host_behavior(source), host_behavior(deobfuscate_source(source))
-
-
 def _dropped_source_characters(source: str, printed: str) -> str:
     """
     The characters of `source` that `printed` does not account for, whitespace aside. Layout is the
@@ -213,6 +192,37 @@ class TestClassBodyIsItsOwnFunctionContext(TestBase):
         the block is its own context and it is strict.
         """
         self.assertEqual(_well_formed('function* f() { class C { static { yield; } } }'), False)
+
+
+class TestABindingNamedByAWordItsFunctionKindReservesIsNoProgram(TestBase):
+    """
+    A declaration whose name is a word the enclosing function kind reserves is read as though the
+    name were absent, and what the printer then writes is not JavaScript:
+    `function* g() { function yield() {} }` comes back as `function* g() {\\n  function(() {}\\n}`
+    and `function* g() { class yield {} }` as `class {\\n    {;\\n  }`, with the same two shapes for
+    `await` inside an `async` function.
+
+    No valid program is harmed by it today: the input is already a text no engine reads. What is
+    wrong is that `refinery.lib.scripts.is_well_formed` answers `True` for the tree, which is the
+    domain every fidelity law is stated over — a caller told the tree is well formed compares text
+    that is not a program against the file it came from, and a printer under no obligation is asked
+    for one anyway.
+    """
+
+    @unittest.expectedFailure
+    def test_a_binding_the_kind_of_function_reserves_is_not_a_well_formed_program(self):
+        """
+        Node refuses all four files of
+        `test.lib.scripts.js.test_parameter_grammar.A_BINDING_THE_KIND_OF_FUNCTION_RESERVES`, which
+        the law in that module pins against the engine along with the controls that part the kind of
+        function from the mode: the same declarations are read inside a plain function, except
+        `class yield`, which every strict region refuses for a reason of its own.
+        """
+        rows = A_BINDING_THE_KIND_OF_FUNCTION_RESERVES
+        self.assertEqual(
+            {source: _well_formed(source) for source in rows},
+            {source: False for source in rows},
+        )
 
 
 class TestLexicalDeclarationIsNotAStatement(TestBase):
@@ -631,163 +641,6 @@ class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
         )
 
 
-#: A parameter list that holds a default value, a rest element, or a destructuring pattern, mapped
-#: to a call that reaches a body reading it, the expression such a body returns, and what Node
-#: prints for that call. A parameter list written any of those ways is not a simple one, and a
-#: function with such a list may hold no Use Strict Directive at all.
-_A_PARAMETER_LIST_NO_DIRECTIVE_MAY_STAND_UNDER = {
-    'a = 1': ('f()', 'a', '1\n'),
-    '...a': ('f(1, 2)', 'a.length', '2\n'),
-    '{a}': ('f({a: 5})', 'a', '5\n'),
-}
-
-
-def _a_function_whose_body_opens_with(head: str, parameters: str, call: str, read: str) -> str:
-    """
-    A program calling a function written with *parameters* as *call*, whose body opens with *head*
-    and reads *read* below it.
-    """
-    return (
-        F'function f({parameters}) {{ {head} return {read}; }}\n'
-        F'console.log({call});\n'
-    )
-
-
-#: A function whose parameter list forbids a directive, whose body holds a `'use strict'` one
-#: statement in, mapped to what Node prints for it. The statement above the directive is the `atob`
-#: call of
-#: `test.lib.scripts.js.analysis.test_differential.SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING`, which
-#: is not a string literal and therefore ends the prologue in front of the directive.
-A_FUNCTION_WHOSE_PARAMETER_LIST_FORBIDS_A_DIRECTIVE = {
-    _a_function_whose_body_opens_with(
-        "atob('YQ=='); 'use strict';", parameters, call, read): prints
-    for parameters, (call, read, prints) in _A_PARAMETER_LIST_NO_DIRECTIVE_MAY_STAND_UNDER.items()
-}
-
-
-#: A function whose parameter list forbids a directive, whose body opens with a statement that is
-#: none but that a fold writes as the plain spelling of one, mapped to what Node prints for it.
-A_FUNCTION_WHOSE_BODY_OPENS_WITH_A_FOLD_TO_THE_DIRECTIVE = {
-    _a_function_whose_body_opens_with(head, parameters, call, read): prints
-    for parameters, (call, read, prints) in _A_PARAMETER_LIST_NO_DIRECTIVE_MAY_STAND_UNDER.items()
-    for head in SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten(TestBase):
-    """
-    A directive is a string literal written plainly at the top of a script or of a function body,
-    and nothing else is one: a bracket around the literal, an operator beside it, or a call that
-    computes the same text each leaves a statement that is merely evaluated. Folding one of those to
-    the text it denotes writes the plain spelling into directive position, and the whole script or
-    body around it turns strict.
-    """
-
-    @unittest.expectedFailure
-    def test_a_statement_that_only_denotes_the_text_leaves_the_script_sloppy(self):
-        """
-        Node prints `false` for each of these programs: the probe is called with no receiver, so
-        `this` in its body is the global object, which is what sloppy code gives. The fold arrives
-        at `'use strict';` as the first statement of the file, and Node prints `true` for what comes
-        back, having read a directive nobody wrote.
-        """
-        sloppy = ('false\n', None)
-        spellings = SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE
-        self.assertEqual(
-            [_before_and_after(a_script_opening_with(head)) for head in spellings],
-            [(sloppy, sloppy)] * len(spellings),
-        )
-
-    @unittest.expectedFailure
-    def test_a_statement_that_only_denotes_the_text_leaves_the_function_body_sloppy(self):
-        """
-        Node prints `false` for each of these too, the statement standing at the top of the probe's
-        own body rather than of the file. A directive there governs the body it opens, so the fold
-        turns that one function strict while the file around it stays as it was.
-        """
-        sloppy = ('false\n', None)
-        spellings = SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE
-        self.assertEqual(
-            [_before_and_after(a_function_body_opening_with(head)) for head in spellings],
-            [(sloppy, sloppy)] * len(spellings),
-        )
-
-    @unittest.expectedFailure
-    def test_a_file_that_holds_an_octal_literal_still_parses(self):
-        """
-        Node prints `8` for each of these, an octal literal being a number in sloppy code and one of
-        the spellings strict mode forbids outright. A directive that appears where none was written
-        costs the file its ability to parse at all, so what comes back is not a program: Node reads
-        it as a SyntaxError and the analysis of the file stops there.
-        """
-        eight = ('8\n', None)
-        spellings = SPELLINGS_A_FOLD_WRITES_AS_THE_DIRECTIVE
-        self.assertEqual(
-            [
-                _before_and_after(a_file_holding_an_octal_literal_opening_with(head))
-                for head in spellings
-            ],
-            [(eight, eight)] * len(spellings),
-        )
-
-    @unittest.expectedFailure
-    def test_a_statement_folded_to_a_plain_string_does_not_extend_the_prologue(self):
-        """
-        Node prints `false` for each of the five files
-        `test.lib.scripts.js.analysis.test_differential.SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING`
-        builds: none of the heads is a string literal, so the prologue ends at it and the
-        `'use strict'` below it governs nothing. Each fold writes a string literal there, and Node
-        prints `true` for what comes back, having read a directive two statements after the file
-        stopped offering one. The read among them is one a fold already declines in this position,
-        written inside a bracket the printer removes.
-        """
-        sloppy = ('false\n', None)
-        spellings = SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING
-        self.assertEqual(
-            [_before_and_after(a_script_whose_directive_stands_below(head)) for head in spellings],
-            [(sloppy, sloppy)] * len(spellings),
-        )
-
-    @unittest.expectedFailure
-    def test_a_fold_writes_no_prologue_into_a_function_that_can_hold_none(self):
-        """
-        Node prints `1`, `2`, and `5` for the three programs of
-        `A_FUNCTION_WHOSE_PARAMETER_LIST_FORBIDS_A_DIRECTIVE`, each of which runs a body holding a
-        `'use strict'` that governs nothing, one statement below a call. The fold writes a string
-        literal where that call stood, which extends the prologue over the line below it, and a
-        function whose parameter list is not simple may not open with that directive under any
-        circumstances. Node refuses all three of these with a SyntaxError, so the cost here is not a
-        body that reports the wrong mode but a file that is no longer a program at all.
-        """
-        rows = A_FUNCTION_WHOSE_PARAMETER_LIST_FORBIDS_A_DIRECTIVE
-        self.assertEqual(
-            {source: _before_and_after(source) for source in rows},
-            _each_program_still_prints(rows),
-        )
-
-    @unittest.expectedFailure
-    def test_a_fold_writes_no_directive_into_a_function_that_can_hold_none(self):
-        """
-        Node prints `1`, `2`, and `5` for the programs of
-        `A_FUNCTION_WHOSE_BODY_OPENS_WITH_A_FOLD_TO_THE_DIRECTIVE`, one for each way of writing a
-        parameter list that is not simple, crossed with every spelling that denotes the text of the
-        directive without being one. Each body opens with a statement that is evaluated and
-        discarded, so each function is sloppy code that a parameter list of that shape is welcome
-        in. The fold writes the plain `'use strict'` in that statement's place, which a function
-        whose parameter list is not simple may not hold under any circumstances: Node refuses every
-        one of these with a SyntaxError. What the whole file is worth is lost here, and not merely
-        the mode of the one body — the same fold in a function whose parameters are simple is
-        pinned by `test_a_statement_that_only_denotes_the_text_leaves_the_function_body_sloppy`,
-        where the file that comes back still runs and reports the wrong mode.
-        """
-        rows = A_FUNCTION_WHOSE_BODY_OPENS_WITH_A_FOLD_TO_THE_DIRECTIVE
-        self.assertEqual(
-            {source: _before_and_after(source) for source in rows},
-            _each_program_still_prints(rows),
-        )
-
-
 #: A sloppy function that writes a parameter and reads the same position back off its `arguments`
 #: object, mapped to what Node prints for it.
 A_SLOPPY_BODY_WHOSE_ARGUMENTS_ALIAS_ITS_PARAMETERS = {
@@ -1180,78 +1033,6 @@ class TestAKeyAnObjectLiteralLacksIsTheChainsToAnswer(TestBase):
         )
 
 
-_REPORTS_THE_MODE_IT_STANDS_IN = '(function () { return this; })() === undefined'
-"""
-An expression that is `true` where it stands in strict code and `false` where it stands in sloppy
-code. A plain call passes no receiver, so `this` in the callee is `undefined` under strict and the
-global object under sloppy, and a function written inside a body runs in the mode that body runs in.
-"""
-
-
-def _a_strict_body_holding(statements: str, installs: str = '') -> str:
-    """
-    A program that runs *installs*, then prints whether the body of `f` runs strict, with
-    *statements* standing between the directive that opens that body and the report.
-    """
-    body = (
-        F"function f(a) {{ 'use strict'; {statements}"
-        F' return {_REPORTS_THE_MODE_IT_STANDS_IN}; }}\n'
-        'console.log(f(1));\n'
-    )
-    return F'{installs}\n{body}' if installs else body
-
-
-def _a_strict_script_holding(statements: str) -> str:
-    """
-    A program printing whether the script runs strict, with *statements* standing between the
-    directive that opens the file and the report.
-    """
-    return F"'use strict';\n{statements}\nconsole.log({_REPORTS_THE_MODE_IT_STANDS_IN});\n"
-
-
-def _an_accessor_returning_a_strict_function(body: str, run: str) -> str:
-    """
-    A program building an accessor with an immediately invoked function that holds one local, whose
-    returned function opens with the directive and closes with *body*, and that then runs *run*.
-    Inlining the accessor is what writes the local of the outer function into the body the directive
-    opens.
-    """
-    return (
-        'var acc = (function () {\n'
-        "  var t = ['a', 'b'];\n"
-        F"  return function (i) {{ 'use strict'; {body} }};\n"
-        '})();\n'
-        F'{run}\n'
-    )
-
-
-#: An accessor whose returned function opens with a directive, mapped to what Node prints for it.
-#: The first reports the mode that function runs in and the second assigns to a name nothing
-#: declares, which strict code refuses and sloppy code answers with a new global.
-AN_ACCESSOR_WHOSE_RETURNED_BODY_OPENS_WITH_A_DIRECTIVE = {
-    _an_accessor_returning_a_strict_function(
-        F"return t[i] + ({_REPORTS_THE_MODE_IT_STANDS_IN} ? 'S' : 'L');",
-        'console.log(acc(1));',
-    ): 'bS\n',
-    _an_accessor_returning_a_strict_function(
-        'undeclared = i; return t[i] + undeclared;',
-        'try { console.log(acc(1)); } catch (e) { console.log(e.constructor.name); }',
-    ): 'ReferenceError\n',
-}
-
-
-#: A body that opens with a directive and holds a binding nothing reads back, mapped to what Node
-#: prints for it. Two of them are function bodies and two are whole scripts, and the binding is
-#: written two ways: as a variable a single assignment stores into, and as a namespace object whose
-#: one property is read straight back.
-A_BODY_WHOSE_DIRECTIVE_STANDS_BESIDE_A_BINDING_NOTHING_READS = {
-    _a_strict_body_holding('q = a;', 'var q;'): 'true\n',
-    _a_strict_script_holding('var q;\nq = 1;'): 'true\n',
-    _a_strict_body_holding('var NS = {}; NS.p = 1; console.log(NS.p);'): '1\ntrue\n',
-    _a_strict_script_holding('var NS = {};\nNS.p = 1;\nconsole.log(NS.p);'): '1\ntrue\n',
-}
-
-
 #: A strict body assigning to a name no binding declares, mapped to the behavior Node gives it: the
 #: pair of what it prints and what it throws. The write is the same in both and only what the body
 #: does about the throw differs, one handling it and one letting it end the program.
@@ -1263,156 +1044,6 @@ A_STRICT_BODY_ASSIGNING_TO_AN_UNDECLARED_NAME = {
     ): ('threw\n', None),
     "(function () { 'use strict'; und = 1; console.log(1); })();\n": ('', 'ReferenceError'),
 }
-
-
-#: A body opening that promotes the statement standing below it once a pass is done with it: a block
-#: whose contents are lifted into the body around it, and a binding nothing reads that is dropped
-#: out of it. Neither writes a character of text; each only changes which statement the body opens
-#: with.
-A_HEAD_A_MOVE_PROMOTES_THE_STATEMENT_BELOW = [
-    "if (1) { 'use strict'; }",
-    "var dead = 1; 'use strict';",
-]
-
-
-#: A function whose parameter list forbids a directive, holding a `'use strict'` that one of those
-#: moves would promote to the head of its body, mapped to what Node prints for it.
-A_FUNCTION_A_MOVE_WOULD_WRITE_A_DIRECTIVE_INTO = {
-    _a_function_whose_body_opens_with(head, parameters, call, read): prints
-    for parameters, (call, read, prints) in _A_PARAMETER_LIST_NO_DIRECTIVE_MAY_STAND_UNDER.items()
-    for head in A_HEAD_A_MOVE_PROMOTES_THE_STATEMENT_BELOW
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestMovingAStatementDoesNotChangeWhichStatementsAreDirectives(TestBase):
-    """
-    Whether a statement is a directive is decided by where it stands. A string literal written
-    plainly in the run of statements a script or a function body opens with is one; the same
-    statement a single position lower is an expression that computes a string and discards it. A
-    pass that lifts the contents of a block into the body around it, one that drops a statement it
-    found dead, and one that writes a declaration into a body each change which statements a body
-    opens with, and none of them asks what the change did to that run.
-
-    The mode of a whole script or body follows, in both directions: below a statement that is
-    dropped, a string nobody wrote as a directive becomes one and turns sloppy code strict, and
-    below a declaration that is written in, a directive that was written stops being one and turns
-    strict code sloppy. Neither is reported anywhere, and the file that comes back is a program that
-    runs by different rules than the one that was handed over. What a fold does to the same run is
-    pinned in `TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten`; these move no statement's text
-    at all.
-    """
-
-    @unittest.expectedFailure
-    def test_lifting_a_block_into_the_body_around_it_writes_no_directive(self):
-        """
-        Node prints `false` for both of these. A block is not a prologue and a statement inside one
-        is never a directive, so the script and the probe's body are sloppy code however certainly
-        the branch around that block is taken. The branch is replaced by the statements it holds,
-        which is a rewrite of the block and nothing more, and it leaves that string opening the
-        script in the first and the body in the second: Node prints `true` for both of the files
-        that come back.
-        """
-        sloppy = ('false\n', None)
-        sources = [
-            a_script_opening_with("if (1) { 'use strict'; }"),
-            a_function_body_opening_with("if (1) { 'use strict'; }"),
-        ]
-        self.assertEqual(
-            [_before_and_after_as_a_script(source) for source in sources],
-            [(sloppy, sloppy)] * len(sources),
-        )
-
-    @unittest.expectedFailure
-    def test_dropping_a_statement_writes_no_directive_below_it(self):
-        """
-        Node prints `false` for both of these. The prologue ends at the declaration, which is no
-        string literal, so the `'use strict'` standing below it computes a string and discards it.
-        Nothing reads `dead`, so the declaration is dropped, which moves every statement below it up
-        one place: the string that stood second now opens the script in the first file and the
-        probe's body in the second, and Node prints `true` for both of the files that come back. A
-        statement removed from a list is one the statements below it move up past.
-        """
-        sloppy = ('false\n', None)
-        sources = [
-            a_script_opening_with("var dead = 1; 'use strict';"),
-            a_function_body_opening_with("var dead = 1; 'use strict';"),
-        ]
-        self.assertEqual(
-            [_before_and_after_as_a_script(source) for source in sources],
-            [(sloppy, sloppy)] * len(sources),
-        )
-
-    @unittest.expectedFailure
-    def test_writing_a_declaration_into_a_body_leaves_its_directive_first(self):
-        """
-        Node prints `bS` and `ReferenceError` for the two programs of
-        `AN_ACCESSOR_WHOSE_RETURNED_BODY_OPENS_WITH_A_DIRECTIVE`. Each returns a function that opens
-        with the directive, so that function is strict: it reports the strict mode in the first, and
-        in the second its assignment to a name nothing declares throws, which the file catches and
-        names. Inlining the accessor writes the local of the outer function into that body, above
-        the directive, which is a position no directive survives. Node prints `bL` for the first
-        file that comes back, a body reporting a mode it no longer has, and `b1` for the second,
-        which creates the global the file threw over and returns a value where it stopped.
-        """
-        rows = AN_ACCESSOR_WHOSE_RETURNED_BODY_OPENS_WITH_A_DIRECTIVE
-        self.assertEqual(
-            {source: _before_and_after_as_a_script(source) for source in rows},
-            _each_program_still_prints(rows),
-        )
-
-    @unittest.expectedFailure
-    def test_a_move_writes_no_directive_into_a_function_that_can_hold_none(self):
-        """
-        Node prints `1`, `2`, and `5` for the six programs of
-        `A_FUNCTION_A_MOVE_WOULD_WRITE_A_DIRECTIVE_INTO`, one pair for each way of writing a
-        parameter list that is not simple. In each, the `'use strict'` stands inside a block or one
-        statement below a binding, so it governs nothing and the function is sloppy code that such a
-        list is welcome in. Lifting the block, and dropping the binding, each leave that directive
-        opening a body which may hold none, and Node refuses every one of the six files that come
-        back with a SyntaxError. The same two moves in a function whose parameter list is simple are
-        pinned by the two entries above, where what comes back still runs and reports a mode the
-        file never declared.
-        """
-        rows = A_FUNCTION_A_MOVE_WOULD_WRITE_A_DIRECTIVE_INTO
-        self.assertEqual(
-            {source: _before_and_after(source) for source in rows},
-            _each_program_still_prints(rows),
-        )
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestADirectiveIsNotAStatementThatCanBeDiscarded(TestBase):
-    """
-    A directive is written in the shape of an expression statement and is not one. Evaluating the
-    literal is the least of what it does: it states the mode the body it opens runs in, and that
-    body keeps the mode for as long as the statement stands there. A statement whose value nothing
-    reads may be discarded, and this one may not, so the shape it is written in is not enough to
-    decide it by.
-
-    It is discarded all the same, whenever a binding standing beside it in the same body is removed:
-    the sweep that drops a variable nothing reads back also drops the statements of that body which
-    only evaluate a literal, and a directive is one of those by its shape alone. What removed the
-    variable does not matter — an assignment nothing reads and a namespace object flattened into
-    bare names each take the directive with them — and neither does whether the body is a function
-    or the file.
-    """
-
-    @unittest.expectedFailure
-    def test_a_directive_survives_the_removal_of_a_binding_beside_it(self):
-        """
-        Node prints `true` for all four programs of
-        `A_BODY_WHOSE_DIRECTIVE_STANDS_BESIDE_A_BINDING_NOTHING_READS`, the two that read a property
-        back printing the property first: each body opens with the directive and is strict for it.
-        Each deobfuscation prints `false`, having removed the binding and the directive together.
-        The first program with its directive left out prints `false` on both sides, so it is the
-        removal of the directive and not the removal of the binding that moved the answer.
-        """
-        rows = A_BODY_WHOSE_DIRECTIVE_STANDS_BESIDE_A_BINDING_NOTHING_READS
-        self.assertEqual(
-            {source: _before_and_after_as_a_script(source) for source in rows},
-            _each_program_still_prints(rows),
-        )
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')

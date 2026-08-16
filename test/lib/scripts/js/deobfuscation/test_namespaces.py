@@ -352,3 +352,38 @@ class TestNamespaceFlattening(TestJsDeobfuscator):
         """
         source = 'var NS = {}; NS.f = impl(); NS.f();'
         self.assertEqual(self._run_transformers(source), self._flatten(source))
+
+    def test_the_declarations_a_flattening_writes_stand_behind_the_directive(self):
+        """
+        Flattening a namespace object writes a declaration for every bare name it leaves behind, and
+        that declaration goes below the `'use strict'` the body opens with. Written above it, the
+        directive would stop being one and the body would run sloppy.
+        """
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f(a) {
+                  'use strict';
+                  var p;
+                  p = a;
+                  return p;
+                }
+                f(1);
+                """
+            ),
+            self._flatten(
+                "function f(a) { 'use strict'; var NS = {}; NS.p = a; return NS.p; }\nf(1);"),
+        )
+
+    def test_the_same_declarations_stand_behind_a_scripts_directive(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                'use strict';
+                var p;
+                p = 1;
+                console.log(p);
+                """
+            ),
+            self._flatten("'use strict';\nvar NS = {};\nNS.p = 1;\nconsole.log(NS.p);"),
+        )

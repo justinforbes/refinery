@@ -13,6 +13,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
     access_key,
     function_binds_name,
+    insert_after_prologue,
     is_receiver_binding_call,
     references_receiver_this,
 )
@@ -402,8 +403,7 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
                 generator=func_expr.generator,
                 is_async=func_expr.is_async,
             )
-            decl.parent = scope
-            body.insert(0, decl)
+            insert_after_prologue(scope, [decl])
 
     @staticmethod
     def _emit_declarations(scope: Node, body: list, props: set[str]) -> None:
@@ -430,8 +430,7 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
             for n in needed
         ]
         decl = JsVariableDeclaration(declarations=declarations, kind=JsVarKind.VAR)
-        decl.parent = scope
-        body.insert(0, decl)
+        insert_after_prologue(scope, [decl])
 
     @staticmethod
     def _remove_declarator(

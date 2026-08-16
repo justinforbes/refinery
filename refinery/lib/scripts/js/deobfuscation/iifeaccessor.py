@@ -61,6 +61,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     strip_parens,
 )
+from refinery.lib.scripts.js.strict import directive_prologue
 
 
 def _is_literal_initializer(node: Node | None) -> bool:
@@ -214,12 +215,27 @@ class JsIIFEAccessorPromoter(ScriptLevelTransformer):
             self._promote(pattern)
 
     def _promote(self, pattern: _Pattern) -> None:
+        """
+        Rewrite the accessor as a plain function declaration, moving the closure's declarations into
+        the inner function's body.
+
+        They go behind that body's Directive Prologue rather than at its head. A declaration written
+        above a `'use strict'` ends the prologue before it is reached, and the promoted function runs
+        sloppy where the source wrote it strict. Behind the prologue is a position the declarations
+        can always take: a prologue is string literals, which read nothing and so cannot observe a
+        binding that is now introduced after them. That is the reason, and not that the declarations
+        happen to be `var`s — `_detect` accepts any `JsVariableDeclaration`, `let` and `const`
+        included.
+        """
         inner = pattern.inner_func
         inner_body = inner.body
         if not isinstance(inner_body, JsBlockStatement):
             return
-        new_body_stmts = [_clone_node(d) for d in pattern.closure_decls]
-        new_body_stmts.extend(_clone_node(s) for s in inner_body.body)
+        carried = [_clone_node(s) for s in inner_body.body]
+        prologue = len(directive_prologue(inner_body))
+        new_body_stmts = carried[:prologue]
+        new_body_stmts.extend(_clone_node(d) for d in pattern.closure_decls)
+        new_body_stmts.extend(carried[prologue:])
         new_func = JsFunctionDeclaration(
             id=JsIdentifier(name=pattern.name),
             params=[_clone_node(p) for p in inner.params],

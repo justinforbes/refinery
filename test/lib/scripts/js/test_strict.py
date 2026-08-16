@@ -199,6 +199,87 @@ class TestJsStrict(TestBase):
     def test_distinct_parameters_clean(self):
         self.assertEqual(self._violations('(function (a, b, c) {})', strict=True), [])
 
+    def test_duplicate_parameter_of_a_method_flagged_when_sloppy(self):
+        source = 'var o = { m(a, a) {} };'
+        self.assertEqual(
+            self._violations(source, strict=False),
+            [StrictViolation(source.rindex('a'), 'duplicate-parameter', 'a')])
+
+    def test_duplicate_parameter_of_an_arrow_flagged_when_sloppy(self):
+        source = 'var f = (a, a) => {};'
+        self.assertEqual(
+            self._violations(source, strict=False),
+            [StrictViolation(source.rindex('a'), 'duplicate-parameter', 'a')])
+
+    def test_duplicate_parameter_of_a_property_value_is_a_sloppy_program(self):
+        source = 'var o = { m: function (a, a) {} };'
+        self.assertEqual(self._violations(source, strict=False), [])
+        self.assertEqual(
+            self._violations(source, strict=True),
+            [StrictViolation(source.rindex('a'), 'duplicate-parameter', 'a')])
+
+    def test_duplicate_parameter_in_a_list_that_is_not_simple_flagged_when_sloppy(self):
+        source = 'function f(a, ...a) {}'
+        self.assertEqual(
+            self._violations(source, strict=False),
+            [StrictViolation(source.rindex('a'), 'duplicate-parameter', 'a')])
+
+    def test_use_strict_under_a_parameter_list_that_is_not_simple(self):
+        source = "function f(a = 1) { 'use strict'; }"
+        self.assertEqual(
+            self._violations(source, strict=False),
+            [StrictViolation(0, 'use-strict-with-non-simple-parameters')])
+
+    def test_use_strict_under_a_non_simple_list_is_flagged_in_either_mode(self):
+        source = "var f = function ({a}) { 'use strict'; };"
+        expected = [StrictViolation(
+            source.index('function'), 'use-strict-with-non-simple-parameters')]
+        self.assertEqual(self._violations(source, strict=False), expected)
+        self.assertEqual(self._violations(source, strict=True), expected)
+
+    def test_use_strict_negatives(self):
+        sources = [
+            "function f(a, b) { 'use strict'; }",
+            "function f(a = 1) { ('use strict'); }",
+            "function f(a = 1) { 0; 'use strict'; }",
+            "var f = (a = 1) => 'use strict';",
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertEqual(self._violations(source, strict=True), [])
+
+    def test_getter_with_a_parameter(self):
+        for source in ['var o = { get g(a) {} };', 'class C { get g(...a) {} }']:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    self._violations(source, strict=False),
+                    [StrictViolation(source.index('('), 'accessor-arity')])
+
+    def test_setter_without_exactly_one_parameter(self):
+        sources = [
+            'var o = { set s() {} };',
+            'var o = { set s(a, b) {} };',
+            'var o = { set s(...a) {} };',
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    self._violations(source, strict=False),
+                    [StrictViolation(source.index('('), 'accessor-arity')])
+
+    def test_accessor_arity_negatives(self):
+        sources = [
+            'var o = { get g() {} };',
+            'var o = { set s(v) {} };',
+            'var o = { set s(v = 1) {} };',
+            'var o = { set s([v]) {} };',
+            'var o = { get(a, b) {} };',
+            'var o = { get: function (a, b) {} };',
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertEqual(self._violations(source, strict=True), [])
+
     def test_default_value_is_a_reference(self):
         self.assertEqual(self._violations('(function (a = eval) {})', strict=True), [])
         source = '(function (a = implements) {})'
