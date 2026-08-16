@@ -109,7 +109,7 @@ COVERAGE: dict[str, _Coverage] = {
     'System.Int32'   : _Coverage(112, 74),
     'System.Int64'   : _Coverage(27, 20),
     'System.SByte'   : _Coverage(2, 0),
-    'System.String'  : _Coverage(55, 23),
+    'System.String'  : _Coverage(65, 23),
     'System.UInt16'  : _Coverage(2, 0),
     'System.UInt32'  : _Coverage(4, 0),
     'System.UInt64'  : _Coverage(2, 0),
@@ -119,7 +119,7 @@ COVERAGE: dict[str, _Coverage] = {
 #: population. `Decimal` is not a `float` — 5.1 computes it exactly and to a different precision —
 #: and `Single` is not one either, so a row carrying one has nothing here to be right about.
 TYPES_OUTSIDE_THE_CURRENCY: dict[str, int] = {
-    'System.Decimal' : 38,
+    'System.Decimal' : 51,
     'System.Single'  : 1,
 }
 

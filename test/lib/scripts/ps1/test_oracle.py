@@ -3191,6 +3191,156 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Decimal\t1.0',
             'OUT\tSystem.Decimal\t1.0',
         ),
+    "$t = 'x' + 1.00d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1',
+            'OUT\tSystem.String\tx1',
+        ),
+    "$t = 'x' + 1.000d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1',
+            'OUT\tSystem.String\tx1',
+        ),
+    "$t = 'x' + 1.100d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.100',
+            'OUT\tSystem.String\tx1.100',
+        ),
+    "$t = 'x' + 10.0d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx10',
+            'OUT\tSystem.String\tx10',
+        ),
+    "$t = 'x' + 0.0d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx0',
+            'OUT\tSystem.String\tx0',
+        ),
+    "$t = 'x' + 1.2300d; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.2300',
+            'OUT\tSystem.String\tx1.2300',
+        ),
+    "$z = 1.00d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.00',
+            'OUT\tSystem.String\tx1.00',
+        ),
+    "$z = 1.000d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.000',
+            'OUT\tSystem.String\tx1.000',
+        ),
+    "$z = 1.100d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.100',
+            'OUT\tSystem.String\tx1.100',
+        ),
+    '$t = 1.00d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1',
+            'OUT\tSystem.Decimal\t1',
+        ),
+    '$t = 1.000d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1',
+            'OUT\tSystem.Decimal\t1',
+        ),
+    '$t = 1.10d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.10',
+            'OUT\tSystem.Decimal\t1.10',
+        ),
+    '$t = 1.100d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.100',
+            'OUT\tSystem.Decimal\t1.100',
+        ),
+    '$t = 1.0d - 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1',
+            'OUT\tSystem.Decimal\t1',
+        ),
+    '$t = 1.0d * 1d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1',
+            'OUT\tSystem.Decimal\t1',
+        ),
+    '$t = 1.0d / 1d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1',
+            'OUT\tSystem.Decimal\t1',
+        ),
+    '$t = 2.50d + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t2.50',
+            'OUT\tSystem.Decimal\t2.50',
+        ),
+    '$t = 1.500d + 1.500d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t3.000',
+            'OUT\tSystem.Decimal\t3.000',
+        ),
+    '$t = 1.0d + 2.0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t3',
+            'OUT\tSystem.Decimal\t3',
+        ),
+    '$z = 1.00d; $t = $z + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.00',
+            'OUT\tSystem.Decimal\t1.00',
+        ),
+    '$z = 1.100d; $t = $z + 0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t1.100',
+            'OUT\tSystem.Decimal\t1.100',
+        ),
+    '$z = 1.50d; $t = $z + 1.50d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t3.00',
+            'OUT\tSystem.Decimal\t3.00',
+        ),
+    '$t = - 1.0d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t-1',
+            'OUT\tSystem.Decimal\t-1',
+        ),
+    '$t = - 1.00d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t-1',
+            'OUT\tSystem.Decimal\t-1',
+        ),
+    '$t = - 1.10d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t-1.10',
+            'OUT\tSystem.Decimal\t-1.10',
+        ),
+    '$z = 1.0d; $t = - $z; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.Decimal\t-1.0',
+            'OUT\tSystem.Decimal\t-1.0',
+        ),
+    '$t = [string]1.00d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1.00',
+            'OUT\tSystem.String\t1.00',
+        ),
+    '$t = [string]1.100d; Write-Output (,$t); Write-Output $t':
+        (
+            'OUT\tSystem.String\t1.100',
+            'OUT\tSystem.String\t1.100',
+        ),
+    "$t = 'x' + (1.0d); Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1',
+            'OUT\tSystem.String\tx1',
+        ),
+    "$t = 'x' + [decimal]'1.0'; Write-Output (,$t); Write-Output $t":
+        (
+            'OUT\tSystem.String\tx1.0',
+            'OUT\tSystem.String\tx1.0',
+        ),
 }
 
 
@@ -3230,25 +3380,6 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: So the Char erasure is a wrong type, a wrong value (`[int][char]48`), a wrong lookup (a Char
 #: hashtable key), and a throw that does not happen — and this ledger holds only the first two.
 TYPE_DEFECTS: dict[str, str] = {
-    "$t = 'x' + 1.0d; Write-Output (,$t); Write-Output $t":
-        'A Decimal spelled with a trailing zero is written one way where 5.1 folds the expression '
-        'producing it at parse time and another where the same operation runs, so the domain '
-        'computes the run-time spelling for a source the host folds. Measured both ways round: '
-        "`'x' + 1.0d` is `x1` while `$z = 1.0d; 'x' + $z` is `x1.0`, and `1.0d + 0d` is `1` while "
-        '`$z = 1.0d; $z + 0d` is `1.0`. Refusing the fold is not the fix, because the run-time '
-        'spelling is the right answer for the second of each pair and inlining is what hands the '
-        "parser an expression to fold. Nor is dropping the zero: two trailing places survive, `'x' "
-        "+ 1.10d` is `x1.10` and `1.50d + 1.50d` is `3.00`, so what separates them is unmeasured. "
-        'The wrong values themselves are held in '
-        '`test.lib.scripts.ps1.analysis.test_value_facts.MISFOLDED_OPERATIONS`.',
-    "$t = 'x' + 2.0d; Write-Output (,$t); Write-Output $t":
-        'The same, to record that it is the shape of the numeral and not the digit one.',
-    '$t = - 0.0d; Write-Output (,$t); Write-Output $t':
-        'The same normalisation reached through a negation rather than a concatenation.',
-    '$t = 1.0d + 0d; Write-Output (,$t); Write-Output $t':
-        'The same, with the value staying a Decimal rather than becoming text.',
-    '$t = 1.0d - $true; Write-Output (,$t); Write-Output $t':
-        'The same, with the operand that carries the trailing zero on the left.',
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
         'The count is right and the elements are not: the interpreter has no Char in the values '
         'it computes with, so a [char] cast reaches the tree as a one-character String.',

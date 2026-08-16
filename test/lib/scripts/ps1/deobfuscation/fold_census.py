@@ -1166,7 +1166,7 @@ FOLDS: dict[str, str] = {
     '$t = - 0d; Write-Output (,$t); Write-Output $t':
         'Write-Output (,0d)\nWrite-Output 0d',
     '$t = - 0.0d; Write-Output (,$t); Write-Output $t':
-        'Write-Output (,0.0d)\nWrite-Output 0.0d',
+        'Write-Output (,0d)\nWrite-Output 0d',
     '$t = 79228162514264337593543950335d + 0d; Write-Output (,$t); Write-Output $t':
         'Write-Output (,79228162514264337593543950335d)\nWrite-Output 79228162514264337593543950335d',
     "$t = '1000' -eq 1e3d; Write-Output (,$t); Write-Output $t":
@@ -1174,7 +1174,7 @@ FOLDS: dict[str, str] = {
     "$t = 'a' + 1e3d; Write-Output (,$t); Write-Output $t":
         "Write-Output (,'a1000')\nWrite-Output 'a1000'",
     "$t = 'x' + 1.0d; Write-Output (,$t); Write-Output $t":
-        "Write-Output (,'x1.0')\nWrite-Output 'x1.0'",
+        "Write-Output (,'x1')\nWrite-Output 'x1'",
     "$t = $true * '1'; Write-Output (,$t); Write-Output $t":
         "$t = $True * '1'\nWrite-Output (,$t)\nWrite-Output $t",
     '$t = 2 * [char]48; Write-Output (,$t); Write-Output $t':
@@ -1184,7 +1184,7 @@ FOLDS: dict[str, str] = {
     '$t = $true + 1.0d; Write-Output (,$t); Write-Output $t':
         '$t = $True + 1.0d\nWrite-Output (,$t)\nWrite-Output $t',
     '$t = 1.0d - $true; Write-Output (,$t); Write-Output $t':
-        'Write-Output (,0.0d)\nWrite-Output 0.0d',
+        'Write-Output (,0d)\nWrite-Output 0d',
     "$t = [char]48 - '1'; Write-Output (,$t); Write-Output $t":
         'Write-Output (,47)\nWrite-Output 47',
     '$t = $true - 1.5; Write-Output (,$t); Write-Output $t':
@@ -1232,7 +1232,7 @@ FOLDS: dict[str, str] = {
     '$t = [string]1.0d; Write-Output (,$t); Write-Output $t':
         "Write-Output (,'1.0')\nWrite-Output '1.0'",
     '$t = 1.0d + 0d; Write-Output (,$t); Write-Output $t':
-        'Write-Output (,1.0d)\nWrite-Output 1.0d',
+        'Write-Output (,1d)\nWrite-Output 1d',
     "$t = 'x' + 1.10d; Write-Output (,$t); Write-Output $t":
         "Write-Output (,'x1.10')\nWrite-Output 'x1.10'",
     '$t = [string]1.10d; Write-Output (,$t); Write-Output $t':
@@ -1242,7 +1242,7 @@ FOLDS: dict[str, str] = {
     '$t = [string]1.000d; Write-Output (,$t); Write-Output $t':
         "Write-Output (,'1.000')\nWrite-Output '1.000'",
     "$t = 'x' + 2.0d; Write-Output (,$t); Write-Output $t":
-        "Write-Output (,'x2.0')\nWrite-Output 'x2.0'",
+        "Write-Output (,'x2')\nWrite-Output 'x2'",
     '$t = [string]2.0d; Write-Output (,$t); Write-Output $t':
         "Write-Output (,'2.0')\nWrite-Output '2.0'",
     '$t = [string]0.0d; Write-Output (,$t); Write-Output $t':
@@ -1251,8 +1251,60 @@ FOLDS: dict[str, str] = {
         "Write-Output (,'x1.0')\nWrite-Output 'x1.0'",
     "$z = 1.10d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
         "Write-Output (,'x1.10')\nWrite-Output 'x1.10'",
-    '$z = 1.0d; $t = $z + 0d; Write-Output (,$t); Write-Output $t':
-        'Write-Output (,1.0d)\nWrite-Output 1.0d',
+    "$t = 'x' + 1.00d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1')\nWrite-Output 'x1'",
+    "$t = 'x' + 1.000d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1')\nWrite-Output 'x1'",
+    "$t = 'x' + 1.100d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.100')\nWrite-Output 'x1.100'",
+    "$t = 'x' + 10.0d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x10')\nWrite-Output 'x10'",
+    "$t = 'x' + 0.0d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x0')\nWrite-Output 'x0'",
+    "$t = 'x' + 1.2300d; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.2300')\nWrite-Output 'x1.2300'",
+    "$z = 1.00d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.00')\nWrite-Output 'x1.00'",
+    "$z = 1.000d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.000')\nWrite-Output 'x1.000'",
+    "$z = 1.100d; $t = 'x' + $z; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1.100')\nWrite-Output 'x1.100'",
+    '$t = 1.00d + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1d)\nWrite-Output 1d',
+    '$t = 1.000d + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1d)\nWrite-Output 1d',
+    '$t = 1.10d + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.10d)\nWrite-Output 1.10d',
+    '$t = 1.100d + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.100d)\nWrite-Output 1.100d',
+    '$t = 1.0d - 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1d)\nWrite-Output 1d',
+    '$t = 1.0d * 1d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1d)\nWrite-Output 1d',
+    '$t = 1.0d / 1d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1d)\nWrite-Output 1d',
+    '$t = 2.50d + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,2.50d)\nWrite-Output 2.50d',
+    '$t = 1.500d + 1.500d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,3.000d)\nWrite-Output 3.000d',
+    '$t = 1.0d + 2.0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,3d)\nWrite-Output 3d',
+    '$z = 1.100d; $t = $z + 0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,1.100d)\nWrite-Output 1.100d',
+    '$z = 1.50d; $t = $z + 1.50d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,3.00d)\nWrite-Output 3.00d',
+    '$t = - 1.0d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-1d)\nWrite-Output (-1d)',
+    '$t = - 1.00d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-1d)\nWrite-Output (-1d)',
+    '$t = - 1.10d; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,-1.10d)\nWrite-Output (-1.10d)',
+    '$t = [string]1.00d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.00')\nWrite-Output '1.00'",
+    '$t = [string]1.100d; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.100')\nWrite-Output '1.100'",
+    "$t = 'x' + (1.0d); Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'x1')\nWrite-Output 'x1'",
     'openssl enc -d -a -in x':
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':

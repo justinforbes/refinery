@@ -28,6 +28,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     integer_of,
     make_string_literal,
     read,
+    survives_being_written,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.ast import (
@@ -187,6 +188,37 @@ def _candidate_key(var: Ps1Variable) -> str | None:
     return None
 
 
+def _survives_this_position(value: Node, occurrence: Ps1Variable) -> bool:
+    """
+    Whether writing *value* where *occurrence* stands leaves the program meaning what it did.
+
+    One value does not: a `System.Decimal` whose value is a whole number written to places. 5.1
+    folds a constant expression in its parser and a numeral reaching that fold loses those places,
+    so putting one where an operator can reach it moves the computation from run time to parse time
+    — measured, `$z = 1.0d; $z + 0d` is `1.0` and the `1.0d + 0d` written for it is `1`. Anywhere an
+    operator cannot reach it the numeral is read as itself and the substitution is what it was:
+    `$z = 1.0d; ,$z` still writes `1.0`.
+
+    See `refinery.lib.scripts.ps1.analysis.values.survives_being_written` for the value half of this
+    and `read_operand` for the rule both stand on.
+    """
+    if survives_being_written(read(value)):
+        return True
+    return not isinstance(
+        _ancestor_past_parens(occurrence), (Ps1BinaryExpression, Ps1UnaryExpression))
+
+
+def _ancestor_past_parens(node: Node) -> Node | None:
+    """
+    The first ancestor of *node* that is not a parenthesis, which is what decides whether an
+    operator reaches it: a parenthesis does not stop 5.1 folding what it wraps.
+    """
+    parent = node.parent
+    while isinstance(parent, Ps1ParenExpression):
+        parent = parent.parent
+    return parent
+
+
 def _constant_value_key(node: Node) -> tuple | None:
     """
     A hashable key for the constant value of a node, or `None` where the node names no value. Two
@@ -202,6 +234,7 @@ def _constant_value_key(node: Node) -> tuple | None:
     A type literal is not a value the domain names — `[int]` as a value is a `System.RuntimeType` —
     and it is keyed here by the name it writes, because the inliner only ever compares one of these
     against another.
+
     """
     node = unwrap_parens(node)
     if isinstance(node, Ps1TypeExpression):
@@ -590,7 +623,7 @@ class Ps1ConstantInlining(Transformer):
         state: _Inlining,
     ) -> None:
         const_value = state.value_at(node, key)
-        if const_value is None:
+        if const_value is None or not _survives_this_position(const_value, node):
             return
         if isinstance(node.parent, Ps1ExpandableString):
             replacement = _interpolated(const_value, node, state.flow)

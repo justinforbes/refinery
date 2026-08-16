@@ -25,6 +25,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     integer_of,
     invariant_text,
     is_truthy,
+    read_operand,
     make_string_literal,
     pattern_at,
     read,
@@ -706,7 +707,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         if op == '-join':
             return self._handle_unary_join(node)
         if op in ('-', '-bnot'):
-            return _folded(apply_unary(op, read(node.operand)))
+            return _folded(apply_unary(op, read_operand(node.operand)))
         if op in ('-not', '!'):
             truth = is_truthy(node.operand)
             if truth is not None:
@@ -1172,7 +1173,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         `0xFFFFFFFF -bxor 0x5A` is Int32 -91 rather than the 4294967205 an operand read as an
         unsigned Python integer would give, and `2147483647 + 1` widens to a Double as a host does.
         """
-        return _folded(apply(op, read(node.left), read(node.right)))
+        return _folded(apply(op, read_operand(node.left), read_operand(node.right)))
 
     @staticmethod
     def _handle_string_multiply(node: Ps1BinaryExpression) -> Expression | None:
@@ -1207,7 +1208,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         `refinery.lib.scripts.ps1.analysis.values`, so that one reader decides what a comparison is
         and a measurement that moves it moves in one place.
         """
-        return _folded(apply(op, read(node.left), read(node.right)))
+        return _folded(apply(op, read_operand(node.left), read_operand(node.right)))
 
     def _handle_logical(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
         """

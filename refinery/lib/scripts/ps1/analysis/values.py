@@ -713,6 +713,76 @@ def read(node: Node | None) -> Ps1Fact:
     return UNKNOWN
 
 
+def read_operand(node: Node | None) -> Ps1Fact:
+    """
+    What an operand *written in the source* contributes to an operation, which is `read` except for
+    a `Decimal` numeral whose value is a whole number: that one contributes the number without the
+    places it was written with.
+
+    5.1 folds a constant expression in its parser, and a numeral reaching that fold carries no scale
+    where it has nothing to hold — measured, `'x' + 1.00d` is `x1` where `'x' + 1.100d` is `x1.100`,
+    and `- 1.0d` is `-1` where `- 1.10d` is `-1.10`. It is each *operand* that loses its places and
+    not the result: `1.500d + 1.500d` is `3.000`, a whole number written to three places, because
+    neither addend was one.
+
+    **Only a numeral**, which is what makes this a different question from `read`. The same value
+    reached any other way keeps its scale, because then no numeral stands where the parser folds:
+    `$z = 1.0d; 'x' + $z` is `x1.0` and `'x' + [decimal]'1.0'` is `x1.0`, both measured, against the
+    `x1` of the numeral written in place. A bare `1.0d` is `1.0` for the same reason — there is no
+    operation over it to fold.
+
+    That is also why `refinery.lib.scripts.ps1.deobfuscation.constants` will not carry such a value:
+    inlining one *writes* a numeral where the source had none, which would move the operand into the
+    fold and take its places away.
+    """
+    numeral = _folded_numeral(node)
+    return read(node) if numeral is None else numeral
+
+
+def survives_being_written(fact: Ps1Fact) -> bool:
+    """
+    Whether a value keeps its meaning when a pass writes it down as a constant where the source had
+    something else. A `Decimal` whose value is a whole number written to places does not: the source
+    reached it through a variable or a cast, and the numeral standing in for one of those is a
+    numeral the parser folds, which takes the places away. `read_operand` is the rule, and this is
+    the same rule asked of a value rather than of a node.
+
+    Measured: `$z = 1.0d; $z + 0d` is `1.0` while the `1.0d + 0d` an inliner writes for it is `1`.
+    Nothing else in the domain answers `False` here — every other value has a spelling that reads
+    back as itself wherever it is put, which is what `render` and `read` being inverses means.
+    """
+    if not isinstance(fact, Ps1Constant) or fact.type != _DECIMAL:
+        return True
+    payload = fact.payload
+    if not isinstance(payload, decimal.Decimal) or payload.as_tuple().exponent == 0:
+        return True
+    with decimal.localcontext(_DECIMAL_ARITHMETIC):
+        return payload.to_integral_value() != payload
+
+
+def _folded_numeral(node: Node | None) -> Ps1Fact | None:
+    """
+    The value a `Decimal` numeral has where the parser folds it, or `None` for a node that is not
+    one of those. See `read_operand`.
+
+    A parenthesis does not stop the fold and so does not stop this: measured, `'x' + (1.0d)` is
+    `x1`, the same as without it.
+    """
+    if node is not None:
+        node = unwrap_parens(node)
+    if not isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral)):
+        return None
+    fact = read(node)
+    if not isinstance(fact, Ps1Constant) or fact.type != _DECIMAL:
+        return None
+    payload = fact.payload
+    if not isinstance(payload, decimal.Decimal) or payload.as_tuple().exponent == 0:
+        return None
+    with decimal.localcontext(_DECIMAL_ARITHMETIC):
+        whole = payload.to_integral_value()
+        return None if whole != payload else Ps1Constant(_DECIMAL, whole)
+
+
 def fact_of(payload: object) -> Ps1Fact:
     """
     The value a Python object denotes where nothing has narrowed it, or `UNKNOWN` for one that
@@ -1547,7 +1617,7 @@ def _evaluated_unary(
     """
     A unary operator, which is `apply_unary` over whatever its operand evaluates to.
     """
-    operand = evaluate(node.operand, type_of_variable)
+    operand = _operand(node.operand, type_of_variable)
     applied = apply_unary(node.operator, operand.value)
     return Ps1Outcome(operand.may_throw or applied.may_throw, applied.value)
 
@@ -1567,11 +1637,25 @@ def _evaluated_binary(
     right operand it was claimed for is the one whose value is unknown, which refuses the cell
     anyway. Reading the left operand alone where it settles the result is a fold this does not take.
     """
-    left = evaluate(node.left, type_of_variable)
-    right = evaluate(node.right, type_of_variable)
+    left = _operand(node.left, type_of_variable)
+    right = _operand(node.right, type_of_variable)
     applied = apply(node.operator, left.value, right.value)
     return Ps1Outcome(
         left.may_throw or right.may_throw or applied.may_throw, applied.value)
+
+
+def _operand(
+    node: Node | None,
+    type_of_variable: Ps1VariableTyping | None,
+) -> Ps1Outcome:
+    """
+    What an operand of an operator produces, which is `evaluate` over it except where `read_operand`
+    says a numeral standing there loses the places it was written with.
+    """
+    numeral = _folded_numeral(node)
+    if numeral is not None:
+        return Ps1Outcome(False, numeral)
+    return evaluate(node, type_of_variable)
 
 
 @functools.cache

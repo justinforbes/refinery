@@ -59,6 +59,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     resolve_expression_type,
     type_of,
     text_of,
+    read_operand,
 )
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.ast import in_evaluation_order, string_value
@@ -603,19 +604,46 @@ def _measured_operation_fact(expression: str) -> Ps1Fact:
 
 def _applied(expression: str) -> Ps1Outcome:
     """
-    What `apply` makes of a measured operation: the operator the row spells, over the facts `read`
-    makes of the two operands it stands between. This is the call
+    What `apply` makes of a measured operation: the operator the row spells, over the facts
+    `read_operand` makes of the two operands it stands between. This is the call
     `refinery.lib.scripts.ps1.deobfuscation.folding` makes for the same expression, so what is
     answered here is what that pass sees.
+
+    `read_operand` and not `read`, because an operand of an operator is not read the way the same
+    numeral is read standing alone: 5.1 folds a constant expression in its parser and a `Decimal`
+    numeral reaching that fold loses the places it has nothing to hold. `'x' + 1.0d` is `x1` while
+    `$t = 1.0d` is `1.0`, both measured, so a step composed out of `read` would answer a value no
+    host prints and the law that `evaluate` agrees with its steps would be quantified over the
+    wrong step.
     """
     applied = _application(expression)
     assert applied is not None, expression
-    return apply(applied.operator.lower(), read(applied.left), read(applied.right))
+    return apply(
+        applied.operator.lower(), read_operand(applied.left), read_operand(applied.right))
 
 
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    "'x' + (1.0d)",
+    "'x' + 0.0d",
+    "'x' + 1.000d",
+    "'x' + 1.00d",
+    "'x' + 1.0d",
+    "'x' + 1.100d",
+    "'x' + 1.2300d",
+    "'x' + 10.0d",
+    "'x' + 2.0d",
+    '1.000d + 0d',
+    '1.00d + 0d',
+    '1.0d * 1d',
+    '1.0d + 2.0d',
+    '1.0d - 0d',
+    '1.0d / 1d',
+    '1.100d + 0d',
+    '1.10d + 0d',
+    '1.500d + 1.500d',
+    '2.50d + 0d',
     '$null -gt -5',
     '$null -le -5',
     '$null -lt -5',
@@ -965,6 +993,17 @@ DECIMAL_TEXTS: tuple[str, ...] = (
     '[string]10d',
 )
 
+#: Decimal literals that spell one number at more than one scale, each of which the corpus measures
+#: the cast to String of. The type keeps the places a value was written with, so `1.0d` and `1.00d`
+#: are one number and two values, and a host writes the one `1.0` and the other `1.00`.
+SCALED_DECIMALS: tuple[str, ...] = (
+    '1.0d',
+    '1.00d',
+    '1.000d',
+    '1.10d',
+    '1.100d',
+)
+
 #: The precisions the questions about a Decimal are asked under. 28 is Python's default and the
 #: others stand for what anything else sharing the process may set it to: one digit, a handful, and
 #: more than the type has.
@@ -1284,20 +1323,16 @@ ELEMENT_PAIRS: tuple[tuple[str, str], ...] = (
 #: The measured operations whose result a host printed to fewer digits than the value has: 5.1
 #: writes a Double as fifteen significant figures, and `512MB * 512MB` is 2 to the 58th exactly.
 #: What such a row measures is the widening, so the type is what the value is held against.
-#: The measured operations the domain answers with a value the host did not print. Each is a wrong
-#: constant the folding pass writes into the emitted script, held here so that it cannot be added to
-#: without saying so and cannot be fixed without this shrinking.
+#: The measured operations the domain answers with a value the host did not print. Empty, and the
+#: partition below is what keeps it so: an operation whose fold stops matching its measurement has
+#: to be written here before the suite passes again, which is a diff saying that a wrong constant is
+#: now being emitted rather than a number quietly moving.
 #:
-#: All of them are one defect. 5.1 folds a constant expression at parse time and writes a `Decimal`
-#: carrying a trailing zero differently there than the same operation writes it at run time —
-#: measured, `'x' + 1.0d` is `x1` while `$z = 1.0d; 'x' + $z` is `x1.0` — and the domain computes the
-#: run-time spelling for both. Two trailing places survive the parse-time fold where one does not, so
-#: what separates them is not the zero and is not measured; `test_oracle.TYPE_DEFECTS` carries the
-#: same defect as the behaviour it changes.
-MISFOLDED_OPERATIONS: dict[str, str] = {
-    "'x' + 1.0d": 'x1.0',
-    "'x' + 2.0d": 'x2.0',
-}
+#: It held the parse-time `Decimal` fold until `read_operand` was written. 5.1 folds a constant
+#: expression in its parser and a numeral reaching that fold loses the places it has nothing to hold
+#: — `'x' + 1.00d` is `x1` where `'x' + 1.100d` is `x1.100`, and it is the *operand* that loses them
+#: and not the result, which is why `1.500d + 1.500d` is `3.000`.
+MISFOLDED_OPERATIONS: dict[str, str] = {}
 
 ABBREVIATED_OPERATIONS: tuple[str, ...] = (
     '$true + 9223372036854775807L',
@@ -1614,6 +1649,16 @@ class _Step(NamedTuple):
     answered: Ps1Outcome
 
 
+def _operand_of(node) -> Ps1Outcome:
+    """
+    What an operand of an operator comes to, which is `evaluate` over it except where `read_operand`
+    reads a numeral standing there differently from the same numeral standing alone. The step and
+    the whole have to be asked about the same operand or the law below compares two expressions.
+    """
+    folded = read_operand(node)
+    return Ps1Outcome(False, folded) if folded is not UNKNOWN else evaluate(node)
+
+
 def _corpus_steps() -> tuple[_Step, ...]:
     steps: list[_Step] = []
     for site in SITES:
@@ -1631,8 +1676,8 @@ def _corpus_steps() -> tuple[_Step, ...]:
                 evaluate(node),
             ))
         elif isinstance(node, Ps1BinaryExpression):
-            left = evaluate(node.left)
-            right = evaluate(node.right)
+            left = _operand_of(node.left)
+            right = _operand_of(node.right)
             steps.append(_Step(
                 site.source,
                 'operator',
@@ -2407,7 +2452,7 @@ class TestPs1MeasuredCasts(unittest.TestCase):
     """
 
     def test_every_cast_the_corpus_measures_is_selected(self):
-        self.assertEqual(len(CAST_ROWS), 113, 'a measured cast was added or withdrawn')
+        self.assertEqual(len(CAST_ROWS), 115, 'a measured cast was added or withdrawn')
         self.assertEqual(sorted(set(DECLINED_CASTS) - set(CAST_ROWS)), [])
         self.assertEqual(sorted(set(DECLINED_CASTS) & set(THROWN)), [])
 
@@ -2800,7 +2845,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
 
     def test_every_measured_operation_is_selected(self):
         self.assertEqual(
-            len(OPERATION_ROWS), 275, 'a measured operation was added or withdrawn')
+            len(OPERATION_ROWS), 293, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
@@ -3108,7 +3153,7 @@ class TestPs1MeasuredNegation(unittest.TestCase):
     """
 
     def test_every_measured_negation_is_selected(self):
-        self.assertEqual(len(NEGATION_ROWS), 29, 'a measured negation was added or withdrawn')
+        self.assertEqual(len(NEGATION_ROWS), 32, 'a measured negation was added or withdrawn')
         self.assertEqual(sorted(THROWN_NEGATIONS), ["- 'abc'", '- @()'])
         self.assertEqual(sorted(set(ABBREVIATED_NEGATIONS) - set(NEGATION_ROWS)), [])
 
@@ -3728,6 +3773,43 @@ class TestPs1TheDecimalTypeKeepsItsDigits(unittest.TestCase):
         self.assertEqual(wrong, {})
 
 
+class TestPs1TheScaleOfADecimalIsPartOfTheValue(unittest.TestCase):
+    """
+    A `System.Decimal` carries the places it was written with, so one number written at two scales
+    is two values: a host writes `1.0d` as `1.0` and `1.00d` as `1.00`, and the domain writes each
+    back as the literal it was read from. A caller that puts a fact in a set or keys a dictionary by
+    one — which is how `refinery.lib.scripts.ps1.deobfuscation.constants` decides whether
+    re-assigning a variable changes what it holds — therefore has to see as many values here as the
+    host writes texts.
+    """
+
+    def _measured_texts(self) -> dict[str, str]:
+        """
+        The text a host wrote each of those literals as, read off the cast to String that measures
+        it.
+        """
+        return {spelling: _measured(F'[string]{spelling}')[1] for spelling in SCALED_DECIMALS}
+
+    def test_a_host_writes_each_of_those_scales_as_its_own_text(self):
+        self.assertEqual(self._measured_texts(), {
+            '1.0d'   : '1.0',
+            '1.00d'  : '1.00',
+            '1.000d' : '1.000',
+            '1.10d'  : '1.10',
+            '1.100d' : '1.100',
+        })
+
+    @unittest.expectedFailure
+    def test_each_of_those_scales_is_a_fact_of_its_own(self):
+        """
+        Ledgered rather than fixed: a fact carries its Decimal as a `decimal.Decimal`, and two of
+        those compare equal and hash alike where they differ only in scale, so the five values
+        collapse into the two numbers they are written from.
+        """
+        distinct = {_read(spelling) for spelling in SCALED_DECIMALS}
+        self.assertEqual(sorted(_spelled(fact) for fact in distinct), sorted(SCALED_DECIMALS))
+
+
 class TestPs1TheTextAValueWrites(unittest.TestCase):
     """
     Two questions with one answer: what `[string]` makes of a value, and what a `+` with a text on
@@ -4034,7 +4116,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in CAST_ROWS
             if _read(CAST_ROWS[expression].operand) is not UNKNOWN
         }
-        self.assertEqual(len(composed), 111)
+        self.assertEqual(len(composed), 113)
         self.assertEqual(
             composed, {expression: _converted(expression) for expression in composed})
 
@@ -4057,7 +4139,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 175)
+        self.assertEqual(len(composed), 192)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -4157,7 +4239,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 2798)
+        self.assertEqual(len(compared), 2913)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -4172,7 +4254,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if resolve_expression_type(site.node) is not None
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2838)
+        self.assertEqual(len(compared), 2956)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -4187,7 +4269,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
             if candidate_types(site.node, CLOSED_WORLD)
             and type_of(evaluate(site.node).value) is not None
         ]
-        self.assertEqual(len(compared), 2838)
+        self.assertEqual(len(compared), 2956)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -4198,7 +4280,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
         )
 
     def test_a_string_the_tree_reader_spells_is_the_string_named_here(self):
-        self.assertEqual(len(STRINGS), 1625)
+        self.assertEqual(len(STRINGS), 1697)
         self.assertEqual(
             [row.source for row in STRINGS if row.named != Ps1Constant(STRING, row.text)], [])
 
@@ -4248,13 +4330,13 @@ class TestPs1EvaluateIsNoStrongerThanItsSteps(unittest.TestCase):
 
     def test_a_step_that_can_be_consulted_is_the_whole_answer(self):
         consulted = [step for step in STEPS if step.consultable]
-        self.assertEqual(len(consulted), 534)
+        self.assertEqual(len(consulted), 555)
         self.assertEqual(
             [step.source for step in consulted if step.answered.value != step.step.value], [])
 
     def test_only_a_cast_names_anything_where_its_step_cannot_be_consulted(self):
         unconsulted = [step for step in STEPS if not step.consultable]
-        self.assertEqual(len(unconsulted), 28)
+        self.assertEqual(len(unconsulted), 34)
         self.assertEqual(
             [step.source for step in unconsulted if _names_a_value(step.answered.value)], [])
         self.assertEqual(
@@ -4298,7 +4380,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 2231)
+        self.assertEqual(len(compared), 2344)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
