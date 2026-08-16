@@ -25,6 +25,7 @@ from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
     behavior,
     deobfuscate_source,
+    host_behavior,
     node_executable,
 )
 from test.lib.scripts.js.analysis.test_differential import (
@@ -122,6 +123,19 @@ def _before_and_after(source: str) -> tuple[tuple[str, str | None], tuple[str, s
     reported together because the law is that the two agree.
     """
     return behavior(source), behavior(deobfuscate_source(source))
+
+
+def _before_and_after_as_a_script(
+    source: str,
+) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
+    """
+    The same pair as `_before_and_after`, with both programs run as classic global scripts.
+
+    `behavior` runs a file as a CommonJS module, which wraps the whole of it in a function, so the
+    top of the file is the top of a function body there and never the top of a script. A law about
+    what the first statement of a script is has to be witnessed where the file has one.
+    """
+    return host_behavior(source), host_behavior(deobfuscate_source(source))
 
 
 def _dropped_source_characters(source: str, printed: str) -> str:
@@ -617,6 +631,29 @@ class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
         )
 
 
+def _a_directive_standing_below_a_fold_in(parameters: str, call: str, read: str) -> str:
+    """
+    A program calling a function written with *parameters* as *call*, whose body reads *read* below
+    a `'use strict'` that stands one statement into it. The statement above it is the `atob` call of
+    `test.lib.scripts.js.analysis.test_differential.SPELLINGS_A_FOLD_WRITES_AS_A_PLAIN_STRING`,
+    which is not a string literal and therefore ends the prologue in front of the directive.
+    """
+    return (
+        F"function f({parameters}) {{ atob('YQ=='); 'use strict'; return {read}; }}\n"
+        F'console.log({call});\n'
+    )
+
+
+#: A function whose parameter list holds a default value, a rest element, or a destructuring
+#: pattern, mapped to what Node prints for it. A parameter list written any of those ways is not a
+#: simple one, and a function with such a list may hold no Use Strict Directive at all.
+A_FUNCTION_WHOSE_PARAMETER_LIST_FORBIDS_A_DIRECTIVE = {
+    _a_directive_standing_below_a_fold_in('a = 1', 'f()', 'a'): '1\n',
+    _a_directive_standing_below_a_fold_in('...a', 'f(1, 2)', 'a.length'): '2\n',
+    _a_directive_standing_below_a_fold_in('{a}', 'f({a: 5})', 'a'): '5\n',
+}
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten(TestBase):
     """
@@ -690,6 +727,23 @@ class TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten(TestBase):
         self.assertEqual(
             [_before_and_after(a_script_whose_directive_stands_below(head)) for head in spellings],
             [(sloppy, sloppy)] * len(spellings),
+        )
+
+    @unittest.expectedFailure
+    def test_a_fold_writes_no_prologue_into_a_function_that_can_hold_none(self):
+        """
+        Node prints `1`, `2`, and `5` for the three programs of
+        `A_FUNCTION_WHOSE_PARAMETER_LIST_FORBIDS_A_DIRECTIVE`, each of which runs a body holding a
+        `'use strict'` that governs nothing, one statement below a call. The fold writes a string
+        literal where that call stood, which extends the prologue over the line below it, and a
+        function whose parameter list is not simple may not open with that directive under any
+        circumstances. Node refuses all three of these with a SyntaxError, so the cost here is not a
+        body that reports the wrong mode but a file that is no longer a program at all.
+        """
+        rows = A_FUNCTION_WHOSE_PARAMETER_LIST_FORBIDS_A_DIRECTIVE
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
         )
 
 
@@ -1042,6 +1096,235 @@ class TestAKeyAnObjectLiteralLacksIsTheChainsToAnswer(TestBase):
         self.assertEqual(
             {source: _before_and_after(source) for source in rows},
             _each_program_still_prints(rows),
+        )
+
+
+_REPORTS_THE_MODE_IT_STANDS_IN = '(function () { return this; })() === undefined'
+"""
+An expression that is `true` where it stands in strict code and `false` where it stands in sloppy
+code. A plain call passes no receiver, so `this` in the callee is `undefined` under strict and the
+global object under sloppy, and a function written inside a body runs in the mode that body runs in.
+"""
+
+
+def _a_strict_body_holding(statements: str, installs: str = '') -> str:
+    """
+    A program that runs *installs*, then prints whether the body of `f` runs strict, with
+    *statements* standing between the directive that opens that body and the report.
+    """
+    body = (
+        F"function f(a) {{ 'use strict'; {statements}"
+        F' return {_REPORTS_THE_MODE_IT_STANDS_IN}; }}\n'
+        'console.log(f(1));\n'
+    )
+    return F'{installs}\n{body}' if installs else body
+
+
+def _a_strict_script_holding(statements: str) -> str:
+    """
+    A program printing whether the script runs strict, with *statements* standing between the
+    directive that opens the file and the report.
+    """
+    return F"'use strict';\n{statements}\nconsole.log({_REPORTS_THE_MODE_IT_STANDS_IN});\n"
+
+
+def _an_accessor_returning_a_strict_function(body: str, run: str) -> str:
+    """
+    A program building an accessor with an immediately invoked function that holds one local, whose
+    returned function opens with the directive and closes with *body*, and that then runs *run*.
+    Inlining the accessor is what writes the local of the outer function into the body the directive
+    opens.
+    """
+    return (
+        'var acc = (function () {\n'
+        "  var t = ['a', 'b'];\n"
+        F"  return function (i) {{ 'use strict'; {body} }};\n"
+        '})();\n'
+        F'{run}\n'
+    )
+
+
+#: An accessor whose returned function opens with a directive, mapped to what Node prints for it.
+#: The first reports the mode that function runs in and the second assigns to a name nothing
+#: declares, which strict code refuses and sloppy code answers with a new global.
+AN_ACCESSOR_WHOSE_RETURNED_BODY_OPENS_WITH_A_DIRECTIVE = {
+    _an_accessor_returning_a_strict_function(
+        F"return t[i] + ({_REPORTS_THE_MODE_IT_STANDS_IN} ? 'S' : 'L');",
+        'console.log(acc(1));',
+    ): 'bS\n',
+    _an_accessor_returning_a_strict_function(
+        'undeclared = i; return t[i] + undeclared;',
+        'try { console.log(acc(1)); } catch (e) { console.log(e.constructor.name); }',
+    ): 'ReferenceError\n',
+}
+
+
+#: A body that opens with a directive and holds a binding nothing reads back, mapped to what Node
+#: prints for it. Two of them are function bodies and two are whole scripts, and the binding is
+#: written two ways: as a variable a single assignment stores into, and as a namespace object whose
+#: one property is read straight back.
+A_BODY_WHOSE_DIRECTIVE_STANDS_BESIDE_A_BINDING_NOTHING_READS = {
+    _a_strict_body_holding('q = a;', 'var q;'): 'true\n',
+    _a_strict_script_holding('var q;\nq = 1;'): 'true\n',
+    _a_strict_body_holding('var NS = {}; NS.p = 1; console.log(NS.p);'): '1\ntrue\n',
+    _a_strict_script_holding('var NS = {};\nNS.p = 1;\nconsole.log(NS.p);'): '1\ntrue\n',
+}
+
+
+#: A strict body assigning to a name no binding declares, mapped to the behavior Node gives it: the
+#: pair of what it prints and what it throws. The write is the same in both and only what the body
+#: does about the throw differs, one handling it and one letting it end the program.
+A_STRICT_BODY_ASSIGNING_TO_AN_UNDECLARED_NAME = {
+    (
+        "function f() { 'use strict'; try { und = 1; return 'ok'; }"
+        " catch (e) { return 'threw'; } }\n"
+        'console.log(f());\n'
+    ): ('threw\n', None),
+    "(function () { 'use strict'; und = 1; console.log(1); })();\n": ('', 'ReferenceError'),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestMovingAStatementDoesNotChangeWhichStatementsAreDirectives(TestBase):
+    """
+    Whether a statement is a directive is decided by where it stands. A string literal written
+    plainly in the run of statements a script or a function body opens with is one; the same
+    statement a single position lower is an expression that computes a string and discards it. A
+    pass that lifts the contents of a block into the body around it, one that drops a statement it
+    found dead, and one that writes a declaration into a body each change which statements a body
+    opens with, and none of them asks what the change did to that run.
+
+    The mode of a whole script or body follows, in both directions: below a statement that is
+    dropped, a string nobody wrote as a directive becomes one and turns sloppy code strict, and
+    below a declaration that is written in, a directive that was written stops being one and turns
+    strict code sloppy. Neither is reported anywhere, and the file that comes back is a program that
+    runs by different rules than the one that was handed over. What a fold does to the same run is
+    pinned in `TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten`; these move no statement's text
+    at all.
+    """
+
+    @unittest.expectedFailure
+    def test_lifting_a_block_into_the_body_around_it_writes_no_directive(self):
+        """
+        Node prints `false` for both of these. A block is not a prologue and a statement inside one
+        is never a directive, so the script and the probe's body are sloppy code however certainly
+        the branch around that block is taken. The branch is replaced by the statements it holds,
+        which is a rewrite of the block and nothing more, and it leaves that string opening the
+        script in the first and the body in the second: Node prints `true` for both of the files
+        that come back.
+        """
+        sloppy = ('false\n', None)
+        sources = [
+            a_script_opening_with("if (1) { 'use strict'; }"),
+            a_function_body_opening_with("if (1) { 'use strict'; }"),
+        ]
+        self.assertEqual(
+            [_before_and_after_as_a_script(source) for source in sources],
+            [(sloppy, sloppy)] * len(sources),
+        )
+
+    @unittest.expectedFailure
+    def test_dropping_a_statement_writes_no_directive_below_it(self):
+        """
+        Node prints `false` for both of these. The prologue ends at the declaration, which is no
+        string literal, so the `'use strict'` standing below it computes a string and discards it.
+        Nothing reads `dead`, so the declaration is dropped, which moves every statement below it up
+        one place: the string that stood second now opens the script in the first file and the
+        probe's body in the second, and Node prints `true` for both of the files that come back. A
+        statement removed from a list is one the statements below it move up past.
+        """
+        sloppy = ('false\n', None)
+        sources = [
+            a_script_opening_with("var dead = 1; 'use strict';"),
+            a_function_body_opening_with("var dead = 1; 'use strict';"),
+        ]
+        self.assertEqual(
+            [_before_and_after_as_a_script(source) for source in sources],
+            [(sloppy, sloppy)] * len(sources),
+        )
+
+    @unittest.expectedFailure
+    def test_writing_a_declaration_into_a_body_leaves_its_directive_first(self):
+        """
+        Node prints `bS` and `ReferenceError` for the two programs of
+        `AN_ACCESSOR_WHOSE_RETURNED_BODY_OPENS_WITH_A_DIRECTIVE`. Each returns a function that opens
+        with the directive, so that function is strict: it reports the strict mode in the first, and
+        in the second its assignment to a name nothing declares throws, which the file catches and
+        names. Inlining the accessor writes the local of the outer function into that body, above
+        the directive, which is a position no directive survives. Node prints `bL` for the first
+        file that comes back, a body reporting a mode it no longer has, and `b1` for the second,
+        which creates the global the file threw over and returns a value where it stopped.
+        """
+        rows = AN_ACCESSOR_WHOSE_RETURNED_BODY_OPENS_WITH_A_DIRECTIVE
+        self.assertEqual(
+            {source: _before_and_after_as_a_script(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestADirectiveIsNotAStatementThatCanBeDiscarded(TestBase):
+    """
+    A directive is written in the shape of an expression statement and is not one. Evaluating the
+    literal is the least of what it does: it states the mode the body it opens runs in, and that
+    body keeps the mode for as long as the statement stands there. A statement whose value nothing
+    reads may be discarded, and this one may not, so the shape it is written in is not enough to
+    decide it by.
+
+    It is discarded all the same, whenever a binding standing beside it in the same body is removed:
+    the sweep that drops a variable nothing reads back also drops the statements of that body which
+    only evaluate a literal, and a directive is one of those by its shape alone. What removed the
+    variable does not matter — an assignment nothing reads and a namespace object flattened into
+    bare names each take the directive with them — and neither does whether the body is a function
+    or the file.
+    """
+
+    @unittest.expectedFailure
+    def test_a_directive_survives_the_removal_of_a_binding_beside_it(self):
+        """
+        Node prints `true` for all four programs of
+        `A_BODY_WHOSE_DIRECTIVE_STANDS_BESIDE_A_BINDING_NOTHING_READS`, the two that read a property
+        back printing the property first: each body opens with the directive and is strict for it.
+        Each deobfuscation prints `false`, having removed the binding and the directive together.
+        The first program with its directive left out prints `false` on both sides, so it is the
+        removal of the directive and not the removal of the binding that moved the answer.
+        """
+        rows = A_BODY_WHOSE_DIRECTIVE_STANDS_BESIDE_A_BINDING_NOTHING_READS
+        self.assertEqual(
+            {source: _before_and_after_as_a_script(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestTheEvaluatorRunsABodyInTheModeItDeclares(TestBase):
+    """
+    A body that opens with the directive runs strict, and an assignment to a name no binding
+    declares throws a `ReferenceError` there rather than creating a global. Running that body is how
+    the tool answers what a call returns, and the mode the body declares is not carried into the
+    run: the write is answered by the sloppy rule, the call is answered with a value it never
+    produced, and the file that comes back prints that value where the program it came from threw.
+
+    This is not the directive being lost. It is still written where the file wrote it, and both the
+    file handed over and the file handed back declare the same mode; only the answer computed
+    between them was computed under the other one.
+    """
+
+    @unittest.expectedFailure
+    def test_an_assignment_to_an_undeclared_name_throws_in_a_strict_body(self):
+        """
+        Node prints `threw` for the first program of
+        `A_STRICT_BODY_ASSIGNING_TO_AN_UNDECLARED_NAME` and refuses the second with a
+        `ReferenceError` having printed nothing: the write is the same in both, and the first body
+        catches what it throws while the second lets it end the program. The first deobfuscation
+        prints `ok`, the value of the branch the throw never let run, and the second prints `1`,
+        having gone on past the statement the file stopped at. The first program with its directive
+        left out prints `ok` on both sides.
+        """
+        rows = A_STRICT_BODY_ASSIGNING_TO_AN_UNDECLARED_NAME
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
         )
 
 
