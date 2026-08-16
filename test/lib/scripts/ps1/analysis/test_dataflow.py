@@ -12,7 +12,6 @@ from refinery.lib.scripts.ps1.analysis.dataflow import (
 )
 from refinery.lib.scripts.ps1.analysis.dominance import build_dominance
 from refinery.lib.scripts.ps1.analysis.model import (
-    Ps1OccurrenceRole,
     Ps1SemanticModel,
     build_semantic_model,
     is_write_occurrence,
@@ -813,7 +812,7 @@ class TestPs1WrittenBeforeAtAnOccurrenceThatObservesWhatItWrites(TestPs1WrittenB
         _, semantic, flow = _models(source)
         observing, = [
             write.node for write in semantic.script_scope.bindings[name].writes
-            if write.role is Ps1OccurrenceRole.WRITE_OBSERVING
+            if write.role.observes
             and isinstance(write.node, Ps1Variable)
         ]
         return flow.written_before(observing)

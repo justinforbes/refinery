@@ -20,7 +20,6 @@ from refinery.lib.scripts.ps1.analysis.model import (
     is_assignment_write_target,
     is_substitutable_position,
     is_write_occurrence,
-    Ps1OccurrenceRole,
 )
 from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
 from refinery.lib.scripts.ps1.analysis.values import (
@@ -665,7 +664,7 @@ class Ps1ConstantInlining(Transformer):
                 continue
             if self._writes_leave_the_body(state.flow, binding):
                 continue
-            if any(write.role is Ps1OccurrenceRole.WRITE_OBSERVING for write in binding.writes):
+            if any(write.role.observes for write in binding.writes):
                 continue
             if self.min_inlines_to_prune is not None:
                 if len(replacements) < self.min_inlines_to_prune:

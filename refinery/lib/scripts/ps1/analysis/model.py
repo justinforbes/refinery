@@ -81,12 +81,35 @@ class Ps1OccurrenceRole(enum.Enum):
     `WRITE_THROUGH` — reads the variable to reach a place inside it that is written: the `$x` of
     `$x[0] = 'z'` or `$x.Length = 5`. The name still holds whatever it held, so this observes the
     value like a read, but no value may be installed in its place.
+
+    Each member carries the four answers a consumer needs, in the order the fields are declared
+    below, rather than being compared against a list of members at every site. A question answered
+    by a membership test lives at each of its call sites and has to be found again by grep whenever
+    a role is added or its meaning moves; a field lives here, beside the member it is about.
     """
-    NOT_A_REFERENCE = enum.auto()
-    READ            = enum.auto()  # noqa
-    WRITE_REPLACING = enum.auto()
-    WRITE_OBSERVING = enum.auto()
-    WRITE_THROUGH   = enum.auto()  # noqa
+    NOT_A_REFERENCE = (False, False, False, False)
+    READ            = (False, True, True, False)    # noqa
+    WRITE_REPLACING = (True, False, False, False)
+    WRITE_OBSERVING = (True, True, False, False)
+    WRITE_THROUGH   = (False, True, False, True)    # noqa
+
+    #: Whether the occurrence is filed among the binding's writes, because it changes what a read
+    #: below it observes.
+    stores: bool
+    #: Whether the occurrence observes the value the name holds.
+    observes: bool
+    #: Whether a value may be installed in the occurrence's place. Only a plain read, and even then
+    #: `is_substitutable_position` has a caveat of its own to add.
+    substitutable: bool
+    #: Whether the occurrence reaches a place *inside* the value rather than the binding itself, so
+    #: that the name is left holding whatever it held.
+    through: bool
+
+    def __init__(self, stores: bool, observes: bool, substitutable: bool, through: bool):
+        self.stores = stores
+        self.observes = observes
+        self.substitutable = substitutable
+        self.through = through
 
 
 def occurrence_role(var: Ps1Variable) -> Ps1OccurrenceRole:
@@ -130,23 +153,23 @@ def is_substitutable_position(var: Ps1Variable) -> bool:
     several. A `[ref]$n` observes the value too, and the literal put in its place is a reference to
     nothing that the callee's store is silently lost through.
     """
-    return occurrence_role(var) is Ps1OccurrenceRole.READ and not var.splatted
+    return occurrence_role(var).substitutable and not var.splatted
 
 
 def declares_binding(var: Ps1Variable) -> bool:
     """
     Whether the occurrence brings the binding into existence in the scope it resolves to.
 
-    Every write does except a reference: PowerShell resolves `[ref]$n` by ordinary lookup and
-    creates nothing, so filing one as a declaration invents a local binding in whatever body the
-    reference is written in and hides the outer one the callee actually stores through.
+    Every write that installs a value does, except a reference: PowerShell resolves `[ref]$n` by
+    ordinary lookup and creates nothing, so filing one as a declaration invents a local binding in
+    whatever body the reference is written in and hides the outer one the callee actually stores
+    through. A write that reaches *through* the value declares nothing for the same reason: it needs
+    a value to reach into, so the binding it names already exists wherever it exists.
     """
     if is_reference_cast(var.parent):
         return False
-    return occurrence_role(var) in (
-        Ps1OccurrenceRole.WRITE_REPLACING,
-        Ps1OccurrenceRole.WRITE_OBSERVING,
-    )
+    role = occurrence_role(var)
+    return role.stores and not role.through
 
 
 def is_assignment_write_target(var: Ps1Variable) -> bool:
@@ -180,7 +203,8 @@ def observes_previous_value(var: Ps1Variable) -> bool:
     store back through. Such a write is also a use, so a binding that has one is not dead however
     many of its `Binding.reads` a caller has accounted for.
     """
-    return occurrence_role(var) is Ps1OccurrenceRole.WRITE_OBSERVING
+    role = occurrence_role(var)
+    return role.stores and role.observes
 
 
 def is_mutated_in_place(var: Ps1Variable) -> bool:
@@ -191,7 +215,7 @@ def is_mutated_in_place(var: Ps1Variable) -> bool:
     Such an occurrence reads the variable in order to reach the part that is written, so
     `is_write_occurrence` calls it a read and no occurrence of the name records the change.
     """
-    return occurrence_role(var) is Ps1OccurrenceRole.WRITE_THROUGH
+    return occurrence_role(var).through
 
 
 def _stores_through(var: Ps1Variable) -> bool:
@@ -235,10 +259,7 @@ def is_write_occurrence(var: Ps1Variable) -> bool:
     An occurrence an assignment stores *through* is not one of these: `$x[0] = 'z'` leaves `$x`
     holding what it held, so the name records no change and the occurrence counts as a read.
     """
-    return occurrence_role(var) in (
-        Ps1OccurrenceRole.WRITE_REPLACING,
-        Ps1OccurrenceRole.WRITE_OBSERVING,
-    )
+    return occurrence_role(var).stores
 
 
 def _is_member_declaration(var: Ps1Variable) -> bool:
@@ -328,7 +349,7 @@ class Binding:
         """
         return [
             *self.reads,
-            *(w for w in self.writes if w.role is Ps1OccurrenceRole.WRITE_OBSERVING),
+            *(write for write in self.writes if write.role.observes),
         ]
 
     @property
