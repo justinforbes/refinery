@@ -29,7 +29,11 @@ from refinery.lib.scripts.js.deobfuscation.unshuffle import JsArrayUnshuffle
 from refinery.lib.scripts.js.deobfuscation.unused import JsUnusedCodeRemoval
 from refinery.lib.scripts.js.deobfuscation.wrappers import JsCallWrapperInliner
 from refinery.lib.scripts.js.model import JsScript
-from refinery.lib.scripts.pipeline import DeobfuscationPipeline, TransformerGroup
+from refinery.lib.scripts.pipeline import (
+    DeobfuscationPipeline,
+    PipelineObserver,
+    TransformerGroup,
+)
 
 _pipeline = DeobfuscationPipeline(
     groups=[
@@ -92,6 +96,7 @@ def deobfuscate(
     *,
     module: bool = False,
     entrypoints: tuple[str, ...] = (),
+    observer: PipelineObserver | None = None,
 ) -> int:
     """
     Apply all available deobfuscators to the input. A non-zero *max_steps* bounds the total number of
@@ -102,7 +107,15 @@ def deobfuscate(
     legitimate deobfuscation, only a runaway loop. Pass `0` to disable the bound entirely. *module*
     selects the execution model the input is assumed to run under and *entrypoints* names top-level
     functions a host calls by name; see
-    `refinery.lib.scripts.js.deobfuscation.options.DeobfuscationOptions`.
+    `refinery.lib.scripts.js.deobfuscation.options.DeobfuscationOptions`. *observer* is called around
+    every transformer, which is how a property of the tree is attributed to the pass that moved it; see
+    `refinery.lib.scripts.js.deobfuscation.audit.StrictModeAudit`.
     """
     options = DeobfuscationOptions(module=module, entrypoints=tuple(entrypoints))
-    return _pipeline.run(ast, max_steps=max_steps, models=ModelCache(ast), options=options)
+    return _pipeline.run(
+        ast,
+        max_steps=max_steps,
+        models=ModelCache(ast),
+        options=options,
+        observer=observer,
+    )

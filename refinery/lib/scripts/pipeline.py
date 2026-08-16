@@ -23,6 +23,32 @@ class DeobfuscationTimeout(Exception):
         self.transformer = transformer
 
 
+class PipelineObserver:
+    """
+    A hook the scheduler calls around every transformer invocation, so that a property of the tree can
+    be read before and after and the pass that changed it can be named. The scheduler knows nothing
+    about the property: an observer for a particular language reads whatever that language's meaning
+    depends on, and the hook only says when to look and on whose behalf.
+
+    An observer sees a pass that ran and what it left behind. It cannot see a pass that examined
+    something and declined, which reports no change and is indistinguishable here from one that found
+    nothing to do — a refusal costs recall silently, and naming it needs a channel out of the pass
+    itself rather than a hook around it.
+    """
+
+    def before(self, group: str, transformer: type[Transformer], ast: Node) -> None:
+        """
+        Called with the tree as it stands before *transformer* runs.
+        """
+
+    def after(
+        self, group: str, transformer: type[Transformer], ast: Node, changed: bool,
+    ) -> None:
+        """
+        Called with the tree as *transformer* left it, and whether it reported a change.
+        """
+
+
 class TransformerGroup:
     """
     A named set of co-dependent transformers that iterate until stable.
@@ -39,6 +65,7 @@ class TransformerGroup:
         max_steps: int = 0,
         models: AnalysisCache | None = None,
         options: object | None = None,
+        observer: PipelineObserver | None = None,
     ) -> tuple[bool, int]:
         """
         Run all transformers in a loop until none report changes. Returns (changed, steps) where
@@ -46,7 +73,7 @@ class TransformerGroup:
         counter. Each transformer instance shares the *models* cache so it reuses the run's analysis
         models instead of rebuilding them, and invalidates that cache when it changes the tree. The
         *options* value is attached to every transformer so language-specific transforms can read
-        caller-supplied settings.
+        caller-supplied settings, and *observer* is called around each one.
         """
         changed = False
         active = set(range(len(self.transformers)))
@@ -58,7 +85,11 @@ class TransformerGroup:
                 t = cls()
                 t.models = models
                 t.options = options
+                if observer is not None:
+                    observer.before(self.name, cls, ast)
                 t.visit(ast)
+                if observer is not None:
+                    observer.after(self.name, cls, ast, t.changed)
                 if t.changed:
                     steps += 1
                     round_changed = True
@@ -120,13 +151,15 @@ class DeobfuscationPipeline:
         initial_steps: int = 0,
         models: AnalysisCache | None = None,
         options: object | None = None,
+        observer: PipelineObserver | None = None,
     ) -> int:
         """
         Execute the pipeline. Returns the total number of transformer invocations that resulted in a
         change, including `initial_steps` carried over from an earlier phase so that a shared
         `max_steps` budget is enforced across phases. A return value equal to `initial_steps` means
         the pipeline was already stable. When *models* is given, every transformer in the run shares
-        that analysis cache. The *options* value is passed through to every transformer.
+        that analysis cache. The *options* value is passed through to every transformer, and
+        *observer* is called around each one.
         """
         stable: set[str] = set()
         steps = initial_steps
@@ -138,7 +171,7 @@ class DeobfuscationPipeline:
                 if (d := self._dependencies.get(name)) and not d <= stable:
                     continue
                 group = self._groups[name]
-                changed, steps = group.run(ast, steps, max_steps, models, options)
+                changed, steps = group.run(ast, steps, max_steps, models, options, observer)
                 stable.add(name)
                 if changed:
                     targets = self._invalidators.get(name)

@@ -1038,3 +1038,72 @@ class TestTheEvaluatorRunsABodyInTheModeItDeclares(TestBase):
         )
 
 
+#: A program whose function reads its variables out of a stack hanging off an object rather than out
+#: of the rest parameter it declares, mapped to what Node prints for it. The truncation is written on
+#: the qualified name and the rest parameter is named nowhere but in the parameter list, so it is the
+#: qualified stack that each of these is about. The elements reach the function through the object:
+#: one program stores them after the declaration, one writes them into the object literal, one
+#: reaches the stack through a chain of two names, one holds two of them, one calls the function
+#: twice, and one has the body write an element back for the file to read after the call.
+A_STACK_REACHED_THROUGH_A_QUALIFIED_NAME = {
+    'var NS = { F: {} };\n'
+    'function f(...r) { NS.F.stk.length = 1; return NS.F.stk[0] * 2; }\n'
+    'NS.F.stk = [5];\n'
+    'console.log(f());\n': '10\n',
+
+    'var NS = { F: { stk: [5] } };\n'
+    'function f(...r) { NS.F.stk.length = 1; return NS.F.stk[0] * 2; }\n'
+    'console.log(f(3));\n': '10\n',
+
+    'var NS = { stk: [5] };\n'
+    'function f(...r) { NS.stk.length = 1; return NS.stk[0] * 2; }\n'
+    'console.log(f(3));\n': '10\n',
+
+    'var NS = { F: { stk: [5, 7] } };\n'
+    'function f(...r) { NS.F.stk.length = 2; return NS.F.stk[0] + NS.F.stk[1]; }\n'
+    'console.log(f());\n': '12\n',
+
+    'var NS = { F: { stk: [5] } };\n'
+    'function f(...r) { NS.F.stk.length = 1; return NS.F.stk[0] * 2; }\n'
+    'console.log(f() + f());\n': '20\n',
+
+    'var NS = { F: { stk: [5] } };\n'
+    'function f(...r) { NS.F.stk.length = 1; NS.F.stk[0] = NS.F.stk[0] + 1; }\n'
+    'f();\n'
+    'console.log(NS.F.stk[0]);\n': '6\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAStackHangingOffAnObjectIsNotTheArgumentsOfACall(TestBase):
+    """
+    A function can pack its variables into an array reached through a qualified name instead of into
+    the rest parameter it declares. That array belongs to the object, so what it holds is whatever
+    the program put there and the call that runs the function need pass nothing at all.
+
+    Unpacking such a function into one taking plain parameters rewrites the callee alone. No call
+    site is given the elements the object held, so a read that named a slot of the stack now names a
+    parameter nobody passes, and a write that filled one now fills a parameter the object never
+    sees. Where the stack is the rest parameter itself the same rewrite is sound, since there the
+    elements are exactly the arguments of the call; that is the stack
+    `test.lib.scripts.js.deobfuscation.test_restunpack` states its laws over.
+    """
+
+    @unittest.expectedFailure
+    def test_the_elements_the_object_holds_survive_the_unpacking(self):
+        """
+        Node prints `10`, `10`, `10`, `12`, `20`, and `6` for the six programs of
+        `A_STACK_REACHED_THROUGH_A_QUALIFIED_NAME`. Their deobfuscations print `NaN`, `6`, `6`,
+        `NaN`, `NaN`, and `5`: the two programs whose call passes an argument read that argument
+        where an element of the object stood, the three that pass none read a parameter no call
+        supplies, and the last leaves the object holding the element it started with. The same
+        computation with the stack written as the rest parameter itself, `f(...s)` truncated at
+        `s.length = 1` and called as `f(5)`, prints `10` on both sides.
+        """
+        rows = A_STACK_REACHED_THROUGH_A_QUALIFIED_NAME
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
