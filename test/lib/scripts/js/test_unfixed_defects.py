@@ -788,6 +788,46 @@ class TestAFoldDoesNotWriteADirectiveWhereNoneWasWritten(TestBase):
         )
 
 
+#: A sloppy function that writes a parameter and reads the same position back off its `arguments`
+#: object, mapped to what Node prints for it.
+A_SLOPPY_BODY_WHOSE_ARGUMENTS_ALIAS_ITS_PARAMETERS = {
+    'function f(a) { a = 2; return arguments[0]; }\nconsole.log(f(1));': '2\n',
+    'function f(a, b) { b = 2; return arguments[1]; }\nconsole.log(f(1, 5));': '2\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWriteToAParameterIsAWriteToTheArgumentsObject(TestBase):
+    """
+    A regular function with a simple parameter list, in sloppy code, gets an `arguments` object
+    whose elements alias its parameters: writing `a` writes `arguments[0]`, and writing
+    `arguments[0]` writes `a`. Strict code gets an independent copy, and so does a list holding a
+    default, a rest element or a destructuring pattern, so the mode and
+    `refinery.lib.scripts.js.strict.has_simple_parameters` decide it together.
+
+    A write to a parameter is therefore read back under a name no sweep over that parameter's uses
+    can see, and a write with no read is one the sweep drops. The write in the other direction is
+    kept, so the aliasing is honoured going one way and not the other.
+    """
+
+    @unittest.expectedFailure
+    def test_a_write_a_sloppy_arguments_object_reads_back_is_not_a_dead_store(self):
+        """
+        Node prints `2` for both programs of `A_SLOPPY_BODY_WHOSE_ARGUMENTS_ALIAS_ITS_PARAMETERS`,
+        which is the value each parameter was written with and not the one the call passed. Each
+        deobfuscation drops the write and prints the argument, `1` and `5`. The first program with
+        `'use strict'` at the head of its body prints `1` on both sides, which is what an unaliased
+        `arguments` answers and why the mode decides the rule; and
+        `function f(a) { arguments[0] = 9; return a; }` prints `9` on both sides, the write in the
+        other direction being one nothing drops.
+        """
+        rows = A_SLOPPY_BODY_WHOSE_ARGUMENTS_ALIAS_ITS_PARAMETERS
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
 class TestADecodeReadsBackTheCharactersNoEscapeIntroduced(TestBase):
     """
     `decodeURIComponent` copies every character of its argument that no escape introduced straight
@@ -1225,6 +1265,25 @@ A_STRICT_BODY_ASSIGNING_TO_AN_UNDECLARED_NAME = {
 }
 
 
+#: A body opening that promotes the statement standing below it once a pass is done with it: a block
+#: whose contents are lifted into the body around it, and a binding nothing reads that is dropped
+#: out of it. Neither writes a character of text; each only changes which statement the body opens
+#: with.
+A_HEAD_A_MOVE_PROMOTES_THE_STATEMENT_BELOW = [
+    "if (1) { 'use strict'; }",
+    "var dead = 1; 'use strict';",
+]
+
+
+#: A function whose parameter list forbids a directive, holding a `'use strict'` that one of those
+#: moves would promote to the head of its body, mapped to what Node prints for it.
+A_FUNCTION_A_MOVE_WOULD_WRITE_A_DIRECTIVE_INTO = {
+    _a_function_whose_body_opens_with(head, parameters, call, read): prints
+    for parameters, (call, read, prints) in _A_PARAMETER_LIST_NO_DIRECTIVE_MAY_STAND_UNDER.items()
+    for head in A_HEAD_A_MOVE_PROMOTES_THE_STATEMENT_BELOW
+}
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestMovingAStatementDoesNotChangeWhichStatementsAreDirectives(TestBase):
     """
@@ -1299,6 +1358,25 @@ class TestMovingAStatementDoesNotChangeWhichStatementsAreDirectives(TestBase):
         rows = AN_ACCESSOR_WHOSE_RETURNED_BODY_OPENS_WITH_A_DIRECTIVE
         self.assertEqual(
             {source: _before_and_after_as_a_script(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+    @unittest.expectedFailure
+    def test_a_move_writes_no_directive_into_a_function_that_can_hold_none(self):
+        """
+        Node prints `1`, `2`, and `5` for the six programs of
+        `A_FUNCTION_A_MOVE_WOULD_WRITE_A_DIRECTIVE_INTO`, one pair for each way of writing a
+        parameter list that is not simple. In each, the `'use strict'` stands inside a block or one
+        statement below a binding, so it governs nothing and the function is sloppy code that such a
+        list is welcome in. Lifting the block, and dropping the binding, each leave that directive
+        opening a body which may hold none, and Node refuses every one of the six files that come
+        back with a SyntaxError. The same two moves in a function whose parameter list is simple are
+        pinned by the two entries above, where what comes back still runs and reports a mode the
+        file never declared.
+        """
+        rows = A_FUNCTION_A_MOVE_WOULD_WRITE_A_DIRECTIVE_INTO
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
             _each_program_still_prints(rows),
         )
 

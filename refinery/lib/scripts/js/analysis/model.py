@@ -81,6 +81,7 @@ from refinery.lib.scripts.js.model import (
     JsWithStatement,
     strip_parens,
 )
+from refinery.lib.scripts.js.strict import has_simple_parameters
 
 FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)
 
@@ -653,6 +654,72 @@ def enclosing_function(node: Node) -> Node | None:
             return cursor
         cursor = cursor.parent
     return None
+
+
+def walk_receiver_scope(root: Node) -> Iterator[Node]:
+    """
+    Yield every node in the subtree at *root* that shares *root*'s `this`/`super` receiver, without
+    descending into a nested regular or generator function, which rebinds `this`. Arrow functions are
+    descended, since they inherit the receiver lexically. A class rebinds `this` for its method bodies
+    and field initializers, but its `extends` clause and any computed member keys are evaluated in the
+    enclosing receiver context, so only those parts of a class are descended. *root* itself is always
+    yielded and descended, so a method reached directly through *root* is included.
+
+    The receiver scope is also the *argument* scope: an arrow has no `arguments` object of its own and
+    reads the enclosing one, a nested function has its own. So `references_own_arguments` asks the same
+    boundary, and both live here rather than beside either caller.
+    """
+    stack: list[Node] = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (JsFunctionExpression, JsFunctionDeclaration)) and node is not root:
+            continue
+        if isinstance(node, (JsClassDeclaration, JsClassExpression)):
+            if node.super_class is not None:
+                stack.append(node.super_class)
+            if node.body is not None:
+                for member in node.body.body:
+                    if isinstance(member, JsStaticBlock):
+                        continue
+                    if member.computed and member.key is not None:
+                        stack.append(member.key)
+            continue
+        stack.extend(node.children())
+
+
+def references_own_arguments(fn: Node) -> bool:
+    """
+    Whether *fn* reads its own `arguments` object, rather than one belonging to a function around it or
+    inside it. `walk_receiver_scope` draws that boundary: an arrow inherits the enclosing `arguments`
+    and is descended, a nested regular or generator function has its own and is not.
+    """
+    return any(
+        isinstance(node, JsIdentifier) and node.name == 'arguments' and is_use_position(node)
+        for node in walk_receiver_scope(fn)
+    )
+
+
+def has_mapped_arguments(fn: Node, *, strict: bool) -> bool:
+    """
+    Whether *fn* observes an `arguments` object whose elements alias its parameters. Aliasing holds for
+    a regular or generator function, in sloppy mode, with a simple parameter list: writing a parameter
+    then writes `arguments[i]`, and writing `arguments[i]` writes the parameter. Strict mode gives an
+    independent copy, and so does any default, rest or destructuring parameter; an arrow has no
+    `arguments` of its own at all.
+
+    *strict* is the mode *fn*'s body runs in and is supplied by the caller rather than derived here,
+    because a payload being examined out of place has no tree above it to derive it from, and because
+    module code is strict for a reason no node records.
+
+    The parameter list must also be non-empty: `has_simple_parameters` answers §15.1.3, which an empty
+    list satisfies, but with no parameters there is nothing for an element to alias.
+    """
+    if strict or not isinstance(fn, (JsFunctionExpression, JsFunctionDeclaration)):
+        return False
+    if not fn.params or not has_simple_parameters(fn):
+        return False
+    return references_own_arguments(fn)
 
 
 def _is_global_base(node: Node | None) -> bool:

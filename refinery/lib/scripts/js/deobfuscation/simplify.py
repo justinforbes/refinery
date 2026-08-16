@@ -86,7 +86,7 @@ from refinery.lib.scripts.js.model import (
 )
 from refinery.lib.scripts.js.numbers import exact_integer
 from refinery.lib.scripts.js.precedence import parens_required
-from refinery.lib.scripts.js.strict import spelling_states
+from refinery.lib.scripts.js.strict import joins_directive_prologue, spelling_states
 
 _OBJECT_PROTO_PROPERTIES = OBJECT_PROTOTYPE_MEMBERS
 
@@ -816,11 +816,9 @@ class JsSimplifications(Transformer):
 
     def _stands_in_a_directive_prologue(self, node: Node) -> bool:
         """
-        Whether *node* is the whole of a statement that a Directive Prologue would take in if it were
-        spelled as a string literal — one no statement precedes but string-literal statements. The
-        prologue is the run of them a body opens with, and it ends at the first statement that is
-        anything else, so replacing that statement's expression with a string literal hands the
-        prologue every string-literal statement that followed it.
+        Whether *node* is the whole of a statement that a Directive Prologue would take in were it
+        spelled as a string literal. `joins_directive_prologue` decides that of the statement; what is
+        decided here is that *node* is the whole of one.
 
         The brackets a read stands in are climbed through rather than trusted to keep it out of the
         prologue: `('abc'[0]);` is not a directive, but nothing keeps the printer from spelling the
@@ -834,18 +832,7 @@ class JsSimplifications(Transformer):
             return False
         if strip_parens(statement.expression) is not node:
             return False
-        body = statement.parent
-        if body is None:
-            return False
-        for sibling in body.children():
-            if sibling is statement:
-                return True
-            if not (
-                isinstance(sibling, JsExpressionStatement)
-                and isinstance(sibling.expression, JsStringLiteral)
-            ):
-                return False
-        return False
+        return joins_directive_prologue(statement)
 
     def _folded_array_length(self, node: JsMemberExpression) -> Expression | None:
         """

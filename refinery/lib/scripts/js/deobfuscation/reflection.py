@@ -48,14 +48,12 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
 )
 from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.deobfuscation.strict_divergence import diverges_under_strict
-from refinery.lib.scripts.js.strict import is_use_strict
+from refinery.lib.scripts.js.strict import declares_use_strict, strict_mode_at
 from refinery.lib.scripts.js.model import (
     JsAssignmentExpression,
     JsAwaitExpression,
     JsBlockStatement,
     JsCallExpression,
-    JsClassDeclaration,
-    JsClassExpression,
     JsExpressionStatement,
     JsFunctionExpression,
     JsIdentifier,
@@ -544,46 +542,6 @@ def _has_top_level_return(stmts: list[Statement]) -> bool:
     return any(isinstance(n, JsReturnStatement) for s in stmts for n in walk_scope(s))
 
 
-def _has_use_strict_directive(stmts: list[Statement]) -> bool:
-    """
-    Whether *stmts* opens with a `"use strict"` directive prologue. A strict `Function`-constructed
-    body cannot be spliced into a possibly-sloppy caller without changing meaning: an assignment to an
-    undeclared name throws under strict but silently creates a global under sloppy, and the directive
-    stops governing the code once the body is no longer the first thing its scope runs.
-    """
-    for stmt in stmts:
-        if not isinstance(stmt, JsExpressionStatement):
-            return False
-        if not isinstance(stmt.expression, JsStringLiteral):
-            return False
-        if is_use_strict(stmt.expression):
-            return True
-    return False
-
-
-def _site_in_strict_context(site: Node, root: JsScript) -> bool:
-    """
-    Whether *site* runs in strict mode, because the script opens with a `"use strict"` directive, an
-    enclosing function does, or an enclosing class body (always strict) contains it. A
-    `Function`-constructed body is always sloppy, so splicing it into a strict context could turn
-    sloppy-only code — an octal literal, an unqualified `delete`, an assignment to an undeclared name
-    or to `eval`/`arguments` — into a strict-mode SyntaxError or a behavior change; declining keeps
-    the inlining sound.
-    """
-    if _has_use_strict_directive(root.body):
-        return True
-    cursor = site.parent
-    while cursor is not None:
-        if isinstance(cursor, (JsClassDeclaration, JsClassExpression)):
-            return True
-        if isinstance(cursor, FUNCTION_NODES):
-            body = cursor.body
-            if isinstance(body, JsBlockStatement) and _has_use_strict_directive(body.body):
-                return True
-        cursor = cursor.parent
-    return False
-
-
 def _references_new_target(root: Node) -> bool:
     """
     Whether *root* reads the `new.target` meta-property, which the parser models as a member access
@@ -1019,9 +977,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         parsed = _try_parse(code, top_level_await=top_level_await)
         if parsed is None:
             return None
-        if _has_use_strict_directive(parsed.body) and (
-            resolves_globally or not _site_in_strict_context(site, root)
-        ):
+        if declares_use_strict(parsed) and (resolves_globally or not strict_mode_at(site)):
             return None
         if resolves_globally:
             rewrite_receiver_this_to_global(parsed)
@@ -1032,7 +988,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         body_model = build_semantic_model(parsed)
         if (
             resolves_globally
-            and _site_in_strict_context(site, root)
+            and strict_mode_at(site)
             and diverges_under_strict(parsed, body_model)
         ):
             return None
@@ -1115,7 +1071,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         if scope is ReflectedScope.GLOBAL_EVAL:
             if module_execution(self.options) or not at_global_scope:
                 return False
-        elif _site_in_strict_context(site, root) or _has_use_strict_directive(body_model.root.body):
+        elif strict_mode_at(site) or declares_use_strict(body_model.root):
             return False
         var_scope = site_scope.var_scope
         if var_scope is None:

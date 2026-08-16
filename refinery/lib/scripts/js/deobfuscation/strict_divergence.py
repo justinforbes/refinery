@@ -36,12 +36,11 @@ from refinery.lib.scripts.js.analysis.model import (
     BindingKind,
     Role,
     SemanticModel,
+    has_mapped_arguments,
     is_direct_eval_call,
     is_member_write_target,
-    is_use_position,
     reference_role,
 )
-from refinery.lib.scripts.js.deobfuscation.helpers import walk_receiver_scope
 from refinery.lib.scripts.js.model import (
     JsArrowFunctionExpression,
     JsBlockStatement,
@@ -172,27 +171,12 @@ def _has_mapped_arguments(parsed: JsScript) -> bool:
     or generator function with a simple parameter list (all plain identifiers) gets an `arguments` object
     whose elements alias the parameters under sloppy but are an independent copy under strict; a default,
     rest, or destructuring parameter already unmaps it, so those do not diverge.
-    """
-    for node in parsed.walk():
-        if not isinstance(node, (JsFunctionExpression, JsFunctionDeclaration)):
-            continue
-        if not node.params or not all(isinstance(param, JsIdentifier) for param in node.params):
-            continue
-        if _references_own_arguments(node):
-            return True
-    return False
 
-
-def _references_own_arguments(func: Node) -> bool:
+    Every function is asked as though it were sloppy. That is what the rule needs: a body already strict
+    diverges nowhere, so seeding the whole payload sloppy can only decline more, and this predicate exists
+    to decline.
     """
-    Whether *func* references its own `arguments` object. The receiver scope is the argument scope: an arrow
-    inherits the enclosing `arguments` and is descended, a nested regular or generator function has its own
-    and is not, so `walk_receiver_scope` attributes each `arguments` use to the function that owns it.
-    """
-    return any(
-        isinstance(node, JsIdentifier) and node.name == 'arguments' and is_use_position(node)
-        for node in walk_receiver_scope(func)
-    )
+    return any(has_mapped_arguments(node, strict=False) for node in parsed.walk())
 
 
 def _reads_poison_pill(parsed: JsScript) -> bool:

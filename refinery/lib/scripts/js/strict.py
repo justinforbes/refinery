@@ -1,10 +1,18 @@
 """
-Strict-mode early-error detection for the JavaScript parser. The parser is fully permissive and always
-produces the sloppy-mode parse tree; strict mode never changes how source is parsed, only which
-already-parsed constructs are illegal. This module is therefore a pure post-parse pass: it walks a
-parsed tree, threading strictness down through function bodies, class bodies, and `"use strict"`
-prologues, and records a `StrictViolation` at every construct that would be a `SyntaxError` if its
-enclosing region ran in strict mode. The tree is never altered.
+Where strict mode comes from, and what it forbids. The parser is fully permissive and always produces
+the sloppy-mode parse tree; strict mode never changes how source is parsed, only which already-parsed
+constructs are illegal. This module is therefore a pure post-parse pass, and it owns two things.
+
+The first is the vocabulary of the Directive Prologue: which nodes can hold one (`is_prologue_host`),
+what a given one holds (`directive_prologue`), whether it declares the Use Strict Directive
+(`declares_use_strict`), and which mode any node consequently runs in (`strict_mode_at`). Directive-hood
+is a fact about a statement's *position in a statement list*, and a deobfuscator rewrites statement
+lists constantly, so every pass that moves, inserts, removes or folds a statement must ask the same
+question of the same names — a pass that re-derives the rules is a pass that gets a different answer.
+
+The second is the early errors: `collect_strict_violations` walks a parsed tree, threading strictness
+down through function bodies, class bodies and prologues, and records a `StrictViolation` at every
+construct a strict region would refuse. The tree is never altered.
 
 The intended consumer is the reflection transform, which inlines payloads from always-sloppy surfaces
 (`Function`, indirect `eval`, string timers) and must refuse an inlining that a strict destination would
@@ -45,6 +53,7 @@ from refinery.lib.scripts.js.model import (
     JsPropertyDefinition,
     JsRestElement,
     JsScript,
+    JsStaticBlock,
     JsStringLiteral,
     JsUnaryExpression,
     JsUpdateExpression,
@@ -102,6 +111,133 @@ def spelling_states(body: str) -> tuple[bool, bool]:
     return body == 'use strict', has_legacy_numeric_escape(body)
 
 
+_FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)
+
+_FunctionNode = JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression
+
+
+def _statement_list(node: Node | None) -> list[Statement] | None:
+    """
+    The statement list *node* holds directly, or `None` when it holds none. Only the three node types
+    that can host a Directive Prologue are answered for, so a caller that already knows it is looking
+    at a host reads the list here without consulting the tree above it.
+    """
+    if isinstance(node, (JsScript, JsBlockStatement, JsStaticBlock)):
+        return node.body
+    return None
+
+
+def is_prologue_host(node: Node | None) -> bool:
+    """
+    Whether *node* holds a statement list that a Directive Prologue can open (§11.2.1): a script body,
+    a function body, or a class static block. Nothing else does. A plain block, the body of a `try`,
+    `catch` or `finally`, a labelled statement, a `switch` case and the expression body of a concise
+    arrow all hold code no directive governs, so a `'use strict'` written at the head of one is an
+    ordinary string-valued statement that changes no mode.
+
+    A function body is recognized through the function that owns it, because a body and a plain block
+    are the same node type and only the tree above tells them apart.
+    """
+    if isinstance(node, (JsScript, JsStaticBlock)):
+        return True
+    if isinstance(node, JsBlockStatement):
+        owner = node.parent
+        return isinstance(owner, _FUNCTION_NODES) and owner.body is node
+    return False
+
+
+def directive_prologue(host: Node | None) -> list[JsExpressionStatement]:
+    """
+    The Directive Prologue of *host*: the run of statements it opens with that consist of nothing but
+    a string literal. The run ends at the first statement that is anything else, so it is a prefix, and
+    every statement behind that one is ordinary code however it happens to be spelled.
+
+    A parenthesized literal is not one of them. A directive is a statement whose expression *is* the
+    literal, so `('use strict');` states nothing, and the parser keeps the parenthesis as a node of its
+    own precisely so that this stays decidable.
+
+    *host* is taken to be a prologue host; where a caller must find the host from a statement inside
+    it, `is_prologue_host` decides that.
+    """
+    prologue: list[JsExpressionStatement] = []
+    for statement in _statement_list(host) or ():
+        if not isinstance(statement, JsExpressionStatement):
+            break
+        if not isinstance(statement.expression, JsStringLiteral):
+            break
+        prologue.append(statement)
+    return prologue
+
+
+def declares_use_strict(host: Node | None) -> bool:
+    """
+    Whether the Directive Prologue of *host* holds the Use Strict Directive, which makes the code
+    *host* encloses strict. The directive need not open the prologue: every string-literal statement
+    ahead of it is a directive too, and one the language does not recognize is simply inert.
+    """
+    for statement in directive_prologue(host):
+        expression = statement.expression
+        if isinstance(expression, JsStringLiteral) and is_use_strict(expression):
+            return True
+    return False
+
+
+def joins_directive_prologue(statement: Statement) -> bool:
+    """
+    Whether *statement* would enter the Directive Prologue of the body that holds it were it spelled as
+    a string literal: it sits in a prologue host, and nothing but string-literal statements precede it.
+    A pass that rewrites such a statement into a literal hands the prologue that statement *and* every
+    string-literal statement standing behind it, so a `'use strict'` that was ordinary code becomes the
+    directive that makes the whole body strict.
+    """
+    host = statement.parent
+    body = _statement_list(host)
+    if body is None or not is_prologue_host(host):
+        return False
+    index = len(directive_prologue(host))
+    return index < len(body) and body[index] is statement
+
+
+def strict_mode_at(node: Node) -> bool:
+    """
+    Whether the code at *node* runs in strict mode. Mode is inherited (§11.2.2): a body is strict when
+    its own Directive Prologue declares it or when the code enclosing it is strict, and every part of a
+    class definition is strict whatever encloses it (§15.7). *node* itself counts, so asking this of a
+    function body answers the mode that body runs in.
+
+    A function's directive reaches further than the body that holds it: the parameter list and the name
+    the function binds are strict code too, which is why `function f(eval) { 'use strict'; }` is refused
+    and `function f(eval) {}` is a program. Neither stands inside the body, so the whole function is
+    asked, not only the host.
+
+    Module code is strict as well; that is not decided here, because module-ness is a fact about the
+    whole program rather than about any node in it.
+    """
+    cursor: Node | None = node
+    while cursor is not None:
+        if isinstance(cursor, (JsClassDeclaration, JsClassExpression)):
+            return True
+        if is_prologue_host(cursor) and declares_use_strict(cursor):
+            return True
+        if isinstance(cursor, _FUNCTION_NODES) and declares_use_strict(cursor.body):
+            return True
+        cursor = cursor.parent
+    return False
+
+
+def has_simple_parameters(fn: _FunctionNode) -> bool:
+    """
+    Whether *fn* has a simple parameter list (§15.1.3): every parameter is a plain identifier, with no
+    default, no rest element and no destructuring. An empty list is simple — nothing in it is anything
+    else — which is what makes a Use Strict Directive legal in `function f() { 'use strict'; }`.
+
+    A rule that additionally needs there to be *something* to be simple about must ask that separately.
+    Whether the `arguments` object aliases a parameter is such a rule: with no parameters there is
+    nothing to alias, but the parameter list is simple all the same.
+    """
+    return all(isinstance(param, JsIdentifier) for param in fn.params)
+
+
 _STRICT_RESERVED = frozenset({
     'implements',
     'interface',
@@ -117,33 +253,16 @@ _STRICT_RESERVED = frozenset({
 _EVAL_ARGS = frozenset({'eval', 'arguments'})
 
 
-def _has_use_strict_prologue(stmts: list[Statement]) -> bool:
-    for stmt in stmts:
-        if not isinstance(stmt, JsExpressionStatement):
-            return False
-        expr = stmt.expression
-        if not isinstance(expr, JsStringLiteral):
-            return False
-        if is_use_strict(expr):
-            return True
-    return False
-
-
 def _child_strictness(node: Node, strict: bool) -> bool:
     if isinstance(node, JsScript):
-        return strict or _has_use_strict_prologue(node.body)
+        return strict or declares_use_strict(node)
     if isinstance(node, (JsClassDeclaration, JsClassExpression)):
         return True
-    if isinstance(node, JsFunctionDeclaration):
-        body = node.body
-    elif isinstance(node, JsFunctionExpression):
-        body = node.body
-    elif isinstance(node, JsArrowFunctionExpression):
-        body = node.body
-    else:
+    if not isinstance(node, _FUNCTION_NODES):
         return strict
+    body = node.body
     if isinstance(body, JsBlockStatement):
-        return strict or _has_use_strict_prologue(body.body)
+        return strict or declares_use_strict(body)
     return strict
 
 

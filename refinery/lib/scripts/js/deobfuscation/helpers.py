@@ -51,6 +51,7 @@ from refinery.lib.scripts.js.analysis.model import (
     build_semantic_model,
     is_use_position,
     reference_role,
+    walk_receiver_scope,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -78,7 +79,6 @@ from refinery.lib.scripts.js.model import (
     JsReturnStatement,
     JsScript,
     JsSequenceExpression,
-    JsStaticBlock,
     JsStringLiteral,
     JsTaggedTemplateExpression,
     JsThisExpression,
@@ -1535,34 +1535,6 @@ def function_binds_name(func: Node, name: str) -> bool:
         for child in node.children():
             stack.append(child)
     return False
-
-
-def walk_receiver_scope(root: Node) -> Iterator[Node]:
-    """
-    Yield every node in the subtree at *root* that shares *root*'s `this`/`super` receiver, without
-    descending into a nested regular or generator function, which rebinds `this`. Arrow functions are
-    descended, since they inherit the receiver lexically. A class rebinds `this` for its method bodies
-    and field initializers, but its `extends` clause and any computed member keys are evaluated in the
-    enclosing receiver context, so only those parts of a class are descended. *root* itself is always
-    yielded and descended, so a method reached directly through *root* is included.
-    """
-    stack: list[Node] = [root]
-    while stack:
-        node = stack.pop()
-        yield node
-        if isinstance(node, (JsFunctionExpression, JsFunctionDeclaration)) and node is not root:
-            continue
-        if isinstance(node, (JsClassDeclaration, JsClassExpression)):
-            if node.super_class is not None:
-                stack.append(node.super_class)
-            if node.body is not None:
-                for member in node.body.body:
-                    if isinstance(member, JsStaticBlock):
-                        continue
-                    if member.computed and member.key is not None:
-                        stack.append(member.key)
-            continue
-        stack.extend(node.children())
 
 
 def references_receiver_this(root: Node) -> bool:
