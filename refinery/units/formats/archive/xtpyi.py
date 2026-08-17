@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Callable, cast
 from Cryptodome.Cipher import AES
 
 from refinery.lib.id import is_likely_pe
+from refinery.lib.meta import MV
 from refinery.lib.py import decompile_buffer, version2tuple
 from refinery.lib.structures import StreamDetour, Struct, StructReader
 from refinery.lib.types import Param, buf
@@ -460,7 +461,7 @@ class xtpyi(ArchiveUnit, docs='{0}{p}{PathExtractorUnit}'):
                     continue
                 if name.startswith('pyiboot'):
                     continue
-            yield self._pack(name, None, file.data, type=file.type.name)
+            yield self._pack(name, None, file.data, **{MV.TYPE: file.type.name})
 
     @classmethod
     def handles(cls, data: buf) -> bool | None:

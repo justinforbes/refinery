@@ -4,6 +4,7 @@ from email.parser import BytesParser
 from enum import Enum
 from urllib.parse import parse_qs
 
+from refinery.lib.meta import MV
 from refinery.lib.types import asbuffer
 from refinery.units import Chunk, Unit
 
@@ -80,7 +81,7 @@ class httprequest(Unit):
         def chunks(upload: dict[bytes, list[bytes]]):
             for key, values in upload.items():
                 for value in values:
-                    yield self.labelled(value, name=key.decode('utf8'))
+                    yield self.labelled(value, **{MV.NAME: key.decode('utf8')})
 
         if mode is _Fmt.RawBody:
             yield body
@@ -101,9 +102,9 @@ class httprequest(Unit):
                     if buffer := asbuffer(payload):
                         kwargs = {}
                         if value := get_param('name'):
-                            kwargs.update(name=value)
+                            kwargs[MV.NAME] = value
                         if value := get_param('filename'):
-                            kwargs.update(file=value)
+                            kwargs[MV.FILE] = value
                         yield self.labelled(buffer, **kwargs)
 
         if mode is _Fmt.UrlEncode:

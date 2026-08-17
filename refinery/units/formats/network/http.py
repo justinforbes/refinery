@@ -4,6 +4,7 @@ from typing import Iterable, NamedTuple, cast
 from urllib.parse import urlunparse
 
 from refinery.lib.frame import Chunk
+from refinery.lib.meta import MV
 from refinery.units import Unit
 from refinery.units.formats.httpresponse import httpresponse
 
@@ -19,7 +20,7 @@ class _HTTPParseError(ValueError):
 
 
 def _parse_http_request(stream: Chunk):
-    dst = cast(bytes, stream['dst'])
+    dst = cast(bytes, stream[MV.DST])
     host, _, port = dst.rpartition(B':')
     lines = stream.splitlines(False)
     headers = iter(lines)
@@ -38,8 +39,8 @@ def _parse_http_request(stream: Chunk):
     components = (B'http', bytes(host), bytes(path), b'', b'', b'')
     return _HTTP_Request(
         urlunparse(components),
-        cast(bytes, stream['src']),
-        cast(bytes, stream['dst']),
+        cast(bytes, stream[MV.SRC]),
+        cast(bytes, stream[MV.DST]),
     )
 
 
@@ -79,7 +80,7 @@ class http(Unit):
         responses: list[Chunk] = []
 
         def lookup(body: Chunk) -> bool:
-            src, dst = body['src'], body['dst']
+            src, dst = body[MV.SRC], body[MV.DST]
             for k, request in enumerate(requests):
                 if request.src == dst and request.dst == src:
                     requests.pop(k)
@@ -102,9 +103,11 @@ class http(Unit):
                 continue
             body = self.labelled(
                 body,
-                src=stream['src'],
-                dst=stream['dst'],
-                stream=stream['stream'],
+                **{
+                    MV.SRC: stream[MV.SRC],
+                    MV.DST: stream[MV.DST],
+                    MV.STREAM: stream[MV.STREAM],
+                }
             )
             if lookup(body):
                 yield body

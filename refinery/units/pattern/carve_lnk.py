@@ -24,5 +24,5 @@ class carve_lnk(Unit):
                 pos += 1
                 continue
             end = pos + parsed.size
-            yield self.labelled(mem[pos:end], offset=pos)
+            yield self.carved(mem[pos:end], pos, end)
             pos = end

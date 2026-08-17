@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from refinery.lib.intervals import IntIntervalUnion
+from refinery.lib.meta import MV
 from refinery.lib.types import Param
 from refinery.units import Arg, Unit
 from refinery.units.pattern.carve_7z import carve_7z
@@ -62,9 +63,9 @@ class subfiles(Unit):
             for chunk in data | unit:
                 if len(chunk) < self._MINLENGTH.get(extension, 1):
                     continue
-                start = chunk['offset']
-                size = len(chunk)
-                end = start + size
+                start = chunk[MV.START]
+                end = chunk[MV.END]
+                size = end - start
                 if any(a + n >= end for a, n in covered.overlap(start, size)):
                     continue
                 if not self.args.recursive:

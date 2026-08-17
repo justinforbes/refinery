@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from refinery.lib.meta import MV
 from refinery.lib.pcap import IPProtocol, TransportSegment, reassemble_udp
 from refinery.units.formats.network import StreamReassemblyUnit
 
@@ -19,6 +20,8 @@ class udp(StreamReassemblyUnit):
         for datagram in reassemble_udp(iter(segments)):
             yield self.labelled(
                 datagram.payload,
-                src=F'{datagram.src_addr}:{datagram.src_port}',
-                dst=F'{datagram.dst_addr}:{datagram.dst_port}',
+                **{
+                    MV.SRC: F'{datagram.src_addr}:{datagram.src_port}',
+                    MV.DST: F'{datagram.dst_addr}:{datagram.dst_port}',
+                }
             )

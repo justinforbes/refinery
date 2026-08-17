@@ -1,6 +1,7 @@
 import pytest
 
 from .. import TestUnitBase
+from . import ZIP_ARCHIVE
 
 
 @pytest.mark.cythonized
@@ -75,3 +76,20 @@ class TestCarveZIP(TestUnitBase):
         })
         test = data | self.load_pipeline('carve-zip [| xtzip | pf {path} ]') | [str]
         self.assertListEqual(test, ['order.jpg', 'SHIPPING_MX00034900_PL_INV_pdf.exe'])
+
+    def test_reports_the_span_of_the_carved_archive(self):
+        for padding in (1, 3, 37, 200):
+            with self.subTest(padding=padding):
+                data = bytes(padding) + ZIP_ARCHIVE
+                result, = data | self.load() | []
+                start, end = result['start'], result['end']
+                self.assertEqual((start, end), (padding, padding + len(ZIP_ARCHIVE)))
+                self.assertEqual(bytes(data[start:end]), bytes(result))
+
+    def test_reports_the_position_of_each_of_two_archives(self):
+        data = bytes(10) + ZIP_ARCHIVE + bytes(5) + ZIP_ARCHIVE
+        results = data | self.load() | []
+        self.assertEqual(len(results), 2)
+        self.assertListEqual(
+            [result['start'] for result in results],
+            [10, 10 + len(ZIP_ARCHIVE) + 5])

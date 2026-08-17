@@ -3,6 +3,7 @@ from __future__ import annotations
 import codecs
 
 from refinery.lib.dotnet.resources import NetStructuredResources, NoManagedResource
+from refinery.lib.meta import MV
 from refinery.lib.types import Param, asbuffer
 from refinery.units import RefineryPartialResult
 from refinery.units.formats import Arg, PathExtractorUnit, UnpackResult
@@ -14,7 +15,7 @@ class dnmr(PathExtractorUnit):
     embedded in .NET assemblies.
     """
     def __init__(
-        self, *paths, path=b'name',
+        self, *paths, path=MV.NAME.encode(),
         raw: Param[bool, Arg.Switch('-w', help='Do not deserialize the managed resource entry data.')] = False,
         **kwargs
     ):

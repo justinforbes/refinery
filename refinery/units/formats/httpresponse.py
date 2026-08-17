@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from http.client import HTTPResponse, IncompleteRead
 
+from refinery.lib.meta import MV
 from refinery.lib.structures import MemoryFile
 from refinery.units import RefineryPartialResult, Unit
 from refinery.units.misc.datefix import datefix
@@ -36,7 +37,7 @@ class httpresponse(Unit):
                 pass
             else:
                 if len(date) == 19:
-                    payload = self.labelled(payload, date=date)
+                    payload = self.labelled(payload, **{MV.DATE: date})
             return payload
 
     @classmethod

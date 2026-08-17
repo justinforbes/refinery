@@ -88,3 +88,18 @@ class TestRex(TestUnitBase):
         unit = self.load('L', '{.}')
         test = data | unit | [bytes]
         self.assertEqual(test, [data, data, data])
+
+    def test_reports_the_span_of_each_match(self):
+        results = b'..AB..AB..' | self.load('AB') | []
+        self.assertListEqual([(r['start'], r['end']) for r in results], [(2, 4), (6, 8)])
+
+    def test_reports_the_doubled_span_of_a_utf16_match(self):
+        """
+        A UTF-16 match is found in the decoded copy of the input, so both ends of the reported span
+        have to be scaled back to the encoded input. The needle is preceded by other characters
+        within the same UTF-16 run so that a missing factor on either end changes the result.
+        """
+        data = b'....' + 'xyAB'.encode('utf-16le') + b'....'
+        result, = data | self.load('AB', unicode=True) | []
+        self.assertEqual(bytes(result), b'AB')
+        self.assertEqual((result['start'], result['end']), (8, 12))

@@ -28,7 +28,7 @@ class carve_elf(Unit):
                 continue
             if size is None or size < 16:
                 continue
-            yield self.labelled(mv[offset:offset + size], offset=offset)
+            yield self.carved(mv[offset:offset + size], offset, offset + size)
             self.log_info(F'extracted ELF file of size 0x{size:08X} from 0x{offset:08X}')
             cursor = offset + size
 

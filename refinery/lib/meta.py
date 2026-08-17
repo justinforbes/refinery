@@ -120,7 +120,8 @@ import os
 import re
 import string
 
-from typing import TYPE_CHECKING, Any, Callable
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from refinery.lib.environment import environment
 from refinery.lib.mime import get_cached_file_magic_info
@@ -156,6 +157,39 @@ class CustomStringRepresentation(abc.ABC):
     @abc.abstractmethod
     def __repr__(self) -> str:
         ...
+
+
+class MV(str, Enum):
+    """
+    Canonical names for meta variables that are shared between units, either because more than one
+    unit emits the variable or because one unit emits it and another reads it back. Referencing these
+    members instead of string literals keeps the name of such a variable defined in a single place.
+    Members compare, hash, and format exactly like the string they stand for, so they can be used as
+    dictionary keys, as keyword arguments, and inside format strings without conversion.
+    """
+    ADDR = 'addr'
+    ARG = 'arg'
+    ATIME = 'atime'
+    BTIME = 'btime'
+    COUNT = 'count'
+    CTIME = 'ctime'
+    DATE = 'date'
+    DST = 'dst'
+    END = 'end'
+    FILE = 'file'
+    KEY = 'key'
+    METHOD = 'method'
+    MTIME = 'mtime'
+    NAME = 'name'
+    PATH = 'path'
+    SRC = 'src'
+    START = 'start'
+    STREAM = 'stream'
+    TAG = 'tag'
+    TYPE = 'type'
+
+    def __str__(self):
+        return self.value
 
 
 _INDEX = 'index'
@@ -292,9 +326,15 @@ class ByteStringWrapper(bytearray, CustomStringRepresentation):
         return self.string.__format__(spec)
 
 
-def is_valid_variable_name(name: str, allow_wildcards: bool = False) -> bool:
+def is_valid_variable_name(
+    name: str,
+    allow_wildcards: bool = False,
+    allow_derivations: bool = True,
+) -> bool:
     """
-    All single-letter, uppercase variable names are reserved.
+    All single-letter, uppercase variable names are reserved. Pass `allow_derivations` as `False`
+    when the name is taken from the input data rather than from the command line, because such a
+    name would otherwise be able to shadow a derived property.
     """
     if allow_wildcards:
         parts = re.split(r'([\*\?\[\]])', name)
@@ -313,7 +353,7 @@ def is_valid_variable_name(name: str, allow_wildcards: bool = False) -> bool:
         parts = [name]
     try:
         for part in parts:
-            check_variable_name(part, allow_derivations=True)
+            check_variable_name(part, allow_derivations=allow_derivations)
     except ValueError:
         return False
     else:
@@ -338,6 +378,20 @@ def check_variable_name(name: str | None, allow_derivations=False) -> str | None
     if error:
         raise ValueError(F'The variable name "{name}" is invalid; it is {error}')
     return name
+
+
+def check_variable_names_of_unit(names: Iterable[str]) -> None:
+    """
+    Verify that a unit does not attach meta variables whose names are reserved for a property that
+    `refinery.lib.meta.LazyMetaOracle` derives from the chunk itself. Such a variable would shadow
+    the derived property, which makes the name mean something different downstream of that unit
+    than it does anywhere else.
+    """
+    for name in names:
+        if name == _INDEX or name in LazyMetaOracle.derivations:
+            raise ValueError(
+                F'A unit attempted to set the meta variable "{name}", but that name is reserved '
+                F'for a property that is derived from the chunk.')
 
 
 class SizeInt(int, CustomStringRepresentation):

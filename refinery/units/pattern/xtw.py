@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from refinery.lib.meta import MV
 from refinery.lib.patterns import wallets
 from refinery.lib.wallets import validate
 from refinery.units import RefineryCriticalException
@@ -29,6 +30,6 @@ class xtw(PatternExtractor):
                 raise RefineryCriticalException('Received empty match.')
             if not validate(name, value):
                 return None
-            return self.labelled(value, kind=name)
+            return self.labelled(value, **{MV.TYPE: name})
 
         yield from self.matches_filtered(memoryview(data), pattern, check)

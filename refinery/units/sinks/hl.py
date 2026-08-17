@@ -9,7 +9,7 @@ if True:
     colorama.init()
 
 from refinery.lib.id import get_text_format
-from refinery.lib.meta import metavars
+from refinery.lib.meta import MV, metavars
 from refinery.lib.scripts.guess import guess_language
 from refinery.lib.types import Param
 from refinery.units import Arg, Unit
@@ -92,7 +92,7 @@ class hl(Unit):
             if format := get_text_format(data):
                 guesses.append(format.extension)
             guesses.append(str(meta['ext']))
-            if path := meta.get('path'):
+            if path := meta.get(MV.PATH):
                 guesses.append(pathlib.Path(str(path)).suffix.lstrip('.'))
             for guess in guesses:
                 try:

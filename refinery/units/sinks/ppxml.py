@@ -28,9 +28,9 @@ class ppxml(Unit):
         try:
             dom = ForgivingParse(data, etm)
         except Exception:
-            from refinery.lib.meta import metavars
+            from refinery.lib.meta import MV, metavars
             msg = 'error parsing as XML, returning original content'
-            path = metavars(data).get('path')
+            path = metavars(data).get(MV.PATH)
             if path:
                 msg = F'{msg}: {path}'
             self.log_warn(msg)

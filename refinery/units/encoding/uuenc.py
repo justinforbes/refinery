@@ -5,7 +5,7 @@ import pathlib
 import re
 
 from refinery.lib import chunks
-from refinery.lib.meta import metavars
+from refinery.lib.meta import MV, metavars
 from refinery.lib.structures import MemoryFile
 from refinery.units import RefineryPartialResult, Unit
 
@@ -28,7 +28,7 @@ class uuenc(Unit):
             if eol and view[br:br + 3] == b'end':
                 path = header[2]
                 if path != B'-':
-                    output = self.labelled(output, path=path)
+                    output = self.labelled(output, **{MV.PATH: path})
                 return output
             count = view[br] - 0x20
             if count not in range(0x41):
@@ -54,7 +54,7 @@ class uuenc(Unit):
 
     def reverse(self, data):
         meta = metavars(data)
-        path = meta.get('path', None)
+        path = meta.get(MV.PATH, None)
         name = path and pathlib.Path(path).name or '-'
         view = memoryview(data)
         with MemoryFile() as stream:

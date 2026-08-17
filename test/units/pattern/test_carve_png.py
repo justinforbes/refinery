@@ -2,6 +2,7 @@ import struct
 import zlib
 
 from .. import TestUnitBase
+from . import PNG_IMAGE
 
 
 def _make_chunk(chunk_type: bytes, chunk_data: bytes) -> bytes:
@@ -50,9 +51,26 @@ class TestCarvePNG(TestUnitBase):
         data = b'\xAA' * 10 + png1 + b'\xBB' * 20 + png2 + b'\xCC' * 10
         unit = self.load()
         result = data | unit | []
-        # carve_png shadows the `data` variable internally, so only the first PNG is found
-        self.assertGreaterEqual(len(result), 1)
+        self.assertEqual(len(result), 2)
         self.assertEqual(bytes(result[0]), png1)
+        self.assertEqual(bytes(result[1]), png2)
+
+    def test_every_carved_image_reports_its_own_position(self):
+        png = _make_minimal_png()
+        data = b'\xAA' * 10 + png + b'\xBB' * 20 + png + b'\xCC' * 10
+        result = data | self.load() | []
+        self.assertListEqual(
+            [item['start'] for item in result],
+            [10, 10 + len(png) + 20])
+
+    def test_reports_the_span_of_the_carved_image(self):
+        for padding in (1, 3, 37, 200):
+            with self.subTest(padding=padding):
+                data = bytes(padding) + PNG_IMAGE
+                result, = data | self.load() | []
+                start, end = result['start'], result['end']
+                self.assertEqual((start, end), (padding, padding + len(PNG_IMAGE)))
+                self.assertEqual(bytes(data[start:end]), bytes(result))
 
     def test_invalid_crc_rejected(self):
         sig = b'\x89PNG\r\n\x1A\n'

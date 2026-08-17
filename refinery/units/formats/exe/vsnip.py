@@ -89,4 +89,4 @@ class vsnip(Unit):
             if area.count:
                 end = min(end, offset + area.count)
 
-            yield self.labelled(data[offset:end], offset=offset)
+            yield self.carved(data[offset:end], offset, end)

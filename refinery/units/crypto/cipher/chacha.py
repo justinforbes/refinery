@@ -7,6 +7,7 @@ from typing import Iterable
 from Cryptodome.Cipher import ChaCha20, ChaCha20_Poly1305
 
 from refinery.lib.crypto import PyCryptoFactoryWrapper, rotl32
+from refinery.lib.meta import MV
 from refinery.lib.types import Param, buf, isbuffer, isq
 from refinery.units import Arg
 from refinery.units.crypto.cipher import LatinCipherStandardUnit, LatinCipherUnit
@@ -87,7 +88,8 @@ class chacha20poly1305(LatinCipherStandardUnit, cipher=PyCryptoFactoryWrapper(Ch
     def encrypt(self, data):
         result = super().encrypt(data)
         if self.args.tag or self.args.aad:
-            result = self.labelled(result, tag=super()._get_cipher(False).digest())
+            result = self.labelled(
+                result, **{MV.TAG: super()._get_cipher(False).digest()})
         return result
 
     def decrypt(self, data):

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from refinery.lib.meta import metavars
+from refinery.lib.meta import MV, metavars
 from refinery.lib.structures import MemoryFile
 from refinery.lib.tools import exception_to_string
 from refinery.lib.types import Param, bounds
@@ -258,10 +258,16 @@ class ef(Unit):
                                 btime = ctime
                             kwargs.update(
                                 fsize=filesize,
-                                btime=datetime.fromtimestamp(btime).isoformat(' ', 'seconds'),
-                                atime=datetime.fromtimestamp(atime).isoformat(' ', 'seconds'),
-                                ctime=datetime.fromtimestamp(ctime).isoformat(' ', 'seconds'),
-                                mtime=datetime.fromtimestamp(mtime).isoformat(' ', 'seconds')
+                                **{
+                                    MV.BTIME:
+                                        datetime.fromtimestamp(btime).isoformat(' ', 'seconds'),
+                                    MV.ATIME:
+                                        datetime.fromtimestamp(atime).isoformat(' ', 'seconds'),
+                                    MV.CTIME:
+                                        datetime.fromtimestamp(ctime).isoformat(' ', 'seconds'),
+                                    MV.MTIME:
+                                        datetime.fromtimestamp(mtime).isoformat(' ', 'seconds'),
+                                }
                             )
                 if size is not None and filesize not in size:
                     continue
@@ -277,4 +283,8 @@ class ef(Unit):
                         else:
                             contents = stream.read()
                             self.log_info(lambda: F'reading: {path!s} ({len(contents)} bytes)')
-                            yield self.labelled(contents, path=path.as_posix(), **kwargs)
+                            yield self.labelled(
+                                contents,
+                                **{MV.PATH: path.as_posix()},
+                                **kwargs
+                            )

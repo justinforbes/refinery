@@ -16,6 +16,7 @@ from refinery.lib.crypto import (
     pad,
     unpad,
 )
+from refinery.lib.meta import MV
 from refinery.lib.types import Any, ClassVar, Collection, Iterable, Param, buf, isbuffer, isq
 from refinery.units import (
     Arg,
@@ -337,7 +338,7 @@ class StandardBlockCipherUnit(BlockCipherUnitBase, StandardCipherUnit):
         result = super().encrypt(data)
         cipher = super()._get_cipher(False)
         if self.args.tag or self.args.aad:
-            result = self.labelled(result, tag=cipher.digest())
+            result = self.labelled(result, **{MV.TAG: cipher.digest()})
         return result
 
     def decrypt(self, data):

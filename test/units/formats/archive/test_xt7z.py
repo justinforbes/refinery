@@ -15,6 +15,13 @@ class Test7zipFileExtractor(TestUnitBase):
     TESTFILE1_CONTENT = 'Hello, this is a test file for 7zip archive testing.'
     TESTFILE2_CONTENT = 'Second file for testing purposes.'
 
+    LZMA_ARCHIVE = base64.b64decode(
+        'N3q8ryccAAQXa3/2swAAAAAAAAAhAAAAAAAAAKsDpUngAFQARV0AJBlJmG8WAoyLktVrywEc3aGe27pL8HOviCZKe7dipsZBOMuv'
+        'PGa8aOyjedMPAUT2o/fNEUBnTSYF/RKO6sYV5xPJZycAAAAAgTMHrg/Smro9QMCQ0v99aU2Hej2pCKJZ2zAHVVF91CzaMd7DmZYE'
+        'RTgR3bxbCIU3T5S8pIeKXSNBjRg66UYcjkRHR0XA1fUMSBeSRGTLKWnV0rOoggmSTW+nXaMlCh6sNxF03hcGTQEJZgAHCwEAASMD'
+        'AQEFXQAQAAAMgI4KAbh91MYAAA=='
+    )
+
     def test_simple_archive(self):
         data = base64.b64decode(
             'N3q8ryccAAT9xtacpQAAAAAAAAAiAAAAAAAAAEerl+XBRlkrcJwwoqgijCyuEh0SqLfjamv2F2vNJGFGyHDfpAAAgTMHrg/QDrA8'
@@ -27,12 +34,7 @@ class Test7zipFileExtractor(TestUnitBase):
         self.assertEqual(str(data | self.load(pwd='boom')), 'refinery\nbinary')
 
     def test_lzma2_archive(self):
-        data = base64.b64decode(
-            'N3q8ryccAAQXa3/2swAAAAAAAAAhAAAAAAAAAKsDpUngAFQARV0AJBlJmG8WAoyLktVrywEc3aGe27pL8HOviCZKe7dipsZBOMuv'
-            'PGa8aOyjedMPAUT2o/fNEUBnTSYF/RKO6sYV5xPJZycAAAAAgTMHrg/Smro9QMCQ0v99aU2Hej2pCKJZ2zAHVVF91CzaMd7DmZYE'
-            'RTgR3bxbCIU3T5S8pIeKXSNBjRg66UYcjkRHR0XA1fUMSBeSRGTLKWnV0rOoggmSTW+nXaMlCh6sNxF03hcGTQEJZgAHCwEAASMD'
-            'AQEFXQAQAAAMgI4KAbh91MYAAA=='
-        )
+        data = self.LZMA_ARCHIVE
         self.assertEqual(
             str(data | self.load('testfile.txt')),
             self.TESTFILE1_CONTENT,
@@ -41,6 +43,23 @@ class Test7zipFileExtractor(TestUnitBase):
             str(data | self.load('testfile2.txt')),
             self.TESTFILE2_CONTENT,
         )
+
+    def test_stored_checksum_matches_the_extracted_content(self):
+        data = data = self.LZMA_ARCHIVE
+        for item in data | self.load() | []:
+            self.assertEqual(item['checksum'], zlib.crc32(bytes(item)))
+            self.assertEqual(item['uncompressed'], len(item))
+
+    def test_the_crc32_variable_is_the_hash_of_the_extracted_content(self):
+        """
+        The checksum recorded in the archive is exposed as `checksum` rather than `crc32`, so that
+        `crc32` keeps its meaning as the hash that refinery computes from a chunk.
+        """
+        data = data = self.LZMA_ARCHIVE
+        for item in data | self.load() | []:
+            self.assertEqual(
+                str(item['crc32']).lower(),
+                F'{zlib.crc32(bytes(item)):08x}')
 
     def test_copy_archive(self):
         data = base64.b64decode(

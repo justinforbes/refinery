@@ -4,6 +4,7 @@ from enum import IntEnum, IntFlag
 from zlib import adler32, crc32
 
 from refinery.lib.dt import date_from_timestamp
+from refinery.lib.meta import MV
 from refinery.lib.structures import MemoryFile, StreamDetour, Struct, StructReader
 from refinery.lib.types import Generator, buf
 from refinery.units import Unit
@@ -274,8 +275,10 @@ class lzo(Unit):
                 output.write(self._decompress_stream(chunk.data))
             return self.labelled(
                 output.getvalue(),
-                path=lzo.name,
-                date=date_from_timestamp(lzo.mtime)
+                **{
+                    MV.PATH: lzo.name,
+                    MV.DATE: date_from_timestamp(lzo.mtime).isoformat(' ', 'seconds'),
+                }
             )
 
     @classmethod

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from refinery.lib import xml
 from refinery.lib.dt import isodate
+from refinery.lib.meta import MV
 from refinery.units.formats import JSONTableUnit, Unit
 from refinery.units.formats.office.xtdoc import xtdoc
 
@@ -151,7 +152,8 @@ class docmeta(JSONTableUnit):
         return {'meta': contents} if contents else None
 
     def _json_ooxml(self, data: bytearray):
-        props = data | xtdoc('docProps/*.xml', exact=True, path=b'path') | {'path': bytearray}
+        _path = MV.PATH
+        props = data | xtdoc('docProps/*.xml', exact=True, path=_path.encode()) | {str(_path): bytearray}
         result = {}
 
         for path, page in props.items():

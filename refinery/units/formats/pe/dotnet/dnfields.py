@@ -10,6 +10,7 @@ from typing import NamedTuple
 from refinery.lib.dotnet import integer_from_ldc
 from refinery.lib.dotnet.header import DotNetHeader
 from refinery.lib.dotnet.signatures import FieldSig, SzArrayTypeSig, parse_signature
+from refinery.lib.meta import MV
 from refinery.units.formats import PathExtractorUnit, UnpackResult
 from refinery.units.formats.pe.dotnet import CodePath
 
@@ -203,7 +204,14 @@ class dnfields(PathExtractorUnit):
                 F'field {k:0{iwidth}d}; token 0x{_index:06X}; RVA 0x{rv.RVA:04X}; count {guess.elements}; type {guess.type}; name {fname}')
             end = offset + guess.elements * guess.size
             path = cpaths.method_path(guess.offset) if guess.offset else ''
-            unpack.append(UnpackResult(F'{path}/{fname}', memory[offset:end], name=fname, type=type))
+            unpack.append(UnpackResult(
+                F'{path}/{fname}',
+                memory[offset:end],
+                **{
+                    MV.NAME: fname,
+                    MV.TYPE: type,
+                }
+            ))
 
         remaining_field_indices = list(remaining_field_indices)
         token_pattern = B'|'.join(
@@ -249,7 +257,14 @@ class dnfields(PathExtractorUnit):
                 except Exception:
                     continue
                 else:
-                    unpack.append(UnpackResult(F'{path}/{name}', value, name=name, type='string'))
+                    unpack.append(UnpackResult(
+                        F'{path}/{name}',
+                        value,
+                        **{
+                            MV.NAME: name,
+                            MV.TYPE: 'string',
+                        }
+                    ))
                     break
 
         unpack.sort(key=lambda u: u.path)

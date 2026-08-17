@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from refinery.lib.dotnet.disassembler import Disassembler
 from refinery.lib.dotnet.disassembler.factory import OutputFactory
+from refinery.lib.meta import MV
 from refinery.lib.types import Param
 from refinery.units.sinks import Arg, Unit
 
@@ -46,7 +47,7 @@ class dnopc(DotnetDisassemblerUnit):
         until=None,
         nvar: Param[str, Arg.String('-n', help=(
             'Variable to receive the disassembled mnemonic. Default is "{default}".'
-        ))] = 'name',
+        ))] = str(MV.NAME),
         avar: Param[str, Arg.String('-a', help=(
             'Variable to receive the address of the instruction. Default is "{default}".'
         ))] = 'addr',

@@ -88,7 +88,7 @@ class xt7z(ArchiveUnit, docs='{0}{p}{PathExtractorUnit}'):
                 info.name,
                 info.mtime or info.ctime,
                 extract,
-                crc32=info.crc,
+                checksum=info.crc,
                 uncompressed=info.size,
             )
 

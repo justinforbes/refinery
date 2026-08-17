@@ -1,9 +1,11 @@
+import hashlib
+import io
+
 from typing import Iterable, List
 
-from refinery.lib.meta import metavars
-from refinery.lib.frame import Chunk
+from refinery.lib.frame import Chunk, FrameUnpacker, generate_frame_header
 from refinery.lib.loader import load_pipeline as L, load_detached as U
-from refinery.lib.meta import LazyMetaOracle
+from refinery.lib.meta import LazyMetaOracle, MV, is_valid_variable_name, metavars
 from refinery.units import Unit
 
 from .. import TestBase
@@ -303,3 +305,121 @@ class TestLazyMetaOracle(TestBase):
         oracle['var1'] = 'a'
         oracle['var2'] = 'b'
         self.assertEqual(len(oracle), initial_len + 2)
+
+
+class TestMV(TestBase):
+    """
+    The members of `MV` are used as meta variable keys, as keyword arguments, and
+    inside format strings. Each test below pins one of the ways in which a member has to be
+    indistinguishable from the string it stands for.
+    """
+
+    def test_format_string_interpolation_yields_the_value(self):
+        self.assertEqual(F'{MV.START}', 'start')
+
+    def test_format_string_with_alignment_spec_yields_the_value(self):
+        self.assertEqual(F'{MV.START:>7}', '  start')
+
+    def test_string_cast_yields_the_value(self):
+        self.assertEqual(str(MV.END), 'end')
+
+    def test_format_map_yields_the_value(self):
+        interpolated = '{default}'.format_map({'default': MV.PATH})
+        self.assertEqual(interpolated, 'path')
+
+    def test_encoding_yields_the_value(self):
+        self.assertEqual(MV.PATH.encode('utf8'), B'path')
+
+    def test_member_equals_and_hashes_as_its_value(self):
+        self.assertEqual(MV.DATE, 'date')
+        self.assertEqual(hash(MV.DATE), hash('date'))
+
+    def test_member_and_value_are_interchangeable_as_dictionary_keys(self):
+        by_member = {MV.START: 1}
+        by_value = {'start': 1}
+        self.assertEqual(by_member['start'], 1)
+        self.assertEqual(by_value[MV.START], 1)
+
+    def test_every_value_is_a_valid_variable_name(self):
+        invalid = [name.value for name in MV if not is_valid_variable_name(name.value)]
+        self.assertListEqual(invalid, [])
+
+    def test_no_member_shadows_a_derived_property(self):
+        shadowing = [
+            name.value for name in MV
+            if name.value in LazyMetaOracle.derivations
+        ]
+        self.assertListEqual(shadowing, [])
+
+    def test_values_are_unique(self):
+        values = [name.value for name in MV]
+        self.assertEqual(len(values), len(set(values)))
+
+    def test_member_used_as_key_reads_back_by_value(self):
+        oracle = LazyMetaOracle(b'data')
+        oracle[MV.START] = 12
+        self.assertEqual(oracle['start'], 12)
+
+    def test_value_used_as_key_reads_back_by_member(self):
+        oracle = LazyMetaOracle(b'data')
+        oracle['start'] = 12
+        self.assertEqual(oracle[MV.START], 12)
+
+    def test_member_keys_normalize_to_strings_across_a_frame_boundary(self):
+        chunk = Chunk(b'data', path=[0], view=[True])
+        chunk.meta[MV.START] = 12
+        stream = io.BytesIO(generate_frame_header(1) + chunk.pack())
+        unpacked = FrameUnpacker(stream)
+        unpacked.nextframe()
+        restored, = unpacked
+        self.assertSetEqual({type(key) for key in restored.meta.keys()}, {str})
+        self.assertEqual(restored.meta[MV.START], 12)
+        self.assertEqual(restored.meta['start'], 12)
+
+
+class TestDerivedVariableProtection(TestBase):
+    """
+    `LazyMetaOracle` derives properties such as `size` and `sha256` from the chunk itself. A unit
+    that attaches a variable of the same name would shadow the derived property, so that the name
+    means something different downstream of that unit than it does anywhere else.
+    """
+
+    def test_unit_cannot_label_a_chunk_with_a_derived_name(self):
+        class shadow(Unit):
+            def process(self, data):
+                yield self.labelled(data, sha256=b'not a hash')
+
+        with self.assertRaises(ValueError):
+            bytearray(b'data') | shadow().log_detach() | []
+
+    def test_no_derived_name_can_be_set_through_labelled(self):
+        for name in LazyMetaOracle.derivations:
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    Unit.labelled(bytearray(b'data'), **{name: 0})
+
+    def test_the_frame_index_cannot_be_set_through_labelled(self):
+        with self.assertRaises(ValueError):
+            Unit.labelled(bytearray(b'data'), index=3)
+
+    def test_unpack_result_rejects_a_derived_name(self):
+        from refinery.units.formats import UnpackResult
+        for name in LazyMetaOracle.derivations:
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    UnpackResult('item', b'data', **{name: 0})
+
+    def test_a_variable_that_is_not_derived_is_accepted(self):
+        chunk = Unit.labelled(bytearray(b'data'), checksum=0x1234)
+        self.assertEqual(chunk['checksum'], 0x1234)
+
+    def test_derived_values_are_still_computed_from_the_chunk(self):
+        self.assertEqual(bytes(L('emit abc [| cm sha256 | pf {sha256} ]')()),
+                         hashlib.sha256(b'abc').hexdigest().encode())
+
+    def test_cm_may_materialize_a_derived_property(self):
+        """
+        The guard applies to units attaching their own values, not to `refinery.cm`, whose whole
+        purpose is to write the derived properties into the meta dictionary.
+        """
+        self.assertEqual(bytes(L('emit abc [| cm size | pf {size} ]')()), b'3')

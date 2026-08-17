@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from refinery.lib.meta import MV
 from refinery.lib.pcap import IPProtocol, TcpFlag, TransportSegment, reassemble_tcp
 from refinery.lib.types import Param
 from refinery.units import Arg
@@ -102,9 +103,9 @@ class tcp(StreamReassemblyUnit):
 
         def labels(datagram):
             return {
-                'src': F'{datagram.src_addr}:{datagram.src_port}',
-                'dst': F'{datagram.dst_addr}:{datagram.dst_port}',
-                'stream': streams[self._conversation(datagram)],
+                MV.SRC: F'{datagram.src_addr}:{datagram.src_port}',
+                MV.DST: F'{datagram.dst_addr}:{datagram.dst_port}',
+                MV.STREAM: streams[self._conversation(datagram)],
             }
 
         if not merge:

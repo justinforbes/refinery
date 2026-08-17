@@ -37,4 +37,4 @@ class carve_der(Unit):
             consumed = reader.tell()
             der = bytes(chunk[:consumed])
             cursor = pos + consumed
-            yield self.labelled(der, offset=pos)
+            yield self.carved(der, pos, cursor)

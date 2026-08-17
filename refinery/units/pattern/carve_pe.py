@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from struct import unpack
 
+from refinery.lib.meta import MV
 from refinery.lib.mime import FileMagicInfo as magic
 from refinery.lib.types import Param
 from refinery.units.formats import Arg, PathExtractorUnit, UnpackResult
@@ -14,7 +15,8 @@ class carve_pe(PathExtractorUnit):
     Extracts anything from the input data that looks like a Portable Executable (PE) file.
     """
     def __init__(
-        self, *paths, list=False, join_path=False, drop_path=False, path=b'name',
+        self, *paths, list=False, join_path=False, drop_path=False,
+        path=MV.NAME.encode(),
         recursive: Param[bool, Arg.Switch('-r', help='Extract PE files that are contained in already extracted PEs.')] = False,
         keep_root: Param[bool, Arg.Switch('-k', help='If the input chunk is itself a PE, include it as an output chunk.')] = False,
         memdump: Param[bool, Arg.Switch('-m', help='Use the virtual memory layout of a PE file to calculate its size.')] = False,
@@ -78,7 +80,10 @@ class carve_pe(PathExtractorUnit):
                     path = F'carve-0x{offset:08X}.{magic(pedata).extension}'
 
             if offset > 0 or self.args.keep_root:
-                yield UnpackResult(path, pedata, offset=offset)
+                yield UnpackResult(path, pedata, **{
+                    MV.START: offset,
+                    MV.END: offset + pesize,
+                })
                 self.log_info(F'extracted PE file of size 0x{pesize:08X} from 0x{offset:08X}')
             else:
                 self.log_info(F'ignored root file of size 0x{pesize:08X} from 0x{offset:08X}')

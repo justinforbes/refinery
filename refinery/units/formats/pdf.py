@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from pypdf.generic import EncodedStreamObject
 
 from refinery.lib import json
+from refinery.lib.meta import MV
 from refinery.lib.mime import get_cached_file_magic_info
 from refinery.lib.structures import MemoryFile
 from refinery.lib.tools import NoLogging
@@ -79,14 +80,18 @@ class xtpdf(ArchiveUnit):
         except AttributeError:
             pass
         else:
-            yield UnpackResult(''.join(path), extract, kind='object')
+            yield UnpackResult(''.join(path), extract, **{MV.TYPE: 'object'})
             return
 
         if isinstance(blob, lib.generic.ByteStringObject):
-            yield UnpackResult(''.join(path), blob, kind='bytes')
+            yield UnpackResult(''.join(path), blob, **{MV.TYPE: 'bytes'})
             return
         if isinstance(blob, lib.generic.TextStringObject):
-            yield UnpackResult(''.join(path), blob.encode(self.codec), kind='string')
+            yield UnpackResult(
+                ''.join(path),
+                blob.encode(self.codec),
+                **{MV.TYPE: 'string'}
+            )
             return
 
         if isinstance(blob, (

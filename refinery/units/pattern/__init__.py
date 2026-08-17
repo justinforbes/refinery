@@ -9,14 +9,14 @@ from hashlib import blake2b
 from itertools import islice
 from typing import TYPE_CHECKING
 
-from refinery.lib.meta import STRING_FORMAT_HELP
+from refinery.lib.meta import STRING_FORMAT_HELP, MV
 from refinery.lib.patterns import formats, indicators
 from refinery.lib.types import INF, Callable, Iterable, Param, bounds, buf
 from refinery.units import Arg, Unit
 
 if TYPE_CHECKING:
     from typing import Mapping
-    MT = tuple[int, re.Match[bytes]]
+    MT = tuple[int, int, re.Match[bytes]]
     MB = re.Match[bytes]
     PT = re.Pattern[bytes]
     MC = Callable[['RefinedMatch'], buf | None]
@@ -124,7 +124,7 @@ class PatternExtractorBase(Unit, abstract=True):
         """
         if self.args.ascii:
             for match in pattern.finditer(data):
-                yield match.start(), match
+                yield match.start(), match.end(), match
         if self.args.utf16:
             from refinery.lib.patterns import alphabet, pattern_with_size_limits
             sizes = self._getbounds()
@@ -136,7 +136,8 @@ class PatternExtractorBase(Unit, abstract=True):
                     b += 1
                 for match in pattern.finditer(bytes(data[a:b:2])):
                     start = a + match.start() * 2
-                    yield start, match
+                    end = a + match.end() * 2
+                    yield start, end, match
 
     def _getbounds(self):
         if (n := self.args.len) > 0:
@@ -153,7 +154,7 @@ class PatternExtractorBase(Unit, abstract=True):
         dedup = not self.args.duplicates
         maxtake = self.args.take
         longest = self.args.longest
-        for offset, match in matches:
+        for start, end, match in matches:
             hit = memoryview(match[0])
             if not hit or sizes and len(hit) not in sizes:
                 continue
@@ -162,7 +163,7 @@ class PatternExtractorBase(Unit, abstract=True):
                 if uid in barrier:
                     continue
                 barrier.add(uid)
-            yield offset, match
+            yield start, end, match
             taken += 1
             if not longest and taken >= maxtake:
                 break
@@ -175,7 +176,7 @@ class PatternExtractorBase(Unit, abstract=True):
                     result = list(result)
                 indices = sorted(
                     range(len(result)),
-                    key=lambda k: len(result[k][1][0]),
+                    key=lambda k: len(result[k][2][0]),
                     reverse=True)
                 for k in sorted(islice(indices, t)):
                     yield result[k]
@@ -183,7 +184,7 @@ class PatternExtractorBase(Unit, abstract=True):
                 yield from islice(matches, t)
         elif self.args.longest:
             def sortkey(m: MT):
-                return m[1].end() - m[1].start()
+                return m[1] - m[0]
             yield from sorted(matches, key=sortkey, reverse=True)
         else:
             yield from matches
@@ -212,11 +213,12 @@ class PatternExtractorBase(Unit, abstract=True):
             transforms = 0,
         group_index = pattern.groupindex
         group_count = pattern.groups
-        for k, (offset, match) in enumerate(self.matchfilter(self.matches(memoryview(data), pattern))):
+        for k, (start, end, match) in enumerate(self.matchfilter(self.matches(memoryview(data), pattern))):
             match = RefinedMatch(match, group_count, group_index)
             for transform in transforms:
                 kwargs: dict = {
-                    'offset': offset
+                    MV.START: start,
+                    MV.END: end,
                 }
                 if callable(transform):
                     transformed = transform(match)

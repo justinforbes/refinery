@@ -30,7 +30,9 @@ class xtxml(XMLToPathExtractorUnit):
                 for k, v in node.attributes.items()
             }
 
-            if not all(is_valid_variable_name(k) for k in attributes):
+            if not all(
+                is_valid_variable_name(k, allow_derivations=False) for k in attributes
+            ):
                 attributes = {F'_{k}': v for k, v in attributes.items()}
 
             yield UnpackResult('/'.join(parts), extract, **attributes)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 
+from refinery.lib.meta import MV
 from refinery.lib.types import Param
 from refinery.lib.vhd import VirtualDisk, is_vhd, is_vhdx
 from refinery.lib.vhd.disk import Partition, VolumeView, partitions
@@ -61,7 +62,7 @@ class xtvhd(ArchiveUnit, docs='{0}{p}{PathExtractorUnit}'):
                 path = F'{prefix}{file.path}' if prefix else file.path
                 date = file.date
                 meta = self._metadata(file)
-                if 'mtime' in meta:
+                if MV.MTIME in meta:
                     date = None
                 yield self._pack(path, date, file.extract, **meta)
 
@@ -78,10 +79,12 @@ class xtvhd(ArchiveUnit, docs='{0}{p}{PathExtractorUnit}'):
         if (_m := self.args.meta) < 1:
             return meta
         meta.update(
-            btime=self._iso(file.btime),
-            ctime=self._iso(file.ctime),
-            mtime=self._iso(file.mtime),
-            atime=self._iso(file.atime),
+            **{
+                MV.BTIME: self._iso(file.btime),
+                MV.CTIME: self._iso(file.ctime),
+                MV.MTIME: self._iso(file.mtime),
+                MV.ATIME: self._iso(file.atime),
+            }
         )
         if _m < 2:
             return meta

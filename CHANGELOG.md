@@ -5,6 +5,21 @@
 > If a release contains only bugfix, it contains no changelog details.
 > Otherwise, the changelog entries highlight only new or changed functionality.
 
+## Version 0.11.3
+
+> [!WARNING]  
+> **BREAKING CHANGES**
+
+- The meta variable `offset` was renamed to `start`.
+  It is emitted by `carve`, `dnsdomain`, `rex`, `xtp`, `xtw`, all `carve-*` units, `ngrams`, `perc`, `vsect`, `vsnip`, `xtasar`.
+  Every unit that reports a `start` now also reports the matching `end`, which is the position just after the region in the input.
+  Pipelines using `{offset}` or `var:offset` have to be updated; the old name can be restored manually with `swap start offset`.
+- The meta variable `kind` was renamed to `type`, which was already the name used by other units for the same
+  concept. This affects `xtw`, where it holds the wallet address format, and `xtpdf`.
+  Pipelines that use `{kind}` or `var:kind` have to be updated.
+- The `xt7z` unit now reports the checksum stored in the archive as `checksum` rather than `crc32`.
+  The latter is the name of a property that refinery computes from a chunk, and a unit is no longer permitted to overwrite such a name.
+
 ## Version 0.11.2
 - The `php` unit was added; it parses PHP into an abstract syntax tree and pretty-prints it.
   Future versions will add deobfuscation capabilities.

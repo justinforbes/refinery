@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from refinery.lib.meta import MV
 from refinery.lib.types import Callable, Param, buf
 from refinery.units import Arg
 from refinery.units.formats import PathExtractorUnit, UnpackResult
@@ -13,10 +14,12 @@ class MultipleArchives(Exception):
 
 class ArchiveUnit(PathExtractorUnit, abstract=True):
     def __init__(
-        self, *paths, list=False, join_path=False, drop_path=False, fuzzy=0, exact=False, regex=False, path=b'path',
+        self, *paths, list=False, join_path=False, drop_path=False, fuzzy=0, exact=False, regex=False,
+        path=MV.PATH.encode(),
         exclude=None,
-        date: Param[buf, Arg('-D', metavar='NAME',
-            help='Name of the meta variable to receive the extracted file date. The default value is "{default}".')] = b'date',
+        date: Param[buf, Arg('-D', metavar='NAME', help=(
+            'Name of the meta variable to receive the extracted file date. The default value is '
+            '"{default}".'))] = MV.DATE.encode(),
         pwd: Param[buf, Arg('-p', help='Optionally specify an extraction password.')] = B'',
         **kwargs
     ):

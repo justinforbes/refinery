@@ -3,7 +3,7 @@ from __future__ import annotations
 from hashlib import blake2b
 
 from refinery.lib.argformats import PythonExpression
-from refinery.lib.meta import metavars
+from refinery.lib.meta import MV, metavars
 from refinery.lib.types import Param, isbuffer
 from refinery.units import Arg, Unit
 
@@ -61,4 +61,4 @@ class dedup(Unit):
 
         if hashes is None:
             for uid, chunk in buffer.items():
-                yield self.labelled(chunk, count=counts[uid])
+                yield self.labelled(chunk, **{MV.COUNT: counts[uid]})

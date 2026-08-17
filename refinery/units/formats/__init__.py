@@ -15,7 +15,13 @@ from zlib import adler32
 from refinery.lib import json as libjson
 from refinery.lib.argformats import pathvar
 from refinery.lib.loader import load
-from refinery.lib.meta import ByteStringWrapper, LazyMetaOracle, metavars
+from refinery.lib.meta import (
+    ByteStringWrapper,
+    LazyMetaOracle,
+    MV,
+    check_variable_names_of_unit,
+    metavars,
+)
 from refinery.lib.tools import exception_to_string, get_terminal_size
 from refinery.lib.types import Callable, Iterable, Param, buf, isbuffer
 from refinery.lib.xml import XMLNodeBase
@@ -38,6 +44,7 @@ class UnpackResult:
         return self.data
 
     def __init__(self, _br__path: str, _br__data: buf | Callable[[], buf], **_br__meta):
+        check_variable_names_of_unit(_br__meta)
         self.path = _br__path
         self.data = _br__data
         self.meta = _br__meta
@@ -168,7 +175,7 @@ class PathExtractorUnit(Unit, abstract=True):
             help='Use regular expressions instead of wildcard patterns.')] = False,
         path: Param[buf, Arg('-P', metavar='NAME', help=(
             'Name of the meta variable to receive the extracted path. The default value is '
-            '"{default}".'))] = b'path',
+            '"{default}".'))] = MV.PATH.encode(),
         **keywords
     ):
         super().__init__(
@@ -352,7 +359,7 @@ class XMLToPathExtractorUnit(PathExtractorUnit, abstract=True):
             'tree to use for generating paths.'
         ))] = None,
         list=False, join_path=False, drop_path=False, fuzzy=0, exact=False, regex=False,
-        path=b'path', exclude=None, **keywords
+        path=MV.PATH.encode(), exclude=None, **keywords
     ):
         super().__init__(
             *paths,

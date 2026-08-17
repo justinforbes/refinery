@@ -217,7 +217,7 @@ class TestCarveElf(TestUnitBase):
         unit = self.load()
         results = data | unit | []
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].meta['offset'], 200)
+        self.assertEqual(results[0].meta['start'], 200)
 
     def test_big_endian_elf(self):
         elf = self._make_minimal_elf(is64=True, little_endian=False)

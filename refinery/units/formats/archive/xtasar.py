@@ -4,6 +4,7 @@ import json
 
 from typing import TYPE_CHECKING
 
+from refinery.lib.meta import MV
 from refinery.lib.structures import Struct, StructReader
 from refinery.units.formats.archive import ArchiveUnit, UnpackResult
 
@@ -56,7 +57,10 @@ class xtasar(ArchiveUnit, docs='{0}{p}{PathExtractorUnit}'):
             yield UnpackResult(
                 '/'.join(path),
                 lambda a=offset, b=end: data[a:b],
-                offset=offset
+                **{
+                    MV.START: offset,
+                    MV.END: end,
+                }
             )
 
         header = AsarHeader.Parse(data)

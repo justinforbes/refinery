@@ -22,10 +22,10 @@ class carve_png(Unit):
             try:
                 while success:
                     size = stream.u32()
-                    data = stream.read_exactly(4 + size)
+                    block = stream.read_exactly(4 + size)
                     crc32r = stream.u32()
-                    crc32c = zlib.crc32(data) & 0xFFFFFFFF
-                    tag = bytes(data[:4])
+                    crc32c = zlib.crc32(block) & 0xFFFFFFFF
+                    tag = bytes(block[:4])
                     self.log_debug(F'{p:#x}: chunk of size {size:#010x}, crc32={crc32c:08X}, check={crc32r:08X}', tag)
                     if crc32r != crc32c:
                         self.log_info(F'{p:#x}: rejecting, invalid checksum on chunk')
@@ -41,6 +41,6 @@ class carve_png(Unit):
                 success = False
             if success:
                 offset = stream.tell()
-                yield self.labelled(memory[start:offset], offset=start)
+                yield self.carved(memory[start:offset], start, offset)
             else:
                 offset = p + 1

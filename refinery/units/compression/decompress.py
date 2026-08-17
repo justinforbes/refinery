@@ -5,6 +5,7 @@ from enum import IntFlag
 import colorama
 
 from refinery.lib.id import get_structured_data_type
+from refinery.lib.meta import MV
 from refinery.lib.tools import normalize_to_display
 from refinery.lib.types import INF, NamedTuple, Param, bounds, buf
 from refinery.units import Arg, RefineryPartialResult, Unit
@@ -369,6 +370,6 @@ class decompress(Unit):
                     self.log_info('the only decompression with result returned only a partial result.')
                 if dc.rating & _R.KnownFormatOut and (magic := dc.magic):
                     self.log_info(F'the decompressed result had a known format: {magic}')
-                return self.labelled(dc.result, method=dc.method)
+                return self.labelled(dc.result, **{MV.METHOD: dc.method})
 
         raise ValueError('no compression engine worked')

@@ -31,4 +31,4 @@ class ngrams(Unit):
                 if block in deduplicator:
                     continue
                 deduplicator.add(block)
-                yield self.labelled(block, offset=index)
+                yield self.carved(block, index, index + n)

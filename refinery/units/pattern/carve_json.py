@@ -50,7 +50,7 @@ class JSONCarver:
             except UnicodeDecodeError:
                 continue
             self.cursor = end + 1
-            return start, data[start:end]
+            return start, end, data[start:end]
 
     @classmethod
     def find_end(cls, data: bytearray, start: int):
@@ -105,5 +105,5 @@ class carve_json(Unit):
         super().__init__(all=all)
 
     def process(self, data):
-        for start, chunk in JSONCarver(data, dictonly=not self.args.all):
-            yield self.labelled(chunk, offset=start)
+        for start, end, chunk in JSONCarver(data, dictonly=not self.args.all):
+            yield self.carved(chunk, start, end)

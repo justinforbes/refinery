@@ -4,6 +4,13 @@ from . import MACHO_TEST
 
 class TestVirtualAddressSnip(TestUnitBase):
 
+    def test_reports_the_physical_offset_of_the_snipped_region(self):
+        data = self.download_sample('c41d0c40d1a19820768ea76111c9d5210c2cb500e93a85bf706dfea9244ce916')
+        result, = data | self.load(slice(0x140001000, 16)) | []
+        start, end = result['start'], result['end']
+        self.assertEqual(start, 0x400)
+        self.assertEqual(bytes(data[start:end]), bytes(result))
+
     def test_pe_01(self):
         data = self.download_sample('c41d0c40d1a19820768ea76111c9d5210c2cb500e93a85bf706dfea9244ce916')
         unit = self.load('0x0140002030', ascii=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from refinery.lib.meta import MV
 from refinery.lib.types import Param
 from refinery.units.sinks import Arg, Unit
 
@@ -26,16 +27,16 @@ class opc(Unit):
         mode: Param[str, Arg.Choice(
             help='Machine code architecture, default is {default}. Select from the following list: {choices}.',
             choices=_ARCHES, metavar='[x32|x64|..]')] = 'x32', *,
-        count: Param[int, Arg.Number('-c', help='Maximum number of bytes to disassemble, infinite by default.')] = None,
-        until: Param[str, Arg.String('-u', help='Disassemble until the given string appears among the disassembly.')] = None,
+        count: Param[int | None, Arg.Number('-c', help='Maximum number of bytes to disassemble, infinite by default.')] = None,
+        until: Param[str | None, Arg.String('-u', help='Disassemble until the given string appears among the disassembly.')] = None,
         nvar: Param[str, Arg.String('-n', help=(
-            'Variable to receive the disassembled mnemonic. Default is "{default}".'))] = 'name',
+            'Variable to receive the disassembled mnemonic. Default is "{default}".'))] = str(MV.NAME),
         avar: Param[str, Arg.String('-a', help=(
-            'Variable to receive the address of the instruction. Default is "{default}".'))] = 'addr',
+            'Variable to receive the address of the instruction. Default is "{default}".'))] = str(MV.ADDR),
         ovar: Param[str, Arg.String('-o', help=(
             'Variable prefix for instruction operands. Default is "{default}". The complete operand '
             'string will be in {default}s, the first argument in {default}1, the second in {default}2, '
-            'and so on.'))] = 'arg',
+            'and so on.'))] = str(MV.ARG),
         **more
     ):
         super().__init__(

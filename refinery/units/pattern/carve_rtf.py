@@ -30,5 +30,5 @@ class carve_rtf(Unit):
                 end += 1
             if depth > 0:
                 break
-            yield self.labelled(mem[pos:end], offset=pos)
+            yield self.carved(mem[pos:end], pos, end)
             pos = end

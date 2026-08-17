@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from refinery.lib.id import get_executable_type, get_structured_data_type
+from refinery.lib.meta import MV
 from refinery.units.blockwise.sub import sub
 from refinery.units.blockwise.xor import xor
 from refinery.units.misc.xkey import xkey
@@ -44,7 +45,7 @@ class autoxor(xkey, docs='{0}{p}{1}'):
                 for k in range(0x1000):
                     if t := check(mem[k:]):
                         self.log_info(F'method {name} resulted in non-blob data ({t.mnemonic}) at offset 0x{k:X}; returning buffer')
-                        return self.labelled(bin, key=key, method=name)
+                        return self.labelled(bin, key=key, **{MV.METHOD: name})
                     if k == 0:
                         check = get_executable_type
 
@@ -67,7 +68,7 @@ class autoxor(xkey, docs='{0}{p}{1}'):
                 if is_text:
                     self.log_info('detected likely text input; automatically shifting towards space character')
                     key = (b'\x20' * len(key)) | unit(key) | bytes
-                    return self.labelled(as_text, key=key, method=name)
+                    return self.labelled(as_text, **{MV.KEY: key, MV.METHOD: name})
 
         if fallback is None:
             self.log_warn('no key was found; returning original data')

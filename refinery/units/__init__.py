@@ -161,6 +161,7 @@ from collections import OrderedDict
 from enum import Enum
 from functools import partial, wraps
 from threading import Lock
+from types import EllipsisType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -189,6 +190,7 @@ from refinery.lib.exceptions import (
     RefineryPotentialUserError,
 )
 from refinery.lib.frame import MAGIC, MSIZE, Chunk, Framed, generate_frame_header
+from refinery.lib.meta import MV, check_variable_names_of_unit
 from refinery.lib.structures import MemoryFile
 from refinery.lib.types import buf, isbuffer, isstream
 
@@ -1792,6 +1794,10 @@ class Unit(UnitBase, abstract=True):
         ...
 
     @overload
+    def __or__(self, stream: type[bytes]) -> bytes:
+        ...
+
+    @overload
     def __or__(self, stream: type[str]) -> str:
         ...
 
@@ -1821,6 +1827,10 @@ class Unit(UnitBase, abstract=True):
 
     @overload
     def __or__(self, stream: list[type[_T]]) -> list[_T]:
+        ...
+
+    @overload
+    def __or__(self, stream: list[EllipsisType]) -> list[Chunk]:
         ...
 
     @overload
@@ -2097,11 +2107,29 @@ class Unit(UnitBase, abstract=True):
         """
         if ___br___data is None:
             return None
-        elif not isinstance(___br___data, Chunk):
+        check_variable_names_of_unit(meta)
+        if not isinstance(___br___data, Chunk):
             ___br___data = Chunk(___br___data, meta=meta)
         elif meta:
             ___br___data.meta.update(meta)
         return ___br___data
+
+    @classmethod
+    def carved(cls, data: Chunk | buf, start: int, end: int, **meta) -> Chunk:
+        """
+        Label a chunk that was extracted from a region of the input with the bounds of that region.
+        Units that carve data out of a larger buffer use this to report where an item was found;
+        `end` is the position just after the region in the input, which is not the same as
+        `start + len(data)` for a unit that transcodes what it carves.
+        """
+        return cls.labelled(
+            data,
+            **{
+                MV.START: start,
+                MV.END: end,
+            },
+            **meta
+        )
 
     def process(self, data: Chunk, /) -> buf | None | Generator[buf]:
         return data

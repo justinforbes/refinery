@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 
+from refinery.lib.meta import MV
 from refinery.lib.suffixtree import SuffixTree
 from refinery.lib.types import INF, Param
 from refinery.units import Arg, RefineryPartialResult, Unit
@@ -175,7 +176,7 @@ class drp(Unit):
 
         if self.args.all:
             for pattern in sorted(patterns, key=pattern_performance.get, reverse=True):
-                yield self.labelled(pattern, count=pattern_count[pattern])
+                yield self.labelled(pattern, **{MV.COUNT: pattern_count[pattern]})
             return
 
         best_patterns = [p for p in patterns if pattern_performance[p] == 1.0]

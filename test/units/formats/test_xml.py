@@ -40,6 +40,23 @@ class TestXMLUnpacker(TestUnitBase):
         self.assertEqual(get_text_format(XML_TEST_FILE), Fmt.XML)
         self.assertTrue(is_likely_xml(XML_TEST_FILE))
 
+    def test_attribute_named_like_a_derived_property_is_prefixed(self):
+        """
+        Attribute names come from the input document, so a document can contain an attribute that is
+        named like a property refinery derives from a chunk. Such a name has to be prefixed rather
+        than shadow the derived property.
+        """
+        data = B'<root ext="edit" spidmax="1035"/>'
+        result, = data | self.load() | []
+        self.assertEqual(str(result['_ext']), 'edit')
+        self.assertEqual(str(result['_spidmax']), '1035')
+
+    def test_prefixed_attribute_does_not_hide_the_derived_property(self):
+        data = B'<root size="99"/>'
+        result, = data | self.load() | []
+        self.assertEqual(str(result['_size']), '99')
+        self.assertEqual(int(result['size']), len(result))
+
     def test_lure_document(self):
         data = self.download_sample('e6daa00e095948acfc176d71c5bf667a0403e5259653ea5ac8950aee13180ae0')
         data = data | self.ldu('xt', 'settings.xml') | bytes

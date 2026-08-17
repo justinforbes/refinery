@@ -26,6 +26,6 @@ class carve_tar(Unit):
             if success:
                 offset = stream.tell()
                 offset -= (offset - start) % tarfile.BLOCKSIZE
-                yield self.labelled(memory[start:offset], offset=start)
+                yield self.carved(memory[start:offset], start, offset)
             else:
                 offset = p + 1

@@ -23,3 +23,14 @@ class TestHTTPResponse(TestUnitBase):
             B'0',
         ])
         self.assertEqual(unit(data), B'BINARY REFINERY!BINARY REFINERY!')
+
+    def test_reports_the_date_header(self):
+        data = b'\r\n'.join([
+            b'HTTP/1.1 200 OK',
+            b'Date: Thu, 09 Apr 2020 21:20:32 GMT',
+            b'Content-Length: 16',
+            b'',
+            b'BINARY REFINERY!',
+        ])
+        result, = data | self.load() | []
+        self.assertEqual(str(result['date']), '2020-04-09 21:20:32')

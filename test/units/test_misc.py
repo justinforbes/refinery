@@ -324,11 +324,11 @@ class TestSimpleInvertible(TestUnitBase):
 class TestScoping(TestUnitBase):
 
     def test_hiding_variables_created_by_units_automatically_01(self):
-        pl = PL('emit TEST [[| rex E ]| pf {offset} ]')
-        self.assertEqual(pl(), b'{offset}')
+        pl = PL('emit TEST [[| rex E ]| pf {start} ]')
+        self.assertEqual(pl(), b'{start}')
 
     def test_hiding_variables_created_by_units_automatically_02(self):
-        pl = PL('emit TEST [[| rex E | pf {offset} ]]')
+        pl = PL('emit TEST [[| rex E | pf {start} ]]')
         self.assertEqual(pl(), b'1')
 
     def test_simple_scoping_01(self):

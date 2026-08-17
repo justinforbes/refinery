@@ -21,11 +21,23 @@ class TestVirtualSections(TestUnitBase):
         unit = self.load('.*', list=True)
         data = self.download_sample('c41d0c40d1a19820768ea76111c9d5210c2cb500e93a85bf706dfea9244ce916')
         self.assertSetEqual(
-            {bytes(name) for name in unit(data).split(B'\n')},
+            {bytes(name) for name in (data | unit | bytearray).split(B'\n')},
             {B'.text', B'.rdata', B'.pdata', B'.rsrc'}
         )
         unit = self.load('.rdata')
         self.assertEqual(hashlib.md5(unit(data)).hexdigest(), '594d833530f81be97e7dae14e3001cd8')
+
+    def test_reports_the_physical_offset_of_each_section(self):
+        data = self.download_sample('c41d0c40d1a19820768ea76111c9d5210c2cb500e93a85bf706dfea9244ce916')
+        results = data | self.load() | [...]
+        self.assertGreater(len(results), 0)
+        for result in results:
+            a, b = result['start'], result['end']
+            assert isinstance(a, int)
+            assert isinstance(b, int)
+            self.assertIsInstance(a, int)
+            self.assertIsInstance(b, int)
+            self.assertEqual(data[a:b], result)
 
     def test_elf(self):
         unit = self.load(list=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from refinery.lib.crypto.mscrypto import CRYPTOKEY
+from refinery.lib.meta import MV
 from refinery.units import Unit
 
 
@@ -14,7 +15,7 @@ class kblob(Unit):
         try:
             return self.labelled(
                 bytes(blob.key),
-                type=blob.header.type.name,
+                **{MV.TYPE: blob.header.type.name},
                 algorithm=blob.header.algorithm.name
             )
         except AttributeError as A:

@@ -1,9 +1,11 @@
 import inspect
-import logging
 import tempfile
 import os
 
+from datetime import datetime
 from pathlib import Path
+
+from refinery.lib.dt import isodate
 
 from test.units import TestUnitBase
 from test.units.compression import KADATH1, KADATH2
@@ -141,3 +143,24 @@ class TestFileReader(TestUnitBase):
                 results = None | self.load('listed.dat', tame=True, list=True) | [str]
         self.assertEqual(len(results), 1)
         self.assertIn('listed.dat', results[0])
+
+    def test_reports_the_path_of_each_file_it_reads(self):
+        with tempfile.TemporaryDirectory() as root:
+            with temporary_chwd(root):
+                with open('note.txt', 'w') as stream:
+                    stream.write('content')
+                result, = None | self.load('note.txt') | []
+                self.assertEqual(str(result['path']), 'note.txt')
+
+    def test_reports_the_file_timestamps_when_asked_for_metadata(self):
+        with tempfile.TemporaryDirectory() as root:
+            with temporary_chwd(root):
+                with open('note.txt', 'w') as stream:
+                    stream.write('content')
+                stat = os.stat('note.txt')
+                result, = None | self.load('note.txt', meta=True) | []
+                for name in ('btime', 'ctime', 'mtime', 'atime'):
+                    self.assertIsNotNone(isodate(str(result[name])), name)
+                self.assertEqual(
+                    isodate(str(result['mtime'])),
+                    datetime.fromtimestamp(stat.st_mtime).replace(microsecond=0))

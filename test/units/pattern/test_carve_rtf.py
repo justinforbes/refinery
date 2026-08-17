@@ -1,4 +1,5 @@
 from .. import TestUnitBase
+from . import RTF_DOCUMENT
 
 
 class TestCarveRTF(TestUnitBase):
@@ -32,3 +33,20 @@ class TestCarveRTF(TestUnitBase):
         data = rtf1 + b'BETWEEN' + rtf2
         results = data | unit | []
         self.assertEqual(len(results), 2)
+
+    def test_reports_the_span_of_the_carved_document(self):
+        for padding in (1, 3, 37, 200):
+            with self.subTest(padding=padding):
+                data = bytes(padding) + RTF_DOCUMENT
+                result, = data | self.load() | []
+                start, end = result['start'], result['end']
+                self.assertEqual((start, end), (padding, padding + len(RTF_DOCUMENT)))
+                self.assertEqual(bytes(data[start:end]), bytes(result))
+
+    def test_reports_the_position_of_each_of_two_documents(self):
+        data = bytes(10) + RTF_DOCUMENT + bytes(5) + RTF_DOCUMENT
+        results = data | self.load() | []
+        self.assertEqual(len(results), 2)
+        self.assertListEqual(
+            [result['start'] for result in results],
+            [10, 10 + len(RTF_DOCUMENT) + 5])

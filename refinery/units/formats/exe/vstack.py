@@ -24,7 +24,7 @@ from refinery.lib.emulator import (
 )
 from refinery.lib.executable import Arch, Range
 from refinery.lib.intervals import MemoryIntervalUnion
-from refinery.lib.meta import metavars
+from refinery.lib.meta import MV, metavars
 from refinery.lib.structures import StructReader
 from refinery.lib.tools import exception_to_string
 from refinery.lib.types import INF, bounds, isbuffer
@@ -593,7 +593,7 @@ class vstack(EmulatingUnit):
                 self.log_info(F'emulation halted with error: {e!s}')
 
             for patch, api in state.synthesized.items():
-                chunk = self.labelled(patch, src=api)
+                chunk = self.labelled(patch, **{MV.ADDR: api})
                 yield chunk
 
             valid = bounds[args.patch_range]
@@ -601,5 +601,5 @@ class vstack(EmulatingUnit):
                 if len(patch) not in valid or not any(patch):
                     continue
                 self.log_info(F'memory patch at {state.fmt(base)} of size {len(patch)}')
-                chunk = self.labelled(patch, src=base)
+                chunk = self.labelled(patch, **{MV.ADDR: base})
                 yield chunk

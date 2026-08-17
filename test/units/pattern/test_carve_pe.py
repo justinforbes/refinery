@@ -57,3 +57,11 @@ class TestCarvePE(TestUnitBase):
         data = pe * 3
         out = data | self.load() | []
         self.assertListEqual(out, [pe, pe])
+
+    def test_reports_the_span_of_the_carved_executable(self):
+        pe = self.download_sample('c41d0c40d1a19820768ea76111c9d5210c2cb500e93a85bf706dfea9244ce916')
+        data = bytes(64) + pe
+        result, = data | self.load() | []
+        start, end = result['start'], result['end']
+        self.assertEqual(start, 64)
+        self.assertEqual(bytes(data[start:end]), bytes(result))

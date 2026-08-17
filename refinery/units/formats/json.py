@@ -4,7 +4,7 @@ from typing import Iterable
 
 from refinery.lib import json as libjson
 from refinery.lib.id import is_likely_json
-from refinery.lib.meta import is_valid_variable_name, metavars
+from refinery.lib.meta import MV, is_valid_variable_name, metavars
 from refinery.lib.types import Param
 from refinery.units import Arg, Chunk, Unit
 from refinery.units.formats import PathExtractorUnit, UnpackResult
@@ -43,7 +43,7 @@ class xtjson(PathExtractorUnit):
                 except UnicodeEncodeError:
                     return dumped.encode('utf8')
 
-            yield UnpackResult(path, extract, type=typename)
+            yield UnpackResult(path, extract, **{MV.TYPE: typename})
 
     @classmethod
     def handles(cls, data) -> bool | None:
@@ -88,7 +88,7 @@ class xj0(Unit):
                 return [convert(k) for k in value]
 
         def acceptable(key, value, nested=False):
-            if not is_valid_variable_name(key):
+            if not is_valid_variable_name(key, allow_derivations=False):
                 self.log_info(F'rejecting item with invalid name {key}')
                 return None
             if isinstance(value, (float, int, bool, str)):

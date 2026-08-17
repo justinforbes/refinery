@@ -8,6 +8,7 @@ from typing import Callable
 from refinery.lib import json, lief
 from refinery.lib.id import is_likely_pe
 from refinery.lib.lcid import LCID
+from refinery.lib.meta import MV
 from refinery.lib.structures import Struct, StructReader
 from refinery.lib.types import Param, buf
 from refinery.units.formats import Arg, PathExtractorUnit, UnpackResult
@@ -137,7 +138,7 @@ class perc(PathExtractorUnit):
                     path,
                     extract,
                     lcid=self._get_lcid(entry),
-                    offset=entry.offset,
+                    **{MV.START: entry.offset},
                 )
 
     def _get_lcid(self, node_data) -> str | None:

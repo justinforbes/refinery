@@ -46,7 +46,7 @@ class TestVStack(TestUnitBase):
     def test_stringcrypt_01(self):
         data = self.download_sample('e7a198902409517fc723d40b79c27b1776509d63c461b8f5daf5bb664f9e0589')
         test = data | self.load_pipeline(
-            'put b [| rex Y:488D4C[2]E8[4]488BC8E8 | eat b | vaddr offset | vstack -w40 var:offset | xtp | defang ]') | {str}
+            'put b [| rex Y:488D4C[2]E8[4]488BC8E8 | eat b | vaddr start | vstack -w40 var:start | xtp | defang ]') | {str}
         self.assertSetEqual(test, {
             'https[:]//discord[.]com/channels/1145547606802563172/1154889021567279115/1154889238077263952',
             'https[:]//raw.githubusercontent[.]com/ToXicVibezz/Galaxy/main/Galaxy.dll',
@@ -56,7 +56,7 @@ class TestVStack(TestUnitBase):
         data = self.download_sample('e7a198902409517fc723d40b79c27b1776509d63c461b8f5daf5bb664f9e0589')
         data = _corrupt_section_virtual_sizes(data)
         test = data | self.load_pipeline(
-            'put b [| rex Y:488D4C[2]E8[4]488BC8E8 | eat b | vaddr offset | vstack -w40 var:offset | xtp | defang ]') | {str}
+            'put b [| rex Y:488D4C[2]E8[4]488BC8E8 | eat b | vaddr start | vstack -w40 var:start | xtp | defang ]') | {str}
         self.assertSetEqual(test, {
             'https[:]//discord[.]com/channels/1145547606802563172/1154889021567279115/1154889238077263952',
             'https[:]//raw.githubusercontent[.]com/ToXicVibezz/Galaxy/main/Galaxy.dll',

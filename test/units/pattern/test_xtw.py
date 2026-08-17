@@ -6,7 +6,7 @@ class TestXTW(TestUnitBase):
     def test_extract_bitcoin_address(self):
         btc = b'1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa'
         data = b'Send payment to ' + btc + b' please.'
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | self.load()}
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | self.load()}
         self.assertEqual(labels, {btc: 'BTC'})
 
     def test_no_wallet_found(self):
@@ -29,7 +29,7 @@ class TestXTW(TestUnitBase):
         results = data | unit | {bytes}
         self.assertIn(ltc, results)
 
-    def test_solana_does_not_steal_other_kinds(self):
+    def test_solana_does_not_steal_other_formats(self):
         unit = self.load()
         addresses = {
             b'TQvf32i7Z4tFT2BQ2nqryKqzKDKQciEMc2' : 'TRON',
@@ -37,8 +37,8 @@ class TestXTW(TestUnitBase):
             b't1dhxHAe1HVemR312nwKDBYJpzK6RYh8UM4' : 'ZCASH',
         }
         data = b'\n'.join(addresses)
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | unit}
-        self.assertEqual(labels, {addr: kind for addr, kind in addresses.items()})
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | unit}
+        self.assertEqual(labels, dict(addresses))
 
     def test_invalid_checksum_is_dropped(self):
         valid = b'3AZ33zG5Z3ECDyFSvUJeGWkK3jrc1yR6GR'
@@ -49,41 +49,41 @@ class TestXTW(TestUnitBase):
     def test_bare_evm_address_labeled_eth(self):
         eth = b'0xd038B95D09831Fe264F0e357Ff9B4B745C0daa1C'
         data = b'pay to ' + eth + b' now'
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | self.load()}
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | self.load()}
         self.assertEqual(labels, {eth: 'ETH'})
 
     def test_ripple_address_survives_validation(self):
         xrp = b'rD9oqq555eqnsQqKFbaAjpirMmStcTrEtY'
         data = b'wallet ' + xrp + b' end'
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | self.load()}
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | self.load()}
         self.assertEqual(labels, {xrp: 'XRP'})
 
     def test_taproot_address_labeled_btc(self):
         btc = b'bc1p83n3au0rjylefxq2nc2xh2y4jzz4pm6zxj4mw5pagdjjr2a9f36s6jjnnu'
         data = b'pay to ' + btc + b' now'
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | self.load()}
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | self.load()}
         self.assertEqual(labels, {btc: 'BTC'})
 
     def test_ronin_mixed_case_address_labeled_ronin(self):
         ronin = b'ronin:d038B95D09831Fe264F0e357Ff9B4B745C0daa1C'
         data = b'pay to ' + ronin + b' now'
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | self.load()}
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | self.load()}
         self.assertEqual(labels, {ronin: 'RONIN'})
 
     def test_wif_private_key_labeled_wif(self):
         wif = b'5JuW2AMDYu4xVwRG9DZW18VbzQrGcd5RCgb99sS6ehJsNQXu5b9'
         data = b'key ' + wif + b' end'
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | self.load()}
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | self.load()}
         self.assertEqual(labels, {wif: 'WIF'})
 
     def test_tezos_address_labeled_xtz(self):
         xtz = b'tz1gvF4cD2dDtqitL3ZTraggSR1Mju2BKFEM'
         data = b'pay to ' + xtz + b' now'
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | self.load()}
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | self.load()}
         self.assertEqual(labels, {xtz: 'XTZ'})
 
     def test_algorand_address_labeled_algo(self):
         algo = b'PNWOET7LLOWMBMLE4KOCELCX6X3D3Q4H2Q4QJASYIEOF7YIPPQBG3YQ5YI'
         data = b'pay to ' + algo + b' now'
-        labels = {bytes(chunk): chunk.meta['kind'] for chunk in data | self.load()}
+        labels = {bytes(chunk): chunk.meta['type'] for chunk in data | self.load()}
         self.assertEqual(labels, {algo: 'ALGO'})

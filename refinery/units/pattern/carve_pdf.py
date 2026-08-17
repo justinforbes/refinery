@@ -29,7 +29,7 @@ class carve_pdf(Unit):
                 end += len(eof_marker)
                 while end < len(data) and data[end:end + 1] in (b'\r', b'\n'):
                     end += 1
-                yield self.labelled(memory[start:end], offset=start)
+                yield self.carved(memory[start:end], start, end)
                 break
             if end < 0:
                 offset = start + 1

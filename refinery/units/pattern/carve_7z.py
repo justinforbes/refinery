@@ -33,4 +33,4 @@ class carve_7z(Unit):
                 continue
             self.log_info(F'identified archive of size 0x{size:08X} at offset 0x{start:08X}')
             cursor = start + size
-            yield self.labelled(mv[start:cursor], offset=start)
+            yield self.carved(mv[start:cursor], start, cursor)

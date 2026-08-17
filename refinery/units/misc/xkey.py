@@ -8,6 +8,7 @@ from typing import Generator, NamedTuple
 
 from Cryptodome.Util.strxor import strxor
 
+from refinery.lib.meta import MV
 from refinery.lib.types import Param, buf
 from refinery.units import Arg, Unit
 
@@ -212,7 +213,7 @@ class xkey(Unit):
         for result in self._attack(data):
             out = result.key
             if how := result.how:
-                out = self.labelled(out, method=how)
+                out = self.labelled(out, **{MV.METHOD: how})
             return out
 
     def _attack(self, data: bytearray):

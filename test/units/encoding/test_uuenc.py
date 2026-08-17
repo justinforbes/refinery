@@ -1,6 +1,16 @@
 from .. import TestUnitBase
 from ..compression import KADATH1, KADATH2
 
+_UU_BODY = [
+    BR'''M5&AR964@=&EM97,@4F%N9&]L<&@@0V%R=&5R(&1R96%M960@;V8@=&AE(&UA''',
+    BR''')<R!P;&%C92X`''',
+    BR'''`''',
+]
+
+
+def _uuencoded(name: bytes) -> bytes:
+    return b'\n'.join([b'begin 666 ' + name, *_UU_BODY, BR'''end''', b''])
+
 
 class TestUUEncDecoder(TestUnitBase):
 
@@ -69,3 +79,17 @@ class TestUUEncDecoder(TestUnitBase):
         for k in (1, 2, 3, 5, 12, 54, 67, 77, 212, 23543):
             b = self.generate_random_buffer(k)
             self.assertEqual(b, b | -u | u | bytes)
+
+    def test_reports_the_encoded_name(self):
+        result, = _uuencoded(b'greeting.txt') | self.load() | [...]
+        self.assertEqual(result['path'], 'greeting.txt')
+
+    def test_omits_the_name_when_the_header_carries_none(self):
+        result, = _uuencoded(b'-') | self.load() | [...]
+        self.assertNotIn('path', result.meta)
+
+    def test_reencodes_using_the_name_from_the_input(self):
+        decoded, = _uuencoded(b'greeting.txt') | self.load() | [...]
+        dec = -self.load()
+        reencoded = decoded | dec | bytes
+        self.assertEqual(reencoded.splitlines()[0], b'begin 666 greeting.txt')

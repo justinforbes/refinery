@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from refinery.lib.executable import Executable
+from refinery.lib.meta import MV
 from refinery.lib.types import Param
 from refinery.units.formats import Arg, PathExtractorUnit, UnpackResult
 
@@ -37,7 +38,10 @@ class vsect(PathExtractorUnit):
             end = section.physical.upper
             va = section.virtual.lower
             vs = len(section.virtual)
-            kwargs = {'offset': start}
+            kwargs: dict[str, int] = {
+                MV.START: start,
+                MV.END: end,
+            }
             if self.args.meta:
                 if va is not None:
                     kwargs['vaddr'] = va

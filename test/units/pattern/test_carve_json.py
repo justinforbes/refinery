@@ -1,5 +1,6 @@
 import json
 from .. import TestUnitBase
+from . import JSON_DOCUMENT
 
 
 class TestCarveJSON(TestUnitBase):
@@ -129,3 +130,20 @@ class TestCarveJSON(TestUnitBase):
         self.assertEqual(len(results), 1)
         parsed = json.loads(bytes(results[0]))
         self.assertEqual(parsed, [[1, 2], [3, 4]])
+
+    def test_reports_the_span_of_the_carved_document(self):
+        for padding in (1, 3, 37, 200):
+            with self.subTest(padding=padding):
+                data = bytes(padding) + JSON_DOCUMENT
+                result, = data | self.load() | []
+                start, end = result['start'], result['end']
+                self.assertEqual((start, end), (padding, padding + len(JSON_DOCUMENT)))
+                self.assertEqual(bytes(data[start:end]), bytes(result))
+
+    def test_reports_the_position_of_each_of_two_documents(self):
+        data = bytes(10) + JSON_DOCUMENT + bytes(5) + JSON_DOCUMENT
+        results = data | self.load() | []
+        self.assertEqual(len(results), 2)
+        self.assertListEqual(
+            [result['start'] for result in results],
+            [10, 10 + len(JSON_DOCUMENT) + 5])

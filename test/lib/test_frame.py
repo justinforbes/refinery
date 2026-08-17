@@ -125,7 +125,7 @@ class TestFraming(TestBase):
 
     def test_units_can_overwrite_parent_metavars(self):
         out, = load_pipeline('emit ABCD [| rex .... | rex B ]')
-        self.assertEqual(out['offset'], 1)
+        self.assertEqual(out['start'], 1)
 
     def test_history_saves_space(self):
         from refinery import Unit

@@ -46,6 +46,19 @@ class TestJSONExtractor(TestUnitBase):
         unit = self.ldu('xtjson', 'foo.b0')
         self.assertEqual(bytes(document | unit), b'Binary')
 
+    def test_json_type_of_each_item_is_reported(self):
+        document = B'{"s": "text", "n": 1, "f": 1.5, "b": true, "a": [], "o": {}}'
+        unit = self.ldu('xtjson', list=True)
+        types = {bytes(t): str(t['type']) for t in document | unit}
+        self.assertEqual(types, {
+            B's': 'str',
+            B'n': 'int',
+            B'f': 'float',
+            B'b': 'bool',
+            B'a': 'list',
+            B'o': 'dict',
+        })
+
 
 class TestJSONLevel0Extractor(TestUnitBase):
 
