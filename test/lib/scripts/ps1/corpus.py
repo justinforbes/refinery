@@ -360,6 +360,20 @@ BEHAVIOURS: tuple[str, ...] = (
     '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; Write-Output $a[0]',
     '$x = 1, 2, 3; $h = @{ k = $x }; Write-Output $h.k',
     '$x = 1, 2, 3; $a, $b = $x, 9; Write-Output $a',
+    '$x = 1, 2, 3; $o = [pscustomobject]@{ P = 0 }; $o.P = $x; $o.P[0] = 9; Write-Output $x',
+    '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; $a[0][0] = 9; Write-Output $x',
+    '$x = 1, 2, 3; $l = New-Object Collections.ArrayList; [void]$l.Add($x); $l[0][0] = 9; '
+    'Write-Output $x',
+    '$x = 1, 2, 3; $h = @{ k = $x }; $h.k[0] = 9; Write-Output $x',
+    "$x = 1, 2, 3; $h = @{ k = $x }; $y = $h['k']; $y[0] = 9; Write-Output $x",
+    '$p = @(@(1, 2), @(3, 4)); $q = $p[0]; $q[0] = 9; Write-Output $p[0][0]',
+    '$p = @(@(1, 2), @(3, 4)); $p | ForEach-Object { [Array]::Reverse($_) }; Write-Output $p[0]',
+    '$p = @(@(1, 2), @(3, 4)); for ($i = 0; $i -lt 1; $i++) { [Array]::Reverse($p[$i]) }; '
+    'Write-Output $p[0]',
+    'function f($a) { [Array]::Reverse($a) }; $x = 1, 2, 3; f $x; Write-Output $x',
+    '$sb = { param($a) [Array]::Reverse($a) }; $x = 1, 2, 3; & $sb $x; Write-Output $x',
+    '$x = 1, 2, 3; function f { , $script:x }; $y = f; $y[0] = 9; Write-Output $x[0]',
+    '$x = 1, 2, 3; $a, $b = $x, 9; [Array]::Reverse($a); Write-Output $x',
 )
 
 

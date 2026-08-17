@@ -195,6 +195,31 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The argument is substituted, so the callee stores a second array and the read prints `1`. '
         'The body keeps what it was handed, so `$k` and `$x` name one array and the snippet prints '
         '`9`. Nothing asks what a called body does with an argument it is given.',
+    '$x = 1, 2, 3; $o = [pscustomobject]@{ P = 0 }; $o.P = $x; $o.P[0] = 9; Write-Output $x':
+        'The read is folded to the array as written. The property holds the array itself, so the '
+        'store through it reaches what `$x` holds and the snippet writes `9 2 3`.',
+    '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; $a[0][0] = 9; Write-Output $x':
+        'The same through an element of another array.',
+    '$x = 1, 2, 3; $l = New-Object Collections.ArrayList; [void]$l.Add($x); $l[0][0] = 9; '
+    'Write-Output $x':
+        'The same through a list a call was handed the array to keep.',
+    '$x = 1, 2, 3; $h = @{ k = $x }; $h.k[0] = 9; Write-Output $x':
+        'The same through a key written into a hash literal rather than stored into one.',
+    "$x = 1, 2, 3; $h = @{ k = $x }; $y = $h['k']; $y[0] = 9; Write-Output $x":
+        'The same reached from the third side: the array is taken back *out* of the container into '
+        'a name, and a store through that name is one `$x` observes.',
+    '$p = @(@(1, 2), @(3, 4)); $q = $p[0]; $q[0] = 9; Write-Output $p[0][0]':
+        'The same where the container is an array of arrays and the name is taken from an element.',
+    '$p = @(@(1, 2), @(3, 4)); $p | ForEach-Object { [Array]::Reverse($_) }; Write-Output $p[0]':
+        'The pipeline variable is bound to the element object itself, so reversing `$_` reverses '
+        'what the collection holds and the snippet writes `2 1`.',
+    'function f($a) { [Array]::Reverse($a) }; $x = 1, 2, 3; f $x; Write-Output $x':
+        'The parameter is bound to the array the argument named rather than to a copy, so the call '
+        'reverses what `$x` holds and the snippet writes `3 2 1`.',
+    '$sb = { param($a) [Array]::Reverse($a) }; $x = 1, 2, 3; & $sb $x; Write-Output $x':
+        'The same through a script block parameter rather than a function parameter.',
+    '$x = 1, 2, 3; $a, $b = $x, 9; [Array]::Reverse($a); Write-Output $x':
+        'The same through a multi-assignment slot, which is handed the object standing against it.',
     '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y':
         'The read is folded to the reversal. A subexpression collects a fresh array rather than '
         'handing the object over, so the two names hold two arrays and the snippet writes `1 2 3`. '

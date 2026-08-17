@@ -1904,3 +1904,141 @@ class TestPs1AStoreIntoAPlaceOfAnArrayDoesNotExcuseTheReadOfItsName(_Ps1Ledger):
             'the two names were taken off the one array',
         )
         self._assertStoresTheArrayItself(tree, 'a')
+
+
+class TestPs1AnObjectPutIntoAContainerIsStillTheOneItsNameHolds(_Ps1Ledger):
+    """
+    A container is handed the array and not a copy, so a store made *through the container* reaches
+    the array the name still holds. Measured on 5.1 in `corpus.BEHAVIOURS`, each script here writes
+    the number the store put at the front and never the array as it was written.
+
+    These are the direction the class above does not ask. There the store is made through `$x` and
+    the read is of the container; here the store is made through the container and the read is of
+    `$x`, and answering the first says nothing about the second: the tool relates two *names*, and a
+    hashtable key, a property, an element and a list slot are not names.
+
+    The last two take the object back out of the container into a name, which is the same fact
+    reached from the third side.
+    """
+
+    def _assertTheStoreReachesTheName(
+        self, source: str, key: str, written: list, corrupt: list,
+    ) -> None:
+        """
+        The output must still be able to write `written`: either it already spells it, or the name
+        under `key` is still spelled where the container was handed the object, which is the whole
+        of what carries the store to the read. `corrupt` is what an output that spelled the array
+        in that position writes instead.
+        """
+        tree = self._deobfuscated_tree(source)
+        names_it = any(
+            isinstance(node, Ps1Variable) and _binding_key(node) == key for node in tree.walk())
+        self._assertWrites(tree, written, corrupt, names_it)
+
+    @unittest.expectedFailure
+    def test_a_store_through_a_property_reaches_the_array_the_name_holds(self):
+        self._assertTheStoreReachesTheName(
+            '$x = 1, 2, 3; $o = [pscustomobject]@{ P = 0 }; $o.P = $x; $o.P[0] = 9; Write-Output $x',
+            'x', [[9, 2, 3]], [[1, 2, 3]])
+
+    @unittest.expectedFailure
+    def test_a_store_through_an_element_reaches_the_array_the_name_holds(self):
+        self._assertTheStoreReachesTheName(
+            '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; $a[0][0] = 9; Write-Output $x',
+            'x', [[9, 2, 3]], [[1, 2, 3]])
+
+    @unittest.expectedFailure
+    def test_a_store_through_a_list_slot_reaches_the_array_the_name_holds(self):
+        self._assertTheStoreReachesTheName(
+            '$x = 1, 2, 3; $l = New-Object Collections.ArrayList; [void]$l.Add($x); '
+            '$l[0][0] = 9; Write-Output $x',
+            'x', [[9, 2, 3]], [[1, 2, 3]])
+
+    @unittest.expectedFailure
+    def test_a_store_through_a_key_of_a_hash_literal_reaches_the_array_the_name_holds(self):
+        self._assertTheStoreReachesTheName(
+            '$x = 1, 2, 3; $h = @{ k = $x }; $h.k[0] = 9; Write-Output $x',
+            'x', [[9, 2, 3]], [[1, 2, 3]])
+
+    @unittest.expectedFailure
+    def test_a_name_taken_back_out_of_a_container_is_on_the_array_that_was_put_in(self):
+        self._assertTheStoreReachesTheName(
+            "$x = 1, 2, 3; $h = @{ k = $x }; $y = $h['k']; $y[0] = 9; Write-Output $x",
+            'x', [[9, 2, 3]], [[1, 2, 3]])
+
+    @unittest.expectedFailure
+    def test_a_name_taken_from_an_element_is_on_the_array_that_element_holds(self):
+        self._assertTheStoreReachesTheName(
+            '$p = @(@(1, 2), @(3, 4)); $q = $p[0]; $q[0] = 9; Write-Output $p[0][0]',
+            'p', [[9]], [[1]])
+
+
+class TestPs1AnObjectHandedToABodyIsStillTheOneItsNameHolds(_Ps1Ledger):
+    """
+    A body is handed the array and not a copy of it, so a call that changes what it was given
+    changes what the caller's name holds. Measured on 5.1 in `corpus.BEHAVIOURS`, each script here
+    writes the reversal and never the array as it was written.
+
+    A pipeline variable, a function parameter, a script block parameter and a multi-assignment slot
+    are four spellings of one hand-off, and none of the four is a name the tool can relate to `$x`.
+    The `foreach` variable of the entry above is the fifth.
+    """
+
+    def _assertTheCallReachesTheName(
+        self, source: str, key: str, written: list, corrupt: list,
+    ) -> None:
+        tree = self._deobfuscated_tree(source)
+        names_it = any(
+            isinstance(node, Ps1Variable) and _binding_key(node) == key for node in tree.walk())
+        self._assertWrites(tree, written, corrupt, names_it)
+
+    @unittest.expectedFailure
+    def test_a_pipeline_variable_is_bound_to_the_element_and_not_to_a_copy(self):
+        self._assertTheCallReachesTheName(
+            '$p = @(@(1, 2), @(3, 4)); $p | ForEach-Object { [Array]::Reverse($_) }; '
+            'Write-Output $p[0]',
+            'p', [[2, 1]], [[1, 2]])
+
+    @unittest.expectedFailure
+    def test_a_function_parameter_is_bound_to_the_array_the_argument_named(self):
+        self._assertTheCallReachesTheName(
+            'function f($a) { [Array]::Reverse($a) }; $x = 1, 2, 3; f $x; Write-Output $x',
+            'x', [[3, 2, 1]], [[1, 2, 3]])
+
+    @unittest.expectedFailure
+    def test_a_script_block_parameter_is_bound_to_the_array_the_argument_named(self):
+        self._assertTheCallReachesTheName(
+            '$sb = { param($a) [Array]::Reverse($a) }; $x = 1, 2, 3; & $sb $x; Write-Output $x',
+            'x', [[3, 2, 1]], [[1, 2, 3]])
+
+    @unittest.expectedFailure
+    def test_a_call_through_a_multi_assignment_slot_reaches_the_array_it_was_handed(self):
+        self._assertTheCallReachesTheName(
+            '$x = 1, 2, 3; $a, $b = $x, 9; [Array]::Reverse($a); Write-Output $x',
+            'x', [[3, 2, 1]], [[1, 2, 3]])
+
+
+class TestPs1APositionThatBuildsANewObjectIsNotAHandOff(_Ps1Ledger):
+    """
+    The controls for the two classes above, and they are not decoration: a fact that answered every
+    one of these the same way would satisfy both classes by refusing everything, which is not a
+    deobfuscator. Measured on 5.1 in `corpus.BEHAVIOURS`, both scripts are answered correctly today
+    and have to stay answered.
+
+    An index whose value the text does not fix already reaches its whole collection, so the loop is
+    a store through `$p` and needs no hand-off to be seen. A function writing `, $script:x` returns
+    a wrapper the caller unrolls into a collection of its own, so the name it is bound to is on an
+    array of one element and not on the array itself.
+    """
+
+    def test_a_store_through_an_index_the_text_does_not_fix_reaches_the_collection(self):
+        tree = self._deobfuscated_tree(
+            '$p = @(@(1, 2), @(3, 4)); for ($i = 0; $i -lt 1; $i++) { [Array]::Reverse($p[$i]) }; '
+            'Write-Output $p[0]')
+        self._assertWrites(
+            tree, [[2, 1]], [[1, 2]], _mutates_through_argument(tree, 'array', 'reverse', 'p'))
+
+    def test_a_name_bound_from_a_wrapped_return_is_not_on_the_array_that_was_wrapped(self):
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; function f { , $script:x }; $y = f; $y[0] = 9; Write-Output $x[0]')
+        self._assertWrites(tree, [[9]], [[1]], True)

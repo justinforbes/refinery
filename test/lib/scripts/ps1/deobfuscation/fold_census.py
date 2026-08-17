@@ -223,6 +223,28 @@ FOLDS: dict[str, str] = {
         '$h = @{\n  k = (1, 2, 3)\n}\nWrite-Output $h.k',
     '$x = 1, 2, 3; $a, $b = $x, 9; Write-Output $a':
         '$a, $b = (1, 2, 3), 9\nWrite-Output $a',
+    '$x = 1, 2, 3; $o = [pscustomobject]@{ P = 0 }; $o.P = $x; $o.P[0] = 9; Write-Output $x':
+        '$x = 1, 2, 3\n$o = [pscustomobject]@{\n  P = 0\n}\n$o.P = $x\n$o.P[0] = 9\nWrite-Output (1, 2, 3)',
+    '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; $a[0][0] = 9; Write-Output $x':
+        '$x = 1, 2, 3\n$a = 0, 0\n$a[0] = $x\n$a[0][0] = 9\nWrite-Output (1, 2, 3)',
+    '$x = 1, 2, 3; $l = New-Object Collections.ArrayList; [void]$l.Add($x); $l[0][0] = 9; Write-Output $x':
+        '$l = New-Object Collections.ArrayList\n[void]$l.Add((1, 2, 3))\n$l[0][0] = 9\nWrite-Output (1, 2, 3)',
+    '$x = 1, 2, 3; $h = @{ k = $x }; $h.k[0] = 9; Write-Output $x':
+        '$x = 1, 2, 3\n$h = @{\n  k = $x\n}\n$h.k[0] = 9\nWrite-Output (1, 2, 3)',
+    "$x = 1, 2, 3; $h = @{ k = $x }; $y = $h['k']; $y[0] = 9; Write-Output $x":
+        "$x = 1, 2, 3\n$h = @{\n  k = $x\n}\n$y = $h['k']\n$y[0] = 9\nWrite-Output (1, 2, 3)",
+    '$p = @(@(1, 2), @(3, 4)); $q = $p[0]; $q[0] = 9; Write-Output $p[0][0]':
+        '$q = (1, 2)\n$q[0] = 9\nWrite-Output 1',
+    '$p = @(@(1, 2), @(3, 4)); $p | ForEach-Object { [Array]::Reverse($_) }; Write-Output $p[0]':
+        '(@(1, 2), @(3, 4)) | ForEach-Object {\n  [Array]::Reverse($_)\n}\nWrite-Output (1, 2)',
+    '$p = @(@(1, 2), @(3, 4)); for ($i = 0; $i -lt 1; $i++) { [Array]::Reverse($p[$i]) }; Write-Output $p[0]':
+        '$p = @(@(1, 2), @(3, 4))\nfor ($i = 0; $i -LT 1; $i++) {\n  [Array]::Reverse($p[$i])\n}\nWrite-Output $p[0]',
+    'function f($a) { [Array]::Reverse($a) }; $x = 1, 2, 3; f $x; Write-Output $x':
+        'function f {\n  Param($a)\n  [Array]::Reverse($a)\n}\nf (1, 2, 3)\nWrite-Output (1, 2, 3)',
+    '$sb = { param($a) [Array]::Reverse($a) }; $x = 1, 2, 3; & $sb $x; Write-Output $x':
+        '$sb = {\n  Param($a)\n  [Array]::Reverse($a)\n}\n& $sb (1, 2, 3)\nWrite-Output (1, 2, 3)',
+    '$x = 1, 2, 3; $a, $b = $x, 9; [Array]::Reverse($a); Write-Output $x':
+        '$x = 1, 2, 3\n$a, $b = $x, 9\n[Array]::Reverse($a)\nWrite-Output (1, 2, 3)',
     "Set-Variable global:y 'b'; Write-Host $global:y":
         'Write-Host $global:y',
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":
