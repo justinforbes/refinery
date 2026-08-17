@@ -1,9 +1,20 @@
 from __future__ import annotations
 
-from test import TestBase
+import inspect
+import unittest
 
+from test import TestBase
+from test.lib.scripts.js.analysis.differential import behavior, node_executable
+
+from refinery.lib.scripts import set_body
+from refinery.lib.scripts.js.model import JsBlockStatement, JsScript
 from refinery.lib.scripts.js.parser import JsParser
-from refinery.lib.scripts.js.strict import StrictViolation, collect_strict_violations
+from refinery.lib.scripts.js.strict import (
+    StrictViolation,
+    collect_strict_violations,
+    keeping_directives,
+)
+from refinery.lib.scripts.js.synth import JsSynthesizer
 
 
 class TestJsStrict(TestBase):
@@ -310,3 +321,161 @@ class TestJsStrict(TestBase):
         self.assertEqual(
             self._violations(source, strict=False),
             [StrictViolation(source.index('package'), 'reserved-word', 'package')])
+
+
+#: A file that spells syntax only module code may hold, together with a construct strict code
+#: refuses. Nothing in any of them declares a mode, so the `import` or `export` — or the
+#: `import.meta` — is the whole of what makes each a file no engine reads.
+A_STRICT_ERROR_UNDER_MODULE_SYNTAX = [
+    'export const a = 1;\nwith ({}) {}',
+    "import 'fs';\nvar q = 010;",
+    'export default 1;\nvar eval = 1;',
+    'var q = import.meta;\ndelete q;',
+    "export * from 'fs';\nfunction f(q, q) {}",
+]
+
+#: The same five files with the module syntax taken out of them, which leaves five sloppy scripts
+#: every engine reads and nothing is reported about.
+THE_SAME_FILES_WITHOUT_THE_MODULE_SYNTAX = [
+    'with ({}) {}',
+    'var q = 010;',
+    'var eval = 1;',
+    'var q = 1;\ndelete q;',
+    'function f(q, q) {}',
+]
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNodeRefusesAStrictErrorInAFileThatSpellsModuleSyntax(TestBase):
+
+    def test_node_refuses_every_one_of_them_as_a_module(self):
+        self.assertEqual(
+            [behavior(source, module=True) for source in A_STRICT_ERROR_UNDER_MODULE_SYNTAX],
+            [('', 'SyntaxError')] * len(A_STRICT_ERROR_UNDER_MODULE_SYNTAX),
+        )
+
+    def test_node_reads_every_one_of_them_with_the_module_syntax_taken_out(self):
+        self.assertEqual(
+            [behavior(source) for source in THE_SAME_FILES_WITHOUT_THE_MODULE_SYNTAX],
+            [('', None)] * len(THE_SAME_FILES_WITHOUT_THE_MODULE_SYNTAX),
+        )
+
+
+class TestTheCollectorReadsModuleCodeAsStrictCode(TestBase):
+    """
+    Module code is strict code with nothing saying so, so a file whose text spells module-only
+    syntax is one the collector reports a strict error in without any seed being given for it. Which
+    files those are is `refinery.lib.scripts.js.strict.names_module_syntax`, recorded on the tree by
+    the parser; the seed a caller passes is the mode of a *destination* and says nothing about the
+    file in hand.
+    """
+
+    @staticmethod
+    def _violations(source: str) -> list[StrictViolation]:
+        return collect_strict_violations(JsParser(source).parse(), strict=False)
+
+    def test_a_with_statement_beside_an_export(self):
+        source = A_STRICT_ERROR_UNDER_MODULE_SYNTAX[0]
+        self.assertEqual(
+            self._violations(source),
+            [StrictViolation(source.index('with'), 'with-statement')])
+
+    def test_an_octal_literal_beside_an_import(self):
+        source = A_STRICT_ERROR_UNDER_MODULE_SYNTAX[1]
+        self.assertEqual(
+            self._violations(source),
+            [StrictViolation(source.index('010'), 'octal-literal')])
+
+    def test_a_binding_named_eval_beside_a_default_export(self):
+        source = A_STRICT_ERROR_UNDER_MODULE_SYNTAX[2]
+        self.assertEqual(
+            self._violations(source),
+            [StrictViolation(source.index('eval'), 'eval-arguments-target', 'eval')])
+
+    def test_a_delete_of_a_name_beside_an_import_meta(self):
+        source = A_STRICT_ERROR_UNDER_MODULE_SYNTAX[3]
+        self.assertEqual(
+            self._violations(source),
+            [StrictViolation(source.index('delete'), 'delete-of-reference')])
+
+    def test_a_repeated_parameter_name_beside_a_star_export(self):
+        source = A_STRICT_ERROR_UNDER_MODULE_SYNTAX[4]
+        self.assertEqual(
+            self._violations(source),
+            [StrictViolation(source.rindex('q'), 'duplicate-parameter', 'q')])
+
+    def test_the_parser_reads_each_of_those_files_as_module_code(self):
+        self.assertEqual(
+            [JsParser(source).parse().module for source in A_STRICT_ERROR_UNDER_MODULE_SYNTAX],
+            [True] * len(A_STRICT_ERROR_UNDER_MODULE_SYNTAX),
+        )
+
+    def test_nothing_is_reported_once_the_module_syntax_is_taken_out(self):
+        self.assertEqual(
+            [self._violations(source) for source in THE_SAME_FILES_WITHOUT_THE_MODULE_SYNTAX],
+            [[]] * len(THE_SAME_FILES_WITHOUT_THE_MODULE_SYNTAX),
+        )
+
+
+class TestKeepingTheDirectiveAcrossAWholeBodyReplacement(TestBase):
+    """
+    Installing a new statement list as a body's whole content drops the Use Strict Directive without
+    removing anything, which is why `refinery.lib.scripts.js.strict.keeping_directives` restores it.
+    A pass that rebuilds a body out of copies of its own statements has already kept it, by value
+    rather than by identity, and carrying the original as well would write the directive twice.
+    """
+
+    SOURCE = "function f() { 'use strict'; log(1); log(2); }"
+
+    STRICT_AGAIN = inspect.cleandoc(
+        """
+        function f() {
+          'use strict';
+          log(1);
+          log(2);
+        }
+        """
+    )
+
+    def _body(self, ast: JsScript) -> JsBlockStatement:
+        return next(node for node in ast.walk() if isinstance(node, JsBlockStatement))
+
+    def _installed(self, replacement) -> str:
+        ast = JsParser(self.SOURCE).parse()
+        host = self._body(ast)
+        set_body(host, keeping_directives(host, replacement(host)))
+        return JsSynthesizer().convert(ast)
+
+    def _a_copy_of_the_prologue(self):
+        """
+        The directive statement of a second parse of the same source: a statement the source wrote
+        as a directive and that is not the one the host holds, which is what a pass handing back
+        clones of a body's own statements installs.
+        """
+        return self._body(JsParser(self.SOURCE).parse()).body[0]
+
+    def test_a_replacement_that_dropped_the_directive_gets_it_back(self):
+        self.assertEqual(self.STRICT_AGAIN, self._installed(lambda host: list(host.body[1:])))
+
+    def test_a_replacement_holding_the_hosts_own_directive_keeps_exactly_one(self):
+        self.assertEqual(self.STRICT_AGAIN, self._installed(lambda host: list(host.body)))
+
+    def test_a_replacement_holding_a_copy_of_the_directive_keeps_exactly_one(self):
+        self.assertEqual(
+            self.STRICT_AGAIN,
+            self._installed(lambda host: [self._a_copy_of_the_prologue(), *host.body[1:]]),
+        )
+
+    def test_a_replacement_that_reordered_the_body_keeps_the_directive_at_its_head(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f() {
+                  'use strict';
+                  log(2);
+                  log(1);
+                }
+                """
+            ),
+            self._installed(lambda host: [host.body[0], host.body[2], host.body[1]]),
+        )

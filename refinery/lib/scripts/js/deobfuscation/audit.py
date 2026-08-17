@@ -18,8 +18,8 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from refinery.lib.scripts import Node, Transformer
-from refinery.lib.scripts.pipeline import PipelineObserver
 from refinery.lib.scripts.js.strict import is_prologue_host, strict_mode_at
+from refinery.lib.scripts.pipeline import PipelineObserver
 
 
 class ModeMovement(NamedTuple):

@@ -90,6 +90,7 @@ from refinery.lib.scripts.js.model import (
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import (
+    canonical_array_index,
     is_negative_zero,
     js_number_to_string,
     js_string_to_number,
@@ -99,6 +100,7 @@ from refinery.lib.scripts.js.strict import (
     directive_prologue,
     is_prologue_host,
     keeping_directives,
+    statement_list,
 )
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
 from refinery.lib.scripts.js.utf16 import code_units
@@ -228,22 +230,6 @@ class JsBuffer(list):
     literal — has to be able to tell them apart.
     """
     pass
-
-
-def canonical_array_index(key: str) -> int | None:
-    """
-    The integer index *key* denotes as an array index, or `None` when it is not one. JavaScript treats
-    a property key as an index only when it is the canonical decimal spelling of a non-negative
-    integer, so `'1'` indexes but `'+1'`, `'01'`, `'1.0'`, `' 1 '`, `'1_0'`, and `'0x1'` are ordinary
-    property names that resolve to `undefined`. Python's `int` accepts every one of those spellings,
-    and `str.isdigit` additionally accepts non-ASCII digits such as `'²'`, so neither is usable alone.
-    """
-    if not key or not all(c in '0123456789' for c in key):
-        return None
-    index = int(key)
-    if str(index) != key:
-        return None
-    return index
 
 
 def converts_uninterceptably(value: Value) -> bool:
@@ -1179,8 +1165,13 @@ def insert_after_prologue(host: Node, statements: list[Statement]) -> None:
 
     *host* is taken rather than its statement list precisely so that this cannot be called the raw
     way: a caller holding only the list can reach `insert` and would not be asking this question.
+
+    The list is read through `statement_list`, which answers for every node a prologue can open —
+    including a class static block, which `get_body` does not know. Reading it through a narrower
+    accessor than `is_prologue_host` accepts would make this a silent no-op for a host it advertises,
+    and a hoist that vanishes leaves the references a pass already rewrote bound to nothing.
     """
-    body = get_body(host)
+    body = statement_list(host)
     if body is None:
         return
     index = len(directive_prologue(host)) if is_prologue_host(host) else 0

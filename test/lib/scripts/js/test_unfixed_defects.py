@@ -36,7 +36,10 @@ from test.lib.scripts.js.test_for_statement_head import (
     printed_from_the_parse,
     printed_without_the_brackets,
 )
-from test.lib.scripts.js.test_parameter_grammar import A_BINDING_THE_KIND_OF_FUNCTION_RESERVES
+from test.lib.scripts.js.test_parameter_grammar import (
+    A_BINDING_THE_KIND_OF_FUNCTION_RESERVES,
+    A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES,
+)
 from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_HAS
 from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
 
@@ -202,11 +205,15 @@ class TestABindingNamedByAWordItsFunctionKindReservesIsNoProgram(TestBase):
     and `function* g() { class yield {} }` as `class {\\n    {;\\n  }`, with the same two shapes for
     `await` inside an `async` function.
 
-    No valid program is harmed by it today: the input is already a text no engine reads. What is
-    wrong is that `refinery.lib.scripts.is_well_formed` answers `True` for the tree, which is the
-    domain every fidelity law is stated over — a caller told the tree is well formed compares text
-    that is not a program against the file it came from, and a printer under no obligation is asked
-    for one anyway.
+    Node refuses each of the four inputs this entry is quantified over, so what those four cost is
+    not a program: it is that `refinery.lib.scripts.is_well_formed` answers `True` for the tree,
+    which is the domain every fidelity law is stated over — a caller told the tree is well formed
+    compares text that is not a program against the file it came from, and a printer under no
+    obligation is asked for one anyway.
+
+    The same reading does reach files Node reads, where what it costs is the file. Those are
+    `TestAnExpressionNamedByAWordOnlyTheEnclosingKindReservesIsAProgram`, kept apart from this entry
+    so that either may retire without the other.
     """
 
     @unittest.expectedFailure
@@ -223,6 +230,46 @@ class TestABindingNamedByAWordItsFunctionKindReservesIsNoProgram(TestBase):
             {source: _well_formed(source) for source in rows},
             {source: False for source in rows},
         )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnExpressionNamedByAWordOnlyTheEnclosingKindReservesIsAProgram(TestBase):
+    """
+    A function expression takes its name from its own kind and not from the kind of the function
+    around it, so a plain expression named `yield` standing inside a generator is a program, and so
+    is one named `await` inside an async function. Node prints `function` for
+
+        function* g() { var f = function yield() { return 1; }; console.log(typeof f); } g().next();
+
+    and for the `await` twin of it, and reads every file of the corpus this entry is quantified
+    over. A directive is no defence for the `await` half, which no strict body reserves.
+
+    The reservation the kind around the expression carries reaches the name anyway, the expression
+    is left without one, and what comes back opens `var f = function(() {` — a text Node refuses. A
+    declaration's name and a class expression's name are read under whatever encloses them instead,
+    which is what makes the four files of
+    `TestABindingNamedByAWordItsFunctionKindReservesIsNoProgram` no programs to begin with.
+    """
+
+    @unittest.expectedFailure
+    def test_printing_one_of_them_gives_a_program_that_runs_the_same_way(self):
+        rows = A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES
+        self.assertEqual(
+            {source: behavior(_printed(source)) for source in rows},
+            {source: ('', None) for source in rows},
+        )
+
+    @unittest.expectedFailure
+    def test_the_deobfuscation_of_one_that_prints_keeps_what_it_prints(self):
+        """
+        A file that asks for the type of the expression keeps it alive through every pass, so what
+        the tool writes for this one is what a caller of `refinery.js` is handed.
+        """
+        source = (
+            'function* g() { var f = function yield() { return 1; };'
+            ' console.log(typeof f); } g().next();'
+        )
+        self.assertEqual(_before_and_after(source), (('function\n', None), ('function\n', None)))
 
 
 class TestLexicalDeclarationIsNotAStatement(TestBase):

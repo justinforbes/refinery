@@ -14,12 +14,22 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     binding_has_references,
     escape_js_string,
     extract_literal_value,
+    insert_after_prologue,
     make_numeric_literal,
     make_string_literal,
     value_to_node,
 )
 from refinery.lib.scripts.js.lexer import decode_js_string_body
-from refinery.lib.scripts.js.model import JsExpressionStatement, JsStringLiteral
+from refinery.lib.scripts.js.model import (
+    JsBlockStatement,
+    JsExpressionStatement,
+    JsIdentifier,
+    JsStaticBlock,
+    JsStringLiteral,
+    JsVariableDeclaration,
+    JsVariableDeclarator,
+    JsVarKind,
+)
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
@@ -353,3 +363,71 @@ class TestEscapeAndDecodeInvertOnNulFollowedByDigit(TestJsDeobfuscator):
     def test_a_letter_after_a_nul_is_recovered(self):
         value = '\x00' + 'a'
         self.assertEqual(value, self._round_trip(value))
+
+
+class TestHoistingBehindADirectivePrologue(TestJsDeobfuscator):
+    """
+    `insert_after_prologue` puts statements at the head of a host's body, behind whatever Directive
+    Prologue the body opens with. Which nodes are prologue hosts is
+    `refinery.lib.scripts.js.strict.is_prologue_host`, and a class static block is one of them: it
+    holds a statement list of its own that a prologue can open, whatever a prologue there decides.
+
+    A hoist that lands nowhere is worse than one that is declined. The caller has already rewritten
+    the references the hoisted declaration is supposed to bind, so a silent no-op leaves those
+    references bound to nothing.
+    """
+
+    @staticmethod
+    def _hoisted_into(source: str, host: type) -> str:
+        ast = JsParser(source).parse()
+        node = next(n for n in ast.walk() if isinstance(n, host))
+        insert_after_prologue(node, [JsVariableDeclaration(
+            kind=JsVarKind.VAR,
+            declarations=[JsVariableDeclarator(id=JsIdentifier(name='hoisted'))],
+        )])
+        return JsSynthesizer().convert(ast)
+
+    def test_a_declaration_hoisted_into_a_class_static_block_lands_in_it(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                class C {
+                  static {
+                    var hoisted;
+                    log(1);
+                  }
+                }
+                """
+            ),
+            self._hoisted_into('class C { static { log(1); } }', JsStaticBlock),
+        )
+
+    def test_it_lands_behind_the_static_blocks_directive_prologue(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                class C {
+                  static {
+                    'use strict';
+                    var hoisted;
+                    log(1);
+                  }
+                }
+                """
+            ),
+            self._hoisted_into("class C { static { 'use strict'; log(1); } }", JsStaticBlock),
+        )
+
+    def test_it_lands_behind_a_function_bodys_directive_prologue(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f() {
+                  'use strict';
+                  var hoisted;
+                  log(1);
+                }
+                """
+            ),
+            self._hoisted_into("function f() { 'use strict'; log(1); }", JsBlockStatement),
+        )

@@ -307,6 +307,62 @@ THE_SAME_BINDING_INSIDE_A_PLAIN_FUNCTION = {
     'function h() { class await {} }'      : False,
 }
 
+#: A function expression named by the word its own kind reserves. An expression's name is bound
+#: inside the function and is read under the function's own kind, so the reservation reaches it
+#: however sloppy the file is and whatever encloses it. Node refuses every one of these.
+A_FUNCTION_EXPRESSION_NAMED_BY_A_WORD_ITS_OWN_KIND_RESERVES = [
+    'var x = function* yield() {};',
+    'var x = (function* yield() {});',
+    'var x = async function await() {};',
+    'var o = { m: function* yield() {} };',
+    'var o = { m: async function await() {} };',
+    'function p() { var f = function* yield() {}; }',
+    'function p() { var f = async function await() {}; }',
+]
+
+#: The same words naming a function expression of a kind that reserves neither of them, and the
+#: word the other kind reserves. Node reads every one of these files.
+A_FUNCTION_EXPRESSION_NAME_ITS_OWN_KIND_LEAVES_ALONE = [
+    'var x = function yield() {};',
+    'var x = function await() {};',
+    'var x = async function yield() {};',
+    'var x = function* await() {};',
+]
+
+#: The same words naming a declaration rather than an expression. A declaration's name is bound
+#: outside the function and is read under whatever encloses it, so a declaration of either kind is a
+#: program wherever nothing around it reserves the word. Node reads every one of these files.
+A_DECLARATION_WHOSE_NAME_THE_ENCLOSING_CONTEXT_GOVERNS = [
+    'function* yield() {}',
+    'async function await() {}',
+    'function p() { function* yield() {} }',
+    'function p() { async function await() {} }',
+]
+
+#: A function expression of a kind that reserves neither word, named by the word the kind of the
+#: function around it reserves. The name is read under the expression's own kind, so a reservation
+#: the surroundings carry does not reach it and Node reads every one of these files. A directive is
+#: no defence for the `await` half, which no strict body reserves. What the tool makes of them is
+#: pinned in `test.lib.scripts.js.test_unfixed_defects`.
+A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES = [
+    'function* g() { var f = function yield() { return 1; }; }',
+    'async function h() { var f = function await() { return 1; }; }',
+    'var o = { *m() { var f = function yield() { return 1; }; } };',
+    'var o = { async m() { var f = function await() { return 1; }; } };',
+    'function* g() { (function yield() { return 1; })(); }',
+    "'use strict'; async function h() { var f = function await() { return 1; }; }",
+]
+
+#: A class expression standing in the same places, named by the same words. A class name is read
+#: under the context the class stands in rather than under a kind of the class's own, so the
+#: reservation does reach it and Node refuses every one of these files.
+A_CLASS_EXPRESSION_NAME_THE_ENCLOSING_KIND_RESERVES = [
+    'function* g() { var C = class yield {}; }',
+    'async function h() { var C = class await {}; }',
+    'var o = { *m() { var C = class yield {}; } };',
+    'var o = { async m() { var C = class await {}; } };',
+]
+
 
 def _a_repeated_name_in_every_position() -> dict[str, bool]:
     return {
@@ -627,3 +683,69 @@ class TestTheCollectorReportsANameTheKindOfFunctionReserves(TestBase):
     def test_it_reports_on_every_one_of_them_under_a_strict_seed(self):
         rows = A_NAME_THE_KIND_OF_FUNCTION_RESERVES
         self.assertEqual(_reported(rows, strict=True), _every_one_of(rows, True))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestWhichContextGovernsAFunctionsOwnName(TestBase):
+    """
+    A function's name is governed by one context and never by two, and which one it is depends on
+    how the function is written. An expression's name is bound inside it and is read under its own
+    kind, so a generator expression may not be named `yield` even where nothing around it is a
+    generator. A declaration's name is bound outside it and is read under whatever encloses it, so a
+    generator declaration named `yield` is a program wherever the enclosing code reserves nothing.
+    """
+
+    def test_node_refuses_every_expression_named_by_a_word_its_own_kind_reserves(self):
+        rows = A_FUNCTION_EXPRESSION_NAMED_BY_A_WORD_ITS_OWN_KIND_RESERVES
+        self.assertEqual(_refused(rows), _every_one_of(rows, True))
+
+    def test_node_refuses_them_under_a_strict_seed_too(self):
+        rows = A_FUNCTION_EXPRESSION_NAMED_BY_A_WORD_ITS_OWN_KIND_RESERVES
+        self.assertEqual(
+            _refused_under_a_strict_seed(rows),
+            _every_one_of([_under_a_strict_seed(program) for program in rows], True),
+        )
+
+    def test_node_reads_an_expression_whose_own_kind_reserves_neither_word(self):
+        rows = A_FUNCTION_EXPRESSION_NAME_ITS_OWN_KIND_LEAVES_ALONE
+        self.assertEqual(_refused(rows), _every_one_of(rows, False))
+
+    def test_node_reads_the_same_word_naming_a_declaration(self):
+        rows = A_DECLARATION_WHOSE_NAME_THE_ENCLOSING_CONTEXT_GOVERNS
+        self.assertEqual(_refused(rows), _every_one_of(rows, False))
+
+    def test_node_reads_an_expression_only_the_kind_around_it_reserves_the_name_of(self):
+        rows = A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES
+        self.assertEqual(_refused(rows), _every_one_of(rows, False))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestWhichContextGovernsAClassExpressionsOwnName(TestBase):
+    """
+    A class expression's name is not read the way a function expression's is. It is read under the
+    context the class stands in, so the word the kind of the function around it reserves reaches the
+    name, and the file is refused where the same name on a function expression is a program.
+    """
+
+    def test_node_refuses_every_class_expression_the_kind_around_it_reserves_the_name_of(self):
+        rows = A_CLASS_EXPRESSION_NAME_THE_ENCLOSING_KIND_RESERVES
+        self.assertEqual(_refused(rows), _every_one_of(rows, True))
+
+
+class TestTheCollectorReadsAFunctionsOwnNameFromTheSamePlace(TestBase):
+
+    def test_it_reports_on_every_expression_named_by_a_word_its_own_kind_reserves(self):
+        rows = A_FUNCTION_EXPRESSION_NAMED_BY_A_WORD_ITS_OWN_KIND_RESERVES
+        self.assertEqual(_reported(rows, strict=False), _every_one_of(rows, True))
+
+    def test_it_reports_on_them_under_a_strict_seed_too(self):
+        rows = A_FUNCTION_EXPRESSION_NAMED_BY_A_WORD_ITS_OWN_KIND_RESERVES
+        self.assertEqual(_reported(rows, strict=True), _every_one_of(rows, True))
+
+    def test_it_reports_on_no_expression_whose_own_kind_reserves_neither_word(self):
+        rows = A_FUNCTION_EXPRESSION_NAME_ITS_OWN_KIND_LEAVES_ALONE
+        self.assertEqual(_reported(rows, strict=False), _every_one_of(rows, False))
+
+    def test_it_reports_on_no_declaration_the_enclosing_context_leaves_alone(self):
+        rows = A_DECLARATION_WHOSE_NAME_THE_ENCLOSING_CONTEXT_GOVERNS
+        self.assertEqual(_reported(rows, strict=False), _every_one_of(rows, False))

@@ -1084,7 +1084,9 @@ class TestReflectionInlining(TestJsDeobfuscator):
 #: A payload spelling an early error in a function's signature: a name repeated in a list the
 #: grammar requires to be unique, an accessor written with the wrong number of parameters, a Use
 #: Strict Directive under a parameter list that may hold none, a name repeated in a list that is not
-#: simple, and a word the kind of function reserves. Node reads none of them, under either mode.
+#: simple, a word the kind of function reserves in its parameter list, and the same word naming a
+#: function expression, whose name is bound inside it and read under its own kind. Node reads none
+#: of them, under either mode.
 A_PAYLOAD_NO_ENGINE_READS = [
     '((a, a) => 0);',
     '({ m(a, a) {} });',
@@ -1094,12 +1096,15 @@ A_PAYLOAD_NO_ENGINE_READS = [
     '(function (a, ...a) {});',
     '(function* (yield) {});',
     '(async function (await) {});',
+    '(function* yield() {});',
+    '(async function await() {});',
 ]
 
 #: The same signatures written the way the language permits, one for each rule above but the
-#: directive, whose control declares a mode and is therefore declined for a reason of its own. Each
-#: is spelled the way the printer spells it, so the text a site is replaced by is the payload
-#: itself.
+#: directive, whose control declares a mode and is therefore declined for a reason of its own. The
+#: last three name a function expression with a word some other kind reserves, which its own kind
+#: does not. Each is spelled the way the printer spells it, so the text a site is replaced by is the
+#: payload itself.
 A_PAYLOAD_EVERY_ENGINE_READS = [
     '((a, b) => 0);',
     '({ m(a, b) {} });',
@@ -1108,6 +1113,9 @@ A_PAYLOAD_EVERY_ENGINE_READS = [
     '(function(a, ...b) {});',
     '(function*(a) {});',
     '(async function(a) {});',
+    '(function yield() {});',
+    '(async function yield() {});',
+    '(function* await() {});',
 ]
 
 #: A surface that takes a payload as a string and evaluates it, as the template writing one there.
@@ -1238,4 +1246,94 @@ class TestAProgramThatCatchesASyntaxErrorStillCatchesOne(TestJsDeobfuscator):
         self.assertEqual(
             {source: behavior(deobfuscate_source(source)) for source in sources},
             {source: (caught, None) for source in sources},
+        )
+
+
+#: A payload spelling syntax only module code may hold: an `import` declaration, an `export`
+#: declaration of each shape, and `import.meta`. Every surface above evaluates its text as a Script,
+#: where each of these is a `SyntaxError` the call site catches. Node reads none of them.
+A_PAYLOAD_ONLY_MODULE_CODE_MAY_HOLD = [
+    'export var q = 1;',
+    'export default 1;',
+    "export * from 'fs';",
+    "import * as m from 'fs';",
+    'import.meta;',
+]
+
+def _a_program_naming_what_one_payload_throws(template: str, payload: str) -> str:
+    """
+    A program that evaluates *payload* through *template* inside a `try` that names what came out of
+    it. The payload is a `SyntaxError` the call site catches and the program names; written into the
+    file instead, it is the file that no longer parses and nothing is named at all.
+    """
+    return (
+        F'try {{ {_a_site_evaluating(template, payload)} }}'
+        F' catch (e) {{ console.log(e.name); }}'
+    )
+
+
+class TestAPayloadOnlyModuleCodeMayHoldIsNotInlined(TestJsDeobfuscator):
+    """
+    Every surface that takes a payload as a string evaluates it as a Script, so an `import` or
+    `export` declaration in one is a `SyntaxError` the call site throws whatever the file around it
+    is. Spliced into that file it is a declaration the program never made, and one the file cannot
+    even be read with; and where the host does load the file as a module, it is a declaration the
+    program never made.
+
+    No mode decides any of it, which is why the refusal costs nothing: the call is left standing to
+    throw exactly what it threw before.
+    """
+
+    def _reflect(self, source: str) -> str:
+        return self._run_transformer(source, JsReflectionInlining)
+
+    def test_no_surface_inlines_a_payload_only_module_code_may_hold(self):
+        for surface, template in A_SURFACE_THAT_EVALUATES_A_STRING.items():
+            sources = [
+                _a_site_evaluating(template, payload)
+                for payload in A_PAYLOAD_ONLY_MODULE_CODE_MAY_HOLD
+            ]
+            with self.subTest(surface=surface):
+                self.assertEqual(
+                    {source: self._reflect(source) for source in sources},
+                    {source: source for source in sources},
+                )
+
+    def test_a_string_timer_does_not_inline_one_either(self):
+        sources = [
+            F'setTimeout({json.dumps(payload)}, 0);'
+            for payload in A_PAYLOAD_ONLY_MODULE_CODE_MAY_HOLD
+        ]
+        self.assertEqual(
+            {source: self._reflect(source) for source in sources},
+            {source: source for source in sources},
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAProgramCatchingAModulePayloadStillCatchesIt(TestJsDeobfuscator):
+    """
+    The string timer is not among the surfaces asked here: Node's timers refuse a string argument
+    outright, so the engine cannot be asked what a payload evaluated through one does.
+    """
+
+    def _programs(self) -> list[str]:
+        return [
+            _a_program_naming_what_one_payload_throws(template, payload)
+            for template in A_SURFACE_THAT_EVALUATES_A_STRING.values()
+            for payload in A_PAYLOAD_ONLY_MODULE_CODE_MAY_HOLD
+        ]
+
+    def test_node_names_a_syntax_error_for_every_one_of_them(self):
+        sources = self._programs()
+        self.assertEqual(
+            {source: behavior(source) for source in sources},
+            {source: ('SyntaxError\n', None) for source in sources},
+        )
+
+    def test_the_deobfuscation_of_each_program_names_the_same_error(self):
+        sources = self._programs()
+        self.assertEqual(
+            {source: behavior(deobfuscate_source(source)) for source in sources},
+            {source: ('SyntaxError\n', None) for source in sources},
         )

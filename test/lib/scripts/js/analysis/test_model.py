@@ -21,6 +21,7 @@ from refinery.lib.scripts.js.model import (
     JsReturnStatement,
 )
 from refinery.lib.scripts.js.parser import JsParser
+from refinery.lib.scripts.js.synth import JsSynthesizer
 
 
 class TestSemanticModel(TestBase):
@@ -1029,3 +1030,171 @@ class TestFreeNameReachableByDirectEval(TestBase):
         neither writable nor configurable it cannot even do that.
         """
         self.assertFalse(self._reachable('function g(){ (0, eval)(payload); return q; }', 'q'))
+
+
+class TestWhatAnAccessOnAMappedArgumentsObjectReaches(TestBase):
+    """
+    An element of a mapped `arguments` object and the parameter at that position are one location:
+    a reference through the object is attributed to the parameter its key names and carries that
+    reference's own role. Which parameter a key names is decided from the key: one that is the
+    canonical spelling of an index in range names that parameter, and one that is statically known
+    and is no such index names none.
+
+    A key the text does not decide is the one case where naming and reaching come apart. Every
+    parameter is in reach of such an access, so every one of them is read by it — reading is what
+    makes a write to a parameter observable — but no parameter is written by it, since a definite
+    write of each is a claim about a value only one of them can hold.
+    """
+
+    @staticmethod
+    def _model(source: str):
+        ast = JsParser(source).parse()
+        return ast, build_semantic_model(ast)
+
+    def _sites(self, source: str, name: str) -> tuple[list[str], list[str]]:
+        """
+        The source text of every recorded write and every recorded read of the parameter *name*.
+        """
+        ast, model = self._model(source)
+        node = next(
+            n for n in ast.walk_in_order()
+            if isinstance(n, JsIdentifier) and n.name == name and model.binding_of(n) is not None
+        )
+        binding = model.binding_of(node)
+        assert binding is not None
+        return (
+            [JsSynthesizer().convert(site) for site in binding.writes],
+            [JsSynthesizer().convert(site) for site in binding.reads],
+        )
+
+    def test_an_index_in_range_writes_the_one_parameter_it_names(self):
+        source = 'function f(a, b) { arguments[1] = 9; }'
+        self.assertEqual(self._sites(source, 'a'), ([], []))
+        self.assertEqual(self._sites(source, 'b'), (['arguments[1]'], []))
+
+    def test_an_index_in_range_reads_the_one_parameter_it_names(self):
+        source = 'function f(a, b) { g(arguments[1]); }'
+        self.assertEqual(self._sites(source, 'a'), ([], []))
+        self.assertEqual(self._sites(source, 'b'), ([], ['arguments[1]']))
+
+    def test_a_key_the_text_does_not_decide_writes_no_parameter_and_reads_every_one(self):
+        source = 'function f(a, b) { arguments[c] = 9; }'
+        self.assertEqual(self._sites(source, 'a'), ([], ['arguments']))
+        self.assertEqual(self._sites(source, 'b'), ([], ['arguments']))
+
+    def test_a_key_that_is_no_index_reaches_no_parameter_at_all(self):
+        for key in ['1e400', '1e21', '1.5', "'01'", "'+1'", "' 1'", "'1e0'", "'²'", "'١'"]:
+            with self.subTest(key=key):
+                source = F'function f(a, b) {{ arguments[{key}] = 9; }}'
+                self.assertEqual(self._sites(source, 'a'), ([], []))
+                self.assertEqual(self._sites(source, 'b'), ([], []))
+
+    def test_a_negated_number_is_a_key_the_text_does_not_decide(self):
+        """
+        `-1` is a unary expression rather than a literal, so no key is read out of it and every
+        parameter is answered as in reach. Node reaches no element through it, as the corpus in
+        `test.lib.scripts.js.deobfuscation.test_arguments_aliasing` records, so the answer here is
+        weaker than the one the text supports and never stronger.
+        """
+        source = 'function f(a, b) { arguments[-1] = 9; }'
+        self.assertEqual(self._sites(source, 'a'), ([], ['arguments']))
+        self.assertEqual(self._sites(source, 'b'), ([], ['arguments']))
+
+    def test_an_index_past_the_end_of_the_list_reaches_no_parameter(self):
+        source = 'function f(a, b) { arguments[2] = 9; }'
+        self.assertEqual(self._sites(source, 'a'), ([], []))
+        self.assertEqual(self._sites(source, 'b'), ([], []))
+
+    def test_a_parenthesized_receiver_reaches_what_the_bare_one_reaches(self):
+        self.assertEqual(
+            self._sites('function f(a, b) { (arguments)[1] = 9; }', 'b'),
+            (['(arguments)[1]'], []),
+        )
+        self.assertEqual(
+            self._sites('function f(a, b) { ((arguments))[1] = 9; }', 'b'),
+            (['((arguments))[1]'], []),
+        )
+
+    def test_a_parenthesized_receiver_leaves_the_parameters_it_does_not_name_alone(self):
+        self.assertEqual(self._sites('function f(a, b) { (arguments)[1] = 9; }', 'a'), ([], []))
+
+    def test_a_name_bound_to_something_else_attributes_nothing_to_a_parameter(self):
+        for source in [
+            'function f(arguments, b) { arguments[1] = 9; }',
+            'function f(a, b) { var arguments = [7]; arguments[1] = 9; }',
+            'function f(a, b) { try { q(); } catch (arguments) { arguments[1] = 9; } }',
+            'function f(a, b) { arguments = [7]; arguments[1] = 9; }',
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(self._sites(source, 'b'), ([], []))
+
+    def test_a_strict_body_has_an_object_that_aliases_nothing(self):
+        source = "function f(a, b) { 'use strict'; arguments[1] = 9; }"
+        self.assertEqual(self._sites(source, 'a'), ([], []))
+        self.assertEqual(self._sites(source, 'b'), ([], []))
+
+
+class TestWhichBindingsAreReachedThroughTheGlobalObject(TestBase):
+    """
+    Two kinds of object reach a binding the access spells no lexical name of: the global object,
+    where `globalThis.x` reaches the global `x`, and a mapped `arguments` object, where
+    `arguments[0]` reaches the first parameter. Both are recorded as a member access standing in for
+    a referencing identifier, so a predicate that reads only the recorded node's type cannot tell
+    them apart — and they mean opposite things to a caller. A global reached that way is reachable
+    from anywhere and must not be treated as a local; a parameter reached that way is reachable from
+    nothing outside the one function that holds it.
+    """
+
+    @staticmethod
+    def _binding(source: str, name: str) -> Binding:
+        ast = JsParser(source).parse()
+        model = build_semantic_model(ast)
+        node = next(
+            n for n in ast.walk_in_order()
+            if isinstance(n, JsIdentifier) and n.name == name
+            and (model.binding_of(n) or model.resolve(n)) is not None
+        )
+        binding = model.binding_of(node) or model.resolve(node)
+        assert binding is not None
+        return binding
+
+    def _reached_through_the_global_object(self, source: str, name: str) -> tuple[bool, bool]:
+        binding = self._binding(source, name)
+        return binding.has_global_member_write, binding.has_member_reference
+
+    def test_a_parameter_written_through_its_own_arguments_object_is_not(self):
+        self.assertEqual(
+            self._reached_through_the_global_object(
+                'function f(a) { arguments[0] = 9; return a; }', 'a'),
+            (False, False),
+        )
+
+    def test_that_parameter_still_carries_the_write(self):
+        binding = self._binding('function f(a) { arguments[0] = 9; return a; }', 'a')
+        self.assertEqual(
+            [JsSynthesizer().convert(site) for site in binding.writes], ['arguments[0]'])
+
+    def test_a_parameter_read_through_its_own_arguments_object_is_not(self):
+        self.assertEqual(
+            self._reached_through_the_global_object(
+                'function f(a) { a = 2; return arguments[0]; }', 'a'),
+            (False, False),
+        )
+
+    def test_a_global_written_through_the_global_object_is(self):
+        self.assertEqual(
+            self._reached_through_the_global_object('var x; globalThis.x = 1;', 'x'),
+            (True, True),
+        )
+
+    def test_an_implicit_global_written_through_the_global_object_is(self):
+        self.assertEqual(
+            self._reached_through_the_global_object('globalThis.x = 1; log(x);', 'x'),
+            (True, True),
+        )
+
+    def test_a_global_only_read_through_the_global_object_carries_no_write(self):
+        self.assertEqual(
+            self._reached_through_the_global_object('var y = 1; globalThis.y;', 'y'),
+            (False, True),
+        )

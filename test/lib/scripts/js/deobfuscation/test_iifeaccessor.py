@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
+from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.deobfuscation.iifeaccessor import JsIIFEAccessorPromoter
@@ -271,4 +273,86 @@ class TestIIFEAccessorPromoter(TestJsDeobfuscator):
                 """
             ),
             self._promote(source),
+        )
+
+
+#: An accessor whose closure returns a function of each kind, mapped to the declaration the
+#: promotion writes for it and to what Node prints when the program calls it. What a call answers is
+#: decided by the kind: a plain function answers the value, an async one a promise, a generator an
+#: iterator, and an async generator an iterator of promises. A declaration written without the kind
+#: would answer something else, and one written without the `*` over a body holding a `yield` is not
+#: even a text an engine reads.
+_AN_ACCESSOR_RETURNING_A_FUNCTION_OF_EACH_KIND: dict[str, tuple[str, str]] = {
+    'var get = function () { var d = [1, 2]; return function (i) { return d[i]; }; }();'
+    ' console.log(get(0));': (
+        inspect.cleandoc(
+            """
+            function get(i) {
+              var d = [1, 2];
+              return d[i];
+            }
+            console.log(get(0));
+            """
+        ), '1\n'),
+    'var get = function () { var d = [1, 2]; return async function (i) { return d[i]; }; }();'
+    ' get(0).then(function (v) { console.log(v); });': (
+        inspect.cleandoc(
+            """
+            async function get(i) {
+              var d = [1, 2];
+              return d[i];
+            }
+            get(0).then(function(v) {
+              console.log(v);
+            });
+            """
+        ), '1\n'),
+    'var get = function () { var d = [1, 2]; return function* (i) { yield d[i]; }; }();'
+    ' console.log(get(0).next().value);': (
+        inspect.cleandoc(
+            """
+            function* get(i) {
+              var d = [1, 2];
+              yield d[i];
+            }
+            console.log(get(0).next().value);
+            """
+        ), '1\n'),
+    'var get = function () { var d = [1, 2]; return async function* (i) { yield d[i]; }; }();'
+    ' get(0).next().then(function (v) { console.log(v.value); });': (
+        inspect.cleandoc(
+            """
+            async function* get(i) {
+              var d = [1, 2];
+              yield d[i];
+            }
+            get(0).next().then(function(v) {
+              console.log(v.value);
+            });
+            """
+        ), '1\n'),
+}
+
+
+class TestAPromotedAccessorIsTheKindOfFunctionItReturned(TestJsDeobfuscator):
+
+    def _promote(self, source: str) -> str:
+        return self._run_transformer(source, JsIIFEAccessorPromoter)
+
+    def test_the_declaration_is_written_the_way_the_row_records(self):
+        rows = _AN_ACCESSOR_RETURNING_A_FUNCTION_OF_EACH_KIND
+        self.assertEqual(
+            {source: self._promote(source) for source in rows},
+            {source: promoted for source, (promoted, _) in rows.items()},
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_prints_the_same_before_and_after_the_promotion(self):
+        rows = _AN_ACCESSOR_RETURNING_A_FUNCTION_OF_EACH_KIND
+        self.assertEqual(
+            {source: (behavior(source), behavior(self._promote(source))) for source in rows},
+            {
+                source: ((printed, None), (printed, None))
+                for source, (_, printed) in rows.items()
+            },
         )

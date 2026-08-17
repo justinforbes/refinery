@@ -32,6 +32,14 @@ each corpus records:
 - Where the reference stands. A block, a loop, a `try`, a `with`, an arrow at any depth and a direct
   `eval` all reach the enclosing object, whatever mode the eval's own code declares. A nested regular
   function introduces its own, and an arrow inside that nested function reads the nested one.
+- How the key is spelled. An element is reached only through the canonical decimal spelling of its
+  index, so a sign, a leading zero, a fraction, surrounding space, an exponent, a number no such
+  spelling names and a digit outside ASCII all name an ordinary property and reach no parameter. The
+  receiver may be written in parentheses, which is no operation and changes nothing.
+- Whether the name `arguments` still denotes the object. A parameter of that name, a `var` given a
+  value, a catch parameter and an assignment over the object each leave the name denoting something
+  whose elements alias nothing; a `var` with no initializer is initialized from the object the
+  function was given and leaves the aliasing where it was.
 
 Every absolute value here is Node's. Each corpus is asserted twice: once against Node, which is what
 makes the recorded value a measurement rather than a claim, and once against the text the
@@ -175,9 +183,9 @@ _WHERE_THE_REFERENCE_TO_THE_OBJECT_STANDS: dict[str, str] = {
     'return (function () { return (() => arguments[0])(); })(7);'       : '7\n',
 }
 
-#: A program whose function has an object aliasing its parameters that nothing in it observes, mapped
-#: to the text the deobfuscation writes for it. Each write is dead in fact and not merely unread by
-#: name, so the tool is free to remove it and does.
+#: A program whose function has an object aliasing its parameters that nothing in it reads a
+#: parameter through, mapped to the text the deobfuscation writes for it. Each write is dead in fact
+#: and not merely unread by name, so the tool is free to remove it and does.
 _AN_ALIASING_NOTHING_OBSERVES: dict[str, str] = {
     'function f(a) { a = 2; return a; } console.log(f(1));':
         'console.log(2);',
@@ -217,11 +225,32 @@ _AN_ALIASING_NOTHING_OBSERVES: dict[str, str] = {
         console.log(f(1));
         """
     ),
+    'function f(a) { var arguments; a = 5; return arguments.length; } console.log(f(1));':
+        inspect.cleandoc(
+            """
+            function f(a) {
+              var arguments;
+              return arguments.length;
+            }
+            console.log(f(1));
+            """
+        ),
+    'function f(a) { arguments = [7]; a = 5; return arguments[0]; } console.log(f(1));':
+        inspect.cleandoc(
+            """
+            function f(a) {
+              arguments = [7];
+              return arguments[0];
+            }
+            console.log(f(1));
+            """
+        ),
 }
 
 #: A program whose write the aliasing carries to the other name, mapped to the text the deobfuscation
-#: writes for it. Each is a row of `_AN_ALIASING_NOTHING_OBSERVES` with the object brought into it, so
-#: that what the tool does with the aliasing is pinned as text and not only as an answer Node gives.
+#: writes for it. Each is a row of `_AN_ALIASING_NOTHING_OBSERVES` with the aliasing brought into
+#: what the body does, so that what the tool does with it is pinned as text and not only as an
+#: answer Node gives.
 _AN_ALIASING_THAT_IS_OBSERVED: dict[str, str] = {
     'function f(a) { a = 2; return arguments[0]; } console.log(f(1));': inspect.cleandoc(
         """
@@ -241,6 +270,103 @@ _AN_ALIASING_THAT_IS_OBSERVED: dict[str, str] = {
         console.log(f(1));
         """
     ),
+    'function f(a) { var arguments; a = 5; return arguments[0]; } console.log(f(1));':
+        inspect.cleandoc(
+            """
+            function f(a) {
+              var arguments;
+              a = 5;
+              return arguments[0];
+            }
+            console.log(f(1));
+            """
+        ),
+}
+
+#: A key that is legal JavaScript and no array index, mapped to what Node prints when a sloppy
+#: function of three parameters writes through it and then returns all three. `1:2:3` is every
+#: parameter still holding what the call passed, so the write landed on the object and on no
+#: parameter. A key is an index only where it is the canonical decimal spelling of one, which rules
+#: out a sign, a leading zero, a fraction, surrounding space, an exponent, a number no decimal
+#: spelling of an integer names, and a digit outside ASCII.
+_A_KEY_THAT_REACHES_NO_ELEMENT: dict[str, str] = {
+    'arguments[1e400] = 9' : '1:2:3\n',
+    'arguments[1e21] = 9'  : '1:2:3\n',
+    'arguments[-1] = 9'    : '1:2:3\n',
+    'arguments[1.5] = 9'   : '1:2:3\n',
+    "arguments['01'] = 9"  : '1:2:3\n',
+    "arguments['+1'] = 9"  : '1:2:3\n',
+    "arguments[' 1'] = 9"  : '1:2:3\n',
+    "arguments['1e0'] = 9" : '1:2:3\n',
+    "arguments['²'] = 9"   : '1:2:3\n',
+    "arguments['١'] = 9"   : '1:2:3\n',
+}
+
+#: A key that does reach an element, mapped to what Node prints for the same body. The value stands
+#: at the position the key names however the source spelled the number, and `-0` names the first.
+_A_KEY_THAT_REACHES_AN_ELEMENT: dict[str, str] = {
+    'arguments[1] = 9'   : '1:9:3\n',
+    'arguments[1.0] = 9' : '1:9:3\n',
+    'arguments[1e0] = 9' : '1:9:3\n',
+    'arguments[0x1] = 9' : '1:9:3\n',
+    "arguments['1'] = 9" : '1:9:3\n',
+    'arguments[-0] = 9'  : '9:2:3\n',
+}
+
+#: A program writing through the object at a key no reading of the text computes, mapped to what
+#: Node prints for it. The key is `1`, so the write lands on the second parameter and the value the
+#: first was given a statement earlier is the one it still holds.
+_A_KEY_THE_TOOL_CANNOT_COMPUTE: dict[str, str] = {
+    'function f(a, b) { var k = Date.now() > 0 ? 1 : 0; a = 5; arguments[k] = 9;'
+    " return a + ':' + b; } console.log(f(1, 2));": '5:9\n',
+    'function f(a, b) { var k = Date.now() > 0 ? 0 : 1; a = 5; arguments[k] = 9;'
+    " return a + ':' + b; } console.log(f(1, 2));": '9:2\n',
+}
+
+#: A body that binds the name `arguments` itself, mapped to what Node prints for it. A parameter of
+#: that name, a `var` given a value, a catch parameter and an assignment over the object each leave
+#: the name denoting something whose elements alias no parameter, so a write through it is read back
+#: only through the name it was written through.
+_A_NAME_THAT_DENOTES_SOMETHING_OTHER_THAN_THE_OBJECT: dict[str, str] = {
+    "function f(arguments, b) { b = 3; arguments[1] = 9; return b + ':' + arguments[1]; }"
+    ' console.log(f([1], 2));': '3:9\n',
+    "function f(a) { var arguments = [7]; arguments[0] = 9; return a + ':' + arguments[0]; }"
+    ' console.log(f(1));': '1:9\n',
+    'function f(a) { try { throw [1]; } catch (arguments) { arguments[0] = 9; } return a; }'
+    ' console.log(f(1));': '1\n',
+    'function f(a) { arguments = [1]; arguments[0] = 9; return a; } console.log(f(1));': '1\n',
+}
+
+#: A `var arguments` with no initializer, mapped to what Node prints for it. The declaration binds
+#: the name the function was already given the object under and initializes it from that object,
+#: wherever in the body it is written, so the aliasing is untouched in both of its directions: `9`
+#: is a write through the object read back under the parameter's name, and `5` is a write to the
+#: parameter read back off the object.
+_A_DECLARATION_THAT_LEAVES_THE_OBJECT_WHERE_IT_WAS: dict[str, str] = {
+    'function f(a) { var arguments; arguments[0] = 9; return a; } console.log(f(1));': '9\n',
+    'function f(a) { var arguments; a = 5; arguments[0] = 9; return a; } console.log(f(1));': '9\n',
+    'function f(a) { var arguments; a = 5; return arguments[0]; } console.log(f(1));': '5\n',
+    'function f(a) { a = 5; var arguments; return arguments[0]; } console.log(f(1));': '5\n',
+    'function f(a, b) { var arguments; b = 5; return arguments[1]; } console.log(f(1, 2));': '5\n',
+}
+
+#: The same name given a value instead, mapped to what Node prints for the same two directions. An
+#: initializer and an assignment each put an array under the name, so a read through it answers the
+#: element that array holds rather than the parameter, and a write through it lands on the array and
+#: leaves the parameter holding what the call passed.
+_A_DECLARATION_THAT_PUTS_AN_ARRAY_UNDER_THE_NAME: dict[str, str] = {
+    'function f(a) { var arguments = [7]; a = 5; return arguments[0]; } console.log(f(1));': '7\n',
+    'function f(a) { var arguments = [7]; arguments[0] = 9; return a; } console.log(f(1));': '1\n',
+    'function f(a) { arguments = [7]; a = 5; return arguments[0]; } console.log(f(1));': '7\n',
+    'function f(a) { arguments = [7]; arguments[0] = 9; return a; } console.log(f(1));': '1\n',
+}
+
+#: A receiver written in parentheses, mapped to what Node prints for it. A grouping is not an
+#: operation, so each of these reaches the element its bare spelling reaches.
+_A_PARENTHESIZED_RECEIVER: dict[str, str] = {
+    'function f(a) { (arguments)[0] = 9; return a; } console.log(f(1));': '9\n',
+    'function f(a) { ((arguments))[0] = 9; return a; } console.log(f(1));': '9\n',
+    'function f(a) { a = 2; return (arguments)[0]; } console.log(f(1));': '2\n',
 }
 
 #: A module, which is strict code with no directive saying so, mapped to what Node prints for it. The
@@ -263,11 +389,22 @@ def _standing(tail: str) -> str:
     return F'function f(a) {{ a = 2; {tail} }} console.log(f(1));'
 
 
+def _keyed(statement: str) -> str:
+    return (
+        F"function f(a, b, c) {{ {statement}; return a + ':' + b + ':' + c; }}"
+        F' console.log(f(1, 2, 3));'
+    )
+
+
 _READS = {_reading(k): v for k, v in _A_READ_THROUGH_THE_OBJECT.items()}
 
 _WRITES = {_writing(k): v for k, v in _A_WRITE_THROUGH_THE_OBJECT.items()}
 
 _PLACES = {_standing(k): v for k, v in _WHERE_THE_REFERENCE_TO_THE_OBJECT_STANDS.items()}
+
+_KEYS_THAT_MISS = {_keyed(k): v for k, v in _A_KEY_THAT_REACHES_NO_ELEMENT.items()}
+
+_KEYS_THAT_HIT = {_keyed(k): v for k, v in _A_KEY_THAT_REACHES_AN_ELEMENT.items()}
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
@@ -351,6 +488,125 @@ class TestAModuleIsStrictCode(TestBase):
             },
             _printed(rows),
         )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestWhichKeysReachAnElement(TestBase):
+
+    def test_node_leaves_every_parameter_alone_for_a_key_that_is_no_index(self):
+        self.assertEqual(_said_by_node(_KEYS_THAT_MISS), _printed(_KEYS_THAT_MISS))
+
+    def test_the_deobfuscation_leaves_them_alone_too(self):
+        self.assertEqual(_said_after_deobfuscation(_KEYS_THAT_MISS), _printed(_KEYS_THAT_MISS))
+
+    def test_node_writes_the_named_parameter_for_a_key_that_is_an_index(self):
+        self.assertEqual(_said_by_node(_KEYS_THAT_HIT), _printed(_KEYS_THAT_HIT))
+
+    def test_the_deobfuscation_writes_the_same_parameter(self):
+        self.assertEqual(_said_after_deobfuscation(_KEYS_THAT_HIT), _printed(_KEYS_THAT_HIT))
+
+
+class TestAKeyHostileToAnIntegerConversionIsStillRead(TestBase):
+    """
+    A key is read for the index it names and not converted through Python's `int`, which raises on a
+    Number literal denoting an infinity and reads digits outside ASCII as the value they would have
+    in ASCII. Each program here is one no pass has anything to do to, so what the tool writes for it
+    is the program itself.
+    """
+
+    def test_a_numeric_key_denoting_an_infinity_is_read(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f(a, b, c) {
+                  arguments[1e400] = 9;
+                  return a + ':' + b + ':' + c;
+                }
+                console.log(f(1, 2, 3));
+                """
+            ),
+            _deobfuscated(_keyed('arguments[1e400] = 9')),
+        )
+
+    def test_a_string_key_spelled_with_a_digit_outside_ascii_is_read(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f(a, b, c) {
+                  arguments['١'] = 9;
+                  return a + ':' + b + ':' + c;
+                }
+                console.log(f(1, 2, 3));
+                """
+            ),
+            _deobfuscated(_keyed("arguments['١'] = 9")),
+        )
+
+    def test_a_string_key_spelled_with_a_superscript_digit_is_read(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f(a, b, c) {
+                  arguments['²'] = 9;
+                  return a + ':' + b + ':' + c;
+                }
+                console.log(f(1, 2, 3));
+                """
+            ),
+            _deobfuscated(_keyed("arguments['²'] = 9")),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAKeyNoReadingOfTheTextComputes(TestBase):
+
+    def test_node_writes_the_one_parameter_the_key_names_at_runtime(self):
+        rows = _A_KEY_THE_TOOL_CANNOT_COMPUTE
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_writes_the_same_one(self):
+        rows = _A_KEY_THE_TOOL_CANNOT_COMPUTE
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestABodyThatBindsTheNameArgumentsItself(TestBase):
+
+    def test_node_reaches_no_parameter_through_a_name_bound_to_something_else(self):
+        rows = _A_NAME_THAT_DENOTES_SOMETHING_OTHER_THAN_THE_OBJECT
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_reaches_no_parameter_either(self):
+        rows = _A_NAME_THAT_DENOTES_SOMETHING_OTHER_THAN_THE_OBJECT
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+    def test_node_keeps_the_aliasing_across_a_declaration_with_no_initializer(self):
+        rows = _A_DECLARATION_THAT_LEAVES_THE_OBJECT_WHERE_IT_WAS
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_keeps_it_too(self):
+        rows = _A_DECLARATION_THAT_LEAVES_THE_OBJECT_WHERE_IT_WAS
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+    def test_node_reaches_no_parameter_through_a_name_a_declaration_gave_a_value(self):
+        rows = _A_DECLARATION_THAT_PUTS_AN_ARRAY_UNDER_THE_NAME
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_reaches_none_through_it_either(self):
+        rows = _A_DECLARATION_THAT_PUTS_AN_ARRAY_UNDER_THE_NAME
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReceiverWrittenInParentheses(TestBase):
+
+    def test_node_reaches_the_element_the_bare_spelling_reaches(self):
+        rows = _A_PARENTHESIZED_RECEIVER
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_reaches_it_too(self):
+        rows = _A_PARENTHESIZED_RECEIVER
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
 
 
 class TestTheAliasingIsHonouredWithoutForfeitingTheSimplification(TestBase):

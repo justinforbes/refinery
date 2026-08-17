@@ -51,6 +51,7 @@ from refinery.lib.scripts.js.deobfuscation.strict_divergence import diverges_und
 from refinery.lib.scripts.js.strict import (
     collect_strict_violations,
     declares_use_strict,
+    names_module_syntax,
     strict_mode_at,
 )
 from refinery.lib.scripts.js.model import (
@@ -116,6 +117,12 @@ def _try_parse(code: str, *, top_level_await: bool, strict: bool) -> JsScript | 
     site catches and carries on from. The two arrive by different routes at the same requirement, which
     is why one seed answers for every surface.
 
+    Module-only syntax is refused for the same reason and needs no mode to decide it. Every surface
+    that reaches here evaluates its text as a Script, where an `import` or `export` declaration is a
+    `SyntaxError` the call site catches; spliced into the file it is a `SyntaxError` the file cannot
+    survive, and where the host does load the file as a module it is a declaration the program never
+    made.
+
     Refusing is free: the `eval` or `Function` call is left standing to throw exactly what it threw
     before. Whether such a body would additionally *behave* differently at a strict destination is a
     separate question, and one only the surfaces that run sloppy have to ask; `diverges_under_strict`
@@ -127,6 +134,8 @@ def _try_parse(code: str, *, top_level_await: bool, strict: bool) -> JsScript | 
     except Exception:
         return None
     if not parsed.body or not is_well_formed(parsed):
+        return None
+    if names_module_syntax(parsed):
         return None
     if collect_strict_violations(parsed, strict=strict):
         return None

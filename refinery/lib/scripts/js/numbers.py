@@ -56,6 +56,22 @@ def is_negative_zero(value: float) -> bool:
     return value == 0 and math.copysign(1.0, value) < 0
 
 
+def canonical_array_index(key: str) -> int | None:
+    """
+    The integer index *key* denotes as an array index, or `None` when it is not one. JavaScript treats
+    a property key as an index only when it is the canonical decimal spelling of a non-negative
+    integer, so `'1'` indexes but `'+1'`, `'01'`, `'1.0'`, `' 1 '`, `'1_0'`, and `'0x1'` are ordinary
+    property names that resolve to `undefined`. Python's `int` accepts every one of those spellings,
+    and `str.isdigit` additionally accepts non-ASCII digits such as `'²'`, so neither is usable alone.
+    """
+    if not key or not all(c in '0123456789' for c in key):
+        return None
+    index = int(key)
+    if str(index) != key:
+        return None
+    return index
+
+
 def exact_integer(value: int | float) -> int | None:
     """
     The integer *value* is, or `None` when it is not one. A consumer that needs a Python `int` — an

@@ -84,7 +84,7 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
             self._rewrite(scope, name, declarator, flattenable)
             self._remove_hoisted_statements(body, hoisted)
             self._emit_declarations(scope, body, flattenable - set(hoisted))
-            self._emit_function_declarations(scope, body, hoisted)
+            self._emit_function_declarations(scope, hoisted)
             if not held_back:
                 self._remove_declarator(body, declarator, decl_stmt)
             self.changed = True
@@ -390,20 +390,28 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
     @staticmethod
     def _emit_function_declarations(
         scope: Node,
-        body: list,
         func_assigns: dict[str, _PropertyAssignment],
     ) -> None:
-        for name in sorted(func_assigns):
+        """
+        Hoist a function declaration for each flattened property that held a function expression.
+
+        All of them are spliced in one call. Splicing one at a time rebuilds and re-parents the whole
+        statement list per declaration, which a namespace holding a few hundred functions pays for
+        once per function over a body already thousands of statements long.
+        """
+        declarations = []
+        for name in sorted(func_assigns, reverse=True):
             func_expr = func_assigns[name].rhs
             assert isinstance(func_expr, JsFunctionExpression)
-            decl = JsFunctionDeclaration(
+            declarations.append(JsFunctionDeclaration(
                 id=JsIdentifier(name=name),
                 params=func_expr.params or [],
                 body=func_expr.body,
                 generator=func_expr.generator,
                 is_async=func_expr.is_async,
-            )
-            insert_after_prologue(scope, [decl])
+            ))
+        if declarations:
+            insert_after_prologue(scope, declarations)
 
     @staticmethod
     def _emit_declarations(scope: Node, body: list, props: set[str]) -> None:

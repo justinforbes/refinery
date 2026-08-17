@@ -33,8 +33,8 @@ from refinery.lib.scripts.js.model import (
     JsArrayPattern,
     JsArrowFunctionExpression,
     JsAssignmentExpression,
-    JsAwaitExpression,
     JsAssignmentPattern,
+    JsAwaitExpression,
     JsBlockStatement,
     JsCatchClause,
     JsClassDeclaration,
@@ -135,7 +135,7 @@ _FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionE
 _FunctionNode = JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression
 
 
-def _statement_list(node: Node | None) -> list[Statement] | None:
+def statement_list(node: Node | None) -> list[Statement] | None:
     """
     The statement list *node* holds directly, or `None` when it holds none. Only the three node types
     that can host a Directive Prologue are answered for, so a caller that already knows it is looking
@@ -178,7 +178,7 @@ def directive_prologue(host: Node | None) -> list[JsExpressionStatement]:
     *host* is taken to be a prologue host; where a caller must find the host from a statement inside
     it, `is_prologue_host` decides that.
     """
-    return leading_string_statements(_statement_list(host) or [])
+    return leading_string_statements(statement_list(host) or [])
 
 
 def leading_string_statements(statements: list[Statement]) -> list[JsExpressionStatement]:
@@ -288,9 +288,11 @@ def is_use_strict_directive(statement: Statement) -> bool:
 
 def keeping_directives(host: Node, replacement: list[Statement]) -> list[Statement]:
     """
-    *replacement* with any Use Strict Directive that *host* currently opens with put back at its head,
-    for a caller about to install *replacement* as *host*'s whole body. A directive already among the
-    replacement statements is left where it is rather than doubled.
+    *replacement* with a Use Strict Directive that *host* currently opens with put back at its head,
+    for a caller about to install *replacement* as *host*'s whole body. Nothing is carried where
+    *replacement* already opens with one, whether that is the host's own statement or a copy of it: a
+    pass that rebuilds a body by cloning it keeps the directive by value and not by identity, and
+    carrying the original as well would write the directive twice.
 
     Whole-body replacement is the one way a directive is lost without a removal: nothing is deleted,
     the statement is simply absent from the list handed in, so a rule phrased over removals cannot see
@@ -298,14 +300,29 @@ def keeping_directives(host: Node, replacement: list[Statement]) -> list[Stateme
     what it is about to install, and declining here would leave those rewrites standing over a body
     that never received them.
     """
-    if not is_prologue_host(host):
+    if not is_prologue_host(host) or _opens_with_use_strict(replacement):
         return replacement
     carried = [
         statement for statement in directive_prologue(host)
         if is_use_strict_directive(statement)
         and not any(kept is statement for kept in replacement)
     ]
-    return carried + replacement if carried else replacement
+    return carried[:1] + replacement if carried else replacement
+
+
+def _opens_with_use_strict(statements: list[Statement]) -> bool:
+    """
+    Whether the opening run of *statements* holds a statement the source wrote as the Use Strict
+    Directive, so that a body built from them declares strict mode wherever it is installed. It is
+    asked of a list that stands in no tree yet, which is why it reads the mark and the spelling
+    rather than `is_use_strict_directive`, whose third question is where the statement stands.
+    """
+    return any(
+        statement.directive
+        and isinstance(statement.expression, JsStringLiteral)
+        and is_use_strict(statement.expression)
+        for statement in leading_string_statements(statements)
+    )
 
 
 def promoted_use_strict(statements: list[Statement]) -> list[JsExpressionStatement]:
@@ -343,7 +360,7 @@ def joins_directive_prologue(statement: Statement) -> bool:
     directive that makes the whole body strict.
     """
     host = statement.parent
-    body = _statement_list(host)
+    body = statement_list(host)
     if body is None or not is_prologue_host(host):
         return False
     index = len(directive_prologue(host))
@@ -457,7 +474,7 @@ _EVAL_ARGS = frozenset({'eval', 'arguments'})
 
 def _child_strictness(node: Node, strict: bool) -> bool:
     if isinstance(node, JsScript):
-        return strict or declares_use_strict(node)
+        return strict or node.module or declares_use_strict(node)
     if isinstance(node, (JsClassDeclaration, JsClassExpression)):
         return True
     if not isinstance(node, _FUNCTION_NODES):
@@ -494,20 +511,22 @@ def reserved_by_function_kind(node: Node) -> frozenset[str]:
     still the enclosing function's code and inherit the reservation, while its body is its own and
     does not, so `(yield) => {}` inside a generator is refused and `() => { var yield = 1; }` is not.
 
-    A function's own name is not part of what it reserves — `function* yield() {}` binds the name
-    outside itself and is read — but it is part of whatever encloses it, so the same declaration
-    written inside a generator is refused. That is why naming itself skips this function's own
-    reservation and keeps climbing rather than answering nothing.
+    A function's name is governed by one context and never by two, but which one depends on how the
+    function is written. A declaration's name is bound outside it and takes the enclosing context, so
+    `function* yield() {}` is read at the top level and refused inside a generator; naming itself
+    therefore skips this function's own reservation and keeps climbing. An expression's name is bound
+    inside it and takes its own kind alone (§15.2.1, §15.5.1, §15.8.1), so
+    `x = (function* yield() {})` is refused while `function* g() { var f = function yield() {}; }` is
+    read; naming itself therefore answers here and does not climb at all.
     """
     reserved: set[str] = set()
     cursor: Node = node
     parent = cursor.parent
     while parent is not None:
         if isinstance(parent, _FUNCTION_NODES):
-            names_itself = (
-                isinstance(parent, (JsFunctionDeclaration, JsFunctionExpression))
-                and cursor is parent.id
-            )
+            if isinstance(parent, JsFunctionExpression) and cursor is parent.id:
+                return _reserved_by_own_kind(parent)
+            names_itself = isinstance(parent, JsFunctionDeclaration) and cursor is parent.id
             if not names_itself:
                 reserved |= _reserved_by_own_kind(parent)
                 inherits = (
@@ -520,8 +539,19 @@ def reserved_by_function_kind(node: Node) -> frozenset[str]:
     return frozenset(reserved)
 
 
+_KIND_RESERVABLE = frozenset({'yield', 'await'})
+"""
+Every name any function kind reserves, which is what `_reserved_by_own_kind` can ever answer with. A
+name outside this set is reserved by no kind, so asking which kinds enclose it cannot change the
+answer — and that question is a climb to the nearest enclosing function, asked once per identifier in
+the tree.
+"""
+
+
 def _check_kind_reserved(node: Node, out: list[StrictViolation]) -> None:
-    if not isinstance(node, JsIdentifier) or _is_property_name_position(node):
+    if not isinstance(node, JsIdentifier) or node.name not in _KIND_RESERVABLE:
+        return
+    if _is_property_name_position(node):
         return
     if node.name in reserved_by_function_kind(node):
         out.append(StrictViolation(node.offset, 'reserved-by-function-kind', node.name))
@@ -632,15 +662,19 @@ def _suspend_operator_in_parameters(fn: _FunctionNode) -> Node | None:
     A function written inside a parameter list is not descended into. Its parameters are its own, and
     the walk reaches it in its own right; its body is a place where the operator can be perfectly
     legal, `function f(a = function* () { yield 1; }) {}` being a program.
+
+    The first such operator in source order is the one answered with, which is the order
+    `collect_strict_violations` reports in; a stack visits what is pushed last first, so each run of
+    children is pushed reversed.
     """
-    stack: list[Node] = list(fn.params)
+    stack: list[Node] = list(reversed(fn.params))
     while stack:
         node = stack.pop()
         if isinstance(node, (JsYieldExpression, JsAwaitExpression)):
             return node
         if isinstance(node, _FUNCTION_NODES):
             continue
-        stack.extend(node.children())
+        stack.extend(reversed(node.children()))
     return None
 
 

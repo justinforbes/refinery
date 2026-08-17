@@ -34,6 +34,10 @@ class PipelineObserver:
     something and declined, which reports no change and is indistinguishable here from one that found
     nothing to do — a refusal costs recall silently, and naming it needs a channel out of the pass
     itself rather than a hook around it.
+
+    Every `before` is paired with an `after`, including when the transformer raises: an observer that
+    holds a reading between the two would otherwise keep it, and the tree it was taken from, for as
+    long as it lives, and would compare the next pass against a reading from this one.
     """
 
     def before(self, group: str, transformer: type[Transformer], ast: Node) -> None:
@@ -85,11 +89,14 @@ class TransformerGroup:
                 t = cls()
                 t.models = models
                 t.options = options
-                if observer is not None:
+                if observer is None:
+                    t.visit(ast)
+                else:
                     observer.before(self.name, cls, ast)
-                t.visit(ast)
-                if observer is not None:
-                    observer.after(self.name, cls, ast, t.changed)
+                    try:
+                        t.visit(ast)
+                    finally:
+                        observer.after(self.name, cls, ast, t.changed)
                 if t.changed:
                     steps += 1
                     round_changed = True

@@ -82,6 +82,7 @@ from refinery.lib.scripts.js.model import (
     JsWithStatement,
     strip_parens,
 )
+from refinery.lib.scripts.js.numbers import canonical_array_index, exact_integer
 from refinery.lib.scripts.js.strict import has_simple_parameters, strict_mode_at
 
 FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)
@@ -231,10 +232,12 @@ class Binding:
     A single declared name within one scope. `declarations` holds the binding-site identifier nodes
     that introduce the name; `reads` and `writes` hold the referencing identifiers that read and write
     it (a compound assignment or update appears in both). `captured` is set when the name is referenced
-    from a function nested below the one that owns it. A read or write performed through a member access
-    on a global-object alias (`globalThis.g`, `globalThis.g = ...`) has no referencing identifier for
-    the global it targets, so the `JsMemberExpression` stands in for that reference; every other
-    `reads`/`writes` entry is an identifier. `dynamic_refs` holds referencing identifiers a dynamic
+    from a function nested below the one that owns it. A read or write performed through an object that
+    aliases the binding has no referencing identifier for the name it targets, so the
+    `JsMemberExpression` stands in for that reference; every other `reads`/`writes` entry is an
+    identifier. Two objects alias this way — a global-object alias (`globalThis.g`) reaching a global,
+    and a mapped `arguments` reaching a parameter — and they are told apart by what the access is on,
+    never by the entry being a member access at all. `dynamic_refs` holds referencing identifiers a dynamic
     scope resolves at runtime — a name inside a `with` body that could denote this binding — which
     `reads`/`writes` omit because such a name resolves to no binding statically; its target is
     uncertain, so it is kept apart from the definite references.
@@ -290,9 +293,13 @@ class Binding:
         Whether the binding is written through a member access on a global-object alias
         (`globalThis.x = ...`), recorded as a `JsMemberExpression` write site rather than a referencing
         identifier (see the class docstring). Only a global ever carries such a write, so the answer is
-        always false for a lexical binding whose writes are all identifiers.
+        always false for a lexical binding.
+
+        The access is tested by what it is on and not by its being a member access, because a parameter
+        of a sloppy function carries member-access writes too — through the `arguments` object that
+        aliases it — and those reach one function's own parameter rather than the global object.
         """
-        return any(isinstance(write, JsMemberExpression) for write in self.writes)
+        return any(_is_global_alias_access(write) for write in self.writes)
 
     @property
     def has_member_reference(self) -> bool:
@@ -301,8 +308,11 @@ class Binding:
         (`globalThis.x`), recorded as a `JsMemberExpression` reference rather than a referencing
         identifier (see the class docstring). Such a binding is reachable through the global object, so
         a caller must not treat it as an ordinary local — it cannot be relocated into a function.
+
+        As with `has_global_member_write`, an access through a mapped `arguments` object is not one of
+        these: it reaches a parameter, which no other function can name.
         """
-        return any(isinstance(ref, JsMemberExpression) for ref in (*self.reads, *self.writes))
+        return any(_is_global_alias_access(ref) for ref in (*self.reads, *self.writes))
 
 
 @dataclass(eq=False)
@@ -744,26 +754,79 @@ def _member_property_name(member: JsMemberExpression) -> str | None:
     return prop.name if isinstance(prop, JsIdentifier) else None
 
 
-def _aliased_parameter_positions(member: JsMemberExpression, count: int) -> range:
+def _rebinds_arguments(binding: Binding) -> bool:
     """
-    The parameter positions a member access on a mapped `arguments` object may observe, out of *count*
-    parameters. A key that is the canonical spelling of an index in range designates that one
-    parameter; a key that is statically known and is not — `length`, `callee`, an index past the end
-    of the list — designates none, an element being the only thing that aliases anything. A key the
-    model cannot name puts every parameter in reach.
+    Whether *binding*, the `arguments` object a function is given, is made to denote something else
+    inside it — an assignment over the name, or a `var` that initializes it. Either replaces the object
+    with a value whose elements alias no parameter.
+
+    A `var arguments;` with no initializer does neither. It redeclares a name the function already has,
+    and a `var` never overwrites a value already bound to its name, so the object stays exactly where it
+    was. The distinction lives here because a declarator with an initializer is recorded as a
+    declaration and not as a write, so asking for writes alone would let `var arguments = [7]` through.
+    """
+    if binding.writes:
+        return True
+    return any(
+        isinstance(site.parent, JsVariableDeclarator) and site.parent.init is not None
+        for site in binding.declarations
+    )
+
+
+def _is_global_alias_access(node: Node) -> bool:
+    """
+    Whether *node* is a member access on a global-object alias, which is the one kind of access that
+    reaches a binding no lexical name of its own is written for. An access on a mapped `arguments`
+    object is the other, and reaches a parameter of the one function that holds it.
+    """
+    return isinstance(node, JsMemberExpression) and _is_global_base(strip_parens(node.object))
+
+
+def _enclosing_member_access(node: Node) -> JsMemberExpression | None:
+    """
+    The member access *node* is the receiver of, looking through any parentheses written around it,
+    or `None` where *node* is used as something other than a receiver. `(arguments)[0]` reaches its
+    element exactly as `arguments[0]` does, so a receiver is recognized through a grouping the way
+    every other operand in this module is.
+    """
+    cursor: Node = node
+    parent = cursor.parent
+    while isinstance(parent, JsParenthesizedExpression):
+        cursor, parent = parent, parent.parent
+    if isinstance(parent, JsMemberExpression) and parent.object is cursor:
+        return parent
+    return None
+
+
+def _aliased_parameter_positions(member: JsMemberExpression, count: int) -> range | None:
+    """
+    The parameter positions a member access on a mapped `arguments` object names, out of *count*
+    parameters, or `None` where it names none of them because the key is not statically known. A key
+    that is the canonical spelling of an index in range designates that one parameter; a key that is
+    statically known and is not — `length`, `callee`, an index past the end of the list — designates
+    the empty range, an element being the only thing that aliases anything.
+
+    Naming and reaching are separate answers, which is why an unknown key is `None` rather than the
+    whole range. Every position is in reach of such an access, but no position is *named* by it, and a
+    caller that recorded the access's own role against each would turn one indefinite write into a
+    definite write of every parameter.
+
+    The key is read through `exact_integer` and `canonical_array_index` rather than through `int`,
+    which raises on the infinities a Number literal may denote and accepts the non-ASCII digits a
+    property key may spell.
     """
     prop = member.property
     if not member.computed:
         return range(0)
     if isinstance(prop, JsNumericLiteral):
-        index = int(prop.value)
-        return range(index, index + 1) if index == prop.value and 0 <= index < count else range(0)
-    if isinstance(prop, JsStringLiteral):
-        text = prop.value
-        if text.isdigit() and str(int(text)) == text and int(text) < count:
-            return range(int(text), int(text) + 1)
+        index = exact_integer(prop.value)
+    elif isinstance(prop, JsStringLiteral):
+        index = canonical_array_index(prop.value)
+    else:
+        return None
+    if index is None or not 0 <= index < count:
         return range(0)
-    return range(count)
+    return range(index, index + 1)
 
 
 def _is_member_assignment_target(member: JsMemberExpression) -> bool:
@@ -1595,20 +1658,50 @@ class SemanticModel:
 
         `has_mapped_arguments` decides which functions have such an object at all, so a strict body, an
         arrow, and any list holding a default, a rest element or a destructuring pattern contribute
-        nothing. Where the object is reached is `walk_receiver_scope`: an arrow reads the enclosing
-        `arguments` and is descended, a nested function has its own and is not.
+        nothing. It is asked of the sloppy case first and the mode only afterwards, which is the same
+        conjunction it states — no function has such an object in strict mode — asked in the order that
+        pays for it: the mode is a climb to the root per function, while everything else is local, and
+        almost no function is a candidate.
+
+        Where the object is reached is `walk_receiver_scope`: an arrow reads the enclosing `arguments`
+        and is descended, a nested function has its own and is not.
 
         An element access is attributed to the parameter it names and carries that access's own role, so
         `arguments[0] = 9` is a write of the first parameter and not merely a read of it. Every other use
         of the object — a key the model cannot name, the object handed to a call, the object bound to a
         second name — is recorded as a read of every parameter: reading is what makes a write to a
         parameter observable, which is the fact a remover needs, while a write is a definite point in the
-        flow that a use of the object as a value does not give.
+        flow that a use of the object as a value does not give. `arguments[i] = v` for an `i` the model
+        cannot read is therefore a read of every parameter and a write of none: it may write any one of
+        them, and recording that as a definite write of each would let a fold answer with a value only
+        one of them can hold.
+
+        The name is resolved rather than matched, because a body may bind `arguments` itself — as a
+        parameter, a `var`, or a catch parameter — and may also assign over the one it was given. In
+        either case the name denotes something whose elements alias nothing, so attributing an access
+        to a parameter would credit the parameter with a write the program never makes. Such a function
+        is left alone entirely rather than up to the point of the rebinding, because which accesses run
+        before it is a question about flow that a walk over the text does not answer.
+
+        What displaces the object is a value put in its place, which `_rebinds_arguments` decides.
+        `var arguments;` does not: it declares a name the function already has, and a `var` with no
+        initializer leaves the value it finds there, so the object and its aliasing are what they were.
+        Refusing such a function would stop recording the reads that keep a write to a parameter alive,
+        and that write would then be dropped as dead.
+
+        A name that resolves to nothing is still taken for the object where it stands: resolution
+        answers `None` for a free name and across a `with`, neither of which is evidence that something
+        else was bound.
         """
         for fn in self.root.walk():
             if not isinstance(fn, (JsFunctionExpression, JsFunctionDeclaration)):
                 continue
-            if not has_mapped_arguments(fn, strict=strict_mode_at(fn)):
+            if not has_mapped_arguments(fn, strict=False) or strict_mode_at(fn):
+                continue
+            own = self.lookup('arguments', self._node_scope.get(id(fn.body)))
+            if own is None or own.kind is not BindingKind.ARGUMENTS:
+                continue
+            if _rebinds_arguments(own):
                 continue
             params = [
                 self.binding_of(param) if isinstance(param, JsIdentifier) else None
@@ -1617,14 +1710,19 @@ class SemanticModel:
             for node in walk_receiver_scope(fn):
                 if not isinstance(node, JsIdentifier) or node.name != 'arguments':
                     continue
-                if not is_use_position(node):
+                if not self.is_reference(node):
                     continue
-                parent = node.parent
-                if isinstance(parent, JsMemberExpression) and parent.object is node:
-                    role = reference_role(parent)
-                    for index in _aliased_parameter_positions(parent, len(params)):
-                        self._record_alias_reference(params[index], parent, role)
+                denotes = self.resolve(node)
+                if denotes is not None and denotes.kind is not BindingKind.ARGUMENTS:
                     continue
+                access = _enclosing_member_access(node)
+                if access is not None:
+                    named = _aliased_parameter_positions(access, len(params))
+                    if named is not None:
+                        role = reference_role(access)
+                        for index in named:
+                            self._record_alias_reference(params[index], access, role)
+                        continue
                 for binding in params:
                     self._record_alias_reference(binding, node, Role.READ)
 

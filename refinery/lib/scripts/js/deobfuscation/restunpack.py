@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from refinery.lib.scripts import Node, _replace_in_parent, set_body
+from refinery.lib.scripts import Node, _replace_in_parent
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.model import SemanticModel, references_own_arguments
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
     canonical_array_index,
+    insert_after_prologue,
     member_key,
     numeric_value,
 )
@@ -419,7 +420,10 @@ class JsRestArrayUnpacking(ScriptLevelTransformer):
         locals_: list[str],
     ) -> None:
         """
-        Insert `var` declarations for the locals the rewrite minted.
+        Insert `var` declarations for the locals the rewrite minted, behind the body's Directive
+        Prologue rather than ahead of it: a declaration written above a `'use strict'` ends the
+        prologue before it is reached and the unpacked function runs sloppy where the source wrote it
+        strict.
         """
         if not locals_:
             return
@@ -432,4 +436,4 @@ class JsRestArrayUnpacking(ScriptLevelTransformer):
             d.parent = decl
             if d.id is not None:
                 d.id.parent = d
-        set_body(body, [decl, *body.body])
+        insert_after_prologue(body, [decl])

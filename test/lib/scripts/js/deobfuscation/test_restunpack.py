@@ -542,3 +542,71 @@ class TestARestArrayThePassUnpacks(TestJsDeobfuscator):
                 for source, (_, printed) in rows.items()
             },
         )
+
+
+class TestABodyThatOpensWithADirective(TestJsDeobfuscator):
+    """
+    The locals the unpacking mints are declared behind the body's Directive Prologue and not ahead
+    of it. A statement written above the prologue ends it, so a declaration at the head of the body
+    takes the directive out of the prologue and leaves what was written as a mode declaration as an
+    expression whose value is discarded.
+
+    Which mode that costs cannot be asked of the source: a Use Strict Directive may not stand under
+    a parameter list that is not simple, so the function this pass takes in is one no engine reads.
+    The function it hands back has a list of plain names and is a program, and the mode it runs in
+    is the question the engine can answer.
+    """
+
+    def _demask(self, source: str) -> str:
+        return self._run_transformer(source, JsRestArrayUnpacking)
+
+    A_BODY_DECLARING_STRICT_MODE = (
+        "var f = function (...s) { 'use strict'; s.length = 1; s.a = 1; leaked = s.a;"
+        ' return s[0] + s.a; };\n'
+        'try { console.log(f(1)); } catch (e) { console.log(e.name); }'
+    )
+
+    def test_the_directive_still_opens_the_unpacked_body(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var f = function(p0) {
+                  'use asm';
+                  var v0;
+                  v0 = 10;
+                  return p0 + v0;
+                };
+                """
+            ),
+            self._demask(
+                "var f = function (...s) { 'use asm'; s.length = 1; s.a = 10; return s[0] + s.a; };"
+            ),
+        )
+
+    def test_the_unpacked_function_declares_the_mode_the_directive_declares(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var f = function(p0) {
+                  'use strict';
+                  var v0;
+                  v0 = 1;
+                  leaked = v0;
+                  return p0 + v0;
+                };
+                try {
+                  console.log(f(1));
+                } catch (e) {
+                  console.log(e.name);
+                }
+                """
+            ),
+            self._demask(self.A_BODY_DECLARING_STRICT_MODE),
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_runs_the_unpacked_function_strict(self):
+        self.assertEqual(
+            ('ReferenceError\n', None),
+            behavior(self._demask(self.A_BODY_DECLARING_STRICT_MODE)),
+        )

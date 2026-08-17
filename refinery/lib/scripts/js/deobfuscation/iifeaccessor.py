@@ -216,8 +216,11 @@ class JsIIFEAccessorPromoter(ScriptLevelTransformer):
 
     def _promote(self, pattern: _Pattern) -> None:
         """
-        Rewrite the accessor as a plain function declaration, moving the closure's declarations into
-        the inner function's body.
+        Rewrite the accessor as a function declaration of the same kind, moving the closure's
+        declarations into the inner function's body. The kind is carried rather than defaulted: an
+        accessor that was `async` returns a promise and one that was a generator returns an iterator,
+        and a declaration that dropped either would compute a different value — a `yield` left in a
+        body no longer marked `*` does not even parse.
 
         They go behind that body's Directive Prologue rather than at its head. A declaration written
         above a `'use strict'` ends the prologue before it is reached, and the promoted function runs
@@ -240,6 +243,8 @@ class JsIIFEAccessorPromoter(ScriptLevelTransformer):
             id=JsIdentifier(name=pattern.name),
             params=[_clone_node(p) for p in inner.params],
             body=JsBlockStatement(body=new_body_stmts),
+            generator=isinstance(inner, JsFunctionExpression) and inner.generator,
+            is_async=inner.is_async,
         )
         _replace_in_parent(pattern.declaration, new_func)
         self.mark_changed()
