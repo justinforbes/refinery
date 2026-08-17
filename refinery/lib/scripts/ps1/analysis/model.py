@@ -40,7 +40,6 @@ from typing import Iterator
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.analysis.arguments import (
-    NOTHING,
     RECEIVER,
     Ps1WrittenSlots,
     written_slots,
@@ -319,19 +318,22 @@ def _stores_through_a_call_slot(found: _CallSlotPosition | None) -> bool:
     """
     if found is None:
         return False
-    if not isinstance(found.call.member, str):
-        return True
-    return found.slot in _written_slots_of(found.call).slots
-
-
-def _written_slots_of(call: Ps1InvokeMember) -> Ps1WrittenSlots:
-    """
-    Which slots of *call* the callee writes through, given only the call. The receiver's type is not
-    asked for; see `written_call_slot`.
-    """
-    member = call.member
+    member = found.call.member
     if not isinstance(member, str):
-        return NOTHING
+        return True
+    return found.slot in _written_slots_of(found.call, member).slots
+
+
+def _written_slots_of(call: Ps1InvokeMember, member: str) -> Ps1WrittenSlots:
+    """
+    Which slots of *call* the callee writes through, given only the call and the name of the member
+    it runs. The receiver's type is not asked for; see `written_call_slot`.
+
+    The member is a parameter rather than read off the call, because a call whose member cannot be
+    named has no answer here at all — `NOTHING` would be the claim that it writes nothing and
+    `UNBOUND` a doubt about an arity that was never in question. `_stores_through_a_call_slot` is
+    where that call is answered, and every caller here has already read the name.
+    """
     static = call.access is Ps1AccessKind.STATIC
     named = call.object
     resolved = (
@@ -360,9 +362,9 @@ def written_call_slot(var: Ps1Variable) -> Ps1CallSlot | None:
     `_stores_through_a_call_slot` says, which is the refusal that belongs to it.
     """
     found = _enclosing_call_slot(var)
-    if found is None or not isinstance(found.call.member, str):
+    if found is None or not isinstance(member := found.call.member, str):
         return None
-    written = _written_slots_of(found.call)
+    written = _written_slots_of(found.call, member)
     if found.slot not in written.slots:
         return None
     return Ps1CallSlot(
@@ -549,28 +551,37 @@ class Ps1AliasLink(typing.NamedTuple):
         return self.first if binding is self.second else None
 
 
+def _link_adjacency(links: list[Ps1AliasLink]) -> dict[int, list[Ps1AliasLink]]:
+    """
+    The links touching each binding, keyed by the binding's identity. One map per alias class and
+    not one per walk over it: the map is a fact about the class, and rebuilding it for every name a
+    walk starts at costs the class its own size again for each of them.
+    """
+    adjacent: dict[int, list[Ps1AliasLink]] = {}
+    for link in links:
+        adjacent.setdefault(id(link.first), []).append(link)
+        adjacent.setdefault(id(link.second), []).append(link)
+    return adjacent
+
+
 def _alias_chains_from(
-    links: list[Ps1AliasLink],
+    adjacent: dict[int, list[Ps1AliasLink]],
     source: Binding,
 ) -> dict[int, tuple[Ps1AliasLink, ...]]:
     """
-    A shortest run of *links* joining *source* to every binding it reaches, keyed by the reached
-    binding's identity.
+    A shortest run of links joining *source* to every binding it reaches, keyed by the reached
+    binding's identity, over the adjacency `_link_adjacency` built for the class.
 
     Shortest because every link on the chain is a claim the ordering layer has to find intact, so a
     detour is a refusal waiting to happen rather than extra evidence. Which end the run is walked
     from does not matter: `Ps1AliasLink` joins its two bindings without ordering them, and
     `Ps1VariableFlow._alias_holds_at` asks the same question of every link on the run.
 
-    One walk per store and not one per pair of names. A walk from the name a store is spelled on
-    already reaches every other name on the way, so asking it again for each of them is the
-    difference between a class costing its own size and costing the square of it — measured, a
-    chain of eighty names took a second and a half to file and now takes a hundredth.
+    One walk per name a store is spelled on, and not one per pair of names, nor one per store. A
+    walk from that name already reaches every other name on the way, so asking it again for each of
+    them is the difference between a class costing its own size and costing the square of it —
+    measured, a chain of eighty names took a second and a half to file and now takes a hundredth.
     """
-    adjacent: dict[int, list[Ps1AliasLink]] = {}
-    for link in links:
-        adjacent.setdefault(id(link.first), []).append(link)
-        adjacent.setdefault(id(link.second), []).append(link)
     reached: dict[int, tuple[Ps1AliasLink, ...]] = {}
     frontier: deque[tuple[Binding, tuple[Ps1AliasLink, ...]]] = deque([(source, ())])
     seen = {id(source)}
@@ -784,10 +795,7 @@ class Ps1SemanticModel:
         """
         if self._changes_in_place is None:
             self._changes_in_place = any(
-                write.role.through
-                for binding in self._every_binding()
-                for write in binding.writes
-            )
+                write.role.through for write in self._every_write())
         return self._changes_in_place
 
     def scope_of(self, node: Node) -> Scope | None:
@@ -1031,10 +1039,11 @@ class Ps1SemanticModel:
             ]
             if not stores:
                 continue
-            reached = {
-                id(source): _alias_chains_from(links, source)
-                for source, _ in stores
-            }
+            adjacent = _link_adjacency(links)
+            reached: dict[int, dict[int, tuple[Ps1AliasLink, ...]]] = {}
+            for source, _ in stores:
+                if id(source) not in reached:
+                    reached[id(source)] = _alias_chains_from(adjacent, source)
             for binding in members:
                 filed = {id(write.node) for write in binding.writes}
                 for source, write in stores:
@@ -1093,12 +1102,17 @@ class Ps1SemanticModel:
         the variable — because the object either name ends up holding is the same question in all
         three. Measured: `$x = 1, 2, 3; $y = [array]$x; $y[0] = 9` leaves `$x` reading `9 2 3`.
 
-        A constraint the *binding* carries counts as much as one this occurrence spells, because
-        PowerShell stores it on the variable and converts every later write through it. Measured:
-        `[string]$y = 0; $x = 1, 2, 3; $y = $x; [Array]::Reverse($x); $y` writes `1 2 3`, because
-        `$y` was handed the String `1 2 3` and never the array — so the definition that reads as
-        the plainest of all is the one a constraint three statements above has already converted.
-        `Binding.constraints` is therefore filed before this runs; see `_build_def_use`.
+        A constraint the *target* binding carries counts as much as one this occurrence spells,
+        because PowerShell stores it on the variable and converts every later write through it.
+        Measured: `[string]$y = 0; $x = 1, 2, 3; $y = $x; [Array]::Reverse($x); $y` writes `1 2 3`,
+        because `$y` was handed the String `1 2 3` and never the array — so the definition that
+        reads as the plainest of all is the one a constraint three statements above has already
+        converted. `Binding.constraints` is therefore filed before this runs; see `_build_def_use`.
+
+        A constraint the *named* binding carries is not one of these. It converted what that name
+        was written with, at the write that carried it, and a read of the name hands over whatever
+        it holds with nothing converting on the way out — measured, `[array]$x = 1, 2, 3; $y = $x;
+        [Array]::Reverse($x); $y` writes `3 2 1`, the same as the script without the constraint.
         """
         for write in self._every_write():
             if write.may_define or not isinstance(write.node, Ps1Variable) or write.role.through:
@@ -1123,8 +1137,7 @@ class Ps1SemanticModel:
             named = self._binding_of.get(id(source))
             if target is None or named is None or target is named:
                 continue
-            certain = certain and not target.constraints and not named.constraints
-            yield Ps1AliasLink(write.node, target, named, certain)
+            yield Ps1AliasLink(write.node, target, named, certain and not target.constraints)
 
     def _every_write(self) -> Iterator[Occurrence]:
         for binding in self._every_binding():

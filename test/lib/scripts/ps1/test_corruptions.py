@@ -30,6 +30,7 @@ The scoping facts the entries rest on, all measured:
 """
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from typing import NamedTuple
@@ -304,6 +305,50 @@ def _piped_into(root: Node, key: str, names: frozenset[str]) -> list[Ps1CommandI
     return found
 
 
+def _pipeline_pairs(
+    root: Node,
+    writing: frozenset[str],
+    binding: frozenset[str],
+) -> list[tuple[Ps1CommandInvocation, Ps1CommandInvocation]]:
+    """
+    Every pair of commands `root` still spells one behind the other in a pipeline, the first named
+    in `writing` and the second in `binding`. What the second one binds is what the first one wrote,
+    so the object it is handed is named among the first command's arguments and nowhere among its
+    own, which is why `_piped_into` cannot find it: nothing pipes a variable in directly.
+    """
+    found: list[tuple[Ps1CommandInvocation, Ps1CommandInvocation]] = []
+    for node in root.walk():
+        if not isinstance(node, Ps1Pipeline):
+            continue
+        for source, sink in zip(node.elements, node.elements[1:]):
+            writer = _unwrap(source.expression)
+            binder = _unwrap(sink.expression)
+            if (
+                isinstance(writer, Ps1CommandInvocation)
+                and isinstance(writer.name, Ps1StringLiteral)
+                and writer.name.value.lower() in writing
+                and isinstance(binder, Ps1CommandInvocation)
+                and isinstance(binder.name, Ps1StringLiteral)
+                and binder.name.value.lower() in binding
+            ):
+                found.append((writer, binder))
+    return found
+
+
+def _wraps_as_one_record(node: Node | None, key: str) -> bool:
+    """
+    Whether `node` is the one-element array a unary comma builds around the variable under `key`. A
+    command hands such an array on as the single object it holds, where the array the variable holds
+    by itself would be written one element at a time.
+    """
+    node = _unwrap(node)
+    return (
+        isinstance(node, Ps1ArrayLiteral)
+        and len(node.elements) == 1
+        and _reads_variable(node.elements[0], key)
+    )
+
+
 def _supplies_array(root: Node, node: Node | None, values: list) -> bool:
     """
     Whether `node` still hands on an array of `values`: either it spells them where it stands, or it
@@ -457,6 +502,14 @@ def _binds(command: Ps1CommandInvocation, parameter: str) -> bool:
         for name in _switch_spellings(command)
         if (written := name.lstrip('-').lower())
     )
+
+
+def _binds_the_name(command: Ps1CommandInvocation, name: str) -> bool:
+    """
+    Whether `command` still spells `name` where the name it binds goes. The value bound to that name
+    arrives from the pipeline, so the name is the whole of what the command's own arguments carry.
+    """
+    return name in [_literal_value(value) for value in _positional_values(command)]
 
 
 def _passes_variable(root: Node, key: str) -> bool:
@@ -1548,20 +1601,56 @@ class TestPs1AStoreThroughAContainerReachesTheArrayTheContainerWasHanded(_Ps1Led
     front — `9 2 3` for the first four and `7 2 3` for the multi-assignment — and never the `1 2 3`
     the array held when the container was filled.
 
+    What each entry asks of the output is that the position still *names* `$x`. An array spelled
+    where the name stood is a second array of the same three numbers, which is what a store made
+    through `$x` reaches in no script and what the read of the container observes in none — the
+    identity is the whole claim, and only naming carries it. Asking merely for an array of `1, 2, 3`
+    is the same question of the two spellings and answers neither.
+
     The property shape is given a receiver that has the property, because `New-Object PSObject`
     mints none: measured, `$o = New-Object PSObject; $o.P = $x` throws rather than storing, and a
     script that throws before it reaches the shape under test states nothing about it.
     """
 
-    #: The same five shapes with nothing storing through the container afterwards. 5.1 writes
-    #: `1 2 3` for each, so the array may be spelled where the name stands, and that these are
-    #: answered is what keeps the refusals above from being the whole shape refused wholesale.
+    #: The same five shapes with nothing storing through the container afterwards. Measured on 5.1
+    #: in `corpus.BEHAVIOURS`, each writes `1 2 3`, so the array may be spelled where the name
+    #: stands, and that these are answered is what keeps the refusals above from being the whole
+    #: shape refused wholesale.
+    #:
+    #: The last two carry that weight for the hash literal and the multi-assignment only in the
+    #: sense that every shape does: neither spells a store through a container, so neither reaches
+    #: the narrowing the first three control. They are kept because the claim they make — that these
+    #: positions are answered when nothing mutates — is the claim that fails first if the refusal is
+    #: ever widened from the position to the shape.
     _UNREACHED = (
-        "$h = @{}\n$h['k'] = $x\nWrite-Output $h['k']",
-        '$o = [pscustomobject]@{ P = 0 }\n$o.P = $x\nWrite-Output $o.P',
-        '$a = 0, 0\n$a[0] = $x\nWrite-Output $a[0]',
-        '$h = @{ k = $x }\nWrite-Output $h.k',
-        '$a, $b = $x, 9\nWrite-Output $a',
+        inspect.cleandoc("""
+            $x = 1, 2, 3
+            $h = @{}
+            $h['k'] = $x
+            Write-Output $h['k']
+        """),
+        inspect.cleandoc("""
+            $x = 1, 2, 3
+            $o = [pscustomobject]@{ P = 0 }
+            $o.P = $x
+            Write-Output $o.P
+        """),
+        inspect.cleandoc("""
+            $x = 1, 2, 3
+            $a = 0, 0
+            $a[0] = $x
+            Write-Output $a[0]
+        """),
+        inspect.cleandoc("""
+            $x = 1, 2, 3
+            $h = @{ k = $x }
+            Write-Output $h.k
+        """),
+        inspect.cleandoc("""
+            $x = 1, 2, 3
+            $a, $b = $x, 9
+            Write-Output $a
+        """),
     )
 
     def _assertKeepsTheArray(
@@ -1573,9 +1662,9 @@ class TestPs1AStoreThroughAContainerReachesTheArrayTheContainerWasHanded(_Ps1Led
     ) -> None:
         """
         The output must still be able to write the array with `stored` at its front: either it
-        already spells it, or the container under `key` is still handed the array and a store
-        through that container still reaches it. `1 2 3` is what the output writes in its place
-        when it answers the read with the array as it stood before that store.
+        already spells it, or the container under `key` is still handed the array `$x` names and a
+        store through that container still reaches it. `1 2 3` is what the output writes in its
+        place when it answers the read with the array as it stood before that store.
         """
         takes_the_store = any(
             _emitted_constants(store.value) == [stored]
@@ -1588,7 +1677,7 @@ class TestPs1AStoreThroughAContainerReachesTheArrayTheContainerWasHanded(_Ps1Led
         tree = self._deobfuscated_tree(
             "$x = 1, 2, 3; $h = @{}; $h['k'] = $x; $h['k'][0] = 9; Write-Output $h['k']")
         holds_the_array = any(
-            _supplies_array(tree, store.value, [1, 2, 3])
+            _reads_variable(store.value, 'x')
             for store in _container_stores(tree, 'h')
         )
         self._assertKeepsTheArray(tree, 'h', 9, holds_the_array)
@@ -1598,7 +1687,7 @@ class TestPs1AStoreThroughAContainerReachesTheArrayTheContainerWasHanded(_Ps1Led
             '$x = 1, 2, 3; $o = [pscustomobject]@{ P = 0 }; $o.P = $x; $o.P[0] = 9; '
             'Write-Output $o.P')
         holds_the_array = any(
-            _supplies_array(tree, store.value, [1, 2, 3])
+            _reads_variable(store.value, 'x')
             for store in _container_stores(tree, 'o')
         )
         self._assertKeepsTheArray(tree, 'o', 9, holds_the_array)
@@ -1607,7 +1696,7 @@ class TestPs1AStoreThroughAContainerReachesTheArrayTheContainerWasHanded(_Ps1Led
         tree = self._deobfuscated_tree(
             '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; $a[0][0] = 9; Write-Output $a[0]')
         holds_the_array = any(
-            _supplies_array(tree, store.value, [1, 2, 3])
+            _reads_variable(store.value, 'x')
             for store in _container_stores(tree, 'a')
         )
         self._assertKeepsTheArray(tree, 'a', 9, holds_the_array)
@@ -1616,7 +1705,7 @@ class TestPs1AStoreThroughAContainerReachesTheArrayTheContainerWasHanded(_Ps1Led
         tree = self._deobfuscated_tree(
             '$x = 1, 2, 3; $h = @{ k = $x }; $h.k[0] = 9; Write-Output $h.k')
         holds_the_array = any(
-            _supplies_array(tree, value, [1, 2, 3])
+            _reads_variable(value, 'x')
             for store in _stores(tree, 'h')
             for value in _hash_values(store.value)
         )
@@ -1626,7 +1715,7 @@ class TestPs1AStoreThroughAContainerReachesTheArrayTheContainerWasHanded(_Ps1Led
         tree = self._deobfuscated_tree(
             '$x = 1, 2, 3; $a, $b = $x, 9; $a[0] = 7; Write-Output $a')
         holds_the_array = any(
-            _supplies_array(tree, element, [1, 2, 3])
+            _reads_variable(element, 'x')
             for store in _stores(tree, 'a')
             if isinstance(value := _unwrap(store.value), Ps1ArrayLiteral)
             for element in value.elements
@@ -1636,7 +1725,7 @@ class TestPs1AStoreThroughAContainerReachesTheArrayTheContainerWasHanded(_Ps1Led
     def test_the_same_shapes_take_the_value_where_no_store_reaches_the_container(self):
         for container in self._UNREACHED:
             with self.subTest(container):
-                tree = self._deobfuscated_tree(F'$x = 1, 2, 3\n{container}')
+                tree = self._deobfuscated_tree(container)
                 self.assertEqual(_occurrences(tree, 'x'), [])
 
 
@@ -1700,16 +1789,20 @@ class TestPs1AConstrainedNameNeverHoldsTheArrayThatWasAssignedToIt(_Ps1Ledger):
         self.assertEqual(_output_writes(tree), [[3, 2, 1]])
 
 
-class TestPs1AValuePipedIntoANameBindingCommandIsBoundToThatName(_Ps1Ledger):
+class TestPs1AValuePipedIntoANameBindingCommandIsBoundToWhatThePipelineWrote(_Ps1Ledger):
     """
-    `Set-Variable` takes the value it binds from the pipeline rather than from an argument, so
-    `$x | Set-Variable z` leaves `$z`, `$x` and `$y` on one array and a store through any of the
-    three is one a read of the others observes. In 5.1 the `$y[0] = 9` below it therefore leaves the
-    read of `$z` writing `9 2 3`, and nothing in the argument list of the command names the array
-    that reached it.
+    A pipeline enumerates what it is handed, so `$x | Set-Variable z` binds `$z` to a collection
+    built from the elements rather than to the array `$x` holds. Measured on 5.1 in
+    `corpus.BEHAVIOURS`, the `$y[0] = 9` below therefore leaves the read of `$z` writing `1 2 3`:
+    the store reaches the array `$x` and `$y` share, and `$z` is not on it.
+
+    This is the control for the class below it, where `-NoEnumerate` sends the array on as one
+    record and the share is real — the two scripts differ by a switch and 5.1 answers them
+    oppositely, `1 2 3` here and `9 2 3` there. An output that read a pipe as a hand-off would
+    satisfy one and corrupt the other, which asking only the second cannot tell.
     """
 
-    def test_a_name_bound_from_the_pipeline_is_on_the_array_that_was_piped_into_it(self):
+    def test_a_name_bound_from_an_enumerating_pipeline_is_not_on_the_array_piped_into_it(self):
         tree = self._deobfuscated_tree(
             '$x = 1, 2, 3; $y = $x; $x | Set-Variable z; $y[0] = 9; Write-Output $z')
         bound = any(
@@ -1717,7 +1810,97 @@ class TestPs1AValuePipedIntoANameBindingCommandIsBoundToThatName(_Ps1Ledger):
             for command in _piped_into(tree, 'x', _SET_VARIABLE)
             for value in _positional_values(command)
         )
-        aliased = any(_reads_variable(store.value, 'x') for store in _stores(tree, 'y'))
-        stored = any(
-            _emitted_constants(store.value) == [9] for store in _element_stores(tree, 'y'))
-        self._assertWrites(tree, [[9, 2, 3]], [[1, 2, 3]], bound and aliased and stored)
+        self._assertWrites(tree, [[1, 2, 3]], [[9, 2, 3]], bound)
+
+
+class TestPs1AValueReachingANameBindingCommandThroughACommandStillReachesIt(_Ps1Ledger):
+    """
+    `Write-Output -NoEnumerate $x` and `Write-Output (,$x)` each write the array `$x` holds as one
+    record instead of one record per element, and a command binding a name from the pipeline binds
+    it to the single record that reached it. Under 5.1 `$z` and `$x` therefore name one array, and
+    the `$x[0] = 9` behind the pipeline leaves the read of `$z` writing `9 2 3`.
+
+    Nothing in either argument list spells that `9`, and the binding command is not handed the array
+    directly either: it takes what the command ahead of it wrote. So the whole of what carries the
+    store to the read is that the command ahead is still handed the array the name holds. An array
+    spelled where `$x` stands is a second array of the same three numbers, and it is that one which
+    is bound to `$z` while the store below reaches the other.
+    """
+
+    def _assertBoundToTheArray(self, tree: Ps1Script, bound: bool) -> None:
+        """
+        The output must still be able to write `9 2 3` for `$z`: either it already spells it, or
+        `bound` reports that the array `$x` names still reaches the command binding the name, and
+        the store that puts the `9` into that array still stands. `1 2 3` is what the output writes
+        in its place when the command was handed an array of its own.
+        """
+        stored = any(_emitted_constants(store.value) == [9] for store in _element_stores(tree, 'x'))
+        self._assertWrites(tree, [[9, 2, 3]], [[1, 2, 3]], bound and stored)
+
+    def test_a_name_bound_behind_a_command_told_not_to_enumerate_is_on_the_array_it_wrote(self):
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; Write-Output -NoEnumerate $x | Set-Variable z; $x[0] = 9; '
+            'Write-Output $z')
+        bound = any(
+            _binds(writer, 'noenumerate')
+            and any(_reads_variable(value, 'x') for value in _argument_values(writer))
+            and _binds_the_name(binder, 'z')
+            for writer, binder in _pipeline_pairs(tree, _WRITE_OUTPUT, _SET_VARIABLE)
+        )
+        self._assertBoundToTheArray(tree, bound)
+
+    def test_a_name_bound_behind_a_command_handed_one_wrapped_array_is_on_that_array(self):
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; Write-Output (,$x) | Set-Variable z; $x[0] = 9; Write-Output $z')
+        bound = any(
+            any(_wraps_as_one_record(value, 'x') for value in _argument_values(writer))
+            and _binds_the_name(binder, 'z')
+            for writer, binder in _pipeline_pairs(tree, _WRITE_OUTPUT, _SET_VARIABLE)
+        )
+        self._assertBoundToTheArray(tree, bound)
+
+
+class TestPs1AStoreIntoAPlaceOfAnArrayDoesNotExcuseTheReadOfItsName(_Ps1Ledger):
+    """
+    `$x = 1, 2, 3; $x[0] = $x` puts the array into its own first element, so `$x[0]` is that array
+    and `[Object]::ReferenceEquals($x[0], $x)` writes `True` under 5.1. The target of that
+    assignment is rooted at `$x` and its value reads `$x`, and the one does not excuse the other: an
+    array spelled where the value stands is a second array, and the comparison writes `False`.
+
+    `$a = $x` ahead of the store changes nothing, the two names being one array: `$a[0] = $x` puts
+    that array into itself exactly as `$x[0] = $x` does.
+
+    The comparison is bound to a name and that name is written, rather than being written where it
+    stands, because an argument holding a static call is a bracket the synthesizer does not put back
+    — a defect of its own, and one a script asserting something else has no business tripping.
+    """
+
+    def _assertStoresTheArrayItself(self, tree: Ps1Script, key: str) -> None:
+        self.assertTrue(
+            [store for store in _element_stores(tree, key) if _reads_variable(store.value, 'x')],
+            F'${key} was given an array of its own, which is not the one $x holds',
+        )
+        self.assertTrue(
+            [
+                call for call in _static_calls(tree, 'object', 'referenceequals')
+                if len(call.arguments) == 2
+                and _reads_variable(call.arguments[0], key)
+                and _reads_variable(call.arguments[1], 'x')
+            ],
+            'the comparison that observes the two as one array was dropped',
+        )
+
+    def test_an_array_written_into_an_element_of_itself_is_the_one_the_name_holds(self):
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; $x[0] = $x; $r = [Object]::ReferenceEquals($x[0], $x); Write-Output $r')
+        self._assertStoresTheArrayItself(tree, 'x')
+
+    def test_an_array_written_into_an_element_reached_by_its_other_name_is_that_one_too(self):
+        tree = self._deobfuscated_tree(
+            '$x = 1, 2, 3; $a = $x; $a[0] = $x; '
+            '$r = [Object]::ReferenceEquals($a[0], $x); Write-Output $r')
+        self.assertTrue(
+            any(_reads_variable(store.value, 'x') for store in _stores(tree, 'a')),
+            'the two names were taken off the one array',
+        )
+        self._assertStoresTheArrayItself(tree, 'a')

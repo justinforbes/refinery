@@ -2343,3 +2343,120 @@ class TestPs1ATypeSpelledTwoWaysIsOneConstraintOnTheVariable(TestPs1):
             Write-Output $q
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output 'ab'")
+
+
+class TestPs1AValueNoStoreCanReachFoldsBesideAnObjectAStoreDoes(TestPs1):
+    """
+    A String, an Int32 and a Char have no identity a store reaches: nothing a script does to an
+    object it holds elsewhere changes what one of them is. So the constants standing beside an array
+    the script turns around, or writes an element of, still fold into the positions that store them
+    — an accumulation, a key of a hashtable literal, a slot of a multi-assignment — and the array
+    keeps its name where the call that writes through it stands.
+    """
+
+    def test_a_string_folds_into_an_accumulation_beside_an_array_that_is_reversed(self):
+        source = inspect.cleandoc("""
+            $b = 1, 2, 3
+            [Array]::Reverse($b)
+            $s = 'abc'
+            $t = ''
+            $t += $s
+            Write-Output $t
+        """)
+        expected = inspect.cleandoc("""
+            $b = 1, 2, 3
+            [Array]::Reverse($b)
+            $t = ''
+            $t += 'abc'
+            Write-Output $t
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_string_folds_into_a_hashtable_key_beside_an_array_that_is_reversed(self):
+        source = inspect.cleandoc("""
+            $b = 1, 2, 3
+            [Array]::Reverse($b)
+            $s = 'abc'
+            $h = @{ k = $s }
+            Write-Output $h['k']
+        """)
+        expected = inspect.cleandoc("""
+            $b = 1, 2, 3
+            [Array]::Reverse($b)
+            $h = @{
+              k = 'abc'
+            }
+            Write-Output $h['k']
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_string_folds_into_a_multi_assignment_slot_beside_an_array_that_is_reversed(self):
+        source = inspect.cleandoc("""
+            $b = 1, 2, 3
+            [Array]::Reverse($b)
+            $s = 'abc'
+            $u, $v = $s, 9
+            Write-Output $u
+        """)
+        expected = inspect.cleandoc("""
+            $b = 1, 2, 3
+            [Array]::Reverse($b)
+            $u, $v = 'abc', 9
+            Write-Output $u
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_string_folds_into_a_hashtable_key_beside_an_array_an_element_is_written_of(self):
+        source = inspect.cleandoc("""
+            $x = 1, 2, 3
+            $x[0] = 9
+            $h = @{ p = $PSHome }
+            Write-Output $h
+        """)
+        expected = inspect.cleandoc(R"""
+            $x = 1, 2, 3
+            $x[0] = 9
+            $h = @{
+              p = 'C:\Windows\System32\WindowsPowerShell\v1.0'
+            }
+            Write-Output $h
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+
+class TestPs1AConstraintOnTheNameBeingReadLeavesTheArrayItHandsOver(TestPs1):
+    """
+    `[Object[]]$x = 1, 2, 3` converts what that write carried and leaves `$x` on the array the
+    conversion produced. A read of the name converts nothing further, so `$y = $x` hands `$y` that
+    same array and `[Array]::Reverse($x)` turns around what both names hold: 5.1 writes `3 2 1`.
+
+    A constraint on the name being written is the other question and keeps the other answer.
+    `[string]$y = 0` converts everything a later write to `$y` arrives with, so `$y = $x` leaves
+    `$y` holding the String `1 2 3`, which is not an array at all and which the reversal below
+    reaches nothing of.
+    """
+
+    def test_a_constraint_on_the_name_handing_the_array_over_leaves_the_reversal_answered(self):
+        source = inspect.cleandoc("""
+            [Object[]]$x = 1, 2, 3
+            $y = $x
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        expected = inspect.cleandoc("""
+            [Object[]]$x = 1, 2, 3
+            $y = $x
+            [Array]::Reverse($x)
+            Write-Output (3, 2, 1)
+        """)
+        self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_constraint_on_the_name_taking_the_array_still_refuses_the_reversal(self):
+        source = inspect.cleandoc("""
+            [string]$y = 0
+            $x = 1, 2, 3
+            $y = $x
+            [Array]::Reverse($x)
+            Write-Output $y
+        """)
+        self.assertEqual(self._deobfuscate(source), source)

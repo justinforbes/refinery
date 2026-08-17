@@ -351,6 +351,15 @@ BEHAVIOURS: tuple[str, ...] = (
     '$p = @(@(1, 2), @(3, 4)); foreach ($e in $p) { [Array]::Reverse($e) }; Write-Output $p[0]',
     '$x = 1, 2, 3; $y = if ($True) { $x }; $x[0] = 9; Write-Output $y[0]',
     'function f($a) { $script:k = $a }; $x = 1, 2, 3; f $x; $x[0] = 9; Write-Output $k[0]',
+    '$x = 1, 2, 3; $y = $x; $x | Set-Variable z; $y[0] = 9; Write-Output $z',
+    '$x = 1, 2, 3; Write-Output -NoEnumerate $x | Set-Variable z; $y = $x; $y[0] = 9; '
+    'Write-Output $z',
+    '$x = 1, 2, 3; $o = [pscustomobject]@{ P = 0 }; $o.P = $x; $x[0] = 9; Write-Output $o.P',
+    "$x = 1, 2, 3; $h = @{}; $h['k'] = $x; Write-Output $h['k']",
+    '$x = 1, 2, 3; $o = [pscustomobject]@{ P = 0 }; $o.P = $x; Write-Output $o.P',
+    '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; Write-Output $a[0]',
+    '$x = 1, 2, 3; $h = @{ k = $x }; Write-Output $h.k',
+    '$x = 1, 2, 3; $a, $b = $x, 9; Write-Output $a',
 )
 
 

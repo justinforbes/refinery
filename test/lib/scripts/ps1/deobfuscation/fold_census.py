@@ -213,6 +213,16 @@ FOLDS: dict[str, str] = {
         '$x = 1, 2, 3\n$y = if ($True) {\n  (1, 2, 3)\n}\n$x[0] = 9\nWrite-Output $y[0]',
     'function f($a) { $script:k = $a }; $x = 1, 2, 3; f $x; $x[0] = 9; Write-Output $k[0]':
         'function f {\n  Param($a)\n  $script:k = $a\n}\n$x = 1, 2, 3\nf (1, 2, 3)\n$x[0] = 9\nWrite-Output $k[0]',
+    "$x = 1, 2, 3; $h = @{}; $h['k'] = $x; Write-Output $h['k']":
+        "$h = @{}\n$h['k'] = (1, 2, 3)\nWrite-Output $h['k']",
+    '$x = 1, 2, 3; $o = [pscustomobject]@{ P = 0 }; $o.P = $x; Write-Output $o.P':
+        '$o = [pscustomobject]@{\n  P = 0\n}\n$o.P = (1, 2, 3)\nWrite-Output $o.P',
+    '$x = 1, 2, 3; $a = 0, 0; $a[0] = $x; Write-Output $a[0]':
+        '$a = 0, 0\n$a[0] = (1, 2, 3)\nWrite-Output $a[0]',
+    '$x = 1, 2, 3; $h = @{ k = $x }; Write-Output $h.k':
+        '$h = @{\n  k = (1, 2, 3)\n}\nWrite-Output $h.k',
+    '$x = 1, 2, 3; $a, $b = $x, 9; Write-Output $a':
+        '$a, $b = (1, 2, 3), 9\nWrite-Output $a',
     "Set-Variable global:y 'b'; Write-Host $global:y":
         'Write-Host $global:y',
     "$x = 'a'; $false -and ($x = 'b'); Write-Host $x":
