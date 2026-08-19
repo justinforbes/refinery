@@ -618,3 +618,43 @@ class TestTheAliasingIsHonouredWithoutForfeitingTheSimplification(TestBase):
     def test_a_write_the_aliasing_reaches_is_left_standing(self):
         rows = _AN_ALIASING_THAT_IS_OBSERVED
         self.assertEqual({source: _deobfuscated(source) for source in rows}, rows)
+
+
+#: A value taken out of a parameter ahead of a write through the object at a key no reading of the
+#: text computes, mapped to what Node prints for it. Such a write lands on exactly one parameter and
+#: which one is not decidable, so what every parameter held stops holding there, and a value read
+#: before it is not the value a read after it would find. The last row writes at a key that *is*
+#: decidable, where the parameter the write lands on is named and the ones beside it are untouched.
+_A_VALUE_READ_AHEAD_OF_AN_UNDECIDABLE_WRITE: dict[str, str] = {
+    'function f(a, b) { var t = a; arguments[b] = 9; return t; }'
+    ' console.log(f(1, 0));': '1\n',
+    'function f(a, b) { var t = a * 2; arguments[b] = 9; return t; }'
+    ' console.log(f(3, 0));': '6\n',
+    "function f(a, b) { var t = 'x' + a; arguments[b] = 9; return t; }"
+    ' console.log(f(1, 0));': 'x1\n',
+    'function f(a, b) { var t = !a; arguments[b] = 9; return t; }'
+    ' console.log(f(1, 0));': 'false\n',
+    'function f(p) { var t = p + 1; arguments[Date.now() > 0 ? 0 : 1] = 99; return t; }'
+    ' console.log(f(1));': '2\n',
+    'function f(a, b) { var t = a; arguments[0] = 9; return t; }'
+    ' console.log(f(1, 0));': '1\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAValueReadAheadOfAWriteThroughAKeyNothingComputes(TestBase):
+    """
+    A write through the object at a key the text does not decide is a write of one parameter and a
+    write of no *particular* parameter. Both halves are load-bearing. Attributing it to every
+    parameter would let a fold answer a later read with a value only one of them can hold; attributing
+    it to none leaves nothing saying that the value a parameter held stopped holding there, and a fold
+    is then free to carry a read taken ahead of the write past it.
+    """
+
+    def test_node_answers_each_program_with_the_value_read_ahead_of_the_write(self):
+        rows = _A_VALUE_READ_AHEAD_OF_AN_UNDECIDABLE_WRITE
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_each_program_the_same_way(self):
+        rows = _A_VALUE_READ_AHEAD_OF_AN_UNDECIDABLE_WRITE
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))

@@ -249,6 +249,7 @@ class Binding:
     reads: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
     writes: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
     dynamic_refs: list[JsIdentifier] = field(default_factory=list)
+    indefinite_writes: list[JsMemberExpression] = field(default_factory=list)
     captured: bool = False
 
     @property
@@ -286,6 +287,21 @@ class Binding:
         a separate reflection gate to keep such a binding.
         """
         return not self.reads and not self.dynamic_refs
+
+    @property
+    def has_indefinite_write(self) -> bool:
+        """
+        Whether some access writes the binding at a point that names it only at run time, so that its
+        value stops holding there and no definition says what replaced it. `arguments[k] = v` for a `k`
+        no reading of the text computes is the one such access: it writes exactly one parameter of the
+        function and which one is not decidable, so it is a kill of each with a value for none.
+
+        It is kept apart from `writes` for the same reason `dynamic_refs` is kept apart: a `writes`
+        entry is a definition, and a consumer reading one expects to find the value it stored. Recording
+        this as a definition of every parameter would let a fold answer with a value only one of them
+        can hold; recording it nowhere lets a fold carry a value across it that the write destroyed.
+        """
+        return bool(self.indefinite_writes)
 
     @property
     def has_global_member_write(self) -> bool:
@@ -1672,9 +1688,11 @@ class SemanticModel:
         second name — is recorded as a read of every parameter: reading is what makes a write to a
         parameter observable, which is the fact a remover needs, while a write is a definite point in the
         flow that a use of the object as a value does not give. `arguments[i] = v` for an `i` the model
-        cannot read is therefore a read of every parameter and a write of none: it may write any one of
-        them, and recording that as a definite write of each would let a fold answer with a value only
-        one of them can hold.
+        cannot read is therefore a read of every parameter and a definite write of none: it may write
+        any one of them, and recording that as a definite write of each would let a fold answer with a
+        value only one of them can hold. It is not nothing, though — the value each parameter held stops
+        holding there — so it is recorded as an `indefinite_writes` entry on every one of them, which is
+        a kill that names no value.
 
         The name is resolved rather than matched, because a body may bind `arguments` itself — as a
         parameter, a `var`, or a catch parameter — and may also assign over the one it was given. In
@@ -1723,6 +1741,10 @@ class SemanticModel:
                         for index in named:
                             self._record_alias_reference(params[index], access, role)
                         continue
+                    if reference_role(access) is not Role.READ:
+                        for binding in params:
+                            if binding is not None:
+                                binding.indefinite_writes.append(access)
                 for binding in params:
                     self._record_alias_reference(binding, node, Role.READ)
 

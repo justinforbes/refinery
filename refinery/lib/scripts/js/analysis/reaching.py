@@ -107,6 +107,7 @@ class ReachingModel:
         if (
             self.effects.mutators_escape(binding)
             or binding.has_global_member_write
+            or binding.has_indefinite_write
             or self.model.reflection_can_reach(binding)
         ):
             return None
