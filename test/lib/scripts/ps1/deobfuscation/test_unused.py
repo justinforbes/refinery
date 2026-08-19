@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -1403,3 +1405,49 @@ class TestPs1UnusedVariableRemovalAndNamedReads(TestPs1):
         """
         result = self._deobfuscate("$a = 'x'\nWrite-Host done")
         self.assertNotIn('$a', result)
+
+
+class TestPs1AJunkStatementGoesWhereNoLeakHasRunBeforeIt(TestPs1):
+    """
+    A leak such as `Invoke-Expression` may re-point a member through the Extended Type System or
+    remap a type accelerator, which is what makes a member read that follows one effectful. A read
+    no leak has run before observes what it always would have, so it is junk like any other.
+    `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld.world_closed_at` answers a whole-script
+    verdict and cannot yet tell the two apart, so one leak anywhere keeps every read in the file.
+
+    The back edge of a loop puts a leak in the body before every read in that body, including the
+    ones written above it.
+    """
+
+    def test_a_read_no_leak_has_run_before_is_junk(self):
+        self.assertEqual(
+            self._deobfuscate('$Null = [Math]::Sqrt(144); Write-Host done'),
+            'Write-Host done')
+
+    @unittest.expectedFailure
+    def test_a_read_ahead_of_a_leak_is_junk(self):
+        self.assertEqual(
+            self._deobfuscate('$Null = [Math]::Sqrt(144); Invoke-Expression $c; Write-Host done'),
+            cleandoc("""
+                Invoke-Expression $c
+                Write-Host done
+            """))
+
+    def test_a_read_behind_a_leak_is_kept(self):
+        self.assertEqual(
+            self._deobfuscate('Invoke-Expression $c; $Null = [Math]::Sqrt(144); Write-Host done'),
+            cleandoc("""
+                Invoke-Expression $c
+                $Null = [Math]::Sqrt(144)
+                Write-Host done
+            """))
+
+    def test_a_read_a_back_edge_puts_behind_a_leak_is_kept(self):
+        self.assertEqual(
+            self._deobfuscate('while ($True) { $Null = [Math]::Sqrt(144); Invoke-Expression $c }'),
+            cleandoc("""
+                while ($True) {
+                  $Null = [Math]::Sqrt(144)
+                  Invoke-Expression $c
+                }
+            """))
