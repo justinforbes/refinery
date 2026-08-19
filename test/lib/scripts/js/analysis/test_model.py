@@ -1035,15 +1035,20 @@ class TestFreeNameReachableByDirectEval(TestBase):
 class TestWhatAnAccessOnAMappedArgumentsObjectReaches(TestBase):
     """
     An element of a mapped `arguments` object and the parameter at that position are one location:
-    a reference through the object is attributed to the parameter its key names and carries that
-    reference's own role. Which parameter a key names is decided from the key: one that is the
-    canonical spelling of an index in range names that parameter, and one that is statically known
-    and is no such index names none.
+    a reference through the object is attributed to the parameter its key names. Which parameter a
+    key names is decided from the key: one that is the canonical spelling of an index in range names
+    that parameter, and one that is statically known and is no such index names none.
 
-    A key the text does not decide is the one case where naming and reaching come apart. Every
-    parameter is in reach of such an access, so every one of them is read by it — reading is what
-    makes a write to a parameter observable — but no parameter is written by it, since a definite
-    write of each is a claim about a value only one of them can hold.
+    The read half of such a reference is a definite read of the parameter. The write half is never a
+    definition of it: §10.2.11 maps an element onto a parameter only at a position the call supplied
+    an argument for, so `arguments[0] = 9` writes the first parameter where the call passed one and
+    creates an ordinary property where it passed none, and the text of the function says which
+    neither way. Such a write is therefore recorded as a kill that names no value.
+
+    A key the text does not decide is where naming and reaching come apart. Every parameter is in
+    reach of such an access, so every one of them is read by it — reading is what makes a write to a
+    parameter observable — and every one of them is killed by it, since it may write any single one
+    and a definition of each would be a claim about a value only one of them can hold.
     """
 
     @staticmethod
@@ -1051,9 +1056,10 @@ class TestWhatAnAccessOnAMappedArgumentsObjectReaches(TestBase):
         ast = JsParser(source).parse()
         return ast, build_semantic_model(ast)
 
-    def _sites(self, source: str, name: str) -> tuple[list[str], list[str]]:
+    def _sites(self, source: str, name: str) -> tuple[list[str], list[str], list[str]]:
         """
-        The source text of every recorded write and every recorded read of the parameter *name*.
+        The source text of every site recorded against the parameter *name*, as the three channels
+        the model keeps them in: the definitions, the kills that name no value, and the reads.
         """
         ast, model = self._model(source)
         node = next(
@@ -1064,30 +1070,31 @@ class TestWhatAnAccessOnAMappedArgumentsObjectReaches(TestBase):
         assert binding is not None
         return (
             [JsSynthesizer().convert(site) for site in binding.writes],
+            [JsSynthesizer().convert(site) for site in binding.indefinite_writes],
             [JsSynthesizer().convert(site) for site in binding.reads],
         )
 
-    def test_an_index_in_range_writes_the_one_parameter_it_names(self):
+    def test_an_index_in_range_kills_the_one_parameter_it_names_and_defines_none(self):
         source = 'function f(a, b) { arguments[1] = 9; }'
-        self.assertEqual(self._sites(source, 'a'), ([], []))
-        self.assertEqual(self._sites(source, 'b'), (['arguments[1]'], []))
+        self.assertEqual(self._sites(source, 'a'), ([], [], []))
+        self.assertEqual(self._sites(source, 'b'), ([], ['arguments[1]'], []))
 
     def test_an_index_in_range_reads_the_one_parameter_it_names(self):
         source = 'function f(a, b) { g(arguments[1]); }'
-        self.assertEqual(self._sites(source, 'a'), ([], []))
-        self.assertEqual(self._sites(source, 'b'), ([], ['arguments[1]']))
+        self.assertEqual(self._sites(source, 'a'), ([], [], []))
+        self.assertEqual(self._sites(source, 'b'), ([], [], ['arguments[1]']))
 
-    def test_a_key_the_text_does_not_decide_writes_no_parameter_and_reads_every_one(self):
+    def test_a_key_the_text_does_not_decide_kills_every_parameter_and_reads_every_one(self):
         source = 'function f(a, b) { arguments[c] = 9; }'
-        self.assertEqual(self._sites(source, 'a'), ([], ['arguments']))
-        self.assertEqual(self._sites(source, 'b'), ([], ['arguments']))
+        self.assertEqual(self._sites(source, 'a'), ([], ['arguments[c]'], ['arguments']))
+        self.assertEqual(self._sites(source, 'b'), ([], ['arguments[c]'], ['arguments']))
 
     def test_a_key_that_is_no_index_reaches_no_parameter_at_all(self):
         for key in ['1e400', '1e21', '1.5', "'01'", "'+1'", "' 1'", "'1e0'", "'²'", "'١'"]:
             with self.subTest(key=key):
                 source = F'function f(a, b) {{ arguments[{key}] = 9; }}'
-                self.assertEqual(self._sites(source, 'a'), ([], []))
-                self.assertEqual(self._sites(source, 'b'), ([], []))
+                self.assertEqual(self._sites(source, 'a'), ([], [], []))
+                self.assertEqual(self._sites(source, 'b'), ([], [], []))
 
     def test_a_negated_number_is_a_key_the_text_does_not_decide(self):
         """
@@ -1097,26 +1104,26 @@ class TestWhatAnAccessOnAMappedArgumentsObjectReaches(TestBase):
         weaker than the one the text supports and never stronger.
         """
         source = 'function f(a, b) { arguments[-1] = 9; }'
-        self.assertEqual(self._sites(source, 'a'), ([], ['arguments']))
-        self.assertEqual(self._sites(source, 'b'), ([], ['arguments']))
+        self.assertEqual(self._sites(source, 'a'), ([], ['arguments[-1]'], ['arguments']))
+        self.assertEqual(self._sites(source, 'b'), ([], ['arguments[-1]'], ['arguments']))
 
     def test_an_index_past_the_end_of_the_list_reaches_no_parameter(self):
         source = 'function f(a, b) { arguments[2] = 9; }'
-        self.assertEqual(self._sites(source, 'a'), ([], []))
-        self.assertEqual(self._sites(source, 'b'), ([], []))
+        self.assertEqual(self._sites(source, 'a'), ([], [], []))
+        self.assertEqual(self._sites(source, 'b'), ([], [], []))
 
     def test_a_parenthesized_receiver_reaches_what_the_bare_one_reaches(self):
         self.assertEqual(
             self._sites('function f(a, b) { (arguments)[1] = 9; }', 'b'),
-            (['(arguments)[1]'], []),
+            ([], ['(arguments)[1]'], []),
         )
         self.assertEqual(
             self._sites('function f(a, b) { ((arguments))[1] = 9; }', 'b'),
-            (['((arguments))[1]'], []),
+            ([], ['((arguments))[1]'], []),
         )
 
     def test_a_parenthesized_receiver_leaves_the_parameters_it_does_not_name_alone(self):
-        self.assertEqual(self._sites('function f(a, b) { (arguments)[1] = 9; }', 'a'), ([], []))
+        self.assertEqual(self._sites('function f(a, b) { (arguments)[1] = 9; }', 'a'), ([], [], []))
 
     def test_a_name_bound_to_something_else_attributes_nothing_to_a_parameter(self):
         for source in [
@@ -1126,12 +1133,12 @@ class TestWhatAnAccessOnAMappedArgumentsObjectReaches(TestBase):
             'function f(a, b) { arguments = [7]; arguments[1] = 9; }',
         ]:
             with self.subTest(source=source):
-                self.assertEqual(self._sites(source, 'b'), ([], []))
+                self.assertEqual(self._sites(source, 'b'), ([], [], []))
 
     def test_a_strict_body_has_an_object_that_aliases_nothing(self):
         source = "function f(a, b) { 'use strict'; arguments[1] = 9; }"
-        self.assertEqual(self._sites(source, 'a'), ([], []))
-        self.assertEqual(self._sites(source, 'b'), ([], []))
+        self.assertEqual(self._sites(source, 'a'), ([], [], []))
+        self.assertEqual(self._sites(source, 'b'), ([], [], []))
 
 
 class TestWhichBindingsAreReachedThroughTheGlobalObject(TestBase):
@@ -1172,7 +1179,9 @@ class TestWhichBindingsAreReachedThroughTheGlobalObject(TestBase):
     def test_that_parameter_still_carries_the_write(self):
         binding = self._binding('function f(a) { arguments[0] = 9; return a; }', 'a')
         self.assertEqual(
-            [JsSynthesizer().convert(site) for site in binding.writes], ['arguments[0]'])
+            [JsSynthesizer().convert(site) for site in binding.indefinite_writes],
+            ['arguments[0]'],
+        )
 
     def test_a_parameter_read_through_its_own_arguments_object_is_not(self):
         self.assertEqual(

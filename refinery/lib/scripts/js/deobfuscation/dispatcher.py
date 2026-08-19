@@ -295,8 +295,12 @@ def _build_extracted_function(
 ) -> JsFunctionDeclaration | None:
     """
     Convert a dispatcher function-table entry into a standalone
-    `refinery.lib.scripts.js.model.JsFunctionDeclaration`. Extracts parameters from the payload
-    destructuring and removes that statement.
+    `refinery.lib.scripts.js.model.JsFunctionDeclaration` of the same kind. Extracts parameters from
+    the payload destructuring and removes that statement.
+
+    The kind is carried rather than defaulted: an entry that was `async` returns a promise and one
+    that was a generator returns an iterator, and a declaration that dropped either would compute a
+    different value — a `yield` left in a body no longer marked `*` does not even parse.
     """
     params = _extract_params(fn, payload_id)
     if params is None:
@@ -326,6 +330,8 @@ def _build_extracted_function(
         id=JsIdentifier(name=key),
         params=list(params),
         body=new_body,
+        generator=fn.generator,
+        is_async=fn.is_async,
     )
     return decl
 

@@ -721,3 +721,250 @@ class TestAWrittenNameThatIsNotTheObject(TestBase):
     def test_the_deobfuscation_leaves_it_untouched_too(self):
         rows = _A_NAME_THAT_IS_NOT_THE_OBJECT_AFTER_ALL
         self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+#: A body that writes its own object at a position the call may not have filled, mapped to what Node
+#: prints for it. An element aliases a parameter only where the call passed an argument at that
+#: position, so one text answers two ways under two arities: `undefined` is a parameter the call
+#: left out, which a write through the object never reaches, and the written value is the one it
+#: did pass.
+#: A position past the end of the parameter list is nothing to alias however many arguments arrive.
+_A_WRITE_AT_A_POSITION_THE_CALL_MAY_NOT_HAVE_FILLED: dict[str, str] = {
+    'function f(a, b) { arguments[1] = 9; return b; } console.log(f(1), f(1, 2));':
+        'undefined 9\n',
+    'function f(a, b) { b = 3; arguments[1] = 9; return b; } console.log(f(1), f(1, 2));':
+        '3 9\n',
+    'function f(a, b) { b = 3; return arguments[1]; } console.log(f(1), f(1, 2));':
+        'undefined 3\n',
+    'function f(a, b) { arguments[1] = 9; return b; } console.log(f(1));':
+        'undefined\n',
+    'function f(a, b) { arguments[1] = 9; return b; } console.log(f(1, 2));':
+        '9\n',
+    'function f(a) { arguments[0] = 9; return a; } console.log(f());':
+        'undefined\n',
+    'function f(a) { arguments[0] = 9; return a; } console.log(f(1));':
+        '9\n',
+    'function f(a) { arguments[1] = 9; return a; } console.log(f(1, 2));':
+        '1\n',
+    'function f(a) { a = 5; return arguments.length; } console.log(f(), f(1), f(1, 2));':
+        '0 1 2\n',
+}
+
+#: The same two directions with the element deleted first, mapped to what Node prints. Deleting an
+#: element breaks the link between it and the parameter and leaves both standing: a write through
+#: the object afterwards lands on an ordinary property and the parameter keeps what the call
+#: passed, and a write to the parameter is no longer read back off the object, which holds nothing
+#: at that key.
+_AN_ELEMENT_DELETED_AHEAD_OF_THE_WRITE: dict[str, str] = {
+    'function f(a) { delete arguments[0]; arguments[0] = 9; return a; } console.log(f(1));':
+        '1\n',
+    'function f(a) { delete arguments[0]; a = 5; return arguments[0]; } console.log(f(1));':
+        'undefined\n',
+    'function f(a) { delete arguments[0]; return a; } console.log(f(1));':
+        '1\n',
+    'function f(a, b) { delete arguments[1]; arguments[1] = 9; return b; } console.log(f(1, 2));':
+        '2\n',
+    "function f(a, b) { delete arguments[0]; b = 3; return arguments[0] + ':' + arguments[1]; }"
+    ' console.log(f(1, 2));':
+        'undefined:3\n',
+    "function f(a, b) { a = 5; delete arguments[1]; arguments[1] = 9; return a + ':' + b; }"
+    ' console.log(f(1, 2));':
+        '5:2\n',
+}
+
+#: A body that mentions its own object without naming a parameter through it, mapped to what Node
+#: prints for it. Handing the object to a call, binding a second name to it and writing an element
+#: from a nested arrow each put every parameter in reach, so the store to the parameter is one whose
+#: value comes back. `delete` of the bare name stores nothing: the binding is not configurable, the
+#: operator answers `false`, and the object is still the one the function was given.
+_A_STORE_A_MENTION_OF_THE_OBJECT_KEEPS_ALIVE: dict[str, str] = {
+    'function g(x) { console.log(x[0]); } function f(a) { a = 2; g(arguments); } f(1);':
+        '2\n',
+    'function f(a) { a = 2; console.log(Array.prototype.slice.call(arguments)[0]); } f(1);':
+        '2\n',
+    'function f(a) { a = 2; (function () { console.log(arguments[0]); }).apply(null, arguments); }'
+    ' f(1);':
+        '2\n',
+    'function f(a) { a = 2; [].forEach.call(arguments, function (v) { console.log(v); }); } f(1);':
+        '2\n',
+    'function f(a) { a = 2; var h = arguments; console.log(h[0]); } f(1);':
+        '2\n',
+    'function f(a) { a = 2; console.log(JSON.stringify(arguments)); } f(1);':
+        '{"0":2}\n',
+    'function f(a) { a = 2; delete arguments; console.log(arguments[0]); } f(1);':
+        '2\n',
+    'function f(a) { a = 2; console.log(delete arguments); } f(1);':
+        'false\n',
+    'function f(a) { var g = () => { arguments[0] = 9; }; g(); console.log(a); } f(1);':
+        '9\n',
+    'function f(a) { var g = () => { arguments[0] = 9; }; a = 2; g(); console.log(a); } f(1);':
+        '9\n',
+    'function f(a) { var g = () => { arguments[0] = 9; }; g(); a = 2;'
+    ' console.log(arguments[0]); } f(1);':
+        '2\n',
+    'function f(a) { a = 2; var g = () => arguments[0]; console.log(g()); } f(1);':
+        '2\n',
+}
+
+#: Every way a body can bind the name `arguments` itself, mapped to the pair Node answers with: what
+#: `Object.prototype.toString` calls the thing the name then denotes, and the error where the text
+#: is no program at all. A parameter, an initialized `var`, a `let` of either shape, a function
+#: declaration, a catch parameter and an assignment each put something else under the name; a `var`
+#: with no initializer redeclares a name the function already has and leaves the object where it
+#: was; and a function expression's own name is bound outside the object's, so the object shadows
+#: it. A class binds its name as strict code, where `arguments` is a name no binding may take.
+_EVERY_WAY_A_BODY_BINDS_THE_NAME_ITSELF: dict[str, tuple[str, str | None]] = {
+    'function f(arguments) { console.log(Object.prototype.toString.call(arguments)); } f(1);':
+        ('[object Number]\n', None),
+    'function f(p) { var arguments;'
+    ' console.log(Object.prototype.toString.call(arguments)); } f(1);':
+        ('[object Arguments]\n', None),
+    'function f(p) { var arguments = [7];'
+    ' console.log(Object.prototype.toString.call(arguments)); } f(1);':
+        ('[object Array]\n', None),
+    'function f(p) { let arguments;'
+    ' console.log(Object.prototype.toString.call(arguments)); } f(1);':
+        ('[object Undefined]\n', None),
+    'function f(p) { let arguments = [7];'
+    ' console.log(Object.prototype.toString.call(arguments)); } f(1);':
+        ('[object Array]\n', None),
+    'function f(p) { class arguments {}'
+    ' console.log(Object.prototype.toString.call(arguments)); } f(1);':
+        ('', 'SyntaxError'),
+    'function f(p) { function arguments() {}'
+    ' console.log(Object.prototype.toString.call(arguments)); } f(1);':
+        ('[object Function]\n', None),
+    'function f(p) { try { throw [7]; } catch (arguments) {'
+    ' console.log(Object.prototype.toString.call(arguments)); } } f(1);':
+        ('[object Array]\n', None),
+    'function f(p) { arguments = [7];'
+    ' console.log(Object.prototype.toString.call(arguments)); } f(1);':
+        ('[object Array]\n', None),
+    'var f = function arguments(p) {'
+    ' console.log(Object.prototype.toString.call(arguments)); }; f(1);':
+        ('[object Arguments]\n', None),
+}
+
+#: The same bindings asked what the aliasing still does, mapped to what Node prints. `5` and `9` are
+#: a write read back under the other name, which is the aliasing still standing; `7` is the array
+#: the binding put under the name answering instead, and `1` is the parameter untouched because the
+#: write landed on that array. A `var` with no initializer and a function expression's own name
+#: leave both directions where they were, and every other binding takes both.
+_THE_ALIASING_UNDER_A_NAME_THE_BODY_BINDS: dict[str, str] = {
+    'function f(p) { var arguments; p = 5; console.log(arguments[0]); } f(1);': '5\n',
+    'function f(p) { var arguments; arguments[0] = 9; console.log(p); } f(1);': '9\n',
+    'var f = function arguments(p) { p = 5; console.log(arguments[0]); }; f(1);': '5\n',
+    'var f = function arguments(p) { arguments[0] = 9; console.log(p); }; f(1);': '9\n',
+    'function f(p) { var arguments = [7]; p = 5; console.log(arguments[0]); } f(1);': '7\n',
+    'function f(p) { var arguments = [7]; arguments[0] = 9; console.log(p); } f(1);': '1\n',
+    'function f(p) { let arguments = [7]; p = 5; console.log(arguments[0]); } f(1);': '7\n',
+    'function f(p) { let arguments = [7]; arguments[0] = 9; console.log(p); } f(1);': '1\n',
+    'function f(p) { let arguments; p = 5; console.log(arguments); } f(1);': 'undefined\n',
+    'function f(p) { arguments = [7]; p = 5; console.log(arguments[0]); } f(1);': '7\n',
+    'function f(p) { function arguments() {} p = 5; console.log(arguments.name); } f(1);':
+        'arguments\n',
+    'function f(p) { function arguments() {} arguments[0] = 9; console.log(p); } f(1);': '1\n',
+    'function f(p) { try { throw [7]; } catch (arguments) { p = 5; console.log(arguments[0]); } }'
+    ' f(1);': '7\n',
+    'function f(p) { try { throw [7]; } catch (arguments) { arguments[0] = 9; } console.log(p); }'
+    ' f(1);': '1\n',
+    'function f(arguments, b) { b = 5; console.log(arguments[1]); } f([0, 7], 1);': '7\n',
+    'function f(arguments, b) { arguments[1] = 9; console.log(b); } f([0, 7], 1);': '1\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestHowManyArgumentsTheCallSupplied(TestBase):
+    """
+    Which elements alias a parameter is decided by the call and not by the function alone, so a
+    write through the object at a fixed position reaches a parameter under one arity and no
+    parameter under another. A rewrite that answers a later read out of such a write has to hold
+    under both.
+    """
+
+    def test_node_answers_each_arity_the_way_the_row_records(self):
+        rows = _A_WRITE_AT_A_POSITION_THE_CALL_MAY_NOT_HAVE_FILLED
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_each_arity_the_same_way(self):
+        rows = _A_WRITE_AT_A_POSITION_THE_CALL_MAY_NOT_HAVE_FILLED
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+    def test_node_answers_a_deleted_element_the_way_the_row_records(self):
+        rows = _AN_ELEMENT_DELETED_AHEAD_OF_THE_WRITE
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_a_deleted_element_the_same_way(self):
+        rows = _AN_ELEMENT_DELETED_AHEAD_OF_THE_WRITE
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAStoreAMentionOfTheObjectKeepsAlive(TestBase):
+    """
+    A store to a parameter that no read of that parameter's name follows is still a store something
+    reads, wherever the body brings the object within reach of a reader. Dropping it as dead is the
+    one rewrite that turns each of these programs into a different one.
+    """
+
+    def test_node_answers_each_mention_the_way_the_row_records(self):
+        rows = _A_STORE_A_MENTION_OF_THE_OBJECT_KEEPS_ALIVE
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_each_mention_the_same_way(self):
+        rows = _A_STORE_A_MENTION_OF_THE_OBJECT_KEEPS_ALIVE
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+#: A row of `_A_STORE_A_MENTION_OF_THE_OBJECT_KEEPS_ALIVE` with the mention of the object taken out,
+#: mapped to the text the deobfuscation writes for it. Nothing observes the store any more and it is
+#: gone, so what the mention buys is pinned as text and the law beside it is not one a tool that
+#: rewrote nothing would satisfy.
+_A_STORE_NO_MENTION_OF_THE_OBJECT_KEEPS_ALIVE: dict[str, str] = {
+    'function g(x) { console.log(1); } function f(a) { a = 2; g(9); } f(1);': inspect.cleandoc(
+        """
+        function g(x) {
+          console.log(1);
+        }
+        function f(a) {
+          g(9);
+        }
+        f(1);
+        """
+    ),
+    'function f(a) { a = 2; var h = [9]; console.log(h[0]); } f(1);': inspect.cleandoc(
+        """
+        function f(a) {
+          console.log(9);
+        }
+        f(1);
+        """
+    ),
+}
+
+
+class TestAStoreNoMentionOfTheObjectKeepsAlive(TestBase):
+
+    def test_the_deobfuscation_writes_the_text_the_row_records(self):
+        rows = _A_STORE_NO_MENTION_OF_THE_OBJECT_KEEPS_ALIVE
+        self.assertEqual({source: _deobfuscated(source) for source in rows}, rows)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestEveryWayABodyCanBindTheNameArguments(TestBase):
+
+    def test_node_answers_each_binding_the_way_the_row_records(self):
+        rows = _EVERY_WAY_A_BODY_BINDS_THE_NAME_ITSELF
+        self.assertEqual(_said_by_node(rows), dict(rows))
+
+    def test_the_deobfuscation_answers_each_binding_the_same_way(self):
+        rows = _EVERY_WAY_A_BODY_BINDS_THE_NAME_ITSELF
+        self.assertEqual(_said_after_deobfuscation(rows), dict(rows))
+
+    def test_node_answers_the_aliasing_under_each_binding_the_way_the_row_records(self):
+        rows = _THE_ALIASING_UNDER_A_NAME_THE_BODY_BINDS
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_the_aliasing_under_each_binding_the_same_way(self):
+        rows = _THE_ALIASING_UNDER_A_NAME_THE_BODY_BINDS
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))

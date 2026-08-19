@@ -291,12 +291,16 @@ class Binding:
     @property
     def has_indefinite_write(self) -> bool:
         """
-        Whether some access writes the binding at a point that names it only at run time, so that its
-        value stops holding there and no definition says what replaced it. `arguments[k] = v` for a `k`
-        no reading of the text computes is one such access: it writes exactly one parameter of the
-        function and which one is not decidable, so it is a kill of each with a value for none. The
-        object handed to a call or bound to a second name is another, and the entry is then the
-        identifier the object escaped through rather than an access on it.
+        Whether some access writes the binding at a point where what it stores, or whether it stores
+        at all, is decided only at run time, so that its value stops holding there and no definition
+        says what replaced it. Every write through a mapped `arguments` object is one. `arguments[k]
+        = v` for a `k` no reading of the text computes writes exactly one parameter of the function
+        and which one is not decidable, so it is a kill of each with a value for none; `arguments[0]
+        = v` names its parameter but still lands only where the call supplied that argument
+        (§10.2.11 maps an element onto a parameter only for a position `index < len`), so it is a
+        kill of that one with a value for none. The object handed to a call or bound to a second
+        name is another, and the entry is then the identifier the object escaped through rather than
+        an access on it.
 
         It is kept apart from `writes` for the same reason `dynamic_refs` is kept apart: a `writes`
         entry is a definition, and a consumer reading one expects to find the value it stored. Recording
@@ -772,38 +776,81 @@ def _member_property_name(member: JsMemberExpression) -> str | None:
     return prop.name if isinstance(prop, JsIdentifier) else None
 
 
-def _last_position_of(params: list[Binding | None], binding: Binding) -> int:
+def _last_positions(params: list[Binding | None]) -> list[Binding | None]:
     """
-    The last position in *params* that *binding* stands at. A repeated parameter name declares one
-    binding, and only its final occurrence is the one an `arguments` element is mapped onto
-    (§10.2.11), so every earlier position of a repeated name aliases nothing.
+    *params* with every position a repeated parameter name occupies but the final one blanked out. A
+    repeated name declares one binding, and only its last occurrence is the one an `arguments`
+    element is mapped onto (§10.2.11), so every earlier position of a repeated name aliases nothing.
     """
-    return max(index for index, other in enumerate(params) if other is binding)
+    result = list(params)
+    seen: set[int] = set()
+    for index in reversed(range(len(result))):
+        binding = result[index]
+        if binding is None:
+            continue
+        if id(binding) in seen:
+            result[index] = None
+        seen.add(id(binding))
+    return result
 
 
-def _rebinds_arguments(binding: Binding) -> bool:
+def _is_delete_operand(node: Node) -> bool:
     """
-    Whether *binding*, the `arguments` object a function is given, is made to denote something else
-    inside it — an assignment over the name, or a `var` that initializes it. Either replaces the object
-    with a value whose elements alias no parameter.
+    Whether *node* stands as the operand of a `delete`. `reference_role` answers `Role.READWRITE`
+    for such a reference as it does for a compound assignment, because both keep the name live as a
+    read; only the assignment puts a value under the name.
+    """
+    governor = _enclosing_operator(node)
+    return (
+        isinstance(governor, JsUnaryExpression)
+        and governor.operator == 'delete'
+        and strip_parens(governor.operand) is node
+    )
 
-    A `var arguments;` with no initializer does neither. It redeclares a name the function already has,
-    and a `var` never overwrites a value already bound to its name, so the object stays exactly where it
-    was. The distinction lives here because a declarator with an initializer is recorded as a
+
+def _displaces_arguments(
+    binding: Binding,
+    fn: JsFunctionExpression | JsFunctionDeclaration,
+) -> bool:
+    """
+    Whether the name `arguments` inside *fn* denotes something other than the mapped object *fn* is
+    given, either because no such object is ever created or because a value is put in its place.
+
+    §10.2.11 creates no object at all where the name is a parameter of *fn*, or where the body
+    declares it lexically (`let arguments;`) or as a function of its own: each of those puts the
+    name in a list the creation is conditioned on, and the name then denotes whatever that
+    declaration binds. An assignment over the name and a `var` that initializes it are the other
+    case — the object is created and then replaced by a value whose elements alias no parameter.
+
+    Three shapes displace nothing. A `var arguments;` with no initializer redeclares a name the
+    function already has, and a `var` never overwrites a value already bound to its name, so the
+    object and its aliasing are what they were; refusing it would stop recording the reads that keep
+    a write to a parameter alive, and that write would then be dropped as dead. A `delete` of the
+    name stores nothing — the binding is not configurable, so the operator evaluates to `false` and
+    leaves the object where it was. And a function expression's own name is bound in an environment
+    the object's own shadows, so `var f = function arguments(a) { return arguments[0]; }` still
+    reads the mapped object; that site is skipped here because the scope model records the two names
+    as one binding.
+
+    The declarator distinction lives here because a declarator with an initializer is recorded as a
     declaration and not as a write, so asking for writes alone would let `var arguments = [7]` through.
     """
-    if binding.writes:
+    if any(not _is_delete_operand(write) for write in binding.writes):
         return True
     for site in binding.declarations:
+        if site is fn.id:
+            continue
         declarator = site.parent
         if not isinstance(declarator, JsVariableDeclarator) or declarator.id is not site:
             return True
         if declarator.init is not None:
             return True
         declaration = declarator.parent
-        if isinstance(declaration, JsVariableDeclaration) and isinstance(
-            declaration.parent, (JsForInStatement, JsForOfStatement)
-        ):
+        if not isinstance(declaration, JsVariableDeclaration):
+            return True
+        if declaration.kind is not JsVarKind.VAR:
+            return True
+        if isinstance(declaration.parent, (JsForInStatement, JsForOfStatement)):
             return True
     return False
 
@@ -822,13 +869,10 @@ def _enclosing_member_access(node: Node) -> JsMemberExpression | None:
     The member access *node* is the receiver of, looking through any parentheses written around it,
     or `None` where *node* is used as something other than a receiver. `(arguments)[0]` reaches its
     element exactly as `arguments[0]` does, so a receiver is recognized through a grouping the way
-    every other operand in this module is.
+    every other operand in this module is — through the one climb `_enclosing_operator` performs.
     """
-    cursor: Node = node
-    parent = cursor.parent
-    while isinstance(parent, JsParenthesizedExpression):
-        cursor, parent = parent, parent.parent
-    if isinstance(parent, JsMemberExpression) and parent.object is cursor:
+    parent = _enclosing_operator(node)
+    if isinstance(parent, JsMemberExpression) and strip_parens(parent.object) is node:
         return parent
     return None
 
@@ -1125,7 +1169,9 @@ class SemanticModel:
         give the name a different value. A named function declaration or a declarator initializer installs
         the value with no recorded write, so any write at all is a reassignment that unpins it. The
         single-declaration and dynamic-reference checks a caller also needs are left to the caller; this
-        answers only the reassignment question.
+        answers only the reassignment question — the whole of it, so a write that leaves no `writes`
+        entry because nothing says what it stored (`has_indefinite_write`) unpins the name as much
+        as one that does.
         """
         parent = function.parent
         establishing = None
@@ -1135,6 +1181,8 @@ class SemanticModel:
             and parent.right is function
         ):
             establishing = strip_parens(parent.left)
+        if binding.has_indefinite_write:
+            return False
         return all(write is establishing for write in binding.writes)
 
     def object_property_reference_points(self, function: Node) -> list[Node] | None:
@@ -1253,11 +1301,16 @@ class SemanticModel:
         the class declaration when the value is a class, which is in its temporal dead zone until it runs;
         the recorded writes when a lone assignment installs it (`f = function(){}`, the form namespace
         flattening leaves). `None` when the binding holds no single such value, so its presence cannot be
-        ordered and the caller declines. This mirrors `singular_value`'s binding shapes exactly, one query
-        returning the value and the other the nodes that establish it. Ordering the returned nodes against
-        the use is the caller's job, since that needs the dominance model this layer must not depend on.
+        ordered and the caller declines — which is also the answer where a write leaves no `writes`
+        entry because nothing says what it stored, since an empty `writes` would otherwise read as a
+        value hoisted into place before any statement runs. This mirrors `singular_value`'s binding
+        shapes exactly, one query returning the value and the other the nodes that establish it.
+        Ordering the returned nodes against the use is the caller's job, since that needs the
+        dominance model this layer must not depend on.
         """
         if binding is None or len(binding.declarations) != 1:
+            return None
+        if binding.has_indefinite_write:
             return None
         if binding.writes:
             return list(binding.writes)
@@ -1420,11 +1473,10 @@ class SemanticModel:
         this binding, so it is treated as a possible rebind), and a direct `eval` in its owning
         function can rebind it opaquely. A member write or method call through the name does not
         rebind it — the name keeps its value — so only a dynamic reference whose role is not a plain
-        read counts. A write through an object that aliases the binding at a position decided only at
-        run time — `indefinite_writes` — is counted here too: it replaces the value under the name
-        while leaving no entry that says with what. A consumer that judges a binding's value stable
-        from `writes` alone must also consult this, since none of these reassignments leaves a `writes`
-        entry; a script-scope binding
+        read counts. A write through an object that aliases the binding — `indefinite_writes` — is
+        counted here too: it replaces the value under the name while leaving no entry that says with
+        what. A consumer that judges a binding's value stable from `writes` alone must also consult
+        this, since none of these reassignments leaves a `writes` entry; a script-scope binding
         reassigned only through an opaque `eval` stays the documented residual, as
         `local_reachable_by_direct_eval` reports it false there.
         """
@@ -1706,30 +1758,32 @@ class SemanticModel:
         Where the object is reached is `walk_receiver_scope`: an arrow reads the enclosing `arguments`
         and is descended, a nested function has its own and is not.
 
-        An element access is attributed to the parameter it names and carries that access's own role, so
-        `arguments[0] = 9` is a write of the first parameter and not merely a read of it. Every other use
-        of the object — a key the model cannot name, the object handed to a call, the object bound to a
-        second name — is recorded as a read of every parameter: reading is what makes a write to a
-        parameter observable, which is the fact a remover needs, while a write is a definite point in the
-        flow that a use of the object as a value does not give. `arguments[i] = v` for an `i` the model
-        cannot read is therefore a read of every parameter and a definite write of none: it may write
-        any one of them, and recording that as a definite write of each would let a fold answer with a
-        value only one of them can hold. It is not nothing, though — the value each parameter held stops
-        holding there — so it is recorded as an `indefinite_writes` entry on every one of them, which is
-        a kill that names no value.
+        An element access is attributed to the parameter it names. The read half of that access is a
+        definite read of the parameter, and the write half never is: §10.2.11 maps an element onto a
+        parameter only at a position the call supplied an argument for, so `arguments[0] = 9` writes
+        the first parameter when the call passed one and creates an ordinary property when it passed
+        none. Nothing in the text of the function says which, so the write is recorded as an
+        `indefinite_writes` entry — a kill that names no value — and not as a definition a fold
+        could answer with. Every other use of the object — a key the model cannot name, the object
+        handed to a call, the object bound to a second name — is recorded as a read of every
+        parameter: reading is what makes a write to a parameter observable, which is the fact a
+        remover needs. `arguments[i] = v` for an `i` the model cannot read is a read of every
+        parameter and an indefinite write of every one of them, since it may write any single one
+        and recording a definition of each would let a fold answer with a value only one of them can
+        hold.
 
         The name is resolved rather than matched, because a body may bind `arguments` itself — as a
-        parameter, a `var`, or a catch parameter — and may also assign over the one it was given. In
-        either case the name denotes something whose elements alias nothing, so attributing an access
-        to a parameter would credit the parameter with a write the program never makes. Such a function
-        is left alone entirely rather than up to the point of the rebinding, because which accesses run
-        before it is a question about flow that a walk over the text does not answer.
+        parameter, a lexical declaration, a `var` given a value, or a catch parameter — and may also
+        assign over the one it was given. In either case the name denotes something whose elements
+        alias nothing, so attributing an access to a parameter would credit the parameter with a
+        write the program never makes. Such a function is left alone entirely rather than up to the
+        point of the rebinding, because which accesses run before it is a question about flow that a
+        walk over the text does not answer. `_displaces_arguments` decides it.
 
-        What displaces the object is a value put in its place, which `_rebinds_arguments` decides.
-        `var arguments;` does not: it declares a name the function already has, and a `var` with no
-        initializer leaves the value it finds there, so the object and its aliasing are what they were.
-        Refusing such a function would stop recording the reads that keep a write to a parameter alive,
-        and that write would then be dropped as dead.
+        A function expression whose own name is `arguments` is not one of those: that name is bound
+        in an environment the object's own shadows, so the body still reads the mapped object. The
+        scope model records the two as one binding, which is why the binding's kind is admitted as
+        well as `ARGUMENTS` here rather than only it.
 
         A name that resolves to nothing is still taken for the object where it stands: resolution
         answers `None` for a free name and across a `with`, neither of which is evidence that something
@@ -1741,26 +1795,21 @@ class SemanticModel:
             if not has_mapped_arguments(fn, strict=False) or strict_mode_at(fn):
                 continue
             own = self.lookup('arguments', self._node_scope.get(id(fn.body)))
-            if own is None or own.kind is not BindingKind.ARGUMENTS:
+            if own is None or own.kind not in (BindingKind.ARGUMENTS, BindingKind.FUNC_NAME):
                 continue
-            if _rebinds_arguments(own):
+            if _displaces_arguments(own, fn):
                 continue
-            params = [
+            params = _last_positions([
                 self.binding_of(param) if isinstance(param, JsIdentifier) else None
                 for param in fn.params
-            ]
-            params = [
-                binding if binding is not None and _last_position_of(params, binding) == index
-                else None
-                for index, binding in enumerate(params)
-            ]
+            ])
             for node in walk_receiver_scope(fn):
                 if not isinstance(node, JsIdentifier) or node.name != 'arguments':
                     continue
                 if not self.is_reference(node):
                     continue
                 denotes = self.resolve(node)
-                if denotes is not None and denotes.kind is not BindingKind.ARGUMENTS:
+                if denotes is not None and denotes is not own:
                     continue
                 access = _enclosing_member_access(node)
                 if access is not None and denotes is not None:
@@ -1774,8 +1823,8 @@ class SemanticModel:
                 may_write = access is None or reference_role(access) is not Role.READ
                 for binding in params:
                     self._record_alias_reference(binding, node, Role.READ)
-                    if may_write and binding is not None:
-                        binding.indefinite_writes.append(site)
+                    if may_write:
+                        self._record_alias_reference(binding, site, Role.WRITE)
 
     def _record_alias_reference(
         self,
@@ -1783,12 +1832,19 @@ class SemanticModel:
         node: JsIdentifier | JsMemberExpression,
         role: Role,
     ) -> None:
+        """
+        Record against a parameter binding one reference made through the `arguments` object that
+        aliases it. The read half is a definite read — the access observes whatever the parameter
+        holds — while the write half never is: whether an element is mapped onto its parameter at
+        all is decided by the call, which a walk over the text does not see, so it lands in
+        `indefinite_writes` as a kill that names no value rather than in `writes` as a definition.
+        """
         if binding is None:
             return
         if role is not Role.WRITE:
             binding.reads.append(node)
         if role is not Role.READ:
-            binding.writes.append(node)
+            binding.indefinite_writes.append(node)
         scope = self._node_scope.get(id(node))
         if scope is None or scope.var_scope is not binding.scope.var_scope:
             binding.captured = True

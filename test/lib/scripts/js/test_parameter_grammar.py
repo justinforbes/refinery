@@ -32,6 +32,7 @@ from typing import Iterable, NamedTuple, Sequence
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
     JsEvaluation,
+    behavior,
     completion_values,
     node_executable,
 )
@@ -52,6 +53,7 @@ from refinery.lib.scripts.js.strict import (
     collect_strict_violations,
     parameter_grammar,
 )
+from refinery.lib.scripts.js.synth import JsSynthesizer
 
 _FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)
 
@@ -749,3 +751,175 @@ class TestTheCollectorReadsAFunctionsOwnNameFromTheSamePlace(TestBase):
     def test_it_reports_on_no_declaration_the_enclosing_context_leaves_alone(self):
         rows = A_DECLARATION_WHOSE_NAME_THE_ENCLOSING_CONTEXT_GOVERNS
         self.assertEqual(_reported(rows, strict=False), _every_one_of(rows, False))
+
+
+#: The four kinds of function, spelled the way the source writes one.
+A_KIND_OF_FUNCTION = ('function', 'function*', 'async function', 'async function*')
+
+#: The call that runs the body of a function of each kind. A generator and an async generator hand
+#: back an iterator and run nothing until it is stepped, so a program that only calls one prints
+#: nothing at all and would report the same for a name kept and a name lost.
+A_CALL_THAT_RUNS_THE_BODY_OF = {
+    'function'        : 'outer();',
+    'function*'       : 'outer().next();',
+    'async function'  : 'outer();',
+    'async function*' : 'outer().next();',
+}
+
+#: A kind of function expression and the word naming it, mapped to what Node prints for a program
+#: that reports the expression's own `name`, or to `None` where Node reads no program at all. An
+#: expression's name is bound inside the function and read under the expression's own kind: a
+#: generator reserves `yield`, an async function reserves `await`, and an async generator reserves
+#: both. Each row stands for the four programs writing that expression inside a function of each
+#: kind, because the kind of the function around it decides nothing about the name.
+A_FUNCTION_EXPRESSION_OF_KIND_NAMED: dict[str, dict[str, str | None]] = {
+    'function'        : {'yield': 'yield\n', 'await': 'await\n'},
+    'function*'       : {'yield': None, 'await': 'await\n'},
+    'async function'  : {'yield': 'yield\n', 'await': None},
+    'async function*' : {'yield': None, 'await': None},
+}
+
+#: The kind of function a declaration stands inside and the word naming that declaration, mapped to
+#: what Node prints for a program that reports the declaration's `name`, or to `None` where Node
+#: reads no program at all. A declaration's name is bound outside the function and read under
+#: whatever encloses it, so the table is the same one and it is read the other way round: each row
+#: stands for the four programs writing that declaration with a kind of its own, because the kind of
+#: the declaration decides nothing about its name. The name is read from a plain function beside the
+#: declaration, where neither word is reserved, so that the reference is never the reason for a
+#: refusal.
+A_FUNCTION_DECLARATION_INSIDE_KIND_NAMED: dict[str, dict[str, str | None]] = {
+    'function'        : {'yield': 'yield\n', 'await': 'await\n'},
+    'function*'       : {'yield': None, 'await': 'await\n'},
+    'async function'  : {'yield': 'yield\n', 'await': None},
+    'async function*' : {'yield': None, 'await': None},
+}
+
+
+def _an_expression_named(enclosing: str, kind: str, name: str) -> str:
+    return (
+        F'{enclosing} outer() {{ var f = {kind} {name}() {{}}; console.log(f.name); }}'
+        F' {A_CALL_THAT_RUNS_THE_BODY_OF[enclosing]}'
+    )
+
+
+def _a_declaration_named(enclosing: str, kind: str, name: str) -> str:
+    return (
+        F'{enclosing} outer() {{ {kind} {name}() {{}}'
+        F' (function () {{ console.log({name}.name); }})(); }}'
+        F' {A_CALL_THAT_RUNS_THE_BODY_OF[enclosing]}'
+    )
+
+
+A_NAMED_FUNCTION_EXPRESSION_UNDER_EVERY_ENCLOSING_KIND: dict[str, str | None] = {
+    _an_expression_named(enclosing, kind, name): printed
+    for enclosing in A_CALL_THAT_RUNS_THE_BODY_OF
+    for kind, answers in A_FUNCTION_EXPRESSION_OF_KIND_NAMED.items()
+    for name, printed in answers.items()
+}
+
+A_NAMED_FUNCTION_DECLARATION_OF_EVERY_KIND: dict[str, str | None] = {
+    _a_declaration_named(enclosing, kind, name): printed
+    for enclosing, answers in A_FUNCTION_DECLARATION_INSIDE_KIND_NAMED.items()
+    for kind in A_KIND_OF_FUNCTION
+    for name, printed in answers.items()
+}
+
+
+def _the_pair_recorded_by(rows: dict[str, str | None]) -> dict[str, tuple[str, str | None]]:
+    return {
+        source: ('', 'SyntaxError') if printed is None else (printed, None)
+        for source, printed in rows.items()
+    }
+
+
+def _spoken_by_node(programs: Iterable[str]) -> dict[str, tuple[str, str | None]]:
+    return {program: behavior(program) for program in programs}
+
+
+def _printed_and_parsed_again(source: str) -> str:
+    return JsSynthesizer().convert(JsParser(source).parse())
+
+
+def _spoken_after_a_round_trip(programs: Iterable[str]) -> dict[str, tuple[str, str | None]]:
+    return {program: behavior(_printed_and_parsed_again(program)) for program in programs}
+
+
+def _refused_as_a_strict_file(programs: Iterable[str]) -> dict[str, bool]:
+    return {
+        program: behavior(_under_a_strict_seed(program))[1] == 'SyntaxError'
+        for program in programs
+    }
+
+
+def _node_refuses(rows: dict[str, str | None]) -> dict[str, bool]:
+    return {source: printed is None for source, printed in rows.items()}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAFunctionNamedYieldOrAwaitKeepsItsName(TestBase):
+    """
+    A named function expression carries its name into the program: the name is bound inside the
+    function and is what `Function.prototype.name` answers with, so a rewrite that drops it changes
+    what the program prints. `yield` and `await` are the two names a kind of function can reserve,
+    and the reservation is what makes half of these texts programs and the other half not, which
+    puts the printer and the early-error collector on the same corpus.
+    """
+
+    def test_node_answers_each_named_expression_the_way_the_row_records(self):
+        rows = A_NAMED_FUNCTION_EXPRESSION_UNDER_EVERY_ENCLOSING_KIND
+        self.assertEqual(_spoken_by_node(rows), _the_pair_recorded_by(rows))
+
+    def test_a_round_trip_answers_each_named_expression_the_same_way(self):
+        rows = A_NAMED_FUNCTION_EXPRESSION_UNDER_EVERY_ENCLOSING_KIND
+        self.assertEqual(_spoken_after_a_round_trip(rows), _the_pair_recorded_by(rows))
+
+    def test_node_answers_each_named_declaration_the_way_the_row_records(self):
+        rows = A_NAMED_FUNCTION_DECLARATION_OF_EVERY_KIND
+        self.assertEqual(_spoken_by_node(rows), _the_pair_recorded_by(rows))
+
+    def test_a_round_trip_answers_each_named_declaration_the_same_way(self):
+        rows = A_NAMED_FUNCTION_DECLARATION_OF_EVERY_KIND
+        self.assertEqual(_spoken_after_a_round_trip(rows), _the_pair_recorded_by(rows))
+
+    def test_printing_a_named_expression_a_second_time_writes_the_same_text(self):
+        rows = A_NAMED_FUNCTION_EXPRESSION_UNDER_EVERY_ENCLOSING_KIND
+        once = {source: _printed_and_parsed_again(source) for source in rows}
+        self.assertEqual(
+            {source: _printed_and_parsed_again(text) for source, text in once.items()},
+            once,
+        )
+
+    def test_printing_a_named_declaration_a_second_time_writes_the_same_text(self):
+        rows = A_NAMED_FUNCTION_DECLARATION_OF_EVERY_KIND
+        once = {source: _printed_and_parsed_again(source) for source in rows}
+        self.assertEqual(
+            {source: _printed_and_parsed_again(text) for source, text in once.items()},
+            once,
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestTheCollectorRefusesAReservedFunctionNameWhereNodeDoes(TestBase):
+    """
+    The collector is the gate that keeps a payload out of a destination that would refuse it, so the
+    texts it reports on have to be the texts an engine refuses and no others. Under a sloppy seed
+    that is Node's verdict on the file as written; under a strict seed it is Node's verdict on the
+    same file below a Use Strict Directive, which is one more word Node reserves and the collector
+    must therefore report one more group of texts under.
+    """
+
+    def test_it_reports_on_exactly_the_named_expressions_node_refuses(self):
+        rows = A_NAMED_FUNCTION_EXPRESSION_UNDER_EVERY_ENCLOSING_KIND
+        self.assertEqual(_reported(rows, strict=False), _node_refuses(rows))
+
+    def test_it_reports_on_exactly_the_named_declarations_node_refuses(self):
+        rows = A_NAMED_FUNCTION_DECLARATION_OF_EVERY_KIND
+        self.assertEqual(_reported(rows, strict=False), _node_refuses(rows))
+
+    def test_it_reports_on_exactly_the_named_expressions_a_strict_file_refuses(self):
+        rows = A_NAMED_FUNCTION_EXPRESSION_UNDER_EVERY_ENCLOSING_KIND
+        self.assertEqual(_reported(rows, strict=True), _refused_as_a_strict_file(rows))
+
+    def test_it_reports_on_exactly_the_named_declarations_a_strict_file_refuses(self):
+        rows = A_NAMED_FUNCTION_DECLARATION_OF_EVERY_KIND
+        self.assertEqual(_reported(rows, strict=True), _refused_as_a_strict_file(rows))

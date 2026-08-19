@@ -7,6 +7,8 @@ from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.deobfuscation.iifeaccessor import JsIIFEAccessorPromoter
+from refinery.lib.scripts.js.parser import JsParser
+from refinery.lib.scripts.js.synth import JsSynthesizer
 
 
 class TestIIFEAccessorPromoter(TestJsDeobfuscator):
@@ -349,6 +351,110 @@ class TestAPromotedAccessorIsTheKindOfFunctionItReturned(TestJsDeobfuscator):
     @unittest.skipIf(node_executable() is None, 'node.js is not available')
     def test_node_prints_the_same_before_and_after_the_promotion(self):
         rows = _AN_ACCESSOR_RETURNING_A_FUNCTION_OF_EACH_KIND
+        self.assertEqual(
+            {source: (behavior(source), behavior(self._promote(source))) for source in rows},
+            {
+                source: ((printed, None), (printed, None))
+                for source, (_, printed) in rows.items()
+            },
+        )
+
+
+#: An accessor a promotion has to leave standing, mapped to what Node prints for it. An `async` IIFE
+#: hands back a promise and a generator hands back an iterator, so the name the assignment binds is
+#: not the returned function and a declaration of that name answers nothing the program read. An
+#: arrow reads the `arguments` of the function around it, so one written in the IIFE's body reads
+#: the object the IIFE was called with, which a body carried into a declaration of one parameter no
+#: longer has, and one written in the returned function reads an object whose elements alias that
+#: function's own parameters.
+_AN_ACCESSOR_A_PROMOTION_MUST_LEAVE_ALONE: dict[str, str] = {
+    'var get = async function () { var d = [1, 2]; return function (i) { return d[i]; }; }();'
+    ' get.then(function (f) { console.log(f(0)); });': '1\n',
+    'var get = function* () { var d = [1, 2]; return function (i) { return d[i]; }; }();'
+    ' console.log(get.next().value(1));': '2\n',
+    'var get = async function* () { var d = [1, 2]; return function (i) { return d[i]; }; }();'
+    ' get.next().then(function (r) { console.log(r.value(1)); });': '2\n',
+    'var get = function () { var g = () => arguments.length; var d = [1, 2];'
+    " return function (i) { return d[i] + ':' + g(); }; }(9, 9); console.log(get(0));": '1:2\n',
+    'var get = function () { var d = [1, 2]; return function (i) { var g = () => arguments[0];'
+    " return d[i] + ':' + g(); }; }(); console.log(get(1));": '2:1\n',
+    'var get = function () { var d = [1, 2]; return function (i) {'
+    ' var g = () => { arguments[0] = 0; }; g(); return d[i]; }; }();'
+    ' console.log(get(1));': '1\n',
+}
+
+#: An accessor the promotion does rewrite, mapped to the text it writes and to what Node prints for
+#: the program. The arrow here stands inside a function expression of its own, whose `arguments` is
+#: that expression's and not the accessor's, so moving the accessor's body changes nothing about
+#: what the arrow reads.
+_AN_ACCESSOR_A_PROMOTION_REWRITES: dict[str, tuple[str, str]] = {
+    'var get = function () { var d = [1, 2]; return function (i) {'
+    ' var h = function () { var g = () => arguments[0]; return g(); };'
+    " return d[i] + ':' + h(5); }; }(); console.log(get(1));": (
+        inspect.cleandoc(
+            """
+            function get(i) {
+              var d = [1, 2];
+              var h = function() {
+                var g = () => arguments[0];
+                return g();
+              };
+              return d[i] + ':' + h(5);
+            }
+            console.log(get(1));
+            """
+        ), '2:5\n'),
+    'var get = function () { var d = [1, 2]; return function (i) { return d[i]; }; }();'
+    ' console.log(get(1));': (
+        inspect.cleandoc(
+            """
+            function get(i) {
+              var d = [1, 2];
+              return d[i];
+            }
+            console.log(get(1));
+            """
+        ), '2\n'),
+}
+
+
+class TestWhatTheKindOfTheIIFEAndAnArrowsArgumentsCostThePromotion(TestJsDeobfuscator):
+    """
+    A promotion replaces the IIFE with a declaration of the returned function under the name the
+    assignment bound. That is only the same program where the IIFE was a plain function, whose call
+    hands back what it returned, and where nothing in the moved body reads an `arguments` object the
+    move puts a different function in charge of.
+    """
+
+    def _promote(self, source: str) -> str:
+        return self._run_transformer(source, JsIIFEAccessorPromoter)
+
+    def _canonical(self, source: str) -> str:
+        return JsSynthesizer().convert(JsParser(source).parse())
+
+    def test_the_promotion_leaves_each_of_those_accessors_as_it_found_it(self):
+        rows = _AN_ACCESSOR_A_PROMOTION_MUST_LEAVE_ALONE
+        written = {source: self._canonical(source) for source in rows}
+        self.assertEqual({source: self._promote(text) for source, text in written.items()}, written)
+
+    def test_the_promotion_writes_the_declaration_the_row_records(self):
+        rows = _AN_ACCESSOR_A_PROMOTION_REWRITES
+        self.assertEqual(
+            {source: self._promote(source) for source in rows},
+            {source: promoted for source, (promoted, _) in rows.items()},
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_prints_the_same_before_and_after_a_promotion_it_declines(self):
+        rows = _AN_ACCESSOR_A_PROMOTION_MUST_LEAVE_ALONE
+        self.assertEqual(
+            {source: (behavior(source), behavior(self._promote(source))) for source in rows},
+            {source: ((printed, None), (printed, None)) for source, printed in rows.items()},
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_prints_the_same_before_and_after_a_promotion_it_makes(self):
+        rows = _AN_ACCESSOR_A_PROMOTION_REWRITES
         self.assertEqual(
             {source: (behavior(source), behavior(self._promote(source))) for source in rows},
             {

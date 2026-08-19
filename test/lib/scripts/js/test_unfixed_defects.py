@@ -199,21 +199,17 @@ class TestClassBodyIsItsOwnFunctionContext(TestBase):
 
 class TestABindingNamedByAWordItsFunctionKindReservesIsNoProgram(TestBase):
     """
-    A declaration whose name is a word the enclosing function kind reserves is read as though the
-    name were absent, and what the printer then writes is not JavaScript:
-    `function* g() { function yield() {} }` comes back as `function* g() {\\n  function(() {}\\n}`
-    and `function* g() { class yield {} }` as `class {\\n    {;\\n  }`, with the same two shapes for
-    `await` inside an `async` function.
+    A class whose name is a word the enclosing function kind reserves is read as though the name
+    were absent, and what the printer then writes is not JavaScript:
+    `function* g() { class yield {} }` comes back as `class {\n    {;\n  }`, and the `await`
+    twin inside an `async` function comes back the same way. The two function declarations of the
+    corpus are read with their names now, so their text comes back exactly as it went in.
 
     Node refuses each of the four inputs this entry is quantified over, so what those four cost is
     not a program: it is that `refinery.lib.scripts.is_well_formed` answers `True` for the tree,
     which is the domain every fidelity law is stated over — a caller told the tree is well formed
     compares text that is not a program against the file it came from, and a printer under no
     obligation is asked for one anyway.
-
-    The same reading does reach files Node reads, where what it costs is the file. Those are
-    `TestAnExpressionNamedByAWordOnlyTheEnclosingKindReservesIsAProgram`, kept apart from this entry
-    so that either may retire without the other.
     """
 
     @unittest.expectedFailure
@@ -244,14 +240,13 @@ class TestAnExpressionNamedByAWordOnlyTheEnclosingKindReservesIsAProgram(TestBas
     and for the `await` twin of it, and reads every file of the corpus this entry is quantified
     over. A directive is no defence for the `await` half, which no strict body reserves.
 
-    The reservation the kind around the expression carries reaches the name anyway, the expression
-    is left without one, and what comes back opens `var f = function(() {` — a text Node refuses. A
-    declaration's name and a class expression's name are read under whatever encloses them instead,
-    which is what makes the four files of
+    The reservation the kind around the expression used to reach the name anyway, leaving the
+    expression without one, so that what came back opened `var f = function(() {` — a text Node
+    refuses. A declaration's name and a class expression's name are read under whatever encloses
+    them instead, which is what makes the four files of
     `TestABindingNamedByAWordItsFunctionKindReservesIsNoProgram` no programs to begin with.
     """
 
-    @unittest.expectedFailure
     def test_printing_one_of_them_gives_a_program_that_runs_the_same_way(self):
         rows = A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES
         self.assertEqual(
@@ -259,7 +254,6 @@ class TestAnExpressionNamedByAWordOnlyTheEnclosingKindReservesIsAProgram(TestBas
             {source: ('', None) for source in rows},
         )
 
-    @unittest.expectedFailure
     def test_the_deobfuscation_of_one_that_prints_keeps_what_it_prints(self):
         """
         A file that asks for the type of the expression keeps it alive through every pass, so what
@@ -1312,5 +1306,3 @@ class TestAnUnpackedStackDeclaresTheLocalsItMints(TestBase):
             {source: _before_and_after(source) for source in rows},
             _each_program_still_prints(rows),
         )
-
-

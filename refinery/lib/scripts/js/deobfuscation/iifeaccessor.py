@@ -41,6 +41,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     extract_identifier_params,
     is_literal,
     references_receiver_this,
+    walk_receiver_scope,
     walk_scope,
 )
 from refinery.lib.scripts.js.model import (
@@ -104,6 +105,8 @@ def _detect(declarator: JsVariableDeclarator) -> _Pattern | None:
     callee = strip_parens(init.callee)
     if not isinstance(callee, (JsFunctionExpression, JsArrowFunctionExpression)):
         return None
+    if callee.is_async or (isinstance(callee, JsFunctionExpression) and callee.generator):
+        return None
     if callee.params:
         return None
     body = callee.body
@@ -164,9 +167,10 @@ def _is_safe_to_promote(
         inner_name = inner.id.name
     if references_receiver_this(body):
         return False
-    for node in walk_scope(body):
+    for node in walk_receiver_scope(body):
         if isinstance(node, JsIdentifier) and node.name == 'arguments':
             return False
+    for node in walk_scope(body):
         if inner_name is not None and isinstance(node, JsIdentifier) and node.name == inner_name:
             return False
     for node in body.walk():

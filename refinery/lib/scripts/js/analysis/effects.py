@@ -2450,13 +2450,18 @@ def _binding_value_roots(binding: Binding) -> Iterator[JsIdentifier]:
     Every name a value of *binding* may denote, over its declarations' initializers and the right side of
     every plain assignment to it. Both are needed: a binding declared empty and assigned later
     (`var m; m = Math`) holds the intrinsic just as one initialized with it does.
+
+    A write the model cannot pin to a value (`indefinite_writes`) contributes as well. This is a
+    *may* analysis, and `arguments[k] = Math` stores the intrinsic under a parameter's name whether
+    or not the text says which parameter or whether the call supplied it; leaving it out is exactly
+    the missed alias the caller's docstring names as a wrong answer.
     """
     for declaration in binding.declarations:
         parent = getattr(declaration, 'parent', None)
         initializer = getattr(parent, 'init', None)
         if initializer is not None:
             yield from _denoted_roots(initializer)
-    for reference in binding.writes:
+    for reference in (*binding.writes, *binding.indefinite_writes):
         parent = getattr(reference, 'parent', None)
         if isinstance(parent, JsAssignmentExpression) and parent.left is reference:
             yield from _denoted_roots(parent.right)

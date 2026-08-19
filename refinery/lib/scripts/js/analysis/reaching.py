@@ -105,9 +105,9 @@ class ReachingModel:
         self, binding: Binding, graph: ControlFlowGraph, def_write: Node | None,
     ) -> frozenset[int] | None:
         if (
-            self.effects.mutators_escape(binding)
+            binding.has_indefinite_write
             or binding.has_global_member_write
-            or binding.has_indefinite_write
+            or self.effects.mutators_escape(binding)
             or self.model.reflection_can_reach(binding)
         ):
             return None

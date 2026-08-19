@@ -277,6 +277,25 @@ class JsParser:
     def _at_binding_identifier(self) -> bool:
         return self._is_binding_identifier(self._current)
 
+    def _at_function_name(self) -> bool:
+        """
+        Whether the token standing here names the function whose `function` keyword was just read.
+        Only a name or the parameter list may stand in that position, so `yield` and `await` are
+        read as the name wherever they appear rather than through `_at_binding_identifier`, whose
+        answer is about the enclosing function's kind.
+
+        That answer is the wrong one here in both directions. A function expression's name takes its
+        own kind and not the enclosing one, so `function* g() { var f = function yield() {}; }` is a
+        program whose name would otherwise be dropped; and where the name really is an early error
+        the tree must still spell it, so that
+        `refinery.lib.scripts.js.strict.reserved_by_function_kind` reports it rather than the
+        parameter list being read starting at the name.
+        """
+        return (
+            self._at_binding_identifier()
+            or self._at(JsTokenKind.YIELD, JsTokenKind.AWAIT)
+        )
+
     def _at_variable_declaration(self) -> bool:
         """
         Whether a variable declaration begins here, rather than an expression that merely opens with
@@ -778,7 +797,7 @@ class JsParser:
         self._expect(JsTokenKind.FUNCTION)
         generator = bool(self._eat(JsTokenKind.STAR))
         id_node = None
-        if self._at_binding_identifier():
+        if self._at_function_name():
             tok = self._advance()
             id_node = JsIdentifier(name=tok.value, offset=tok.offset)
         with self._function_body_context(is_async, generator):

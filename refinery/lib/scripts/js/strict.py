@@ -294,10 +294,12 @@ def keeping_directives(host: Node, replacement: list[Statement]) -> list[Stateme
     pass that rebuilds a body by cloning it keeps the directive by value and not by identity, and
     carrying the original as well would write the directive twice.
 
-    Whether *replacement* holds the statement is asked of its opening run and not of the whole list. A
-    directive is what a body opens with; one the caller kept but put behind another statement declares
-    nothing where it now stands, so the host's is carried in front of it exactly as if it had been
-    dropped.
+    A directive is what a body opens with, so one the caller kept but put behind another statement
+    declares nothing where it now stands and the host's is put in front of it. It is *moved* there
+    and never copied ahead of itself: a tree holds a node in one place, and a list naming the same
+    statement at two indices would leave one node with one parent standing at both, which every
+    `id`-keyed map over the tree then reads as two. Where the statement stood it computed a string
+    and discarded it, so taking it from there changes nothing but the mode it now declares.
 
     Whole-body replacement is the one way a directive is lost without a removal: nothing is deleted,
     the statement is simply absent from the list handed in, so a rule phrased over removals cannot see
@@ -307,12 +309,16 @@ def keeping_directives(host: Node, replacement: list[Statement]) -> list[Stateme
     """
     if not is_prologue_host(host) or _opens_with_use_strict(replacement):
         return replacement
-    carried = [
-        statement for statement in directive_prologue(host)
-        if is_use_strict_directive(statement)
-        and not any(kept is statement for kept in leading_string_statements(replacement))
-    ]
-    return carried[:1] + replacement if carried else replacement
+    carried = next(
+        (
+            statement for statement in directive_prologue(host)
+            if is_use_strict_directive(statement)
+        ),
+        None,
+    )
+    if carried is None:
+        return replacement
+    return [carried, *(kept for kept in replacement if kept is not carried)]
 
 
 def _opens_with_use_strict(statements: list[Statement]) -> bool:

@@ -6,7 +6,7 @@ import unittest
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
 
-from refinery.lib.scripts import set_body
+from refinery.lib.scripts import Statement, set_body
 from refinery.lib.scripts.js.model import JsBlockStatement, JsScript
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.strict import (
@@ -478,4 +478,80 @@ class TestKeepingTheDirectiveAcrossAWholeBodyReplacement(TestBase):
                 """
             ),
             self._installed(lambda host: [host.body[0], host.body[2], host.body[1]]),
+        )
+
+
+#: A permutation of a three-statement body whose first statement is the Use Strict Directive,
+#: written as the indices the replacement takes from that body. None of them opens with the
+#: directive, which is the case a pass that reorders statements hands over, and the last one
+#: drops a statement as well.
+AN_ORDER_THAT_LEAVES_THE_DIRECTIVE_OFF_THE_HEAD = [
+    (1, 0, 2),
+    (1, 2, 0),
+    (2, 0, 1),
+    (2, 1, 0),
+    (2, 0),
+]
+
+
+class TestAReplacementHoldingTheDirectiveBehindAnotherStatement(TestBase):
+    """
+    A directive is what a body opens with, so a pass that reorders statements hands back a list
+    where the host's own directive statement declares nothing, and the list installed as the body
+    has to open with it again. Moving it there is the only way: a tree holds a node in one place, so
+    a list naming the same statement at two indices leaves one node with one parent standing at
+    both, and every map keyed by identity over the tree then reads it as two.
+    """
+
+    SOURCE = "function f() { 'use strict'; log(1); log(2); }"
+
+    def _replacement_and_result(
+        self,
+        order: tuple[int, ...],
+    ) -> tuple[list[Statement], list[Statement], list[Statement]]:
+        ast = JsParser(self.SOURCE).parse()
+        host = next(node for node in ast.walk() if isinstance(node, JsBlockStatement))
+        written = list(host.body)
+        replacement = [written[index] for index in order]
+        return written, replacement, keeping_directives(host, replacement)
+
+    def _where_the_directive_stands(self, order: tuple[int, ...]) -> list[int]:
+        written, _, kept = self._replacement_and_result(order)
+        return [index for index, member in enumerate(kept) if member is written[0]]
+
+    def _times_each_statement_is_named(self, order: tuple[int, ...]) -> list[int]:
+        _, replacement, kept = self._replacement_and_result(order)
+        return [
+            sum(1 for member in kept if member is statement)
+            for statement in replacement
+        ]
+
+    def _the_statements_beside_the_directive(self, order: tuple[int, ...]) -> list[int]:
+        written, _, kept = self._replacement_and_result(order)
+        return [
+            index
+            for member in kept
+            for index, statement in enumerate(written)
+            if statement is member and index != 0
+        ]
+
+    def test_the_directive_stands_once_and_at_the_head(self):
+        orders = AN_ORDER_THAT_LEAVES_THE_DIRECTIVE_OFF_THE_HEAD
+        self.assertEqual(
+            {order: self._where_the_directive_stands(order) for order in orders},
+            {order: [0] for order in orders},
+        )
+
+    def test_every_statement_the_replacement_named_is_named_exactly_once(self):
+        orders = AN_ORDER_THAT_LEAVES_THE_DIRECTIVE_OFF_THE_HEAD
+        self.assertEqual(
+            {order: self._times_each_statement_is_named(order) for order in orders},
+            {order: [1] * len(order) for order in orders},
+        )
+
+    def test_the_statements_beside_it_keep_the_order_the_replacement_gave_them(self):
+        orders = AN_ORDER_THAT_LEAVES_THE_DIRECTIVE_OFF_THE_HEAD
+        self.assertEqual(
+            {order: self._the_statements_beside_the_directive(order) for order in orders},
+            {order: [index for index in order if index != 0] for order in orders},
         )

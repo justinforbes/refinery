@@ -1260,6 +1260,7 @@ A_PAYLOAD_ONLY_MODULE_CODE_MAY_HOLD = [
     'import.meta;',
 ]
 
+
 def _a_program_naming_what_one_payload_throws(template: str, payload: str) -> str:
     """
     A program that evaluates *payload* through *template* inside a `try` that names what came out of
