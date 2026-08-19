@@ -177,7 +177,10 @@ def build_world_reach(
             refuse = True
             continue
         sources.append(landing)
-    if refuse:
+    # An open world yields at least one opener, since `world_openers` and `build_closed_world` read
+    # the same `_opens_world`; empty sources here would mean that coupling broke, so fail closed
+    # rather than flood from nothing and grant every position.
+    if refuse or not sources:
         return Ps1WorldReach(world, refuse=True)
     poisoned = ReachabilityQuery(dominance).reachable_from_any(sources)
     return Ps1WorldReach(

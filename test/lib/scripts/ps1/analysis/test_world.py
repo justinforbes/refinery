@@ -336,8 +336,8 @@ class TestPs1ClosedButForAliasBindings(Ps1TypeWorldTest):
     """
     Whether the only thing holding a world open is that the script binds aliases, so that a pass
     which deleted every `Set-Alias` would leave it closed. A caller cannot reach this from
-    `closed_for_the_whole_run` and the list of what it is about to remove, because a verdict of open names no
-    reason; it is read here so that the two answers cannot disagree about what an opener is.
+    `closed_for_the_whole_run` and the list of what it is about to remove, because a verdict of open
+    names no reason; it is read here so that the two answers cannot disagree about what an opener is.
     """
 
     _SHAPES = (

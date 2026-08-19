@@ -60,7 +60,7 @@ class ReachabilityQuery:
         The ids of the nodes forward-reachable from *any* of *sources*, each source included — the
         multi-source flood a taint analysis wants from a set of origins.
 
-        Walked as one breadth-first sweep seeded with every source rather than a union of per-source
+        Walked as one depth-first sweep seeded with every source rather than a union of per-source
         `reachable` sets: the union grows the same answer at the cost of one full walk per source,
         where a single sweep visits each node once however many sources reach it. The result is a
         fresh set the caller owns, so it may intersect or discard it in place, unlike `reachable`.

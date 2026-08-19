@@ -250,8 +250,8 @@ class Ps1TypeWorld:
 
         A pass cannot work this out from `closed_for_the_whole_run` and its own list of what it is
         about to remove, because a verdict of *open* names no reason: it would have to re-walk the
-        tree for
-        every other way the world opens, which is the whole of this model restated in a transform.
+        tree for every other way the world opens, which is the whole of this model restated in a
+        transform.
         Asking here instead is one walk, and the two answers cannot disagree about what an opener is.
 
         Only `Set-Alias` is set aside, not every command that redefines identity. `New-Alias` throws

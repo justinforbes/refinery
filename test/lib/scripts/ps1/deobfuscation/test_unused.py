@@ -1628,3 +1628,87 @@ class TestPs1AddingALeakNeverDeletesMore(TestPs1):
         kept = set(self._deobfuscate(self._QUIET_SCRIPT).splitlines())
         leaked = set(self._deobfuscate(F'Invoke-Expression $c\n{self._QUIET_SCRIPT}').splitlines())
         self.assertLessEqual(kept, leaked)
+
+
+class TestPs1ALeakTheGraphCannotPlaceKeepsEveryRead(TestPs1):
+    """
+    A leak the per-body control-flow graph places nowhere cannot be flooded forward from, so the
+    flow-sensitive world falls back to the whole-run verdict and reads open at every position: every
+    inert read is kept. A parameter default is the clearest such node, run on a call the graph never
+    models as a statement, so `build_world_reach` cannot bound where the leak inside one ran.
+    Deleting a read that leak may already have made effectful would resume a script whose world had
+    opened.
+    """
+
+    def test_a_leak_in_a_function_parameter_default_keeps_a_root_read(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                function F { param($x = (Invoke-Expression $c)) }
+                $Null = [Math]::Sqrt(144)
+                Write-Host done
+            """)),
+            cleandoc("""
+                function F {
+                  Param($x = (Invoke-Expression $c))
+                }
+                $Null = [Math]::Sqrt(144)
+                Write-Host done
+            """))
+
+    def test_a_leak_in_a_script_parameter_default_keeps_a_root_read(self):
+        source = cleandoc("""
+            Param($x = (Invoke-Expression $c))
+            $Null = [Math]::Sqrt(144)
+            Write-Host done
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_benign_script_parameter_default_still_strips_the_root_read(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                Param($x = (Get-Date))
+                $Null = [Math]::Sqrt(144)
+                Write-Host done
+            """)),
+            cleandoc("""
+                Param($x = (Get-Date))
+                Write-Host done
+            """))
+
+
+class TestPs1ANestedBodyReadIsRefusedWhileTheWorldIsOpen(TestPs1):
+    """
+    A read written inside a script block or function body is refused wholesale while the world is
+    open: a body may be entered again by a later call, so the intraprocedural graph cannot order a
+    read inside it against a leak. A nested-body read ahead of the leak in source is therefore kept
+    even though the root read beside it, which the graph does order, is deleted. The nested read is
+    genuinely strippable — a leak-free script strips it — so its survival is the refusal and nothing
+    else.
+    """
+
+    def test_a_nested_body_read_is_kept_while_the_root_read_ahead_of_the_leak_is_deleted(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                & { $Null = [Math]::Sqrt(144) }
+                $Null = [Math]::Sqrt(121)
+                Invoke-Expression $c
+                Write-Host done
+            """)),
+            cleandoc("""
+                & {
+                  $Null = [Math]::Sqrt(144)
+                }
+                Invoke-Expression $c
+                Write-Host done
+            """))
+
+    def test_the_same_nested_body_read_is_stripped_when_no_leak_opens_the_world(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                & { $Null = [Math]::Sqrt(144) }
+                Write-Host done
+            """)),
+            cleandoc("""
+                & {}
+                Write-Host done
+            """))
