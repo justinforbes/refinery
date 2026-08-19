@@ -658,3 +658,66 @@ class TestAValueReadAheadOfAWriteThroughAKeyNothingComputes(TestBase):
     def test_the_deobfuscation_answers_each_program_the_same_way(self):
         rows = _A_VALUE_READ_AHEAD_OF_AN_UNDECIDABLE_WRITE
         self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+#: A program whose parameter is written through the object at a position nothing in the text decides,
+#: mapped to what Node prints for it. Each reads the parameter's value out ahead of that write, through
+#: a route a different query answers: an object literal folded into its access site, a compound write,
+#: a closure over the value, and the object escaping into a call or into a second name. A value-stability
+#: query that answers over such a binding says it holds one value for its lifetime, which it does not.
+#: The last row writes at a position the text does decide, where the parameter it lands on is named.
+_A_PARAMETER_WRITTEN_AT_A_POSITION_NOTHING_DECIDES: dict[str, str] = {
+    'function f(a, b) { var o = { p: a }; arguments[b] = 9; console.log(o.p); } f(1, 0);': '1\n',
+    'function f(a, b) { var o = { p: a }; arguments[b] += 9; console.log(o.p); } f(1, 0);': '1\n',
+    'function f(a, b) { var o = { p: a }; function g() { return o.p; } arguments[b] = 9;'
+    ' console.log(g()); } f(1, 0);': '1\n',
+    'function g(x) { x[0] = 9; } function f(a) { var t = a; g(arguments); console.log(t, a); }'
+    ' f(1);': '1 9\n',
+    'function f(a) { var t = a; var q = arguments; q[0] = 9; console.log(t, a); } f(1);': '1 9\n',
+    'function f(a, b) { var o = { p: a }; arguments[0] = 9; console.log(o.p); } f(1, 0);': '1\n',
+}
+
+#: A function that has no `arguments` object aliasing its parameters, though the name is written in it,
+#: mapped to what Node prints. A function declaration of that name means no such object is created at
+#: all; a destructuring declarator and a `with` object each put something else under the name. `true`
+#: is the parameter untouched, which is what every row asserts.
+_A_NAME_THAT_IS_NOT_THE_OBJECT_AFTER_ALL: dict[str, str] = {
+    "function f(a) { function arguments() {} arguments[0] = {}; console.log('q' in a); }"
+    ' f({q: 1});': 'true\n',
+    "function f(a) { var [arguments] = [[7]]; arguments[0] = {}; console.log('q' in a); }"
+    ' f({q: 1});': 'true\n',
+    "function f(a) { with ({arguments: [7]}) { arguments[0] = {}; } console.log('q' in a); }"
+    ' f({q: 1});': 'true\n',
+    "function f(a) { for (var arguments of [[7]]) { arguments[0] = {}; } console.log('q' in a); }"
+    ' f({q: 1});': 'true\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAParameterWrittenAtAPositionNothingDecides(TestBase):
+    """
+    Such a write lands on one parameter and names none, so no parameter of the function holds one
+    value for its lifetime afterwards. Every query that reports value stability has to say so, not
+    only the one that computes reaching definitions, and an object the function hands out or binds to
+    a second name is the same fact reached by another route.
+    """
+
+    def test_node_answers_each_program_with_the_value_read_ahead_of_the_write(self):
+        rows = _A_PARAMETER_WRITTEN_AT_A_POSITION_NOTHING_DECIDES
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_each_program_the_same_way(self):
+        rows = _A_PARAMETER_WRITTEN_AT_A_POSITION_NOTHING_DECIDES
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWrittenNameThatIsNotTheObject(TestBase):
+
+    def test_node_leaves_the_parameter_untouched(self):
+        rows = _A_NAME_THAT_IS_NOT_THE_OBJECT_AFTER_ALL
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_leaves_it_untouched_too(self):
+        rows = _A_NAME_THAT_IS_NOT_THE_OBJECT_AFTER_ALL
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))

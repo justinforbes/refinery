@@ -294,6 +294,11 @@ def keeping_directives(host: Node, replacement: list[Statement]) -> list[Stateme
     pass that rebuilds a body by cloning it keeps the directive by value and not by identity, and
     carrying the original as well would write the directive twice.
 
+    Whether *replacement* holds the statement is asked of its opening run and not of the whole list. A
+    directive is what a body opens with; one the caller kept but put behind another statement declares
+    nothing where it now stands, so the host's is carried in front of it exactly as if it had been
+    dropped.
+
     Whole-body replacement is the one way a directive is lost without a removal: nothing is deleted,
     the statement is simply absent from the list handed in, so a rule phrased over removals cannot see
     it. It is repaired rather than refused because a pass reaches this point having already rewritten
@@ -305,7 +310,7 @@ def keeping_directives(host: Node, replacement: list[Statement]) -> list[Stateme
     carried = [
         statement for statement in directive_prologue(host)
         if is_use_strict_directive(statement)
-        and not any(kept is statement for kept in replacement)
+        and not any(kept is statement for kept in leading_string_statements(replacement))
     ]
     return carried[:1] + replacement if carried else replacement
 

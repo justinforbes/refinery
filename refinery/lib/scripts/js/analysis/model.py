@@ -249,7 +249,7 @@ class Binding:
     reads: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
     writes: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
     dynamic_refs: list[JsIdentifier] = field(default_factory=list)
-    indefinite_writes: list[JsMemberExpression] = field(default_factory=list)
+    indefinite_writes: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
     captured: bool = False
 
     @property
@@ -293,8 +293,10 @@ class Binding:
         """
         Whether some access writes the binding at a point that names it only at run time, so that its
         value stops holding there and no definition says what replaced it. `arguments[k] = v` for a `k`
-        no reading of the text computes is the one such access: it writes exactly one parameter of the
-        function and which one is not decidable, so it is a kill of each with a value for none.
+        no reading of the text computes is one such access: it writes exactly one parameter of the
+        function and which one is not decidable, so it is a kill of each with a value for none. The
+        object handed to a call or bound to a second name is another, and the entry is then the
+        identifier the object escaped through rather than an access on it.
 
         It is kept apart from `writes` for the same reason `dynamic_refs` is kept apart: a `writes`
         entry is a definition, and a consumer reading one expects to find the value it stored. Recording
@@ -770,6 +772,15 @@ def _member_property_name(member: JsMemberExpression) -> str | None:
     return prop.name if isinstance(prop, JsIdentifier) else None
 
 
+def _last_position_of(params: list[Binding | None], binding: Binding) -> int:
+    """
+    The last position in *params* that *binding* stands at. A repeated parameter name declares one
+    binding, and only its final occurrence is the one an `arguments` element is mapped onto
+    (§10.2.11), so every earlier position of a repeated name aliases nothing.
+    """
+    return max(index for index, other in enumerate(params) if other is binding)
+
+
 def _rebinds_arguments(binding: Binding) -> bool:
     """
     Whether *binding*, the `arguments` object a function is given, is made to denote something else
@@ -783,10 +794,18 @@ def _rebinds_arguments(binding: Binding) -> bool:
     """
     if binding.writes:
         return True
-    return any(
-        isinstance(site.parent, JsVariableDeclarator) and site.parent.init is not None
-        for site in binding.declarations
-    )
+    for site in binding.declarations:
+        declarator = site.parent
+        if not isinstance(declarator, JsVariableDeclarator) or declarator.id is not site:
+            return True
+        if declarator.init is not None:
+            return True
+        declaration = declarator.parent
+        if isinstance(declaration, JsVariableDeclaration) and isinstance(
+            declaration.parent, (JsForInStatement, JsForOfStatement)
+        ):
+            return True
+    return False
 
 
 def _is_global_alias_access(node: Node) -> bool:
@@ -1401,11 +1420,16 @@ class SemanticModel:
         this binding, so it is treated as a possible rebind), and a direct `eval` in its owning
         function can rebind it opaquely. A member write or method call through the name does not
         rebind it — the name keeps its value — so only a dynamic reference whose role is not a plain
-        read counts. A consumer that judges a binding's value stable from `writes` alone must also
-        consult this, since neither reassignment leaves a `writes` entry; a script-scope binding
+        read counts. A write through an object that aliases the binding at a position decided only at
+        run time — `indefinite_writes` — is counted here too: it replaces the value under the name
+        while leaving no entry that says with what. A consumer that judges a binding's value stable
+        from `writes` alone must also consult this, since none of these reassignments leaves a `writes`
+        entry; a script-scope binding
         reassigned only through an opaque `eval` stays the documented residual, as
         `local_reachable_by_direct_eval` reports it false there.
         """
+        if binding.has_indefinite_write:
+            return True
         if self.local_reachable_by_direct_eval(binding):
             return True
         return any(
@@ -1725,6 +1749,11 @@ class SemanticModel:
                 self.binding_of(param) if isinstance(param, JsIdentifier) else None
                 for param in fn.params
             ]
+            params = [
+                binding if binding is not None and _last_position_of(params, binding) == index
+                else None
+                for index, binding in enumerate(params)
+            ]
             for node in walk_receiver_scope(fn):
                 if not isinstance(node, JsIdentifier) or node.name != 'arguments':
                     continue
@@ -1734,19 +1763,19 @@ class SemanticModel:
                 if denotes is not None and denotes.kind is not BindingKind.ARGUMENTS:
                     continue
                 access = _enclosing_member_access(node)
-                if access is not None:
+                if access is not None and denotes is not None:
                     named = _aliased_parameter_positions(access, len(params))
                     if named is not None:
                         role = reference_role(access)
                         for index in named:
                             self._record_alias_reference(params[index], access, role)
                         continue
-                    if reference_role(access) is not Role.READ:
-                        for binding in params:
-                            if binding is not None:
-                                binding.indefinite_writes.append(access)
+                site: JsIdentifier | JsMemberExpression = node if access is None else access
+                may_write = access is None or reference_role(access) is not Role.READ
                 for binding in params:
                     self._record_alias_reference(binding, node, Role.READ)
+                    if may_write and binding is not None:
+                        binding.indefinite_writes.append(site)
 
     def _record_alias_reference(
         self,

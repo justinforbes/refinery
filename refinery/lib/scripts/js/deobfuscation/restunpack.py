@@ -18,7 +18,6 @@ from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.model import SemanticModel, references_own_arguments
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
-    canonical_array_index,
     insert_after_prologue,
     member_key,
     numeric_value,
@@ -40,7 +39,11 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
 )
-from refinery.lib.scripts.js.numbers import exact_integer, js_number_to_string
+from refinery.lib.scripts.js.numbers import (
+    canonical_array_index,
+    exact_integer,
+    js_number_to_string,
+)
 from refinery.lib.scripts.js.strict import strict_mode_at
 
 
