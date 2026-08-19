@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import unittest
-
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -1412,8 +1410,9 @@ class TestPs1AJunkStatementGoesWhereNoLeakHasRunBeforeIt(TestPs1):
     A leak such as `Invoke-Expression` may re-point a member through the Extended Type System or
     remap a type accelerator, which is what makes a member read that follows one effectful. A read
     no leak has run before observes what it always would have, so it is junk like any other.
-    `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld.world_closed_at` answers a whole-script
-    verdict and cannot yet tell the two apart, so one leak anywhere keeps every read in the file.
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach.closed_at` grants such a read by
+    flooding forward from every leak and sparing what the flood does not reach, where the whole-run
+    verdict kept every read in a file that leaks once anywhere.
 
     The back edge of a loop puts a leak in the body before every read in that body, including the
     ones written above it.
@@ -1424,7 +1423,6 @@ class TestPs1AJunkStatementGoesWhereNoLeakHasRunBeforeIt(TestPs1):
             self._deobfuscate('$Null = [Math]::Sqrt(144); Write-Host done'),
             'Write-Host done')
 
-    @unittest.expectedFailure
     def test_a_read_ahead_of_a_leak_is_junk(self):
         self.assertEqual(
             self._deobfuscate('$Null = [Math]::Sqrt(144); Invoke-Expression $c; Write-Host done'),
@@ -1451,3 +1449,182 @@ class TestPs1AJunkStatementGoesWhereNoLeakHasRunBeforeIt(TestPs1):
                   Invoke-Expression $c
                 }
             """))
+
+
+class TestPs1WhereALeakCanHaveRunBeforeARead(TestPs1):
+    """
+    A leak written inside a stored block or a function body cannot run before the statement that
+    binds it, so that statement is the earliest point the leak reaches: an inert read ahead of it is
+    junk and one behind it is kept. A leak sharing its statement with the read, and a leak in a
+    branch, likewise keep exactly the positions they can have run before.
+    """
+
+    def test_a_read_beside_a_leak_in_the_same_statement_is_kept(self):
+        self.assertEqual(
+            self._deobfuscate('$Null = [Math]::Sqrt(144) + (Invoke-Expression $c)'),
+            '$Null = [Math]::Sqrt(144) + (Invoke-Expression $c)')
+
+    def test_a_read_ahead_of_a_pipeline_whose_block_leaks_is_junk(self):
+        self.assertEqual(
+            self._deobfuscate(
+                '$Null = [Math]::Sqrt(144); $env:A | ForEach-Object { Invoke-Expression $_ }; Write-Host done'),
+            cleandoc("""
+                $env:A | ForEach-Object {
+                  Invoke-Expression $_
+                }
+                Write-Host done
+            """))
+
+    def test_a_read_behind_a_pipeline_whose_block_leaks_is_kept(self):
+        self.assertEqual(
+            self._deobfuscate(
+                '$env:A | ForEach-Object { Invoke-Expression $_ }; $Null = [Math]::Sqrt(144); Write-Host done'),
+            cleandoc("""
+                $env:A | ForEach-Object {
+                  Invoke-Expression $_
+                }
+                $Null = [Math]::Sqrt(144)
+                Write-Host done
+            """))
+
+    def test_a_read_ahead_of_the_definition_of_a_leaking_function_is_junk(self):
+        self.assertEqual(
+            self._deobfuscate(
+                '$Null = [Math]::Sqrt(144); function F { Invoke-Expression $c }; F; Write-Host done'),
+            cleandoc("""
+                function F {
+                  Invoke-Expression $c
+                }
+                F
+                Write-Host done
+            """))
+
+    def test_a_read_behind_a_called_leaking_function_is_kept(self):
+        self.assertEqual(
+            self._deobfuscate(
+                'function F { Invoke-Expression $c }; F; $Null = [Math]::Sqrt(144); Write-Host done'),
+            cleandoc("""
+                function F {
+                  Invoke-Expression $c
+                }
+                F
+                $Null = [Math]::Sqrt(144)
+                Write-Host done
+            """))
+
+    def test_a_read_behind_an_if_with_one_leaking_arm_is_kept(self):
+        source = cleandoc("""
+            if ($env:FOO) {
+              Invoke-Expression $c
+              Write-Host a
+            } else {
+              Write-Host b
+            }
+            $Null = [Math]::Sqrt(144)
+            Write-Host done
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_read_in_the_arm_beside_the_leaking_one_is_junk(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                if ($env:FOO) {
+                  Invoke-Expression $c
+                  Write-Host a
+                } else {
+                  $Null = [Math]::Sqrt(144)
+                  Write-Host b
+                }
+                Write-Host done
+            """)),
+            cleandoc("""
+                if ($env:FOO) {
+                  Invoke-Expression $c
+                  Write-Host a
+                } else {
+                  Write-Host b
+                }
+                Write-Host done
+            """))
+
+
+class TestPs1ALeakThatPrecedesEveryPosition(TestPs1):
+    """
+    A `class` or `enum` definition takes effect before the first statement of the script runs, and
+    a root `process` block re-runs once per pipeline input, so no position in such a script comes
+    ahead of the leak and every inert read is kept.
+    """
+
+    def test_a_read_ahead_of_a_class_definition_is_kept(self):
+        source = cleandoc("""
+            $Null = [Math]::Sqrt(144)
+            class C {}
+            Write-Host done
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_read_ahead_of_an_enum_definition_is_kept(self):
+        source = cleandoc("""
+            $Null = [Math]::Sqrt(144)
+            enum E {
+              A
+            }
+            Write-Host done
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_read_beside_a_leak_in_a_root_process_block_is_kept(self):
+        self.assertEqual(
+            self._deobfuscate('process { $Null = [Math]::Sqrt(144); Invoke-Expression $_ }'),
+            cleandoc("""
+                process {
+                  $Null = [Math]::Sqrt(144)
+                  Invoke-Expression $_
+                }
+            """) + '\n')
+
+
+class TestPs1CommandNameTrustIsAWholeRunVerdict(TestPs1):
+    """
+    Dropping a noise bareword rests on trusting that no command bears its name, and a script that
+    rebinds command names anywhere revokes that trust everywhere: the artifact is kept even where
+    no rebinding has run before it.
+    """
+
+    def test_a_noise_bareword_ahead_of_a_set_alias_is_kept(self):
+        source = cleandoc("""
+            try {
+              foo =5
+            } catch {}
+            Set-Alias wq i*x
+            wq
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1AddingALeakNeverDeletesMore(TestPs1):
+
+    _QUIET_SCRIPT = cleandoc("""
+        $Null = [Math]::Sqrt(144)
+        $u = 'noise'
+        Write-Host alpha
+        Write-Host omega
+    """)
+
+    def test_the_leak_free_script_prunes_down_to_its_live_statements(self):
+        self.assertEqual(
+            self._deobfuscate(self._QUIET_SCRIPT),
+            cleandoc("""
+                Write-Host alpha
+                Write-Host omega
+            """))
+
+    def test_an_appended_leak_deletes_nothing_the_leak_free_run_kept(self):
+        kept = set(self._deobfuscate(self._QUIET_SCRIPT).splitlines())
+        leaked = set(self._deobfuscate(F'{self._QUIET_SCRIPT}\nInvoke-Expression $c').splitlines())
+        self.assertLessEqual(kept, leaked)
+
+    def test_a_prepended_leak_deletes_nothing_the_leak_free_run_kept(self):
+        kept = set(self._deobfuscate(self._QUIET_SCRIPT).splitlines())
+        leaked = set(self._deobfuscate(F'Invoke-Expression $c\n{self._QUIET_SCRIPT}').splitlines())
+        self.assertLessEqual(kept, leaked)

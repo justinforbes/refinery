@@ -4,6 +4,7 @@ from test import TestBase
 
 from refinery.lib.scripts.ps1.analysis.values import candidate_types, resolve_expression_type
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.data import resolve_type
 from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement
 from refinery.lib.scripts.ps1.parser import Ps1Parser
@@ -14,7 +15,7 @@ class Ps1ExpressionTypeTest(TestBase):
     #: The world every script that redefines nothing and runs no opaque code has. Typing questions
     #: are asked against it because a command name is only trustworthy in a closed world, so an open
     #: world answers nothing and would test the absence, not the typing.
-    CLOSED = Ps1TypeWorld(True, frozenset())
+    CLOSED = Ps1WorldReach(Ps1TypeWorld(True, frozenset()))
 
     @staticmethod
     def _expr(source: str):
@@ -31,7 +32,7 @@ class TestPs1CandidateTypes(Ps1ExpressionTypeTest):
     result is reported as such and an unknowable one as the empty set, never as a single guess.
     """
 
-    def _candidates(self, source: str, world: Ps1TypeWorld | None = None):
+    def _candidates(self, source: str, world: Ps1WorldReach | None = None):
         return candidate_types(self._expr(source), self.CLOSED if world is None else world)
 
     def test_a_cmdlet_contributes_every_output_type_it_declares(self):
@@ -115,7 +116,9 @@ class TestPs1CandidateTypes(Ps1ExpressionTypeTest):
     def test_an_open_world_contributes_no_command_candidates(self):
         # A command name means what the metadata says only while nothing can have rebound it, so the
         # cmdlet whose declaration is trusted in a closed world contributes nothing in an open one.
-        self.assertEqual(self._candidates('(Get-Date)', Ps1TypeWorld(False, frozenset())), frozenset())
+        self.assertEqual(
+            self._candidates('(Get-Date)', Ps1WorldReach(Ps1TypeWorld(False, frozenset()))),
+            frozenset())
 
 
 if __name__ == '__main__':

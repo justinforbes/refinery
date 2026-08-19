@@ -18,7 +18,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     is_side_effect_free,
     output_sink,
 )
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.analysis.values import integer_of, is_truthy, read
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
@@ -84,7 +84,7 @@ def _carries_assignment_marker(cmd: Ps1CommandInvocation, name: str) -> bool:
     )
 
 
-def _is_injected_noise_bareword(expr: Expression, world: Ps1TypeWorld) -> bool:
+def _is_injected_noise_bareword(expr: Expression, world: Ps1WorldReach) -> bool:
     """
     Return `True` when `expr` is a bareword command carrying an assignment marker and no argument
     that does anything — the shape an obfuscator injects to pad a script, which the passes below
@@ -107,13 +107,13 @@ def _is_injected_noise_bareword(expr: Expression, world: Ps1TypeWorld) -> bool:
         return False
     if not isinstance(expr.name, Ps1StringLiteral):
         return False
-    if not world.world_closed_at(expr):
+    if not world.closed_at(expr):
         return False
     name = expr.name.value
     name_lower = name.lower()
     if not _carries_assignment_marker(expr, name):
         return False
-    if name_lower in KNOWN_CMDLETS or not world.may_trust_command_name(name_lower, expr):
+    if name_lower in KNOWN_CMDLETS or not world.may_trust_command_name(name_lower):
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
         return False
@@ -147,7 +147,7 @@ def _hoisted_initializer(expr: Expression) -> Ps1ExpressionStatement:
     return store_dropped_to_value(expr)
 
 
-def _try_body_survivors(body: list[Statement], world: Ps1TypeWorld) -> list[Statement] | None:
+def _try_body_survivors(body: list[Statement], world: Ps1WorldReach) -> list[Statement] | None:
     """
     What a try body leaves behind once its construct is dissolved, or `None` when it cannot be.
 
@@ -386,14 +386,15 @@ class Ps1DeadCodeElimination(Transformer):
 
     def visit(self, node: Node):
         # The world is captured once, not re-read per body: `set_body` below advances the tree
-        # version, so a per-call-site lookup would rebuild the whole-tree walk after every prune, and
-        # could flip the verdict mid-pass. Capturing errs the safe way — this pass only removes or
-        # hoists nodes and never introduces a leak, so a stale verdict is always the more open one.
-        # The cache itself is threaded so that reachability is read fresh per body: a reachability
+        # version, so a per-call-site lookup would rebuild the control-flow flood after every prune.
+        # The captured world binds its flow-sensitive grants to the tree it measured and refuses —
+        # falls back to the whole-run verdict — once that version advances, so a prune that moved a
+        # read can never turn a held grant unsound; it only defers the grant to the next pass. The
+        # cache itself is threaded so that reachability is read fresh per body: a reachability
         # verdict must reflect the current tree, and reading it through the version-aware cache
         # rebuilds only after a body has actually changed.
         cache = model_cache(self, node)
-        world = cache.closed_world
+        world = cache.world_reach
         for parent in list(node.walk()):
             sink = output_sink(parent)
             if sink is None or sink is OutputSink.CAPTURED:
@@ -401,7 +402,7 @@ class Ps1DeadCodeElimination(Transformer):
             if self._prune_body(parent, world, cache):
                 self.mark_changed()
 
-    def _prune_body(self, parent: Node, world: Ps1TypeWorld, cache: Ps1ModelCache) -> bool:
+    def _prune_body(self, parent: Node, world: Ps1WorldReach, cache: Ps1ModelCache) -> bool:
         """
         Rewrite each statement of one body into what its condition has already been proved to make
         of it, or leave it alone.
@@ -500,7 +501,7 @@ class Ps1DeadCodeElimination(Transformer):
         return saw_node
 
     def _try_prune(
-        self, stmt: Statement, world: Ps1TypeWorld, dominance: DominatorModel,
+        self, stmt: Statement, world: Ps1WorldReach, dominance: DominatorModel,
     ) -> list[Statement] | None:
         if isinstance(stmt, Ps1WhileLoop):
             return self._prune_while(stmt)
@@ -640,7 +641,7 @@ class Ps1DeadCodeElimination(Transformer):
             return body[0]
         return []
 
-    def _prune_try(self, node: Ps1TryCatchFinally, world: Ps1TypeWorld) -> list[Statement] | None:
+    def _prune_try(self, node: Ps1TryCatchFinally, world: Ps1WorldReach) -> list[Statement] | None:
         """
         Resolve a `try`/`catch`/`finally` into what its `try` body leaves behind, followed by the
         `finally` body, which always runs. An empty or absent try body needs no separate case
@@ -669,7 +670,7 @@ class Ps1DeadCodeElimination(Transformer):
         return survivors + list(finally_body)
 
     def _prune_trap(
-        self, node: Ps1TrapStatement, world: Ps1TypeWorld, dominance: DominatorModel,
+        self, node: Ps1TrapStatement, world: Ps1WorldReach, dominance: DominatorModel,
     ) -> list[Statement] | None:
         """
         Remove a `trap` handler whose body produces no observable output and whose scope cannot

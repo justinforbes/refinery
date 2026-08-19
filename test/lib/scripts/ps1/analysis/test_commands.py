@@ -393,7 +393,7 @@ class TestPs1WorldRoleAgreement(TestBase):
                 invocation = _sole_invocation(tree)
                 self.assertEqual(cache.commands.world_role(invocation), role)
                 self.assertEqual(
-                    cache.closed_world.world_closed_at(invocation), role is WorldRole.NONE)
+                    cache.closed_world.closed_for_the_whole_run, role is WorldRole.NONE)
 
 
 class TestExtractAliasDefinition(TestBase):

@@ -54,13 +54,13 @@ class TestPs1CommandNameRewrite(TestPs1):
         tree = Ps1Parser('gci $x').parse()
         cache = Ps1ModelCache(tree)
         invocation = _command_named(tree, 'gci')
-        self.assertTrue(cache.closed_world.world_closed_at(tree))
+        self.assertTrue(cache.closed_world.closed_for_the_whole_run)
         self.assertTrue(set_command_name(invocation, 'C:\\Stage Two\\payload.ps1'))
         self.assertEqual(
             Ps1Synthesizer().convert(tree),
             "& 'C:\\Stage Two\\payload.ps1' $x",
         )
-        self.assertFalse(cache.closed_world.world_closed_at(tree))
+        self.assertFalse(cache.closed_world.closed_for_the_whole_run)
         self.assertEqual(
             cache.commands.denotation(invocation),
             Denotation(CommandKind.UNKNOWN, None),

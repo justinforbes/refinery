@@ -26,7 +26,7 @@ class Ps1TypeWorldTest(TestBase):
     @staticmethod
     def _closed(source: str) -> bool:
         script = Ps1Parser(source).parse()
-        return build_closed_world(script).world_closed_at(None)
+        return build_closed_world(script).closed_for_the_whole_run
 
     @staticmethod
     def _closed_but_for_aliases(source: str) -> bool:
@@ -336,7 +336,7 @@ class TestPs1ClosedButForAliasBindings(Ps1TypeWorldTest):
     """
     Whether the only thing holding a world open is that the script binds aliases, so that a pass
     which deleted every `Set-Alias` would leave it closed. A caller cannot reach this from
-    `world_closed_at` and the list of what it is about to remove, because a verdict of open names no
+    `closed_for_the_whole_run` and the list of what it is about to remove, because a verdict of open names no
     reason; it is read here so that the two answers cannot disagree about what an opener is.
     """
 

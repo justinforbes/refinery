@@ -18,6 +18,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     unconsumed_statement,
 )
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.ast import get_body, get_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
@@ -38,13 +39,13 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: its full type reasoning. `TestPs1Purity` asserts type facts (this member read is a plain .NET
 #: property) against it, because Position A makes a present-member grant conditional on the world
 #: being closed; the open-world behaviour it guards is exercised in `TestPs1ClosedWorld`.
-_CLOSED_WORLD = Ps1TypeWorld(True, frozenset())
+_CLOSED_WORLD = Ps1WorldReach(Ps1TypeWorld(True, frozenset()))
 
 #: An open world, which is what a caller holds before anything has been measured. Every
 #: present-member grant is withheld, so a read this module proves pure is still kept. Named rather
 #: than defaulted: a test asserting open-world behaviour has to say so, and the effect layer no
 #: longer lets a call site acquire this answer by omission.
-_NO_WORLD = Ps1TypeWorld(False, frozenset())
+_NO_WORLD = Ps1WorldReach(Ps1TypeWorld(False, frozenset()))
 
 
 class Ps1EffectsTest(TestBase):
@@ -539,8 +540,8 @@ class TestPs1CommandShadowing(Ps1EffectsTest):
     """
 
     @staticmethod
-    def _shadowing(*names: str) -> Ps1TypeWorld:
-        return Ps1TypeWorld(True, frozenset(names))
+    def _shadowing(*names: str) -> Ps1WorldReach:
+        return Ps1WorldReach(Ps1TypeWorld(True, frozenset(names)))
 
     def test_a_shadowed_commands_read_and_call_are_impure(self):
         world = self._shadowing('get-date', 'new-object')
@@ -1064,7 +1065,7 @@ class TestPs1EmitSafety(Ps1EffectsTest):
 
         source = 'function foreach { Start-Process calc }\n1..3 | foreach { $Null = $_ }'
         tree = self._parse(source)
-        world = build_closed_world(tree)
+        world = Ps1WorldReach(build_closed_world(tree))
         statement = tree.body[-1]
         self.assertFalse(effects._pipeline_ends_with_void_foreach(statement.expression, world))
         self.assertIsNot(effects.statement_effect(statement, world), StatementEffect.DISCARD)
@@ -1137,7 +1138,7 @@ class TestPs1OpenWorldNameTrust(Ps1EffectsTest):
     """
 
     #: A world nothing was proven to redefine, but in which something can redefine anything.
-    OPEN = Ps1TypeWorld(False, frozenset())
+    OPEN = Ps1WorldReach(Ps1TypeWorld(False, frozenset()))
 
     def test_an_open_world_grants_no_command_purity(self):
         for source in ('Get-Date', 'New-Object System.Version', '(Get-Date)'):

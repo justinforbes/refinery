@@ -56,7 +56,7 @@ from refinery.lib.scripts.ps1.ast import (
     is_builtin_variable,
     unwrap_parens,
 )
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.data import (
     OBJ_COMMANDS,
     TYPE_ARG_COMMANDS,
@@ -331,7 +331,7 @@ _CLOSED_OUTPUT_CMDLETS = frozenset({
 
 def candidate_types(
     expr: Expression,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
     type_of_variable: Ps1VariableTyping | None = None,
 ) -> frozenset[Ps1TypeName]:
     """
@@ -383,7 +383,7 @@ def _static_method_candidates(node: Ps1InvokeMember) -> frozenset[Ps1TypeName]:
 
 def _command_candidates(
     cmd: Ps1CommandInvocation,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
     type_of_variable: Ps1VariableTyping | None,
 ) -> frozenset[Ps1TypeName]:
     """
@@ -400,7 +400,7 @@ def _command_candidates(
     if name is None:
         return frozenset()
     lower = name.lower()
-    if not world.may_trust_command_name(lower, cmd):
+    if not world.may_trust_command_name(lower):
         return frozenset()
     if lower in TYPE_ARG_COMMANDS:
         single = resolve_expression_type(cmd, type_of_variable)

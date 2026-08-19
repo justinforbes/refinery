@@ -62,6 +62,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     read_operand,
 )
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.ast import in_evaluation_order, string_value
 from refinery.lib.scripts.ps1.data import (
     OperatorOutcome,
@@ -1503,7 +1504,7 @@ SITES: tuple[_Site, ...] = _corpus_sites()
 #: The world a typing question is asked in. It is closed, so that a command name still denotes what
 #: the collected metadata says: an open world types nothing at all, and an agreement over it would
 #: hold because neither side answers rather than because they answer alike.
-CLOSED_WORLD = Ps1TypeWorld(True, frozenset())
+CLOSED_WORLD = Ps1WorldReach(Ps1TypeWorld(True, frozenset()))
 
 
 class _Numeral(NamedTuple):

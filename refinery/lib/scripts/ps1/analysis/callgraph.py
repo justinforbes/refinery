@@ -292,7 +292,7 @@ def build_call_graph(root: Ps1Script, world: Ps1TypeWorld) -> Ps1CallGraph:
     call_sites: dict[str, list[Ps1CallSite]] = {}
     qualified: list[str] = []
     retried: dict[str, list[str]] = {}
-    readable = world.world_closed_at(root)
+    readable = world.closed_for_the_whole_run
     exports = False
     for node in root.walk_in_order():
         if isinstance(node, Ps1FunctionDefinition):

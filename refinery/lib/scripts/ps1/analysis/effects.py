@@ -38,7 +38,7 @@ from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.analysis.arguments import Ps1WrittenSlots, written_slots
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
 from refinery.lib.scripts.ps1.analysis.values import candidate_types, integer_of, read
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
     get_body,
@@ -532,7 +532,7 @@ def _scriptblock_arguments(cmd: Ps1CommandInvocation) -> list[Ps1ScriptBlock]:
 
 def _arguments_are_pure(
     arguments: Sequence[Expression],
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
 ) -> bool:
     """
     Whether an argument list is safe to evaluate *and* hands the callee nothing to write back
@@ -547,7 +547,7 @@ def _arguments_are_pure(
 
 def _command_arguments_are_pure(
     cmd: Ps1CommandInvocation,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
 ) -> bool:
     """
     Whether every non-scriptblock argument of a command is side-effect free. A cmdlet being a pure
@@ -659,7 +659,7 @@ def _runs_only_visible_blocks(cmd: Ps1CommandInvocation) -> bool:
 
 def _command_body_is_pure(
     cmd: Ps1CommandInvocation,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
 ) -> bool:
     """
     Check whether all script block arguments of a pipeline cmdlet (ForEach-Object, Where-Object,
@@ -721,7 +721,7 @@ def _reflection_read_is_pure(type_key: Ps1TypeName, member: str) -> bool:
     return False
 
 
-def _member_read_is_pure(obj, member: str, world: Ps1TypeWorld) -> bool:
+def _member_read_is_pure(obj, member: str, world: Ps1WorldReach) -> bool:
     """
     Whether reading the named `member` off `obj` has no side effect, decided over every type
     `refinery.lib.scripts.ps1.analysis.values.candidate_types` says `obj` could carry. The read is
@@ -736,21 +736,21 @@ def _member_read_is_pure(obj, member: str, world: Ps1TypeWorld) -> bool:
     )
 
 
-def _grant(verdict: bool, node, world: Ps1TypeWorld) -> bool:
+def _grant(verdict: bool, node, world: Ps1WorldReach) -> bool:
     """
     A present-member or present-type purity grant, conditioned on the type world being closed at
     `node`. Every branch of `is_side_effect_free` that returns `True` because a member, static
     method or constructor resolves to a known-pure .NET operation routes its verdict through here:
-    the grant holds only when no code the script runs could have shadowed that member through the
-    Extended Type System or remapped its type name through an accelerator, which is
-    `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld.world_closed_at`. An open world answers
-    `False`, so such a caller keeps the access. An impurity *deny* is never routed through here; it
-    holds unconditionally.
+    the grant holds only when no code that runs *before this node* could have shadowed that member
+    through the Extended Type System or remapped its type name through an accelerator, which is
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach.closed_at`. A world open at the node
+    answers `False`, so such a caller keeps the access — even when the world is closed elsewhere in
+    the same script. An impurity *deny* is never routed through here; it holds unconditionally.
     """
-    return verdict and world.world_closed_at(node)
+    return verdict and world.closed_at(node)
 
 
-def is_side_effect_free(node, world: Ps1TypeWorld) -> bool:
+def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
     """
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
     observable side effects beyond yielding a value. The `world` decides whether a present-member
@@ -775,7 +775,7 @@ def is_side_effect_free(node, world: Ps1TypeWorld) -> bool:
         # collected type can still run code (`[xml]$s` parses, and follows external DTDs), which
         # `_PURE_CAST_TYPES` is the eventual answer to. The world is read before either check
         # because it is a stored bool that can only veto, while both checks below walk.
-        if not world.world_closed_at(node):
+        if not world.closed_at(node):
             return False
         if data.resolve_type(node.type_name) is None:
             return False
@@ -872,7 +872,7 @@ def is_side_effect_free(node, world: Ps1TypeWorld) -> bool:
             return False
         new_object = extract_new_object(node)
         if new_object is not None:
-            if not world.may_trust_command_name('new-object', node):
+            if not world.may_trust_command_name('new-object'):
                 return False
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
@@ -888,7 +888,7 @@ def is_side_effect_free(node, world: Ps1TypeWorld) -> bool:
         name = name.lower()
         # A command the script redefines no longer runs what the metadata describes, and neither
         # does any command in a script able to rebind names, so its purity is not the built-in's.
-        if not world.may_trust_command_name(name, node):
+        if not world.may_trust_command_name(name):
             return False
         # The pipeline set is checked through the same gate rather than after the plain one: three
         # of its four members are in both, so testing the plain set first would make the body check
@@ -897,10 +897,11 @@ def is_side_effect_free(node, world: Ps1TypeWorld) -> bool:
             return False
         if not _command_arguments_are_pure(node, world):
             return False
-        # Routed through `_grant` like every other grant, though `may_trust_command_name` above
-        # already refuses an open world. The redundancy is the point: this arm would otherwise hold
-        # its world check inside a name-trust question, so narrowing that question back to what its
-        # name suggests would silently reopen a fail-open hole with nothing in the path to catch it.
+        # Routed through `_grant` like every other grant. `may_trust_command_name` above refuses a
+        # name the whole run cannot trust; `_grant` here refuses a member the world does not hold at
+        # this node. The two ask different worlds — one whole-run, one positional — so a name that
+        # passed the first is still gated on the second, and narrowing that back to the name check
+        # would reopen a fail-open hole with nothing in the path to catch it.
         if name in _PURE_PIPELINE_CMDLETS:
             return _grant(_command_body_is_pure(node, world), node, world)
         return _grant(True, node, world)
@@ -1041,7 +1042,7 @@ def is_fault_free(node) -> bool:
     return False
 
 
-def may_be_dropped(node, world: Ps1TypeWorld) -> bool:
+def may_be_dropped(node, world: Ps1WorldReach) -> bool:
     """
     Whether an expression the script evaluates may be deleted without changing what the script does.
 
@@ -1147,7 +1148,7 @@ def _is_null_discard(node) -> TypeGuard[Ps1AssignmentExpression]:
     )
 
 
-def statement_effect(stmt, world: Ps1TypeWorld) -> StatementEffect:
+def statement_effect(stmt, world: Ps1WorldReach) -> StatementEffect:
     """
     Classify the observable effect of a standalone statement as a `StatementEffect`. This is the one
     shared authority the dead-code and junk-removal passes consult so they never disagree about
@@ -1225,7 +1226,7 @@ def _terminal_command(pipeline: Ps1Pipeline, name: str) -> Ps1CommandInvocation 
 
 def _pipeline_ends_with_out_null(
     pipeline: Ps1Pipeline,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
 ) -> bool:
     """
     Whether a pipeline is terminated by an `Out-Null` that throws its input away *and* costs nothing
@@ -1234,14 +1235,14 @@ def _pipeline_ends_with_out_null(
     value the pipeline never carried and is not a junk sink.
     """
     out_null = _terminal_command(pipeline, 'out-null')
-    if out_null is None or not world.may_trust_command_name('out-null', out_null):
+    if out_null is None or not world.may_trust_command_name('out-null'):
         return False
     return _command_arguments_are_pure(out_null, world)
 
 
 def _pipeline_prefix_is_pure(
     pipeline: Ps1Pipeline,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
 ) -> bool:
     for el in pipeline.elements[:-1]:
         if not isinstance(el, Ps1PipelineElement) or el.redirections:
@@ -1253,7 +1254,7 @@ def _pipeline_prefix_is_pure(
 
 def _pipeline_final_is_pure(
     pipeline: Ps1Pipeline,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
 ) -> bool:
     """
     Whether the last element of a pipeline is side-effect free. Together with
@@ -1272,7 +1273,7 @@ def _pipeline_final_is_pure(
 
 def _pipeline_ends_with_void_foreach(
     pipeline: Ps1Pipeline,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
 ) -> bool:
     """
     Detect junk pipelines like `... | ForEach-Object { [Void]$_ }` or
@@ -1292,7 +1293,7 @@ def _pipeline_ends_with_void_foreach(
     the blocks they saw, and a body that was never shown is not among them.
     """
     foreach = _terminal_command(pipeline, 'foreach-object')
-    if foreach is None or not world.may_trust_command_name('foreach-object', foreach):
+    if foreach is None or not world.may_trust_command_name('foreach-object'):
         return False
     if not _command_arguments_are_pure(foreach, world):
         return False
@@ -1788,7 +1789,7 @@ def pruning_erases_body(node, survivors: Sequence[Node]) -> bool:
 
 def _param_block_is_inert(
     block: Ps1ParamBlock | None,
-    world: Ps1TypeWorld,
+    world: Ps1WorldReach,
 ) -> bool:
     """
     Whether a `param( ... )` block runs nothing when the function is called. Declaring a name binds
@@ -1811,7 +1812,7 @@ def _param_block_is_inert(
     )
 
 
-def body_is_inert(node, world: Ps1TypeWorld) -> bool:
+def body_is_inert(node, world: Ps1WorldReach) -> bool:
     """
     Whether the body that `node` owns neither emits a value nor performs a side effect: `node` is
     `None`, the body is empty, or every statement in it is a `StatementEffect.DISCARD`. An inert

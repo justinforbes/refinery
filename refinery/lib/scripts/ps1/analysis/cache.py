@@ -23,6 +23,7 @@ from refinery.lib.scripts.ps1.analysis.dominance import build_dominance
 from refinery.lib.scripts.ps1.analysis.effects import Ps1OutputFlow, build_output_flow
 from refinery.lib.scripts.ps1.analysis.model import Ps1SemanticModel, build_semantic_model
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld, build_closed_world
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach, build_world_reach
 from refinery.lib.scripts.ps1.model import Ps1Script
 
 
@@ -42,6 +43,7 @@ class Ps1ModelCache(ModelCacheBase):
     _SLOTS = (
         '_model',
         '_closed_world',
+        '_world_reach',
         '_call_graph',
         '_output_flow',
         '_control_flow',
@@ -55,6 +57,7 @@ class Ps1ModelCache(ModelCacheBase):
     root: Ps1Script
     _model: Ps1SemanticModel | None
     _closed_world: Ps1TypeWorld | None
+    _world_reach: Ps1WorldReach | None
     _call_graph: Ps1CallGraph | None
     _output_flow: Ps1OutputFlow | None
     _control_flow: ControlFlowModel | None
@@ -77,6 +80,18 @@ class Ps1ModelCache(ModelCacheBase):
         one, or two transforms reach opposite conclusions about the same node.
         """
         return self._lazy('_closed_world', lambda: build_closed_world(self.root))
+
+    @property
+    def world_reach(self) -> Ps1WorldReach:
+        """
+        The flow-sensitive reading of `closed_world`: whether the type world is closed at one
+        particular read, over `control_flow` and `dominance`. The effect layer takes this in place
+        of the leaf world so a member-read grant may survive a leak the read provably runs before,
+        while a name-trust question stays the whole-run verdict. Rebuilt with the rest of the cache
+        when this root's tree changes, so a transform never reads a position against a stale graph.
+        """
+        return self._lazy('_world_reach', lambda: build_world_reach(
+            self.root, self.closed_world, self.control_flow, self.dominance))
 
     @property
     def call_graph(self) -> Ps1CallGraph:

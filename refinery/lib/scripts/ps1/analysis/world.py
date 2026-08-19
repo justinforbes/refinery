@@ -19,18 +19,20 @@ aliasing spelling, a `using module` statement, a computed provider path — is a
 recall gap: a mutator the list misses leaves the world reading closed, which fires the grants and
 deletes the reads that mutator makes effectful. Every name added to it buys correctness, not recall.
 
-This is a leaf model — a one-shot whole-script verdict — cached in
-`refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` and queried directly by the effect layer.
-`Ps1TypeWorld.world_closed_at` takes the read node so a flow-sensitive successor can make the answer
-depend on where the read sits relative to the leaks that reach it; in this phase the node is not yet
-consulted.
+This is a leaf value model — a one-shot whole-script verdict plus the shadow set — cached in
+`refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache`. Whether the world is closed at *one*
+particular read, which depends on where that read sits relative to the leaks that reach it, is a
+graph question and does not live here: `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach`
+answers it, layered on this model and on the control-flow graph, and `world_openers` is the shared
+enumeration of the nodes that open the world so the two cannot disagree about what an opener is.
 """
 from __future__ import annotations
 
 import enum
 
-from typing import NamedTuple
+from typing import Iterator, NamedTuple
 
+from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_member_name,
@@ -192,11 +194,29 @@ def command_role(name: str) -> WorldRole:
     return WorldRole.NONE
 
 
+def world_openers(root: Ps1Script) -> Iterator[Node]:
+    """
+    Every node of *root* that opens the world, in walk order — the shared enumeration that
+    `build_closed_world` reduces to a whole-script verdict and
+    `refinery.lib.scripts.ps1.analysis.worldflow.build_world_reach` floods forward from. Stated once
+    so the whole-run bool and the flow-sensitive gate cannot disagree about what opens the world: a
+    node the flood misses but the bool counts, or the reverse, would let one model grant where the
+    other refuses over the same script.
+
+    Yields the opener node itself, not its role — the reach model needs the position, and the class
+    or enum definition among them, which opens the world at no position because the engine compiles
+    it before the first statement runs, is recognized by the consumer that must fail closed on it.
+    """
+    for node in root.walk():
+        if _opens_world(node, _identity_redefinitions(node)):
+            yield node
+
+
 class Ps1TypeWorld:
     """
     The verdict of `build_closed_world`: whether the running script leaves the type system and
     command table intact. It carries both command-table facts the purity gate needs — the
-    whole-world verdict (`world_closed_at`) and the set of command names the script redefines
+    whole-run verdict (`closed_for_the_whole_run`) and the set of command names the script redefines
     (`command_shadowed`) — so the two cannot drift apart, and the one question a caller actually
     asks of the pair (`may_trust_command_name`). Held in a
     `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot and passed to the effect layer.
@@ -228,8 +248,9 @@ class Ps1TypeWorld:
         Whether the only thing keeping this world open is that the script binds aliases — so that a
         pass which deleted every `Set-Alias` would leave it closed.
 
-        A pass cannot work this out from `world_closed_at` and its own list of what it is about to
-        remove, because a verdict of *open* names no reason: it would have to re-walk the tree for
+        A pass cannot work this out from `closed_for_the_whole_run` and its own list of what it is
+        about to remove, because a verdict of *open* names no reason: it would have to re-walk the
+        tree for
         every other way the world opens, which is the whole of this model restated in a transform.
         Asking here instead is one walk, and the two answers cannot disagree about what an opener is.
 
@@ -241,12 +262,20 @@ class Ps1TypeWorld:
         """
         return self._closed_but_for_alias_bindings
 
-    def world_closed_at(self, node) -> bool:
+    @property
+    def closed_for_the_whole_run(self) -> bool:
         """
-        Whether the type world is closed at `node`. Today this is the whole-script verdict and
-        `node` is not consulted — it is a forward-declared seam for the flow-sensitive successor,
-        which will make the answer depend on whether a leak reaches this read rather than whether
-        the script contains one anywhere.
+        Whether the type world is closed *anywhere* the script runs: no node opens it, so a
+        present-member grant holds at every position. This is the whole-script verdict, position
+        free by construction — a question about the run entire, not about one read within it.
+
+        The flow-sensitive successor to this — whether the world is closed at one particular read,
+        which depends on where that read sits relative to the leaks that reach it — is not a fact
+        about this value object. It needs the control-flow graph, so it lives in
+        `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach`, layered on this the way
+        `refinery.lib.scripts.ps1.analysis.commands.Ps1CommandModel` is layered on `shadowed_names`.
+        A verdict of closed here means that model grants at every position; only when this is open
+        does the position start to matter.
         """
         return self._closed
 
@@ -256,30 +285,38 @@ class Ps1TypeWorld:
         or a `function:`/`alias:`-scope assignment, so the collected metadata no longer describes
         what the name runs. The analysis must not trust such a name for typing or purity. The set is
         whole-script and conservative — an inner-scope redefinition distrusts the name everywhere,
-        which only keeps more — mirroring `world_closed_at`'s whole-script granularity.
+        which only keeps more — mirroring `closed_for_the_whole_run`'s whole-script granularity.
 
         The query is normalized the way the set was built, so the spelling a caller happens to hold
         cannot answer `False` for a name the walk recorded under its canonical key.
         """
         return normalize_command_name(name) in self._shadowed
 
-    def may_trust_command_name(self, name: str, node) -> bool:
+    def may_trust_command_name(self, name: str) -> bool:
         """
-        Whether the collected metadata still describes what the command `name` runs at `node`, so a
-        site may act on the name — for typing or for purity. Two things stop it describing it, and
-        both are this model's to answer: the script redefines the name where the walk can classify
-        the redefinition, or the world is open at `node`, in which case a dot-sourced file, an
-        imported module, an `iex`, an item cmdlet writing the `function:` provider or an opaque
-        dispatch can bind *any* name to code this tree does not contain. Reading the shadow set
-        alone would trust every name in exactly the scripts able to rebind them, and that set holds
-        only the two spellings the classifier sees.
+        Whether the collected metadata still describes what the command `name` runs, so a site may
+        act on the name — for typing or for purity. Two things stop it describing it, and both are
+        this model's to answer: the script redefines the name where the walk can classify the
+        redefinition, or the world is open anywhere the run reaches, in which case a dot-sourced
+        file, an imported module, an `iex`, an item cmdlet writing the `function:` provider or an
+        opaque dispatch can bind *any* name to code this tree does not contain. Reading the shadow
+        set alone would trust every name in exactly the scripts able to rebind them, and that set
+        holds only the two spellings the classifier sees.
+
+        This is the whole-run verdict, *not* the position-sensitive one. Command identity is opened
+        along a different axis than the type system — a `Start-Job` leak runs its block in another
+        runspace and cannot rebind the caller's table where an `iex` of the same block would, and a
+        surviving `Set-Alias` can hide a mutator behind a later bareword the flood would not have
+        poisoned — so the flow-sensitive relaxation `refinery.lib.scripts.ps1.analysis.worldflow`
+        applies to a member read is not sound to apply to a name. Any name the script can rebind is
+        distrusted everywhere; the identity axis earns its own frontier in its own increment.
 
         Named for the question a caller actually has rather than for the shadow set, because the
         answer is wider than the set: a reader who takes this for "is it redefined?" and narrows it
         back to that would reopen a hole that deletes code, and no `_grant` sits in the path to
         catch it.
         """
-        return self.world_closed_at(node) and not self.command_shadowed(name)
+        return self._closed and not self.command_shadowed(name)
 
     @property
     def shadowed_names(self) -> frozenset[str]:

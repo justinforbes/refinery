@@ -10,7 +10,7 @@ from typing import Callable, TypeGuard
 
 from refinery.lib.scripts import Node, Transformer, set_value
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.analysis.values import (
     coerced_text,
     collect_facts,
@@ -466,19 +466,21 @@ def apply_string_method(
 class WorldAwareTransformer(Transformer):
     """
     A transform whose every purity verdict is asked against the run's shared
-    `refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld`, read once at entry from the model cache
-    rather than reconstructed per node. One shared world is what keeps two transforms in a run from
-    reaching opposite conclusions about the same node, and reading it before this run's own edits can
-    only make the answer the more open — and so the more conservative — of the two. See
-    `refinery.lib.scripts.ps1.deobfuscation.unused.Ps1DeadStoreElimination` for why the single world
-    is load-bearing. Which command a name denotes — the other question a transform must not answer
-    privately — is the command model's, read through
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach`, read once at entry from the model
+    cache rather than reconstructed per node. One shared world is what keeps two transforms in a run
+    from reaching opposite conclusions about the same node. Its flow-sensitive grants depend on
+    where a read sits relative to the leaks that reach it, so a world held across this transform's
+    own edits could grant a read an edit moved past a leak. The model instead falls back to the
+    whole-run verdict once the tree version advances, so the held world only loses recall, never
+    soundness. See `refinery.lib.scripts.ps1.deobfuscation.unused.Ps1DeadStoreElimination` for why
+    the single world is load-bearing. Which command a name denotes — the other question a transform
+    must not answer privately — is the command model's, read through
     `refinery.lib.scripts.ps1.analysis.commands.Ps1CommandModel`.
     """
 
     def __init__(self):
         super().__init__()
-        self._world: Ps1TypeWorld | None = None
+        self._world: Ps1WorldReach | None = None
         self._entry = False
 
     def visit(self, node: Node):
@@ -486,7 +488,7 @@ class WorldAwareTransformer(Transformer):
             return super().visit(node)
         self._entry = True
         try:
-            self._world = model_cache(self, node).closed_world
+            self._world = model_cache(self, node).world_reach
             return super().visit(node)
         finally:
             self._entry = False
