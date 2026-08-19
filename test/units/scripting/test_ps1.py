@@ -795,10 +795,10 @@ class TestPs1RealWorldLarge(TestUnitBase):
         goal = inspect.cleandoc(
             """
             $ppvvglp = New-Object -Com "Scripting.FileSystemObject"
-            New-Object -Com "WScript.Shell"
+            $Null = New-Object -Com "WScript.Shell"
             $aefqnhv = $ppvvglp.GetDrive("c:").SerialNumber
             $oysdesi = New-Object Threading.Mutex ($False, $aefqnhv)
-            $oysdesi.WaitOne(1)
+            $Null = $oysdesi.WaitOne(1)
             $aefqnhv = "{0:X}" -f $aefqnhv
             $aefqnhv = [Convert]::ToInt64($aefqnhv, 16)
             $serial = $aefqnhv
@@ -867,7 +867,7 @@ class TestPs1RealWorldLarge(TestUnitBase):
         test = data | self.load() | str
         goal = inspect.cleandoc(
             r"""
-            (Get-Command ???t?).Name
+            $Null = (Get-Command ???t?).Name
             $kxYB = ([char[]]($lyA5) | ForEach-Object {
               [byte][char]$_
             })
