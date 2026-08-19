@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import inspect
 
+import unittest
+
+from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
@@ -1746,4 +1749,26 @@ class TestHostEntrypoints(TestJsDeobfuscator):
                 """
             ),
             self._remove_unused(source),
+        )
+
+
+#: An assignment to a name no declaration binds, standing where nothing makes the region strict,
+#: mapped to what Node prints. Sloppy code answers such a write by creating a property of the global
+#: object, so a write nothing reads back really is a dead store and removing it is right.
+A_SLOPPY_REGION_ASSIGNING_TO_NO_BINDING: dict[str, tuple[str, str | None]] = {
+    'function f(b) { var q = b + 1; undeclared_e = 1; return q; } console.log(f(2));':
+        ('3\n', None),
+    'undeclared_f = 1; console.log(3);': ('3\n', None),
+    "'use strict'; var declared_g; declared_g = 1; console.log(3);": ('3\n', None),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWriteSloppyCodeAnswersIsADeadStore(TestJsDeobfuscator):
+
+    def test_the_write_is_removed_where_nothing_makes_the_region_strict(self):
+        rows = A_SLOPPY_REGION_ASSIGNING_TO_NO_BINDING
+        self.assertEqual(
+            {source: behavior(self._deobfuscate(source)) for source in rows},
+            dict(rows),
         )
