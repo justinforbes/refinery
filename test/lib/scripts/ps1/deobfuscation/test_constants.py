@@ -895,3 +895,31 @@ class TestPs1AConstantInterpolatesAsTheTextItRendersTo(TestPs1):
 
     def test_a_number_interpolated_beside_a_text_is_the_text_of_both(self):
         self.assertEqual(self._deobfuscate_iterative('$s = 0xFF; $t = "v$s"'), "$t = 'v255'")
+
+
+class TestPs1ALaunchDependentDefaultIsNotInvented(TestPs1):
+    """
+    `$PSCommandPath` and `$PSScriptRoot` have no single default: both are empty at an interactive
+    prompt and hold the script's own path when the script runs from a file, so inlining either
+    launch mode's value changes what the script prints under the other one. Reads of them pass
+    through untouched, where a name whose default no launch mode can change is still inlined.
+    """
+
+    def test_a_read_of_a_script_path_name_passes_through_untouched(self):
+        for source in (
+            'Write-Host $PSCommandPath',
+            'Write-Host $PSScriptRoot',
+            'Write-Host "${PSCommandPath}"',
+            'Write-Host "${PSScriptRoot}"',
+        ):
+            with self.subTest(source):
+                self._assertUnchanged(source, Ps1ConstantInlining)
+                self.assertEqual(self._deobfuscate_iterative(source), source)
+
+    def test_a_default_no_launch_mode_can_change_is_still_inlined(self):
+        self.assertEqual(
+            self._apply('Write-Host $PSHome', Ps1ConstantInlining),
+            "Write-Host 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0'")
+        self.assertEqual(
+            self._apply('Write-Host "$PSHome"', Ps1ConstantInlining),
+            'Write-Host "C:\\Windows\\System32\\WindowsPowerShell\\v1.0"')

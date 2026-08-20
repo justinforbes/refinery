@@ -1712,3 +1712,56 @@ class TestPs1ANestedBodyReadIsRefusedWhileTheWorldIsOpen(TestPs1):
                 & {}
                 Write-Host done
             """))
+
+
+class TestPs1AScriptThatNamesItsOwnPathIsRefusedWhole(TestPs1):
+    """
+    A statement like `. $PSCommandPath` re-runs the script's own file in the same process, which
+    makes every statement written before a leak run again after it. Which statement would perform
+    such a re-run is not decidable from here, but every portable spelling of one passes through
+    the names PowerShell reveals a script's own path or text under — so a script that spells any
+    of them anywhere takes the whole-run verdict and a junk read ahead of its leak is kept.
+    Naming one's own path is not itself a leak: without one, the same read goes.
+    """
+
+    _MENTIONS_AND_TWINS = (
+        ('Write-Host $PSCommandPath', 'Write-Host $q'),
+        ('Write-Host $MyInvocation', 'Write-Host $q'),
+        ('Write-Host $PSScriptRoot', 'Write-Host $q'),
+        ('Write-Host "at ${PSScriptRoot}"', 'Write-Host "at ${q}"'),
+        ("Write-Host 'at $PSCommandPath'", "Write-Host 'at $q'"),
+        ('Get-Variable MyInvocation', 'Get-Variable Unrelated'),
+        ('Get-PSCallStack', 'Get-Culture'),
+        (
+            'Write-Host ([Environment]::GetCommandLineArgs())',
+            'Write-Host ([Environment]::GetEnvironmentVariables())',
+        ),
+    )
+
+    def _script_with_tail(self, tail: str) -> str:
+        return cleandoc(F"""
+            $Null = [Math]::Sqrt(144)
+            Invoke-Expression $c
+            {tail}
+        """)
+
+    def test_a_read_ahead_of_the_leak_is_kept_under_every_spelling_of_the_self_path(self):
+        for mention, _ in self._MENTIONS_AND_TWINS:
+            with self.subTest(mention):
+                source = self._script_with_tail(mention)
+                self.assertEqual(self._deobfuscate(source), source)
+
+    def test_the_same_read_goes_when_the_self_path_naming_is_absent(self):
+        for _, twin in self._MENTIONS_AND_TWINS:
+            with self.subTest(twin):
+                self.assertEqual(
+                    self._deobfuscate(self._script_with_tail(twin)),
+                    cleandoc(F"""
+                        Invoke-Expression $c
+                        {twin}
+                    """))
+
+    def test_a_self_path_name_without_a_leak_does_not_keep_the_read(self):
+        self.assertEqual(
+            self._deobfuscate('$Null = [Math]::Sqrt(144); Write-Host $PSCommandPath'),
+            'Write-Host $PSCommandPath')

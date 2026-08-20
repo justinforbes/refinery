@@ -55,30 +55,6 @@ class ReachabilityQuery:
             self._reach[key] = cached
         return cached
 
-    def reachable_from_any(self, sources: Iterable[CfgNode]) -> frozenset[int]:
-        """
-        The ids of the nodes forward-reachable from *any* of *sources*, each source included — the
-        multi-source flood a taint analysis wants from a set of origins.
-
-        Walked as one depth-first sweep seeded with every source rather than a union of per-source
-        `reachable` sets: the union grows the same answer at the cost of one full walk per source,
-        where a single sweep visits each node once however many sources reach it. The result is a
-        fresh set the caller owns, so it may intersect or discard it in place, unlike `reachable`.
-        """
-        seen: set[int] = set()
-        stack: list[CfgNode] = []
-        for source in sources:
-            if id(source) not in seen:
-                seen.add(id(source))
-                stack.append(source)
-        while stack:
-            node = stack.pop()
-            for successor in node.successors:
-                if id(successor) not in seen:
-                    seen.add(id(successor))
-                    stack.append(successor)
-        return frozenset(seen)
-
     def any_between(
         self, source: CfgNode, target: CfgNode, candidates: Iterable[int],
     ) -> bool:

@@ -82,6 +82,12 @@ from refinery.lib.scripts.ps1.model import (
 from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
 from refinery.lib.scripts.win32const import DEFAULT_ENVIRONMENT_TEMPLATE
 
+#: The value an engine variable holds when the script never writes it, for the names whose default
+#: does not depend on how the script was launched. `$PSCommandPath` and `$PSScriptRoot` are
+#: deliberately absent: they are empty only at an interactive prompt and hold the script's own path
+#: under file execution, so no single value stands for them — and inlining the interactive one both
+#: rewrites what a file-run script prints and erases the self-path names
+#: `refinery.lib.scripts.ps1.analysis.worldflow.build_world_reach` refuses over.
 _PS1_DEFAULT_VARIABLES: dict[str, str] = {
     key.lower(): value for key, value in {
         'ConfirmPreference'          : r'High',
@@ -90,11 +96,9 @@ _PS1_DEFAULT_VARIABLES: dict[str, str] = {
         'ErrorActionPreference'      : r'Continue',
         'InformationPreference'      : r'SilentlyContinue',
         'ProgressPreference'         : r'Continue',
-        'PSCommandPath'              : r'',
         'PSCulture'                  : r'en-US',
         'PSEmailServer'              : r'',
         'PSHome'                     : r'C:\Windows\System32\WindowsPowerShell\v1.0',
-        'PSScriptRoot'               : r'',
         'PSSessionApplicationName'   : r'wsman',
         'PSSessionConfigurationName' : r'http://schemas.microsoft.com/powershell/Microsoft.PowerShell',
         'PSUICulture'                : r'en-US',

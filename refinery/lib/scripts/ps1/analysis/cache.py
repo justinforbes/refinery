@@ -85,13 +85,13 @@ class Ps1ModelCache(ModelCacheBase):
     def world_reach(self) -> Ps1WorldReach:
         """
         The flow-sensitive reading of `closed_world`: whether the type world is closed at one
-        particular read, over `control_flow` and `dominance`. The effect layer takes this in place
-        of the leaf world so a member-read grant may survive a leak the read provably runs before,
-        while a name-trust question stays the whole-run verdict. Rebuilt with the rest of the cache
-        when this root's tree changes, so a transform never reads a position against a stale graph.
+        particular read, over `control_flow`. The effect layer takes this in place of the leaf
+        world so a member-read grant may survive a leak the read provably runs before, while a
+        name-trust question stays the whole-run verdict. Rebuilt with the rest of the cache when
+        this root's tree changes, so a transform never reads a position against a stale graph.
         """
         return self._lazy('_world_reach', lambda: build_world_reach(
-            self.root, self.closed_world, self.control_flow, self.dominance))
+            self.root, self.closed_world, self.control_flow))
 
     @property
     def call_graph(self) -> Ps1CallGraph:
