@@ -181,9 +181,9 @@ BOUNDARIES: tuple[str, ...] = (
     'f 1e3.5',
 )
 
-#: How a word may be written where a command name is read, and where a value is. This is the
-#: question M1 stalled on — whether a bare word keeps its spelling when it moves into a slot that
-#: reads a pipeline — and 5.1 answers it in the token stream rather than the tree.
+#: How a word may be written where a command name is read, and where a value is: whether a bare
+#: word keeps its spelling when it moves into a slot that reads a pipeline — and 5.1 answers it in
+#: the token stream rather than the tree.
 SPELLINGS: tuple[str, ...] = (
     'Get-Item a',
     "Get-Item 'a'",

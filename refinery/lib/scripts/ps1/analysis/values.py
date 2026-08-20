@@ -1306,7 +1306,7 @@ def _typed_result(
 #: the **UInt32** 1294967295 and `-bnot 5000000000.0` the Int64 -5000000001, each the narrowest
 #: width that holds the number. Naming `Int32` here is safe because it is the narrowest rung: a
 #: value that does not fit one makes `convert` throw and `apply_unary` refuse, so what the floor
-#: costs is a fold and never an answer. Completing it is scheduled; see the plan.
+#: costs is a fold and never an answer.
 #:
 #: A type absent here is one nothing measured a width for. A collection is not missing but refused:
 #: `-bnot @(1, 2)` throws, and so does `-bnot 'abc'`, which is the conversion throwing rather than
