@@ -1509,11 +1509,14 @@ class XChaChaMixin(SetupEncryptionHeader):
         return self.PasswordTest == self.decrypt(
             password_bytes, bytes(4), 0, SpecialCryptContext.PasswordTest)
 
-    def decrypt(self, password_bytes: buf, data: buf, chunk_start: int, first_slice: int) -> buf:
+    def decrypt(self, password_bytes: buf, data: buf, chunk_start: int, first_slice: int) -> bytes:
         key = self._derive(password_bytes)
-        from refinery.units.crypto.cipher.chacha import xchacha
-        nonce = self.PasswordSeed.BaseNonce.compile(chunk_start, first_slice)
-        return data | xchacha(key, nonce=nonce) | bytes
+        from Crypto.Cipher import ChaCha20
+        seed = self.PasswordSeed
+        assert isinstance(seed, XChaChaParams)
+        nonce = seed.BaseNonce.compile(chunk_start, first_slice)
+        cipher = ChaCha20.new(key=key, nonce=nonce)
+        return cipher.decrypt(data)
 
 
 class SetupEncryptionHeaderV1(Struct, SetupEncryptionHeader):
