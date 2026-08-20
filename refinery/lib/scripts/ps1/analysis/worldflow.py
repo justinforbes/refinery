@@ -258,11 +258,13 @@ def build_world_reach(
         return Ps1WorldReach(world, root=root, refuse=True, build_version=version)
     if world.closed_for_the_whole_run and not measurement.shadow_sites:
         return Ps1WorldReach(world, root=root, build_version=version)
+    if root.process_block is not None or _names_own_path(root):
+        return Ps1WorldReach(world, root=root, refuse=True, build_version=version)
     control_flow = control_flow_of()
     root_graph = control_flow.graph_of(root)
     if root_graph is None:
         return Ps1WorldReach(world, root=root, refuse=True, build_version=version)
-    refuse = root.process_block is not None or _names_own_path(root)
+    refuse = False
     sources: list[CfgNode] = []
     for opener in measurement.openers:
         if isinstance(opener, (Ps1ClassDefinition, Ps1EnumDefinition)):
