@@ -1309,10 +1309,10 @@ class TestAnUnpackedStackDeclaresTheLocalsItMints(TestBase):
 
 
 #: A region that runs strict, holding an assignment to a name no declaration binds, mapped to the
-#: behavior Node gives it. Assigning to an unresolvable reference is a `ReferenceError` in strict code
-#: where sloppy code creates a property of the global object, so the statement's one effect is the
-#: throw and nothing written behind it runs. The mode is arrived at three ways, none of which the
-#: statement itself states.
+#: behavior Node gives it. Assigning to an unresolvable reference is a `ReferenceError` in strict
+#: code where sloppy code creates a property of the global object, so the statement's one effect is
+#: the throw and nothing written behind it runs. The mode is arrived at three ways, none of which
+#: the statement itself states.
 A_STRICT_REGION_ASSIGNING_TO_NO_BINDING = {
     "function f(b) { 'use strict'; var q = b + 1; undeclared_a = 1; return q; }"
     ' console.log(f(2));': ('', 'ReferenceError'),
@@ -1326,16 +1326,17 @@ A_STRICT_REGION_ASSIGNING_TO_NO_BINDING = {
 class TestAWriteOnlyStrictCodeRefusesIsNotADeadStore(TestBase):
     """
     A store whose value nothing reads is removable only where storing is all it does. Where the name
-    resolves to no binding and the write stands in strict code the assignment throws instead, and the
-    sweep reads it as a store and deletes the throw along with everything the program never reached.
-    The same write in sloppy code really is dead, and `test_unused.TestAWriteSloppyCodeAnswersIsADeadStore` pins that it is still removed.
+    resolves to no binding and the write stands in strict code the assignment throws instead, and
+    the sweep reads it as a store and deletes the throw along with everything the program never
+    reached. The same write in sloppy code really is dead, and
+    `test_unused.TestAWriteSloppyCodeAnswersIsADeadStore` pins that it is still removed.
 
     Refusing to remove it is not by itself the fix, and a repair that stops there makes a commoner
     program worse. A namespace flattening rewrites `NS.p = 1` to a bare `p = 1` and emits `var p`
-    beside it; where a fold then answers every read of `p`, the declaration is swept as unread. Keeping
-    the assignment while its declaration goes leaves a write to a name nothing binds — the very throw
-    this entry is about, in a program that had none. The store and its declaration have to be decided
-    together.
+    beside it; where a fold then answers every read of `p`, the declaration is swept as unread.
+    Keeping the assignment while its declaration goes leaves a write to a name nothing binds — the
+    very throw this entry is about, in a program that had none. The store and its declaration have
+    to be decided together.
     """
 
     @unittest.expectedFailure

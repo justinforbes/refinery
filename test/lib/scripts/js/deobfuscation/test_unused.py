@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-
 import unittest
 
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
@@ -1753,22 +1752,45 @@ class TestHostEntrypoints(TestJsDeobfuscator):
 
 
 #: An assignment to a name no declaration binds, standing where nothing makes the region strict,
-#: mapped to what Node prints. Sloppy code answers such a write by creating a property of the global
-#: object, so a write nothing reads back really is a dead store and removing it is right.
-A_SLOPPY_REGION_ASSIGNING_TO_NO_BINDING: dict[str, tuple[str, str | None]] = {
+#: mapped to the text the deobfuscation writes for it. Sloppy code answers such a write by creating
+#: a property of the global object, so a write nothing reads back really is a dead store and the
+#: text records that it is gone.
+A_SLOPPY_REGION_ASSIGNING_TO_NO_BINDING: dict[str, str] = {
     'function f(b) { var q = b + 1; undeclared_e = 1; return q; } console.log(f(2));':
-        ('3\n', None),
-    'undeclared_f = 1; console.log(3);': ('3\n', None),
-    "'use strict'; var declared_g; declared_g = 1; console.log(3);": ('3\n', None),
+        'console.log(3);',
+    'undeclared_f = 1; console.log(3);': 'console.log(3);',
+}
+
+#: A region that runs strict, assigning to a name it declares itself, mapped to the text the
+#: deobfuscation writes for it. Strictness refuses only the write that resolves to no binding, so a
+#: declared name leaves the store as dead here as it is anywhere, and the mode is no reason to keep
+#: it.
+A_STRICT_REGION_ASSIGNING_TO_A_NAME_IT_DECLARES: dict[str, str] = {
+    "'use strict'; var declared_g; declared_g = 1; console.log(3);":
+        "'use strict';\nconsole.log(3);",
 }
 
 
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAWriteSloppyCodeAnswersIsADeadStore(TestJsDeobfuscator):
 
     def test_the_write_is_removed_where_nothing_makes_the_region_strict(self):
         rows = A_SLOPPY_REGION_ASSIGNING_TO_NO_BINDING
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_the_write_is_removed_where_the_strict_region_declares_the_name(self):
+        rows = A_STRICT_REGION_ASSIGNING_TO_A_NAME_IT_DECLARES
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNodePrintsTheSameOnceTheDeadStoreIsGone(TestJsDeobfuscator):
+
+    def test_each_program_prints_what_it_printed_before_the_removal(self):
+        rows = {
+            **A_SLOPPY_REGION_ASSIGNING_TO_NO_BINDING,
+            **A_STRICT_REGION_ASSIGNING_TO_A_NAME_IT_DECLARES,
+        }
         self.assertEqual(
             {source: behavior(self._deobfuscate(source)) for source in rows},
-            dict(rows),
+            {source: behavior(source) for source in rows},
         )
