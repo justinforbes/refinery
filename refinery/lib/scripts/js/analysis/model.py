@@ -46,7 +46,9 @@ from refinery.lib.scripts.js.model import (
     JsCatchClause,
     JsClassDeclaration,
     JsClassExpression,
+    JsConditionalExpression,
     JsContinueStatement,
+    JsDoWhileStatement,
     JsExportSpecifier,
     JsForInStatement,
     JsForOfStatement,
@@ -54,6 +56,7 @@ from refinery.lib.scripts.js.model import (
     JsFunctionDeclaration,
     JsFunctionExpression,
     JsIdentifier,
+    JsIfStatement,
     JsImportDeclaration,
     JsImportDefaultSpecifier,
     JsImportExpression,
@@ -79,6 +82,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclaration,
     JsVariableDeclarator,
     JsVarKind,
+    JsWhileStatement,
     JsWithStatement,
     strip_parens,
 )
@@ -875,6 +879,60 @@ def _enclosing_member_access(node: Node) -> JsMemberExpression | None:
     if isinstance(parent, JsMemberExpression) and strip_parens(parent.object) is node:
         return parent
     return None
+
+
+_IDENTITY_OPERATORS = frozenset({'typeof', 'void', '!'})
+"""
+The unary operators that take their operand to a type name or a truth value without entering the
+object protocol. `+`, `-` and `~` are not in it: `ToNumber` calls `valueOf`, which a poisoned
+`Object.prototype` answers with code that receives the operand as `this`.
+"""
+
+
+def _observes_identity_alone(governor: Node | None, operand: Node) -> bool:
+    """
+    Whether the construct governing a bare reference to a mapped `arguments` object observes only
+    what the object is, never what it holds or where it goes: the operand of `typeof`, `void` or
+    `!`, and the test of a branch, a loop or a conditional expression, take the object to a type
+    name or a truth value without reading an element, writing one, or letting the object itself
+    flow anywhere. `for-in` is here and `for-of` is not, because enumeration reads the key set,
+    which a write to a parameter never changes — §10.2.11 keys the mapping by the call's arity —
+    while iteration reads the elements.
+    """
+    if isinstance(governor, JsUnaryExpression):
+        return (
+            governor.operator in _IDENTITY_OPERATORS
+            and strip_parens(governor.operand) is operand
+        )
+    if isinstance(governor, (
+        JsIfStatement,
+        JsWhileStatement,
+        JsDoWhileStatement,
+        JsForStatement,
+        JsConditionalExpression,
+    )):
+        return strip_parens(governor.test) is operand
+    if isinstance(governor, JsForInStatement):
+        return strip_parens(governor.right) is operand
+    return False
+
+
+def _reads_every_element_alone(governor: Node | None, operand: Node) -> bool:
+    """
+    Whether the construct governing a bare reference to a mapped `arguments` object reads the
+    elements out of it and does nothing else: a spread copies the values and a `for-of` walks
+    them, and both leave the object behind — the values escape, the object does not, and a value
+    cannot write the parameter it was read from. Both walks go through the object's own
+    `@@iterator`, which holds the values intrinsic from the moment of creation and can only be
+    replaced through a member write that `_record_arguments_alias_references` already takes as an
+    indefinite write of every parameter, so a program that could turn the walk into a write has
+    refused every fold before this answer is consulted.
+    """
+    if isinstance(governor, JsSpreadElement):
+        return strip_parens(governor.argument) is operand
+    if isinstance(governor, JsForOfStatement):
+        return strip_parens(governor.right) is operand
+    return False
 
 
 def _aliased_parameter_positions(member: JsMemberExpression, count: int) -> range | None:
@@ -1764,10 +1822,16 @@ class SemanticModel:
         the first parameter when the call passed one and creates an ordinary property when it passed
         none. Nothing in the text of the function says which, so the write is recorded as an
         `indefinite_writes` entry — a kill that names no value — and not as a definition a fold
-        could answer with. Every other use of the object — a key the model cannot name, the object
-        handed to a call, the object bound to a second name — is recorded as a read of every
-        parameter: reading is what makes a write to a parameter observable, which is the fact a
-        remover needs. `arguments[i] = v` for an `i` the model cannot read is a read of every
+        could answer with. A bare use of the object is asked what its governing construct can do with
+        it: one that observes identity alone — a `typeof`, a truth test, a `for-in` head — is
+        recorded as nothing, and one that reads every element and nothing else — a spread, a
+        `for-of` head — as a read of each parameter. `_observes_identity_alone` and
+        `_reads_every_element_alone` carry the argument for every admitted position, and an
+        indefinite write recorded at one of them would refuse every fold in the function for a use
+        that cannot write anything. Every use those two decline, and every access whose key the
+        model cannot name — the object handed to a call, the object bound to a second name — is
+        recorded as a read of every parameter: reading is what makes a write to a parameter
+        observable, which is the fact a remover needs. `arguments[i] = v` for an `i` the model cannot read is a read of every
         parameter and an indefinite write of every one of them, since it may write any single one
         and recording a definition of each would let a fold answer with a value only one of them can
         hold.
@@ -1818,6 +1882,14 @@ class SemanticModel:
                         role = reference_role(access)
                         for index in named:
                             self._record_alias_reference(params[index], access, role)
+                        continue
+                if access is None:
+                    governor = _enclosing_operator(node)
+                    if _observes_identity_alone(governor, node):
+                        continue
+                    if _reads_every_element_alone(governor, node):
+                        for binding in params:
+                            self._record_alias_reference(binding, node, Role.READ)
                         continue
                 site: JsIdentifier | JsMemberExpression = node if access is None else access
                 may_write = access is None or reference_role(access) is not Role.READ

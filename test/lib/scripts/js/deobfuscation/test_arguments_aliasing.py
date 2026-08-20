@@ -968,3 +968,213 @@ class TestEveryWayABodyCanBindTheNameArguments(TestBase):
     def test_the_deobfuscation_answers_the_aliasing_under_each_binding_the_same_way(self):
         rows = _THE_ALIASING_UNDER_A_NAME_THE_BODY_BINDS
         self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+#: A use of the object that observes only what it is — its type, its truth, its key set, or the
+#: function it belongs to — mapped to what Node prints when a sloppy function stores to its
+#: parameter first. No recorded value shows the store: such a use can neither write a parameter
+#: nor hand the object to code that could, and the legacy `callee` route answers with the value
+#: the call passed rather than the one the body stored.
+_A_USE_THAT_CAN_TOUCH_NO_PARAMETER: dict[str, str] = {
+    'function f(a) { a = 2; console.log(typeof arguments); } f(1);': 'object\n',
+    "function f(a) { a = 2; if (arguments) console.log('t'); } f(1);": 't\n',
+    'function f(a) { a = 2; console.log(!arguments); } f(1);': 'false\n',
+    'function f(a) { a = 2; console.log(void arguments); } f(1);': 'undefined\n',
+    "function f(a) { a = 2; console.log(arguments ? 'y' : 'n'); } f(1);": 'y\n',
+    'function f(a) { a = 2; for (var k in arguments) console.log(k); } f(1);': '0\n',
+    "function f(a) { a = 2; while (arguments) { console.log('w'); break; } } f(1);": 'w\n',
+    'function f(a) { a = 2; console.log(arguments.callee.arguments[0]); } f(1);': '1\n',
+}
+
+#: The store ahead of such a use, mapped to the text the deobfuscation writes for it: the use
+#: stays and the store is gone, because no construct that runs afterwards can read the parameter
+#: back out of the object.
+_THE_STORE_SUCH_A_USE_RELEASES: dict[str, str] = {
+    'function f(a) { a = 2; console.log(typeof arguments); } f(1);': inspect.cleandoc(
+        """
+        function f(a) {
+          console.log(typeof arguments);
+        }
+        f(1);
+        """
+    ),
+    "function f(a) { a = 2; if (arguments) console.log('t'); } f(1);": inspect.cleandoc(
+        """
+        function f(a) {
+          if (arguments) {
+            console.log('t');
+          }
+        }
+        f(1);
+        """
+    ),
+    'function f(a) { a = 2; console.log(!arguments); } f(1);': inspect.cleandoc(
+        """
+        function f(a) {
+          console.log(!arguments);
+        }
+        f(1);
+        """
+    ),
+    'function f(a) { a = 2; console.log(void arguments); } f(1);': inspect.cleandoc(
+        """
+        function f(a) {
+          console.log(void arguments);
+        }
+        f(1);
+        """
+    ),
+    "function f(a) { a = 2; console.log(arguments ? 'y' : 'n'); } f(1);": inspect.cleandoc(
+        """
+        function f(a) {
+          console.log(arguments ? 'y' : 'n');
+        }
+        f(1);
+        """
+    ),
+    'function f(a) { a = 2; for (var k in arguments) console.log(k); } f(1);': inspect.cleandoc(
+        """
+        function f(a) {
+          for (var k in arguments) {
+            console.log(k);
+          }
+        }
+        f(1);
+        """
+    ),
+    "function f(a) { a = 2; while (arguments) { console.log('w'); break; } } f(1);":
+        inspect.cleandoc(
+            """
+            function f(a) {
+              while (arguments) {
+                console.log('w');
+                break;
+              }
+            }
+            f(1);
+            """
+        ),
+}
+
+#: A walk that reads every element out of the object, mapped to what Node prints for the same
+#: store: the stored value comes back out of the walk, so the store is observed even though the
+#: walk cannot write a parameter either. A `for-of` head reads the values where the `for-in` head
+#: one keyword away reads only the keys.
+_A_WALK_THAT_READS_THE_STORE_BACK: dict[str, str] = {
+    'function f(a) { a = 2; for (var v of arguments) console.log(v); } f(1);': '2\n',
+    'function f(a) { a = 2; console.log([...arguments][0]); } f(1);': '2\n',
+}
+
+#: A conversion of the object, mapped to what Node prints when the body has poisoned the protocol
+#: the conversion enters. `ToPrimitive` runs whatever `Object.prototype` holds with the object as
+#: `this`, so `+arguments` and `arguments == 2` hand the object to code that reads the parameter
+#: through it — which `typeof`, `void` and `!` never do.
+_A_CONVERSION_THAT_HANDS_THE_OBJECT_TO_CODE: dict[str, str] = {
+    'function f(a) { a = 2; Object.prototype.toString = function () { return String(this[0]); };'
+    ' console.log(+arguments); } f(1);': '2\n',
+    'function f(a) { a = 2; Object.prototype.toString = function () { return String(this[0]); };'
+    ' console.log(arguments == 2); } f(1);': 'true\n',
+}
+
+#: A call whose body computes only from its parameter beside a use that can touch no parameter,
+#: mapped to the text the deobfuscation writes for it: the call is folded to its value. The second
+#: row's use binds the object to a name nothing reads, which hands it nowhere.
+_A_CALL_FOLDED_PAST_A_USE_THAT_TOUCHES_NOTHING: dict[str, str] = {
+    'function f(a) { var t = typeof arguments; return a + 1; } console.log(f(2));':
+        'console.log(3);',
+    'function f(a) { var t = arguments; return a + 1; } console.log(f(2));':
+        'console.log(3);',
+}
+
+#: The same call beside a use that writes a parameter or hands the object to code that does,
+#: mapped to what Node prints for it: the value written through the object, not the one the call
+#: passed, so the fold above would answer every one of these with the wrong number.
+_A_CALL_A_WRITING_USE_KEEPS_ALIVE: dict[str, str] = {
+    'function f(a) { arguments[0] = 9; return a + 1; } console.log(f(2));': '10\n',
+    'function f(a) { arguments[0]++; return a + 1; } console.log(f(2));': '4\n',
+    'function g(x) { x[0] = 9; } function f(a) { g(arguments); return a + 1; }'
+    ' console.log(f(2));': '10\n',
+    'function f(a) { var h = arguments; h[0] = 9; return a + 1; } console.log(f(2));': '10\n',
+    'function f(a) { (() => { arguments[0] = 9; })(); return a + 1; } console.log(f(2));': '10\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAUseThatCanTouchNoParameter(TestBase):
+    """
+    What a body does with its object decides what may still be assumed about its parameters. Each
+    of these uses takes the object to a type name, a truth value, a key set or the function it
+    belongs to, and none of those is a route a parameter's value travels — Node's answer shows no
+    trace of the store — so a store ahead of such a use is still the deobfuscator's to reason
+    about.
+    """
+
+    def test_node_answers_each_use_without_the_stored_value(self):
+        rows = _A_USE_THAT_CAN_TOUCH_NO_PARAMETER
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_each_use_the_same_way(self):
+        rows = _A_USE_THAT_CAN_TOUCH_NO_PARAMETER
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+    def test_node_answers_the_foldable_call_with_the_folded_value(self):
+        rows = _A_CALL_FOLDED_PAST_A_USE_THAT_TOUCHES_NOTHING
+        self.assertEqual(_said_by_node(rows), {source: ('3\n', None) for source in rows})
+
+
+class TestTheSimplificationAHarmlessUseDoesNotForfeit(TestBase):
+
+    def test_the_store_is_removed_and_the_use_is_kept(self):
+        rows = _THE_STORE_SUCH_A_USE_RELEASES
+        self.assertEqual({source: _deobfuscated(source) for source in rows}, rows)
+
+    def test_the_call_is_folded_to_its_value(self):
+        rows = _A_CALL_FOLDED_PAST_A_USE_THAT_TOUCHES_NOTHING
+        self.assertEqual({source: _deobfuscated(source) for source in rows}, rows)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWalkThatReadsTheElements(TestBase):
+    """
+    A spread and a `for-of` head read every element and write none: the values escape and the
+    object does not. The walk cannot write a parameter, but the stored value is what it reads
+    back, so the store has to outlive the removal its `for-in` neighbour permits.
+    """
+
+    def test_node_reads_the_stored_value_back_out_of_the_walk(self):
+        rows = _A_WALK_THAT_READS_THE_STORE_BACK
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_reads_it_back_too(self):
+        rows = _A_WALK_THAT_READS_THE_STORE_BACK
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAConversionHandsTheObjectToCode(TestBase):
+
+    def test_node_reads_the_parameter_through_the_poisoned_protocol(self):
+        rows = _A_CONVERSION_THAT_HANDS_THE_OBJECT_TO_CODE
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_preserves_the_read(self):
+        rows = _A_CONVERSION_THAT_HANDS_THE_OBJECT_TO_CODE
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAUseThatCanWriteAParameter(TestBase):
+    """
+    An element written, an element updated, the object handed to a call, and the object written
+    from behind a second name or a nested arrow each put a value under a parameter's name that
+    the call did not pass. Node answers each call with that value, so folding any of these calls
+    the way the harmless uses permit would answer with the wrong number.
+    """
+
+    def test_node_answers_each_call_with_the_written_value(self):
+        rows = _A_CALL_A_WRITING_USE_KEEPS_ALIVE
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_each_call_the_same_way(self):
+        rows = _A_CALL_A_WRITING_USE_KEEPS_ALIVE
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
