@@ -153,11 +153,11 @@ class _Builder(CfgBuilder):
         `catch` bodies for the same reason.
 
         `continue` inside a trap resumes at the statement following the one that threw, which is a
-        shape this graph cannot express exactly. Every resumption point is therefore linked to
-        *every* node the guarded body created, which is the over-approximation: it claims more paths
-        than exist, where claiming fewer would let an analysis call a statement after a trap
-        unreachable, or let a store before one look dead because the resumption that reads it was
-        never modelled.
+        shape this graph cannot express exactly. Every resumption point is therefore taken to reach
+        *every* node the guarded body created (`_link_resumptions`), which is the over-approximation:
+        it claims more paths than exist, where claiming fewer would let an analysis call a statement
+        after a trap unreachable, or let a store before one look dead because the resumption that
+        reads it was never modelled.
         """
         statements = self.body_statements(self.cfg.owner)
         traps = _declared_traps(statements)
@@ -180,11 +180,27 @@ class _Builder(CfgBuilder):
             self._handlers.pop()
         self.link(frontier, self.cfg.exit)
         landing = [node for node in self.cfg.nodes[guarded_from:] if node.element is not None]
-        for resume in resumes:
-            self.add_edge(resume, self.cfg.exit)
-            for node in landing:
-                self.add_edge(resume, node)
+        if resumes:
+            self._link_resumptions(resumes, landing)
         return self.cfg
+
+    def _link_resumptions(self, resumes: list[CfgNode], landing: list[CfgNode]) -> None:
+        """
+        Wire every trap resumption to every guarded landing point and the exit, the
+        over-approximation `build` documents, through one synthetic hub rather than an edge from
+        each resume to each landing. A resume reaching a landing through the hub is the same
+        reachability an analysis reads off a direct edge — the hub carries no element, so it locates
+        into no query and generates no dataflow fact — while the edge count falls from the product
+        of the two sets to their sum, which is what a guarded body holding hundreds of resumes over
+        thousands of landings costs when every resume names every landing directly.
+        """
+        hub = CfgNode(None)
+        self.cfg.nodes.append(hub)
+        self.add_edge(hub, self.cfg.exit)
+        for node in landing:
+            self.add_edge(hub, node)
+        for resume in resumes:
+            self.add_edge(resume, hub)
 
     def body_statements(self, owner: Node) -> list[Node]:
         """

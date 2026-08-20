@@ -273,8 +273,9 @@ class TestPs1ControlFlowGraph(TestBase):
         """
         tree, graph = self._tree_and_graph("trap { continue }\n'a'\n'b'")
         jump = self._node_for(graph, Ps1ContinueStatement)
-        self.assertIn(graph.node_of(tree.body[1]), jump.successors)
-        self.assertIn(graph.node_of(tree.body[2]), jump.successors)
+        reached = self._forward(jump)
+        self.assertIn(id(graph.node_of(tree.body[1])), reached)
+        self.assertIn(id(graph.node_of(tree.body[2])), reached)
 
     def test_a_trap_does_not_guard_its_own_body(self):
         """
