@@ -534,7 +534,14 @@ class JsSynthesizer(Synthesizer):
         self._write(')')
 
     def visit_JsSequenceExpression(self, node: JsSequenceExpression):
-        self._comma_separated(node.expressions, lead_newline=False)
+        """
+        A sequence written inside a sequence keeps its brackets. The comma operator is flat in the
+        text and nested in the tree, so `(a, b), c` and `a, (b, c)` are both spelled `a, b, c` once
+        the brackets are gone, and reading that back gives one sequence of three where the tree held
+        two of two. The value is the same either way, which is exactly why nothing downstream would
+        report the shape being lost.
+        """
+        self._comma_separated(node.expressions, lead_newline=False, wrap_sequences=True)
 
     def visit_JsYieldExpression(self, node: JsYieldExpression):
         self._write('yield')
