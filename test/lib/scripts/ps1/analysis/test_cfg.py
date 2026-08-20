@@ -363,6 +363,20 @@ class TestPs1ControlFlowGraph(TestBase):
         edges = sum(len(node.successors) for node in graph.nodes)
         self.assertLess(edges, 200)
 
+    def test_a_trap_that_continues_stays_linear_in_the_size_of_the_body_it_guards(self):
+        """
+        A `trap` that resumes reaches every statement of the body it guards, which is a relation of
+        size `resumes * guarded` and must not be spelled as that many edges.
+        """
+        # Written as one edge per pair, a body of eighty statements costs thousands, and every
+        # reachability walk over the graph pays it — one real sample reached half a million edges
+        # and three minutes of deobfuscation. The bound sits far above the linear count and far
+        # below the quadratic one, so it moves only if the shape regresses.
+        body = ' '.join(F"'s{index}';" for index in range(80))
+        graph = self._script_graph(F'trap {{ continue }}; {body}')
+        edges = sum(len(node.successors) for node in graph.nodes)
+        self.assertLess(edges, 500)
+
     def test_dynamicparam_runs_before_the_begin_block(self):
         tree = Ps1Parser("function f { dynamicparam { 'd' } begin { 'b' } end { 'e' } }").parse()
         definition = next(n for n in tree.walk() if isinstance(n, Ps1FunctionDefinition))
