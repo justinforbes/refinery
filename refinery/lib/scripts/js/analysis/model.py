@@ -552,6 +552,29 @@ def _governing_target(node: Node) -> tuple[Node | None, Node]:
     return parent, cursor
 
 
+_UNRESOLVABLE_TOLERANT_OPERATORS = frozenset({'typeof', 'delete'})
+"""
+The two unary operators the language lets stand in front of a name that resolves to nothing:
+`typeof` answers `'undefined'` (§13.5.3) and `delete` answers `true` (§13.5.1.2), where every other
+read of an unresolvable reference throws a `ReferenceError`. `typeof name === 'undefined'` is the
+feature-detection idiom every guarded program is written with, so counting it as a throw would
+refuse the guard itself.
+"""
+
+
+def tolerates_unresolvable(node: Node) -> bool:
+    """
+    Whether the operator governing *node* reads it without demanding that the name resolve, so a
+    free name standing there names nothing and still yields a value rather than throwing.
+    """
+    governor = _enclosing_operator(node)
+    return (
+        isinstance(governor, JsUnaryExpression)
+        and governor.operator in _UNRESOLVABLE_TOLERANT_OPERATORS
+        and strip_parens(governor.operand) is node
+    )
+
+
 def container_reference_role(node: JsIdentifier | JsMemberExpression) -> ContainerRole:
     """
     Classify how the reference *node* touches the container value (object or array) its binding holds.
@@ -1189,6 +1212,44 @@ class SemanticModel:
         if not isinstance(node, JsIdentifier) or not self.is_reference(node):
             return False
         return crosses_dynamic_scope(self._node_scope.get(id(node)))
+
+    def read_may_throw(self, node: JsIdentifier) -> bool:
+        """
+        Whether evaluating *node* as a read may throw a `ReferenceError` because the name it spells
+        is not certain to denote a binding. The companion to `read_has_dynamic_effect`, which asks
+        what else a read may do; this asks whether it may not happen at all. A caller that treats an
+        unresolved read as free is asserting the host defines the name, which for a name the program
+        neither declares nor assigns is an assertion about someone else's global object.
+
+        A name resolves for certain when a declaration binds it, or when the specification mandates
+        it on the global object (`GUARANTEED_GLOBALS`) — the same existence allowlist that decides
+        whether a global-alias member read may be collapsed to a bare name. A
+        `GLOBAL_OBJECT_ALIASES` spelling resolves too, which is a *host* assumption rather than a
+        language one: no host defines all of them, so a bare `window` throws under Node exactly as a
+        bare `global` throws in a browser. It is admitted because the effect analysis already rests
+        on it — `_base_is_safe` clears a property access on an alias — and answering otherwise here
+        would leave that clause standing with nothing left for it to decide. Everything else may not
+        be there:
+
+        - a free name, which reaches the host and may simply not exist
+        - a name whose only binding is an `IMPLICIT_GLOBAL`, which the assignment that creates it
+          brings into existence, so a read that runs first — or whose creating assignment sits in a
+          function nobody calls — throws exactly as a free name does
+        - a name resolved through a `with` body whose object may not carry it and which has no
+          lexical binding to fall through to, which the `cross_dynamic` lookup is what distinguishes
+
+        A reference that is written and not read answers `False`, as do the two operator positions
+        `tolerates_unresolvable` names.
+        """
+        if not self.is_reference(node) or reference_role(node) is Role.WRITE:
+            return False
+        if node.name in GUARANTEED_GLOBALS or node.name in GLOBAL_OBJECT_ALIASES:
+            return False
+        if tolerates_unresolvable(node):
+            return False
+        scope = self._node_scope.get(id(node))
+        binding = self.lookup(node.name, scope, cross_dynamic=True)
+        return binding is None or binding.kind is BindingKind.IMPLICIT_GLOBAL
 
     def naming_binding(self, function: Node) -> Binding | None:
         """

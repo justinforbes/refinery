@@ -1546,3 +1546,205 @@ class TestAPropertyKeyWrittenWithAnEscapeIsTheNameThatEscapeDenotes(TestBase):
             {source: _before_and_after(source) for source in rows},
             _each_program_still_prints(rows),
         )
+
+
+#: A program whose one function reads a global-object alias Node does not put on the global object,
+#: mapped to the behavior Node gives it. The read is everything the function does and the call is
+#: everything the program does before it prints, so what the read does is all that decides a row.
+A_READ_OF_AN_ALIAS_THE_RUNNING_HOST_LACKS = {
+    'function f() { return window; }\nf();\nconsole.log(1);\n': ('', 'ReferenceError'),
+    'function f() { return self; }\nf();\nconsole.log(1);\n': ('', 'ReferenceError'),
+    'function f() { return top; }\nf();\nconsole.log(1);\n': ('', 'ReferenceError'),
+    'function f() { return frames; }\nf();\nconsole.log(1);\n': ('', 'ReferenceError'),
+}
+
+
+#: The same program written with `global`, the alias Node defines and a browser does not. Running it
+#: decides nothing — both sides print `1` under the only engine this file can ask — so the answer is
+#: pinned as the text a correct implementation writes rather than as what an engine makes of it.
+A_READ_OF_THE_ALIAS_ONLY_ANOTHER_HOST_LACKS = (
+    'function f() { return global; }\nf();\nconsole.log(1);\n'
+)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestABareGlobalObjectAliasIsNotCertainToResolve(TestBase):
+    """
+    `window`, `global`, `self`, `top` and `frames` are names a host may put on its global object,
+    and no host puts all of them there. A bare read of one may therefore find nothing, and finding
+    nothing is a `ReferenceError`: Node refuses `window`, `self`, `top` and `frames`, a browser
+    refuses `global`. `SemanticModel.read_may_throw` answers `False` for every one of the five,
+    which asserts that whoever runs the file defines the name — the assertion it refuses to make
+    for any other name the program neither declares nor assigns.
+
+    A function whose body only reads one is then a function with no effect, its discarded call is
+    removed, and the declaration goes with it, so a program whose one failure was that read comes
+    back as one that runs to the end and prints. `globalThis` is the spelling the language mandates
+    rather than the host, which is why `GUARANTEED_GLOBALS` holds it, and it is not what this entry
+    is about.
+
+    Fixing this is not free, because the same host assumption is made a second time elsewhere:
+    `EffectModel._base_is_safe` clears a property access whose base is one of these five names as
+    one that cannot throw on a nullish base, which is the identical claim that whoever runs the
+    file defines the name, made about a member read rather than about a bare one. An
+    implementation that stops vouching for the five here has to answer for that clause in the same
+    breath, or the analysis holds two contradictory answers to one question: a bare `window` that
+    may throw, and a `window.x` whose base is certain to be there.
+    """
+
+    @unittest.expectedFailure
+    def test_a_read_of_an_alias_the_running_host_lacks_still_throws(self):
+        """
+        Node refuses each program of `A_READ_OF_AN_ALIAS_THE_RUNNING_HOST_LACKS` having printed
+        nothing, with a `ReferenceError` reading `window is not defined` and the same for `self`,
+        `top` and `frames`. Every deobfuscation prints `1`: `console.log(1);` is the whole of what
+        comes back for each of them.
+        """
+        rows = A_READ_OF_AN_ALIAS_THE_RUNNING_HOST_LACKS
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
+        )
+
+    @unittest.expectedFailure
+    def test_a_read_of_the_alias_the_running_host_defines_is_kept_all_the_same(self):
+        """
+        Node prints `1` for `A_READ_OF_THE_ALIAS_ONLY_ANOTHER_HOST_LACKS` and prints `1` for its
+        deobfuscation, so running the two decides nothing about this alias and the text is what
+        carries the answer. The text pinned is the one this program takes today when the name is
+        one the analysis does not vouch for: written with `zzz` in place of `global`, it comes back
+        with its function and its call in place and only the layout changed.
+        """
+        self.assertEqual(
+            _folded(A_READ_OF_THE_ALIAS_ONLY_ANOTHER_HOST_LACKS),
+            'function f() {\n  return global;\n}\nf();\nconsole.log(1);',
+        )
+
+
+#: A program reading a `let` or `const` binding from a point its declaration has not run past,
+#: mapped to the behavior Node gives it. The read is reached four ways: through the initializer of a
+#: later declarator, through an assignment, through `typeof`, and with no function in the file.
+A_READ_IN_THE_DEAD_ZONE_OF_A_LEXICAL_BINDING = {
+    'function f() { let v = q; let q = 1; }\n'
+    'f();\nconsole.log(1);\n': ('', 'ReferenceError'),
+
+    'function f() { let v = 0; v = q; const q = 1; }\n'
+    'f();\nconsole.log(1);\n': ('', 'ReferenceError'),
+
+    'function f() { { let v = typeof q; let q = 1; } }\n'
+    'f();\nconsole.log(1);\n': ('', 'ReferenceError'),
+
+    '{ let v = q; let q = 1; }\nconsole.log(1);\n': ('', 'ReferenceError'),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReadOfALexicalBindingBeforeItsDeclarationThrows(TestBase):
+    """
+    A `let` or `const` binding exists from the moment its block is entered and holds no value until
+    its declaration runs. A read in between resolves to it and throws a `ReferenceError` all the
+    same, which is the one way a name is bound and unreadable at once. The analysis stops at the
+    resolution, so `SemanticModel.read_may_throw` answers `False` and the read is one that cannot
+    fail: the store holding it is a store nothing reads, the function it leaves empty has no
+    effect, and the discarded call goes. What comes back runs to the end and prints.
+
+    `typeof` is no defence, which is where a dead zone parts company with a name that denotes no
+    binding at all. Node prints `1` for
+
+        function f() { let v = 0; v = typeof zzz; } f(); console.log(1);
+
+    where nothing binds `zzz`, and refuses the same program with the read moved into a dead zone. A
+    `var` has no dead zone either, being initialized to `undefined` when the body is entered, so
+    Node prints `1` for
+
+        function f() { { let v = q; var q = 1; } } f(); console.log(1);
+
+    and for the same program with the declaration written in front of the read; both of those calls
+    are discarded rightly.
+
+    Resolving the read correctly is not the whole of the fix. The sweep that removes the store asks
+    no question of the read either, so a store holding a free name is removed from these same
+    positions and its program comes back running too; a dead zone read is the case where the name
+    does resolve and the answer is still that the read may not happen.
+    """
+
+    @unittest.expectedFailure
+    def test_a_read_before_the_declaration_runs_still_throws(self):
+        """
+        Node refuses each program of `A_READ_IN_THE_DEAD_ZONE_OF_A_LEXICAL_BINDING` having printed
+        nothing, the `typeof` row included, with a `ReferenceError` reading
+
+            Cannot access 'q' before initialization
+
+        Every deobfuscation prints `1`: the three programs that call a function come back as
+        `void 0;` in front of the print, and the one written as a block comes back as an empty
+        block.
+        """
+        rows = A_READ_IN_THE_DEAD_ZONE_OF_A_LEXICAL_BINDING
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
+        )
+
+
+#: A program whose one failure is a read of a name nothing binds, mapped to the behavior Node gives
+#: it. Each read stands where nothing goes on to use the value around it — a store no later
+#: statement reads, an assignment to a name no later statement reads, and a container built into
+#: such a store — so the expression holding the read is discarded and the read goes with it.
+A_DISCARDED_READ_OF_A_NAME_NOTHING_BINDS = {
+    'function f() { let v = zzz; }\nf();\nconsole.log(1);\n': ('', 'ReferenceError'),
+    'function f() { var v = zzz; }\nf();\nconsole.log(1);\n': ('', 'ReferenceError'),
+    'y = a;\nconsole.log(1);\n': ('', 'ReferenceError'),
+    'var o = { p: g };\nconsole.log(1);\n': ('', 'ReferenceError'),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReadOfANameNothingBindsThrowsWhereverItStands(TestBase):
+    """
+    Reading a name no binding resolves throws a `ReferenceError`, and the gate that decides whether
+    evaluating an expression may be dropped — `refinery.lib.scripts.js.analysis.effects` and its
+    `side_effect_free` — answers that such a read does nothing. Wherever an expression is discarded
+    the read inside it is therefore discarded too, and the program comes back running to the end.
+    No dead zone is involved and no host is: the name is bound nowhere, under every engine, and
+    Node refuses each of these programs having printed nothing.
+
+    `TestAnAllocationThatCannotBeBuiltAnswersNothing` pins the same gate at the allocation, where
+    the program does ask a question of the value — what `typeof [zzz]` calls it, which branch
+    `{p: zzz} ? 1 : 2` picks — and the answer is given without building it. Here nothing is asked:
+    the expression is thrown away whole, so the same gate is reached with no fold in front of it.
+    `TestAReadOfALexicalBindingBeforeItsDeclarationThrows` is the case where the name does resolve
+    and the read may still not happen; the last paragraph of that entry is about this defect, the
+    other half of the fix it needs.
+
+    The hook for the fix already exists and is already documented for it: `side_effect_free` takes
+    a *read_effect* whose contract says the read it rejects may fire the `with` object's getter or
+    throw, and `EffectModel.is_side_effect_free` supplies only the getter half of that contract,
+    which is `SemanticModel.read_has_dynamic_effect`. Widening it to reject every read that
+    `SemanticModel.read_may_throw` rejects was measured, and it does correct every row below. It
+    also breaks a program that is right today:
+
+        X = 5; y = X; console.log(1);
+
+    Node prints `1` for it and so does the deobfuscation as it stands. Under the widened hook the
+    program comes back as `X;` in front of the print, which throws: the store-removal pass drops
+    the write that establishes `X` in the same round in which the preserved right-hand side of
+    `y = X` keeps the read of it standing. Widening the hook by itself therefore buys the four rows
+    below at the price of a fifth answer, and a fix has to settle what that pass does with a store
+    whose value it may no longer drop.
+    """
+
+    @unittest.expectedFailure
+    def test_a_read_of_a_name_nothing_binds_is_not_dropped_with_its_expression(self):
+        """
+        Node refuses each program of `A_DISCARDED_READ_OF_A_NAME_NOTHING_BINDS` having printed
+        nothing, with a `ReferenceError` reading `zzz is not defined` and the same for `a` and for
+        `g`. Every deobfuscation prints `1`: the two programs that call a function come back as
+        `void 0;` in front of the print, and the two written at the top of the file come back as
+        the print alone.
+        """
+        rows = A_DISCARDED_READ_OF_A_NAME_NOTHING_BINDS
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
+        )

@@ -390,8 +390,9 @@ class EffectSummary:
     The observable effects one call of a function may have, each field a conservative over-estimate.
     `writes_global` covers assignment to a global or to a property of an object reached through one;
     `writes_captured` covers assignment to a binding owned by an enclosing function (a closure mutation
-    visible after the call returns); `throws` covers a `throw` or an operation that may throw on a
-    value the analysis cannot prove safe; `calls_unknown` covers invoking a callee that cannot be
+    visible after the call returns); `throws` covers a `throw`, an operation that may throw on a
+    value the analysis cannot prove safe, or a read of a name that is not certain to denote a binding
+    (`SemanticModel.read_may_throw`); `calls_unknown` covers invoking a callee that cannot be
     resolved and summarized. A summary with none of these set is `is_pure`. `mutates_returned_local` is
     held apart from those four: it records a write to a fresh local the function owns whose sole route to
     the caller is the value the call returns. Such a write is a real mutation baked into the returned
@@ -1231,6 +1232,8 @@ class EffectModel:
             if isinstance(node, JsThrowStatement):
                 summary.throws = True
             elif isinstance(node, JsIdentifier):
+                if self.model.read_may_throw(node):
+                    summary.throws = True
                 if reference_role(node) is not Role.READ:
                     self._account_write(summary, node, func)
             elif isinstance(node, JsMemberExpression):

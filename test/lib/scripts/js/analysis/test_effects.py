@@ -27,6 +27,36 @@ from refinery.lib.scripts.js.model import (
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
+_GLOBALS_THE_SPECIFICATION_MANDATES = (
+    'Array',
+    'Boolean',
+    'Date',
+    'Error',
+    'Function',
+    'Infinity',
+    'JSON',
+    'Map',
+    'Math',
+    'NaN',
+    'Number',
+    'Object',
+    'Promise',
+    'Reflect',
+    'String',
+    'Symbol',
+    'Uint8Array',
+    'decodeURIComponent',
+    'eval',
+    'globalThis',
+    'isNaN',
+    'parseInt',
+    'undefined',
+)
+"""
+Names every conforming engine puts on the global object before any code runs, so that a bare read of
+one of them denotes a binding and cannot throw.
+"""
+
 
 class TestEffectModel(TestBase):
 
@@ -182,14 +212,98 @@ class TestEffectModel(TestBase):
         self.assertFalse(effects.global_pristine)
         self.assertFalse(effects.summary_of(self._func(ast, 'f')).is_pure)
 
-    def test_write_to_function_confined_global_is_pure(self):
-        self.assertTrue(self._summary('function f(n){ acc = 0; acc = acc + n; return acc; }', 'f').is_pure)
+    def test_write_to_function_confined_global_is_not_a_global_write(self):
+        """
+        Every reference to `acc` lies inside `f`, so no code outside can observe the assignment and
+        it is not counted as a global write. Purity is a separate question about the same name:
+        `acc` is an implicit global, which comes into existence only once an assignment to it has
+        run, and a flow-insensitive summary cannot put the write in front of the read.
+        """
+        summary = self._summary('function f(n){ acc = 0; acc = acc + n; return acc; }', 'f')
+        self.assertFalse(summary.writes_global)
+        self.assertTrue(summary.throws)
 
     def test_confined_global_read_in_another_function_is_impure(self):
         source = 'function f(n){ acc = 0; acc = acc + n; return acc; } function g(){ return acc; }'
         summary = self._summary(source, 'f')
         self.assertTrue(summary.writes_global)
         self.assertFalse(summary.is_pure)
+
+    def test_bare_statement_read_of_a_name_nothing_binds_throws(self):
+        summary = self._summary('function f(){ missing; }', 'f')
+        self.assertTrue(summary.throws)
+        self.assertFalse(summary.is_pure)
+
+    def test_returned_read_of_a_name_nothing_binds_throws(self):
+        summary = self._summary('function f(){ return missing; }', 'f')
+        self.assertTrue(summary.throws)
+        self.assertFalse(summary.is_pure)
+
+    def test_read_of_a_name_nothing_binds_in_a_call_argument_throws(self):
+        summary = self._summary('function f(){ return String(missing); }', 'f')
+        self.assertTrue(summary.throws)
+        self.assertFalse(summary.is_pure)
+
+    def test_shorthand_object_key_reads_a_name_nothing_binds_and_throws(self):
+        summary = self._summary('function f(){ return { missing }; }', 'f')
+        self.assertTrue(summary.throws)
+        self.assertFalse(summary.is_pure)
+
+    def test_member_read_off_a_name_nothing_binds_throws(self):
+        summary = self._summary('function f(){ return typeof missing.x; }', 'f')
+        self.assertTrue(summary.throws)
+        self.assertFalse(summary.is_pure)
+
+    def test_read_of_a_name_only_an_uncalled_function_assigns_throws(self):
+        """
+        Nothing calls `never`, so its assignment never runs and never brings `later` into existence.
+        """
+        source = 'function never(){ later = 1; } function f(){ return later; }'
+        summary = self._summary(source, 'f')
+        self.assertTrue(summary.throws)
+        self.assertFalse(summary.is_pure)
+
+    def test_read_of_a_host_name_the_specification_does_not_mandate_throws(self):
+        summary = self._summary('function f(){ return document; }', 'f')
+        self.assertTrue(summary.throws)
+        self.assertFalse(summary.is_pure)
+
+    def test_no_read_of_a_specification_mandated_global_throws(self):
+        throwing = {
+            name for name in _GLOBALS_THE_SPECIFICATION_MANDATES
+            if self._summary(F'function f(){{ return {name}; }}', 'f').throws
+        }
+        self.assertEqual(throwing, set())
+
+    def test_read_of_the_name_that_spells_the_global_object_is_pure(self):
+        self.assertTrue(self._summary('function f(){ return globalThis; }', 'f').is_pure)
+
+    def test_read_of_a_declared_global_is_pure(self):
+        self.assertTrue(self._summary('var g; function f(){ return g; }', 'f').is_pure)
+
+    def test_typeof_of_a_name_nothing_binds_is_pure(self):
+        self.assertTrue(self._summary('function f(){ return typeof missing; }', 'f').is_pure)
+
+    def test_delete_of_a_name_nothing_binds_is_pure(self):
+        self.assertTrue(self._summary('function f(){ return delete missing; }', 'f').is_pure)
+
+    def test_an_object_key_and_the_property_name_reading_it_back_are_not_reads(self):
+        source = 'function f(){ return { missing: 1 }.missing; }'
+        self.assertTrue(self._summary(source, 'f').is_pure)
+
+    def test_a_label_is_not_a_read(self):
+        broken = 'function f(){ missing: { break missing; } return 7; }'
+        skipped = 'function f(){ missing: while (0) { continue missing; } return 1; }'
+        self.assertTrue(self._summary(broken, 'f').is_pure)
+        self.assertTrue(self._summary(skipped, 'f').is_pure)
+
+    def test_a_local_declaration_of_the_name_is_not_a_read(self):
+        source = 'function f(){ var missing = 3; return missing; }'
+        self.assertTrue(self._summary(source, 'f').is_pure)
+
+    def test_a_catch_parameter_is_not_a_read(self):
+        source = 'function f(){ try { return 1; } catch (missing) { return missing; } }'
+        self.assertTrue(self._summary(source, 'f').is_pure)
 
     def test_global_object_property_write_is_a_global_write(self):
         summary = self._summary('function f(){ globalThis.cache = 1; }', 'f')
