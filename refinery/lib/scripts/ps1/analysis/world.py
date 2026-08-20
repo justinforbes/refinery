@@ -195,32 +195,48 @@ def command_role(name: str) -> WorldRole:
     return WorldRole.NONE
 
 
+class Ps1ShadowSite(NamedTuple):
+    """
+    One statement that takes a command name over: the `name` it rebinds, keyed through
+    `refinery.lib.scripts.ps1.ast.normalize_command_name` like the shadow set, and the `site` node
+    performing the redefinition. `refinery.lib.scripts.ps1.analysis.worldflow.build_world_reach`
+    floods forward from these the way it floods from the openers, so a call no redefinition of its
+    name can precede still means the built-in the metadata describes.
+    """
+    name: str
+    site: Node
+
+
 class Ps1WorldMeasurement(NamedTuple):
     """
-    One walk's reading of *root*: the whole-run `world` verdict, the `openers` that produced it in
-    walk order, and the `root` and `build_version` those two were measured over. The verdict and the
-    positions come from the same walk, so `world.closed_for_the_whole_run` and `not openers` are the
-    same fact — a node one counts and the other misses cannot exist. Held in a
-    `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot; `build_world_reach` floods from
-    `openers` and stamps `build_version` onto the reach model so a held one notices the tree change.
+    One walk's reading of *root*: the whole-run `world` verdict, the `openers` that produced it and
+    the `shadow_sites` where a command name is taken over, each in walk order, and the `root` and
+    `build_version` they were measured over. All come from the same walk, so
+    `world.closed_for_the_whole_run` and `not openers` are the same fact, and the names of
+    `shadow_sites` are exactly `world.shadowed_names` — a node one counts and the other misses
+    cannot exist. Held in a `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot;
+    `build_world_reach` floods from `openers` and `shadow_sites` and stamps `build_version` onto
+    the reach model so a held one notices the tree change.
 
-    The opener nodes are live tree references, which is why this is a cache record rather than a
-    field of the leaf `Ps1TypeWorld`: a slot is dropped whole on the next version bump, so its node
-    references are never read against a tree they no longer belong to.
+    The opener and site nodes are live tree references, which is why this is a cache record rather
+    than a field of the leaf `Ps1TypeWorld`: a slot is dropped whole on the next version bump, so
+    its node references are never read against a tree they no longer belong to.
     """
     world: Ps1TypeWorld
     openers: tuple[Node, ...]
+    shadow_sites: tuple[Ps1ShadowSite, ...]
     root: Ps1Script
     build_version: int
 
 
 def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
     """
-    Walk the whole tree once, computing the command-table verdict and the opener positions together:
+    Walk the whole tree once, computing the command-table verdict and every position together:
     whether any node opens the world (a single opener anywhere is global and retroactive, so it
-    closes off the verdict), the set of command names the script redefines, and every opener node in
-    walk order. The walk cannot short-circuit on the first opener because the shadow set needs every
-    redefinition, wherever it sits, and the flood needs every opener position.
+    closes off the verdict), the set of command names the script redefines and the site of each
+    redefinition, and every opener node in walk order. The walk cannot short-circuit on the first
+    opener because the shadow set needs every redefinition, wherever it sits, and the floods need
+    every position.
 
     An opener is yielded as the node itself, not its role. The class or enum definition among them
     opens the world at no position — the engine compiles it before the first statement runs — and is
@@ -230,9 +246,11 @@ def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
     closed_but_for_alias_bindings = True
     shadowed: set[str] = set()
     openers: list[Node] = []
+    shadow_sites: list[Ps1ShadowSite] = []
     for node in root.walk():
         redefined = _identity_redefinitions(node)
         shadowed.update(record.name for record in redefined)
+        shadow_sites.extend(Ps1ShadowSite(record.name, node) for record in redefined)
         if not _opens_world(node, redefined):
             continue
         openers.append(node)
@@ -240,7 +258,8 @@ def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
         if not _opens_world_only_by_binding_an_alias(node):
             closed_but_for_alias_bindings = False
     world = Ps1TypeWorld(closed, frozenset(shadowed), closed_but_for_alias_bindings)
-    return Ps1WorldMeasurement(world, tuple(openers), root, tree_version(root))
+    return Ps1WorldMeasurement(
+        world, tuple(openers), tuple(shadow_sites), root, tree_version(root))
 
 
 class Ps1TypeWorld:
@@ -334,13 +353,14 @@ class Ps1TypeWorld:
         set alone would trust every name in exactly the scripts able to rebind them, and that set
         holds only the two spellings the classifier sees.
 
-        This is the whole-run verdict, *not* the position-sensitive one. Command identity is opened
-        along a different axis than the type system — a `Start-Job` leak runs its block in another
-        runspace and cannot rebind the caller's table where an `iex` of the same block would, and a
-        surviving `Set-Alias` can hide a mutator behind a later bareword the flood would not have
-        poisoned — so the flow-sensitive relaxation `refinery.lib.scripts.ps1.analysis.worldflow`
-        applies to a member read is not sound to apply to a name. Any name the script can rebind is
-        distrusted everywhere; the identity axis earns its own frontier in its own increment.
+        This is the whole-run verdict, position free by construction — the right question for a
+        caller reasoning about a definition's liveness, which outlives any one position. Whether
+        the name may be trusted at *one particular node* — which depends on where that node sits
+        relative to the openers and to the redefinitions of this very name — is
+        `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach.may_trust_command_name_at`,
+        layered on this verdict the way `closed_at` is layered on `closed_for_the_whole_run`. A
+        verdict of trusted here means that model grants at every position; only when this refuses
+        does the position start to matter.
 
         Named for the question a caller actually has rather than for the shadow set, because the
         answer is wider than the set: a reader who takes this for "is it redefined?" and narrows it
