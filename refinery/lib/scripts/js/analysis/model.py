@@ -50,6 +50,7 @@ from refinery.lib.scripts.js.model import (
     JsContinueStatement,
     JsDoWhileStatement,
     JsExportSpecifier,
+    JsExpressionStatement,
     JsForInStatement,
     JsForOfStatement,
     JsForStatement,
@@ -898,6 +899,11 @@ def _observes_identity_alone(governor: Node | None, operand: Node) -> bool:
     flow anywhere. `for-in` is here and `for-of` is not, because enumeration reads the key set,
     which a write to a parameter never changes — §10.2.11 keys the mapping by the call's arity —
     while iteration reads the elements.
+
+    A statement that is the reference and nothing else is the plainest of them: it reads the
+    binding and discards what it read, which is what `void` spells with a keyword in front. A
+    statement value is unobservable in a function body, and a mapped `arguments` object is only
+    ever named inside one, so nothing downstream can pick the object up from there.
     """
     if isinstance(governor, JsUnaryExpression):
         return (
@@ -914,23 +920,33 @@ def _observes_identity_alone(governor: Node | None, operand: Node) -> bool:
         return strip_parens(governor.test) is operand
     if isinstance(governor, JsForInStatement):
         return strip_parens(governor.right) is operand
+    if isinstance(governor, JsExpressionStatement):
+        return strip_parens(governor.expression) is operand
     return False
 
 
 def _reads_every_element_alone(governor: Node | None, operand: Node) -> bool:
     """
     Whether the construct governing a bare reference to a mapped `arguments` object reads the
-    elements out of it and does nothing else: a spread copies the values and a `for-of` walks
-    them, and both leave the object behind — the values escape, the object does not, and a value
-    cannot write the parameter it was read from. Both walks go through the object's own
+    elements out of it and does nothing else: a spread copies the values and a synchronous `for-of`
+    walks them, and both leave the object behind — the values escape, the object does not, and a
+    value cannot write the parameter it was read from. Both walks go through the object's own
     `@@iterator`, which holds the values intrinsic from the moment of creation and can only be
     replaced through a member write that `_record_arguments_alias_references` already takes as an
     indefinite write of every parameter, so a program that could turn the walk into a write has
     refused every fold before this answer is consulted.
+
+    `for await` is not one of them, and being one keyword away from a walk that is makes it worth
+    saying why: asynchronous iteration asks for `@@asyncIterator` first, which §10.2.11 gives the
+    object none of, so the lookup leaves the object and reaches `Object.prototype` — and whatever
+    stands there is then called with the object as `this`. Node prints `10` rather than `3` for
+    `f(2)` where `f` is `async function f(a) { for await (const v of arguments) {} return a + 1; }`
+    and `Object.prototype[Symbol.asyncIterator]` writes `this[0]`, which is a parameter written
+    through a walk this answer would have called incapable of writing one.
     """
     if isinstance(governor, JsSpreadElement):
         return strip_parens(governor.argument) is operand
-    if isinstance(governor, JsForOfStatement):
+    if isinstance(governor, JsForOfStatement) and not governor.is_await:
         return strip_parens(governor.right) is operand
     return False
 
@@ -1828,13 +1844,13 @@ class SemanticModel:
         `for-of` head — as a read of each parameter. `_observes_identity_alone` and
         `_reads_every_element_alone` carry the argument for every admitted position, and an
         indefinite write recorded at one of them would refuse every fold in the function for a use
-        that cannot write anything. Every use those two decline, and every access whose key the
-        model cannot name — the object handed to a call, the object bound to a second name — is
-        recorded as a read of every parameter: reading is what makes a write to a parameter
-        observable, which is the fact a remover needs. `arguments[i] = v` for an `i` the model cannot read is a read of every
-        parameter and an indefinite write of every one of them, since it may write any single one
-        and recording a definition of each would let a fold answer with a value only one of them can
-        hold.
+        that cannot write anything. Every use those two decline — the object handed to a call, the
+        object bound to a second name — is recorded as a read of every parameter and an indefinite
+        write of every one of them: reading is what makes a write to a parameter observable, which
+        is the fact a remover needs, and the object may reach code that writes any element.
+        `arguments[i] = v` for an `i` the model cannot read is recorded the same way, since it may
+        write any single one and recording a definition of each would let a fold answer with a value
+        only one of them can hold.
 
         The name is resolved rather than matched, because a body may bind `arguments` itself — as a
         parameter, a lexical declaration, a `var` given a value, or a catch parameter — and may also

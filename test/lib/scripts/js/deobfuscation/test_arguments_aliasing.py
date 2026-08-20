@@ -1077,8 +1077,10 @@ _A_CONVERSION_THAT_HANDS_THE_OBJECT_TO_CODE: dict[str, str] = {
 }
 
 #: A call whose body computes only from its parameter beside a use that can touch no parameter,
-#: mapped to the text the deobfuscation writes for it: the call is folded to its value. The second
-#: row's use binds the object to a name nothing reads, which hands it nowhere.
+#: mapped to the text the deobfuscation writes for it: the call is folded to its value. The first
+#: row's use is one the position classification admits and the second's is not — binding the
+#: object to a name is taken for a hand-off to anything that name reaches, and the call folds only
+#: once the declarator nothing reads is swept and the use goes with it.
 _A_CALL_FOLDED_PAST_A_USE_THAT_TOUCHES_NOTHING: dict[str, str] = {
     'function f(a) { var t = typeof arguments; return a + 1; } console.log(f(2));':
         'console.log(3);',
@@ -1150,6 +1152,36 @@ class TestAWalkThatReadsTheElements(TestBase):
         self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
 
 
+#: An asynchronous walk of the object beside the protocol it looks up, which the body has poisoned,
+#: mapped to what Node prints. `f(2)` answers with `10` and not `3`, so the parameter came back
+#: written by code the walk handed the object to.
+_A_WALK_THAT_HANDS_THE_OBJECT_TO_CODE: dict[str, str] = {
+    'Object.prototype[Symbol.asyncIterator] = function () { this[0] = 9;'
+    ' return { next() { return Promise.resolve({ done: true }); } }; };'
+    ' async function f(a) { for await (const v of arguments) {} return a + 1; }'
+    ' f(2).then(function (r) { console.log(r); });': '10\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnAsynchronousWalkHandsTheObjectToCode(TestBase):
+    """
+    `for await` is one keyword away from the walk above and reaches the object a different way: it
+    asks for `@@asyncIterator`, which §10.2.11 gives the object none of, so the lookup leaves the
+    object for `Object.prototype` and calls whatever stands there with the object as `this`. A body
+    that puts a parameter write there is answered with the written value, which is the measurement
+    behind `_reads_every_element_alone` admitting the synchronous head and refusing this one.
+    """
+
+    def test_node_answers_the_call_with_the_value_the_protocol_wrote(self):
+        rows = _A_WALK_THAT_HANDS_THE_OBJECT_TO_CODE
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_the_call_the_same_way(self):
+        rows = _A_WALK_THAT_HANDS_THE_OBJECT_TO_CODE
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAConversionHandsTheObjectToCode(TestBase):
 
@@ -1159,6 +1191,42 @@ class TestAConversionHandsTheObjectToCode(TestBase):
 
     def test_the_deobfuscation_preserves_the_read(self):
         rows = _A_CONVERSION_THAT_HANDS_THE_OBJECT_TO_CODE
+        self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
+
+
+#: A mention of the object standing on its own as a statement, beside the conversion one character
+#: away from it, mapped to what Node prints for each. `Object.prototype` holds a conversion that
+#: writes element `0` in every row, so a position that enters it answers `10` and a position that
+#: stays out of it answers `3`. An expression statement takes the value of its expression and throws
+#: it away: no property of the object is touched and the object is handed to nobody, so the last
+#: row is the only one of the three whose parameter comes back written. Wrapping the mention in
+#: parentheses is no operation and leaves it the same statement.
+_A_MENTION_A_STATEMENT_DISCARDS: dict[str, str] = {
+    'Object.prototype[Symbol.toPrimitive] = function () { this[0] = 9; return 0; };'
+    ' function f(a) { arguments; return a + 1; } console.log(f(2));': '3\n',
+    'Object.prototype[Symbol.toPrimitive] = function () { this[0] = 9; return 0; };'
+    ' function f(a) { (arguments); return a + 1; } console.log(f(2));': '3\n',
+    'Object.prototype[Symbol.toPrimitive] = function () { this[0] = 9; return 0; };'
+    ' function f(a) { +arguments; return a + 1; } console.log(f(2));': '10\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAMentionAStatementDiscards(TestBase):
+    """
+    A statement that is nothing but the name is the mention that reaches least: the value it takes
+    goes nowhere, so it reads no element and hands the object to no code that could write one. This
+    is the measurement behind that position being classified with `typeof` and `void` rather than
+    with the hand-offs, which `test.lib.scripts.js.analysis.test_model` records as the answer the
+    parameters of such a body carry.
+    """
+
+    def test_node_answers_each_use_the_way_the_row_records(self):
+        rows = _A_MENTION_A_STATEMENT_DISCARDS
+        self.assertEqual(_said_by_node(rows), _printed(rows))
+
+    def test_the_deobfuscation_answers_each_use_the_same_way(self):
+        rows = _A_MENTION_A_STATEMENT_DISCARDS
         self.assertEqual(_said_after_deobfuscation(rows), _printed(rows))
 
 
