@@ -283,6 +283,38 @@ class TestAWalkIsAnsweredTheSameWhetherOrNotItFolds(TestBase):
         )
 
 
+#: A question about a position a `delete` emptied, mapped to what Node answers it with. A removed
+#: position is no longer one of the array's own keys, so the walk passes over it, the membership
+#: test reports it absent, and a search does not find `undefined` there. The same four questions
+#: over a position an array grew past are answered wrongly and are pinned in
+#: `test.lib.scripts.js.test_unfixed_defects`; these rows are the half that is already right, and
+#: they are what says the two ways of emptying a position are told apart at all.
+_A_POSITION_A_DELETE_EMPTIED: dict[str, str] = {
+    "var v = [1, 2, 3]; delete v[1]; var r = ''; for (var k in v) r += k; return r;" : '02',
+    'var v = [1, 2, 3]; delete v[1]; return 1 in v;'                                 : 'false',
+    "var v = [1, 2, 3]; delete v[1]; return Object.keys(v).join('|');"               : '0|2',
+    'var v = [1, 2, 3]; delete v[1]; return v.indexOf(undefined);'                   : '-1',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPositionADeleteEmptiedIsNoLongerAnOwnKey(TestBase):
+
+    def test_node_answers_each_question_the_way_the_row_records(self):
+        rows = _A_POSITION_A_DELETE_EMPTIED
+        self.assertEqual(
+            {body: behavior(_walk(body)) for body in rows},
+            {body: (F'{found}\n', None) for body, found in rows.items()},
+        )
+
+    def test_the_deobfuscated_program_still_answers_that_way(self):
+        rows = _A_POSITION_A_DELETE_EMPTIED
+        self.assertEqual(
+            {body: behavior(_walked(body)) for body in rows},
+            {body: (F'{found}\n', None) for body, found in rows.items()},
+        )
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestTheEndOfTheSpaceAnArrayDrawsItsPositionsFrom(TestBase):
 

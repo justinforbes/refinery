@@ -1008,6 +1008,107 @@ class TestAnElisionWritesNoSlot(TestBase):
         )
 
 
+def _returned_from_a_body(body: str) -> str:
+    """
+    A script whose one function runs *body* and prints what it returned.
+
+    A question asked inside a function is what puts it where the tool answers it at all, for the
+    reason `_evaluated_in_a_body` gives. The body is written out whole here because the receivers
+    below are built by statements rather than by one literal.
+    """
+    return F'function f() {{ {body} }}\nconsole.log(f());\n'
+
+
+#: A `for...in` walk over an array holding a position no element was written in, mapped to what Node
+#: prints for it. The walk reports the array's own keys, and such a position is not one of them
+#: however it came about: written as an elision, passed over by a write beyond the end, or passed
+#: over by moving `length` up.
+A_FOR_IN_WALK_OVER_AN_ARRAY_HOLDING_A_HOLE = {
+    _returned_from_a_body(
+        "var v = [1, , 3]; var r = ''; for (var k in v) r += k; return r;"
+    ): '02\n',
+    _returned_from_a_body(
+        "var v = [1]; v[2] = 3; var r = ''; for (var k in v) r += k; return r;"
+    ): '02\n',
+    _returned_from_a_body(
+        "var v = [1]; v.length = 3; var r = ''; for (var k in v) r += k; return r;"
+    ): '0\n',
+}
+
+
+#: A membership test over a position an array grew past without writing anything in it, mapped to
+#: what Node prints for it. Growth moves how far the array reaches and never says that every
+#: position below that was filled.
+A_MEMBERSHIP_TEST_OVER_A_SLOT_GROWTH_PASSED_OVER = {
+    _returned_from_a_body('var v = [1]; v.length = 3; return 1 in v;'): 'false\n',
+    _returned_from_a_body('var v = [1]; v[2] = 3; return 1 in v;'): 'false\n',
+}
+
+
+#: A search of a grown array for the value a position it passed over would hold if it held one,
+#: mapped to what Node prints for it. `indexOf` skips a position the array does not hold, so it
+#: reports `-1` where the same search over `[1, undefined, 3]` reports `1`.
+A_SEARCH_FOR_UNDEFINED_IN_A_SLOT_GROWTH_PASSED_OVER = {
+    _returned_from_a_body('var v = [1]; v.length = 3; return v.indexOf(undefined);'): '-1\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWalkOfAnArrayVisitsOnlyThePositionsItHolds(TestBase):
+    """
+    `for...in` visits an object's own keys, and an array's own keys are the positions it holds. A
+    position nothing was ever written in is not one of them, so Node prints `02`, `02`, and `0` for
+    the three programs of `A_FOR_IN_WALK_OVER_AN_ARRAY_HOLDING_A_HOLE`.
+
+    Each walk is taken from the length instead and prints `012`, which is the walk of an array whose
+    every position was written. The walk then hands its body an index the array has nothing at, and
+    a body reading `v[k]` for each `k` it is given reads a slot the prototype chain owns.
+
+    A walk of an array a `delete` left a hole in is answered correctly and is stated as law in
+    `test.lib.scripts.js.deobfuscation.test_own_property_order`. The two holes are one hole to an
+    engine, and this entry retires when one representation answers both.
+    """
+
+    @unittest.expectedFailure
+    def test_a_position_no_element_was_written_in_is_visited_by_no_walk(self):
+        rows = A_FOR_IN_WALK_OVER_AN_ARRAY_HOLDING_A_HOLE
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestGrowingAnArrayWritesNoElement(TestBase):
+    """
+    Moving `length` up and writing beyond the end both make an array reach further while leaving
+    every position passed over empty, which is a hole exactly as an elision is. Node prints `false`
+    for both programs of `A_MEMBERSHIP_TEST_OVER_A_SLOT_GROWTH_PASSED_OVER` and `-1` for the one of
+    `A_SEARCH_FOR_UNDEFINED_IN_A_SLOT_GROWTH_PASSED_OVER`.
+
+    Growth is recorded as elements instead, so the passed-over position answers as though it held
+    `undefined`: the membership tests print `true` and the search prints `1`. The same two questions
+    over a hole a `delete` made are answered correctly, which is what says it is growth rather than
+    the hole that has no representation here.
+    """
+
+    @unittest.expectedFailure
+    def test_a_position_growth_passed_over_is_in_no_array(self):
+        rows = A_MEMBERSHIP_TEST_OVER_A_SLOT_GROWTH_PASSED_OVER
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+    @unittest.expectedFailure
+    def test_a_search_finds_no_undefined_in_a_position_growth_passed_over(self):
+        rows = A_SEARCH_FOR_UNDEFINED_IN_A_SLOT_GROWTH_PASSED_OVER
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAKeyAnObjectLiteralLacksIsTheChainsToAnswer(TestBase):
     """
@@ -1386,4 +1487,62 @@ class TestANameTheModuleReservesStaysBehindTheEval(TestBase):
                 behavior(deobfuscate_source(source, module=True), module=True),
             ),
             (('3\n', None), ('3\n', None)),
+        )
+
+
+def _spelled_with_an_escaped_identifier(source: str) -> str:
+    """
+    *source* with the placeholder `ESCAPED_A` replaced by the unicode escape denoting the identifier
+    `a`, and `ESCAPED_Q` by the one denoting `q`.
+
+    Both escapes are assembled from `chr(92)` rather than written out. An escape written into this
+    file is one flattening away from being the character it denotes, and an entry that no longer
+    contains the spelling it asks about asks nothing at all.
+    """
+    with_a = source.replace('ESCAPED_A', F'{chr(92)}u0061')
+    return with_a.replace('ESCAPED_Q', F'{chr(92)}u0071')
+
+
+#: A program naming a property by an identifier written with a unicode escape, mapped to what Node
+#: prints for it. The escape is the identifier and not four characters that resemble it, so the
+#: literal writes the key `a`, a plain `.a` reads what it wrote, a plain read finds a key an escaped
+#: spelling wrote, and a membership test over `q` finds the key an escaped `q` wrote.
+A_PROPERTY_KEY_WRITTEN_WITH_AN_ESCAPE = {
+    _spelled_with_an_escaped_identifier(
+        _returned_from_a_body("return Object.keys({ ESCAPED_A: 1, b: 2 }).join('|');")
+    ): 'a|b\n',
+    _spelled_with_an_escaped_identifier(
+        _returned_from_a_body('return { ESCAPED_A: 7 }.a;')
+    ): '7\n',
+    _spelled_with_an_escaped_identifier(
+        _returned_from_a_body('var o = { a: 1 }; return o.ESCAPED_A;')
+    ): '1\n',
+    _spelled_with_an_escaped_identifier(
+        _returned_from_a_body("return 'q' in { ESCAPED_Q: 1 };")
+    ): 'true\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPropertyKeyWrittenWithAnEscapeIsTheNameThatEscapeDenotes(TestBase):
+    """
+    The name a property key carries is the code points its escapes resolve to and not the characters
+    it was typed with, so a key written with an escape and a read written plainly are one name, and
+    so is the reverse pair. Node prints `a|b`, `7`, `1`, and `true` for the four programs of
+    `A_PROPERTY_KEY_WRITTEN_WITH_AN_ESCAPE`.
+
+    `test.lib.scripts.js.analysis.test_differential` pins the same defect where it costs code: a
+    declaration written with an escape never matches the plain read of it, so the declaration reads
+    as unused and is dropped. In a property key it costs an answer instead, which is worse. Each
+    program here folds to a constant, and every one of those constants is wrong: the key comes back
+    spelled with the backslash the file used, the two reads come back `undefined`, and the
+    membership test comes back `false` for a key the object owns.
+    """
+
+    @unittest.expectedFailure
+    def test_a_key_written_with_an_escape_is_the_name_that_escape_denotes(self):
+        rows = A_PROPERTY_KEY_WRITTEN_WITH_AN_ESCAPE
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
         )
