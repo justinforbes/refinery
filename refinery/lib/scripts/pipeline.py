@@ -40,8 +40,12 @@ class PipelineObserver:
     leaves the tree half-edited and a reading taken from it would be reported as the pass's result;
     `failed` exists so an observer holding the reading taken in `before`, and through it the tree,
     can drop both rather than keep them for as long as it lives and compare the next pass against
-    them. Whatever `failed` raises is suppressed, because it runs while the transformer's own
-    exception unwinds and anything it raised would replace the exception the caller needs.
+    them. An `Exception` out of `failed` is suppressed, because it runs while the transformer's own
+    exception unwinds and would otherwise replace the exception the caller needs. A `BaseException`
+    is not, since `KeyboardInterrupt` is the caller asking for the run to end and no exception in
+    flight outranks that. Nothing out of `after` is suppressed: the transformer returned, so there
+    is no exception to mask, and an observer that cannot read a tree a pass finished with is a
+    defect of the observer that the caller has to be shown.
     """
 
     def before(self, group: str, transformer: type[Transformer], ast: Node) -> None:

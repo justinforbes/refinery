@@ -506,3 +506,51 @@ class TestTheAuditReportsNothingOverAProgramWhoseModesAreAlreadyPinned(TestBase)
             {source: _audited(source) for source in rows},
             {source: '' for source in rows},
         )
+
+
+class ATransformerThatRaisesHalfwayThroughTheBody(Transformer):
+    """
+    Drops the directive from a body that holds one and then raises, which is what a pass does that
+    edits and then fails: the tree is left in a state no pass ever chose to produce.
+    """
+
+    def visit_JsFunctionDeclaration(self, node: JsFunctionDeclaration):
+        body = node.body
+        if not isinstance(body, JsBlockStatement):
+            return
+        set_body(body, [
+            statement for statement in body.body
+            if not is_use_strict_directive(statement)
+        ])
+        raise ZeroDivisionError('the pass failed after editing')
+
+
+class TestAPassThatRaisesIsNoReadingTheAuditKeeps(TestBase):
+    """
+    A tree a transformer left behind on its way out is not that pass's result, so no mode read from
+    it may be reported, and the reading taken before it may not survive to be compared against the
+    next pass. This transformer moves a mode and then raises, which is the one shape that tells the
+    two apart: an audit that reported from the half-edited tree would name it, and one that kept the
+    reading would compare the next pass against a tree that no longer exists.
+    """
+
+    def test_it_names_no_movement(self):
+        source = F"function f() {{ 'use strict'; {_reports('f')} }}"
+        ast = JsParser(source).parse()
+        audit = StrictModeAudit()
+        with self.assertRaises(ZeroDivisionError):
+            TransformerGroup(_THE_GROUP, ATransformerThatRaisesHalfwayThroughTheBody).run(
+                ast, observer=audit)
+        self.assertEqual(audit.report(), '')
+
+    def test_the_reading_it_was_measured_against_is_not_compared_against_the_next_pass(self):
+        source = F"function f() {{ 'use strict'; {_reports('f')} }}"
+        ast = JsParser(source).parse()
+        audit = StrictModeAudit()
+        raising = ATransformerThatRaisesHalfwayThroughTheBody
+        audit.before(_THE_GROUP, raising, ast)
+        with self.assertRaises(ZeroDivisionError):
+            raising().visit(ast)
+        audit.failed(_THE_GROUP, raising)
+        audit.after(_THE_GROUP, TheDirectiveSweptOutOfTheBody, ast, False)
+        self.assertEqual(audit.report(), '')
