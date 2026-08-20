@@ -362,10 +362,12 @@ class Ps1TypeWorld:
 
 def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
     """
-    The whole-run verdict alone, for a caller that needs the leaf value and not the opener positions
-    `refinery.lib.scripts.ps1.analysis.worldflow.build_world_reach` floods from — the closed-world
-    cache slot and the tests that assert the verdict. A projection of `measure_world`, so a verdict
-    read this way and one the flow gate floods from are never two different answers.
+    The whole-run verdict alone, for a caller that wants the leaf value without a cache and not the
+    opener positions `refinery.lib.scripts.ps1.analysis.worldflow.build_world_reach` floods from —
+    the tests that assert the verdict. A projection of `measure_world`, so a verdict read this way
+    and one the flow gate floods from are never two different answers. The cache reaches that same
+    projection through `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache.world_measurement`,
+    not through here.
     """
     return measure_world(root).world
 
