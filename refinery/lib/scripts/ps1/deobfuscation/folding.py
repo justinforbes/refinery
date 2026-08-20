@@ -9,8 +9,10 @@ import re
 
 from typing import Iterator, NamedTuple, TypeGuard
 
-from refinery.lib.scripts import Node, canonical, reattach
+from refinery.lib.scripts import Node, Transformer, canonical, reattach
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import is_fault_free, may_be_dropped
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.analysis.values import (
     Ps1Constant,
     Ps1Fact,
@@ -39,7 +41,6 @@ from refinery.lib.scripts.ps1.data import ENCODING_MAP, instance_overloads, name
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.deobfuscation.constants import PS1_ENV_CONSTANTS
 from refinery.lib.scripts.ps1.deobfuscation.helpers import (
-    WorldAwareTransformer,
     StringMethodError,
     apply_format_string,
     apply_string_method,
@@ -569,7 +570,34 @@ def _folded(outcome) -> Expression | None:
     return None if outcome.may_throw else render(outcome.value)
 
 
-class Ps1ConstantFolding(WorldAwareTransformer):
+class Ps1ConstantFolding(Transformer):
+    """
+    Fold constant expressions to their values. The purity questions the fold rests on are asked
+    against the run's shared `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach`, captured
+    once at entry from the version-keyed model cache rather than re-read per fold. One capture keeps
+    every fold in a sweep judged against one world, and — unlike the delete-only passes, which fetch
+    the world per body — folding cannot afford a per-question fetch: it edits in post-order, so a
+    fresh fetch after each child fold would rebuild the world flood on every index or member fold,
+    of which a string-picking obfuscation has thousands. Holding is sound because the captured world
+    reads its fail-closed pole once a fold advances the tree version, so a fold it can no longer
+    vouch for is deferred, not mis-granted; the pipeline re-runs this pass to a fixpoint, and the
+    deferred fold lands in the next sweep against a world rebuilt over the changed tree.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._world: Ps1WorldReach | None = None
+        self._entry = False
+
+    def visit(self, node: Node):
+        if self._entry:
+            return super().visit(node)
+        self._entry = True
+        try:
+            self._world = model_cache(self, node).world_reach
+            return super().visit(node)
+        finally:
+            self._entry = False
 
     def visit_Ps1Pipeline(self, node: Ps1Pipeline):
         if len(node.elements) == 2:
@@ -745,8 +773,7 @@ class Ps1ConstantFolding(WorldAwareTransformer):
         work the script would no longer do; see
         `refinery.lib.scripts.ps1.analysis.effects.may_be_dropped` for what that means.
 
-        The world is the one captured at the root by
-        `refinery.lib.scripts.ps1.deobfuscation.helpers.WorldAwareTransformer`. This pass only
+        The world is the one this pass captured at entry (see the class docstring). This pass only
         folds, so a verdict taken before its own edits is the more open, and so the more
         conservative, of the two.
 

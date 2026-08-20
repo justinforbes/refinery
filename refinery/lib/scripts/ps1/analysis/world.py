@@ -23,16 +23,17 @@ This is a leaf value model — a one-shot whole-script verdict plus the shadow s
 `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache`. Whether the world is closed at *one*
 particular read, which depends on where that read sits relative to the leaks that reach it, is a
 graph question and does not live here: `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach`
-answers it, layered on this model and on the control-flow graph, and `world_openers` is the shared
-enumeration of the nodes that open the world so the two cannot disagree about what an opener is.
+answers it, layered on this model and on the control-flow graph. `measure_world` produces the
+verdict and the opener positions the flow gate floods from in one walk, so the two cannot disagree
+about what an opener is.
 """
 from __future__ import annotations
 
 import enum
 
-from typing import Iterator, NamedTuple
+from typing import NamedTuple
 
-from refinery.lib.scripts import Node
+from refinery.lib.scripts import Node, tree_version
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_member_name,
@@ -194,22 +195,52 @@ def command_role(name: str) -> WorldRole:
     return WorldRole.NONE
 
 
-def world_openers(root: Ps1Script) -> Iterator[Node]:
+class Ps1WorldMeasurement(NamedTuple):
     """
-    Every node of *root* that opens the world, in walk order — the shared enumeration that
-    `build_closed_world` reduces to a whole-script verdict and
-    `refinery.lib.scripts.ps1.analysis.worldflow.build_world_reach` floods forward from. Stated once
-    so the whole-run bool and the flow-sensitive gate cannot disagree about what opens the world: a
-    node the flood misses but the bool counts, or the reverse, would let one model grant where the
-    other refuses over the same script.
+    One walk's reading of *root*: the whole-run `world` verdict, the `openers` that produced it in
+    walk order, and the `root` and `build_version` those two were measured over. The verdict and the
+    positions come from the same walk, so `world.closed_for_the_whole_run` and `not openers` are the
+    same fact — a node one counts and the other misses cannot exist. Held in a
+    `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot; `build_world_reach` floods from
+    `openers` and stamps `build_version` onto the reach model so a held one notices the tree change.
 
-    Yields the opener node itself, not its role — the reach model needs the position, and the class
-    or enum definition among them, which opens the world at no position because the engine compiles
-    it before the first statement runs, is recognized by the consumer that must fail closed on it.
+    The opener nodes are live tree references, which is why this is a cache record rather than a
+    field of the leaf `Ps1TypeWorld`: a slot is dropped whole on the next version bump, so its node
+    references are never read against a tree they no longer belong to.
     """
+    world: Ps1TypeWorld
+    openers: tuple[Node, ...]
+    root: Ps1Script
+    build_version: int
+
+
+def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
+    """
+    Walk the whole tree once, computing the command-table verdict and the opener positions together:
+    whether any node opens the world (a single opener anywhere is global and retroactive, so it
+    closes off the verdict), the set of command names the script redefines, and every opener node in
+    walk order. The walk cannot short-circuit on the first opener because the shadow set needs every
+    redefinition, wherever it sits, and the flood needs every opener position.
+
+    An opener is yielded as the node itself, not its role. The class or enum definition among them
+    opens the world at no position — the engine compiles it before the first statement runs — and is
+    recognized by `build_world_reach`, which must fail closed on it.
+    """
+    closed = True
+    closed_but_for_alias_bindings = True
+    shadowed: set[str] = set()
+    openers: list[Node] = []
     for node in root.walk():
-        if _opens_world(node, _identity_redefinitions(node)):
-            yield node
+        redefined = _identity_redefinitions(node)
+        shadowed.update(record.name for record in redefined)
+        if not _opens_world(node, redefined):
+            continue
+        openers.append(node)
+        closed = False
+        if not _opens_world_only_by_binding_an_alias(node):
+            closed_but_for_alias_bindings = False
+    world = Ps1TypeWorld(closed, frozenset(shadowed), closed_but_for_alias_bindings)
+    return Ps1WorldMeasurement(world, tuple(openers), root, tree_version(root))
 
 
 class Ps1TypeWorld:
@@ -331,23 +362,12 @@ class Ps1TypeWorld:
 
 def build_closed_world(root: Ps1Script) -> Ps1TypeWorld:
     """
-    Walk the whole tree once, computing both command-table facts: whether any node opens the world
-    (a single opener anywhere is global and retroactive, so it closes off the verdict) and the set
-    of command names the script redefines. The walk cannot short-circuit on the first opener
-    because the shadow set needs every redefinition, wherever it sits.
+    The whole-run verdict alone, for a caller that needs the leaf value and not the opener positions
+    `refinery.lib.scripts.ps1.analysis.worldflow.build_world_reach` floods from — the closed-world
+    cache slot and the tests that assert the verdict. A projection of `measure_world`, so a verdict
+    read this way and one the flow gate floods from are never two different answers.
     """
-    closed = True
-    closed_but_for_alias_bindings = True
-    shadowed: set[str] = set()
-    for node in root.walk():
-        redefined = _identity_redefinitions(node)
-        shadowed.update(record.name for record in redefined)
-        if not _opens_world(node, redefined):
-            continue
-        closed = False
-        if not _opens_world_only_by_binding_an_alias(node):
-            closed_but_for_alias_bindings = False
-    return Ps1TypeWorld(closed, frozenset(shadowed), closed_but_for_alias_bindings)
+    return measure_world(root).world
 
 
 def _opens_world_only_by_binding_an_alias(node) -> bool:

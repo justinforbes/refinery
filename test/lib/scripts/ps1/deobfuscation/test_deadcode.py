@@ -746,3 +746,92 @@ class TestPs1DeadCodeLeavesTheTreeConsistent(TestPs1):
             "if ($false) { Write-Host 'dead' > C:\\o.txt } else { Write-Host 'live' }",
             Ps1DeadCodeElimination)
         self.assertEqual(result, "Write-Host 'live'")
+
+
+class TestPs1TypeDefinitionsSurviveNeverRunCode(TestPs1):
+    """
+    PowerShell registers a top-level `class` or `enum` when it compiles the script, before the
+    first statement runs, so a definition inside a region that never executes still defines its
+    type and has to survive the removal of that region.
+    """
+
+    def test_a_class_in_a_constant_false_branch_survives_while_its_plain_twin_is_removed(self):
+        kept = cleandoc(
+            """
+            if ($False) {
+              class Foo {}
+            }
+            Write-Host 'live'
+            """
+        )
+        self.assertEqual(self._deobfuscate_iterative(kept), kept)
+        self.assertEqual(
+            self._deobfuscate_iterative("if ($False) { Write-Host 'dead' }\nWrite-Host 'live'"),
+            "Write-Host 'live'")
+
+    def test_an_enum_in_a_never_entered_loop_body_survives_while_its_plain_twin_is_removed(self):
+        kept = cleandoc(
+            """
+            while ($False) {
+              enum Bar {
+                A
+              }
+            }
+            Write-Host 'live'
+            """
+        )
+        self.assertEqual(self._deobfuscate_iterative(kept), kept)
+        self.assertEqual(
+            self._deobfuscate_iterative("while ($False) { Write-Host 'dead' }\nWrite-Host 'live'"),
+            "Write-Host 'live'")
+
+    def test_a_class_after_a_top_level_exit_survives_while_a_plain_statement_is_removed(self):
+        kept = cleandoc(
+            """
+            [Foo]::new().Run()
+            exit
+            class Foo {
+              [void] Run() {
+                Write-Host 'run'
+              }
+            }
+            """
+        )
+        self.assertEqual(self._deobfuscate_iterative(kept), kept)
+        self.assertEqual(self._deobfuscate_iterative("exit\nWrite-Host 'dead'"), 'exit')
+
+    def test_a_class_in_an_unselected_switch_clause_survives_while_its_plain_twin_collapses(self):
+        kept = cleandoc(
+            """
+            switch (5) {
+              3 {
+                class Foo {}
+              }
+              5 {
+                Write-Host 'live'
+              }
+            }
+            """
+        )
+        self.assertEqual(self._deobfuscate_iterative(kept), kept)
+        self.assertEqual(
+            self._deobfuscate_iterative(
+                "switch (5) { 3 { Write-Host 'dead' } 5 { Write-Host 'live' } }"),
+            "Write-Host 'live'")
+
+    def test_a_class_in_the_taken_branch_is_carried_out_while_junk_beside_it_is_stripped(self):
+        result = self._deobfuscate_iterative(cleandoc(
+            """
+            if ($True) {
+              class Foo {}
+              $junk = 123
+              Write-Host 'live'
+            }
+            """
+        ))
+        self.assertEqual(result, cleandoc(
+            """
+            class Foo {}
+            Write-Host 'live'
+            """
+        ))
