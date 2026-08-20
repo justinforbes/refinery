@@ -56,18 +56,37 @@ def is_negative_zero(value: float) -> bool:
     return value == 0 and math.copysign(1.0, value) < 0
 
 
+ARRAY_INDEX_LIMIT = 0xFFFFFFFF
+"""
+One past the largest array index. An array's length is a `uint32`, so the largest index one can hold
+is `2**32 - 2` and the spelling `'4294967295'` names an ordinary property of the array object.
+"""
+
+_ARRAY_INDEX_DIGITS = len(str(ARRAY_INDEX_LIMIT))
+
+
 def canonical_array_index(key: str) -> int | None:
     """
     The integer index *key* denotes as an array index, or `None` when it is not one. JavaScript treats
     a property key as an index only when it is the canonical decimal spelling of a non-negative
-    integer, so `'1'` indexes but `'+1'`, `'01'`, `'1.0'`, `' 1 '`, `'1_0'`, and `'0x1'` are ordinary
-    property names that resolve to `undefined`. Python's `int` accepts every one of those spellings,
-    and `str.isdigit` additionally accepts non-ASCII digits such as `'²'`, so neither is usable alone.
+    integer below `ARRAY_INDEX_LIMIT`, so `'1'` indexes but `'+1'`, `'01'`, `'1.0'`, `' 1 '`, `'1_0'`,
+    and `'0x1'` are ordinary property names that resolve to `undefined`. Python's `int` accepts every
+    one of those spellings, and `str.isdigit` additionally accepts non-ASCII digits such as `'²'`, so
+    neither is usable alone.
+
+    The upper bound belongs to the definition rather than guarding against large numbers. A key at or
+    above it is a property name, which is stored where an index is not, enumerates with the names
+    rather than ahead of them, and does not move the array's length. Reading it as an index answers a
+    different question about a different slot.
+
+    The digit count is tested before the value because a key is arbitrary program text: converting a
+    numeral of a few thousand digits raises rather than answers, and no such spelling could name an
+    index in any case.
     """
-    if not key or not all(c in '0123456789' for c in key):
+    if not key or len(key) > _ARRAY_INDEX_DIGITS or not all(c in '0123456789' for c in key):
         return None
     index = int(key)
-    if str(index) != key:
+    if str(index) != key or index >= ARRAY_INDEX_LIMIT:
         return None
     return index
 

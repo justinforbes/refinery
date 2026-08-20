@@ -264,6 +264,36 @@ class MemberRead(Enum):
     NOT_DATA = auto()
 
 
+def own_property_keys(obj: dict) -> list[str]:
+    """
+    The own keys of *obj* in the order JavaScript enumerates them: the array indices first, ascending
+    by value, then every remaining key in the order it was created.
+
+    A `dict` already preserves creation order, which is the whole of the second half of the rule and
+    the reason enumeration reads as insertion order for as long as no index is present. An index is
+    what breaks it, and the break is not a detail of ordering: a lookup table written with numeric
+    keys comes back in an order the source does not show, so a program that walks one and a fold that
+    walks the same one must agree about which key is first.
+
+    Which keys are indices is the distinction `refinery.lib.scripts.js.numbers.canonical_array_index`
+    draws, so a key an array could not have used as an index — `'01'`, `'-1'`, `'4294967295'` — sorts
+    with the names and not with the numbers.
+
+    This is the own half of enumeration, like `read_data_property` is the own half of a read: it
+    answers about the keys *obj* holds and nothing about the ones a prototype would contribute.
+    """
+    indices: list[tuple[int, str]] = []
+    names: list[str] = []
+    for key in obj:
+        index = canonical_array_index(key)
+        if index is None:
+            names.append(key)
+        else:
+            indices.append((index, key))
+    indices.sort()
+    return [key for _, key in indices] + names
+
+
 def read_data_property(obj: Value, key: str) -> tuple[MemberRead, Value]:
     """
     Read *key* off *obj* as far as the value itself decides it: the own data properties of a string,
