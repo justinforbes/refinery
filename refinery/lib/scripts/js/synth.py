@@ -261,10 +261,14 @@ class JsSynthesizer(Synthesizer):
             self._write('*')
 
     def _emit_key(self, key: Node | None, computed: bool):
+        """
+        A computed key holds one operand and not a whole expression, so a sequence written as one
+        keeps its brackets: without them the first comma ends the key rather than continuing it, and
+        the text is not a program at all.
+        """
         if computed:
             self._write('[')
-            if key:
-                self.visit(key)
+            self._emit_element(key, True)
             self._write(']')
         elif key:
             self.visit(key)
@@ -1040,7 +1044,7 @@ class JsSynthesizer(Synthesizer):
     def visit_JsExportDefaultDeclaration(self, node: JsExportDefaultDeclaration):
         self._write('export default ')
         if node.declaration:
-            self.visit(node.declaration)
+            self._emit_element(node.declaration, True)
             if not isinstance(node.declaration, (
                 JsFunctionDeclaration, JsClassDeclaration,
             )):
