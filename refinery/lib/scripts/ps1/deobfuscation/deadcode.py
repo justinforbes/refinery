@@ -104,10 +104,11 @@ def _is_injected_noise_bareword(expr: Expression, world: Ps1WorldReach) -> bool:
     file, imports a module, defines an alias or runs `iex` can make any bareword resolve to real
     code, and only the redefinitions spelled as a `function` reach the shadow set — the world
     verdict the name-trust gate reads covers the rest, which is why the precondition sits here
-    rather than in another name-by-name list. Trust is a whole-run question about a name, not a
-    position one: a surviving `Set-Alias` hides a mutator behind a later bareword no forward flood
-    would poison, so a position gate (`closed_at`) is the wrong gate here and would only ever agree
-    with the name gate it stands beside, never narrow it.
+    rather than in another name-by-name list. The gate is deliberately the whole-run
+    `may_trust_command_name` and not its positional successor `may_trust_command_name_at`: purity
+    is a proof about a known built-in, where relaxing by position only widens what a proof already
+    covers, while this is a guess about an artifact, and a guess should not grow bolder with flow
+    analysis until that is measured as its own increment.
     """
     if not isinstance(expr, Ps1CommandInvocation):
         return False

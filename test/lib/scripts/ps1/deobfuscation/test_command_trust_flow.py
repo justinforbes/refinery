@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import unittest
-
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
 #: An acting statement that is never a removal candidate, so its survival says only that the pass
@@ -50,31 +48,27 @@ class _Ps1CommandTrustFlow(TestPs1):
 class TestPs1APureCommandBeforeTheOnlyLeakIsRemoved(_Ps1CommandTrustFlow):
     """
     A discarded side-effect-free command placed where no statement that could rebind its own name
-    can have run before it observes the command table the metadata describes, so it is junk like any
-    other and should be removed. Command-name trust is currently a whole-run verdict — any leak
-    anywhere distrusts every name everywhere — so these describe the flow-sensitive behavior the
-    tool does not yet have and are expected to fail until it earns its own frontier.
+    can have run before it observes the command table the metadata describes, so it is junk like
+    any other and is removed. Command-name trust is positional — `may_trust_command_name_at`
+    floods forward from the openers and from the name's own definition sites — so a call neither
+    flood reaches still names the built-in and goes.
     """
 
-    @unittest.expectedFailure
     def test_a_pure_command_before_the_only_invoke_expression_is_removed(self):
         source, token = _RANDOM
         self._assertPureCommandRemoved(
             F'{source}\nInvoke-Expression $enc\n{_ANCHOR}', token, 'Invoke-Expression')
 
-    @unittest.expectedFailure
     def test_a_pure_command_before_the_only_opaque_call_is_removed(self):
         source, token = _CHILDITEM
         self._assertPureCommandRemoved(
             F'{source}\n& $dispatch\n{_ANCHOR}', token, '$dispatch')
 
-    @unittest.expectedFailure
     def test_a_pure_command_before_the_only_import_module_is_removed(self):
         source, token = _SELECT
         self._assertPureCommandRemoved(
             F'{source}\nImport-Module .\\mod.psm1\n{_ANCHOR}', token, 'Import-Module')
 
-    @unittest.expectedFailure
     def test_a_pure_command_before_its_own_function_redefinition_is_removed(self):
         # The bare command runs before the `function` statement that takes its name over, so it
         # names the built-in and not the effectful redefinition below it; the redefinition and the
@@ -85,7 +79,6 @@ class TestPs1APureCommandBeforeTheOnlyLeakIsRemoved(_Ps1CommandTrustFlow):
             F'Get-Random\n{_ANCHOR}',
             '88175', 'Start-Process calc')
 
-    @unittest.expectedFailure
     def test_a_pure_command_before_its_own_set_alias_is_removed(self):
         # The discarded call precedes the `Set-Alias` that rebinds its name, so it still resolves to
         # the built-in `Get-Date` and is removable; the alias itself is an identity leak and stays.

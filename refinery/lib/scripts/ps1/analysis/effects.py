@@ -754,8 +754,9 @@ def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
     """
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
     observable side effects beyond yielding a value. The `world` decides whether a present-member
-    grant may be trusted at all and whether a command name still denotes what the metadata says; an
-    open one grants nothing, so every member read and every named call stays impure.
+    grant may be trusted and whether a command name still denotes what the metadata says, each at
+    the position of the node it is asked about: a world opened, or a name rebound, only by
+    statements no path places before the node still answers for it.
     """
     if isinstance(node, _LITERAL_EXPRESSIONS):
         return True
@@ -872,7 +873,7 @@ def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
             return False
         new_object = extract_new_object(node)
         if new_object is not None:
-            if not world.may_trust_command_name('new-object'):
+            if not world.may_trust_command_name_at('new-object', node):
                 return False
             type_name, ctor_args = new_object
             resolved = data.resolve_type(type_name)
@@ -886,9 +887,11 @@ def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
         if name is None:
             return False
         name = name.lower()
-        # A command the script redefines no longer runs what the metadata describes, and neither
-        # does any command in a script able to rebind names, so its purity is not the built-in's.
-        if not world.may_trust_command_name(name):
+        # A command a reachable statement may have rebound no longer surely runs what the metadata
+        # describes, so its purity is not the built-in's. The gate is positional — the identity
+        # twin of the `_grant` below — trusting the name only where no opener and no redefinition
+        # of this very name can have run first.
+        if not world.may_trust_command_name_at(name, node):
             return False
         # The pipeline set is checked through the same gate rather than after the plain one: three
         # of its four members are in both, so testing the plain set first would make the body check
@@ -897,11 +900,12 @@ def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
             return False
         if not _command_arguments_are_pure(node, world):
             return False
-        # Routed through `_grant` like every other grant. `may_trust_command_name` above refuses a
-        # name the whole run cannot trust; `_grant` here refuses a member the world does not hold at
-        # this node. The two ask different worlds — one whole-run, one positional — so a name that
-        # passed the first is still gated on the second, and narrowing that back to the name check
-        # would reopen a fail-open hole with nothing in the path to catch it.
+        # Routed through `_grant` like every other grant. `may_trust_command_name_at` above refuses
+        # a name a rebinding statement can reach; `_grant` here refuses a member the type world
+        # does not hold at this node. The two read different floods — the name gate adds the
+        # per-name redefinition flood the type axis never reads — so a name that passed the first
+        # is still gated on the second, and narrowing either check back into the other would reopen
+        # a fail-open hole with nothing in the path to catch it.
         if name in _PURE_PIPELINE_CMDLETS:
             return _grant(_command_body_is_pure(node, world), node, world)
         return _grant(True, node, world)
@@ -1235,7 +1239,7 @@ def _pipeline_ends_with_out_null(
     value the pipeline never carried and is not a junk sink.
     """
     out_null = _terminal_command(pipeline, 'out-null')
-    if out_null is None or not world.may_trust_command_name('out-null'):
+    if out_null is None or not world.may_trust_command_name_at('out-null', out_null):
         return False
     return _command_arguments_are_pure(out_null, world)
 
@@ -1293,7 +1297,7 @@ def _pipeline_ends_with_void_foreach(
     the blocks they saw, and a body that was never shown is not among them.
     """
     foreach = _terminal_command(pipeline, 'foreach-object')
-    if foreach is None or not world.may_trust_command_name('foreach-object'):
+    if foreach is None or not world.may_trust_command_name_at('foreach-object', foreach):
         return False
     if not _command_arguments_are_pure(foreach, world):
         return False
