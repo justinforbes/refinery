@@ -91,6 +91,9 @@ class StrictModeAudit(PipelineObserver):
             self.movements.append(
                 ModeMovement(group, transformer.__name__, became_strict, became_sloppy))
 
+    def failed(self, group: str, transformer: type[Transformer]) -> None:
+        self._before = {}
+
     def report(self) -> str:
         """
         The recorded movements, one per line, in the order they happened.

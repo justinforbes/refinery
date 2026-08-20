@@ -7,7 +7,12 @@ import unittest
 
 from dataclasses import dataclass, field
 from refinery.lib.scripts import Node, Transformer
-from refinery.lib.scripts.pipeline import DeobfuscationPipeline, DeobfuscationTimeout, TransformerGroup
+from refinery.lib.scripts.pipeline import (
+    DeobfuscationPipeline,
+    DeobfuscationTimeout,
+    PipelineObserver,
+    TransformerGroup,
+)
 
 
 @dataclass(repr=False)
@@ -103,3 +108,111 @@ class TestDeobfuscationTimeoutReport(unittest.TestCase):
         self.assertEqual(
             str(context.exception),
             'transformer _NeverSettle in group g exceeded the step budget')
+
+
+class _TransformerFailure(Exception):
+    pass
+
+
+def _RaiseWith(error: BaseException):
+    class _RaiseWith(Transformer):
+        def visit__MockNode(self, node: _MockNode):
+            raise error
+    return _RaiseWith
+
+
+class _EventLedger(PipelineObserver):
+
+    def __init__(self):
+        self.events: list[tuple] = []
+
+    def before(self, group: str, transformer: type[Transformer], ast: Node) -> None:
+        self.events.append(('before', group, transformer, ast))
+
+    def after(
+        self, group: str, transformer: type[Transformer], ast: Node, changed: bool,
+    ) -> None:
+        self.events.append(('after', group, transformer, ast, changed))
+
+    def failed(self, group: str, transformer: type[Transformer]) -> None:
+        self.events.append(('failed', group, transformer))
+
+
+class _LedgerThatRaisesInFailed(_EventLedger):
+
+    def failed(self, group: str, transformer: type[Transformer]) -> None:
+        super().failed(group, transformer)
+        raise RuntimeError('the observer itself is broken')
+
+
+class TestPipelineObserverWhenATransformerRaises(unittest.TestCase):
+
+    def test_the_group_caller_receives_the_raised_exception_itself(self):
+        failure = _TransformerFailure()
+        group = TransformerGroup('g', _RaiseWith(failure))
+        with self.assertRaises(_TransformerFailure) as context:
+            group.run(_MockNode(), observer=_EventLedger())
+        self.assertIs(context.exception, failure)
+
+    def test_the_pipeline_caller_receives_the_raised_exception_itself(self):
+        failure = _TransformerFailure()
+        raising = _RaiseWith(failure)
+        ledger = _EventLedger()
+        pipeline = DeobfuscationPipeline([
+            TransformerGroup('quiet', _ChangeN(1, 'quiet')),
+            TransformerGroup('loud', raising),
+        ])
+        with self.assertRaises(_TransformerFailure) as context:
+            pipeline.run(_MockNode(), observer=ledger)
+        self.assertIs(context.exception, failure)
+        self.assertEqual(ledger.events[-1], ('failed', 'loud', raising))
+
+    def test_every_before_is_answered_exactly_once_and_failed_is_told_no_tree(self):
+        node = _MockNode()
+        ledger = _EventLedger()
+        settling = _ChangeN(1, 'settling')
+        raising = _RaiseWith(_TransformerFailure())
+        group = TransformerGroup('g', settling, raising)
+        with self.assertRaises(_TransformerFailure):
+            group.run(node, observer=ledger)
+        self.assertEqual(ledger.events, [
+            ('before', 'g', settling, node),
+            ('after', 'g', settling, node, True),
+            ('before', 'g', raising, node),
+            ('failed', 'g', raising),
+        ])
+
+    def test_a_failed_hook_that_raises_does_not_replace_the_transformers_exception(self):
+        failure = _TransformerFailure()
+        raising = _RaiseWith(failure)
+        ledger = _LedgerThatRaisesInFailed()
+        group = TransformerGroup('g', raising)
+        with self.assertRaises(_TransformerFailure) as context:
+            group.run(_MockNode(), observer=ledger)
+        self.assertIs(context.exception, failure)
+        self.assertEqual(ledger.events[-1], ('failed', 'g', raising))
+
+    def test_failed_answers_a_raise_that_is_no_exception_subclass(self):
+        node = _MockNode()
+        ledger = _EventLedger()
+        raising = _RaiseWith(KeyboardInterrupt())
+        group = TransformerGroup('g', raising)
+        with self.assertRaises(KeyboardInterrupt):
+            group.run(node, observer=ledger)
+        self.assertEqual(ledger.events, [
+            ('before', 'g', raising, node),
+            ('failed', 'g', raising),
+        ])
+
+    def test_a_step_budget_timeout_is_answered_by_after_and_never_by_failed(self):
+        node = _MockNode()
+        ledger = _EventLedger()
+        group = TransformerGroup('g', _NeverSettle)
+        with self.assertRaises(DeobfuscationTimeout):
+            group.run(node, max_steps=1, observer=ledger)
+        self.assertEqual(ledger.events, [
+            ('before', 'g', _NeverSettle, node),
+            ('after', 'g', _NeverSettle, node, True),
+            ('before', 'g', _NeverSettle, node),
+            ('after', 'g', _NeverSettle, node, True),
+        ])

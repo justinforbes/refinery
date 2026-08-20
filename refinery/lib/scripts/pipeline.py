@@ -35,9 +35,13 @@ class PipelineObserver:
     nothing to do — a refusal costs recall silently, and naming it needs a channel out of the pass
     itself rather than a hook around it.
 
-    Every `before` is paired with an `after`, including when the transformer raises: an observer that
-    holds a reading between the two would otherwise keep it, and the tree it was taken from, for as
-    long as it lives, and would compare the next pass against a reading from this one.
+    Every `before` is answered exactly once, by `after` when the transformer returns and by `failed`
+    when it raises. `after` is not called on the failure path, because a transformer that raises
+    leaves the tree half-edited and a reading taken from it would be reported as the pass's result;
+    `failed` exists so an observer holding the reading taken in `before`, and through it the tree,
+    can drop both rather than keep them for as long as it lives and compare the next pass against
+    them. Whatever `failed` raises is suppressed, because it runs while the transformer's own
+    exception unwinds and anything it raised would replace the exception the caller needs.
     """
 
     def before(self, group: str, transformer: type[Transformer], ast: Node) -> None:
@@ -50,6 +54,12 @@ class PipelineObserver:
     ) -> None:
         """
         Called with the tree as *transformer* left it, and whether it reported a change.
+        """
+
+    def failed(self, group: str, transformer: type[Transformer]) -> None:
+        """
+        Called instead of `after` when *transformer* raised. The tree is not passed, because the
+        state it was left in is not the pass's result and must not be read as one.
         """
 
 
@@ -95,8 +105,13 @@ class TransformerGroup:
                     observer.before(self.name, cls, ast)
                     try:
                         t.visit(ast)
-                    finally:
-                        observer.after(self.name, cls, ast, t.changed)
+                    except BaseException:
+                        try:
+                            observer.failed(self.name, cls)
+                        except Exception:
+                            pass
+                        raise
+                    observer.after(self.name, cls, ast, t.changed)
                 if t.changed:
                     steps += 1
                     round_changed = True
