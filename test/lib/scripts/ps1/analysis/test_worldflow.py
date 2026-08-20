@@ -30,3 +30,19 @@ class TestPs1WorldReachIsBoundToTheTreeItMeasured(TestBase):
         self.assertFalse(reach.closed_for_the_whole_run)
         self.assertFalse(reach.closed_at(read))
         self.assertFalse(reach.may_trust_command_name('write-host'))
+
+
+class TestPs1CommandTrustIsPositionalWhereTheWorldStaysClosed(TestBase):
+
+    def test_whole_run_and_positional_trust_disagree_across_a_function_redefinition(self):
+        script = Ps1Parser(
+            '$Null = Get-Random -Maximum 88175\n'
+            'function Get-Random { Start-Process calc }\n'
+            'Get-Random').parse()
+        reach = Ps1ModelCache(script).world_reach
+        call_before, _, call_after = script.body
+        self.assertTrue(reach.closed_for_the_whole_run)
+        self.assertTrue(reach.may_trust_command_name('Start-Process'))
+        self.assertFalse(reach.may_trust_command_name('Get-Random'))
+        self.assertTrue(reach.may_trust_command_name_at('Get-Random', call_before))
+        self.assertFalse(reach.may_trust_command_name_at('Get-Random', call_after))

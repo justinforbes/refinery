@@ -168,3 +168,135 @@ class TestPs1CommandTrustPolesWithAndWithoutALeak(_Ps1CommandTrustFlow):
         ):
             with self.subTest(leak):
                 self._assertPureCommandKept(F'{leak}\n{source}\n{_ANCHOR}', token, acting)
+
+
+class TestPs1AFunctionRedefinitionSplitsItsNameIntoTwoEras(_Ps1CommandTrustFlow):
+    """
+    One script, one name, two eras: the discarded call ahead of the `function` statement still
+    names the built-in and goes, while the bare call behind it runs the effectful redefinition and
+    stays, in the same pass over the same tree.
+    """
+
+    def test_the_discarded_call_before_the_definition_goes_and_the_bare_call_after_it_stays(self):
+        result = self._deobfuscate(
+            F'$Null = Get-Random -Maximum 88175\n'
+            F'function Get-Random {{ Start-Process calc }}\n'
+            F'Get-Random -Maximum 70223\n{_ANCHOR}')
+        self.assertNotIn('88175', result)
+        self.assertIn('70223', result)
+        self.assertIn('Start-Process calc', result)
+        self.assertIn(_ANCHOR_TOKEN, result)
+
+
+class TestPs1APureCommandLoopingWithItsOwnRedefinitionIsKept(_Ps1CommandTrustFlow):
+    """
+    A redefinition of the discarded command's own name sharing a loop body with it precedes a
+    later iteration's call along the back edge, so the call stays although the redefinition follows
+    it in source. The same call in the same loop without the redefinition goes: a loop body is not
+    itself a sanctuary.
+    """
+
+    def test_a_pure_command_alone_in_a_loop_body_is_removed(self):
+        source, token = _RANDOM
+        self._assertPureCommandRemoved(
+            F'while ($True) {{ {source}; {_ANCHOR} }}', token, _ANCHOR_TOKEN)
+
+    def test_a_pure_command_looping_with_its_own_function_redefinition_is_kept(self):
+        source, token = _RANDOM
+        self._assertPureCommandKept(
+            F'while ($True) {{ {source}; function Get-Random {{ Start-Process calc }} }}\n{_ANCHOR}',
+            token, 'Start-Process calc')
+
+    def test_a_pure_command_looping_with_its_own_set_alias_is_kept(self):
+        source, token = _DATE
+        self._assertPureCommandKept(
+            F'foreach ($i in 1..4) {{ {source}; Set-Alias Get-Date i*x }}\n{_ANCHOR}',
+            token, 'Set-Alias')
+
+
+class TestPs1ARedefinitionSiteTheGraphCannotPlaceIsAlwaysAhead(_Ps1CommandTrustFlow):
+    """
+    A `function global:` statement inside a parameter default rebinds the name when the enclosing
+    function is called, but no control-flow graph places a default's evaluation, so no position can
+    prove itself ahead of it and every discarded call of the name stays — whether that site is the
+    name's only one or stands beside an ordinary redefinition the flood could place.
+    """
+
+    def test_a_pure_command_after_a_param_default_redefinition_of_its_own_name_is_kept(self):
+        self._assertPureCommandKept(
+            F'function f {{ param($p = $(function global:Get-Random {{ Start-Process calc }})) }}\n'
+            F'f\n'
+            F'$Null = Get-Random -Maximum 88175\n{_ANCHOR}',
+            '88175', 'Start-Process calc')
+
+    def test_an_unplaceable_site_keeps_a_call_an_ordinary_later_redefinition_alone_would_shed(self):
+        self._assertPureCommandKept(
+            F'function f {{ param($p = $(function global:Get-Random {{ Start-Process calc }})) }}\n'
+            F'f\n'
+            F'$Null = Get-Random -Maximum 88175\n'
+            F'function Get-Random {{ Start-Process iexplore }}\n{_ANCHOR}',
+            '88175', 'iexplore')
+
+
+class TestPs1BothPipedDiscardSinksFollowTheTrustVerdict(_Ps1CommandTrustFlow):
+    """
+    The verdict turns on the trust of the piped command's own name, not on which sink swallows the
+    pipeline: `| Out-Null` and `| ForEach-Object { [Void]$_ }` are removed and kept together.
+    """
+
+    _SINKS = ('| Out-Null', '| ForEach-Object { [Void]$_ }')
+
+    def test_a_piped_discard_with_no_rebinder_of_its_name_anywhere_is_removed(self):
+        for sink in self._SINKS:
+            with self.subTest(sink):
+                self._assertPureCommandRemoved(
+                    F'Get-Random -Maximum 88175 {sink}\n{_ANCHOR}', '88175', _ANCHOR_TOKEN)
+
+    def test_a_piped_discard_after_a_rebinder_of_its_own_name_is_kept(self):
+        for sink in self._SINKS:
+            for rebinder, acting in (
+                ('Set-Alias Get-Random i*x', 'Set-Alias'),
+                ('function Get-Random { Start-Process calc }', 'Start-Process calc'),
+                ('Invoke-Expression $enc', 'Invoke-Expression'),
+            ):
+                with self.subTest(F'{rebinder} {sink}'):
+                    self._assertPureCommandKept(
+                        F'{rebinder}\nGet-Random -Maximum 88175 {sink}\n{_ANCHOR}', '88175', acting)
+
+
+class TestPs1AWholeRunRefusalOverridesThePositionalGrant(_Ps1CommandTrustFlow):
+    """
+    A script that spells `$PSCommandPath` can re-run its own statements after its leaks, and a root
+    `process` block re-runs per pipeline input, so either refuses the whole run and the positional
+    grant that removes a call ahead of its own redefinition yields to that refusal.
+    """
+
+    _REMOVABLE = (
+        F'$Null = Get-Random -Maximum 88175\n'
+        F'function Get-Random {{ Start-Process calc }}\n'
+        F'Get-Random -Maximum 70223\n{_ANCHOR}')
+
+    def test_naming_the_own_script_path_keeps_a_call_its_position_alone_would_shed(self):
+        self._assertPureCommandRemoved(self._REMOVABLE, '88175', 'Start-Process calc')
+        self._assertPureCommandKept(
+            F'{self._REMOVABLE}\nWrite-Host $PSCommandPath', '88175', 'Start-Process calc')
+
+    def test_a_root_process_block_keeps_a_call_its_position_alone_would_shed(self):
+        self._assertPureCommandRemoved(self._REMOVABLE, '88175', 'Start-Process calc')
+        self._assertPureCommandKept(
+            F'process {{\n{self._REMOVABLE}\n}}', '88175', 'Start-Process calc')
+
+
+class TestPs1AnOpenerRefusesACallItsOwnDefinitionSitesWouldGrant(_Ps1CommandTrustFlow):
+    """
+    The call sits where the flood from its own name's definition sites does not reach, because the
+    `function` statement only follows it, so the own-name axis alone would remove it; the
+    `Invoke-Expression` ahead of it can rebind any name and must keep it on its own.
+    """
+
+    def test_a_call_between_an_opener_and_its_own_later_redefinition_is_kept(self):
+        self._assertPureCommandKept(
+            F'Invoke-Expression $enc\n'
+            F'$Null = Get-Random -Maximum 88175\n'
+            F'function Get-Random {{ Start-Process calc }}\n{_ANCHOR}',
+            '88175', 'Invoke-Expression')
