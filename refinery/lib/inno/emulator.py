@@ -65,7 +65,9 @@ from refinery.lib.inno.ifps import (
     VariableSpec,
     VariableType,
 )
+from refinery.lib import json
 from refinery.lib.patterns import formats
+from refinery.lib.resources import datapath
 from refinery.lib.types import AST, INF
 
 if TYPE_CHECKING:
@@ -680,13 +682,21 @@ class IFPSEmulator:
     """
     The core IFPS emulator.
     """
-
     def __init__(
         self,
         archive: InnoArchive | IFPSFile,
         options: IFPSEmulatorConfig | None = None,
         **more
     ):
+        with datapath('winapi.json').open('rb') as stream:
+            self.winapi: dict[str, list[str]] = json.loads(stream.read())
+            base = 0x70000000
+            self.winapi_module_to_addr = _ml = {name: base + k * 0x100000 for k, name in enumerate(self.winapi)}
+            self.winapi_addr_to_module = {addr: module for module, addr in _ml.items()}
+            self.winapi_symbol_to_addr = _sl = {
+                symbol: _ml[module] + k * 0x1000 for module, symbols in self.winapi.items() for k, symbol in enumerate(symbols)}
+            self.winapi_addr_to_symbol = {addr: module for module, addr in _sl.items()}
+
         if isinstance(archive, InnoArchive):
             self.inno = archive
             self.ifps = ifps = archive.ifps
@@ -888,7 +898,7 @@ class IFPSEmulator:
                         if inspect.isgenerator(return_value):
                             return_value = yield from return_value
                     except GeneratorExit:
-                        pass
+                        raise
                     except BaseException as b:
                         pending_exception = IFPSException(F'Error calling {function.name}: {b!s}', b)
                     else:
@@ -1220,6 +1230,23 @@ class IFPSEmulator:
         p_record.set(record)
         return True
 
+    @external(alias=[
+        'LoadLibraryW',
+        'LoadLibraryA',
+    ])
+    def kernel32__LoadLibrary(self, name: str) -> int:
+        name = name.lower()
+        base, dot, ext = name.rpartition('.')
+        if dot and ext.lower() == 'dll':
+            name = base
+        return self.winapi_module_to_addr.get(name, 0)
+
+    @external(alias=['GetProcAddressA'])
+    def kernel32__GetProcAddress(self, module: int, name: str) -> int:
+        if module not in self.winapi_addr_to_module:
+            return 0
+        return self.winapi_symbol_to_addr.get(name, 0)
+
     @external(alias=['Process32NextW'])
     def kernel32__Process32Next(self, handle: int, p_record: Variable[list]) -> bool:
         record = p_record.get()
@@ -1303,7 +1330,7 @@ class IFPSEmulator:
 
     @external()
     def DirExists(self, path: str) -> bool:
-        return True
+        return False
 
     @external()
     def ForceDirectories(self, path: str) -> bool:

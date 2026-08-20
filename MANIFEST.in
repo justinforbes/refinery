@@ -1,6 +1,7 @@
 include requirements.txt
 include README.md
 include LICENSE.md
+include refinery/data/winapi.json
 include refinery/data/rich.json
 include refinery/data/pwsh-meta.json.gz
 include refinery/data/pwsh-types.json.gz
