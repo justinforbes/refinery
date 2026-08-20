@@ -54,6 +54,7 @@ from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
     JsAssignmentExpression,
+    JsAwaitExpression,
     JsBinaryExpression,
     JsBooleanLiteral,
     JsCallExpression,
@@ -82,6 +83,7 @@ from refinery.lib.scripts.js.model import (
     JsUnaryExpression,
     JsUpdateExpression,
     JsVariableDeclarator,
+    JsYieldExpression,
     strip_parens,
 )
 
@@ -1799,6 +1801,9 @@ class EffectModel:
         - Nothing in the argument list is itself a call this gate does not also clear, so admitting an outer
           call cannot smuggle in an inner one. A nested built-in (`Math.floor(Math.abs(-1.7))`) is fine
           precisely because the same questions are asked of it.
+        - No part of the call stores anything the residual would go on to read. The fold deletes the
+          whole expression, so a store is lost wherever in it the store was written — an argument, the
+          receiver, or the computed key naming the method; see `_call_stores_nothing`.
 
         Trust is not evaluability, and this answers only the first. `trusted_intrinsic` says `unknownFn` is
         undisturbed — true, and no help, since no such built-in exists to fold. Whether a callee can
@@ -1807,7 +1812,28 @@ class EffectModel:
         """
         if not self._callee_is_trusted(node, receiver_type):
             return False
+        if not self._call_stores_nothing(node):
+            return False
         return all(self._argument_is_admissible(arg) for arg in node.arguments)
+
+    def _call_stores_nothing(self, node: JsCallExpression) -> bool:
+        """
+        Whether the parts of *node* that name what is being called store anything: the receiver it is
+        called on, and the computed key that says which method. The fold deletes the whole call
+        expression, so a store written into either is lost exactly as one written into an argument is,
+        and `Math[v = 'floor'](1.9)` drops the write to `v` while answering `1`.
+
+        A receiver that is itself a call is not asked here. It is a link in a chain, and
+        `_callee_is_trusted` already puts it through this same gate in full, where its own receiver,
+        key and arguments are each accounted for.
+        """
+        callee = strip_parens(node.callee)
+        if not isinstance(callee, JsMemberExpression):
+            return True
+        base = strip_parens(callee.object)
+        if not isinstance(base, JsCallExpression) and not self._stores_nothing(base):
+            return False
+        return not callee.computed or self._stores_nothing(callee.property)
 
     def _callee_is_trusted(self, node: JsCallExpression, receiver_type: type | None) -> bool:
         callee = strip_parens(node.callee)
@@ -1832,12 +1858,70 @@ class EffectModel:
         return self.trusted_prototype(receiver_type)
 
     def _argument_is_admissible(self, arg: Node | None) -> bool:
+        """
+        Whether *arg* may be evaluated as part of a fold that then replaces the whole call, deleting
+        the argument's text along with it.
+
+        A function-valued argument is judged by what calling it would do, because the call is what the
+        fold performs. A call is judged by this same gate in full, so that admitting an outer call
+        cannot smuggle in an inner one. Everything else is judged by whether evaluating it can be
+        dropped at all, which is the question `is_side_effect_free` already answers over the whole
+        subtree — and it is the argument's *subtree* that matters, because a store need not be the
+        argument itself. `Math.floor(v = 4)` is only the plainest spelling of it; the same store hides
+        in a summand, a comma operand, a template substitution, and a compound or logical assignment,
+        each of which the fold would delete while the residual keeps reading the old value.
+        """
         node = strip_parens(arg)
         if isinstance(node, FUNCTION_NODES):
             summary = self.summary_of(node)
             return summary.is_effect_free_when_discarded and not summary.written_bindings
         if isinstance(node, JsCallExpression):
             return self.call_is_foldable(node)
+        return self._stores_nothing(node)
+
+    def _stores_nothing(self, node: Node | None) -> bool:
+        """
+        Whether evaluating the expression *node* performs no store, so that a fold which replaces it
+        with the value it computed loses nothing a later statement could read.
+
+        A fold deletes the expression it replaces. Where that expression assigned, updated or deleted
+        something, the store went with it and the residual program keeps reading the old value, which
+        is what makes `Math.floor(v = 4)` answer `4` and leave `v` at `0`. The store is rarely the
+        whole argument — it hides in a summand, a comma operand, a template substitution, a compound
+        or a logical assignment — so the question is asked of the whole subtree and not of the shape
+        at its root.
+
+        A `yield` or an `await` is refused under the same heading: neither stores, but both hand
+        control somewhere that can, and a fold that runs them decides when they resume.
+
+        A function written down inside the expression stores nothing by being evaluated, since it is a
+        value and only calling it could store; its body is therefore not walked.
+
+        A call is refused when its callee can be named and that callee is known to write. It is
+        admitted when the callee cannot be named, which is where this predicate stops being a proof:
+        `s.charCodeAt(i)` on a parameter resolves to nothing this model can summarize and stores
+        nothing, and refusing every unnameable call would decline the string decoders this tool exists
+        to read. A `new` expression is admitted on the same terms. Admitting them is what the gate did
+        for every call in this position before, so the rule only ever narrows what folds.
+        """
+        if node is None:
+            return True
+        pending: list[Node] = [node]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, FUNCTION_NODES):
+                continue
+            if isinstance(current, (JsAssignmentExpression, JsUpdateExpression)):
+                return False
+            if isinstance(current, JsUnaryExpression) and current.operator == 'delete':
+                return False
+            if isinstance(current, (JsYieldExpression, JsAwaitExpression)):
+                return False
+            if isinstance(current, JsCallExpression):
+                callee = self.unambiguous_callee(current)
+                if callee is not None and self.summary_of(callee).written_bindings:
+                    return False
+            pending.extend(current.children())
         return True
 
     def _is_trusted_global_read(self, member: JsMemberExpression) -> bool:

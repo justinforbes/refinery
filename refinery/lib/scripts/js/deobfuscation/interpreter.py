@@ -1843,7 +1843,7 @@ class JsInterpreter:
             value = self._eval(node.right)
             self._env[name] = value
             return value
-        current = self._env.get(name)
+        current = self._eval(node.left)
         if op in LOGICAL_ASSIGNMENT_OPS:
             if self._short_circuits(op, current):
                 return current
