@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import json
+import unittest
 
+from typing import NamedTuple
+
+from test.lib.scripts.js.analysis.differential import completion_values, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 
@@ -1001,4 +1006,585 @@ class TestAstralStringCodePointIterationAndCodeUnitIndexing(TestJsDeobfuscator):
                 "String.fromCharCode('\U0001F600'.charCodeAt(0), '\U0001F600'.charCodeAt(1)) "
                 "=== '\U0001F600'"
             ),
+        )
+
+_SWITCH_DEFAULT_LAST = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: log += 'A'; break;
+        case 2: log += 'B'; break;
+        default: log += 'D';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_DEFAULT_ABSENT = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: log += 'A'; break;
+        case 2: log += 'B'; break;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_DEFAULT_FIRST = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        default: log += 'D'; break;
+        case 1: log += 'A'; break;
+        case 2: log += 'B'; break;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_DEFAULT_FIRST_OPEN = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        default: log += 'D';
+        case 1: log += 'A'; break;
+        case 2: log += 'B'; break;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_DEFAULT_BETWEEN = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case (log += 'a', 1): log += 'A';
+        case (log += 'b', 2): log += 'B'; break;
+        default: log += 'D'; break;
+        case (log += 'c', 3): log += 'C'; break;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_DEFAULT_BETWEEN_OPEN = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: log += 'A';
+        default: log += 'D';
+        case 2: log += 'B';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_DEFAULT_WITHOUT_A_BODY = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: log += 'A'; break;
+        default:
+        case 2: log += 'B'; break;
+        case 3: log += 'C'; break;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_DEFAULT_ALONE = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        default: log += 'D';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITHOUT_CLAUSES = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+      }
+      return log;
+    }
+""")
+
+_SWITCH_TRACED_TESTS = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case (log += 'a', 1): log += 'A'; break;
+        case (log += 'b', 2): log += 'B'; break;
+        case (log += 'c', 3): log += 'C'; break;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_TRACED_BEHIND_DEFAULT = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        default: log += 'D'; break;
+        case (log += 'a', 1): log += 'A'; break;
+        case (log += 'b', 2): log += 'B'; break;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_TRACED_DISCRIMINANT = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (log += 'x', x) {
+        case (log += 'a', 1): log += 'A'; break;
+        case (log += 'b', 2): log += 'B'; break;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_THROWING_LAST_TEST = inspect.cleandoc("""
+    function f(x) {
+      try {
+        switch (x) {
+          case 1: return 'A';
+          case null.missing: return 'B';
+        }
+      } catch (e) {
+        return e.name;
+      }
+      return 'Z';
+    }
+""")
+
+_SWITCH_THROWING_TEST_BEHIND_DEFAULT = inspect.cleandoc("""
+    function f(x) {
+      try {
+        switch (x) {
+          case 1: return 'A';
+          default: return 'D';
+          case null.missing: return 'B';
+        }
+      } catch (e) {
+        return e.name;
+      }
+    }
+""")
+
+_SWITCH_THROWING_DISCRIMINANT = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      try {
+        switch (null.missing) {
+          case (log += 'a', 1): log += 'A'; break;
+          default: log += 'D';
+        }
+      } catch (e) {
+        log += e.name;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_OVER_EVERY_KIND_OF_CASE = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: log += 'n'; break;
+        case '1': log += 's'; break;
+        case true: log += 'b'; break;
+        case null: log += 'z'; break;
+        case undefined: log += 'u'; break;
+        case NaN: log += 'q'; break;
+        case 0: log += 'o'; break;
+        default: log += 'D';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_OVER_AN_OBJECT = inspect.cleandoc("""
+    function f() {
+      var log = '';
+      var o = { valueOf: function () { return 1; } };
+      var p = { valueOf: function () { return 1; } };
+      switch (o) {
+        case 1: log += 'v'; break;
+        case p: log += 'P'; break;
+        case o: log += 'O'; break;
+        default: log += 'D';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITH_EQUAL_TESTS = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: log += 'A'; break;
+        case 1: log += 'B'; break;
+        default: log += 'D';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITHOUT_CLAUSE_BODIES = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1:
+        case 2:
+        case 3: log += 'L'; break;
+        default: log += 'D';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITHOUT_BREAKS = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: log += 'A';
+        case 2: log += 'B';
+        case 3: log += 'C';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITH_RETURNS = inspect.cleandoc("""
+    function f(x) {
+      switch (x) {
+        case 1: return 'A';
+        case 2: return 'B';
+      }
+      return 'Z';
+    }
+""")
+
+_SWITCH_INSIDE_A_LOOP = inspect.cleandoc("""
+    function f() {
+      var log = '';
+      for (var i = 0; i < 3; i++) {
+        switch (i) {
+          case 1: log += 'A'; break;
+          default: log += 'd';
+        }
+        log += i;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITH_A_CONTINUE = inspect.cleandoc("""
+    function f() {
+      var log = '';
+      for (var i = 0; i < 3; i++) {
+        switch (i) {
+          case 1: continue;
+          default: log += 'd';
+        }
+        log += i;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_INSIDE_A_CLAUSE = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1:
+          switch (x) {
+            case 1: log += 'i'; break;
+          }
+          log += 'A';
+        case 2: log += 'B'; break;
+        default: log += 'D';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITH_A_STATEMENT_BEHIND_IT = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: log += 'A'; break;
+        default: log += 'D';
+      }
+      log += '!';
+      return log;
+    }
+""")
+
+_SWITCH_DECLARING_IN_A_CLAUSE = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        case 1: var v = 'v'; let l = 'l'; log += v + l;
+        case 2: log += typeof v;
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITH_TESTS_THAT_WRITE = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      var k = 0;
+      switch (x) {
+        case (k = 1, x = 99, 0): log += 'A'; break;
+        case k: log += 'B'; break;
+        case 99: log += 'C'; break;
+        default: log += 'D';
+      }
+      return log;
+    }
+""")
+
+_SWITCH_WITH_COMPUTED_TESTS = inspect.cleandoc("""
+    function f(x) {
+      var bump = function (v) { return v + 1; };
+      switch (x) {
+        case bump(0): return 'A';
+        case bump(1): return 'B';
+        default: return 'D';
+      }
+    }
+""")
+
+_SWITCH_OVER_STRINGS = inspect.cleandoc("""
+    function f(x) {
+      switch (x) {
+        case 'a': return 'alpha';
+        case 'b': return 'beta';
+        default: return 'other';
+      }
+    }
+""")
+
+_SWITCH_THROWING_IN_A_CLAUSE_BODY = inspect.cleandoc("""
+    function f(x) {
+      try {
+        switch (x) {
+          case 1: throw 'boom';
+          default: return 'D';
+        }
+      } catch (e) {
+        return e;
+      }
+    }
+""")
+
+_SWITCH_WITH_TWO_DEFAULTS = inspect.cleandoc("""
+    function f(x) {
+      var log = '';
+      switch (x) {
+        default:
+          log += 'D';
+        case 1:
+          log += 'A';
+          break;
+        default:
+          log += 'E';
+      }
+      return log;
+    }
+""")
+
+_EVERY_KIND_OF_DISCRIMINANT = {
+    '1'      : 'n',
+    "'1'"    : 's',
+    'true'   : 'b',
+    'null'   : 'z',
+    'void 0' : 'u',
+    ''       : 'u',
+    '0 / 0'  : 'D',
+    '-0'     : 'o',
+    'false'  : 'D',
+    "'0'"    : 'D',
+    '[]'     : 'D',
+}
+
+
+class _SwitchProbe(NamedTuple):
+    """
+    One way of writing a `switch`, and the string the function hands back for each discriminant it
+    is asked about, spelled the way that discriminant is written as an argument to `f`.
+    """
+    source: str
+    answers: dict[str, str]
+
+
+class _SwitchRun(NamedTuple):
+    """
+    One of those switches asked about one of those discriminants.
+    """
+    label: str
+    source: str
+    argument: str
+    result: str
+
+
+_SWITCH_PROBES: dict[str, _SwitchProbe] = {
+    'default_written_last': _SwitchProbe(
+        _SWITCH_DEFAULT_LAST, {'1': 'A', '2': 'B', '9': 'D'}
+    ),
+    'no_default_at_all': _SwitchProbe(
+        _SWITCH_DEFAULT_ABSENT, {'1': 'A', '9': ''}
+    ),
+    'default_written_first': _SwitchProbe(
+        _SWITCH_DEFAULT_FIRST, {'2': 'B', '9': 'D'}
+    ),
+    'default_written_first_without_a_break': _SwitchProbe(
+        _SWITCH_DEFAULT_FIRST_OPEN, {'2': 'B', '9': 'DA'}
+    ),
+    'default_written_between_the_cases': _SwitchProbe(
+        _SWITCH_DEFAULT_BETWEEN,
+        {'1': 'aAB', '2': 'abB', '3': 'abcC', '9': 'abcD', '0 / 0': 'abcD'},
+    ),
+    'default_written_between_cases_without_breaks': _SwitchProbe(
+        _SWITCH_DEFAULT_BETWEEN_OPEN, {'1': 'ADB', '2': 'B', '9': 'DB'}
+    ),
+    'default_written_without_a_body': _SwitchProbe(
+        _SWITCH_DEFAULT_WITHOUT_A_BODY, {'1': 'A', '3': 'C', '9': 'B'}
+    ),
+    'default_is_the_only_clause': _SwitchProbe(
+        _SWITCH_DEFAULT_ALONE, {'1': 'D'}
+    ),
+    'no_clauses_at_all': _SwitchProbe(
+        _SWITCH_WITHOUT_CLAUSES, {'1': ''}
+    ),
+    'tests_that_record_being_evaluated': _SwitchProbe(
+        _SWITCH_TRACED_TESTS, {'1': 'aA', '2': 'abB', '9': 'abc'}
+    ),
+    'tests_recorded_behind_a_leading_default': _SwitchProbe(
+        _SWITCH_TRACED_BEHIND_DEFAULT, {'2': 'abB', '9': 'abD'}
+    ),
+    'a_discriminant_that_records_being_evaluated': _SwitchProbe(
+        _SWITCH_TRACED_DISCRIMINANT, {'2': 'xabB', '9': 'xab'}
+    ),
+    'a_throwing_test_written_last': _SwitchProbe(
+        _SWITCH_THROWING_LAST_TEST, {'1': 'A', '2': 'TypeError', '9': 'TypeError'}
+    ),
+    'a_throwing_test_written_behind_the_default': _SwitchProbe(
+        _SWITCH_THROWING_TEST_BEHIND_DEFAULT, {'1': 'A', '9': 'TypeError'}
+    ),
+    'a_throwing_discriminant': _SwitchProbe(
+        _SWITCH_THROWING_DISCRIMINANT, {'1': 'TypeError'}
+    ),
+    'a_case_for_every_kind_of_value': _SwitchProbe(
+        _SWITCH_OVER_EVERY_KIND_OF_CASE, _EVERY_KIND_OF_DISCRIMINANT
+    ),
+    'an_object_discriminant': _SwitchProbe(
+        _SWITCH_OVER_AN_OBJECT, {'': 'O'}
+    ),
+    'two_cases_with_the_same_test': _SwitchProbe(
+        _SWITCH_WITH_EQUAL_TESTS, {'1': 'A'}
+    ),
+    'cases_written_without_bodies': _SwitchProbe(
+        _SWITCH_WITHOUT_CLAUSE_BODIES, {'1': 'L', '2': 'L', '3': 'L', '9': 'D'}
+    ),
+    'cases_written_without_breaks': _SwitchProbe(
+        _SWITCH_WITHOUT_BREAKS, {'1': 'ABC', '3': 'C', '9': ''}
+    ),
+    'cases_that_return': _SwitchProbe(
+        _SWITCH_WITH_RETURNS, {'2': 'B', '3': 'Z'}
+    ),
+    'a_switch_inside_a_loop': _SwitchProbe(
+        _SWITCH_INSIDE_A_LOOP, {'': 'd0A1d2'}
+    ),
+    'a_continue_inside_a_clause': _SwitchProbe(
+        _SWITCH_WITH_A_CONTINUE, {'': 'd0d2'}
+    ),
+    'a_switch_inside_a_clause': _SwitchProbe(
+        _SWITCH_INSIDE_A_CLAUSE, {'1': 'iAB'}
+    ),
+    'a_statement_written_behind_the_switch': _SwitchProbe(
+        _SWITCH_WITH_A_STATEMENT_BEHIND_IT, {'1': 'A!', '9': 'D!'}
+    ),
+    'declarations_written_inside_a_clause': _SwitchProbe(
+        _SWITCH_DECLARING_IN_A_CLAUSE, {'1': 'vlstring', '2': 'undefined'}
+    ),
+    'tests_that_write_what_a_later_test_reads': _SwitchProbe(
+        _SWITCH_WITH_TESTS_THAT_WRITE, {'1': 'B', '9': 'D'}
+    ),
+    'tests_that_are_computed': _SwitchProbe(
+        _SWITCH_WITH_COMPUTED_TESTS, {'1': 'A', '2': 'B', '9': 'D'}
+    ),
+    'a_dispatch_over_strings': _SwitchProbe(
+        _SWITCH_OVER_STRINGS, {"'a'": 'alpha', "'b'": 'beta', "'z'": 'other'}
+    ),
+    'a_throw_inside_a_clause_body': _SwitchProbe(
+        _SWITCH_THROWING_IN_A_CLAUSE_BODY, {'1': 'boom', '9': 'D'}
+    ),
+}
+
+
+def _switch_runs() -> list[_SwitchRun]:
+    return [
+        _SwitchRun(F'{name}({argument})', probe.source, argument, result)
+        for name, probe in _SWITCH_PROBES.items()
+        for argument, result in probe.answers.items()
+    ]
+
+
+class TestInterpreterSwitchStatement(TestJsDeobfuscator):
+    """
+    A `switch` selects one clause and then runs it and every clause written behind it, until a
+    `break`, a `continue`, a `return`, or the end of the switch. Which clause it selects follows
+    three rules: a clause is selected when its test is strictly equal to the discriminant; the tests
+    are evaluated in the order they are written and the search stops at the first match; and
+    `default` is selected only once every test has missed, wherever the `default` is written, so a
+    clause written behind it is still asked before it is taken.
+
+    Each program below is one reading of those rules, and Node decides every answer. The
+    discriminant is the argument `f` is called with, and the string `f` hands back names what
+    happened: where a program records its own run, a lowercase letter is written by a clause test
+    being evaluated and an uppercase letter by a clause body being run, so `abcD` is a switch that
+    asked three tests, matched none of them, and then ran its `default`.
+    """
+
+    def test_switch_folds_to_what_the_clauses_it_runs_produce(self):
+        for run in _switch_runs():
+            with self.subTest(run.label):
+                self.assertEqual(
+                    F"var x = '{run.result}';",
+                    self._evaluate(F'{run.source}\nvar x = f({run.argument});'),
+                )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_produces_every_pinned_switch_result(self):
+        """
+        `completion_values` names a string value by its JSON spelling, which is what `json.dumps`
+        writes, so each comparison is between the value Node computed and the value pinned above.
+        """
+        runs = _switch_runs()
+        values = completion_values([F'{run.source}\nf({run.argument});' for run in runs])
+        self.assertEqual(
+            {run.label: json.dumps(run.result) for run in runs},
+            dict(zip([run.label for run in runs], values)),
+        )
+
+    def test_a_switch_with_two_default_clauses_folds_to_nothing(self):
+        """
+        A second `default` clause is an early error, so the program never runs at all and there is
+        no value for the call to be folded to.
+        """
+        source = F'{_SWITCH_WITH_TWO_DEFAULTS}\nvar x = f(9);'
+        self.assertEqual(source, self._evaluate(source))
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_refuses_a_switch_with_two_default_clauses(self):
+        self.assertEqual(
+            ['throw SyntaxError'],
+            completion_values([F'{_SWITCH_WITH_TWO_DEFAULTS}\nf(9);']),
         )

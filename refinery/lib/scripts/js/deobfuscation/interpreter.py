@@ -233,7 +233,7 @@ def _in_code_units(fn: Callable) -> Callable:
     """
     Wrap a builtin so a bare string it produces is held as UTF-16 code units before it enters the
     value domain, so a decode that introduces an astral code point yields the surrogate pair a
-    literal already is. Every reader of the registry — the interpreter and the simplifier — gets this
+    literal already is. Every reader of the registry â€” the interpreter and the simplifier â€” gets this
     without repeating the rule, and a builtin added later is covered by being registered. It reaches
     only a string the builtin returns directly: a string nested in a returned list or dict is the
     producer's own to normalize (as `_json_to_value` does its keys and values). It is idempotent,
@@ -511,8 +511,8 @@ def _string_from_char_code(args: list[Value]) -> Value:
 def _json_to_value(value):
     """
     The interpreter's value for a node `json.loads` decoded: a JSON `null` (Python `None`) becomes
-    the `JS_NULL` sentinel rather than `undefined`, and every string — an object key as much as a
-    value — becomes the UTF-16 code units the value domain counts, so an astral character
+    the `JS_NULL` sentinel rather than `undefined`, and every string â€” an object key as much as a
+    value â€” becomes the UTF-16 code units the value domain counts, so an astral character
     `json.loads` read as one code point is the surrogate pair a literal already is. It recurses, so
     a string nested in an object or array is reached too.
     """
@@ -1153,9 +1153,9 @@ _TYPEOF_OBJECT_GLOBALS = frozenset({'Math', 'JSON', 'Reflect', 'Atomics', 'globa
 
 def _global_typeof(name: str) -> str | None:
     """
-    The `typeof` result for a well-known global *name* — a constructor or built-in function is
+    The `typeof` result for a well-known global *name* â€” a constructor or built-in function is
     `'function'`, a namespace object is `'object'`, `NaN`/`Infinity` are `'number'` and `undefined` is
-    `'undefined'` — or `None` when the interpreter does not model *name* and so cannot tell a declared
+    `'undefined'` â€” or `None` when the interpreter does not model *name* and so cannot tell a declared
     global (whose `typeof` is not `'undefined'`) from a genuinely absent one.
     """
     if name in _TYPEOF_FUNCTION_GLOBALS or (None, name) in BUILTIN_REGISTRY:
@@ -1171,7 +1171,7 @@ def _global_typeof(name: str) -> str | None:
 
 def is_runtime_name(name: str) -> bool:
     """
-    Return True if `name` is a known JavaScript runtime symbol — either a static object namespace
+    Return True if `name` is a known JavaScript runtime symbol â€” either a static object namespace
     (e.g. `Math`, `String`) or a global function registered in the builtin registry (e.g.
     `parseInt`, `parseFloat`).
     """
@@ -1213,8 +1213,8 @@ class JsInterpreter:
         self._model = model if model is not None else effects and effects.model
         """
         The scope authority, held separately from *effects*. Whether a name still reaches the host is a
-        question about bindings alone, so a caller that has only the semantic model — reflection builds
-        one and would pay for an effect model it never consults — can answer it by passing *model*.
+        question about bindings alone, so a caller that has only the semantic model â€” reflection builds
+        one and would pay for an effect model it never consults â€” can answer it by passing *model*.
         """
         self._closure: Mapping[str, Value] = closure or {}
         self._closure_env: Mapping[int, Mapping[str, Value]] = closure_env or {}
@@ -1357,18 +1357,46 @@ class JsInterpreter:
             self._exec_statement(node.alternate)
 
     def _exec_switch(self, node: JsSwitchStatement) -> None:
-        discriminant = self._eval(node.discriminant)
-        matched = False
-        for case in node.cases:
+        """
+        A switch runs the clause whose test the discriminant matches, and where none matches, the
+        default clause. The default is chosen only after every test has been evaluated, so a clause
+        written after it is still asked. Writing the default in the middle of a dispatcher is a way
+        to make the clause order look like the run order when it is not, and reading the default the
+        moment it is reached answers with the wrong branch for every discriminant a later clause
+        would have claimed.
+
+        Once a clause is chosen, execution enters it and falls through the clauses behind it, which
+        is why the run is a walk from the chosen index rather than of the clause alone. Tests behind
+        the match are not evaluated: a match ends the search, and an expression that would throw is
+        never reached.
+
+        A second default clause is an early error, so a switch carrying one is not a program and is
+        refused rather than interpreted as though the first of them governed.
+        """
+        cases = node.cases
+        for case in cases:
             if not isinstance(case, JsSwitchCase):
                 raise InterpreterError
-            if not matched:
-                matched = case.test is None or self._strict_equal(discriminant, self._eval(case.test))
-            if matched:
-                try:
-                    self._exec_statements(case.body)
-                except _BreakSignal:
-                    return
+        defaults = [index for index, case in enumerate(cases) if case.test is None]
+        if len(defaults) > 1:
+            raise InterpreterError
+        discriminant = self._eval(node.discriminant)
+        chosen = None
+        for index, case in enumerate(cases):
+            if case.test is None:
+                continue
+            if self._strict_equal(discriminant, self._eval(case.test)):
+                chosen = index
+                break
+        if chosen is None:
+            if not defaults:
+                return
+            chosen = defaults[0]
+        try:
+            for case in cases[chosen:]:
+                self._exec_statements(case.body)
+        except _BreakSignal:
+            return
 
     def _exec_loop_body(self, body) -> bool:
         if not body:
@@ -1577,7 +1605,7 @@ class JsInterpreter:
         function declaration or a bare-assignment (`var f; f = function(){}`) resolves, but a name
         reassigned away from a value it already held stays unresolved. When an *established* predicate was
         supplied, a resolved function is returned only if it is in place before the call site folding began
-        — a bare-assignment or initializer function reached before its establishing node has run reads a
+        â€” a bare-assignment or initializer function reached before its establishing node has run reads a
         temporal dead zone or a hoisted `undefined` at runtime, so resolving it here would replace that
         throw with a value. A hoisted function declaration is always established and passes unconditionally.
         """
@@ -1628,9 +1656,9 @@ class JsInterpreter:
     def _resolves_to_a_binding(self, node: JsIdentifier) -> bool:
         """
         Whether *node* resolves to any binding at all. A name the model binds but `_env` does not hold
-        has a value this interpreter does not know — it may belong to an enclosing scope that is not in
+        has a value this interpreter does not know â€” it may belong to an enclosing scope that is not in
         the closure, or to a `let` whose declarator has not run, which is a read in its temporal dead
-        zone that throws — so the well-known-global `typeof` fallback must not answer for it.
+        zone that throws â€” so the well-known-global `typeof` fallback must not answer for it.
         """
         model = self._model
         return model is not None and model.resolve(node) is not None
@@ -1665,7 +1693,7 @@ class JsInterpreter:
 
     def _apply_binary(self, op: str, left: Value, right: Value) -> Value:
         """
-        Apply the binary operator *op* to two already-evaluated values — the one place this interpreter
+        Apply the binary operator *op* to two already-evaluated values â€” the one place this interpreter
         decides what an operator means. A binary expression and the arithmetic step of a compound assignment
         ask the same question, so they must ask it here: the three compound paths used to hand-roll their own
         answers, and the copies disagreed with this one on `-0`, on a zero divisor, and on which operators
@@ -1784,7 +1812,7 @@ class JsInterpreter:
         """
         The value a compound assignment stores: its right operand evaluated and combined with *current* under
         the operator the assignment names. *current* is read by the caller before this runs, because
-        JavaScript reads the target before evaluating the right operand — `v += (v = 10)` on `v = 5` is 15.
+        JavaScript reads the target before evaluating the right operand â€” `v += (v = 10)` on `v = 5` is 15.
         """
         return self._apply_binary(operator[:-1], current, self._eval(node.right))
 
@@ -1823,13 +1851,13 @@ class JsInterpreter:
     def _eval_member_assignment(self, node: JsAssignmentExpression) -> Value:
         """
         Assign to a member target. The object and key expressions are evaluated exactly once, before the
-        operator is considered, so `a[i++] += 1` advances `i` once — and a logical assignment that
+        operator is considered, so `a[i++] += 1` advances `i` once â€” and a logical assignment that
         short-circuits performs no store at all.
 
         Skipping that store is what JavaScript specifies rather than an optimization: the language makes it
         observable through a setter or a frozen object, neither of which this interpreter's value domain has.
         Within this domain a store of the value just read is idempotent, so no program folded here can tell
-        the difference — the rule is kept because the domain is a subset of the language's, not because a test
+        the difference â€” the rule is kept because the domain is a subset of the language's, not because a test
         can witness it.
         """
         member = node.left
@@ -1983,7 +2011,7 @@ class JsInterpreter:
         slips through every purity flag. `written_bindings` records outer bindings by identity and catches it.
 
         This refuses the `reduce` accumulator idiom, `(acc, v) => { acc.push(v); return acc; }`, whose
-        `acc.push` sets `calls_unknown` — a method call on a parameter is a callee the summary cannot
+        `acc.push` sets `calls_unknown` â€” a method call on a parameter is a callee the summary cannot
         resolve. That is a real fold this declines, and deliberately: the same flag is the only thing
         distinguishing `acc.push(v)` from a mutation of an outer array `s.push(v)`, so admitting one admits
         the other. Separating them needs the callee resolution to see through the parameter to the argument,
@@ -2070,7 +2098,7 @@ class JsInterpreter:
     def _mutates_captured_binding(self, func) -> bool:
         """
         Whether *func* assigns to a name that the calling environment binds but that *func* does not
-        declare locally — a write through a closure into a captured outer variable. A nested call runs
+        declare locally â€” a write through a closure into a captured outer variable. A nested call runs
         in an isolated child interpreter with only a snapshot of captured values and no write-back, so
         the mutation would be silently lost. Refusing to evaluate leaves the call in place for a real
         engine to run and keeps the fold sound rather than producing a wrong constant.
@@ -2152,8 +2180,8 @@ class JsInterpreter:
     def _eval_object(self, node: JsObjectExpression) -> Value:
         """
         Evaluate an object literal into a dict of its own data properties. A literal that installs a
-        prototype through the plain `__proto__:` form has a member surface this dict cannot express —
-        the installed object's properties are inherited, not owned — so it aborts interpretation rather
+        prototype through the plain `__proto__:` form has a member surface this dict cannot express â€”
+        the installed object's properties are inherited, not owned â€” so it aborts interpretation rather
         than record `__proto__` as an ordinary key, which would invent an own property JavaScript does
         not create. `object_sets_prototype` decides which spellings do that; the computed form and a
         shorthand or method define an ordinary own property and evaluate normally.
@@ -2191,8 +2219,8 @@ class JsInterpreter:
     def _get_property(self, obj: Value, key: str) -> Value:
         """
         Read property *key* off *obj*, as a property *read* rather than a call. A method name yields the
-        method itself, which this interpreter has no value domain for — a JS function value has an
-        observable identity, `name`, `length`, and source text — so reading one aborts interpretation
+        method itself, which this interpreter has no value domain for â€” a JS function value has an
+        observable identity, `name`, `length`, and source text â€” so reading one aborts interpretation
         instead of guessing. Crucially it must not *invoke* the method: `typeof 'abc'.charAt` is
         `'function'`, not the `typeof` of what `charAt()` would return.
 
@@ -2206,7 +2234,7 @@ class JsInterpreter:
         there is none, exactly as it does for the names `_property_is_absent` refuses to decide
         without the chain. It is preserved rather than fixed here because closing it changes what
         every emulated read of a sparse index answers; `MemberRead.ABSENT` is what a caller
-        unwilling to inherit it — the folder — declines on.
+        unwilling to inherit it â€” the folder â€” declines on.
         """
         if obj is None or obj is JS_NULL:
             _js_throw('TypeError', F"Cannot read properties of {to_string(obj)} (reading '{key}')")
@@ -2227,9 +2255,9 @@ class JsInterpreter:
         and nothing can be proven absent on it.
 
         Absence is a claim about the chain as the language defines it, so it holds only while the program
-        leaves that chain alone. `Object.defineProperty(Array.prototype, 'zz', { get: … })` puts a name
+        leaves that chain alone. `Object.defineProperty(Array.prototype, 'zz', { get: â€¦ })` puts a name
         there that no table here lists, and answering `undefined` for it both loses the getter's effect and
-        yields the wrong value — which is why this consults the effect model rather than deciding on the
+        yields the wrong value â€” which is why this consults the effect model rather than deciding on the
         tables alone. Without a model there is nothing to consult and the caller owns the assumption, as
         with `_callee_is_intact`.
         """
@@ -2263,8 +2291,8 @@ class JsInterpreter:
 
         An array accepts only `length` and a canonical index. Refusing every *named* property on one is not
         merely a gap in coverage: it is what keeps a function that writes `constructor` or `__proto__` on an
-        array unfoldable. Those two properties decide what `slice` and its neighbours return — the read goes
-        through ArraySpeciesCreate — so a program that sets them can make an apparently fresh array be a
+        array unfoldable. Those two properties decide what `slice` and its neighbours return â€” the read goes
+        through ArraySpeciesCreate â€” so a program that sets them can make an apparently fresh array be a
         shared object, or make the call throw by leaving a primitive there. `EffectModel` refuses such a
         receiver as well, and both refusals are wanted: a widening here that started modelling named array
         properties would need that reasoning restated, not silently dropped.
