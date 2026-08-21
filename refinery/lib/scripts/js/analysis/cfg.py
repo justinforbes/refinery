@@ -7,8 +7,8 @@ the shapes themselves — lives in `refinery.lib.scripts.analysis.cfg`. What rem
 `_Builder.statement`, the recognition of `Js*` node types, and the accessors that pull a construct
 apart. Three of the shape parameters are answered from JavaScript semantics rather than from syntax:
 `switch` falls through from one case to the next, an unlabelled `break` may leave a `switch` as well
-as a loop, and a `catch` carries no type filter, so a throw the guarded block makes never gets past
-it to whatever guards the construct.
+as a loop, and a `catch` carries no type filter, so a throw the guarded block makes gets past it only
+where binding the caught value can itself throw — see `_catch_may_rethrow`.
 """
 from __future__ import annotations
 
@@ -26,8 +26,10 @@ from refinery.lib.scripts.analysis.cfg import (
 from refinery.lib.scripts.analysis.cfg import build_control_flow as _build_control_flow
 from refinery.lib.scripts.js.analysis.model import FUNCTION_NODES
 from refinery.lib.scripts.js.model import (
+    JsArrayPattern,
     JsBlockStatement,
     JsBreakStatement,
+    JsCatchClause,
     JsContinueStatement,
     JsDoWhileStatement,
     JsForInStatement,
@@ -35,6 +37,7 @@ from refinery.lib.scripts.js.model import (
     JsForStatement,
     JsIfStatement,
     JsLabeledStatement,
+    JsObjectPattern,
     JsReturnStatement,
     JsScript,
     JsSwitchStatement,
@@ -61,6 +64,22 @@ _LOOP_NODES = (
     JsForInStatement,
     JsForOfStatement,
 )
+
+
+def _catch_may_rethrow(handler: JsCatchClause | None) -> bool:
+    """
+    Whether a throw offered to *handler* may still reach whatever guards the construct.
+
+    A `catch` carries no type filter, so the clause always matches and the throw stops there — with
+    one exception, which is why this is a question rather than a constant. Binding the caught value
+    is a destructuring assignment when the parameter is a pattern, and destructuring evaluates:
+    `catch ({ a })` over a thrown `null` throws again while binding, and that second throw leaves
+    the construct. A plain identifier binds by name and an omitted parameter binds nothing, so
+    neither can.
+    """
+    if handler is None:
+        return False
+    return isinstance(handler.param, (JsObjectPattern, JsArrayPattern))
 
 
 def _label_name(statement: Node) -> str | None:
@@ -116,7 +135,7 @@ class _Builder(CfgBuilder):
                 finalizer,
                 list(finalizer.body) if finalizer is not None else (),
                 frontier,
-                escapes=False,
+                escapes=_catch_may_rethrow(handler),
             )
         if isinstance(statement, JsLabeledStatement):
             return self.labelled(

@@ -29,6 +29,7 @@ _CORPUS = [
     'switch (x) { case 1: a; break; case 2: b; default: c; }',
     'try { a; } catch (e) { b; } finally { c; }',
     'try { a; } finally { b; }',
+    'try { try { a; } catch ({ p }) {} } catch (q) { b; }',
     'outer: for (;;) { inner: for (;;) { continue outer; break inner; } }',
     'function f() { a; return b; } g();',
     'while (x) { if (y) continue; a; }',
@@ -60,6 +61,21 @@ class TestControlFlowGraph(TestBase):
                 continue
             seen.add(id(node))
             stack.extend(node.successors)
+        return seen
+
+    @staticmethod
+    def _handlers_reachable_from(cfg: ControlFlowGraph, start):
+        seen: set[int] = set()
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            for successor in node.successors:
+                if not cfg.is_exceptional(node, successor):
+                    continue
+                if id(successor) in seen:
+                    continue
+                seen.add(id(successor))
+                stack.append(successor)
         return seen
 
     @staticmethod
@@ -197,6 +213,44 @@ class TestControlFlowGraph(TestBase):
         guarded = cfg.node_of(self._first(ast, JsExpressionStatement))
         assert guarded is not None
         self.assertIn(id(guarded), self._forward_from(guarded))
+
+    def test_named_or_omitted_catch_parameter_keeps_a_throw_inside_its_construct(self):
+        for source in [
+            'try { try { t; } catch (e) {} } catch (r) { u; }',
+            'try { try { t; } catch {} } catch (r) { u; }',
+        ]:
+            with self.subTest(source):
+                ast, cfg = self._cfg(source)
+                inner, outer = (n for n in ast.walk_in_order() if isinstance(n, JsCatchClause))
+                guarded = cfg.node_of(self._first(ast, JsExpressionStatement))
+                inner_handler, outer_handler = cfg.node_of(inner), cfg.node_of(outer)
+                assert guarded is not None
+                assert inner_handler is not None and outer_handler is not None
+                self.assertEqual(
+                    self._handlers_reachable_from(cfg, guarded), {id(inner_handler)}
+                )
+
+    def test_destructuring_catch_parameter_passes_a_throw_to_the_enclosing_handler(self):
+        """
+        A pattern parameter binds the caught value by destructuring it, and destructuring a thrown
+        `null` throws while binding; that second throw escapes the inner construct, so the outer
+        clause is reachable for an error raised in the inner guarded block.
+        """
+        for source in [
+            'try { try { t; } catch ({ p }) {} } catch (r) { u; }',
+            'try { try { t; } catch ([p]) {} } catch (r) { u; }',
+        ]:
+            with self.subTest(source):
+                ast, cfg = self._cfg(source)
+                inner, outer = (n for n in ast.walk_in_order() if isinstance(n, JsCatchClause))
+                guarded = cfg.node_of(self._first(ast, JsExpressionStatement))
+                inner_handler, outer_handler = cfg.node_of(inner), cfg.node_of(outer)
+                assert guarded is not None
+                assert inner_handler is not None and outer_handler is not None
+                self.assertEqual(
+                    self._handlers_reachable_from(cfg, guarded),
+                    {id(inner_handler), id(outer_handler)},
+                )
 
     def test_nested_function_has_its_own_graph(self):
         ast = JsParser('function f() { a; return b; } g();').parse()
