@@ -13,6 +13,24 @@ _RAISE = "$Null = [Int]'abc'"
 #: A second spelling of the same fault, so that no claim below rests on the cast in particular.
 _RAISE_DIV = '$Null = 1/0'
 
+#: Statements that Windows PowerShell 5.1 runs to completion. Each is a discarded value that emits
+#: nothing and mutates nothing, exactly like `_RAISE`, and differs from it only in raising no error
+#: for a handler to observe. A pass that decides a removal by asking whether a statement can raise
+#: therefore has to delete every one of these from the shapes in which it has to keep `_RAISE`.
+#: They are spelled twelve different ways so that no such claim rests on one expression.
+_QUIET_CAST = "$Null = [Int]'42'"
+_QUIET_DIVISION = '$Null = 1/1'
+_QUIET_PRODUCT = '$Null = 6 * 7'
+_QUIET_LENGTH = "$Null = 'abcdef'.Length"
+_QUIET_REMAINDER = '$Null = 10 % 3'
+_QUIET_CHAR = '$Null = [Char]65'
+_QUIET_CONCATENATION = "$Null = 'ab' + 'cd'"
+_QUIET_STRING = '$Null = [String]12'
+_QUIET_CONJUNCTION = '$Null = 3 -Band 1'
+_QUIET_NEGATION = '$Null = -Not $True'
+_QUIET_BOOL = "$Null = [Bool]'x'"
+_QUIET_COUNT = '$Null = @(1, 2, 3).Count'
+
 #: An acting statement that is never a removal candidate, so its survival says only that the pass
 #: did not empty the script wholesale.
 _ANCHOR = "Write-Host 'ANCHOR_SURVIVES'"
@@ -50,6 +68,15 @@ class _Ps1FaultObservability(TestPs1):
     def _assertKept(self, source: str) -> None:
         self._assertDeobfuscatesTo(source, source)
 
+    def _assertRemoved(self, source: str, statement: str) -> None:
+        """
+        The expected output is `source` with `statement` gone and nothing else touched, so the pair
+        of arguments spells out one removal rather than a whole rewritten script. Naming a statement
+        that `source` does not contain would leave the expectation saying nothing, so it is refused.
+        """
+        self.assertIn(statement, source)
+        self._assertDeobfuscatesTo(source, source.replace(statement, ''))
+
 
 class TestPs1ARaisingStatementDirectlyInAGuardedTryBlockIsKept(_Ps1FaultObservability):
     """
@@ -79,7 +106,7 @@ class TestPs1ARaisingStatementDirectlyInAGuardedTryBlockIsKept(_Ps1FaultObservab
         """)
 
 
-class TestPs1ARaisingStatementNestedInAGuardedTryBlockIsKept(_Ps1FaultObservability):
+class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
     """
     A `catch` clause observes an error raised anywhere inside its `try` block, not only one raised
     by a statement written directly in it. A branch body, a loop body, a `switch` case body and a
@@ -89,6 +116,11 @@ class TestPs1ARaisingStatementNestedInAGuardedTryBlockIsKept(_Ps1FaultObservabil
     The deobfuscator recognizes a handler only for a statement whose immediate holder is the `try`
     block itself. One nesting level is enough to hide the handler from it, so it deletes each of
     these and leaves behind a `catch` body that can no longer run.
+
+    Every shape is written twice. The second of the pair puts a statement that runs to completion
+    where the raising one stood: no handler can observe it, deleting it is the job, and the nesting
+    must not save it either. The pair tells a pass that has found the handler apart from one that
+    has merely stopped deleting.
     """
 
     @unittest.expectedFailure
@@ -102,6 +134,16 @@ class TestPs1ARaisingStatementNestedInAGuardedTryBlockIsKept(_Ps1FaultObservabil
             }}
         """)
 
+    def test_a_quiet_cast_in_a_nested_if_body_is_removed(self):
+        self._assertRemoved(F"""
+            try {{
+              if ({_OPAQUE}) {{ {_QUIET_CAST} }}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _QUIET_CAST)
+
     @unittest.expectedFailure
     def test_a_raising_cast_in_a_nested_foreach_body_is_kept(self):
         self._assertKept(F"""
@@ -112,6 +154,16 @@ class TestPs1ARaisingStatementNestedInAGuardedTryBlockIsKept(_Ps1FaultObservabil
               {_HANDLER}
             }}
         """)
+
+    def test_a_quiet_product_in_a_nested_foreach_body_is_removed(self):
+        self._assertRemoved(F"""
+            try {{
+              foreach ($i in {_OPAQUE}) {{ {_QUIET_PRODUCT} }}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _QUIET_PRODUCT)
 
     @unittest.expectedFailure
     def test_a_raising_cast_in_a_nested_while_body_is_kept(self):
@@ -124,6 +176,16 @@ class TestPs1ARaisingStatementNestedInAGuardedTryBlockIsKept(_Ps1FaultObservabil
             }}
         """)
 
+    def test_a_quiet_length_in_a_nested_while_body_is_removed(self):
+        self._assertRemoved(F"""
+            try {{
+              while ({_OPAQUE}) {{ {_QUIET_LENGTH} }}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _QUIET_LENGTH)
+
     @unittest.expectedFailure
     def test_a_raising_cast_in_a_nested_switch_case_body_is_kept(self):
         self._assertKept(F"""
@@ -134,6 +196,16 @@ class TestPs1ARaisingStatementNestedInAGuardedTryBlockIsKept(_Ps1FaultObservabil
               {_HANDLER}
             }}
         """)
+
+    def test_a_quiet_remainder_in_a_nested_switch_case_body_is_removed(self):
+        self._assertRemoved(F"""
+            try {{
+              switch ({_OPAQUE}) {{ 1 {{ {_QUIET_REMAINDER} }} }}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _QUIET_REMAINDER)
 
     @unittest.expectedFailure
     def test_a_raising_cast_in_a_scriptblock_invoked_in_place_is_kept(self):
@@ -146,6 +218,16 @@ class TestPs1ARaisingStatementNestedInAGuardedTryBlockIsKept(_Ps1FaultObservabil
             }}
         """)
 
+    def test_a_quiet_char_in_a_scriptblock_invoked_in_place_is_removed(self):
+        self._assertRemoved(F"""
+            try {{
+              & {{ {_QUIET_CHAR} }}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _QUIET_CHAR)
+
     @unittest.expectedFailure
     def test_a_raising_division_in_a_nested_if_body_is_kept(self):
         self._assertKept(F"""
@@ -157,14 +239,27 @@ class TestPs1ARaisingStatementNestedInAGuardedTryBlockIsKept(_Ps1FaultObservabil
             }}
         """)
 
+    def test_a_quiet_division_in_a_nested_if_body_is_removed(self):
+        self._assertRemoved(F"""
+            try {{
+              if ({_OPAQUE}) {{ {_QUIET_DIVISION} }}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _QUIET_DIVISION)
 
-class TestPs1ARaisingStatementInAFunctionAGuardedTryBlockCallsIsKept(_Ps1FaultObservability):
+
+class TestPs1AStatementInAFunctionAGuardedTryBlockCalls(_Ps1FaultObservability):
     """
     A terminating error raised in a function reaches the `catch` clause guarding the call, so a
     function body is inside the `try` block for this purpose even though it is written outside it.
 
     The deobfuscator empties the function body, because the call site is what the `try` block holds
     and the raising statement is somewhere else entirely.
+
+    A statement that runs to completion in that same function body reaches no handler at all, so
+    emptying the body is the right answer for it and the two differ only in the raise.
     """
 
     @unittest.expectedFailure
@@ -180,6 +275,19 @@ class TestPs1ARaisingStatementInAFunctionAGuardedTryBlockCallsIsKept(_Ps1FaultOb
               {_HANDLER}
             }}
         """)
+
+    def test_a_quiet_concatenation_in_a_function_the_try_block_calls_is_removed(self):
+        self._assertRemoved(F"""
+            function Invoke-Thing {{
+              {_QUIET_CONCATENATION}
+            }}
+            try {{
+              Invoke-Thing
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _QUIET_CONCATENATION)
 
 
 class TestPs1AnEmptyCatchSwallowsSoTheRaisingStatementIsRemovable(_Ps1FaultObservability):
@@ -253,6 +361,9 @@ class TestPs1AnInnerFinallyDoesNotShieldAnOuterCatch(_Ps1FaultObservability):
     The deobfuscator reads the inner `try` as unguarded, deletes the raising statement, then
     dissolves the construct and hoists the `finally` body into the outer block, leaving a `catch`
     clause nothing reaches.
+
+    A statement that runs to completion under that same inner `finally` reaches no handler, so the
+    whole sequence is the right answer for it and the two differ only in the raise.
     """
 
     @unittest.expectedFailure
@@ -260,6 +371,27 @@ class TestPs1AnInnerFinallyDoesNotShieldAnOuterCatch(_Ps1FaultObservability):
         self._assertKept(F"""
             try {{
               try {{ {_RAISE} }} finally {{ {_CLEANUP} }}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_a_quiet_string_under_an_inner_finally_inside_a_live_outer_catch_is_removed(self):
+        """
+        An inner `try` whose block is empty runs its `finally` and nothing else, so the expected
+        output is the construct gone with the cleanup standing in the outer block in its place.
+        """
+        self._assertDeobfuscatesTo(F"""
+            try {{
+              try {{ {_QUIET_STRING} }} finally {{ {_CLEANUP} }}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, F"""
+            try {{
+              {_CLEANUP}
               {_ANCHOR}
             }} catch {{
               {_HANDLER}
@@ -276,6 +408,10 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
 
     The deobfuscator never consults a `trap` when it decides a removal. It deletes the raising
     statement in each of these and keeps the `trap`, which is then a handler nothing can trigger.
+
+    What a `trap` guards is the raise, so a statement that runs to completion gives it nothing to
+    handle wherever in the scope it stands. Every shape is written a second time with such a
+    statement, which the pass must go on deleting.
     """
 
     @unittest.expectedFailure
@@ -286,6 +422,13 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
             {_ANCHOR}
         """)
 
+    def test_a_quiet_conjunction_below_a_live_trap_in_the_same_scope_is_removed(self):
+        self._assertRemoved(F"""
+            trap {{ {_HANDLER} }}
+            {_QUIET_CONJUNCTION}
+            {_ANCHOR}
+        """, _QUIET_CONJUNCTION)
+
     @unittest.expectedFailure
     def test_a_raising_cast_above_a_live_trap_in_the_same_scope_is_kept(self):
         self._assertKept(F"""
@@ -293,6 +436,13 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
             trap {{ {_HANDLER} }}
             {_ANCHOR}
         """)
+
+    def test_a_quiet_negation_above_a_live_trap_in_the_same_scope_is_removed(self):
+        self._assertRemoved(F"""
+            {_QUIET_NEGATION}
+            trap {{ {_HANDLER} }}
+            {_ANCHOR}
+        """, _QUIET_NEGATION)
 
     @unittest.expectedFailure
     def test_a_raising_cast_nested_in_a_scope_a_live_trap_guards_is_kept(self):
@@ -304,6 +454,15 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
             }}
         """)
 
+    def test_a_quiet_bool_nested_in_a_scope_a_live_trap_guards_is_removed(self):
+        self._assertRemoved(F"""
+            trap {{ {_HANDLER} }}
+            if ({_OPAQUE}) {{
+              {_QUIET_BOOL}
+              {_ANCHOR}
+            }}
+        """, _QUIET_BOOL)
+
     @unittest.expectedFailure
     def test_a_raising_cast_in_a_function_scope_a_live_trap_guards_is_kept(self):
         self._assertKept(F"""
@@ -314,6 +473,16 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
             Invoke-Thing
             {_ANCHOR}
         """)
+
+    def test_a_quiet_count_in_a_function_scope_a_live_trap_guards_is_removed(self):
+        self._assertRemoved(F"""
+            function Invoke-Thing {{
+              trap {{ {_HANDLER} }}
+              {_QUIET_COUNT}
+            }}
+            Invoke-Thing
+            {_ANCHOR}
+        """, _QUIET_COUNT)
 
 
 class TestPs1ATrapThatSwallowsOrIsOutOfScopeLeavesTheStatementRemovable(_Ps1FaultObservability):
