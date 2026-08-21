@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
 
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
+from refinery.lib.scripts.ps1.analysis import cache
 from refinery.lib.scripts.ps1.deobfuscation import Ps1ControlFlowDeflattening
+from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
 class TestPs1ControlFlowDeflattening(TestPs1):
@@ -301,3 +304,76 @@ class TestPs1ControlFlowDeflattening(TestPs1):
         self.assertNotIn('switch', result)
         self.assertNotIn('while', result)
         self.assertIn('$script:msg', result)
+
+
+class TestPs1DeflatteningDoesNotRebuildTheModelPerMachine(TestPs1):
+    """
+    Every removal plan the pass opens reads the fault model, and that model is layered on the
+    control-flow graph of every block in the script. A commit advances the tree version those
+    graphs are cached against, so the next plan rebuilds all of them: a body holding several
+    independent machines pays for the whole script once per machine it dissolves. What a walk over
+    a script costs is a property of the script, not of how many of its statements turn out to be
+    removable.
+
+    The pass opens its plan inside the loop over the body and builds one model per machine, so the
+    count grows with the number of machines and a script holding many of them is walked many times.
+
+    The build is `refinery.lib.scripts.ps1.analysis.cache.build_control_flow_model`, which is what
+    the cache calls, counted here rather than timed so the measurement is the same on every
+    machine. It is compared between two machine counts rather than against a number of its own: a
+    count that answers the same for two machines as for eight is the only one that does not carry
+    the machine count in it, and which constant it settles on is the fix's to choose.
+    """
+
+    _FEW = 2
+    _MANY = 8
+
+    _MACHINE = """
+        $s{index} = 0
+        while ($s{index} -NE -1) {{
+          switch ($s{index}) {{
+            0 {{ Write-Host 'a{index}'; $s{index} = 1 }}
+            1 {{ Write-Host 'b{index}'; $s{index} = -1 }}
+            default {{ break }}
+          }}
+        }}
+    """
+
+    @classmethod
+    def _machines(cls, count: int) -> str:
+        machine = cleandoc(cls._MACHINE)
+        return '\n'.join(machine.format(index=index) for index in range(count))
+
+    @staticmethod
+    def _dissolved(count: int) -> str:
+        lines = []
+        for index in range(count):
+            lines.append(F"Write-Host 'a{index}'")
+            lines.append(F"Write-Host 'b{index}'")
+        return '\n'.join(lines)
+
+    def _models_built(self, count: int) -> int:
+        built = 0
+        build = cache.build_control_flow_model
+
+        def counted(root):
+            nonlocal built
+            built += 1
+            return build(root)
+
+        script = Ps1Parser(self._machines(count)).parse()
+        with unittest.mock.patch.object(cache, 'build_control_flow_model', counted):
+            Ps1ControlFlowDeflattening().visit(script)
+        return built
+
+    def test_every_machine_in_the_body_is_dissolved(self):
+        for count in (self._FEW, self._MANY):
+            with self.subTest(machines=count):
+                self.assertEqual(
+                    self._apply(self._machines(count), Ps1ControlFlowDeflattening),
+                    self._dissolved(count),
+                )
+
+    @unittest.expectedFailure
+    def test_the_models_built_are_the_same_for_two_machines_and_for_eight(self):
+        self.assertEqual(self._models_built(self._MANY), self._models_built(self._FEW))

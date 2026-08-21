@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -559,6 +561,39 @@ class TestPs1DeadCodeEliminationDoesNotUnhookAHandler(TestPs1):
             } catch { }
         """), Ps1DeadCodeElimination)
         self.assertNotIn('trap', result)
+
+
+class TestPs1DeadCodeEliminationKeepsATrapOverABlockThatRaises(TestPs1):
+    """
+    A `trap` runs when the block it is written in raises, and a bare value in its body goes to the
+    output stream, so deleting one over a block that raises silences an output the script made.
+    Measured on 5.1: `trap { 'TRAP_OUTPUT' }` above `$Null = [Int]'abc'` and `'AFTER'` prints
+    `TRAP_OUTPUT` and then `AFTER`, while the same `trap` above `Write-Host 'keep'` prints only
+    `keep`, because nothing in that block raises and the handler never runs.
+
+    The deobfuscator deletes the `trap` in both. It reads the handler body for what running it
+    would do and never asks whether the block it guards can raise, so the two scripts are the same
+    question to it and the removal that is right for the second is wrong for the first.
+    """
+
+    @unittest.expectedFailure
+    def test_a_trap_whose_body_writes_is_kept_above_a_statement_that_raises(self):
+        self._assertUnchanged(cleandoc("""
+            trap {
+              'TRAP_OUTPUT'
+            }
+            $Null = [Int]'abc'
+            'AFTER'
+        """), Ps1DeadCodeElimination)
+
+    def test_the_same_trap_above_a_statement_that_does_not_raise_is_removed(self):
+        result = self._apply(cleandoc("""
+            trap {
+              'TRAP_OUTPUT'
+            }
+            Write-Host 'keep'
+        """), Ps1DeadCodeElimination)
+        self.assertEqual(result, "Write-Host 'keep'")
 
 
 class TestPs1DeadCodeEliminationDoesNotCarryATrapOutOfItsBlock(TestPs1):
