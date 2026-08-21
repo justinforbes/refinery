@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from test import TestBase
 
-from refinery.lib.scripts import Statement
+from refinery.lib.scripts import Node, Statement
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph
 from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
@@ -36,15 +36,23 @@ _CORPUS = [
     "switch ($x) { 1 { 'a' } 2 { 'b' } }",
     "switch ($x) { 1 { 'a' } default { 'b' } }",
     "switch ($x) { 1 { break } 2 { 'b' } }",
+    "switch ($x) { 1 { trap { 'h' }\n'a' } }",
     "try { 'a' } catch { 'b' }",
     "try { 'a' } finally { 'c' }",
     "try { 'a' } catch { 'b' } finally { 'c' }",
     "switch ($x) { 1 { } 2 { } 3 { } }",
     "while ($x) { switch ($y) { 1 { continue } } }",
     "try { 'a' } catch [System.IO.IOException] { 'b' } catch { 'c' }",
+    "try { try { 'a' } catch { 'i' } } catch { 'o' }",
+    "try { trap { 'h' }\n'a' } catch { 'c' }",
+    "try { 'a' } finally { trap { 'h' }\n'b' }",
     "trap { continue }\n'a'",
+    "trap { break }\n'a'",
+    "trap { :t while ($true) { break t } }\n'a'",
     "trap { 'h' }\ntrap [System.IO.IOException] { 'i' }\n'a'",
     "if ($c) { trap { 'h' }\n'a' }\n'b'",
+    "trap { 'h' }\nif ($c) { 'a' }\n'b'",
+    "trap { 'o' }\nif ($c) { trap { 'i' }\n'a' }",
     "function f { 'a' }\nf",
     "function f { return 1 }",
     "function f { dynamicparam { 'd' } begin { 'b' } process { 'p' } end { 'e' } }",
@@ -96,6 +104,32 @@ class TestPs1ControlFlowGraph(TestBase):
     def _tree_and_graph(self, source: str) -> tuple[Ps1Script, ControlFlowGraph]:
         tree = Ps1Parser(source).parse()
         return tree, build_ps1_control_flow(tree)[id(tree)]
+
+    def _required_node(self, graph: ControlFlowGraph, element: Node) -> CfgNode:
+        node = graph.node_of(element)
+        if node is None:
+            self.fail(F'no control-flow node stands for a {type(element).__name__}')
+        return node
+
+    def _handlers(self, graph: ControlFlowGraph, *elements: Node) -> set[CfgNode]:
+        return {self._required_node(graph, element) for element in elements}
+
+    def _reached_by_an_error_at(self, graph: ControlFlowGraph, element: Node) -> set[CfgNode]:
+        """
+        The nodes an error raised at *element* may travel to, walked over exceptional edges alone.
+        Each of them is a handler that may be offered the error, except for the graph exit, which
+        stands for the error leaving this body with no handler having taken it.
+        """
+        reached: set[CfgNode] = set()
+        stack = [self._required_node(graph, element)]
+        while stack:
+            source = stack.pop()
+            for target in source.successors:
+                if target in reached or not graph.is_exceptional(source, target):
+                    continue
+                reached.add(target)
+                stack.append(target)
+        return reached
 
     def test_every_graph_is_internally_consistent(self):
         for source in _CORPUS:
@@ -260,11 +294,22 @@ class TestPs1ControlFlowGraph(TestBase):
         trap = self._node_for(graph, Ps1TrapStatement)
         self.assertIn(graph.node_of(tree.body[0]), trap.predecessors)
 
-    def test_a_trap_declared_inside_a_nested_block_still_guards_the_whole_body(self):
+    def test_a_trap_declared_inside_a_nested_block_guards_that_block(self):
         tree, graph = self._tree_and_graph("if ($c) { trap { 'h' }\n'a' }\n'b'")
         trap = self._node_for(graph, Ps1TrapStatement)
-        self.assertIn(graph.node_of(tree.body[1]), trap.predecessors)
+        self.assertIn(graph.node_of(tree.body[0].clauses[0][1].body[1]), trap.predecessors)
         self.assertIsNotNone(graph.node_of(trap.element.body.body[0]))
+
+    def test_a_trap_declared_inside_a_nested_block_does_not_guard_the_body_around_it(self):
+        """
+        A trap belongs to the statement block it is written in, so an error raised outside that
+        block is never offered to it. Reading it as a handler for the body around it hands errors to
+        a trap no run reaches, and hands them to a type filter that guards nothing they can occur
+        in.
+        """
+        tree, graph = self._tree_and_graph("if ($c) { trap { 'h' }\n'a' }\n'b'")
+        trap = self._node_for(graph, Ps1TrapStatement)
+        self.assertNotIn(trap, graph.node_of(tree.body[1]).successors)
 
     def test_a_trap_that_continues_resumes_in_the_body_it_guards(self):
         """
@@ -295,6 +340,138 @@ class TestPs1ControlFlowGraph(TestBase):
         tree, graph = self._tree_and_graph("trap { return }\n'a'")
         trap = self._node_for(graph, Ps1TrapStatement)
         self.assertIn(trap, graph.node_of(tree.body[1]).successors)
+
+    def test_a_trap_takes_the_errors_of_its_own_block_and_none_from_around_it(self):
+        tree, graph = self._tree_and_graph("if ($c) { trap { 'h' }\n'a' }\n'b'")
+        guarded = tree.body[0].clauses[0][1]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, guarded.body[1]),
+            self._handlers(graph, guarded.body[0]),
+        )
+        self.assertEqual(self._reached_by_an_error_at(graph, tree.body[1]), set())
+
+    def test_a_trap_at_script_scope_takes_an_error_raised_in_a_block_nested_under_it(self):
+        tree, graph = self._tree_and_graph("trap { 'h' }\nif ($c) { 'a' }\n'b'")
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, tree.body[1].clauses[0][1].body[0]),
+            self._handlers(graph, tree.body[0]),
+        )
+
+    def test_an_untyped_trap_shields_the_trap_of_the_block_around_it(self):
+        tree, graph = self._tree_and_graph("trap { 'o' }\nif ($c) { trap { 'i' }\n'a' }")
+        inner = tree.body[1].clauses[0][1]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, inner.body[1]),
+            self._handlers(graph, inner.body[0]),
+        )
+
+    def test_a_typed_trap_leaves_the_error_to_the_trap_of_the_block_around_it(self):
+        tree, graph = self._tree_and_graph(
+            "trap { 'o' }\nif ($c) { trap [System.IO.IOException] { 'i' }\n'a' }")
+        inner = tree.body[1].clauses[0][1]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, inner.body[1]),
+            self._handlers(graph, inner.body[0], tree.body[0]),
+        )
+
+    def test_a_trap_that_breaks_rethrows_to_the_trap_of_the_block_around_it(self):
+        """
+        `break` ends the trap after its body has run and hands the error on, so both the trap and
+        the handler around it are on the path the error may take.
+        """
+        tree, graph = self._tree_and_graph("trap { 'o' }\nif ($c) { trap { break }\n'a' }")
+        inner = tree.body[1].clauses[0][1]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, inner.body[1]),
+            self._handlers(graph, inner.body[0], tree.body[0]),
+        )
+
+    def test_a_break_leaving_a_loop_written_in_the_trap_body_is_not_a_rethrow(self):
+        tree, graph = self._tree_and_graph(
+            "trap { 'o' }\nif ($c) { trap { :t while ($true) { break t } }\n'a' }")
+        inner = tree.body[1].clauses[0][1]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, inner.body[1]),
+            self._handlers(graph, inner.body[0]),
+        )
+
+    def test_a_trap_set_that_may_decline_the_error_lets_it_leave_the_body(self):
+        for source in [
+            "trap [System.IO.IOException] { 'h' }\n'a'",
+            "trap { break }\n'a'",
+        ]:
+            with self.subTest(source):
+                tree, graph = self._tree_and_graph(source)
+                self.assertEqual(
+                    self._reached_by_an_error_at(graph, tree.body[1]),
+                    self._handlers(graph, tree.body[0]) | {graph.exit},
+                )
+
+    def test_an_untyped_trap_that_does_not_break_keeps_the_error_inside_the_body(self):
+        tree, graph = self._tree_and_graph("trap { 'h' }\n'a'")
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, tree.body[1]),
+            self._handlers(graph, tree.body[0]),
+        )
+
+    def test_an_untyped_catch_clause_keeps_the_error_from_the_trap_around_the_try(self):
+        tree, graph = self._tree_and_graph("trap { 'o' }\ntry { 'a' } catch { 'c' }")
+        guarded = tree.body[1]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, guarded.try_block.body[0]),
+            self._handlers(graph, guarded.catch_clauses[0]),
+        )
+
+    def test_a_typed_catch_clause_leaves_the_error_to_the_trap_around_the_try(self):
+        tree, graph = self._tree_and_graph(
+            "trap { 'o' }\ntry { 'a' } catch [System.IO.IOException] { 'c' }")
+        guarded = tree.body[1]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, guarded.try_block.body[0]),
+            self._handlers(graph, guarded.catch_clauses[0], tree.body[0]),
+        )
+
+    def test_an_untyped_inner_catch_clause_keeps_the_error_from_the_outer_one(self):
+        tree, graph = self._tree_and_graph("try { try { 'a' } catch { 'i' } } catch { 'o' }")
+        inner = tree.body[0].try_block.body[0]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, inner.try_block.body[0]),
+            self._handlers(graph, inner.catch_clauses[0]),
+        )
+
+    def test_a_typed_inner_catch_clause_passes_the_error_to_the_outer_one(self):
+        tree, graph = self._tree_and_graph(
+            "try { try { 'a' } catch [System.IO.IOException] { 'i' } } catch { 'o' }")
+        outer = tree.body[0]
+        inner = outer.try_block.body[0]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, inner.try_block.body[0]),
+            self._handlers(graph, inner.catch_clauses[0], outer.catch_clauses[0]),
+        )
+
+    def test_a_trap_in_a_try_block_takes_the_error_before_the_catch_clause_does(self):
+        tree, graph = self._tree_and_graph("try { trap { 'h' }\n'a' } catch { 'c' }")
+        guarded = tree.body[0]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, guarded.try_block.body[1]),
+            self._handlers(graph, guarded.try_block.body[0]),
+        )
+
+    def test_a_trap_in_a_switch_clause_body_guards_that_clause_body(self):
+        tree, graph = self._tree_and_graph("switch ($x) { 1 { trap { 'h' }\n'a' } }")
+        clause = tree.body[0].clauses[0][1]
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, clause.body[1]),
+            self._handlers(graph, clause.body[0]),
+        )
+
+    def test_a_trap_in_a_finally_body_guards_that_finally_body(self):
+        tree, graph = self._tree_and_graph("try { 'a' } finally { trap { 'h' }\n'b' }")
+        cleanup = tree.body[0].finally_block
+        self.assertEqual(
+            self._reached_by_an_error_at(graph, cleanup.body[1]),
+            self._handlers(graph, cleanup.body[0]),
+        )
 
     def test_a_switch_clause_may_be_entered_after_the_previous_one_ran(self):
         # Asserted as a direct edge from the first clause's body to the second's. Under EXCLUSIVE

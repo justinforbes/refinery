@@ -232,7 +232,7 @@ class CfgBuilder:
     a *frontier* — the set of nodes from which normal control currently falls through — into each
     statement and out the other side.
 
-    A language subclasses this and implements `statement` and `body_statements`. Everything else is
+    A language subclasses this and implements `statement` and `body_blocks`. Everything else is
     shared, and the shape methods below take the parts of a construct rather than the construct, so
     that no code here has to know what a language calls the pieces of its `for` loop.
     """
@@ -244,16 +244,28 @@ class CfgBuilder:
         self._pending_label: str | None = None
 
     def build(self) -> ControlFlowGraph:
-        frontier = self.sequence(self.body_statements(self.cfg.owner), [self.cfg.entry])
+        frontier = [self.cfg.entry]
+        for statements in self.body_blocks(self.cfg.owner):
+            frontier = self.block(statements, frontier)
         self.link(frontier, self.cfg.exit)
         return self.cfg
 
-    def body_statements(self, owner: Node) -> list[Node]:
+    def body_blocks(self, owner: Node) -> Sequence[Sequence[Node]]:
         """
-        The statements *owner* runs, in order. A language whose body may be a single unbraced
-        statement, or which splits one body across several named blocks, resolves that here.
+        The statement blocks *owner* runs, in the order it runs them. A language whose body may be a
+        single unbraced statement resolves that here, and one that splits a body across several
+        named blocks reports them apart rather than joined, because a construct scoped to a block
+        cannot be modelled from a body that has forgotten where its blocks ended.
         """
         raise NotImplementedError
+
+    def block(self, statements: Sequence[Node], frontier: list[CfgNode]) -> list[CfgNode]:
+        """
+        One statement block. The statements in order, which is all a block is to a language whose
+        blocks carry nothing of their own; a language whose blocks scope a handler installs it here
+        and calls this for every block it builds.
+        """
+        return self.sequence(statements, frontier)
 
     def statement(self, statement: Node, frontier: list[CfgNode]) -> list[CfgNode]:
         """
@@ -271,11 +283,23 @@ class CfgBuilder:
         statement inside a guarded block may throw and the whole point of the edge is that it does
         not depend on which statement it is.
         """
+        node = self.detached_node(element)
+        if self._handlers:
+            self.exceptional_edge(node, self._handlers[-1])
+        return node
+
+    def detached_node(self, element: Node) -> CfgNode:
+        """
+        A graph node for *element* that the enclosing handler does not guard.
+
+        A handler's own entry is one: it stands for the point at which a throw is *offered* to a
+        clause, which is not a point inside the region that clause guards. The edge outward from
+        there says the clause did not take the throw, and whether any run says that is a property of
+        the whole handler set, which `guarded` reads once.
+        """
         node = CfgNode(element)
         self.cfg.nodes.append(node)
         self.cfg._node_of[id(element)] = node
-        if self._handlers:
-            self.exceptional_edge(node, self._handlers[-1])
         return node
 
     @staticmethod
@@ -286,6 +310,13 @@ class CfgBuilder:
     def exceptional_edge(self, source: CfgNode, target: CfgNode) -> None:
         self.add_edge(source, target)
         self.cfg.exceptional_edges.add((id(source), id(target)))
+
+    def unwinding(self) -> CfgNode:
+        """
+        Where a throw goes when nothing open here takes it: the innermost active handler, or the
+        body's exit, which is how the graph says the throw leaves the body.
+        """
+        return self._handlers[-1] if self._handlers else self.cfg.exit
 
     def link(self, frontier: Iterable[CfgNode], target: CfgNode) -> None:
         for node in frontier:
@@ -540,6 +571,8 @@ class CfgBuilder:
         finalizer: Node | None,
         finalizer_body: Sequence[Node],
         frontier: list[CfgNode],
+        *,
+        escapes: bool,
     ) -> list[CfgNode]:
         """
         A guarded block with any number of handlers and an optional finalizer.
@@ -555,16 +588,22 @@ class CfgBuilder:
         takes it exactly when the earlier handler did not match, so nothing that handler's node
         stands for has run and its kill must not apply along it.
 
+        `escapes` says the set of handlers may fail to take a throw the block makes, which is what a
+        language whose clauses carry a type filter reports and what one whose single clause takes
+        everything denies. It decides one edge — from the last handler to whatever guards this
+        construct, or to the body exit when nothing does, which is how the graph says a throw leaves
+        the body with no handler having taken it. Denying the edge is the difference between a
+        clause that swallows and one that passes the throw on, so it is asked of every language
+        rather than defaulted: the safe answer invents a path the program cannot take, and the
+        other drops one it can.
+
         The finalizer is entered from the block's normal exits and from every handler's, and itself
         carries an exceptional edge outward, because a finalizer runs on the exceptional path too and
         control leaves the construct from it either way.
         """
         handlers = list(handlers)
-        entries = [self.node(handler) for handler, _ in handlers]
-        finalizer_entry: CfgNode | None = None
-        if finalizer is not None:
-            finalizer_entry = CfgNode(finalizer)
-            self.cfg.nodes.append(finalizer_entry)
+        entries = [self.detached_node(handler) for handler, _ in handlers]
+        finalizer_entry = self.detached_node(finalizer) if finalizer is not None else None
         guard = entries[0] if entries else finalizer_entry
         if guard is not None:
             self._handlers.append(guard)
@@ -577,12 +616,12 @@ class CfgBuilder:
                 self.exceptional_edge(entries[index - 1], entry)
             normal_exits += (
                 self.statement(body, [entry]) if body is not None else [entry])
+        if entries and escapes:
+            self.exceptional_edge(entries[-1], self.unwinding())
         if finalizer_entry is not None and finalizer is not None:
             self.link(normal_exits, finalizer_entry)
-            self.cfg._node_of[id(finalizer)] = finalizer_entry
             final_exits = self.sequence(list(finalizer_body), [finalizer_entry])
-            self.exceptional_edge(
-                finalizer_entry, self._handlers[-1] if self._handlers else self.cfg.exit)
+            self.exceptional_edge(finalizer_entry, self.unwinding())
             return final_exits
         return normal_exits
 
@@ -655,7 +694,7 @@ class CfgBuilder:
         node = self.node(element)
         self.link(frontier, node)
         if exceptional:
-            self.exceptional_edge(node, self._handlers[-1] if self._handlers else self.cfg.exit)
+            self.exceptional_edge(node, self.unwinding())
         else:
             self.add_edge(node, self.cfg.exit)
         return []
@@ -667,6 +706,14 @@ class CfgBuilder:
         when no such construct is open asks this to tell the two spellings apart.
         """
         return self._continue_target(label) is not None
+
+    def has_break_target(self, label: str | None) -> bool:
+        """
+        Whether a jump out naming *label* — or an unlabelled one — resolves to a construct currently
+        being built, the counterpart of `has_continue_target` for the language in which `break`
+        means something other than leaving a construct when no construct is open to leave.
+        """
+        return self._break_target(label) is not None
 
     def _break_target(self, label: str | None) -> _Target | None:
         for target in reversed(self._targets):

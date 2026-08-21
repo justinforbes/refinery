@@ -5,9 +5,10 @@ control-flow shape, and where the parts of each are stored.
 Everything structural — the graph, the frontier threading, the jump-target and handler stacks, and
 the shapes themselves — lives in `refinery.lib.scripts.analysis.cfg`. What remains here is
 `_Builder.statement`, the recognition of `Js*` node types, and the accessors that pull a construct
-apart. Two of the shape parameters are answered from JavaScript semantics rather than from syntax:
-`switch` falls through from one case to the next, and an unlabelled `break` may leave a `switch` as
-well as a loop.
+apart. Three of the shape parameters are answered from JavaScript semantics rather than from syntax:
+`switch` falls through from one case to the next, an unlabelled `break` may leave a `switch` as well
+as a loop, and a `catch` carries no type filter, so a throw the guarded block makes never gets past
+it to whatever guards the construct.
 """
 from __future__ import annotations
 
@@ -72,14 +73,18 @@ class _Builder(CfgBuilder):
     The JavaScript dispatch over `refinery.lib.scripts.analysis.cfg.CfgBuilder`.
     """
 
-    def body_statements(self, owner: Node) -> list[Node]:
+    def body_blocks(self, owner: Node) -> Sequence[Sequence[Node]]:
+        """
+        The one block a JavaScript body is. A concise arrow function's body is an expression rather
+        than a block, and it is reported as the single statement it evaluates.
+        """
         if isinstance(owner, JsScript):
-            return list(owner.body)
+            return [list(owner.body)]
         body = getattr(owner, 'body', None)
         if isinstance(body, JsBlockStatement):
-            return list(body.body)
+            return [list(body.body)]
         if isinstance(body, Node):
-            return [body]
+            return [[body]]
         return []
 
     def statement(self, statement: Node, frontier: list[CfgNode]) -> list[CfgNode]:
@@ -111,6 +116,7 @@ class _Builder(CfgBuilder):
                 finalizer,
                 list(finalizer.body) if finalizer is not None else (),
                 frontier,
+                escapes=False,
             )
         if isinstance(statement, JsLabeledStatement):
             return self.labelled(
