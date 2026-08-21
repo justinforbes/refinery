@@ -120,7 +120,6 @@ class TestPs1ATrapWhoseTypeFilterMissesTheErrorEndsTheScript(_Ps1FaultEscalation
     The deobfuscator reads a `trap` it cannot match as no `trap` at all and deletes the raise.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_under_an_empty_trap_whose_filter_misses_is_kept(self):
         self._assertKept(F"""
             trap {_DIFFERENT} {{ }}
@@ -146,7 +145,6 @@ class TestPs1ATrapBodyThatReachesBreakEndsTheScript(_Ps1FaultEscalation):
     `trap` with it and lets the script run to its end.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_under_a_trap_that_breaks_is_kept(self):
         self._assertKept(F"""
             trap {{ break }}

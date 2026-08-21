@@ -107,6 +107,15 @@ _CATCHES_EVERY_ERROR = frozenset({
 })
 
 
+def _names_every_error(name: str) -> bool:
+    """
+    Whether *name* is a type filter every terminating error matches. An empty name is no filter at
+    all, which is the same answer for a different reason and the reason a `catch` clause and a
+    `trap` can ask one question: both spell *unfiltered* as nothing written.
+    """
+    return not name.strip() or name.strip().lower() in _CATCHES_EVERY_ERROR
+
+
 def _catch_takes_every_error(clause: Ps1CatchClause) -> bool:
     """
     Whether *clause* is certain to be the one that takes a throw the guarded block makes: it carries
@@ -117,7 +126,7 @@ def _catch_takes_every_error(clause: Ps1CatchClause) -> bool:
     """
     if not clause.types:
         return True
-    return any(name.strip().lower() in _CATCHES_EVERY_ERROR for name in clause.types)
+    return any(_names_every_error(name) for name in clause.types)
 
 
 def _jump_label(statement: Ps1Jump) -> str | None:
@@ -196,8 +205,8 @@ class _Builder(CfgBuilder):
         Where blocks nest, the innermost one declaring a `trap` is the only set the error is offered
         to, which pushing that set on the handler stack already says. The set passes the error
         outward — to the `catch` or `trap` guarding the block, and to the body exit when nothing
-        guards it — exactly when it may fail to take it: every `trap` in it carrying a type filter,
-        so none is known to match, or one of them reaching the `break` that runs the body and
+        guards it — exactly when it may fail to take it: every `trap` in it carrying a filter no
+        error is known to match, or one of them reaching the `break` that runs the body and
         rethrows. Nothing else in a body reaches the exit on an exceptional edge without a handler
         having been offered the error, which is what tells an error that ends the script apart from
         one that is reported and stepped over.
@@ -235,7 +244,7 @@ class _Builder(CfgBuilder):
         for trap, handler in zip(traps, entries):
             self._trap_body = built = _TrapBody()
             resumes += self._body(trap.body, [handler]) + built.resumes
-            if not trap.type_name and not built.rethrows:
+            if _names_every_error(trap.type_name) and not built.rethrows:
                 escapes = False
         self._handlers.pop()
         self._trap_body = enclosing

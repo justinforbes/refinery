@@ -203,7 +203,6 @@ class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
             }}
         """, _QUIET_REMAINDER)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_scriptblock_invoked_in_place_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -257,7 +256,6 @@ class TestPs1AStatementInAFunctionAGuardedTryBlockCalls(_Ps1FaultObservability):
     emptying the body is the right answer for it and the two differ only in the raise.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_function_the_try_block_calls_is_kept(self):
         self._assertKept(F"""
             function Invoke-Thing {{

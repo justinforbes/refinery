@@ -1772,8 +1772,8 @@ def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
     **This is not the question asked before a handler is deleted.** A `trap` cannot raise, so
     nothing about its own position decides anything: what a removal changes is where the errors of
     *other* statements go, and that is the transpose,
-    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.handler_is_reachable`. Nor is it the
-    question asked before a guarded body is emptied, which is `emptying_unhooks_a_handler` — a
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.removing_a_handler_is_observed`. Nor is it
+    the question asked before a guarded body is emptied, which is `emptying_unhooks_a_handler` — a
     policy about what a listing should still show rather than a claim about what runs.
     """
     judged = False

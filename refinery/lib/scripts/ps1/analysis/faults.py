@@ -31,6 +31,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1BreakStatement,
     Ps1CatchClause,
     Ps1ContinueStatement,
+    Ps1Script,
     Ps1TrapStatement,
 )
 
@@ -96,6 +97,7 @@ class Ps1FaultReach:
         self._control_flow = control_flow
         self._forward: dict[int, Ps1FaultRouting] = {}
         self._backward: dict[int, bool] = {}
+        self._handled: set[int] | None = None
 
     def routing_at(self, node: Node) -> Ps1FaultRouting | None:
         """
@@ -146,15 +148,53 @@ class Ps1FaultReach:
         it, so everything written after the raise stops running. A `catch` that misses does not do
         that — the sharp asymmetry between the two keywords — so the reading is keyed to the `trap`
         and not to the escape.
+
+        **An error that gets past a function's own handlers is the caller's**, and no graph here
+        holds both ends of a call. Measured: the same function whose error is reported and stepped
+        over when called at script scope abandons its remaining statements and runs the `catch` of a
+        `try` written around the *call*, however many bodies deep the raise is. So a raise in a body
+        something may call is refused wherever the script holds a handler that acts — and granted
+        where it holds none, since a `catch` that is not written cannot be the one guarding the call.
         """
+        located = self._control_flow.locate(node)
+        if located is None:
+            return True
+        graph, _ = located
         routing = self.routing_at(node)
         if routing is None:
             return True
         if any(handler_acts(handler) for handler in routing.handlers):
             return True
-        return routing.leaves_the_body and any(
+        if routing.leaves_the_body and any(
             isinstance(handler, Ps1TrapStatement) for handler in routing.handlers
-        )
+        ):
+            return True
+        if routing.handlers and not routing.leaves_the_body:
+            return False
+        return not isinstance(graph.owner, Ps1Script) and self._handled_elsewhere(graph)
+
+    def _handled_elsewhere(self, body: ControlFlowGraph) -> bool:
+        """
+        Whether this script writes a handler that acts in some body other than *body*. What guards a
+        call is unknowable from the called body's graph, and this is what settles it in the direction
+        of a grant: a handler written in the very body that raises is one the error has already got
+        past, and a script with none anywhere else has no call site the raise could matter at.
+
+        A named block is not a body of its own here, which is why the comparison is per graph: a
+        `trap` in `begin` and a raise in `process` share one script block, and neither guards the
+        other.
+        """
+        if self._handled is None:
+            self._handled = {
+                id(graph)
+                for graph in self._control_flow.graphs.values()
+                if any(
+                    isinstance(node.element, (Ps1CatchClause, Ps1TrapStatement))
+                    and handler_acts(node.element)
+                    for node in graph.nodes
+                )
+            }
+        return bool(self._handled - {id(body)})
 
     def leaves_the_body(self, node: Node) -> bool:
         """
@@ -187,6 +227,11 @@ class Ps1FaultReach:
         outside it lets an error be reported and stepped over, which is what an unhandled error
         already did. A fallback the graph does not record is refused, because a handler whose
         counterfactual is unknown is one whose removal cannot be judged.
+
+        **A `trap` set that may decline is load bearing for declining**, not only for handling. It
+        is what turns an error 5.1 would report and step over into one that ends the body, so
+        deleting it starts running everything written after the raise — `trap [System.IO.IOException]
+        { }` guards nothing and is still the whole reason a script stops where it does.
         """
         located = self._control_flow.locate(handler)
         if located is None:
@@ -200,6 +245,11 @@ class Ps1FaultReach:
     def _removal_matters(self, graph: ControlFlowGraph, start: CfgNode) -> bool:
         if not self._raisers(graph, start):
             return False
+        routing = self._route(graph, start)
+        if isinstance(start.element, Ps1TrapStatement) and routing.leaves_the_body:
+            return True
+        if any(handler_acts(handler) for handler in routing.handlers):
+            return True
         fallback = graph.fallback_of(start)
         if fallback is None:
             return True

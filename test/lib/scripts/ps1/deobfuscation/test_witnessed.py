@@ -8,10 +8,12 @@ from unittest.mock import patch
 
 from test import TestBase
 from test.lib.scripts.ps1 import test_deobfuscation
-from test.lib.scripts.ps1.analysis import test_callgraph
+from test.lib.scripts.ps1.analysis import test_callgraph, test_faults
 from test.lib.scripts.ps1.deobfuscation import (
     test_deadcode,
     test_emulator,
+    test_fault_escalation,
+    test_fault_observability,
     test_folding,
     test_iexinline,
     test_removal,
@@ -19,8 +21,8 @@ from test.lib.scripts.ps1.deobfuscation import (
     test_wildcards,
 )
 
-from refinery.lib.scripts import owning_list
-from refinery.lib.scripts.ps1.analysis import callgraph, effects
+from refinery.lib.scripts import Node, owning_list
+from refinery.lib.scripts.ps1.analysis import callgraph, effects, faults
 from refinery.lib.scripts.ps1.analysis.effects import OutputSink, is_side_effect_free
 from refinery.lib.scripts.ps1.deobfuscation import (
     deadcode,
@@ -31,7 +33,11 @@ from refinery.lib.scripts.ps1.deobfuscation import (
     unused,
     wildcards,
 )
-from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement
+from refinery.lib.scripts.ps1.model import (
+    Ps1ExpressionStatement,
+    Ps1Script,
+    Ps1TryCatchFinally,
+)
 
 
 def _witness(witness: type) -> str:
@@ -48,21 +54,32 @@ _CALL_GRAPH = _witness(test_callgraph.TestPs1CallGraphReadability)
 _DEAD_CODE = _witness(test_deadcode.TestPs1DeadCodeElimination)
 _DEAD_CODE_EXTRA = _witness(test_deadcode.TestPs1DeadCodeExtra)
 _DEAD_CODE_TREE = _witness(test_deadcode.TestPs1DeadCodeLeavesTheTreeConsistent)
+_DIRECT_GUARD = _witness(
+    test_fault_observability.TestPs1ARaisingStatementDirectlyInAGuardedTryBlockIsKept)
+_EMPTY_CATCH = _witness(
+    test_fault_observability.TestPs1AnEmptyCatchSwallowsSoTheRaisingStatementIsRemovable)
 _EMULATOR = _witness(test_emulator.TestPs1FunctionEvaluator)
 _EMULATOR_EXTRA = _witness(test_emulator.TestPs1EmulatorExtra)
+_ESCALATION = _witness(test_faults.TestPs1FaultIsObservedWhereAHandlerActsOrATrapMayDecline)
 _FOREACH_PIPELINE = _witness(test_emulator.TestPs1EmulatorRedirections)
 _HANDLER = _witness(test_removal.TestPs1DeadCodeEliminationDoesNotUnhookAHandler)
 _IEX_REDIRECTIONS = _witness(test_iexinline.TestPs1IexRedirections)
 _INTEGRATION = _witness(test_deobfuscation.TestPs1Integration)
 _KEPT_EITHER_WAY = _witness(test_unused.TestPs1OutputSomethingElseHoldsIsKeptEitherWay)
 _KEPT_WHEN_ASKED = _witness(test_unused.TestPs1BareOutputIsKeptWhenAsked)
+_NESTED_GUARD = _witness(test_fault_observability.TestPs1AStatementNestedInAGuardedTryBlock)
 _PLAN = _witness(test_removal.TestPs1RemovalPlan)
+_PROTECTED_BODY = _witness(test_removal.TestPs1RemovalDoesNotEmptyAProtectedTryBody)
 _QUALIFIED = _witness(test_unused.TestPs1AQualifiedCallKeepsTheNameItResolvesOnto)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
 _SELECTION_COUNT = _witness(test_folding.TestPs1CountingAnArrayKeepsWhatBuildingItDid)
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
+_SWALLOWING_TRAP = _witness(
+    test_fault_escalation.TestPs1ATrapThatTakesTheErrorAndSwallowsLeavesTheRaiseRemovable)
 _TREE = _witness(test_unused.TestPs1RemovalLeavesTheTreeConsistent)
+_UNREACHED_TRAP = _witness(
+    test_fault_escalation.TestPs1ATrapTheRaisingBlockDoesNotReachLeavesItRemovable)
 _UNUSED = _witness(test_unused.TestPs1UnusedVariableRemoval)
 _WILDCARD_REDIRECTIONS = _witness(test_wildcards.TestPs1WildcardRedirections)
 
@@ -181,6 +198,70 @@ def _try_body_survivors_hoisting_anything_pure(body: list, oracle) -> list | Non
         return None
     return survivors
 
+
+def _fault_observed_where_the_clause_is_written(stmt: Node, reach: faults.Ps1FaultReach) -> bool:
+    """
+    The reading the routing walk superseded: a deletion is refused where the statement stands
+    *directly* in the `try` block of a construct one of whose `catch` clauses has a body. One
+    syntactic position and no graph at all, so a raise one nesting level down, a raise in a body the
+    block calls, and every raise a `trap` guards are raises this cannot see.
+    """
+    block = stmt.parent
+    guard = block.parent if block is not None else None
+    if not isinstance(guard, Ps1TryCatchFinally) or guard.try_block is not block:
+        return False
+    return any(
+        clause.body is not None and clause.body.body
+        for clause in guard.catch_clauses
+    )
+
+
+def _fault_observed_wherever_an_error_would_go(stmt: Node, reach: faults.Ps1FaultReach) -> bool:
+    """
+    The guard with its first half dropped: every point inside *stmt* is asked where an error raised
+    there would go, and no point is asked whether it can raise one, so every statement is judged as
+    though it might. This refuses **more** than the guard does, which is what the padding an
+    obfuscator writes by the hundred used to cost — so what notices it is a test asserting that
+    something is still deleted.
+    """
+    judged = False
+    for site in reach.points_in(stmt):
+        judged = True
+        if reach.observed_at(site):
+            return True
+    return not judged
+
+
+def _observed_at_reading_only_what_acts(self: faults.Ps1FaultReach, node: Node) -> bool:
+    """
+    The position question with the escalation taken out of it and every other step left standing: a
+    handler that acts still makes the error observable, and a `trap` set that may decline it no
+    longer does, although declining is what ends the body rather than reporting the error and
+    stepping over it. Kept a token away from the original so that a reading which grows a step reads
+    as stale here rather than quietly modelling a different bug.
+    """
+    located = self._control_flow.locate(node)
+    if located is None:
+        return True
+    graph, _ = located
+    routing = self.routing_at(node)
+    if routing is None:
+        return True
+    if any(faults.handler_acts(handler) for handler in routing.handlers):
+        return True
+    if routing.handlers and not routing.leaves_the_body:
+        return False
+    return not isinstance(graph.owner, Ps1Script) and self._handled_elsewhere(graph)
+
+
+def _removing_a_handler_asked_at_the_handler(self: faults.Ps1FaultReach, handler: Node) -> bool:
+    """
+    The transpose answered by the forward question, which is the confusion the two queries exist to
+    prevent. A `trap` raises nothing, so where an error raised *at* it would go is a question about
+    a position nothing raises at, and its answer says nothing about the errors the removal re-routes
+    or about what they would fall back to.
+    """
+    return self.observed_at(handler)
 
 
 class TestPs1RemovalGuardsAreWitnessed(TestBase):
@@ -442,3 +523,60 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             patch.object(
                 callgraph, '_collides_with_a_definition', lambda resolved, definitions: False),
             notices='test_a_quoted_module_qualified_call_keeps_the_definition_it_resolves_onto')
+
+    def test_walking_the_routing_rather_than_reading_a_position_is_witnessed(self):
+        # The defect the rebuild was for. Patched in `removal`, which imported the name and is the
+        # guard's only reader. The one position the old reading did see stays green, and so does
+        # every statement that runs to completion, so what the mutation costs is exactly the raises
+        # a graph walk finds and a syntactic position cannot.
+        self._assertWitnessed(
+            [_NESTED_GUARD, _DIRECT_GUARD],
+            patch.object(removal, 'fault_is_observed', _fault_observed_where_the_clause_is_written),
+            notices='test_a_raising_cast_in_a_nested_if_body_is_kept')
+
+    def test_the_short_circuit_on_a_statement_that_cannot_raise_is_witnessed(self):
+        self._assertWitnessed(
+            [_NESTED_GUARD],
+            patch.object(removal, 'fault_is_observed', _fault_observed_wherever_an_error_would_go),
+            notices='test_a_quiet_cast_in_a_nested_if_body_is_removed')
+
+    def test_asking_whether_a_handler_acts_at_all_is_witnessed(self):
+        # Patched in the module that owns it, where both readings of the routing consult it. The
+        # empty `catch` an obfuscator writes is inert either way, so the class built on one stays
+        # green while the class built on a handler with a body goes red — which is the distinction
+        # the mutation erases, spelled as two outcomes rather than one.
+        self._assertWitnessed(
+            [_DIRECT_GUARD, _EMPTY_CATCH],
+            patch.object(faults, 'handler_acts', lambda handler: False),
+            notices='test_a_raising_cast_directly_in_the_try_block_is_kept')
+
+    def test_reading_the_escalation_off_the_routing_is_witnessed(self):
+        # Measured: with the clause dropped the position question answers differently in two tests
+        # of the whole package, and both are in the unit test over the reading itself. No pass in
+        # the deobfuscator is reached by a `trap` set that may decline an error, so this is the
+        # only witness there is.
+        self._assertWitnessed(
+            [_ESCALATION, _SWALLOWING_TRAP],
+            patch.object(faults.Ps1FaultReach, 'observed_at', _observed_at_reading_only_what_acts),
+            notices='test_a_raise_guarded_by_a_typed_trap_is_observed_because_the_set_may_decline_it')
+
+    def test_judging_a_handler_by_the_transpose_is_witnessed(self):
+        # Both directions of the confusion, so that neither reads as the mutation merely refusing
+        # more: a swallowing `trap` whose errors would fall back to a live one is deleted, and a
+        # `trap` a `catch` with a payload depends on is unhooked.
+        self._assertWitnessed(
+            [_UNREACHED_TRAP, _HANDLER],
+            patch.object(
+                faults.Ps1FaultReach,
+                'removing_a_handler_is_observed',
+                _removing_a_handler_asked_at_the_handler),
+            notices='test_a_raising_cast_whose_innermost_trap_continues_is_removed')
+
+    def test_refusing_a_batch_that_would_empty_a_protected_body_is_witnessed(self):
+        # The set-level half, which the per-statement veto cannot stand in for: what the witnesses
+        # put in a guarded body cannot raise, so no removal of one is vetoed on its own, and what
+        # keeps the handler beside it in the listing is the refusal to clear the block.
+        self._assertWitnessed(
+            [_PROTECTED_BODY],
+            patch.object(removal, 'emptying_unhooks_a_handler', lambda block: False),
+            notices='test_junk_removal_keeps_a_protected_try_body')
