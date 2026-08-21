@@ -48,6 +48,21 @@ def _removes_a_handler(statement: Node) -> bool:
     return isinstance(statement, Ps1TrapStatement)
 
 
+def _rescopes_a_handler(replacement: list[Statement]) -> bool:
+    """
+    Whether installing *replacement* would move a `trap` into a statement block other than the one
+    it was written in, which re-aims a handler rather than removing or rewriting one.
+
+    A `trap` guards the block it stands in and nothing around it, so a pass that dissolves a
+    construct and carries its statements outward carries the handler's *scope* outward with them:
+    `if ($True) { trap { <payload> }; ... }` hoisted to the body around it makes every later
+    statement of that body reach a handler no run reached before. Every statement of a replacement
+    becomes a direct member of this plan's list, so the top level is the whole of what moves — a
+    `trap` nested deeper inside one keeps the block it is written in and is not this.
+    """
+    return any(isinstance(statement, Ps1TrapStatement) for statement in replacement)
+
+
 def _restore(landed: list[Node]) -> None:
     """
     Put the parent pointers inside everything the batch has just left standing back in agreement
@@ -126,13 +141,14 @@ class Ps1RemovalPlan:
 
     `removals_may_fault` is the one thing about a pass this class does have to be told, because the
     fault refusal is not the same question for every pass either.
-    `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` exists because *nothing* in the
-    effect substrate can answer whether a statement throws, so a pass that cannot say declines every
-    removal from a protected `try` body. `Ps1DeadCodeElimination` can say: it removes pure constants
-    and constructs whose condition it has already proved constant, neither of which can raise. For
-    such a pass the refusal that remains is the set-level one the per-statement veto was standing in
-    for — the batch must not leave the protected body empty, because an empty `try` block is
-    evidence about the pass rather than about the code as written.
+    `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` asks both halves of it — whether
+    what the removal takes away can raise, and where the error would go — so a pass that cannot rule
+    the first half out for itself says so and lets the veto weigh it statement by statement.
+    `Ps1DeadCodeElimination` can rule it out: it removes pure constants and constructs whose
+    condition it has already proved constant, neither of which can raise, so it skips the veto
+    entirely. The set-level refusal stands beside both — the batch must not leave a protected body
+    empty, because an empty `try` block is evidence about the pass rather than about the code as
+    written — and is asked of every pass whatever this flag says.
 
     `all_or_nothing` is the second, for a batch whose parts are one edit rather than several. A veto
     normally skips the proposal it lands on and lets the rest through, which is right when each
@@ -154,9 +170,9 @@ class Ps1RemovalPlan:
         """
         `faults` is the model the removal verdicts are reached against, and `None` says this plan
         installs replacements and removes nothing. A caller that has no removal to file has no
-        verdict to reach and nothing to reach it with — `refinery.lib.scripts.ps1.deobfuscation.
-        substitution.substitute_statement` is the one — and filing a removal against such a plan is
-        refused at `propose` rather than let through unchecked.
+        verdict to reach and nothing to reach it with, and filing a removal against such a plan is
+        refused at `propose` rather than let through unchecked. The one such caller is
+        `refinery.lib.scripts.ps1.deobfuscation.substitution.substitute_statement`.
         """
         self.parent = parent
         self.attr = attr
@@ -197,10 +213,12 @@ class Ps1RemovalPlan:
         left a statement standing over a literal that named a node the pass had thrown away.
         """
         proposal = _Proposal(statement, list(replacement or ()))
-        if not proposal.replacement and self.faults is None:
-            raise ValueError('this plan was opened to substitute and holds no fault model')
-        self._proposals[id(statement)] = proposal
-        reattach(statement)
+        try:
+            if not proposal.replacement and self.faults is None:
+                raise ValueError('this plan was opened to substitute and holds no fault model')
+            self._proposals[id(statement)] = proposal
+        finally:
+            reattach(statement)
 
     def withdraw(self, statement: Statement) -> None:
         """
@@ -238,12 +256,14 @@ class Ps1RemovalPlan:
         define. Such a guard asks this, drops what it now forbids with `withdraw`, and asks again;
         the loop terminates because the batch only shrinks.
 
-        **That last part is a fact about the default flags, not about this query.** Under
-        `all_or_nothing`, and under `removals_may_fault=False` against a protected body, a
-        withdrawal can take this set from empty to non-empty — the batch *grows*, and a loop resting
-        on the shrinking argument does not terminate. `Ps1RemovalPlans` opens every plan with the
-        defaults, which is why its consumers may write that loop; a pass that sets either flag and
-        then loops on `accepted` owes its own termination argument.
+        **That last part is not a fact about this query, and no flag makes it one.** Under
+        `all_or_nothing`, and against a protected body whatever the flags, a withdrawal can take
+        this set from empty to non-empty — the batch *grows*, and a loop resting on the shrinking
+        argument does not terminate. The protected-body refusal used to be reachable only with
+        `removals_may_fault=False`, so a `Ps1RemovalPlans` consumer could rest on the defaults; it
+        is asked of every plan now, so a pass that loops on `accepted` owes its own termination
+        argument — `refinery.lib.scripts.ps1.deobfuscation.unused.Ps1JunkStatementRemoval` has one,
+        because what shrinks there is the group set and not this.
 
         What a caller obtains is what *this* plan would do, not a post-veto survivor set. The
         distinction is the whole safety argument: `survivors` still cannot show a permissive guard a
@@ -279,9 +299,12 @@ class Ps1RemovalPlan:
         """
         Whether a single proposal must be skipped although the guards allowed the batch.
 
-        Both questions below are asked of deletions only, because a rewrite that keeps evaluating
-        the original expression still throws where the original threw, so an enclosing handler stays
-        as reachable as it was.
+        **A rewrite is refused for one reason and one only: it relocates a handler.** Everything
+        else a replacement does is safe on this axis, because it keeps evaluating the original
+        expression and so throws where the original threw, leaving an enclosing handler as
+        reachable as it was. What that argument does not cover is a `trap` carried out of the block
+        it was written in, which changes nothing about where *this* statement's errors go and
+        everything about where the rest of the target body's do; see `_rescopes_a_handler`.
 
         **A handler and a statement that might fault are opposite questions**, and reading one as
         the other invents a wrong answer in each direction. Deleting a `trap` re-routes errors the
@@ -291,7 +314,7 @@ class Ps1RemovalPlan:
         `fault_is_observed`, and only for a pass that cannot rule the fault out itself.
         """
         if proposal.replacement:
-            return False
+            return _rescopes_a_handler(proposal.replacement)
         faults = self.faults
         if faults is None:
             return True
@@ -364,13 +387,13 @@ class Ps1RemovalPlan:
 
         `emptying_unhooks_a_handler` is a policy about the listing rather than a claim about what
         runs; the emptiness test lives here so that the two halves of the name are decided in one
-        place, and so that the `BodyEdit` it needs is built only where the answer can be used.
+        place. It is asked first because it is two attribute reads against a body that is almost
+        never a guarded one, where the emptiness test copies the whole list — and this now runs for
+        every pass rather than for the few that used to reach it.
         """
-        if not allowed:
+        if not allowed or not emptying_unhooks_a_handler(self.parent):
             return False
-        if self._edit(allowed).result():
-            return False
-        return emptying_unhooks_a_handler(self.parent)
+        return not self._edit(allowed).result()
 
 
 class Ps1RemovalPlans:
@@ -390,8 +413,8 @@ class Ps1RemovalPlans:
 
     def __init__(self, faults: Ps1FaultReach):
         self.faults = faults
-        #: Every plan this opens may remove, so unlike `Ps1RemovalPlan` there is no substitution-only
-        #: spelling of this class: a caller holding one is a pass that deletes.
+        #: Every plan this opens may remove, so unlike `Ps1RemovalPlan` there is no
+        #: substitution-only spelling of this class: a caller holding one is a pass that deletes.
         self._plans: dict[tuple[int, str], Ps1RemovalPlan] = {}
         self._rewrites: dict[int, _Proposal] = {}
         #: The filed statement is kept beside its plan, and not only its `id`, for the reason
@@ -534,10 +557,11 @@ class Ps1RemovalPlans:
 
         Every verdict is reached before the first edit lands, and every edit lands before the first
         repair. A veto is a question about the tree —
-        `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` reads the handler beside the
-        body it is asked about — so a plan that emptied a `catch` body would change the answer for
-        the `try` body's plan, and which plan that is would be decided by nothing better than the
-        order the batch happened to open them in. That is also what makes `accepted` exact: what it
+        `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` reads it through the
+        control-flow graphs, which are built from the tree as it stands and are dropped the moment
+        it moves — so a plan that emptied a `catch` body would change the answer for the `try`
+        body's plan, and which plan that is would be decided by nothing better than the order the
+        batch happened to open them in. That is also what makes `accepted` exact: what it
         reported is what commits. `_restore` says why the repairs come last.
 
         Nothing that did not land is repaired. A rewrite the field refused is a replacement that was

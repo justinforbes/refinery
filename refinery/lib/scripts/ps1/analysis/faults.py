@@ -107,11 +107,7 @@ class Ps1FaultReach:
         located = self._control_flow.locate(node)
         if located is None:
             return UNPLACED
-        graph, start = located
-        remembered = self._forward.get(id(start))
-        if remembered is None:
-            remembered = self._forward[id(start)] = self._route(graph, start)
-        return remembered
+        return self._routing(*located)
 
     def points_in(self, node: Node) -> Iterator[Node]:
         """
@@ -128,10 +124,8 @@ class Ps1FaultReach:
         A construct that yields nothing at all is one the graphs model nowhere, and a caller reads
         that as a subtree it cannot judge rather than as one that raises nothing.
         """
-        if self._control_flow.node_of(node) is not None:
-            yield node
         for inner in node.walk():
-            if inner is not node and self._control_flow.node_of(inner) is not None:
+            if self._control_flow.node_of(inner) is not None:
                 yield inner
 
     def observed_at(self, node: Node) -> bool:
@@ -154,15 +148,21 @@ class Ps1FaultReach:
         over when called at script scope abandons its remaining statements and runs the `catch` of a
         `try` written around the *call*, however many bodies deep the raise is. So a raise in a body
         something may call is refused wherever the script holds a handler that acts — and granted
-        where it holds none, since a `catch` that is not written cannot be the one guarding the call.
+        where it holds none, since a `catch` that is not written cannot be the one guarding the
+        call.
         """
         located = self._control_flow.locate(node)
         if located is None:
             return True
-        graph, _ = located
-        routing = self.routing_at(node)
-        if routing is None:
-            return True
+        graph, start = located
+        return self._reading_is_observed(graph, self._routing(graph, start))
+
+    def _reading_is_observed(self, graph: ControlFlowGraph, routing: Ps1FaultRouting) -> bool:
+        """
+        Whether an error routed like *routing* out of *graph* changes what runs. The one reading of
+        a routing there is, so that the position question, the arrival question `_observed_from`
+        asks of a fallback, and anything later that reads a routing cannot answer it three ways.
+        """
         if any(handler_acts(handler) for handler in routing.handlers):
             return True
         if routing.leaves_the_body and any(
@@ -175,10 +175,11 @@ class Ps1FaultReach:
 
     def _handled_elsewhere(self, body: ControlFlowGraph) -> bool:
         """
-        Whether this script writes a handler that acts in some body other than *body*. What guards a
-        call is unknowable from the called body's graph, and this is what settles it in the direction
-        of a grant: a handler written in the very body that raises is one the error has already got
-        past, and a script with none anywhere else has no call site the raise could matter at.
+        Whether this script writes a handler that acts in some body other than *body*. What guards
+        a call is unknowable from the called body's graph, and this is what settles it in the
+        direction of a grant: a handler written in the very body that raises is one the error has
+        already got past, and a script with none anywhere else has no call site the raise could
+        matter at.
 
         A named block is not a body of its own here, which is why the comparison is per graph: a
         `trap` in `begin` and a raise in `process` share one script block, and neither guards the
@@ -221,6 +222,14 @@ class Ps1FaultReach:
         crosses other handlers, because a `catch` that misses hands the error on and the statement
         that raised it is behind that clause rather than at it.
 
+        **What the handler itself emits is deliberately not asked here**, and it is a hole: a body
+        that writes runs exactly when the handler is offered an error, so `trap { 'h' }` beside a
+        raise puts `h` on the output stream where an unhandled error writes only its record — and
+        this reports it removable. Asking `handler_acts` of the handler under test closes it and
+        costs the injected-noise shape `refinery.lib.scripts.ps1.deobfuscation.deadcode`
+        deliberately drops, because `_raisers` counts every statement the block offers rather than
+        every statement that may raise. The two are one question and it is not settled here.
+
         **And what it would fall back to has to act.** Deleting a handler sends its errors to
         whatever the graph records as its fallback, so the question is asked again there: an empty
         `catch` beside it swallows exactly as it did, and a `trap` at script scope with nothing
@@ -230,13 +239,20 @@ class Ps1FaultReach:
 
         **A `trap` set that may decline is load bearing for declining**, not only for handling. It
         is what turns an error 5.1 would report and step over into one that ends the body, so
-        deleting it starts running everything written after the raise — `trap [System.IO.IOException]
-        { }` guards nothing and is still the whole reason a script stops where it does.
+        deleting it starts running everything written after the raise:
+
+            trap [System.IO.IOException] { }
+
+        guards nothing and is still the whole reason a script stops where it does.
         """
         located = self._control_flow.locate(handler)
         if located is None:
             return True
         graph, start = located
+        if start.element is not handler:
+            # The climb left the handler behind, so the node this would answer about stands for the
+            # statement around it and every question below reads the wrong element.
+            return True
         remembered = self._backward.get(id(start))
         if remembered is None:
             remembered = self._backward[id(start)] = self._removal_matters(graph, start)
@@ -245,8 +261,9 @@ class Ps1FaultReach:
     def _removal_matters(self, graph: ControlFlowGraph, start: CfgNode) -> bool:
         if not self._raisers(graph, start):
             return False
-        routing = self._route(graph, start)
-        if isinstance(start.element, Ps1TrapStatement) and routing.leaves_the_body:
+        element = start.element
+        routing = self._routing(graph, start)
+        if isinstance(element, Ps1TrapStatement) and routing.leaves_the_body:
             return True
         if any(handler_acts(handler) for handler in routing.handlers):
             return True
@@ -258,17 +275,24 @@ class Ps1FaultReach:
     def _observed_from(self, graph: ControlFlowGraph, arrival: CfgNode) -> bool:
         """
         Whether an error arriving at *arrival* changes what runs: *arrival* is a handler that acts,
-        or the routing onward from it reaches one.
+        or the routing onward from it is one `_reading_is_observed` calls observable — including the
+        body boundary, because an error that gets past *arrival* is the caller's exactly as one
+        raised at a position is.
         """
         element = arrival.element
         if isinstance(element, (Ps1CatchClause, Ps1TrapStatement)) and handler_acts(element):
             return True
-        routing = self._route(graph, arrival)
-        if any(handler_acts(reached) for reached in routing.handlers):
-            return True
-        return routing.leaves_the_body and any(
-            isinstance(reached, Ps1TrapStatement) for reached in routing.handlers
-        )
+        return self._reading_is_observed(graph, self._routing(graph, arrival))
+
+    def _routing(self, graph: ControlFlowGraph, start: CfgNode) -> Ps1FaultRouting:
+        """
+        The routing out of *start*, remembered for the life of this model. Every reader goes through
+        here so that a node's closure is walked once however many questions are asked about it.
+        """
+        remembered = self._forward.get(id(start))
+        if remembered is None:
+            remembered = self._forward[id(start)] = self._route(graph, start)
+        return remembered
 
     def _route(self, graph: ControlFlowGraph, start: CfgNode) -> Ps1FaultRouting:
         handlers: list[Ps1CatchClause | Ps1TrapStatement] = []

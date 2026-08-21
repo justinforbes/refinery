@@ -15,8 +15,8 @@ from refinery.lib.scripts import (
     _clone_node,
 )
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
-from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow
+from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
     binding_key,
@@ -742,13 +742,14 @@ class Ps1ConstantInlining(Transformer):
         # changed, which drops the cache, so a per-site lookup would rebuild the control-flow graphs
         # of the whole script once per inlined variable. Nothing this pass adds or removes is a
         # statement, so the graphs it would rebuild are the graphs it already has.
-        flow = model_cache(self, node).variable_flow
+        cache = model_cache(self, node)
+        flow, faults = cache.variable_flow, cache.faults
         table = _ConstantTable(node)
         if not table:
             return None
         state = _Inlining(table, flow, self._blocked_by_expansion(node, table))
         self._substitute(node, state)
-        self._remove_dead_assignments(table, state, model_cache(self, node).faults)
+        self._remove_dead_assignments(table, state, faults)
         return None
 
     def _blocked_by_expansion(self, root: Node, table: _ConstantTable) -> set[str]:

@@ -4,9 +4,11 @@ from inspect import cleandoc
 
 from test import TestBase
 
+from refinery.lib.scripts import Statement
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach, build_fault_reach, handler_acts
-from refinery.lib.scripts.ps1.model import Ps1Script
+from refinery.lib.scripts.ps1.ast import get_body
+from refinery.lib.scripts.ps1.model import Ps1Script, Ps1TrapStatement
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -161,6 +163,54 @@ class TestPs1FaultLeavesTheBody(TestBase):
         elsewhere = _parse("'z'").body[0]
         self.assertIsNone(reach.routing_at(elsewhere))
         self.assertTrue(reach.leaves_the_body(elsewhere))
+
+
+class TestPs1ATrapDisposesOfTheErrorWhateverConstructEnclosesItsBlock(TestBase):
+    """
+    A `trap` body is a scope of its own for `break` and `continue`, so what the set does with an
+    error is decided by the body alone and not by the loop or `switch` the guarded block happens to
+    be written inside. Measured on 5.1: a `trap { break }` written in a `while` body stops the
+    script where the raise is, exactly as one written at script scope does, and a
+    `trap { continue }` written there resumes at the statement after the raise on every iteration.
+    """
+
+    _SPELLINGS = [
+        "trap { %s }\n'a'",
+        "while ($c) {\n  trap { %s }\n  'a'\n}",
+        "do {\n  trap { %s }\n  'a'\n} while ($c)",
+        "for ($i = 0; $i -lt 3; $i++) {\n  trap { %s }\n  'a'\n}",
+        "foreach ($i in $x) {\n  trap { %s }\n  'a'\n}",
+        "switch ($x) {\n  1 {\n    trap { %s }\n    'a'\n  }\n}",
+    ]
+
+    def _trap_and_the_raise_it_guards(
+        self, source: str
+    ) -> tuple[Ps1FaultReach, Ps1TrapStatement, Statement]:
+        tree, reach = _model(source)
+        for node in tree.walk_in_order():
+            if isinstance(node, Ps1TrapStatement):
+                block = get_body(node.parent)
+                if block is not None:
+                    return reach, node, block[1]
+        self.fail('no trap of this script is written in a statement block')
+
+    def test_a_trap_that_breaks_lets_the_raise_past_wherever_its_block_is_written(self):
+        for spelling in self._SPELLINGS:
+            source = spelling % 'break'
+            with self.subTest(source):
+                reach, trap, raised = self._trap_and_the_raise_it_guards(source)
+                self.assertEqual(reach.routing_at(raised).handlers, (trap,))
+                self.assertTrue(reach.leaves_the_body(raised))
+                self.assertTrue(reach.observed_at(raised))
+
+    def test_a_trap_that_continues_keeps_the_raise_wherever_its_block_is_written(self):
+        for spelling in self._SPELLINGS:
+            source = spelling % 'continue'
+            with self.subTest(source):
+                reach, trap, raised = self._trap_and_the_raise_it_guards(source)
+                self.assertEqual(reach.routing_at(raised).handlers, (trap,))
+                self.assertFalse(reach.leaves_the_body(raised))
+                self.assertFalse(reach.observed_at(raised))
 
 
 class TestPs1HandlerActs(TestBase):

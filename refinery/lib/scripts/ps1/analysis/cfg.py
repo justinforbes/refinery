@@ -175,7 +175,9 @@ class _TrapBody:
 
     `rethrows` is decided through the builder's jump-target stack rather than by finding the
     keyword: a `break` naming a loop written inside the body leaves that loop, and the `trap` goes
-    on swallowing.
+    on swallowing. The stack the body is built against holds nothing from outside it — see
+    `_Builder.block` — because a `trap` body is a scope of its own and a jump in it can name no
+    construct the block is written inside.
     """
     resumes: list[CfgNode] = field(default_factory=list)
     rethrows: bool = False
@@ -221,6 +223,14 @@ class _Builder(CfgBuilder):
         the body exit: the error ends the body, which is the one place a `trap` turns a fault that
         would have been reported and stepped over into one that stops everything after it.
 
+        **A trap body is built against an empty jump-target stack**, because 5.1 compiles one as a
+        scope of its own: `break` in it ends the trap and rethrows, and `continue` in it resumes the
+        guarded block, whatever loop or `switch` the block itself is written inside. Leaving the
+        enclosing construct's targets in place resolves both keywords to that construct instead —
+        the `break` stops being a rethrow, so the set reads as swallowing an error that in fact ends
+        the body, and the `continue` becomes a back-jump, so the resumption the trap exists to
+        create is never wired at all.
+
         `continue` inside a trap resumes at the statement following the one that threw, which is a
         shape this graph cannot express exactly. Every resumption point is therefore taken to reach
         *every* node the block created (`_link_resumptions`), which is the over-approximation: it
@@ -240,6 +250,10 @@ class _Builder(CfgBuilder):
         resumes: list[CfgNode] = []
         escapes = True
         enclosing = self._trap_body
+        outer_targets = self._targets
+        outer_label = self._pending_label
+        self._targets = []
+        self._pending_label = None
         self._handlers.append(self.unwinding())
         for trap, handler in zip(traps, entries):
             self._trap_body = built = _TrapBody()
@@ -248,6 +262,8 @@ class _Builder(CfgBuilder):
                 escapes = False
         self._handlers.pop()
         self._trap_body = enclosing
+        self._targets = outer_targets
+        self._pending_label = outer_label
         self.close_handler_set(entries, escapes=escapes)
         guarded_from = len(self.cfg.nodes)
         self._handlers.append(entries[0])

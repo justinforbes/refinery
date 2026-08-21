@@ -8,6 +8,7 @@ from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model, build_ps1_control_flow
 from refinery.lib.scripts.ps1.analysis.model import build_semantic_model
+from refinery.lib.scripts.ps1.ast import get_body
 from refinery.lib.scripts.ps1.model import (
     Ps1BreakStatement,
     Ps1ContinueStatement,
@@ -49,6 +50,8 @@ _CORPUS = [
     "trap { continue }\n'a'",
     "trap { break }\n'a'",
     "trap { :t while ($true) { break t } }\n'a'",
+    "while ($c) { trap { break }\n'a' }",
+    "while ($c) { trap { continue }\n'a' }",
     "trap { 'h' }\ntrap [System.IO.IOException] { 'i' }\n'a'",
     "if ($c) { trap { 'h' }\n'a' }\n'b'",
     "trap { 'h' }\nif ($c) { 'a' }\n'b'",
@@ -130,6 +133,29 @@ class TestPs1ControlFlowGraph(TestBase):
                 reached.add(target)
                 stack.append(target)
         return reached
+
+    def _the_block_a_trap_is_written_in(self, tree: Ps1Script) -> list:
+        for node in tree.walk_in_order():
+            if isinstance(node, Ps1TrapStatement):
+                block = get_body(node.parent)
+                if block is not None:
+                    return block
+        self.fail('no trap of this script is written in a statement block')
+
+    @staticmethod
+    def _reached_without(start: CfgNode, barrier: CfgNode) -> set[int]:
+        """
+        The nodes forward-reachable from *start* along paths that never enter *barrier*.
+        """
+        seen = {id(start), id(barrier)}
+        stack = [start]
+        while stack:
+            for successor in stack.pop().successors:
+                if id(successor) not in seen:
+                    seen.add(id(successor))
+                    stack.append(successor)
+        seen.discard(id(barrier))
+        return seen
 
     def test_every_graph_is_internally_consistent(self):
         for source in _CORPUS:
@@ -395,6 +421,49 @@ class TestPs1ControlFlowGraph(TestBase):
             self._handlers(graph, inner.body[0]),
         )
 
+    def test_a_trap_that_breaks_rethrows_wherever_the_block_it_guards_is_written(self):
+        """
+        `break` inside a `trap` body ends the trap and hands the error on, whatever construct the
+        guarded block is written inside. Measured on 5.1: a `trap { break }` written in a `while`
+        body stops the script at the raise, exactly as one written at script scope does.
+        """
+        for source in [
+            "trap { break }\n'a'",
+            "while ($c) { trap { break }\n'a' }",
+            "do { trap { break }\n'a' } while ($c)",
+            "for ($i = 0; $i -lt 3; $i++) { trap { break }\n'a' }",
+            "foreach ($i in $x) { trap { break }\n'a' }",
+            "switch ($x) { 1 { trap { break }\n'a' } }",
+        ]:
+            with self.subTest(source):
+                tree, graph = self._tree_and_graph(source)
+                guarded = self._the_block_a_trap_is_written_in(tree)
+                self.assertEqual(
+                    self._reached_by_an_error_at(graph, guarded[1]),
+                    self._handlers(graph, guarded[0]) | {graph.exit},
+                )
+
+    def test_a_trap_that_continues_resumes_inside_the_iteration_that_raised(self):
+        """
+        `continue` inside a `trap` body resumes the guarded block at the statement after the one
+        that threw rather than starting the next iteration of the loop the block is written in.
+        Measured on 5.1: every iteration of a `while` whose body raises under `trap { continue }`
+        runs the statements written after the raise.
+        """
+        for source in [
+            "while ($c) { trap { continue }\n'a'\n'b' }",
+            "foreach ($i in $x) { trap { continue }\n'a'\n'b' }",
+            "switch ($x) { 1 { trap { continue }\n'a'\n'b' } }",
+        ]:
+            with self.subTest(source):
+                tree, graph = self._tree_and_graph(source)
+                guarded = self._the_block_a_trap_is_written_in(tree)
+                jump = self._node_for(graph, Ps1ContinueStatement)
+                head = self._required_node(graph, tree.body[0])
+                reached = self._reached_without(jump, head)
+                self.assertIn(id(self._required_node(graph, guarded[1])), reached)
+                self.assertIn(id(self._required_node(graph, guarded[2])), reached)
+
     def test_a_trap_set_that_may_decline_the_error_lets_it_leave_the_body(self):
         for source in [
             "trap [System.IO.IOException] { 'h' }\n'a'",
@@ -526,6 +595,33 @@ class TestPs1ControlFlowGraph(TestBase):
         second = graph.node_of(clauses[1])
         self.assertIn(second, first.successors)
         self.assertTrue(graph.is_exceptional(first, second))
+
+    def test_a_trap_that_declines_hands_the_error_to_the_trap_written_after_it(self):
+        """
+        The counterfactual of a handler is where its errors would go if it were not written, and a
+        set is consulted in order, so for every member but the last that is the member after it.
+        """
+        tree, graph = self._tree_and_graph(
+            "trap { 'o' }\nif ($c) { trap { 'a' }\ntrap { 'b' }\n'x' }")
+        first, second = tree.body[1].clauses[0][1].body[:2]
+        self.assertIs(
+            graph.fallback_of(self._required_node(graph, first)),
+            self._required_node(graph, second),
+        )
+        self.assertIs(
+            graph.fallback_of(self._required_node(graph, second)),
+            self._required_node(graph, tree.body[0]),
+        )
+
+    def test_a_catch_clause_that_declines_hands_the_error_to_the_clause_written_after_it(self):
+        tree, graph = self._tree_and_graph(
+            "try { 'x' } catch [System.IO.IOException] { 'a' } catch { 'b' }")
+        first, second = tree.body[0].catch_clauses
+        self.assertIs(
+            graph.fallback_of(self._required_node(graph, first)),
+            self._required_node(graph, second),
+        )
+        self.assertIs(graph.fallback_of(self._required_node(graph, second)), graph.exit)
 
     def test_a_switch_of_empty_clauses_stays_linear_in_the_number_of_clauses(self):
         """

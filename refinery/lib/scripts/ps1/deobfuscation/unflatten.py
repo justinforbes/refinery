@@ -13,11 +13,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Generator, NamedTuple
 
 from refinery.lib.scripts import Block, Node, Statement, Transformer
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS
 from refinery.lib.scripts.ps1.deobfuscation.emulator import evaluate_truthy
 from refinery.lib.scripts.ps1.deobfuscation.helpers import inside_value_producing_context
-from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
 from refinery.lib.scripts.ps1.model import (
     Expression,

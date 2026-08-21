@@ -117,7 +117,8 @@ class TestPs1ATrapWhoseTypeFilterMissesTheErrorEndsTheScript(_Ps1FaultEscalation
     anything written after the raise, whether the body is empty or writes to the host. Deleting the
     raise starts running the rest of the script.
 
-    The deobfuscator reads a `trap` it cannot match as no `trap` at all and deletes the raise.
+    The deobfuscator used to read a `trap` it could not match as no `trap` at all and delete the
+    raise.
     """
 
     def test_a_raising_cast_under_an_empty_trap_whose_filter_misses_is_kept(self):
@@ -141,8 +142,8 @@ class TestPs1ATrapBodyThatReachesBreakEndsTheScript(_Ps1FaultEscalation):
     Nothing written after the raise runs, so deleting the raise starts running it. The one-word
     variant of the same `trap` that reaches `continue` instead is licensed to lose the raise.
 
-    The deobfuscator reads no `trap` body when it decides a removal, so it deletes the raise and the
-    `trap` with it and lets the script run to its end.
+    The deobfuscator used to read no `trap` body when it decided a removal, so it deleted the raise
+    and the `trap` with it and let the script run to its end.
     """
 
     def test_a_raising_cast_under_a_trap_that_breaks_is_kept(self):
@@ -216,8 +217,8 @@ class TestPs1ATypedCatchThatMissesDoesNotShieldAnEnclosingCatch(_Ps1FaultEscalat
     passes it on to the enclosing `catch`, whose body then runs. The raise is what makes that
     handler run and must survive.
 
-    The deobfuscator reads any `catch` written around the raise as taking it, deletes the raise, and
-    leaves the enclosing handler with nothing that can reach it.
+    The deobfuscator used to read any `catch` written around the raise as taking it, delete the
+    raise, and leave the enclosing handler with nothing that could reach it.
     """
 
     def test_a_raising_cast_a_missing_filter_passes_to_a_live_outer_catch_is_kept(self):
@@ -303,8 +304,8 @@ class TestPs1ATrapGuardsTheBlockItIsWrittenIn(_Ps1FaultEscalation):
     live `trap` is what makes that `trap` run, and a raise beside the inner of two live traps is
     what makes the inner one run and the outer one not.
 
-    The deobfuscator never consults a `trap` when it decides a removal, so it deletes the raise in
-    both and keeps handlers nothing can trigger.
+    The deobfuscator used to consult no `trap` when it decided a removal, so it deleted the raise in
+    both and kept handlers nothing could trigger.
     """
 
     def test_a_raising_cast_beside_a_live_trap_in_the_same_nested_block_is_kept(self):
@@ -620,8 +621,8 @@ class TestPs1ATrapTakesTheErrorsOfTheNamedBlockItIsWrittenIn(_Ps1FaultEscalation
     as a live `trap` is what makes that `trap` run, and execution then resumes at the next statement
     of that block, so both the raise and what follows it survive.
 
-    The deobfuscator never consults a `trap` when it decides a removal, so it deletes the raise from
-    either block and keeps a handler nothing can trigger.
+    The deobfuscator used to consult no `trap` when it decided a removal, so it deleted the raise
+    from either block and kept a handler nothing could trigger.
     """
 
     def test_a_raising_cast_beside_a_live_trap_in_the_same_process_block_is_kept(self):
@@ -683,4 +684,57 @@ class TestPs1ATrapInAnotherNamedBlockLeavesTheRaiseRemovable(_Ps1FaultEscalation
               }}
             }}
             Invoke-Thing
+        """)
+
+
+class TestPs1ATrapInAFunctionOutlivesTheRaiseWhereAHandlerMayGuardTheCall(_Ps1FaultEscalation):
+    """
+    An error that gets past a function's own handlers is the caller's, so a `trap` written in a
+    function decides what a `try` around the *call* sees. Measured on 5.1: the function below runs
+    to its end with the `trap` written in it, and hands the error to the `catch` around the call
+    without it, so the two scripts write different things to the host.
+
+    The raise itself may go either way: the `trap` takes it and the statement after it runs whether
+    or not it is written, which is what makes the `trap` the whole of what is at stake here.
+    """
+
+    def test_a_trap_in_a_function_a_guarded_call_reaches_is_kept(self):
+        self._assertDeobfuscatesTo(F"""
+            function Invoke-Thing {{
+              trap {{ continue }}
+              {_RAISE}
+              {_FOLLOWER}
+            }}
+            try {{
+              Invoke-Thing
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, F"""
+            function Invoke-Thing {{
+              trap {{ continue }}
+              {_FOLLOWER}
+            }}
+            try {{
+              Invoke-Thing
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_the_same_trap_is_removed_where_the_script_holds_no_handler_at_all(self):
+        self._assertDeobfuscatesTo(F"""
+            function Invoke-Thing {{
+              trap {{ continue }}
+              {_RAISE}
+              {_FOLLOWER}
+            }}
+            Invoke-Thing
+            {_ANCHOR}
+        """, F"""
+            function Invoke-Thing {{
+              {_FOLLOWER}
+            }}
+            Invoke-Thing
+            {_ANCHOR}
         """)

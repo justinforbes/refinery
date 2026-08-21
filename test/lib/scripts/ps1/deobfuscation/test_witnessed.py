@@ -558,7 +558,8 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
         self._assertWitnessed(
             [_ESCALATION, _SWALLOWING_TRAP],
             patch.object(faults.Ps1FaultReach, 'observed_at', _observed_at_reading_only_what_acts),
-            notices='test_a_raise_guarded_by_a_typed_trap_is_observed_because_the_set_may_decline_it')
+            notices=(
+                'test_a_raise_guarded_by_a_typed_trap_is_observed_because_the_set_may_decline_it'))
 
     def test_judging_a_handler_by_the_transpose_is_witnessed(self):
         # Both directions of the confusion, so that neither reads as the mutation merely refusing

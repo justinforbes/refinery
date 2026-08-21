@@ -21,8 +21,10 @@ from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ExpressionStatement,
     Ps1ParenExpression,
+    Ps1TrapStatement,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
+from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
 
 
 def _faults(node):
@@ -294,6 +296,32 @@ class TestPs1IterativeRemoval(TestPs1):
         self.assertIn('appdata', result.lower())
 
 
+class TestPs1AScriptIsNeverPrunedToNothing(TestPs1):
+    """
+    A script that is nothing but a bare value still emits that value, so the root body may not be
+    emptied. A `trap` left standing beside the value is machinery for the statements around it
+    rather than one of them, and a body holding nothing else runs nothing at all.
+    """
+
+    def _content_beside_the_traps(self, source: str) -> str:
+        script = Ps1Parser(self._deobfuscate_iterative(source)).parse()
+        set_child_list(script, 'body', [
+            statement for statement in script.body if not isinstance(statement, Ps1TrapStatement)
+        ])
+        return Ps1Synthesizer().convert(script)
+
+    def test_the_only_value_a_script_emits_survives_an_injected_noise_trap(self):
+        for trap in [
+            'trap { break }',
+            'trap { continue }',
+            'trap { }',
+            "trap [System.IO.IOException] { 'h' }",
+            'trap [System.IO.IOException] { continue }',
+        ]:
+            with self.subTest(trap):
+                self.assertEqual(self._content_beside_the_traps(F"{trap}\n'a'"), "'a'")
+
+
 class TestPs1RemovalReportsWhatItDid(TestPs1):
     def _edit(self, source: str, transform):
         ast = Ps1Parser(cleandoc(source)).parse()
@@ -531,6 +559,67 @@ class TestPs1DeadCodeEliminationDoesNotUnhookAHandler(TestPs1):
             } catch { }
         """), Ps1DeadCodeElimination)
         self.assertNotIn('trap', result)
+
+
+class TestPs1DeadCodeEliminationDoesNotCarryATrapOutOfItsBlock(TestPs1):
+    """
+    A `trap` guards the statement block it is written in and nothing around it, so a pass that
+    resolves a construct into the statements of one of its blocks must leave a block that declares
+    one alone. Measured on 5.1: a raise written after
+    `if ($True) { trap { Write-Host 'TRAP_RAN' }; Write-Host 'inside' }` never runs that trap body,
+    and the same trap hoisted to script scope runs it.
+    """
+
+    def test_a_trap_written_in_a_branch_the_pass_would_resolve_keeps_that_branch(self):
+        self._assertUnchanged(cleandoc("""
+            if ($True) {
+              trap {
+                Write-Host 'TRAP_RAN'
+              }
+              Write-Host 'inside'
+            }
+            Write-Host 'AFTER'
+        """), Ps1DeadCodeElimination)
+
+    def test_a_trap_written_in_a_finally_body_keeps_its_construct(self):
+        self._assertUnchanged(cleandoc("""
+            try {
+              42
+            } finally {
+              trap {
+                Write-Host 'TRAP_RAN'
+              }
+              Write-Host 'cleanup'
+            }
+            Write-Host 'AFTER'
+        """), Ps1DeadCodeElimination)
+
+    def test_the_same_branch_without_a_trap_is_resolved_into_the_statements_it_holds(self):
+        result = self._apply(cleandoc("""
+            if ($True) {
+              Write-Host 'inside'
+            }
+            Write-Host 'AFTER'
+        """), Ps1DeadCodeElimination)
+        self.assertEqual(result, cleandoc("""
+            Write-Host 'inside'
+            Write-Host 'AFTER'
+        """))
+
+    def test_the_same_construct_without_a_trap_is_resolved_into_the_blocks_it_holds(self):
+        result = self._apply(cleandoc("""
+            try {
+              42
+            } finally {
+              Write-Host 'cleanup'
+            }
+            Write-Host 'AFTER'
+        """), Ps1DeadCodeElimination)
+        self.assertEqual(result, cleandoc("""
+            42
+            Write-Host 'cleanup'
+            Write-Host 'AFTER'
+        """))
 
 
 class TestPs1ACallThatWritesNothingGoesOnlyWhereNothingObservesIt(TestPs1):

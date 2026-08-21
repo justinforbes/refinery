@@ -333,12 +333,19 @@ class CfgBuilder:
 
         Called once the set's bodies are built and the set itself is off the handler stack, so that
         `unwinding` names what guards the *construct* rather than the set being closed.
+
+        A member that is not the last one falls back to the member after it and not to what guards
+        the construct, because the engine consults the set in order: a throw the first clause
+        declines is offered to the second, which is also where it would go if the first were not
+        written. Recording the construct's fallback for every member reads one clause's
+        counterfactual off another's, and a set whose later member acts then looks deletable.
         """
-        fallback = self.unwinding()
-        for entry in entries:
-            self.cfg._fallback[id(entry)] = fallback
+        outward = self.unwinding()
+        for index, entry in enumerate(entries):
+            following = entries[index + 1] if index + 1 < len(entries) else outward
+            self.cfg._fallback[id(entry)] = following
         if escapes and entries:
-            self.exceptional_edge(entries[-1], fallback)
+            self.exceptional_edge(entries[-1], outward)
 
     def unwinding(self) -> CfgNode:
         """

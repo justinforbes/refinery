@@ -279,9 +279,15 @@ def _watched_run() -> _Observations:
     that went stale the moment the veto learned to ask a second question: the fault routing, the
     transpose a `trap` needs, and the emptiness policy are three questions now, and a pass credited
     through one of them would have gone uncredited by an observer over another.
+
+    **One refusal `_vetoed` makes is deliberately not credited**: declining to delete a `trap`,
+    which is the transpose and involves no `try`, no acting `catch` and no guarded body at all. A
+    pass whose only exercise is deleting a load-bearing handler at script scope has never been put
+    in front of the shape this ratchet exists to require, and crediting it would report green for
+    the same reason the string-matching reading did — a proxy that fires where the thing does not.
     """
     from refinery.lib.scripts.ps1.parser import Ps1Parser
-    from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
+    from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan, _removes_a_handler
 
     active: list[str] = []
     fired: set[str] = set()
@@ -290,13 +296,16 @@ def _watched_run() -> _Observations:
     emptied = Ps1RemovalPlan._empties_a_protected_body
     build = Ps1Parser.__init__
 
-    def refusing(refusal):
+    def refusing(refusal, credits=lambda argument: True):
         def refused(self, argument):
             answer = refusal(self, argument)
-            if answer and active:
+            if answer and active and credits(argument):
                 fired.add(active[-1])
             return answer
         return refused
+
+    def declines_a_faulting_statement(proposal) -> bool:
+        return not _removes_a_handler(proposal.statement)
 
     def recording(self, source, *args, **kwargs):
         if isinstance(source, str):
@@ -313,7 +322,8 @@ def _watched_run() -> _Observations:
         return visiting
 
     with ExitStack() as stack:
-        stack.enter_context(patch.object(Ps1RemovalPlan, '_vetoed', refusing(vetoed)))
+        stack.enter_context(patch.object(
+            Ps1RemovalPlan, '_vetoed', refusing(vetoed, declines_a_faulting_statement)))
         stack.enter_context(
             patch.object(Ps1RemovalPlan, '_empties_a_protected_body', refusing(emptied)))
         stack.enter_context(patch.object(Ps1Parser, '__init__', recording))

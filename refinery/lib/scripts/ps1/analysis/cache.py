@@ -17,11 +17,11 @@ from refinery.lib.scripts.modelcache import ModelCacheBase
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, build_block_model
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, build_call_graph
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
-from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach, build_fault_reach
 from refinery.lib.scripts.ps1.analysis.commands import Ps1CommandModel, build_command_model
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow, build_variable_flow
 from refinery.lib.scripts.ps1.analysis.dominance import build_dominance
 from refinery.lib.scripts.ps1.analysis.effects import Ps1OutputFlow, build_output_flow
+from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach, build_fault_reach
 from refinery.lib.scripts.ps1.analysis.model import Ps1SemanticModel, build_semantic_model
 from refinery.lib.scripts.ps1.analysis.world import (
     Ps1TypeWorld,
@@ -40,6 +40,7 @@ class Ps1ModelCache(ModelCacheBase):
     `refinery.lib.scripts.ps1.analysis.callgraph.Ps1CallGraph`, the
     `refinery.lib.scripts.ps1.analysis.effects.Ps1OutputFlow`, the
     `refinery.lib.scripts.analysis.cfg.ControlFlowModel`, the
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach`, the
     `refinery.lib.scripts.ps1.analysis.blocks.Ps1BlockModel` and the
     `refinery.lib.scripts.analysis.cycles.CycleModel` derived from it — each dropped
     whenever this root's AST-mutation counter advances past the value it was built at.

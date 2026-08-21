@@ -554,10 +554,12 @@ class Ps1JunkStatementRemoval(Transformer):
         against the **pre-veto** survivors, which is the polarity they require — see
         `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`.
 
-        A `DISCARD` emits nothing and is always safe to drop wherever the body's output goes, even
-        when it empties the body; that is what turns a junk function inert. An `OUTPUT` writes a
-        value someone could see, and dropping it needs three separate things to hold, none of which
-        implies another:
+        A `DISCARD` emits nothing wherever the body's output goes, so nothing about the output makes
+        one worth keeping and a body of them turns a junk function inert. It is not by itself a
+        licence to drop, because emission is all it claims: a call returning `System.Void` emits as
+        little as a discard idiom and can still raise, which is the removal veto's to weigh and not
+        this. An `OUTPUT` writes a value someone could see, and dropping it needs three separate
+        things to hold, none of which implies another:
 
         - the caller asks for it, which is `bare_output_is_preserved` read the other way round;
         - the value provably reaches the host and nothing else, which is `sink`. A body whose writes

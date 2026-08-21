@@ -14,9 +14,9 @@ once over the whole script and held in a
 different thing, and no one of them may stand in for another:
 
 - whether it performs a side effect — `statement_effect`;
-- whether it may *throw* — `is_fault_free`, a closed allow-list that answers `False` for everything
-  it does not recognize. Purity is not this question: `is_side_effect_free` accepts `[Int]$x` and
-  `$a / $b`, both of which raise;
+- whether it may *throw* — `is_fault_free`, which grants what the value domain computes and what a
+  syntactic allow-list names, and answers `False` for everything else. Purity is not this question:
+  `is_side_effect_free` accepts `[Int]$x` and `$a / $b`, both of which raise;
 - where the value it writes to the output stream is read — `output_sink` positionally, and
   `Ps1OutputFlow` through the call graph, which is the only one that can see past a function
   boundary.
@@ -97,6 +97,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1SwitchStatement,
+    Ps1TrapStatement,
     Ps1TryCatchFinally,
     Ps1TypeExpression,
     Ps1UnaryExpression,
@@ -1082,14 +1083,15 @@ def may_be_dropped(node, world: Ps1WorldReach) -> bool:
     `try { $r = @(1, [Int]'abc')[0] } catch { <payload> }` keeps a handler the drop would otherwise
     leave unreachable.
 
-    **As the two predicates stand the fault half is the narrower, and it is the only one a test can
-    see refuse.** `is_fault_free` is a closed allow-list of constants and containers of constants,
-    and nothing it admits does anything, so today it refuses everything purity refuses and more.
-    Purity is asked anyway because that containment is a fact about the current allow-lists rather
-    than about the question: an `is_fault_free` widened to admit an increment on a variable it has
-    typed would start answering yes to work. The conjunction lives here, under one name, so that
-    the guard a caller installs is one thing a probe can mutate rather than a pair whose second
-    half nothing can be shown to notice.
+    **The fault half is still the narrower of the two, and it is the only one a test can see
+    refuse.** What `is_fault_free` grants is a constant, a container of constants, and whatever the
+    value domain can compute — none of which does anything — so it goes on refusing everything
+    purity refuses and more. Purity is asked anyway because that containment is a fact about what
+    the two currently reach rather than about the question, and the fault half has already been
+    widened once: the domain arm admits `6 * 7` and `[Int]'42'`, and an arm admitting an increment
+    on a variable it has typed would start answering yes to work. The conjunction lives here, under
+    one name, so that the guard a caller installs is one thing a probe can mutate rather than a pair
+    whose second half nothing can be shown to notice.
     """
     return is_side_effect_free(node, world) and is_fault_free(node)
 
@@ -1816,9 +1818,10 @@ def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
     **This is not the question asked before a handler is deleted.** A `trap` cannot raise, so
     nothing about its own position decides anything: what a removal changes is where the errors of
     *other* statements go, and that is the transpose,
-    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.removing_a_handler_is_observed`. Nor is it
-    the question asked before a guarded body is emptied, which is `emptying_unhooks_a_handler` — a
-    policy about what a listing should still show rather than a claim about what runs.
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.removing_a_handler_is_observed`.
+    Nor is it the question asked before a guarded body is emptied, which is
+    `emptying_unhooks_a_handler` — a policy about what a listing should still show rather than a
+    claim about what runs.
     """
     judged = False
     for site in faults.points_in(stmt):
@@ -1882,8 +1885,17 @@ def pruning_erases_body(node, survivors: Sequence[Node]) -> bool:
     hold freshly synthesized statements that are not parented into a body yet, and statements
     hoisted out of a pruned block still point at the block they came from; answering this kind of
     question by walking `parent` is what used to delete live return values.
+
+    **A `trap` left standing is not something that survived**, for the reason
+    `refinery.lib.scripts.ps1.deobfuscation.unused.Ps1JunkStatementRemoval` does not count a
+    definition: it is machinery for the statements around it rather than one of them, and a body
+    holding nothing else runs nothing at all. Counting one let `trap { break }` beside a bare `'a'`
+    erase the whole script in two steps — this pass deleted `'a'` because the `trap` looked like a
+    survivor, and the next deleted the `trap` because nothing raised into it any more.
     """
-    return not survivors and isinstance(node, Ps1Script)
+    return isinstance(node, Ps1Script) and not any(
+        not isinstance(statement, Ps1TrapStatement) for statement in survivors
+    )
 
 
 def _param_block_is_inert(

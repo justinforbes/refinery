@@ -747,11 +747,14 @@ class Ps1DeadCodeElimination(Transformer):
     @staticmethod
     def _intercepts_a_reachable_throw(node: Ps1TrapStatement, dominance: DominatorModel) -> bool:
         """
-        Whether a `throw` the control-flow graph reports as reachable lies in the scope this trap
-        guards. A trap catches for the whole body it is declared in, which is exactly the body whose
-        graph it belongs to, so the reachable `throw` statements of that graph are the ones it would
-        intercept. A trap this cannot place — one with no graph node — is kept, which is the safe
-        direction.
+        Whether a `throw` the control-flow graph reports as reachable lies in the body this trap is
+        written in. That body is wider than the trap's scope — a `trap` catches for the statement
+        block it stands in and for nothing around it, while this counts every reachable `throw` of
+        the whole graph — so what it answers is an over-approximation, and one that keeps a trap
+        rather than dropping it. `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach` answers
+        the exact question, and the plan's veto asks it of this removal; what is left here is a
+        cheap first refusal rather than the decision. A trap this cannot place — one with no graph
+        node — is kept, which is the same safe direction.
         """
         located = dominance.locate(node)
         if located is None:

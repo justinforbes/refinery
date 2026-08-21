@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import unittest
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
@@ -113,9 +112,9 @@ class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
     scriptblock invoked in place with `&` are all inside the block, so a raising statement in any of
     them is one the handler depends on and none of them may be deleted.
 
-    The deobfuscator recognizes a handler only for a statement whose immediate holder is the `try`
-    block itself. One nesting level is enough to hide the handler from it, so it deletes each of
-    these and leaves behind a `catch` body that can no longer run.
+    The deobfuscator used to recognize a handler only for a statement whose immediate holder was the
+    `try` block itself. One nesting level was enough to hide the handler from it, so it deleted each
+    of these and left behind a `catch` body that could no longer run.
 
     Every shape is written twice. The second of the pair puts a statement that runs to completion
     where the raising one stood: no handler can observe it, deleting it is the job, and the nesting
@@ -249,8 +248,8 @@ class TestPs1AStatementInAFunctionAGuardedTryBlockCalls(_Ps1FaultObservability):
     A terminating error raised in a function reaches the `catch` clause guarding the call, so a
     function body is inside the `try` block for this purpose even though it is written outside it.
 
-    The deobfuscator empties the function body, because the call site is what the `try` block holds
-    and the raising statement is somewhere else entirely.
+    The deobfuscator used to empty the function body, because the call site is what the `try` block
+    holds and the raising statement is somewhere else entirely.
 
     A statement that runs to completion in that same function body reaches no handler at all, so
     emptying the body is the right answer for it and the two differ only in the raise.
@@ -351,9 +350,9 @@ class TestPs1AnInnerFinallyDoesNotShieldAnOuterCatch(_Ps1FaultObservability):
     enclosing `catch`, which here has a body. The raising statement is what makes that handler run
     and must survive.
 
-    The deobfuscator reads the inner `try` as unguarded, deletes the raising statement, then
-    dissolves the construct and hoists the `finally` body into the outer block, leaving a `catch`
-    clause nothing reaches.
+    The deobfuscator used to read the inner `try` as unguarded, delete the raising statement, then
+    dissolve the construct and hoist the `finally` body into the outer block, leaving a `catch`
+    clause nothing reached.
 
     A statement that runs to completion under that same inner `finally` reaches no handler, so the
     whole sequence is the right answer for it and the two differ only in the raise.
@@ -393,16 +392,16 @@ class TestPs1AnInnerFinallyDoesNotShieldAnOuterCatch(_Ps1FaultObservability):
 
 class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
     """
-    A `trap` handles a terminating error raised anywhere in the scope it is written in, whether it
-    stands above the raising statement or below it, and whether the error is raised at the top of
-    that scope or inside a construct nested in it. A live `trap` in scope makes the raising
-    statement the reason the handler runs, so the statement survives.
+    A `trap` handles a terminating error raised anywhere in the statement block it is written in,
+    whether it stands above the raising statement or below it, and whether the error is raised at
+    the top of that block or inside a construct nested in it. A live `trap` over the raise makes the
+    raising statement the reason the handler runs, so the statement survives.
 
-    The deobfuscator never consults a `trap` when it decides a removal. It deletes the raising
-    statement in each of these and keeps the `trap`, which is then a handler nothing can trigger.
+    The deobfuscator used to consult no `trap` when it decided a removal. It deleted the raising
+    statement in each of these and kept the `trap`, which was then a handler nothing could trigger.
 
     What a `trap` guards is the raise, so a statement that runs to completion gives it nothing to
-    handle wherever in the scope it stands. Every shape is written a second time with such a
+    handle wherever in the block it stands. Every shape is written a second time with such a
     statement, which the pass must go on deleting.
     """
 
