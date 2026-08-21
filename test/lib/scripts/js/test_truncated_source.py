@@ -162,7 +162,7 @@ FOLDS_ANSWERED_WITH_A_PROGRAM = {
 The same kind of file, cut the same way, where the literal the cut left open stands in a declaration
 nothing goes on to read: the declaration is dropped before anything is printed, so the literal never
 reaches the printer at all. Nothing here is a program either, and the answer these are given is
-pinned in `test.lib.scripts.js.test_unfixed_defects`.
+pinned in `test.lib.scripts.js.test_release_blockers`.
 """
 
 _EVERY_FOLD = {**_FOLDS, **FOLDS_ANSWERED_WITH_A_PROGRAM}
