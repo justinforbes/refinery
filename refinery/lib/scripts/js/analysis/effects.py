@@ -23,7 +23,11 @@ Symmetrically, an assignment is not counted as a write when nothing can observe 
 is read nowhere, or every reference to it is confined to the assigning function so it never escapes. Both
 rest on the same pristine-global precondition, since a reflective surface or an installed setter could
 otherwise observe the assignment. This is what lets a function whose only effect is an obfuscator's
-scratch temporary — a write-only global, or an accumulator local to one function — be judged pure.
+write-only scratch global be judged pure. A scratch name the function also *reads* is a separate
+question, answered by `SemanticModel.read_may_throw` rather than here: where the name's only
+binding is an implicit global, the read may run before the assignment that creates it, which this
+flow-insensitive summary cannot rule out, so the function throws even though the write itself is
+unobservable.
 
 The public surface — `EffectSummary`, `EffectModel.summary_of`, `EffectModel.is_pure_call`,
 `build_effects` — is representation-agnostic and keyed to AST node identity, matching the model's
@@ -1232,7 +1236,7 @@ class EffectModel:
             if isinstance(node, JsThrowStatement):
                 summary.throws = True
             elif isinstance(node, JsIdentifier):
-                if self.model.read_may_throw(node):
+                if not summary.throws and self.model.read_may_throw(node):
                     summary.throws = True
                 if reference_role(node) is not Role.READ:
                     self._account_write(summary, node, func)
@@ -1272,13 +1276,20 @@ class EffectModel:
 
     def _write_unobservable(self, binding: Binding, func: Node) -> bool:
         """
-        Whether assigning *binding* within *func* has no observable consumer, so a function whose only
-        effect is the assignment is pure. The program must be `global_pristine`: it exposes no reflection
-        surface through which the name could be read and installs no accessor that an assignment to a
-        global property could trigger as a setter. Then the write is unobservable when either the value
-        is read nowhere (`Binding.is_read` is false), or every reference to it is `_confined_to` *func* so
-        no outside code can see it. This ports the evaluator's sound permissiveness for an obfuscator's
-        scratch binding — whether a write-only global or an accumulator local to a single function.
+        Whether assigning *binding* within *func* has no observable consumer, so the assignment
+        is not counted as a write. The program must be `global_pristine`: it exposes no reflection
+        surface through which the name could be read and installs no accessor that an assignment to
+        a global property could trigger as a setter. Then the write is unobservable when either the
+        value is read nowhere (`Binding.is_read` is false), or every reference to it is
+        `_confined_to` *func* so no outside code can see it. This ports the evaluator's sound
+        permissiveness for an obfuscator's scratch binding — whether a write-only global or an
+        accumulator local to a single function.
+
+        Not counting the write is not the same as answering that the function is pure. A confined
+        accumulator whose name is an implicit global is also *read*, and
+        `SemanticModel.read_may_throw` answers that such a read may throw, since nothing here orders
+        the creating assignment in front of it; the summary then carries `throws` with
+        `writes_global` clear.
         """
         if not self.global_pristine:
             return False
@@ -2013,6 +2024,10 @@ class EffectModel:
         name is never reassigned to a value that could be nullish. A `var`/`let`/`const` local initialized to a
         literal is deliberately NOT admitted here: its initializer may not have run yet at the access
         (`function(){ a.x = 1; var a = []; }` throws), which this flow-insensitive predicate cannot rule out.
+        The global object is recognized through `_base_is_global_object`, so an alias spelling a
+        local declaration shadows names that local and is decided by the same rules as any other
+        name: a shadowed `window` is the hoisted-`undefined` window this predicate refuses
+        elsewhere.
 
         Non-nullishness is a *different* question from freshness and from getter-freeness, so this shares only
         the container-literal atom with its neighbours: a primitive qualifies here and is not fresh, while a
@@ -2026,7 +2041,7 @@ class EffectModel:
         if isinstance(node, (JsStringLiteral, JsNumericLiteral, JsBooleanLiteral)):
             return True
         if isinstance(node, JsIdentifier):
-            if node.name in GLOBAL_OBJECT_ALIASES:
+            if self._base_is_global_object(node):
                 return True
             if isinstance(self.intrinsic_of(node), str):
                 return True
@@ -2162,15 +2177,20 @@ def _returns_on_every_path(func: Node) -> bool:
 
 def _body_nodes(func: Node) -> Iterator[Node]:
     """
-    Yield the nodes a single execution of *func* evaluates — the statements of its body and their
-    descendants — without descending into nested function bodies, whose effects belong to *their* calls.
-    Nested function nodes are still yielded so a call to one can be recognized.
+    Yield the nodes a single execution of *func* evaluates — its parameter list and the statements
+    of its body, with their descendants — without descending into nested function bodies, whose
+    effects belong to *their* calls. Nested function nodes are still yielded so a call to one can be
+    recognized. The parameter list is part of what a call evaluates because a default runs on every
+    call that omits its argument (`function f(a = zzz){}` reads `zzz` before the body is entered),
+    so a scan that started at the body alone could not see an effect the call really has.
     """
     if isinstance(func, JsScript):
         roots: list[Node] = list(func.body)
     else:
+        roots = list(getattr(func, 'params', ()))
         body = getattr(func, 'body', None)
-        roots = [body] if body is not None else []
+        if body is not None:
+            roots.append(body)
     stack = list(reversed(roots))
     while stack:
         node = stack.pop()

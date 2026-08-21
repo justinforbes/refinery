@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from test import TestBase
 
 from refinery.lib.scripts.js.analysis.effects import (
@@ -28,12 +30,25 @@ from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
 _GLOBALS_THE_SPECIFICATION_MANDATES = (
+    'AggregateError',
     'Array',
+    'ArrayBuffer',
+    'BigInt',
+    'BigInt64Array',
+    'BigUint64Array',
     'Boolean',
+    'DataView',
     'Date',
     'Error',
+    'EvalError',
+    'FinalizationRegistry',
+    'Float32Array',
+    'Float64Array',
     'Function',
     'Infinity',
+    'Int16Array',
+    'Int32Array',
+    'Int8Array',
     'JSON',
     'Map',
     'Math',
@@ -41,20 +56,47 @@ _GLOBALS_THE_SPECIFICATION_MANDATES = (
     'Number',
     'Object',
     'Promise',
+    'Proxy',
+    'RangeError',
+    'ReferenceError',
     'Reflect',
+    'RegExp',
+    'Set',
     'String',
     'Symbol',
+    'SyntaxError',
+    'TypeError',
+    'URIError',
+    'Uint16Array',
+    'Uint32Array',
     'Uint8Array',
+    'Uint8ClampedArray',
+    'WeakMap',
+    'WeakRef',
+    'WeakSet',
+    'decodeURI',
     'decodeURIComponent',
+    'encodeURI',
+    'encodeURIComponent',
     'eval',
     'globalThis',
+    'isFinite',
     'isNaN',
+    'parseFloat',
     'parseInt',
     'undefined',
 )
 """
-Names every conforming engine puts on the global object before any code runs, so that a bare read of
-one of them denotes a binding and cannot throw.
+Every property the ECMAScript specification requires the global object to carry, taken from its
+own list of them and confirmed one by one against Node, where a bare read of each returns rather
+than throws. A read of any of these therefore denotes a binding under every engine, which is what
+makes it safe to treat one as an operand rather than as something that may not be there.
+
+Three names on that list are held back. `SharedArrayBuffer` and `Atomics` are the two a host is
+allowed to keep off the global object — a browser outside a cross-origin-isolated context does
+exactly that — so a bare read of either throws in a place that is still conforming.
+`Float16Array` was added late enough that an engine still in service predates it, which is the
+same objection made about vintage rather than about the host.
 """
 
 
@@ -2242,3 +2284,227 @@ class TestEscapedIntrinsicWrites(TestBase):
 
     def test_a_two_hop_alias_records_nothing(self):
         self._omits('var m = Math; var n = m; console.log(n.floor(1.7));', 'Math')
+
+
+def _call_summary(source: str, name: str = '') -> EffectSummary:
+    """
+    The summary of the function *name* declares in *source*, or of the first function the text
+    spells when *name* is empty, which is how a table varies a function between a declaration, a
+    function expression and an arrow: only one of the three carries a name at all.
+    """
+    ast = JsParser(source).parse()
+    effects = build_effects(build_semantic_model(ast))
+    for node in ast.walk_in_order():
+        if not isinstance(node, (
+            JsArrowFunctionExpression,
+            JsFunctionDeclaration,
+            JsFunctionExpression,
+        )):
+            continue
+        if not name:
+            return effects.summary_of(node)
+        if isinstance(node, JsFunctionDeclaration) and node.id is not None and node.id.name == name:
+            return effects.summary_of(node)
+    raise AssertionError(F'no function named {name} in {source}')
+
+
+def _without_binding_identity(summary: EffectSummary) -> EffectSummary:
+    """
+    *summary* with `EffectSummary.written_bindings` emptied. That set names `Binding` objects by
+    identity, so summaries taken from two parses of two programs can never compare equal through it,
+    however alike the effects they record are.
+    """
+    return replace(summary, written_bindings=set())
+
+
+class TestAClassBodysMemberNamesAreNotReads(TestBase):
+    """
+    The name of a class method, field or accessor is the key the member is stored under, the same
+    kind of name as an object-literal key, and never a read of a binding spelled the same way.
+    Defining such a class inside a function therefore leaves that function doing what it does
+    without it. A name written in brackets is the opposite: the brackets hold an expression the
+    class definition evaluates, so the function does whatever evaluating that expression does.
+
+    Each case is an equality between the summaries of two programs rather than a flag, so that it
+    goes on saying the same thing when the summary grows a field.
+    """
+
+    def test_a_class_whose_member_names_are_keys_leaves_the_function_holding_it_unchanged(self):
+        for member in [
+            'gk() {}',
+            'get gk() { return 0; }',
+            'set gk(v) {}',
+            'static gk() {}',
+            'static get gk() { return 0; }',
+            'async gk() {}',
+            '*gk() {}',
+            'gk = 1;',
+            'static gk = 1;',
+            'constructor() {}',
+        ]:
+            with self.subTest(member=member):
+                self.assertEqual(
+                    _call_summary(F'function f() {{ class C {{ {member} }} return 1; }}'),
+                    _call_summary('function f() { return 1; }'),
+                )
+
+    def test_a_class_member_name_says_what_the_object_literal_entry_of_that_name_says(self):
+        for member, entry in [
+            ('gk() {}', 'gk() {}'),
+            ('get gk() { return 0; }', 'get gk() { return 0; }'),
+            ('set gk(v) {}', 'set gk(v) {}'),
+            ('async gk() {}', 'async gk() {}'),
+            ('*gk() {}', '*gk() {}'),
+            ('gk = 1;', 'gk: 1'),
+        ]:
+            with self.subTest(member=member):
+                self.assertEqual(
+                    _call_summary(F'function f() {{ class C {{ {member} }} return 1; }}'),
+                    _call_summary(F'function f() {{ var o = {{ {entry} }}; return 1; }}'),
+                )
+
+    def test_a_member_name_in_brackets_says_what_a_bare_read_of_that_name_says(self):
+        for member in [
+            '[gk]() {}',
+            'get [gk]() { return 0; }',
+            'static [gk]() {}',
+            '[gk] = 1;',
+            'static [gk] = 1;',
+        ]:
+            with self.subTest(member=member):
+                self.assertEqual(
+                    _call_summary(F'function f() {{ class C {{ {member} }} return 1; }}'),
+                    _call_summary('function f() { gk; return 1; }'),
+                )
+
+    def test_a_member_name_in_brackets_a_local_binds_leaves_the_function_unchanged(self):
+        self.assertEqual(
+            _call_summary("function f() { var k = 'gk'; class C { [k]() {} } return 1; }"),
+            _call_summary("function f() { var k = 'gk'; return 1; }"),
+        )
+
+
+_AN_EXPRESSION_A_CALL_EVALUATES: dict[str, tuple[str, str]] = {
+    'a read of a name nothing binds': (
+        'function f(a = zzz) { return a; }',
+        'function f(a) { zzz; return a; }',
+    ),
+    'a read of a host name the specification does not mandate': (
+        'function f(a = document) { return a; }',
+        'function f(a) { document; return a; }',
+    ),
+    'a call to a function nothing declares': (
+        'function f(a = g()) { return a; }',
+        'function f(a) { g(); return a; }',
+    ),
+    'a call to a global the specification mandates': (
+        'function f(a = Math.max(1, 2)) { return a; }',
+        'function f(a) { Math.max(1, 2); return a; }',
+    ),
+    'a literal': (
+        'function f(a = 1) { return a; }',
+        'function f(a) { 1; return a; }',
+    ),
+    'a write to a global another function reads': (
+        'function f(a = (leak = 1)) { return a; } function r() { return leak; }',
+        'function f(a) { leak = 1; return a; } function r() { return leak; }',
+    ),
+    'a read of a name nothing binds, inside a destructuring pattern': (
+        'function f({ a = zzz } = {}) { return a; }',
+        'function f(o) { zzz; return o; }',
+    ),
+    'a read of a name nothing binds, in an arrow': (
+        'var f = (a = zzz) => a;',
+        'var f = (a) => { zzz; return a; };',
+    ),
+}
+"""
+A function whose parameter default is an expression, paired with a function that evaluates that same
+expression as the first thing in its body. A call that omits the argument evaluates the default
+before entering the body, so the two functions do the same thing on such a call.
+"""
+
+_A_DEFAULT_THAT_READS_A_NAME_NOTHING_BINDS = [
+    'function f(a = zzz) { return a; }',
+    'var f = function (a = zzz) { return a; };',
+    'var f = (a = zzz) => a;',
+    'function f({ a = zzz } = {}) { return a; }',
+    'function f([a = zzz] = []) { return a; }',
+    'function f(b, a = zzz) { return a; }',
+]
+"""
+Functions a call that omits the argument cannot enter: evaluating the default ends that call in a
+`ReferenceError` before the first statement of the body runs.
+"""
+
+_A_DEFAULT_EVERY_NAME_OF_WHICH_IS_BOUND = [
+    'function f(a = 1) { return a; }',
+    'var f = function (a = 1) { return a; };',
+    'var f = (a = 1) => a;',
+    'function f({ a = 5 } = {}) { return a; }',
+    'function f([a = 5] = []) { return a; }',
+    'function f(b, a = b) { return a; }',
+    'function f(a = Math.max(1, 2)) { return a; }',
+    'var ok = 5; function f(a = ok) { return a; }',
+]
+"""
+The controls, in the same spellings: a call that omits the argument evaluates the default and goes
+on into the body, so nothing about the parameter list may be held against it.
+"""
+
+
+class TestAParameterDefaultIsPartOfWhatACallEvaluates(TestBase):
+    """
+    A parameter default is evaluated by the call, before the body is entered, on every call that
+    omits the argument. What a default does is therefore part of what a call to the function does,
+    and a summary taken from the body alone is a summary of a different function.
+    """
+
+    def test_a_call_may_throw_exactly_where_the_default_reads_a_name_nothing_binds(self):
+        summarized = [
+            *_A_DEFAULT_THAT_READS_A_NAME_NOTHING_BINDS,
+            *_A_DEFAULT_EVERY_NAME_OF_WHICH_IS_BOUND,
+        ]
+        self.assertEqual(
+            {source for source in summarized if _call_summary(source).throws},
+            set(_A_DEFAULT_THAT_READS_A_NAME_NOTHING_BINDS),
+        )
+
+    def test_a_default_every_name_of_which_is_bound_leaves_the_call_pure(self):
+        impure = {
+            source for source in _A_DEFAULT_EVERY_NAME_OF_WHICH_IS_BOUND
+            if not _call_summary(source).is_pure
+        }
+        self.assertEqual(impure, set())
+
+    def test_a_default_is_summarized_as_the_same_expression_at_the_top_of_the_body_is(self):
+        for name, (default, body) in _AN_EXPRESSION_A_CALL_EVALUATES.items():
+            with self.subTest(name=name):
+                self.assertEqual(
+                    _without_binding_identity(_call_summary(default)),
+                    _without_binding_identity(_call_summary(body)),
+                )
+
+    def test_a_default_writing_a_global_another_function_reads_is_a_global_write(self):
+        default = 'function f(a = (leak = 1)) { return a; } function r() { return leak; }'
+        moved = 'function f(a) { leak = 1; return a; } function r() { return leak; }'
+        self.assertTrue(_call_summary(default, 'f').writes_global)
+        self.assertEqual(
+            _without_binding_identity(_call_summary(default, 'f')),
+            _without_binding_identity(_call_summary(moved, 'f')),
+        )
+
+    def test_a_default_writing_a_binding_an_enclosing_function_owns_is_a_captured_write(self):
+        default = (
+            'function outer() { var c = 0;'
+            ' function f(a = (c = 1)) { return a; } return [f, c]; }'
+        )
+        moved = (
+            'function outer() { var c = 0;'
+            ' function f(a) { c = 1; return a; } return [f, c]; }'
+        )
+        self.assertTrue(_call_summary(default, 'f').writes_captured)
+        self.assertEqual(
+            _without_binding_identity(_call_summary(default, 'f')),
+            _without_binding_identity(_call_summary(moved, 'f')),
+        )

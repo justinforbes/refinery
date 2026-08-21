@@ -49,6 +49,7 @@ from refinery.lib.scripts.js.model import (
     JsConditionalExpression,
     JsContinueStatement,
     JsDoWhileStatement,
+    JsExportAllDeclaration,
     JsExportSpecifier,
     JsExpressionStatement,
     JsForInStatement,
@@ -58,6 +59,7 @@ from refinery.lib.scripts.js.model import (
     JsFunctionExpression,
     JsIdentifier,
     JsIfStatement,
+    JsImportAttribute,
     JsImportDeclaration,
     JsImportDefaultSpecifier,
     JsImportExpression,
@@ -65,12 +67,14 @@ from refinery.lib.scripts.js.model import (
     JsImportSpecifier,
     JsLabeledStatement,
     JsMemberExpression,
+    JsMethodDefinition,
     JsNewExpression,
     JsNumericLiteral,
     JsObjectExpression,
     JsObjectPattern,
     JsParenthesizedExpression,
     JsProperty,
+    JsPropertyDefinition,
     JsRestElement,
     JsScript,
     JsSpreadElement,
@@ -411,11 +415,17 @@ def crosses_dynamic_scope(scope: Scope | None) -> bool:
     return False
 
 
+_KEYED_CLASS_MEMBERS = (JsMethodDefinition, JsPropertyDefinition)
+
+
 def is_use_position(node: JsIdentifier) -> bool:
     """
     Whether an identifier occupies a position where it reads or writes a value, as opposed to naming a
-    property, an object-literal key, a label, or an import/export specifier. Binding sites are not
-    excluded here; `SemanticModel.is_reference` is the binding-aware predicate that also excludes them.
+    property, a key, a label, or an import/export specifier. A key is such a name wherever it is
+    spelled out rather than computed: an object-literal key, a class method or field name, and an
+    import attribute all name a property of the thing being built and read no binding. Binding
+    sites are not excluded here; `SemanticModel.is_reference` is the binding-aware predicate that
+    also excludes them.
     """
     p = node.parent
     if p is None:
@@ -423,6 +433,12 @@ def is_use_position(node: JsIdentifier) -> bool:
     if isinstance(p, JsMemberExpression) and p.property is node and not p.computed:
         return False
     if isinstance(p, JsProperty) and p.key is node and not p.computed and not p.shorthand:
+        return False
+    if isinstance(p, _KEYED_CLASS_MEMBERS) and p.key is node and not p.computed:
+        return False
+    if isinstance(p, JsImportAttribute) and p.key is node:
+        return False
+    if isinstance(p, JsExportAllDeclaration) and p.exported is node:
         return False
     if isinstance(p, (JsBreakStatement, JsContinueStatement, JsLabeledStatement)) and p.label is node:
         return False
@@ -556,10 +572,26 @@ _UNRESOLVABLE_TOLERANT_OPERATORS = frozenset({'typeof', 'delete'})
 """
 The two unary operators the language lets stand in front of a name that resolves to nothing:
 `typeof` answers `'undefined'` (§13.5.3) and `delete` answers `true` (§13.5.1.2), where every other
-read of an unresolvable reference throws a `ReferenceError`. `typeof name === 'undefined'` is the
-feature-detection idiom every guarded program is written with, so counting it as a throw would
-refuse the guard itself.
+read of an unresolvable reference throws a `ReferenceError`. This is about the operand and nothing
+further: `typeof name === 'undefined'` is spared, but a read the guard stands in front of is a
+separate position and is still answered as a throw, since nothing here orders the guard before it.
+So the feature-detection idiom parses its own guard for free and its guarded body does not.
 """
+
+
+def _is_unary_operand(governor: Node | None, node: Node, operators: frozenset[str]) -> bool:
+    """
+    Whether *governor* is a unary expression whose operator is one of *operators* and whose
+    operand, looked through parentheses, is *node*. The single test behind every question of the
+    form `does this operator stand in front of this reference`, so a parenthesization or
+    operand-shape case fixed once is fixed for all of them; a caller that has not already resolved
+    the governing construct obtains it from `_enclosing_operator`.
+    """
+    return (
+        isinstance(governor, JsUnaryExpression)
+        and governor.operator in operators
+        and strip_parens(governor.operand) is node
+    )
 
 
 def tolerates_unresolvable(node: Node) -> bool:
@@ -567,12 +599,7 @@ def tolerates_unresolvable(node: Node) -> bool:
     Whether the operator governing *node* reads it without demanding that the name resolve, so a
     free name standing there names nothing and still yields a value rather than throwing.
     """
-    governor = _enclosing_operator(node)
-    return (
-        isinstance(governor, JsUnaryExpression)
-        and governor.operator in _UNRESOLVABLE_TOLERANT_OPERATORS
-        and strip_parens(governor.operand) is node
-    )
+    return _is_unary_operand(_enclosing_operator(node), node, _UNRESOLVABLE_TOLERANT_OPERATORS)
 
 
 def container_reference_role(node: JsIdentifier | JsMemberExpression) -> ContainerRole:
@@ -822,18 +849,16 @@ def _last_positions(params: list[Binding | None]) -> list[Binding | None]:
     return result
 
 
+_DELETE_OPERATOR = frozenset({'delete'})
+
+
 def _is_delete_operand(node: Node) -> bool:
     """
     Whether *node* stands as the operand of a `delete`. `reference_role` answers `Role.READWRITE`
     for such a reference as it does for a compound assignment, because both keep the name live as a
     read; only the assignment puts a value under the name.
     """
-    governor = _enclosing_operator(node)
-    return (
-        isinstance(governor, JsUnaryExpression)
-        and governor.operator == 'delete'
-        and strip_parens(governor.operand) is node
-    )
+    return _is_unary_operand(_enclosing_operator(node), node, _DELETE_OPERATOR)
 
 
 def _displaces_arguments(
@@ -929,10 +954,7 @@ def _observes_identity_alone(governor: Node | None, operand: Node) -> bool:
     ever named inside one, so nothing downstream can pick the object up from there.
     """
     if isinstance(governor, JsUnaryExpression):
-        return (
-            governor.operator in _IDENTITY_OPERATORS
-            and strip_parens(governor.operand) is operand
-        )
+        return _is_unary_operand(governor, operand, _IDENTITY_OPERATORS)
     if isinstance(governor, (
         JsIfStatement,
         JsWhileStatement,
@@ -1239,7 +1261,11 @@ class SemanticModel:
           lexical binding to fall through to, which the `cross_dynamic` lookup is what distinguishes
 
         A reference that is written and not read answers `False`, as do the two operator positions
-        `tolerates_unresolvable` names.
+        `tolerates_unresolvable` names. The write case is a scope boundary, not a claim that
+        writing is safe: sloppy code assigning to a name nothing binds creates a property of the
+        global object, while strict code throws the same `ReferenceError` a read does, which is a
+        separate defect with its own pin
+        (`test_unfixed_defects.A_STRICT_REGION_ASSIGNING_TO_NO_BINDING`).
         """
         if not self.is_reference(node) or reference_role(node) is Role.WRITE:
             return False

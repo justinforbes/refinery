@@ -3933,7 +3933,6 @@ class TestClassMemberNamesArePropertyKeys(TestBase):
             ),
         )
 
-    @unittest.expectedFailure
     def test_an_instance_field_name_is_not_a_variable_read(self):
         """
         Node: `1 label X`. The instance carries one property and it is named `label`, so a rewritten
@@ -3944,7 +3943,6 @@ class TestClassMemberNamesArePropertyKeys(TestBase):
             " console.log(new C().label, Object.keys(new C()).join('|'), label);",
             '1 label X\n')
 
-    @unittest.expectedFailure
     def test_an_instance_method_name_is_not_a_variable_read(self):
         """
         Node: `5 hi`. A renamed method leaves `new C().greet` undefined, so the call is a `TypeError`
@@ -3955,7 +3953,6 @@ class TestClassMemberNamesArePropertyKeys(TestBase):
             ' console.log(new C().greet(), greet);',
             '5 hi\n')
 
-    @unittest.expectedFailure
     def test_a_static_field_name_is_not_a_variable_read(self):
         """
         Node: `7 T`. The property belongs to the constructor rather than to an instance, which is a
@@ -3965,7 +3962,6 @@ class TestClassMemberNamesArePropertyKeys(TestBase):
             "var tag = 'T'; class C { static tag = 7; } console.log(C.tag, tag);",
             '7 T\n')
 
-    @unittest.expectedFailure
     def test_a_static_method_name_is_not_a_variable_read(self):
         """
         Node: `9 R`.

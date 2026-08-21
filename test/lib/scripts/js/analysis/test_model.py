@@ -1287,3 +1287,82 @@ class TestWhichBindingsAreReachedThroughTheGlobalObject(TestBase):
             self._reached_through_the_global_object('var y = 1; globalThis.y;', 'y'),
             (False, True),
         )
+
+
+def _how_each_occurrence_is_read(source: str, name: str) -> list[tuple[bool, bool]]:
+    """
+    For every identifier spelled *name* in *source*, in source order, whether the model calls it a
+    reference and whether it answers that reading it may throw.
+    """
+    ast = JsParser(source).parse()
+    model = build_semantic_model(ast)
+    return [
+        (model.is_reference(node), model.read_may_throw(node))
+        for node in ast.walk_in_order()
+        if isinstance(node, JsIdentifier) and node.name == name
+    ]
+
+
+class TestANameSpelledInAKeyPositionReadsNoBinding(TestBase):
+    """
+    A name a class body spells out is the key its member is stored under; so is the key of an import
+    attribute, and so is the name an `export * as` exports a module under. None of the three reads a
+    binding, and none of them can throw for want of one.
+
+    Every program below spells the same name twice: once in such a position, and once as a bare
+    expression statement, which is a read of a name nothing binds. The pair is the assertion — the
+    second occurrence is what the first would answer if it were being read as a name. A key written
+    in brackets is the case where the two occurrences agree, because there the name really is an
+    expression the definition evaluates.
+    """
+
+    def test_a_class_member_name_spelled_out_reads_no_binding(self):
+        for member in [
+            'gk() {}',
+            'get gk() { return 0; }',
+            'set gk(v) {}',
+            'static gk() {}',
+            'static get gk() { return 0; }',
+            'async gk() {}',
+            '*gk() {}',
+            'gk = 1;',
+            'static gk = 1;',
+        ]:
+            with self.subTest(member=member):
+                self.assertEqual(
+                    _how_each_occurrence_is_read(F'class C {{ {member} }}\ngk;', 'gk'),
+                    [(False, False), (True, True)],
+                )
+
+    def test_a_class_member_name_in_brackets_reads_the_binding_it_spells(self):
+        for member in [
+            '[gk]() {}',
+            'get [gk]() { return 0; }',
+            'set [gk](v) {}',
+            'static [gk]() {}',
+            '[gk] = 1;',
+            'static [gk] = 1;',
+        ]:
+            with self.subTest(member=member):
+                self.assertEqual(
+                    _how_each_occurrence_is_read(F'class C {{ {member} }}\ngk;', 'gk'),
+                    [(True, True), (True, True)],
+                )
+
+    def test_an_object_literal_key_reads_no_binding(self):
+        self.assertEqual(
+            _how_each_occurrence_is_read('var o = { gk: 1 };\ngk;', 'gk'),
+            [(False, False), (True, True)],
+        )
+
+    def test_an_import_attribute_key_reads_no_binding(self):
+        self.assertEqual(
+            _how_each_occurrence_is_read("import x from 'm' with { type: 'json' };\ntype;", 'type'),
+            [(False, False), (True, True)],
+        )
+
+    def test_the_name_an_export_all_exports_a_module_under_reads_no_binding(self):
+        self.assertEqual(
+            _how_each_occurrence_is_read("export * as ns from 'm';\nns;", 'ns'),
+            [(False, False), (True, True)],
+        )

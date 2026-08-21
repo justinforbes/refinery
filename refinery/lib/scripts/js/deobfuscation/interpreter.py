@@ -2006,9 +2006,11 @@ class JsInterpreter:
         has an effect the resulting literal cannot carry: `[1,2].map(function (x) { n += x; return x; })`
         yields the right array while leaving `n` unchanged.
 
-        `is_effect_free_when_discarded` rather than `is_pure`, which is stricter than this position needs: it
-        tolerates a mutation the callback confines to a fresh local it returns, and a throw, which surfaces
-        as a real `_ThrowSignal` an emulated `try/catch` observes rather than being swallowed.
+        `is_effect_free_when_discarded` rather than `is_pure`, which is stricter than this position
+        needs: it tolerates a mutation the callback confines to a fresh local it returns. It does
+        not tolerate a throw — `throws` blocks both — so a callback that reads a name the
+        specification does not mandate on the global object is refused here, even though such a
+        throw would surface as a real `_ThrowSignal` an emulated `try/catch` observes.
 
         Purity is not sufficient on its own either. A write to a *script-scope* `var` reports
         `writes_captured=False`, because that binding is not captured from the callback's perspective, so it

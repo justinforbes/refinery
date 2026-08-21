@@ -1567,7 +1567,6 @@ A_READ_OF_THE_ALIAS_ONLY_ANOTHER_HOST_LACKS = (
 )
 
 
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestABareGlobalObjectAliasIsNotCertainToResolve(TestBase):
     """
     `window`, `global`, `self`, `top` and `frames` are names a host may put on its global object,
@@ -1592,6 +1591,7 @@ class TestABareGlobalObjectAliasIsNotCertainToResolve(TestBase):
     may throw, and a `window.x` whose base is certain to be there.
     """
 
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
     @unittest.expectedFailure
     def test_a_read_of_an_alias_the_running_host_lacks_still_throws(self):
         """
@@ -1748,3 +1748,304 @@ class TestAReadOfANameNothingBindsThrowsWhereverItStands(TestBase):
             {source: _before_and_after(source) for source in rows},
             {source: (answer, answer) for source, answer in rows.items()},
         )
+
+
+#: A program whose discarded read of a name nothing binds stands inside a `try`, mapped to what Node
+#: prints for it. The read throws, the `catch` clause runs, and the program goes on to the end, so
+#: the whole of the defect is one line of output and neither the program nor its deobfuscation ends
+#: in an error. The last two rows are the controls: a `throw` and a member read on `null` reach the
+#: same `catch` from the same block and are kept.
+A_DISCARDED_READ_A_TRY_CATCHES = {
+    'try {\n  var x = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
+    'try {\n  let v = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
+    'try {\n  y = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
+    'try {\n  var o = { p: missing };\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
+        '2\n3\n',
+    'try {\n  throw 1;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
+    'try {\n  null.p;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReadOfANameNothingBindsInsideATryIsCaught(TestBase):
+    """
+    This is the same gate `TestAReadOfANameNothingBindsThrowsWhereverItStands` pins — a
+    discarded expression holding a read of a name no binding resolves is dropped, read and all —
+    asked in the one place where dropping it costs no error. It is a separate entry rather than a
+    row of `A_DISCARDED_READ_OF_A_NAME_NOTHING_BINDS` because every row of that corpus is a
+    program Node refuses and a deobfuscation that runs, and the law over it is stated in those
+    terms; here both sides run to the end and print, and only the first line of output tells them
+    apart. A ledger of behavior-preservation defects that only ever compares an error against
+    no error would not have this defect in it at all, which is the reason to keep it stated on
+    its own.
+
+    A `catch` clause is what turns the throw into output: the read fails, the clause runs, and the
+    program carries on. Emptying the `try` block takes the clause's run away with it, so the line
+    the clause prints is gone and the line after the statement is all that is left.
+
+    The last two rows are the control. A `throw` and a member read on `null` reach the same clause
+    from the same block, are not reads of a name, and are kept, so an entry that started passing by
+    refusing to touch a `try` at all would be reported as an unexpected success here.
+    """
+
+    @unittest.expectedFailure
+    def test_a_read_that_throws_inside_a_try_still_reaches_the_catch(self):
+        """
+        Node prints `2` and then `3` for every program of `A_DISCARDED_READ_A_TRY_CATCHES`, the
+        first line from the `catch` clause the failed read reaches and the second from the statement
+        after the `try`. The four deobfuscations whose block holds a read come back with that block
+        emptied — `try {} catch (e) { console.log(2); }` — and print `3` alone.
+        """
+        rows = A_DISCARDED_READ_A_TRY_CATCHES
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
+#: A program that calls a function whose body reads a name nothing binds and prints the result,
+#: mapped to the behavior Node gives it. The read stands in a store no later statement reads, which
+#: is what lets the body be emptied down to the value it returns. The last two rows are the
+#: controls: the same read written where no store holds it, and the returned value itself.
+A_CALL_WHOSE_BODY_READS_A_NAME_NOTHING_BINDS = {
+    'function f() {\n  var x = missing;\n  return 7;\n}\nconsole.log(f());\n':
+        ('', 'ReferenceError'),
+    'function f() {\n  var x = { p: missing };\n  return 7;\n}\nconsole.log(f());\n':
+        ('', 'ReferenceError'),
+    'var f = () => {\n  var x = missing;\n  return 7;\n};\nconsole.log(f());\n':
+        ('', 'ReferenceError'),
+    'function f() {\n  missing;\n  return 7;\n}\nconsole.log(f());\n': ('', 'ReferenceError'),
+    'function f() {\n  return missing;\n}\nconsole.log(f());\n': ('', 'ReferenceError'),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestACallWhoseBodyReadsANameNothingBindsIsNotAValue(TestBase):
+    """
+    A call that cannot return, because evaluating its body throws, is not a call that may be written
+    as the value it would have returned. The result here is not merely a call that survives where it
+    should have gone: the call is replaced by a literal, so the program that refused to run comes
+    back printing a number.
+
+    Two gates have to be passed for that, and widening the one
+    `TestAReadOfANameNothingBindsThrowsWhereverItStands` names would only close the first. The store
+    holding the read is dropped because the gate that entry is about answers that the read does
+    nothing, which leaves a body that only returns. What then replaces the call is decided by
+    `EffectSummary.is_literal_replaceable`, and that property does not consult
+    `EffectSummary.throws` at all — deliberately, since a literal replacement is meant for an
+    evaluator that ran the call to a value, and such an evaluator reproduces the throw by
+    throwing. `throws` is set for every function below; it is the second gate, not the summary,
+    that has to learn the difference between a value an evaluator computed and one the body was
+    read to have.
+
+    The last two rows are the control, and they pass today: the same read written as a statement of
+    its own and the same read written as the returned expression are both kept, so an entry that
+    began passing by refusing to fold any call at all would be an unexpected success here.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_that_cannot_return_is_not_replaced_by_what_it_would_have_returned(self):
+        """
+        Node refuses every program of `A_CALL_WHOSE_BODY_READS_A_NAME_NOTHING_BINDS` having printed
+        nothing, with a `ReferenceError` reading
+
+            missing is not defined
+
+        The three deobfuscations whose read stands in a store come back as `console.log(7);` and
+        print `7`.
+        """
+        rows = A_CALL_WHOSE_BODY_READS_A_NAME_NOTHING_BINDS
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
+        )
+
+
+#: A program in which a read of a name nothing binds is an operand of a sequence expression whose
+#: value is decided by a later operand, mapped to the behavior Node gives it. The read is evaluated
+#: for its effect and its value is thrown away, which is what the operand of a sequence is for.
+A_SEQUENCE_OPERAND_READING_A_NAME_NOTHING_BINDS = {
+    'missing, console.log(1);\n': ('', 'ReferenceError'),
+    '(missing, 0), console.log(1);\n': ('', 'ReferenceError'),
+    'var v = (missing, 2);\nconsole.log(v);\n': ('', 'ReferenceError'),
+    'console.log((missing, 1));\n': ('', 'ReferenceError'),
+    'function f() {\n  missing, console.log(1);\n}\nf();\n': ('', 'ReferenceError'),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestASequenceOperandThatThrowsIsNotDropped(TestBase):
+    """
+    Every operand of a sequence expression is evaluated, in order, and every one but the last has
+    its value discarded. Discarding the value is not licence to skip the evaluation: an operand that
+    reads a name no binding resolves throws before the operands after it are reached, so a sequence
+    whose first operand is such a read has no value at all and the program ends there.
+
+    `TestAReadOfANameNothingBindsThrowsWhereverItStands` names one hook for its fix — the
+    *read_effect* callback `side_effect_free` takes — and this is the case that claim does not
+    reach. A sequence operand never passes through that callback:
+    `JsSimplifications.visit_JsSequenceExpression` keeps an operand that `is_simple_expression`
+    rejects or that `SemanticModel.read_has_dynamic_effect` accepts, and drops the rest. A bare
+    identifier is simple, and `read_has_dynamic_effect` is the `with`-object question rather than
+    the may-it-throw question, so the read is dropped by a route of its own and needs a fix of its
+    own.
+
+    The rows vary where the sequence stands, because that decides what is left behind rather than
+    whether the operand goes: at the top of a statement, nested in another sequence, on the right of
+    a declaration, inside a call's argument list, and inside a function body.
+    """
+
+    @unittest.expectedFailure
+    def test_an_operand_whose_value_is_discarded_is_still_evaluated(self):
+        """
+        Node refuses every program of `A_SEQUENCE_OPERAND_READING_A_NAME_NOTHING_BINDS` having
+        printed nothing, with a `ReferenceError` reading
+
+            missing is not defined
+
+        Every deobfuscation drops the operand and prints: the first four come back as
+        `console.log(1);`, `console.log(1);`, `console.log(2);` and `console.log(1);`, and the last
+        keeps the function with the read gone from its body.
+        """
+        rows = A_SEQUENCE_OPERAND_READING_A_NAME_NOTHING_BINDS
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
+        )
+
+
+def _a_property_written_on_a_local_object(name: str) -> str:
+    """
+    A program that declares *name* as a local object, writes a property on it, and prints the object
+    as JSON, so that a write that went missing is a line of output and not an error.
+    """
+    return (
+        F'var {name} = {{}};\n'
+        F'{name}.x = 1;\n'
+        F'console.log(JSON.stringify({name}));\n'
+    )
+
+
+#: A program whose object is named by a local declaration, mapped to what Node prints for it. The
+#: name is spelled seven ways: the six the model calls aliases of the global object, and one that
+#: is no spelling of it at all, which is the control.
+A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS = {
+    _a_property_written_on_a_local_object(name): '{"x":1}\n'
+    for name in ['globalThis', 'global', 'window', 'self', 'top', 'frames', 'obj']
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPropertyWriteThroughAShadowedGlobalAliasSurvives(TestBase):
+    """
+    `window` names the global object only where nothing else binds it. A declaration of that name
+    binds it, and from then on `window.x = 1` is a property write on whatever the declaration put
+    there — a plain object here — which the program goes on to read back.
+
+    The sweep that deletes a write of a global property never asks that question.
+    `JsUnusedCodeRemoval._remove_dead_global_properties` takes a statement to be a global-property
+    write when the base is an identifier whose *name* is one of
+    `refinery.lib.scripts.js.deobfuscation.helpers.GLOBAL_OBJECT_ALIASES`, and decides from the
+    spelling alone; `EffectModel._base_is_global_object` asks the model whether the name is bound
+    before answering the same question, which is the answer this sweep needs.
+
+    Two of the six spellings are wrong in the other direction and pass today, which is why they are
+    rows and not omissions: the alias set the sweep reads holds four names, and the model's
+    `refinery.lib.scripts.js.analysis.model.GLOBAL_OBJECT_ALIASES` holds six, so `top` and `frames`
+    are outside the sweep's reach for a reason that has nothing to do with shadowing. The last row
+    is the control: `obj` is a spelling of nothing, and its write is kept, so an entry that started
+    passing by keeping every property write would be reported as an unexpected success.
+    """
+
+    @unittest.expectedFailure
+    def test_a_write_on_an_object_a_local_name_holds_is_kept(self):
+        """
+        Node prints `{"x":1}` for every program of
+        `A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS`, the property having been written on
+        the object the declaration made. The four deobfuscations whose name is one the sweep
+        reads — `globalThis`, `global`, `window` and `self` — come back with the assignment
+        deleted and print `{}`.
+        """
+        rows = A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS
+        self.assertEqual(
+            {source: _before_and_after(source) for source in rows},
+            _each_program_still_prints(rows),
+        )
+
+
+#: A program whose object literal names a property by its shorthand, mapped to the text a correct
+#: deobfuscation writes for it. The one identifier of a shorthand is both the name of the property
+#: and a read of the binding, so a constant reaches it the way it reaches any other read, and the
+#: property still needs a name once the value is there. The last three rows are the controls, each
+#: of them a substitution that lands where it belongs: into a key that is spelled out, into the
+#: object a destructuring pattern takes apart, and into the default a shorthand in such a pattern
+#: carries.
+A_CONSTANT_REACHING_A_SHORTHAND_PROPERTY = {
+    'var q = 1;\nconsole.log(JSON.stringify({ q }));\n':
+        'console.log(JSON.stringify({ q: 1 }));',
+    'var q = "a";\nconsole.log(JSON.stringify({ q }));\n':
+        'console.log(JSON.stringify({ q: "a" }));',
+    'var q = 1;\nvar w = 2;\nconsole.log(JSON.stringify({ q, w }));\n':
+        'console.log(JSON.stringify({ q: 1, w: 2 }));',
+    'var q = 1;\nvar o = { q, r: 2 };\nconsole.log(JSON.stringify(o));\n':
+        'var o = { q: 1, r: 2 };\nconsole.log(JSON.stringify(o));',
+    'var q = 1;\nconsole.log(JSON.stringify({ q: q }));\n':
+        'console.log(JSON.stringify({ q: 1 }));',
+    'var p = 5;\nvar o = { q: p };\nvar { q } = o;\nconsole.log(q);\n':
+        'var o = { q: 5 };\nvar { q } = o;\nconsole.log(q);',
+    'var d = 5;\nvar o = {};\nvar { q = d } = o;\nconsole.log(q);\n':
+        'var o = {};\nvar { q = 5 } = o;\nconsole.log(q);',
+}
+
+
+class TestAConstantSubstitutedIntoAShorthandPropertyKeepsItsName(TestBase):
+    """
+    `{ q }` means `{ q: q }`, and what parts the two spellings is that the shorthand writes one
+    identifier where the other writes two: the name of the property and the read of the binding are
+    the same word. Node prints `{"q":1}` for
+
+        var q = 1; console.log(JSON.stringify({ q }));
+
+    and prints `{"q":1}` for `{ q: 1 }` written out in full, which is where the value of that read
+    has to go. A property named by nothing is not a property, so the one thing a substitution here
+    may not do is put the value where the name stood.
+
+    `JsConstantInlining._substitute_constants` replaces the identifier through `_replace_in_parent`,
+    and the parser stores one node in both the `key` and the `value` of a shorthand `JsProperty`, so
+    the replacement lands on the name as well as on the read — twice over, once for each slot the
+    walk reaches the node through. `JsSynthesizer.visit_JsProperty` writes a shorthand out by
+    emitting its key alone, so what comes back is `{ 1 }`, `{ "a" }` and `{ 1, 2 }`, none of which
+    any engine reads.
+
+    The guard is written already and is written for exactly this:
+    `refinery.lib.scripts.js.deobfuscation.helpers._substitute_use_position` refuses to substitute a
+    non-computed key and clears `JsProperty.shorthand` when it replaces the value, so that the
+    property is spelled in full. The inliner does not go through it.
+
+    The entry is stated over the text the tool writes rather than over what running it prints,
+    because the corrupt rows are not programs and cannot be run at all: Node answers `SyntaxError`
+    for each of them, and answers it just as readily for any other way of breaking a file, so
+    running them can say that something is wrong but never which value went where. The controls are
+    the second reason. A fix that stopped substituting into an object literal altogether would leave
+    every program here printing what it printed before, since refusing to touch a program cannot
+    change what it does, and a behavior comparison would then report this entry as an unexpected
+    success on the day the defect was covered over instead of fixed.
+
+    Those controls are the last three rows, and each is the text the tool writes today. The first
+    takes the same constant into a key that is spelled out and keeps the name beside it. The other
+    two are the destructuring pattern, which was measured rather than assumed: a shorthand there
+    names the binding the pattern writes and not one it reads, nothing is substituted over it, and a
+    constant reaching the same statement lands on the object being taken apart in one row and on the
+    default the shorthand carries in the other.
+    """
+
+    @unittest.expectedFailure
+    def test_a_constant_substituted_into_a_shorthand_property_is_written_under_its_name(self):
+        """
+        Node prints `{"q":1}`, `{"q":"a"}`, `{"q":1,"w":2}`, `{"q":1,"r":2}`, `{"q":1}`, `5` and `5`
+        for the seven programs of `A_CONSTANT_REACHING_A_SHORTHAND_PROPERTY`, and prints those same
+        seven lines for the seven texts they are mapped to. The four whose property is written as a
+        shorthand come back as `{ 1 }`, `{ "a" }`, `{ 1, 2 }` and `{ 1, r: 2 }`.
+        """
+        rows = A_CONSTANT_REACHING_A_SHORTHAND_PROPERTY
+        self.assertEqual({source: _folded(source) for source in rows}, rows)
