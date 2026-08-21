@@ -62,101 +62,17 @@ class TestAnIdentifierNamedKeyReadsAsUtf16CodeUnits(TestBase):
         )
 
 
-#: Files that stop in the middle of a construct, grouped by the construct each one stops inside of.
-#: No engine reads any of them, and this parser reads every one of them as a program, so the law
-#: below is quantified over all of them at once: the group a row is in is only what the parser had
-#: to finish writing in order to answer with a program at all.
-SOURCES_THE_RECOVERY_SILENTLY_COMPLETES = {
-    'a function': (
-        'function',
-        'function f',
-        'function f(',
-        'function f(a, b',
-        'function f() {',
-        'function f() { g();',
-        'function* g() {',
-        'async function h() {',
-        'x = function (',
-        'x = () => {',
-    ),
-    'a class': (
-        'class',
-        'class Foo',
-        'class Foo {',
-        'class Foo extends Bar {',
-        'class Foo { m(',
-        'class Foo { m() {',
-        'class Foo { m() { g();',
-        'class Foo { static {',
-        'x = class {',
-    ),
-    'a statement': (
-        'if (a) {',
-        'if (a) { f();',
-        'while (a) {',
-        'for (;;) {',
-        'for (const v of a) {',
-        'with (o) {',
-        'label: {',
-        'try {',
-        'try { f();',
-        'try {} catch',
-        'try {} catch (e',
-        'try {} catch (e) {',
-        'try { f(); } catch (e) { g();',
-        'try {} finally',
-        'switch (x',
-        'switch (x) {',
-        'switch (x) { case 1:',
-        'switch (x) { case 1: f();',
-        'switch (x) { default:',
-    ),
-    'a bracketed expression': (
-        'x = (1 + 2',
-        'x = { a',
-        'x = { a: 1',
-        'x = { a: 1, b: 2',
-        'x = [1, 2',
-        'x = [1, 2, 3',
-        'x = f(1, 2',
-        'x = f(g(1), 2',
-        'x = a.b(',
-        'x = new C(',
-    ),
-    'a binding pattern': (
-        'const {',
-        'const { a',
-        'const { a, b',
-        'const [',
-        'const [a, b',
-        'const { a: { b',
-        'const [a, [b',
-        'try {} catch ({ a',
-    ),
-    'an export declaration': (
-        'export {',
-        'export { a',
-        'export function f() {',
-        'export default function () {',
-    ),
-}
-
-
 class TestWellFormednessRefusesANonProgram(TestBase):
     """
     `refinery.lib.scripts.is_well_formed` is the domain over which fidelity is stated: it holds
     when every node in the tree spells something a parser agreed to read. A source no engine
     accepts is not such a tree, and a caller that is told otherwise compares a fabrication against
     the file it came from.
-    """
 
-    @unittest.expectedFailure
-    def test_an_unclosed_parenthesis_is_not_a_well_formed_program(self):
-        """
-        Node refuses `var x = (1 + 2; g(x);` with `SyntaxError: Unexpected token ';'`. Supplying
-        the bracket nobody wrote makes a truncated file read as though it had been written closed.
-        """
-        self.assertEqual(well_formed('var x = (1 + 2; g(x);'), False)
+    What is left here is the class the parser reads without repairing anything: an assignment
+    target the grammar refuses. A file that stops in the middle of a construct is answered
+    correctly and its law lives in `test.lib.scripts.js.test_parser_recovery`.
+    """
 
     @unittest.expectedFailure
     def test_an_arrow_function_is_not_an_update_target(self):
@@ -173,36 +89,6 @@ class TestWellFormednessRefusesANonProgram(TestBase):
         postfix operation`, naming the same missing target the arrow form lacks.
         """
         self.assertEqual(well_formed('f = function () {}++'), False)
-
-    @unittest.expectedFailure
-    def test_a_file_that_stops_inside_a_construct_is_not_a_well_formed_program(self):
-        """
-        The parser answers a file that was cut off inside a construct by writing the token it was
-        waiting for — a name, a bracket, a brace, a body — and records nowhere that it did so: not
-        one of the sixty files in `SOURCES_THE_RECOVERY_SILENTLY_COMPLETES` leaves a
-        `refinery.lib.scripts.js.model.JsErrorNode` anywhere in the tree, so every one of them is
-        reported as a program and the cut is gone. `x = f(1, 2` is printed as `x = f(1, 2);`, which
-        is a program that runs; `try {} catch` is printed as `try {} catch {}`, a handler no file
-        wrote; `export {` is printed as `export {  };`.
-
-        No engine reads any of them. `new vm.Script` refuses every row but the export declarations,
-        each with `SyntaxError: Unexpected end of input` except `x = f(1, 2` and `x = f(g(1), 2`,
-        which it refuses with `missing ) after argument list`. The export declarations are put to
-        `new vm.SourceTextModule` under `node --experimental-vm-modules`, because `vm.Script`
-        refuses them for a reason of its own, `Unexpected token 'export'`; that host refuses all
-        four with `Unexpected end of input` and accepts `export {};`, `var a; export { a };`,
-        `export function f() {}` and `export default function () {}`, so what it refuses is the cut
-        and not the keyword.
-        """
-        sources = [
-            source
-            for group in SOURCES_THE_RECOVERY_SILENTLY_COMPLETES.values()
-            for source in group
-        ]
-        self.assertEqual(
-            {source: well_formed(source) for source in sources},
-            {source: False for source in sources},
-        )
 
 
 class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
@@ -734,3 +620,83 @@ class TestAConstantSubstitutedIntoAShorthandPropertyKeepsItsName(TestBase):
         """
         rows = A_CONSTANT_REACHING_A_SHORTHAND_PROPERTY
         self.assertEqual({source: folded(source) for source in rows}, rows)
+
+
+def _a_module_reporting_it_loaded(module: str) -> str:
+    """
+    *module* with a statement printing `loaded` appended. A module that only declares and exports
+    does nothing an engine reports, and the print is what makes the difference between a module that
+    loads and one that does not an answer rather than a silence on both sides.
+    """
+    return F"{module}\nconsole.log('loaded');\n"
+
+
+#: A module that exports a binding it declares, mapped to what Node prints for it. Every one of them
+#: is a module an engine loads, which is the whole of what an export list has to be checked against:
+#: a list compiles only where the module declares what it names.
+A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES = {
+    _a_module_reporting_it_loaded('var a = 1;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('let a = 1;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('const a = 1;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('const a = () => 1;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('let a;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('var a = 1;\nexport { a as b };'): 'loaded\n',
+    _a_module_reporting_it_loaded('var a = 1, b = 2;\nexport { a, b };'): 'loaded\n',
+    _a_module_reporting_it_loaded('var a = 1;\nexport { a as default };'): 'loaded\n',
+    'var a = 1;\nexport { a };\nconsole.log(a);\n': '1\n',
+    _a_module_reporting_it_loaded('function a() { return 1; }\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('class a {}\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        "import { format } from 'node:util';\nexport { format };"
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        "var format = 1;\nexport { format } from 'node:util';"
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded('export var a = 1;'): 'loaded\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnExportListReadsTheBindingItNames(TestBase):
+    """
+    A module can declare a binding and export it in two statements, the declaration and an export
+    list naming it, and the name in that list is a read of that binding. `export { a };` is a module
+    only where `a` is declared, and Node refuses one where it is not with `SyntaxError: Export 'a'
+    is not defined in module`. That refusal is the linker's rather than the parser's, so it is what
+    whoever imports the module gets as much as whoever runs it.
+
+    A declaration whose only reader is such a list is read as unread and deleted, and the list is
+    left standing over a name the module no longer declares. What comes back reads as the file it
+    came from with one dead statement taken out of it: nothing throws while the tool runs, nothing
+    is left half-rewritten, and the module is one no engine will load.
+
+    Which declarations this reaches was measured. A variable declaration goes whatever keyword wrote
+    it, with an initializer or without, whether the list renames what it exports, exports it as
+    `default`, or names two bindings at once, and whether or not the module reads it somewhere else:
+    a read a constant is substituted into is a read the declaration is no longer kept for.
+
+    The last five rows are the controls a fix has to keep. Three of them export a name the module
+    declares no local for — an export list carrying a `from` clause names a binding on the far side
+    of the module boundary, a list re-exporting an import names what the import statement bound, and
+    an `export var` is one statement and not two — and the other two are a function declaration
+    and a class declaration, the latter of which is kept here whether or not any list names it.
+
+    Reading every name in every export list as a local read is not a fix those controls survive: the
+    `from` row declares a local under the name the list exports and the list does not name that
+    local, so a constant substituted into it writes `export { 1 } from 'node:util'`, which Node
+    refuses as readily as it refuses the export of a name nothing declared.
+    """
+
+    @unittest.expectedFailure
+    def test_a_declaration_an_export_list_names_is_read_by_that_list(self):
+        """
+        Node prints `loaded` for thirteen of the fourteen modules of
+        `A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES` and `1` for the one that reads what it
+        exports. Nine of them are handed back as a module no engine loads, printing nothing and
+        answering `SyntaxError` to anyone who asks for them.
+        """
+        rows = A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES
+        self.assertEqual(
+            {source: before_and_after(source, module=True) for source in rows},
+            each_program_still_prints(rows),
+        )

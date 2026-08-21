@@ -4,6 +4,8 @@ import inspect
 import json
 import unittest
 
+from typing import NamedTuple
+
 from test.lib.scripts.js.analysis.differential import (
     JsEvaluation,
     behavior,
@@ -1337,4 +1339,173 @@ class TestAProgramCatchingAModulePayloadStillCatchesIt(TestJsDeobfuscator):
         self.assertEqual(
             {source: behavior(deobfuscate_source(source)) for source in sources},
             {source: ('SyntaxError\n', None) for source in sources},
+        )
+
+
+class APayloadCutShort(NamedTuple):
+    """
+    A payload that stops where the language still requires something, together with the text that
+    would have finished it and what the finished payload prints. `cut` is what a call site is
+    handed and `whole` is the payload the cut was taken from, so the text the cut took is the whole
+    of the difference between the two.
+    """
+    opened: str
+    closing: str
+    prints: str
+
+    @property
+    def cut(self) -> str:
+        return self.opened
+
+    @property
+    def whole(self) -> str:
+        return F'{self.opened}{self.closing}'
+
+
+#: A payload that stops in the middle of a construct, keyed by the construct it stops inside of. A
+#: string carved out of a buffer or assembled from a source that was itself truncated ends this
+#: way. Node refuses every `cut` below and reads every `whole`, and each `whole` is spelled the way
+#: the printer spells it, so the text a site is replaced by is the finished payload itself.
+A_PAYLOAD_CUT_SHORT = {
+    'an argument list': APayloadCutShort(
+        'console.log(1, 2', ');', '1 2\n'),
+    'a nested argument list': APayloadCutShort(
+        'console.log(Math.max(1, 2), 3', ');', '2 3\n'),
+    'a parenthesized operand': APayloadCutShort(
+        'console.log((1 + 2', ') * 3);', '9\n'),
+    'a catch clause': APayloadCutShort(
+        'try {\n  console.log(1);\n} catch', ' (e) {}', '1\n'),
+    'a catch body': APayloadCutShort(
+        'try {\n  console.log(1);\n} catch (e) {\n  console.log(2);', '\n}', '1\n'),
+    'an object literal': APayloadCutShort(
+        'console.log({ a: 1, b: 2', ' });', '{ a: 1, b: 2 }\n'),
+    'an object property value': APayloadCutShort(
+        'console.log({ a: [1, 2], b:', ' 3 });', '{ a: [ 1, 2 ], b: 3 }\n'),
+    'an array literal': APayloadCutShort(
+        'console.log([1, 2', ']);', '[ 1, 2 ]\n'),
+    'a function body': APayloadCutShort(
+        '(function() {\n  console.log(1);', '\n})();', '1\n'),
+    'a parameter list': APayloadCutShort(
+        '(function(a, b', ') {\n  console.log(a + b);\n})(1, 2);', '3\n'),
+    'an arrow body': APayloadCutShort(
+        '(() => {\n  console.log(1);', '\n})();', '1\n'),
+    'a template literal': APayloadCutShort(
+        'console.log(`a${1}b', '`);', 'a1b\n'),
+    'a block statement': APayloadCutShort(
+        'if (1) {\n  console.log(1);', '\n}', '1\n'),
+    'a switch body': APayloadCutShort(
+        'switch (1) {\n  case 1:\n    console.log(1);', '\n}', '1\n'),
+    'a statement following a complete one': APayloadCutShort(
+        'console.log(1);\nconsole.log(2', ');', '1\n2\n'),
+}
+
+
+def _a_program_reporting_what_each_payload_did(template: str, payloads: list[str]) -> str:
+    """
+    A program that evaluates every payload of *payloads* through *template*, each inside a `try`
+    that reports either what came out of it or that the site was reached, and reports that it got
+    to the end.
+
+    That last line is the whole point of the shape. A payload the engine refuses is a `SyntaxError`
+    the call site catches, and the program runs on; written into the file instead, it is the file
+    that no longer parses, and nothing runs at all.
+    """
+    attempts = [
+        F'try {{ {_a_site_evaluating(template, payload)} console.log("read"); }}'
+        F' catch (e) {{ console.log(e.name); }}'
+        for payload in payloads
+    ]
+    return '\n'.join([*attempts, "console.log('done');"]) + '\n'
+
+
+class TestAPayloadCutShortIsNotInlined(TestJsDeobfuscator):
+    """
+    A payload that stops in the middle of a construct is a program no engine reads, and where it is
+    read decides what that costs. Evaluated, it is a `SyntaxError` at the one call site, which the
+    program around it is free to catch and go on from. Spliced into the file, the tokens the
+    payload stops before have to be written by whoever reads it, and the file then holds a program
+    the payload never spelled.
+
+    Writing the text each cut took turns the same payload into one every engine reads, and that one
+    is inlined exactly as before.
+    """
+
+    def _reflect(self, source: str) -> str:
+        return self._run_transformer(source, JsReflectionInlining)
+
+    def test_no_surface_inlines_a_payload_cut_short(self):
+        for surface, template in A_SURFACE_THAT_EVALUATES_A_STRING.items():
+            sources = [
+                _a_site_evaluating(template, row.cut)
+                for row in A_PAYLOAD_CUT_SHORT.values()
+            ]
+            with self.subTest(surface=surface):
+                self.assertEqual(
+                    {source: self._reflect(source) for source in sources},
+                    {source: source for source in sources},
+                )
+
+    def test_a_string_timer_does_not_lower_one_either(self):
+        sources = [
+            F'setTimeout({json.dumps(row.cut)}, 0);'
+            for row in A_PAYLOAD_CUT_SHORT.values()
+        ]
+        self.assertEqual(
+            {source: self._reflect(source) for source in sources},
+            {source: source for source in sources},
+        )
+
+    def test_every_surface_inlines_the_payload_each_cut_was_taken_from(self):
+        for surface, template in A_SURFACE_THAT_EVALUATES_A_STRING.items():
+            rows = {
+                _a_site_evaluating(template, row.whole): row.whole
+                for row in A_PAYLOAD_CUT_SHORT.values()
+            }
+            with self.subTest(surface=surface):
+                self.assertEqual({s: self._reflect(s) for s in rows}, dict(rows))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAProgramAroundAPayloadCutShortRunsOn(TestJsDeobfuscator):
+
+    def _programs(self, payloads: list[str]) -> list[str]:
+        return [
+            _a_program_reporting_what_each_payload_did(template, payloads)
+            for template in A_SURFACE_THAT_EVALUATES_A_STRING.values()
+        ]
+
+    def test_node_catches_a_syntax_error_at_every_cut_site_and_reaches_the_end(self):
+        rows = A_PAYLOAD_CUT_SHORT.values()
+        caught = 'SyntaxError\n' * len(rows) + 'done\n'
+        sources = self._programs([row.cut for row in rows])
+        self.assertEqual(
+            {source: behavior(source) for source in sources},
+            {source: (caught, None) for source in sources},
+        )
+
+    def test_the_deobfuscation_of_each_program_catches_the_same_and_reaches_the_end(self):
+        rows = A_PAYLOAD_CUT_SHORT.values()
+        caught = 'SyntaxError\n' * len(rows) + 'done\n'
+        sources = self._programs([row.cut for row in rows])
+        self.assertEqual(
+            {source: behavior(deobfuscate_source(source)) for source in sources},
+            {source: (caught, None) for source in sources},
+        )
+
+    def test_node_prints_what_every_payload_a_cut_was_taken_from_holds(self):
+        rows = A_PAYLOAD_CUT_SHORT.values()
+        printed = ''.join(F'{row.prints}read\n' for row in rows) + 'done\n'
+        sources = self._programs([row.whole for row in rows])
+        self.assertEqual(
+            {source: behavior(source) for source in sources},
+            {source: (printed, None) for source in sources},
+        )
+
+    def test_the_deobfuscation_of_each_program_prints_the_same(self):
+        rows = A_PAYLOAD_CUT_SHORT.values()
+        printed = ''.join(F'{row.prints}read\n' for row in rows) + 'done\n'
+        sources = self._programs([row.whole for row in rows])
+        self.assertEqual(
+            {source: behavior(deobfuscate_source(source)) for source in sources},
+            {source: (printed, None) for source in sources},
         )

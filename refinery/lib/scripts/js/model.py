@@ -584,7 +584,7 @@ class JsExportAllDeclaration(Statement):
 
 
 @dataclass(repr=False, eq=False)
-class JsScript(Statement, spelling='module'):
+class JsScript(Statement, spelling=('module', 'recovered')):
     body: list[Statement] = field(default_factory=list)
     #: Whether the source is module code, which the host decides (§16.1) and the syntax only reports:
     #: an `import` or `export` declaration, or `import.meta`, can appear in nothing else. It is a
@@ -592,6 +592,14 @@ class JsScript(Statement, spelling='module'):
     #: a host loads it — and because a pass that cuts the last import out of a body does not turn a
     #: module into a script.
     module: bool = False
+    #: Whether the parser had to invent a token, or step over one, in order to read this file. It is
+    #: a spelling field for the reason `module` is: it records where the tree came from rather than
+    #: what it spells, so two scripts differing only here are the same program. Nothing ever clears
+    #: it, because no later pass can put back a token the source never held.
+    recovered: bool = False
+
+    def is_recovered(self) -> bool:
+        return self.recovered
 
 
 def strip_parens(node: Node | None) -> Node | None:

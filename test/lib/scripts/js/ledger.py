@@ -27,12 +27,23 @@ def folded(source: str) -> str:
     return source.encode('utf8') | js() | str
 
 
-def before_and_after(source: str) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
+def before_and_after(
+    source: str,
+    *,
+    module: bool = False,
+) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
     """
     What Node makes of *source* and what it makes of the text `refinery.js` deobfuscates it to,
     reported together because the law is that the two agree.
+
+    *module* reads the source as an ECMAScript module rather than as a script, which an entry
+    pinning an `import` or `export` declaration has to ask for: no script spells one, and the answer
+    such a declaration is wrong in is the linker's rather than the parser's.
     """
-    return behavior(source), behavior(deobfuscate_source(source))
+    return (
+        behavior(source, module=module),
+        behavior(deobfuscate_source(source, module=module), module=module),
+    )
 
 
 def each_program_still_prints(

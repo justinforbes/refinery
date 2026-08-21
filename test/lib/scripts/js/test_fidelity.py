@@ -16,7 +16,9 @@ buys and costs for JavaScript is stated in `TestJsSamenessIsBlindToHowAValueIsWr
 The law is quantified over the trees that spell a program. Half of that is
 `refinery.lib.scripts.is_well_formed`, which the js model answers for a literal the source left
 unclosed; the other half is `test.lib.scripts.js.corpus.shapes_the_grammar_forbids`, which states
-the shapes the model does not yet refuse.
+the shapes the model does not yet refuse. A domain a filter decides is one whose size is invisible,
+so it is asserted rather than assumed: every snippet is required to be in it, and a cut child list
+is required to leave it only for a shape the grammar names.
 
 Three tiers of input feed the law:
 
@@ -258,6 +260,30 @@ class TestJsFidelity(TestBase):
                 produced = {type(node).__name__ for node in self._parse(source).walk()}
                 self.assertIn(name, produced)
 
+    def test_every_snippet_spells_a_program(self):
+        """
+        The domain the laws below are stated over, asserted rather than assumed. A source that
+        spells no program is skipped by each of them, and a skip is a filter: a parser that stops
+        reading a construct takes every source holding it out of the domain, which leaves the laws
+        quantified over less and every one of them green.
+
+        Only the hand-authored half can carry the claim, and it carries it exactly. Each snippet is
+        a program an engine compiles, so a snippet outside the domain is the parser being wrong
+        about JavaScript rather than the corpus holding text no engine reads. The one entry an
+        engine refuses is `JsDecorator`, whose grammar is a proposal the model reads ahead of V8.
+        Nothing of the kind can be said about the harvested half, which is every JavaScript string
+        the suite holds and therefore holds the ones a test deliberately left broken.
+
+        With `test_every_node_class_has_a_snippet`, this is what makes fidelity a statement about
+        every node class rather than about whichever ones the parser still reads: the table has an
+        entry per class, and every entry is in the domain.
+        """
+        skipped = [
+            name for name, source in SNIPPETS.items()
+            if not self._spells_a_program(self._parse(source))
+        ]
+        self.assertEqual(skipped, [])
+
     def test_the_parser_never_builds_a_shape_the_grammar_forbids(self):
         """
         A shape the language cannot write is one the parser must not hand back, because the
@@ -320,15 +346,35 @@ class TestJsFidelity(TestBase):
         for name, source in SNIPPETS.items():
             for index, field, size in self._truncations(source):
                 with self.subTest(node=name, field=field, size=size):
-                    tree = self._parse(source)
-                    holder = list(tree.walk_in_order())[index]
-                    setattr(holder, field, getattr(holder, field)[:size])
+                    tree = self._truncated(source, index, field, size)
                     if not self._spells_a_program(tree):
                         continue
                     printed, differences = self._round_trip(tree)
                     self.assertEqual(
                         sorted(differences - set(KNOWN_VIOLATIONS)), [],
                         F'{field}[:{size}] printed as {printed!r}')
+
+    def test_a_truncation_is_passed_over_only_for_a_shape_the_grammar_forbids(self):
+        """
+        The domain the law above is stated over. A cut that leaves no program is passed over rather
+        than printed, so were cutting to stop producing programs the law would check nothing and
+        report it nowhere.
+
+        Only one of the two ways out of the domain is a reason. Removing entries from a child list
+        can leave a shape no text spells, which is what `SHORTEST_LIST` and the arity of a
+        template's runs and holes state from the grammar, and a cut reaching one of those is not a
+        cut a pass makes. Cutting cannot instead take a tree out of `is_well_formed`: none of the
+        three facts that predicate reads is answered by a list a node holds, and a shorter list is a
+        walk over fewer nodes rather than over different ones. Were that ever to change, the rule
+        about how short a list may be would have moved into the model, and this is what says so.
+        """
+        unspelled = [
+            (name, field, size)
+            for name, source in SNIPPETS.items()
+            for index, field, size in self._truncations(source)
+            if not is_well_formed(self._truncated(source, index, field, size))
+        ]
+        self.assertEqual(unspelled, [])
 
     def test_the_synthesizer_inverts_the_parser_without_the_original_brackets(self):
         """
@@ -351,6 +397,12 @@ class TestJsFidelity(TestBase):
             for field, items in child_list_fields(node):
                 for size in range(len(items)):
                     yield index, field, size
+
+    def _truncated(self, source: str, index: int, field: str, size: int) -> Node:
+        tree = self._parse(source)
+        holder = list(tree.walk_in_order())[index]
+        setattr(holder, field, getattr(holder, field)[:size])
+        return tree
 
 
 class TestJsSamenessIsBlindToHowAValueIsWritten(TestBase):

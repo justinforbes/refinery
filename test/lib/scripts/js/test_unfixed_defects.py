@@ -53,10 +53,21 @@ from test.lib.scripts.js.test_parameter_grammar import (
     A_BINDING_THE_KIND_OF_FUNCTION_RESERVES,
     A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES,
 )
+from test.lib.scripts.js.test_parser_recovery import (
+    A_POSITION_NAMING_A_BINDING_THE_FILE_CREATES,
+    A_WORD_NO_MODULE_MAY_BIND,
+)
 from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_HAS
 
 from refinery.lib.scripts import UnspellableNode
-from refinery.lib.scripts.js.model import JsIdentifier, JsPropertyDefinition, JsStringLiteral
+from refinery.lib.scripts.js.model import (
+    JsExportAllDeclaration,
+    JsExportSpecifier,
+    JsIdentifier,
+    JsImportSpecifier,
+    JsPropertyDefinition,
+    JsStringLiteral,
+)
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
@@ -122,6 +133,8 @@ class TestClassBodyIsItsOwnFunctionContext(TestBase):
     A class body does not belong to the function that encloses it. Each field initializer is a
     function context of its own and so is each static block, and both are strict code, so `await`
     and `yield` mean there what they mean in a fresh body that is neither async nor a generator.
+    A static block goes one step further and bans `await` outright, in every position and of its
+    own accord, so that the word is no more a name there than it is an operator.
     """
 
     @unittest.expectedFailure
@@ -148,14 +161,27 @@ class TestClassBodyIsItsOwnFunctionContext(TestBase):
         self.assertEqual(well_formed('async function f() { class C { p = await x; } }'), False)
 
     @unittest.expectedFailure
-    def test_await_is_banned_in_a_class_static_block(self):
+    def test_a_class_static_block_bans_await_whatever_encloses_the_class(self):
         """
-        Node refuses `async function f() { class C { static { var await = 1; } } }` with
-        `SyntaxError: Unexpected reserved word`. A static block bans `await` in every position, as
-        a name no less than as an operator, and the enclosing async function does not change that.
+        Node refuses `class C { static { var await = 1; } }` with `SyntaxError: Unexpected reserved
+        word`, and refuses the same class standing inside a plain function and inside an `async`
+        one with the same message. The ban is the block's own, because the block is its own function
+        context: no enclosure has to supply it and none can lift it.
+
+        The `async` row is why this entry is quantified over three rather than written about one.
+        The word is reserved throughout an async function's body, so a parser that lets that
+        reservation reach through the class body into the block refuses that row for a reason of
+        the enclosure's — the right answer by accident — while reading the other two as programs.
         """
-        source = 'async function f() { class C { static { var await = 1; } } }'
-        self.assertEqual(well_formed(source), False)
+        sources = [
+            'class C { static { var await = 1; } }',
+            'function f() { class C { static { var await = 1; } } }',
+            'async function f() { class C { static { var await = 1; } } }',
+        ]
+        self.assertEqual(
+            {source: well_formed(source) for source in sources},
+            {source: False for source in sources},
+        )
 
     @unittest.expectedFailure
     def test_yield_in_a_field_initializer_is_refused(self):
@@ -243,6 +269,71 @@ class TestAnExpressionNamedByAWordOnlyTheEnclosingKindReservesIsAProgram(TestBas
             ' console.log(typeof f); } g().next();'
         )
         self.assertEqual(before_and_after(source), (('function\n', None), ('function\n', None)))
+
+
+class TestABindingNamedByAWordNoModuleMayBindIsNoProgram(TestBase):
+    """
+    An `import` or `export` declaration stands only in module code, and module code is strict with
+    no directive saying so, so a binding one of them creates cannot be named by a word strict code
+    reserves, by the one word only a module reserves, or by either of the two names strict code
+    refuses to bind. `node --check` over a `.mjs` file refuses every word of
+    `test.lib.scripts.js.test_parser_recovery.A_WORD_NO_MODULE_MAY_BIND` in every position of
+    `A_POSITION_NAMING_A_BINDING_THE_FILE_CREATES` beside it, each with a `SyntaxError`:
+
+        import yield from "m";               Unexpected strict mode reserved word
+        import * as enum from "m";           Unexpected reserved word
+        import { await } from "m";           Unexpected reserved word
+        import { remote as eval } from "m";  Unexpected eval or arguments in strict mode
+
+    The fifth position writes the binding with a `var` of its own before exporting it, so the
+    declaration the host names in refusing `var yield;` and `export { yield };` together is that
+    one. The same host binds `yield`, `let` and `eval` freely in a sloppy script, which is what
+    makes the module and not the word the reason any of these is refused.
+
+    The far side of the same declaration is a different position under no such restriction, a name
+    reaching across the module boundary being an IdentifierName rather than one the file could
+    refer to: the host reads `import { yield as v } from "m";` and `export * as await from "m";`.
+    That half is already answered, by the law
+    `TestAModuleTakesAWiderNameAcrossItsBoundaryThanItBinds` of the module the two corpora live in,
+    which reads every word of both in every boundary position with no repair. A refusal that
+    reaches a name across the boundary therefore turns that law red rather than this entry green.
+
+    The words the language reserves outright are refused already in four of the five binding
+    positions. The words only strict code and only a module reserve are read in all five, and the
+    shorthand `import { yield } from "m";`, whose one word is a boundary name and a binding at
+    once, is read for every word of the corpus. Each file so read prints back exactly as it went
+    in, so what they cost is what the four files of
+    `TestABindingNamedByAWordItsFunctionKindReservesIsNoProgram` cost:
+    `refinery.lib.scripts.is_well_formed` answers `True` for a tree that is not a program, which is
+    the domain every fidelity law is stated over, and a consumer reading that tree finds a module
+    binding a name no module has.
+    """
+
+    @unittest.expectedFailure
+    def test_a_binding_named_by_a_word_no_module_may_bind_is_not_a_well_formed_program(self):
+        """
+        Every file of the product is one the host refuses, and all of them are compared in a single
+        answer so that any position or any word left reading is this entry still failing.
+        """
+        sources = [
+            template.format(name=word)
+            for template in A_POSITION_NAMING_A_BINDING_THE_FILE_CREATES.values()
+            for word in A_WORD_NO_MODULE_MAY_BIND
+        ]
+        self.assertEqual(
+            {source: well_formed(source) for source in sources},
+            {source: False for source in sources},
+        )
+
+    @unittest.expectedFailure
+    def test_the_shorthand_import_binds_the_word_the_shorthand_re_export_only_passes_on(self):
+        """
+        The word in `import { yield } from "m";` names a binding as well as the far side of the
+        boundary, and the word in `export { yield } from "m";` names the far side twice over, which
+        is why the host refuses the first and reads the second.
+        """
+        sources = ['import { yield } from "m";', 'export { yield } from "m";']
+        self.assertEqual([well_formed(source) for source in sources], [False, True])
 
 
 class TestLexicalDeclarationIsNotAStatement(TestBase):
@@ -359,6 +450,31 @@ class TestRecoveryKeepsTheSourceText(TestBase):
         sources = ['x = y[a b]', 'x = y.replace(/[^a-z']
         dropped = tuple(_dropped_source_characters(s, _printed(s)) for s in sources)
         self.assertEqual(dropped, ('', ''))
+
+    @unittest.expectedFailure
+    def test_the_token_a_repair_steps_over_is_still_in_what_is_printed(self):
+        """
+        Node refuses all six of these: `missing ) after argument list` for the two argument lists,
+        `Unexpected identifier 'b'` for the two parameter lists, `Unexpected string` for the catch
+        parameter, and `Unexpected token 'break'` for the case clause. Standing where the grammar
+        requires one token and finding another, `JsParser._expect` writes the token it wanted and
+        steps over the one that was there, so `f('alpha' 'beta');` comes back as `f('alpha');` and
+        the `break` of the case clause is nowhere in what comes back at all. No error node is built
+        for the token that went and no other node holds its text, so the entire record of it is
+        that the file is reported as one the parser repaired.
+        """
+        sources = [
+            "f('alpha' 'beta');",
+            "x = new C('alpha' 'beta');",
+            'function f(a b) { return a; }',
+            'class C { m(a b) {} }',
+            "try { f(); } catch (e 'beta') {}",
+            'switch (x) { case 1 break; }',
+        ]
+        self.assertEqual(
+            [_dropped_source_characters(source, _printed(source)) for source in sources],
+            [''] * len(sources),
+        )
 
 
 class TestPrintingIsIdempotent(TestBase):
@@ -1325,4 +1441,86 @@ class TestAPropertyWriteThroughAShadowedGlobalAliasSurvives(TestBase):
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
+        )
+
+
+def _the_module_export_name(source: str) -> str | None:
+    """
+    The name the one specifier of *source* reaches across the module boundary with, which is the
+    text denoted by the string literal written in that position. A position holding anything other
+    than a string literal denotes no text at all, and nothing is what that is reported as.
+    """
+    for node in JsParser(source).parse().walk_in_order():
+        if isinstance(node, JsImportSpecifier):
+            written = node.imported
+        elif isinstance(node, (JsExportSpecifier, JsExportAllDeclaration)):
+            written = node.exported
+        else:
+            continue
+        return written.value if isinstance(written, JsStringLiteral) else None
+    return None
+
+
+class TestAModuleExportNameWrittenAsAStringIsAString(TestBase):
+    """
+    An import or export list may name what it reads or writes across the module boundary with a
+    string literal instead of a word, which is how a module reaches a name no identifier spells.
+    What such a specifier names is the text the literal denotes: the quotes are how it was written
+    and are no part of it, and an escape in it stands for the character it denotes.
+
+    The text of every one of these declarations prints back exactly as it was written, and that is
+    not what is wrong. What is wrong is the tree behind it. The literal is read as though it were a
+    word and kept as a `refinery.lib.scripts.js.model.JsIdentifier` whose name is the raw spelling,
+    quotes and all, so a consumer reading that name reads a name no module has, two spellings of
+    the one name are two names, and the rules the grammar attaches to a name written as a string
+    are rules the parser is never in a position to apply.
+
+    Every answer below is Node's over a `.mjs` file, a module being the only kind of code these
+    declarations appear in: `node --check` for what it refuses, and running the file for what it
+    prints.
+    """
+
+    @unittest.expectedFailure
+    def test_a_name_written_as_a_string_is_the_text_that_string_denotes(self):
+        """
+        A module re-exporting `{ a as 'b c' }` and one importing `{ 'b c' as v }` from it print `1`
+        together, and so do the same two with the `b` of the importing module's name written as a
+        `u` escape: the name a boundary matches on is the text the literal denotes and not the way
+        that text was spelled. An importing module asking for the name `"'b c'"` instead is refused
+        with `SyntaxError: The requested module './mid.mjs' does not provide an export named
+        ''b c''`, which is those quotes being taken for part of the name.
+        """
+        escaped = F'{chr(92)}u0062 c'
+        sources = [
+            "export { a as 'b c' } from 'm';",
+            F"export {{ a as '{escaped}' }} from 'm';",
+            "import { 'b c' as v } from 'm';",
+            "export * as 'b c' from 'm';",
+            "var a = 1; export { a as 'b c' };",
+        ]
+        self.assertEqual(
+            [_the_module_export_name(source) for source in sources],
+            ['b c'] * len(sources),
+        )
+
+    @unittest.expectedFailure
+    def test_a_string_named_specifier_the_grammar_bans_is_not_a_well_formed_program(self):
+        """
+        Node refuses `export { 'a' };` with `SyntaxError: String literal module export names must
+        be followed by a 'from' clause`, refuses `import { 'a' } from 'm';` with `SyntaxError:
+        Unexpected reserved word`, a string being no name a module may bind a local to, and refuses
+        the name holding an unpaired surrogate with `SyntaxError: Invalid module export name:
+        contains unpaired surrogate`. It accepts `export { 'a' } from 'm';`,
+        `import { 'a' as b } from 'm';` and `var a = 1; export { a as 'a' };`, so each refusal is
+        about where the string stands and not about a string standing there at all.
+        """
+        unpaired_surrogate = F'{chr(92)}uD800'
+        sources = [
+            "export { 'a' };",
+            "import { 'a' } from 'm';",
+            F"var a = 1; export {{ a as '{unpaired_surrogate}' }};",
+        ]
+        self.assertEqual(
+            {source: well_formed(source) for source in sources},
+            {source: False for source in sources},
         )

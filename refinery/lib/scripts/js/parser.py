@@ -165,6 +165,7 @@ class JsParser:
         self._in_async: bool = top_level_await
         self._in_generator: bool = False
         self._pending_comments: list[str] = []
+        self._recovered: bool = False
         self._advance()
 
     def _pull_token(self) -> tuple[JsToken, bool]:
@@ -246,11 +247,35 @@ class JsParser:
         return None
 
     def _expect(self, kind: JsTokenKind) -> JsToken:
+        """
+        The token that must stand here, where it does. Where it does not, the parser writes it
+        itself and steps over what was there, so that a file it cannot read is still answered with a
+        tree. That answer is a program the source does not hold, in both directions at once — a
+        bracket nobody wrote is invented and the token that stood in its place is dropped — so the
+        file is recorded as one the parser repaired. `JsScript.recovered` carries that to
+        `refinery.lib.scripts.is_well_formed`, which is what keeps a truncated payload from being
+        spliced into a host file as though it had been written whole.
+        """
         if self._current.kind == kind:
             return self._advance()
         tok = self._current
+        self._recovered = True
         self._advance()
         return JsToken(kind, tok.value, tok.offset, tok.terminated)
+
+    def _require(self, kind: JsTokenKind) -> None:
+        """
+        The token the grammar requires here, consumed where it stands here. Where it does not the
+        parser goes on without it and records the repair, leaving what is here to be read as
+        whatever comes next.
+
+        This is what a list separator wants, and it is why `_expect` is the wrong primitive for one:
+        what follows a missing comma is the next element of the list, not a token to be thrown away,
+        so `{ a: 1 b: 2 }` is a file the parser reports having repaired and still prints everything
+        that was written in.
+        """
+        if not self._eat(kind):
+            self._recovered = True
 
     def _is_binding_identifier(self, token: JsToken) -> bool:
         """
@@ -371,7 +396,7 @@ class JsParser:
     def _parse_program(self) -> JsScript:
         offset = self._current.offset
         body = self._parse_statement_list(JsTokenKind.EOF)
-        return JsScript(body=body, offset=offset)
+        return JsScript(body=body, offset=offset, recovered=self._recovered)
 
     def _parse_statement(self) -> Statement | None:
         offset = self._current.offset
@@ -1155,13 +1180,28 @@ class JsParser:
             offset=offset,
         )
 
+    def _parse_module_export_name(self) -> Expression:
+        """
+        The name an import or export list gives a binding on the far side of the module boundary. It
+        is an IdentifierName rather than a name this file could refer to, so every word the language
+        has stands here and none of them is a repair: `import { default as d } from 'm.js'` and
+        `export * as default from 'm.js'` are both ordinary declarations.
+
+        The shorthand `import { a }` writes one name in two positions at once, and this reads it as
+        the boundary one, which is the wider of the two: what the shorthand also does is bind `a`
+        locally, and no module may bind a word its strict code reserves. That rule is not applied
+        anywhere yet, so nothing is lost by reading the shorthand here rather than gained by reading
+        it as a binding.
+        """
+        tok = self._advance()
+        return self._name_or_error(tok.value, tok.offset)
+
     def _parse_namespace_import(self) -> JsImportNamespaceSpecifier:
         offset = self._current.offset
         self._expect(JsTokenKind.STAR)
         self._expect_contextual('as')
-        tok = self._expect(JsTokenKind.IDENTIFIER)
         return JsImportNamespaceSpecifier(
-            local=self._name_or_error(tok.value, tok.offset),
+            local=self._parse_binding_identifier(),
             offset=offset,
         )
 
@@ -1170,13 +1210,11 @@ class JsParser:
         specs: list[JsImportSpecifier] = []
         while not self._at(JsTokenKind.RBRACE, JsTokenKind.EOF):
             spec_offset = self._current.offset
-            tok = self._advance()
-            imported = self._name_or_error(tok.value, tok.offset)
+            imported = self._parse_module_export_name()
             local = imported
             if self._at(JsTokenKind.AS):
                 self._advance()
-                ltok = self._expect(JsTokenKind.IDENTIFIER)
-                local = self._name_or_error(ltok.value, ltok.offset)
+                local = self._parse_binding_identifier()
             specs.append(JsImportSpecifier(
                 imported=imported, local=local, offset=spec_offset))
             if not self._at(JsTokenKind.RBRACE):
@@ -1212,8 +1250,7 @@ class JsParser:
             exported = None
             if self._at(JsTokenKind.AS):
                 self._advance()
-                tok = self._expect(JsTokenKind.IDENTIFIER)
-                exported = self._name_or_error(tok.value, tok.offset)
+                exported = self._parse_module_export_name()
             self._expect_contextual('from')
             source = self._module_specifier()
             if source is None:
@@ -1247,13 +1284,11 @@ class JsParser:
         specifiers: list[JsExportSpecifier] = []
         while not self._at(JsTokenKind.RBRACE, JsTokenKind.EOF):
             spec_offset = self._current.offset
-            tok = self._advance()
-            local = self._name_or_error(tok.value, tok.offset)
+            local = self._parse_module_export_name()
             exported = local
             if self._at(JsTokenKind.AS):
                 self._advance()
-                etok = self._advance()
-                exported = self._name_or_error(etok.value, etok.offset)
+                exported = self._parse_module_export_name()
             specifiers.append(JsExportSpecifier(
                 local=local, exported=exported, offset=spec_offset))
             if not self._at(JsTokenKind.RBRACE):
@@ -1284,6 +1319,12 @@ class JsParser:
         )
 
     def _expect_contextual(self, keyword: str):
+        """
+        The word that must stand here, which is a word and not a token kind: `as` and `from` are
+        names everywhere else, so the lexer hands them over as themselves in one form and as an
+        identifier in the other. Where neither is what stands here the parser steps over whatever
+        does, which drops it from the file, and that is a repair like any other.
+        """
         if self._at(JsTokenKind.FROM) and keyword == 'from':
             self._advance()
             return
@@ -1293,6 +1334,7 @@ class JsParser:
         if self._at(JsTokenKind.IDENTIFIER) and self._current.value == keyword:
             self._advance()
             return
+        self._recovered = True
         self._advance()
 
     def _parse_expression(self) -> Expression:
@@ -1699,7 +1741,7 @@ class JsParser:
                 else:
                     elements.append(self._parse_assignment_expression())
                 if not self._at(JsTokenKind.RBRACKET):
-                    self._eat(JsTokenKind.COMMA)
+                    self._require(JsTokenKind.COMMA)
             self._expect(JsTokenKind.RBRACKET)
         return JsArrayExpression(elements=elements, offset=offset)
 
@@ -1717,7 +1759,7 @@ class JsParser:
                 else:
                     properties.append(self._parse_object_property())
                 if not self._at(JsTokenKind.RBRACE):
-                    self._eat(JsTokenKind.COMMA)
+                    self._require(JsTokenKind.COMMA)
             self._expect(JsTokenKind.RBRACE)
         return JsObjectExpression(properties=properties, offset=offset)
 

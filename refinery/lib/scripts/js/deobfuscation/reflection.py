@@ -99,7 +99,11 @@ def _try_parse(code: str, *, top_level_await: bool, strict: bool) -> JsScript | 
     and a literal the code left open would run on into whatever follows it at the call site.
 
     Recovery makes the parser total, so raising is not the test. The test is whether the tree is
-    well formed, which is precisely the domain over which printing it back means what it said.
+    well formed, which is precisely the domain over which printing it back means what it said. A
+    payload cut off in the middle of a construct is the case that makes the difference: the parser
+    finishes it by writing the token it was waiting for, so `x = f(1, 2` reads as a call that runs,
+    and only the repair the parser records keeps that from being spliced into the file as though it
+    had been written whole.
 
     Well formed is not the whole of it. A text can spell a tree the printer reproduces exactly and
     still be one the language refuses to read — a repeated parameter where the grammar wants a unique

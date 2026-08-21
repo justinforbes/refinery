@@ -313,7 +313,14 @@ class TestTruncatedSource(TestBase):
             with self.subTest(name):
                 self.assertEqual(self._template_runs_of(_TRUNCATIONS[name].whole), runs)
 
-    def test_a_tree_is_well_formed_after_the_cut_only_where_no_literal_stayed_open(self):
+    def test_a_tree_is_well_formed_after_the_cut_only_where_the_cut_left_nothing_open(self):
+        """
+        Two different things a cut leaves open take a tree out of the fidelity domain, and a file
+        can hold either without the other. A literal the cut ran into is spelled by no text, which
+        the literal itself reports; a construct the cut ran into is finished by the parser writing
+        the token it was waiting for, which the file reports. Only a cut inside a comment at the top
+        level leaves neither, because a comment is not part of the program and nothing encloses it.
+        """
         expected = {
             'string_at_top_level': False,
             'template_at_top_level': False,
@@ -324,7 +331,7 @@ class TestTruncatedSource(TestBase):
             'template_in_function_body': False,
             'template_hole_in_function_body': False,
             'regexp_in_function_body': False,
-            'comment_in_function_body': True,
+            'comment_in_function_body': False,
         }
         for name, well_formed in expected.items():
             with self.subTest(name):

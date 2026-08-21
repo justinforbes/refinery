@@ -159,13 +159,17 @@ def canonical(node: Node):
 
 def is_well_formed(root: Node) -> bool:
     """
-    Whether every node in the tree at `root` spells something, which is the domain over which
-    `canonical` states a fidelity law. A tree containing a node that `Node.has_spelling` rejects
-    cannot be printed at all, and one containing an `unparsed` node prints source that no parser
-    agreed to read, so re-reading it yields whatever the recovery happens to make of the text.
-    Neither says anything about whether a synthesizer is faithful.
+    Whether the tree at `root` spells the source it was read from, which is the domain over which
+    `canonical` states a fidelity law. Three things take a tree out of it. A node that
+    `Node.has_spelling` rejects cannot be printed at all; an `unparsed` node prints source that no
+    parser agreed to read, so re-reading it yields whatever the recovery happens to make of the
+    text; and a node that `Node.is_recovered` reports as repaired prints a program the file did not
+    hold. None of the three says anything about whether a synthesizer is faithful.
     """
-    return all(node.has_spelling() and not node.unparsed for node in root.walk())
+    return all(
+        node.has_spelling() and not node.unparsed and not node.is_recovered()
+        for node in root.walk()
+    )
 
 
 @dataclass(repr=False, eq=False)
@@ -189,9 +193,10 @@ class Node:
       field by field. Where an identification instead needs to look at the instance, because it
       holds only for some values, override `canonical_form` instead.
 
-    Two further facts are per-instance rather than per-class and so are methods: `has_spelling`
-    reports whether this node can be printed at all, and `canonical_form` reports the node this one
-    is identified with when comparing programs.
+    Three further facts are per-instance rather than per-class and so are methods: `has_spelling`
+    reports whether this node can be printed at all, `is_recovered` reports whether the parser had
+    to supply source in order to build it, and `canonical_form` reports the node this one is
+    identified with when comparing programs.
     """
     offset: int = -1
     parent: Node | None = field(default=None, compare=False)
@@ -234,6 +239,20 @@ class Node:
         prevent.
         """
         return True
+
+    def is_recovered(self) -> bool:
+        """
+        Whether reading this node needed the parser to supply source that was not written. A
+        recovery that writes the token it was waiting for answers a file nobody can run with a
+        program that runs: `f(1, 2` becomes the call `f(1, 2)`, and `try {} catch` a handler with a
+        body nobody wrote.
+
+        Such a node prints perfectly well, which is why this is a fact of its own rather than a case
+        of `has_spelling`. What is wrong with it is not that no text spells it, but that the text it
+        was read from spells something else. A parser that cannot say which node it repaired answers
+        this at the root of the file, since a token it stepped over belongs to no node at all.
+        """
+        return False
 
     def canonical_form(self) -> Node | None:
         """

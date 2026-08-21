@@ -416,3 +416,249 @@ class TestAModuleDeclarationIsReadOnlyWhereItsSpecifierIsWritten(TestBase):
             {source: (self._well_formed(source), self._printed(source)) for source in sources},
             {source: (True, source) for source in sources},
         )
+
+
+#: Files that stop in the middle of a construct, grouped by the construct each one stops inside of.
+#: No engine reads any of them, and the law below is quantified over all of them at once: the group
+#: a row is in is only what the parser would have had to finish writing in order to answer with a
+#: program at all.
+SOURCES_THAT_STOP_INSIDE_A_CONSTRUCT = {
+    'a function': (
+        'function',
+        'function f',
+        'function f(',
+        'function f(a, b',
+        'function f() {',
+        'function f() { g();',
+        'function* g() {',
+        'async function h() {',
+        'x = function (',
+        'x = () => {',
+    ),
+    'a class': (
+        'class',
+        'class Foo',
+        'class Foo {',
+        'class Foo extends Bar {',
+        'class Foo { m(',
+        'class Foo { m() {',
+        'class Foo { m() { g();',
+        'class Foo { static {',
+        'x = class {',
+    ),
+    'a statement': (
+        'if (a) {',
+        'if (a) { f();',
+        'while (a) {',
+        'for (;;) {',
+        'for (const v of a) {',
+        'with (o) {',
+        'label: {',
+        'try {',
+        'try { f();',
+        'try {} catch',
+        'try {} catch (e',
+        'try {} catch (e) {',
+        'try { f(); } catch (e) { g();',
+        'try {} finally',
+        'switch (x',
+        'switch (x) {',
+        'switch (x) { case 1:',
+        'switch (x) { case 1: f();',
+        'switch (x) { default:',
+    ),
+    'a bracketed expression': (
+        'x = (1 + 2',
+        'x = { a',
+        'x = { a: 1',
+        'x = { a: 1, b: 2',
+        'x = [1, 2',
+        'x = [1, 2, 3',
+        'x = f(1, 2',
+        'x = f(g(1), 2',
+        'x = a.b(',
+        'x = new C(',
+    ),
+    'a binding pattern': (
+        'const {',
+        'const { a',
+        'const { a, b',
+        'const [',
+        'const [a, b',
+        'const { a: { b',
+        'const [a, [b',
+        'try {} catch ({ a',
+    ),
+    'an export declaration': (
+        'export {',
+        'export { a',
+        'export function f() {',
+        'export default function () {',
+    ),
+}
+
+
+class TestAFileThatStopsInsideAConstructIsNotAProgram(TestBase):
+    """
+    A file cut in the middle of a construct still has to be answered with a tree, so the parser
+    writes the token it was waiting for and steps over what stood in its place. What comes back is
+    then a program the file does not hold — `x = f(1, 2` prints as the call `x = f(1, 2);`, and
+    `try {} catch` as a handler with a body nobody wrote — and the only thing keeping a caller from
+    comparing that fabrication against the source it came from is that the parser records having
+    made it.
+
+    No engine reads any of these. `new vm.Script` refuses every row but the export declarations,
+    each with `SyntaxError: Unexpected end of input` except `x = f(1, 2` and `x = f(g(1), 2`, which
+    it refuses with `missing ) after argument list`. The export declarations are put to `new
+    vm.SourceTextModule` under `node --experimental-vm-modules`, because `vm.Script` refuses them
+    for a reason of its own, `Unexpected token 'export'`; that host refuses all four with
+    `Unexpected end of input` and accepts `export {};`, `var a; export { a };`, `export function
+    f() {}` and `export default function () {}`, so what it refuses is the cut and not the keyword.
+
+    This was an entry of `test.lib.scripts.js.test_release_blockers` until the parser began
+    recording the repair, and it stays as the regression test that entry became.
+    """
+
+    @staticmethod
+    def _well_formed(source: str) -> bool:
+        return is_well_formed(JsParser(source).parse())
+
+    def test_a_file_that_stops_inside_a_construct_is_not_a_well_formed_program(self):
+        sources = [
+            source
+            for group in SOURCES_THAT_STOP_INSIDE_A_CONSTRUCT.values()
+            for source in group
+        ]
+        self.assertEqual(
+            {source: self._well_formed(source) for source in sources},
+            {source: False for source in sources},
+        )
+
+    def test_a_bracket_the_file_closes_with_something_else_is_not_a_well_formed_program(self):
+        """
+        Node refuses `var x = (1 + 2; g(x);` with `SyntaxError: Unexpected token ';'`. The file does
+        not stop anywhere — it runs to its end — and what the recovery does here is drop the `;` it
+        found and write the `)` it wanted, so a file written closed is what the tree reports.
+        """
+        self.assertEqual(self._well_formed('var x = (1 + 2; g(x);'), False)
+
+
+#: Names a module may bind. `node --check` on a `.mjs` file accepts every one of them in every
+#: position of `A_POSITION_NAMING_A_BINDING_THE_FILE_CREATES` and in every position of
+#: `A_POSITION_NAMING_THE_FAR_SIDE_OF_THE_BOUNDARY`.
+A_NAME_A_MODULE_MAY_BIND = (
+    'alpha',
+    'as',
+    'from',
+    'of',
+    'get',
+    'set',
+    'async',
+    'target',
+    'meta',
+)
+
+#: Words that same host refuses in every position of
+#: `A_POSITION_NAMING_A_BINDING_THE_FILE_CREATES`, each with a `SyntaxError`: `Unexpected token
+#: 'class'` and its like for a word the language reserves anywhere, `Unexpected reserved word` for
+#: `enum` and for `await`, which only module code reserves, `Unexpected strict mode reserved word`
+#: for the words only strict code reserves, and `Unexpected eval or arguments in strict mode` for
+#: the two names strict code refuses to bind. It accepts every one of them in every position of
+#: `A_POSITION_NAMING_THE_FAR_SIDE_OF_THE_BOUNDARY`.
+A_WORD_NO_MODULE_MAY_BIND = (
+    'default',
+    'class',
+    'new',
+    'function',
+    'var',
+    'if',
+    'in',
+    'this',
+    'typeof',
+    'void',
+    'return',
+    'super',
+    'import',
+    'export',
+    'null',
+    'true',
+    'enum',
+    'await',
+    'yield',
+    'let',
+    'static',
+    'implements',
+    'interface',
+    'package',
+    'private',
+    'protected',
+    'public',
+    'eval',
+    'arguments',
+)
+
+#: The positions of an `import` or `export` declaration that name a binding the file creates, each
+#: as the declaration that writes a name there.
+A_POSITION_NAMING_A_BINDING_THE_FILE_CREATES = {
+    'a default import'     : 'import {name} from "m";',
+    'a namespace import'   : 'import * as {name} from "m";',
+    'a renamed import'     : 'import {{ remote as {name} }} from "m";',
+    'a plain import'       : 'import {{ {name} }} from "m";',
+    'an export of a local' : 'var {name};\nexport {{ {name} }};',
+}
+
+#: The positions of an `import` or `export` declaration that name something on the far side of the
+#: module boundary, where the grammar takes an IdentifierName rather than a name the file binds.
+A_POSITION_NAMING_THE_FAR_SIDE_OF_THE_BOUNDARY = {
+    'an import'              : 'import {{ {name} as local }} from "m";',
+    'a re-export'            : 'export {{ {name} }} from "m";',
+    'a renamed re-export'    : 'export {{ {name} as local }} from "m";',
+    'the name it exports as' : 'export {{ local as {name} }} from "m";',
+    'a namespace re-export'  : 'export * as {name} from "m";',
+    'an export of a local'   : 'var local;\nexport {{ local as {name} }};',
+}
+
+
+class TestAModuleTakesAWiderNameAcrossItsBoundaryThanItBinds(TestBase):
+    """
+    An `import` or `export` declaration writes names in two kinds of position. One names a binding
+    the file creates, and takes an ordinary name: `node --check` on a `.mjs` file refuses every
+    word of `A_WORD_NO_MODULE_MAY_BIND` there. The other names something on the far side of the
+    module boundary, and takes an IdentifierName, which is the wider set — the same host accepts
+    every one of those words there. `import { default as local } from "m";` is a module and
+    `import { default } from "m";` is not, and the two differ in nothing but which position the
+    reserved word stands in.
+
+    What is pinned is the accepting half of that: every spelling the host reads is read here
+    without a repair, and printed back as the file wrote it.
+    """
+
+    @staticmethod
+    def _read_and_printed(source: str) -> tuple[bool, str]:
+        tree = JsParser(source).parse()
+        return is_well_formed(tree), JsSynthesizer().convert(tree)
+
+    def test_a_name_a_module_binds_is_a_program_printed_as_it_was_written(self):
+        for position, template in A_POSITION_NAMING_A_BINDING_THE_FILE_CREATES.items():
+            sources = [
+                template.format(name=name)
+                for name in A_NAME_A_MODULE_MAY_BIND
+            ]
+            with self.subTest(position=position):
+                self.assertEqual(
+                    {source: self._read_and_printed(source) for source in sources},
+                    {source: (True, source) for source in sources},
+                )
+
+    def test_a_name_across_the_module_boundary_is_a_program_printed_as_it_was_written(self):
+        words = (*A_NAME_A_MODULE_MAY_BIND, *A_WORD_NO_MODULE_MAY_BIND)
+        for position, template in A_POSITION_NAMING_THE_FAR_SIDE_OF_THE_BOUNDARY.items():
+            sources = [
+                template.format(name=word)
+                for word in words
+            ]
+            with self.subTest(position=position):
+                self.assertEqual(
+                    {source: self._read_and_printed(source) for source in sources},
+                    {source: (True, source) for source in sources},
+                )
