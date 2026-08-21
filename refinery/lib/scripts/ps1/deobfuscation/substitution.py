@@ -228,6 +228,6 @@ def substitute_statement(
         raise ValueError('an empty replacement is a removal; open a Ps1RemovalPlan for it')
     if not may_substitute(statement, replacement, moved):
         return _release(statement)
-    plan = Ps1RemovalPlan(container)
+    plan = Ps1RemovalPlan(container, faults=None)
     plan.propose(statement, replacement)
     return plan.commit()

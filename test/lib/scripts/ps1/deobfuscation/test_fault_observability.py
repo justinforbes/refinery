@@ -123,7 +123,6 @@ class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
     has merely stopped deleting.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_nested_if_body_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -144,7 +143,6 @@ class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
             }}
         """, _QUIET_CAST)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_nested_foreach_body_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -165,7 +163,6 @@ class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
             }}
         """, _QUIET_PRODUCT)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_nested_while_body_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -186,7 +183,6 @@ class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
             }}
         """, _QUIET_LENGTH)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_nested_switch_case_body_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -228,7 +224,6 @@ class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
             }}
         """, _QUIET_CHAR)
 
-    @unittest.expectedFailure
     def test_a_raising_division_in_a_nested_if_body_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -366,7 +361,6 @@ class TestPs1AnInnerFinallyDoesNotShieldAnOuterCatch(_Ps1FaultObservability):
     whole sequence is the right answer for it and the two differ only in the raise.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_under_an_inner_finally_inside_a_live_outer_catch_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -414,7 +408,6 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
     statement, which the pass must go on deleting.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_below_a_live_trap_in_the_same_scope_is_kept(self):
         self._assertKept(F"""
             trap {{ {_HANDLER} }}
@@ -429,7 +422,6 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
             {_ANCHOR}
         """, _QUIET_CONJUNCTION)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_above_a_live_trap_in_the_same_scope_is_kept(self):
         self._assertKept(F"""
             {_RAISE}
@@ -444,7 +436,6 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
             {_ANCHOR}
         """, _QUIET_NEGATION)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_nested_in_a_scope_a_live_trap_guards_is_kept(self):
         self._assertKept(F"""
             trap {{ {_HANDLER} }}
@@ -463,7 +454,6 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
             }}
         """, _QUIET_BOOL)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_function_scope_a_live_trap_guards_is_kept(self):
         self._assertKept(F"""
             function Invoke-Thing {{

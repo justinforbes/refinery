@@ -1767,7 +1767,7 @@ class Ps1FunctionEvaluator(Transformer):
         parent = funcdef.parent
         if not isinstance(parent, (Ps1Script, Block)):
             return False
-        plan = Ps1RemovalPlan(parent)
+        plan = Ps1RemovalPlan(parent, faults=model_cache(self, funcdef).faults)
         plan.propose(funcdef)
         if not plan.commit():
             return False
@@ -1797,7 +1797,7 @@ class Ps1FunctionEvaluator(Transformer):
         if not isinstance(root, (Ps1Script, Block)):
             return
         held = {id(statement) for statement in root.body}
-        plan = Ps1RemovalPlan(root)
+        plan = Ps1RemovalPlan(root, faults=model_cache(self, root).faults)
         for cmd in root.walk():
             if not isinstance(cmd, Ps1CommandInvocation):
                 continue

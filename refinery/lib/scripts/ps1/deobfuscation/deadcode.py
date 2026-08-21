@@ -473,7 +473,7 @@ class Ps1DeadCodeElimination(Transformer):
         # a whole, and an empty guarded body is evidence about an earlier pass rather than about the
         # code, so the unreachability deletion stays out of every handler body.
         deletes_unreachable = not self._within_handler_body(parent)
-        plan = Ps1RemovalPlan(parent, removals_may_fault=False)
+        plan = Ps1RemovalPlan(parent, removals_may_fault=False, faults=cache.faults)
         for stmt in get_body(parent):
             if (
                 deletes_unreachable

@@ -116,6 +116,7 @@ class ControlFlowGraph:
         self.nodes: list[CfgNode] = [self.entry, self.exit]
         self._node_of: dict[int, CfgNode] = {}
         self.exceptional_edges: set[tuple[int, int]] = set()
+        self._fallback: dict[int, CfgNode] = {}
 
     def node_of(self, element: Node) -> CfgNode | None:
         """
@@ -123,6 +124,20 @@ class ControlFlowGraph:
         a node the graph does not represent on its own such as a plain expression inside a statement.
         """
         return self._node_of.get(id(element))
+
+    def fallback_of(self, handler: CfgNode) -> CfgNode | None:
+        """
+        Where a throw offered to *handler* goes if *handler* does not take it, or `None` when
+        *handler* is not a handler entry of this graph.
+
+        This is recorded rather than read off the edges because the two are not the same claim. The
+        edge is drawn only where some run may decline — a clause with a type filter, a `trap` set
+        that may fail to match — and a handler certain to take the throw has none, which is what
+        makes it shield whatever guards the construct. The fact holds either way, and it is what
+        answers the *counterfactual*: not where the throw goes, but where it would go if this
+        handler were not written at all, which is the question asked before one is deleted.
+        """
+        return self._fallback.get(id(handler))
 
     def is_exceptional(self, source: CfgNode, target: CfgNode) -> bool:
         """
@@ -310,6 +325,20 @@ class CfgBuilder:
     def exceptional_edge(self, source: CfgNode, target: CfgNode) -> None:
         self.add_edge(source, target)
         self.cfg.exceptional_edges.add((id(source), id(target)))
+
+    def close_handler_set(self, entries: Sequence[CfgNode], *, escapes: bool) -> None:
+        """
+        Finish a chain of handler entries: record where a throw goes when none of them takes it,
+        and draw the edge there when some run may leave one of them to.
+
+        Called once the set's bodies are built and the set itself is off the handler stack, so that
+        `unwinding` names what guards the *construct* rather than the set being closed.
+        """
+        fallback = self.unwinding()
+        for entry in entries:
+            self.cfg._fallback[id(entry)] = fallback
+        if escapes and entries:
+            self.exceptional_edge(entries[-1], fallback)
 
     def unwinding(self) -> CfgNode:
         """
@@ -616,8 +645,7 @@ class CfgBuilder:
                 self.exceptional_edge(entries[index - 1], entry)
             normal_exits += (
                 self.statement(body, [entry]) if body is not None else [entry])
-        if entries and escapes:
-            self.exceptional_edge(entries[-1], self.unwinding())
+        self.close_handler_set(entries, escapes=escapes)
         if finalizer_entry is not None and finalizer is not None:
             self.link(normal_exits, finalizer_entry)
             final_exits = self.sequence(list(finalizer_body), [finalizer_entry])

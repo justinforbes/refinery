@@ -14,7 +14,11 @@ from refinery.lib.scripts import (
     owning_list,
     reattach,
 )
-from refinery.lib.scripts.ps1.analysis.effects import fault_is_observed
+from refinery.lib.scripts.ps1.analysis.effects import (
+    emptying_unhooks_a_handler,
+    fault_is_observed,
+)
+from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ExpressionStatement,
@@ -37,7 +41,9 @@ def _removes_a_handler(statement: Node) -> bool:
     A `trap` intercepts a terminating error that would otherwise reach the enclosing `catch`, so
     deleting one re-routes the fault although the deleted statement cannot itself raise.
     `removals_may_fault` answers only the first half of the fault question — can what this pass
-    removes throw — and says nothing about this half, so this half is asked of every pass.
+    removes throw — and says nothing about this half, so this half is asked of every pass, and it is
+    asked as the *transpose*: not where an error raised here would go, but whether anything is left
+    that could offer this handler one.
     """
     return isinstance(statement, Ps1TrapStatement)
 
@@ -142,11 +148,21 @@ class Ps1RemovalPlan:
         attr: str = 'body',
         removals_may_fault: bool = True,
         all_or_nothing: bool = False,
+        *,
+        faults: Ps1FaultReach | None,
     ):
+        """
+        `faults` is the model the removal verdicts are reached against, and `None` says this plan
+        installs replacements and removes nothing. A caller that has no removal to file has no
+        verdict to reach and nothing to reach it with — `refinery.lib.scripts.ps1.deobfuscation.
+        substitution.substitute_statement` is the one — and filing a removal against such a plan is
+        refused at `propose` rather than let through unchecked.
+        """
         self.parent = parent
         self.attr = attr
         self.removals_may_fault = removals_may_fault
         self.all_or_nothing = all_or_nothing
+        self.faults = faults
         self._proposals: dict[int, _Proposal] = {}
 
     def propose(
@@ -180,7 +196,10 @@ class Ps1RemovalPlan:
         that arrives as the record of what was built is reading the survivors of that filter, and it
         left a statement standing over a literal that named a node the pass had thrown away.
         """
-        self._proposals[id(statement)] = _Proposal(statement, list(replacement or ()))
+        proposal = _Proposal(statement, list(replacement or ()))
+        if not proposal.replacement and self.faults is None:
+            raise ValueError('this plan was opened to substitute and holds no fault model')
+        self._proposals[id(statement)] = proposal
         reattach(statement)
 
     def withdraw(self, statement: Statement) -> None:
@@ -260,17 +279,27 @@ class Ps1RemovalPlan:
         """
         Whether a single proposal must be skipped although the guards allowed the batch.
 
-        `fault_is_observed` asks whether the edit changes which code runs, and it is asked of
-        deletions only, because a rewrite that keeps evaluating the original expression still throws
-        where the original threw, so an enclosing handler stays as reachable as it was. It is asked
-        only of a pass that cannot rule the fault out itself — or of a statement that *is* a
-        handler, which no pass can rule out; see `_removes_a_handler`.
+        Both questions below are asked of deletions only, because a rewrite that keeps evaluating
+        the original expression still throws where the original threw, so an enclosing handler stays
+        as reachable as it was.
+
+        **A handler and a statement that might fault are opposite questions**, and reading one as
+        the other invents a wrong answer in each direction. Deleting a `trap` re-routes errors the
+        `trap` did not raise, so what decides it is whether anything is left that can still reach it
+        — and asking `fault_is_observed` of a `trap` instead asks where an error raised *at* the
+        `trap` would go, which is a position nothing raises at. Deleting anything else is
+        `fault_is_observed`, and only for a pass that cannot rule the fault out itself.
         """
         if proposal.replacement:
             return False
-        if not (self.removals_may_fault or _removes_a_handler(proposal.statement)):
+        faults = self.faults
+        if faults is None:
+            return True
+        if _removes_a_handler(proposal.statement):
+            return faults.removing_a_handler_is_observed(proposal.statement)
+        if not self.removals_may_fault:
             return False
-        return fault_is_observed(proposal.statement)
+        return fault_is_observed(proposal.statement, faults)
 
     def _allowed(self) -> list[_Proposal]:
         """
@@ -325,17 +354,23 @@ class Ps1RemovalPlan:
 
     def _empties_a_protected_body(self, allowed: list[_Proposal]) -> bool:
         """
-        Whether committing `allowed` would clear a `try` body beside a handler that acts. Asked only
-        of a pass that ruled the per-statement fault question out; for every other pass the veto has
-        already declined each such removal one at a time. The emptiness test lives here rather than
-        at the call site so that the two halves of the name are decided in one place, and so that
-        the `BodyEdit` it needs is built only for the pass that can use the answer.
+        Whether committing `allowed` would clear a `try` body beside a handler that acts.
+
+        Asked of every pass, and it was not always: while the per-statement veto refused every
+        removal from a guarded body whatever stood there, this question was already answered for the
+        passes that fire it and only the others had to ask. The veto now refuses a statement that
+        cannot raise nothing at all — which is what lets the padding inside a `try` go — so what
+        keeps the body itself from emptying is this and only this.
+
+        `emptying_unhooks_a_handler` is a policy about the listing rather than a claim about what
+        runs; the emptiness test lives here so that the two halves of the name are decided in one
+        place, and so that the `BodyEdit` it needs is built only where the answer can be used.
         """
-        if self.removals_may_fault or not allowed:
+        if not allowed:
             return False
         if self._edit(allowed).result():
             return False
-        return any(fault_is_observed(proposal.statement) for proposal in allowed)
+        return emptying_unhooks_a_handler(self.parent)
 
 
 class Ps1RemovalPlans:
@@ -353,7 +388,10 @@ class Ps1RemovalPlans:
     veto has nothing to say about them: it declines deletions, and none of these is one.
     """
 
-    def __init__(self):
+    def __init__(self, faults: Ps1FaultReach):
+        self.faults = faults
+        #: Every plan this opens may remove, so unlike `Ps1RemovalPlan` there is no substitution-only
+        #: spelling of this class: a caller holding one is a pass that deletes.
         self._plans: dict[tuple[int, str], Ps1RemovalPlan] = {}
         self._rewrites: dict[int, _Proposal] = {}
         #: The filed statement is kept beside its plan, and not only its `id`, for the reason
@@ -396,7 +434,7 @@ class Ps1RemovalPlans:
         try:
             return self._plans[key]
         except KeyError:
-            plan = self._plans[key] = Ps1RemovalPlan(parent, attr)
+            plan = self._plans[key] = Ps1RemovalPlan(parent, attr, faults=self.faults)
             return plan
 
     def propose(

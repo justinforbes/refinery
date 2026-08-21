@@ -128,7 +128,6 @@ class TestPs1ATrapWhoseTypeFilterMissesTheErrorEndsTheScript(_Ps1FaultEscalation
             {_FOLLOWER}
         """)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_under_a_live_trap_whose_filter_misses_is_kept(self):
         self._assertKept(F"""
             trap {_DIFFERENT} {{ {_HANDLER} }}
@@ -155,7 +154,6 @@ class TestPs1ATrapBodyThatReachesBreakEndsTheScript(_Ps1FaultEscalation):
             {_FOLLOWER}
         """)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_under_a_trap_that_writes_then_breaks_is_kept(self):
         self._assertKept(F"""
             trap {{
@@ -224,7 +222,6 @@ class TestPs1ATypedCatchThatMissesDoesNotShieldAnEnclosingCatch(_Ps1FaultEscalat
     leaves the enclosing handler with nothing that can reach it.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_a_missing_filter_passes_to_a_live_outer_catch_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -312,7 +309,6 @@ class TestPs1ATrapGuardsTheBlockItIsWrittenIn(_Ps1FaultEscalation):
     both and keeps handlers nothing can trigger.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_beside_a_live_trap_in_the_same_nested_block_is_kept(self):
         self._assertKept(F"""
             if ({_OPAQUE}) {{
@@ -322,7 +318,6 @@ class TestPs1ATrapGuardsTheBlockItIsWrittenIn(_Ps1FaultEscalation):
             {_ANCHOR}
         """)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_beside_the_innermost_of_two_live_traps_is_kept(self):
         self._assertKept(F"""
             trap {{ {_FOLLOWER} }}
@@ -342,6 +337,11 @@ class TestPs1ATrapTheRaisingBlockDoesNotReachLeavesItRemovable(_Ps1FaultEscalati
     enclosing it is never offered the error, so that raise is removable too.
 
     These are the shapes a refusal keyed to a `trap` appearing anywhere in the script would break.
+
+    Both leave the `trap` itself standing, which is what a handler with nothing left to handle costs
+    and not what it means. `Write-Host` is a command, and no reading here shows a command unable to
+    raise, so deleting the swallowing `trap` would expose whatever remains in its block to the live
+    `trap` around it — a different handler, on the path 5.1 takes when the host does fail.
     """
 
     def test_a_raising_cast_outside_the_block_that_declares_the_trap_is_removed(self):
@@ -370,6 +370,7 @@ class TestPs1ATrapTheRaisingBlockDoesNotReachLeavesItRemovable(_Ps1FaultEscalati
         """, F"""
             trap {{ {_HANDLER} }}
             if ({_OPAQUE}) {{
+              trap {{ continue }}
               {_FOLLOWER}
             }}
             {_ANCHOR}
@@ -560,7 +561,6 @@ class TestPs1ARaiseInATrapBodyEndsThatBody(_Ps1FaultEscalation):
             {_ANCHOR}
         """)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_trap_body_an_enclosing_catch_takes_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -576,7 +576,6 @@ class TestPs1ARaiseInATrapBodyEndsThatBody(_Ps1FaultEscalation):
             {_ANCHOR}
         """)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_trap_body_an_enclosing_trap_takes_is_kept(self):
         self._assertKept(F"""
             trap {{ {_OUTER_HANDLER} }}
@@ -627,7 +626,6 @@ class TestPs1ATrapTakesTheErrorsOfTheNamedBlockItIsWrittenIn(_Ps1FaultEscalation
     either block and keeps a handler nothing can trigger.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_beside_a_live_trap_in_the_same_process_block_is_kept(self):
         self._assertKept(F"""
             function Invoke-Thing {{
@@ -640,7 +638,6 @@ class TestPs1ATrapTakesTheErrorsOfTheNamedBlockItIsWrittenIn(_Ps1FaultEscalation
             Invoke-Thing
         """)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_beside_a_live_trap_in_the_same_begin_block_is_kept(self):
         self._assertKept(F"""
             function Invoke-Thing {{

@@ -17,6 +17,7 @@ from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_p
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS
 from refinery.lib.scripts.ps1.deobfuscation.emulator import evaluate_truthy
 from refinery.lib.scripts.ps1.deobfuscation.helpers import inside_value_producing_context
+from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -1252,7 +1253,11 @@ class Ps1ControlFlowDeflattening(Transformer):
             # A vetoed half would leave the machine partly dissolved and the cursor pointing into a
             # body that no longer has the shape the arithmetic below assumes, so the whole recovery
             # stands or falls together.
-            plan = Ps1RemovalPlan(parent, all_or_nothing=True)
+            plan = Ps1RemovalPlan(
+                parent,
+                all_or_nothing=True,
+                faults=model_cache(self, parent).faults,
+            )
             plan.propose(body[init_index])
             plan.propose(stmt, recovered)
             if not plan.commit():

@@ -15,6 +15,7 @@ from refinery.lib.scripts import (
     _clone_node,
 )
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow
 from refinery.lib.scripts.ps1.analysis.model import (
     Binding,
@@ -747,7 +748,7 @@ class Ps1ConstantInlining(Transformer):
             return None
         state = _Inlining(table, flow, self._blocked_by_expansion(node, table))
         self._substitute(node, state)
-        self._remove_dead_assignments(table, state)
+        self._remove_dead_assignments(table, state, model_cache(self, node).faults)
         return None
 
     def _blocked_by_expansion(self, root: Node, table: _ConstantTable) -> set[str]:
@@ -890,7 +891,9 @@ class Ps1ConstantInlining(Transformer):
             self.mark_changed()
             state.installed(node, replacement)
 
-    def _remove_dead_assignments(self, table: _ConstantTable, state: _Inlining):
+    def _remove_dead_assignments(
+        self, table: _ConstantTable, state: _Inlining, faults: Ps1FaultReach,
+    ):
         """
         Delete the constant writes of every binding whose value nothing observes any more.
 
@@ -914,7 +917,7 @@ class Ps1ConstantInlining(Transformer):
         same fact on the read side. Deleting such a write leaves the caller reading the value from
         before the body.
         """
-        plans = Ps1RemovalPlans()
+        plans = Ps1RemovalPlans(faults)
         for binding, replacements in state.record:
             if len(replacements) < len(binding.reads):
                 continue

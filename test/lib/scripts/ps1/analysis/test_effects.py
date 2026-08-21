@@ -756,6 +756,129 @@ class TestPs1FaultFreedom(Ps1EffectsTest):
                 self.assertFalse(is_fault_free(self._expression(source)))
 
 
+class TestPs1FaultFreedomGrantsWhatPowerShellEvaluates(Ps1EffectsTest):
+    """
+    Every row here runs to completion on a 5.1 host, and the predicate reaches it by computing the
+    value: carrying out the conversion, the arithmetic or the comparison is what proves it succeeds.
+    A refusal costs only recall, but these are the rows the pruning passes live on.
+    """
+
+    def test_an_expression_that_evaluates_to_a_value_is_fault_free(self):
+        for source in (
+            '6 * 7',
+            "[Int]'42'",
+            '1 / 1',
+            '10 % 3',
+            '[Char]65',
+            "'ab' + 'cd'",
+            '[String]12',
+            '3 -band 1',
+            "[Bool]'x'",
+            '-0.5',
+            "'abc'",
+            '42',
+            '$True',
+            '$Null',
+            '(42)',
+            "'a' -eq 'A'",
+            '1 -lt 2',
+            '[Long]42',
+            '[Double]1',
+            "'42' + 1",
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_fault_free(self._expression(source)))
+
+
+class TestPs1FaultFreedomGrantsWhatCannotFailToBuild(Ps1EffectsTest):
+    """
+    A range, a hash literal and an array literal are built rather than computed, so evaluating one
+    hands back no value to reason from. Fault freedom is not the folder's verdict: a construction
+    assembled from parts that cannot raise has to be granted without one.
+    """
+
+    def test_a_construction_over_safe_parts_is_fault_free(self):
+        for source in (
+            '1..5',
+            '0..0',
+            '@{ a = 1 }',
+            '@{ a = 1; b = 2 }',
+            '@()',
+            '@(1, 2, 3)',
+            "@('a', @(1, 2))",
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_fault_free(self._expression(source)))
+
+
+class TestPs1FaultFreedomRefusesWhatPowerShellRaisesOn(Ps1EffectsTest):
+    """
+    Each row terminates on a 5.1 host, so granting one is a soundness defect: a pass would delete or
+    relocate a statement whose error an enclosing handler was catching.
+    """
+
+    def test_an_expression_that_terminates_the_script_is_not_fault_free(self):
+        # A 5.1 range reads both ends through `Int32`, and `'a'` has no conversion to it. A hash
+        # literal with a duplicate key is refused before the script runs at all, and its keys are
+        # compared case-insensitively and across the string/integer divide.
+        for source in (
+            "[Int]'abc'",
+            '1 / 0',
+            "[Convert]::ToInt32('x')",
+            "'abc'.Substring(5)",
+            "'a'..'e'",
+            "@{ a = 1; 'a' = 2 }",
+            "-'abc'",
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_fault_free(self._expression(source)))
+
+
+class TestPs1FaultFreedomRefusesAnOutcomeItCannotKnow(Ps1EffectsTest):
+    """
+    Whether these raise depends on a value the analysis does not hold, or on .NET semantics it never
+    models. `[Math]::Sqrt(36)` raises on no host at all and still has to be refused, because the
+    grant would be a claim about a method body this layer does not read.
+    """
+
+    def test_an_expression_over_an_unknown_is_not_fault_free(self):
+        for source in (
+            '$x',
+            '$x + 1',
+            '[Int]$x',
+            '@{ a = $x }',
+            '1..$x',
+            'Get-Random',
+            '[Math]::Sqrt(36)',
+            '$a[$i]',
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_fault_free(self._expression(source)))
+
+
+class TestPs1FaultFreedomAndSideEffectFreedomAreIndependent(Ps1EffectsTest):
+    """
+    Purity says an expression changes nothing, fault freedom says it cannot raise, and neither
+    answer decides the other. The rows that agree on the first while disagreeing on the second are
+    what stops a later change from serving both questions out of a single verdict.
+    """
+
+    def test_a_pure_expression_may_still_raise(self):
+        for source, side_effect_free, fault_free in (
+            ('42', True, True),
+            ("[Int]'42'", True, True),
+            ('[Int]$x', True, False),
+            ('$a / $b', True, False),
+            ('$a[$i]', True, False),
+        ):
+            with self.subTest(source):
+                expression = self._expression(source)
+                self.assertEqual(
+                    (self._pure(expression), is_fault_free(expression)),
+                    (side_effect_free, fault_free),
+                )
+
+
 class TestPs1EffectInvariant(Ps1EffectsTest):
     """
     A regression list of shapes that were each, at some point, deleted along with real work: a

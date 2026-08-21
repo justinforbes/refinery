@@ -47,6 +47,7 @@ from refinery.lib.scripts.analysis.cfg import (
 from refinery.lib.scripts.ps1.ast import get_named_blocks, string_value
 from refinery.lib.scripts.ps1.model import (
     Ps1BreakStatement,
+    Ps1CatchClause,
     Ps1Code,
     Ps1ContinueStatement,
     Ps1DoLoop,
@@ -84,6 +85,39 @@ _LOOP_NODES = (
     Ps1ForLoop,
     Ps1ForEachLoop,
 )
+
+
+#: The type names a `catch` clause may carry that take every terminating error Windows PowerShell
+#: 5.1 raises, in the spellings 5.1 resolves. `System.Exception` is the root of the .NET hierarchy
+#: and matches by definition; `RuntimeException` is what the engine wraps a terminating error in,
+#: measured to match a failed cast, a division by zero, `throw` of a string, `throw` of a .NET
+#: exception, a method that threw, a member access on `$null`, and a cmdlet stopped by
+#: `-ErrorAction Stop`.
+#:
+#: The spellings are the measurement too, and they are not symmetric: a bare name is resolved
+#: against `System` alone, so `[Exception]` names `System.Exception` while `[RuntimeException]`
+#: names nothing at all and the clause it filters matches no error whatsoever. Listing the short
+#: form of the second would grant a clause that in fact declines everything, which is the one
+#: direction that deletes code.
+_CATCHES_EVERY_ERROR = frozenset({
+    'exception',
+    'system.exception',
+    'management.automation.runtimeexception',
+    'system.management.automation.runtimeexception',
+})
+
+
+def _catch_takes_every_error(clause: Ps1CatchClause) -> bool:
+    """
+    Whether *clause* is certain to be the one that takes a throw the guarded block makes: it carries
+    no type filter at all, or one of the filters it carries names a type every terminating error is.
+
+    A clause carrying several types matches when *any* of them does, so one universal name among
+    them settles it however narrow the others are.
+    """
+    if not clause.types:
+        return True
+    return any(name.strip().lower() in _CATCHES_EVERY_ERROR for name in clause.types)
 
 
 def _jump_label(statement: Ps1Jump) -> str | None:
@@ -197,8 +231,7 @@ class _Builder(CfgBuilder):
         resumes: list[CfgNode] = []
         escapes = True
         enclosing = self._trap_body
-        unwinding = self.unwinding()
-        self._handlers.append(unwinding)
+        self._handlers.append(self.unwinding())
         for trap, handler in zip(traps, entries):
             self._trap_body = built = _TrapBody()
             resumes += self._body(trap.body, [handler]) + built.resumes
@@ -206,8 +239,7 @@ class _Builder(CfgBuilder):
                 escapes = False
         self._handlers.pop()
         self._trap_body = enclosing
-        if escapes:
-            self.exceptional_edge(entries[-1], unwinding)
+        self.close_handler_set(entries, escapes=escapes)
         guarded_from = len(self.cfg.nodes)
         self._handlers.append(entries[0])
         exits = self.sequence(statements, frontier)
@@ -367,9 +399,10 @@ class _Builder(CfgBuilder):
         clauses are chained: the guarded block reaches the first, and each clause reaches the next,
         because which one runs depends on the exception type and none of them is guaranteed.
 
-        A clause carrying no type takes every error, so a set holding one leaves nothing to pass
-        outward — which is what makes an empty `catch` shield the `catch` or `trap` around it where
-        a typed one hands the error straight on to it.
+        A clause certain to take every error leaves nothing to pass outward — which is what makes
+        an empty `catch` shield the `catch` or `trap` around it where a typed one hands the error
+        straight on to it. Carrying no type is one way to be certain and naming `System.Exception`
+        is another; see `_catch_takes_every_error`.
 
         The `finally` body travels as its block for the same reason a `switch` arm does: it is a
         statement block, and a `trap` written in one guards it alone.
@@ -382,7 +415,7 @@ class _Builder(CfgBuilder):
             finalizer,
             (finalizer,) if finalizer is not None else (),
             frontier,
-            escapes=all(clause.types for clause in clauses),
+            escapes=not any(_catch_takes_every_error(clause) for clause in clauses),
         )
 
 

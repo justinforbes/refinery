@@ -37,7 +37,13 @@ from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
 from refinery.lib.scripts.ps1.analysis.arguments import Ps1WrittenSlots, written_slots
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
-from refinery.lib.scripts.ps1.analysis.values import candidate_types, integer_of, read
+from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
+from refinery.lib.scripts.ps1.analysis.values import (
+    candidate_types,
+    evaluate,
+    integer_of,
+    read,
+)
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.ast import (
     extract_new_object,
@@ -997,11 +1003,28 @@ def _range_is_fault_free(node: Ps1RangeExpression) -> bool:
 
 def is_fault_free(node) -> bool:
     """
-    Whether evaluating an expression provably cannot raise: a literal, one of the built-in constants
-    `$Null`, `$True`, `$False`, a container built entirely out of such values, or any of those
-    through enclosing parentheses and a unary sign. Everything else answers `False`, including
-    expressions that are obviously fine, because this is a closed allow-list and the safe answer to
-    an unlisted node is that it might raise.
+    Whether evaluating an expression provably cannot raise. Two readings grant that, and neither
+    subsumes the other: the value domain answers it for anything it can actually compute, and a
+    syntactic allow-list answers it for the constructions the domain does not model. Everything
+    else answers `False`, including expressions that are obviously fine, because the safe answer to
+    an expression neither reading claims is that it might raise.
+
+    **The value domain is asked first, because it is the one that knows.**
+    `refinery.lib.scripts.ps1.analysis.values.Ps1Outcome.may_throw` is `False` only where that
+    module claims an operation cannot throw, and not knowing is a throw there as it is here, so the
+    two axes already agree about which direction is safe. It reaches what no list of shapes can:
+    `6 * 7`, `[Int]'42'` and `'ab' + 'cd'` cannot raise and are not literals, and a gate that called
+    them unsafe refused to delete the padding an obfuscator writes by the hundred. It declines every
+    call and every expression naming a variable, which is why the sweep behind this grant is a grid
+    of constants — 9210 expressions it calls throw-free, every one of them confirmed against a
+    Windows PowerShell 5.1 host.
+
+    **The allow-list is what the domain does not model**, not a weaker copy of it: a range and a
+    hash literal are constructions rather than operations, and the domain names no value for either.
+    The container arm recurses into the elements rather than granting the form, so `@{ a = 1 }`
+    cannot fail while `@{ a = [Int]'x' }` still can and is rejected by the element it holds. A hash
+    literal with a duplicate key is the one construction PowerShell refuses outright, so the keys
+    are compared rather than trusted; see `_hash_literal_is_fault_free`.
 
     Purity is a different question and neither implies the other. `is_side_effect_free` accepts
     `[Int]$x`, `$a / $b` and `$a[$i]`, all of which raise on the wrong operand, and it is the
@@ -1009,21 +1032,13 @@ def is_fault_free(node) -> bool:
     construct on a purity argument, because an empty `catch` was swallowing what the hoisted
     statement now raises into the caller.
 
-    The container arm recurses into the elements rather than granting the form: constructing an
-    array, a hash table or a range cannot fail, so `@(1, 2, 3)` and `@{ a = 1 }` cannot, while
-    `@{ a = [Int]'x' }` still can and is rejected by the element it holds. A hash literal with a
-    duplicate key is the one construction PowerShell refuses outright, so the keys are compared
-    rather than trusted; see `_hash_literal_is_fault_free`.
-
-    A method or cmdlet call is deliberately not here, however obviously safe. `[Math]::Sqrt(36)`
-    cannot throw and `[Convert]::ToInt32('x')` can, and telling those apart is a table of .NET
-    semantics rather than a rule about the syntax.
-
     **A unary sign and a range coerce, and coercion is the fault this predicate exists to see.**
     Both read their operands through `Int32`, so `-'abc'` and `'a'..'z'` raise exactly what
     `[Int]'abc'` raises; neither may inherit the string-literal grant, and both go through
     `_is_numeric_constant` and `_range_is_fault_free` instead.
     """
+    if not evaluate(node).may_throw:
+        return True
     if isinstance(node, (Ps1IntegerLiteral, Ps1RealLiteral, Ps1StringLiteral)):
         return True
     if is_builtin_variable(node):
@@ -1714,43 +1729,79 @@ def build_output_flow(graph: Ps1CallGraph) -> Ps1OutputFlow:
     ))
 
 
-def fault_is_observed(stmt: Node) -> bool:
+def fault_operand(stmt: Node) -> Node | None:
     """
-    Whether removing `stmt` could change whether an enclosing handler runs: it sits directly in the
-    `try` block of a `try`/`catch` with at least one catch clause that does something.
+    The expression whose fault is *stmt*'s fault, or `None` where *stmt* is not one expression.
 
-    `StatementEffect` models emission and side effect, not fault — nothing here can answer whether a
-    statement throws. So a statement is removed from a protected body only when it is not protected
-    at all, however pure it looks: `[Int]'abc'` produces no output and raises, and dropping it makes
-    the `try` body empty, which is evidence about this pass rather than about the code as written.
-
-    This is the first of two refusals and no longer the only one.
-    `Ps1DeadCodeElimination._prune_try` now declines to dissolve a construct whose handler has a
-    body, whatever emptied the `try` block, because the routes to an empty body are many and each
-    new pass adds another. Neither refusal makes the other redundant: this one keeps the body from
-    being emptied through the pruning path at all, and that one covers every other route.
-
-    An empty `catch { }` is deliberately not a handler that does something: it swallows the error
-    and execution continues either way, so *removing* a throwing statement changes nothing
-    observable. That is the shape obfuscators emit, which is why this costs the cleanup passes
-    almost nothing.
-
-    What that argument licenses is removal and nothing wider. It does not license *moving* a
-    throwing statement out of the construct, which is what dissolving one does — the swallowing
-    `catch` is gone by then and the throw reaches the caller. `_prune_try` read this as the broader
-    licence and hoisted anything `is_side_effect_free` accepted, so `try { [Int]'abc' } catch { }`
-    became a bare `[Int]'abc'` that raises. It now gates on `is_fault_free` instead.
-
-    The converse under-deletion is left alone: `_prune_try` requires *every* catch clause to be
-    empty before it dissolves a construct, where a body proven not to throw would let it dissolve
-    one with a live handler and delete that handler as unreachable. `is_fault_free` decides that
-    narrowly enough to act on — `try { 42 } catch { Start-Process calc }` has an unreachable
-    handler — and deleting a payload on a purity-adjacent proof is not a step to take alongside the
-    fix for taking one too broadly. Both directions remain the fault axis's to settle.
+    A discard idiom performs no work of its own: `$Null = X` and `[Void]X` evaluate `X`, name
+    nothing and emit nothing, so what either of them can raise is what `X` can raise. Asking the
+    statement's own expression instead asks about an assignment, which no reading of the value
+    domain calls safe, and every discarded constant in an obfuscated script then reads as something
+    that might throw.
     """
-    block = stmt.parent
-    if block is None:
-        return False
+    if not isinstance(stmt, Ps1ExpressionStatement):
+        return None
+    expression = stmt.expression
+    if expression is None:
+        return None
+    if _is_void_cast(expression):
+        return expression.operand
+    if _is_null_discard(expression):
+        return expression.value
+    return expression
+
+
+def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
+    """
+    Whether deleting *stmt* may change which handler runs.
+
+    Two things have to be true for a deletion to be observable on this axis: something the deletion
+    removes has to be able to raise, and the error it would raise has to reach a handler that acts
+    — or end the body, which a `trap` set that may decline it does. Neither half answers for the
+    other, and the pass this exists for gets both wrong in opposite directions if it asks only one:
+    a gate that refuses whatever might raise keeps the padding an obfuscator writes by the hundred,
+    and a gate that refuses only what a `catch` clause is written *beside* deletes the statement a
+    handler one nesting level away was waiting for.
+
+    The first half is `is_fault_free` over `fault_operand`, and the second is
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.observed_at`. Both are asked once per
+    point the graphs evaluate inside *stmt*, because a construct is deleted whole and each of its
+    parts raises where it stands; a construct the graphs place nothing for at all is refused, since
+    a subtree nothing models is one nothing can clear.
+
+    **This is not the question asked before a handler is deleted.** A `trap` cannot raise, so
+    nothing about its own position decides anything: what a removal changes is where the errors of
+    *other* statements go, and that is the transpose,
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.handler_is_reachable`. Nor is it the
+    question asked before a guarded body is emptied, which is `emptying_unhooks_a_handler` — a
+    policy about what a listing should still show rather than a claim about what runs.
+    """
+    judged = False
+    for site in faults.points_in(stmt):
+        judged = True
+        operand = fault_operand(site)
+        if operand is not None and is_fault_free(operand):
+            continue
+        if faults.observed_at(site):
+            return True
+    return not judged
+
+
+def emptying_unhooks_a_handler(block: Node) -> bool:
+    """
+    Whether clearing *block* would leave a `catch` clause that acts with nothing left to trigger it:
+    *block* is the `try` block of a construct one of whose clauses has a body.
+
+    This is a policy about the listing rather than a claim about what runs. A `try` body holding
+    only statements that cannot raise already reaches its handler on no path, so emptying it changes
+    nothing a run can see — but it turns `try { 42 } catch { Start-Process calc }` into a construct
+    the next pass dissolves, and the payload leaves the output with it. What a triage tool must not
+    do is delete the thing an analyst opened it to read.
+
+    An empty `catch { }` is deliberately not a clause that acts. It swallows the error and execution
+    continues either way, so nothing is hidden by letting the body go — and that is the shape
+    obfuscators emit, which is why this policy costs the cleanup passes almost nothing.
+    """
     guard = block.parent
     if not isinstance(guard, Ps1TryCatchFinally) or guard.try_block is not block:
         return False

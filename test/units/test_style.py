@@ -271,20 +271,32 @@ def _watched_run() -> _Observations:
     The pass a veto fired for is read off a stack of the `visit` calls in flight rather than from
     the plan, since a plan is told nothing about who built it and this must not become a reason to
     tell it.
+
+    **The two refusals are watched, not the predicates they ask.** A removal is declined either one
+    at a time, by `Ps1RemovalPlan._vetoed`, or as a batch that would clear the body, by
+    `_empties_a_protected_body` — and which of the two a given pass meets depends on whether it can
+    rule the fault out itself. Watching whichever predicate they happened to share was a reading
+    that went stale the moment the veto learned to ask a second question: the fault routing, the
+    transpose a `trap` needs, and the emptiness policy are three questions now, and a pass credited
+    through one of them would have gone uncredited by an observer over another.
     """
     from refinery.lib.scripts.ps1.parser import Ps1Parser
+    from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan
 
     active: list[str] = []
     fired: set[str] = set()
     parsed: list[str] = []
-    answer = removal.fault_is_observed
+    vetoed = Ps1RemovalPlan._vetoed
+    emptied = Ps1RemovalPlan._empties_a_protected_body
     build = Ps1Parser.__init__
 
-    def watched(statement):
-        observed = answer(statement)
-        if observed and active:
-            fired.add(active[-1])
-        return observed
+    def refusing(refusal):
+        def refused(self, argument):
+            answer = refusal(self, argument)
+            if answer and active:
+                fired.add(active[-1])
+            return answer
+        return refused
 
     def recording(self, source, *args, **kwargs):
         if isinstance(source, str):
@@ -301,7 +313,9 @@ def _watched_run() -> _Observations:
         return visiting
 
     with ExitStack() as stack:
-        stack.enter_context(patch.object(removal, 'fault_is_observed', watched))
+        stack.enter_context(patch.object(Ps1RemovalPlan, '_vetoed', refusing(vetoed)))
+        stack.enter_context(
+            patch.object(Ps1RemovalPlan, '_empties_a_protected_body', refusing(emptied)))
         stack.enter_context(patch.object(Ps1Parser, '__init__', recording))
         for name in sorted(_passes_that_remove()):
             pass_type = _pass_type(name)

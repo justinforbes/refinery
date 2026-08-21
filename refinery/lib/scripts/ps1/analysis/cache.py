@@ -9,7 +9,7 @@ only declares the PowerShell model slot and its `build_*` wiring.
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Transformer
+from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.analysis.cfg import ControlFlowModel
 from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
@@ -17,6 +17,7 @@ from refinery.lib.scripts.modelcache import ModelCacheBase
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, build_block_model
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, build_call_graph
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
+from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach, build_fault_reach
 from refinery.lib.scripts.ps1.analysis.commands import Ps1CommandModel, build_command_model
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow, build_variable_flow
 from refinery.lib.scripts.ps1.analysis.dominance import build_dominance
@@ -51,6 +52,7 @@ class Ps1ModelCache(ModelCacheBase):
         '_call_graph',
         '_output_flow',
         '_control_flow',
+        '_faults',
         '_dominance',
         '_blocks',
         '_cycles',
@@ -65,6 +67,7 @@ class Ps1ModelCache(ModelCacheBase):
     _call_graph: Ps1CallGraph | None
     _output_flow: Ps1OutputFlow | None
     _control_flow: ControlFlowModel | None
+    _faults: Ps1FaultReach | None
     _dominance: DominatorModel | None
     _blocks: Ps1BlockModel | None
     _cycles: CycleModel | None
@@ -143,6 +146,18 @@ class Ps1ModelCache(ModelCacheBase):
         return self._lazy('_control_flow', lambda: build_control_flow_model(self.root))
 
     @property
+    def faults(self) -> Ps1FaultReach:
+        """
+        Where a terminating error raised at a point in this root goes, over `control_flow`. The
+        single place a pass asks whether deleting something changes which handler runs — the
+        question every removing pass used to answer for itself by looking at the statement's
+        immediate holder, which reads a handler one nesting level away as no handler at all.
+
+        Purely syntactic like the graphs it reads, so it joins nothing else and orders nothing else.
+        """
+        return self._lazy('_faults', lambda: build_fault_reach(self.control_flow))
+
+    @property
     def dominance(self) -> DominatorModel:
         """
         Whether one statement of this root is guaranteed to have executed by the time another runs,
@@ -201,7 +216,7 @@ class Ps1ModelCache(ModelCacheBase):
             self.model, self.control_flow, self.dominance, self.blocks, self.cycles))
 
 
-def model_cache(transformer: Transformer, root: Ps1Script) -> Ps1ModelCache:
+def model_cache(transformer: Transformer, root: Node) -> Ps1ModelCache:
     """
     The pipeline's shared `Ps1ModelCache` for *root* when one is attached to *transformer* and
     built over that same root, otherwise a fresh cache stashed back onto *transformer* for reuse
