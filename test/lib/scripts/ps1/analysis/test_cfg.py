@@ -80,7 +80,11 @@ _CORPUS = [
 ]
 
 
-class TestPs1ControlFlowGraph(TestBase):
+class _Ps1ControlFlowGraphs(TestBase):
+    """
+    The graph fixtures every test below reads, kept apart from the tests so that a pin needing
+    one inherits the fixtures and not another class's assertions.
+    """
 
     @staticmethod
     def _graphs(source: str) -> dict[int, ControlFlowGraph]:
@@ -159,6 +163,9 @@ class TestPs1ControlFlowGraph(TestBase):
                     stack.append(successor)
         seen.discard(id(barrier))
         return seen
+
+
+class TestPs1ControlFlowGraph(_Ps1ControlFlowGraphs):
 
     def test_every_graph_is_internally_consistent(self):
         for source in _CORPUS:
@@ -855,7 +862,7 @@ class TestPs1ControlFlowGraph(TestBase):
         self.assertTrue(cycles.repeats(tree.body[0]))
 
 
-class TestPs1ACatchWhoseTypeFilterCannotBeReadIsNotUnfiltered(TestPs1ControlFlowGraph):
+class TestPs1ACatchWhoseTypeFilterCannotBeReadIsNotUnfiltered(_Ps1ControlFlowGraphs):
     """
     A `catch` carrying no type filter takes every error, and one carrying a filter takes only what
     the filter matches — so whether a throw the guarded block makes can get past the clause is

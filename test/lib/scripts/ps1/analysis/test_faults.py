@@ -12,6 +12,7 @@ from refinery.lib.scripts.ps1.analysis.faults import (
     Ps1FaultReach,
     Ps1FaultRouting,
     build_fault_reach,
+    ends_the_script,
     handler_acts,
 )
 from refinery.lib.scripts.ps1.ast import get_body
@@ -31,6 +32,14 @@ def _parse(source: str) -> Ps1Script:
 def _model(source: str) -> tuple[Ps1Script, Ps1FaultReach]:
     tree = _parse(source)
     return tree, build_fault_reach(build_control_flow_model(tree))
+
+
+#: The subexpression that `TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression` is measured
+#: over, and whose shape `TestPs1TheBracketFixturesHoldTheShapeTheirPinsAssume` keeps.
+_TRAP_IN_A_SUBEXPRESSION = "$x = $(trap { 'h' }; 'a')"
+
+#: The array expression twin of `_TRAP_IN_A_SUBEXPRESSION`.
+_TRAP_IN_AN_ARRAY_EXPRESSION = "$x = @(trap { 'h' }; 'a')"
 
 
 class TestPs1FaultRoutingOffersTheRaiseToTheHandlersThatGuardIt(TestBase):
@@ -442,12 +451,12 @@ class TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression(TestBase):
 
     @unittest.expectedFailure
     def test_a_raise_in_a_subexpression_is_offered_to_the_trap_written_beside_it(self):
-        trap, raise_site, reach = self._bracket("$x = $(trap { 'h' }; 'a')")
+        trap, raise_site, reach = self._bracket(_TRAP_IN_A_SUBEXPRESSION)
         self.assertEqual(reach.routing_at(raise_site), Ps1FaultRouting((trap,), False))
 
     @unittest.expectedFailure
     def test_a_raise_in_an_array_expression_is_offered_to_the_trap_written_beside_it(self):
-        trap, raise_site, reach = self._bracket("$x = @(trap { 'h' }; 'a')")
+        trap, raise_site, reach = self._bracket(_TRAP_IN_AN_ARRAY_EXPRESSION)
         self.assertEqual(reach.routing_at(raise_site), Ps1FaultRouting((trap,), False))
 
     def test_a_raise_outside_the_bracket_is_offered_to_no_trap_written_inside_one(self):
@@ -456,3 +465,145 @@ class TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression(TestBase):
             'a'
         """)
         self.assertEqual(reach.routing_at(tree.body[1]), Ps1FaultRouting((), False))
+
+
+class TestPs1TheBracketFixturesHoldTheShapeTheirPinsAssume(TestBase):
+    """
+    `TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression` reads its `trap` and the statement
+    beside it out of the one bracket its fixture parses to, and every reader of that fixture is an
+    expected failure, which takes a fixture that no longer parses to that shape for the wrong answer
+    the pin exists to record. A parser that stopped holding the statements of a bracket in its body,
+    or that stopped placing the `trap` first among them, would retire those pins in silence. This
+    reads the same two sources and fails loudly instead.
+    """
+
+    def _which_statements_are_traps(self, source: str) -> list[list[bool]]:
+        return [
+            [isinstance(statement, Ps1TrapStatement) for statement in bracket.body]
+            for bracket in _parse(source).walk_in_order()
+            if isinstance(bracket, (Ps1ArrayExpression, Ps1SubExpression))
+        ]
+
+    def test_each_fixture_parses_to_one_bracket_holding_a_trap_and_one_other_statement(self):
+        sources = [_TRAP_IN_A_SUBEXPRESSION, _TRAP_IN_AN_ARRAY_EXPRESSION]
+        self.assertEqual(
+            {source: self._which_statements_are_traps(source) for source in sources},
+            {source: [[True, False]] for source in sources},
+        )
+
+
+class TestPs1ACommandToldToStopEndsTheScriptHoweverItIsTold(TestBase):
+    """
+    `-ErrorAction` takes a `[System.Management.Automation.ActionPreference]`, of which `Stop` is the
+    member whose ordinal is 1. Windows PowerShell 5.1 binds that member from its name, from any
+    abbreviation of the name that no other member of the set answers to, and from any integer
+    spelling of the ordinal; it binds the parameter itself from any prefix of `ErrorAction` that no
+    other parameter of the command answers to, and from the documented alias `EA`, whether the
+    argument is written beside the parameter or attached to it with a colon. A command told to stop
+    reports a terminating error and ends the script wherever nothing takes it, and every member
+    other than `Stop` leaves what it reports non-terminating, so the next statement runs.
+    """
+
+    def _verdicts(self, commands: list[str]) -> dict[str, bool]:
+        return {command: ends_the_script(_parse(command).body[0]) for command in commands}
+
+    def _assertEveryActionStops(self, actions: list[str]) -> None:
+        commands = [F'Get-Item nope -ErrorAction {action}' for action in actions]
+        self.assertEqual(self._verdicts(commands), dict.fromkeys(commands, True))
+
+    def _assertNoActionStops(self, actions: list[str]) -> None:
+        commands = [F'Get-Item nope -ErrorAction {action}' for action in actions]
+        self.assertEqual(self._verdicts(commands), dict.fromkeys(commands, False))
+
+    def _assertEveryParameterCarriesTheStop(self, parameters: list[str]) -> None:
+        commands = [F'Get-Item nope {parameter} Stop' for parameter in parameters]
+        self.assertEqual(self._verdicts(commands), dict.fromkeys(commands, True))
+
+    def test_the_member_name_of_stop_is_read_however_it_is_cased_or_quoted(self):
+        self._assertEveryActionStops(['Stop', 'stop', 'STOP', "'Stop'", '"Stop"'])
+
+    def test_an_abbreviation_no_other_member_answers_to_names_stop(self):
+        self._assertEveryActionStops(['St', 'Sto'])
+
+    def test_the_ordinal_of_stop_names_it_however_the_integer_is_spelled(self):
+        self._assertEveryActionStops(['1', '01', '0x1'])
+
+    def test_a_prefix_no_other_parameter_answers_to_binds_the_action(self):
+        self._assertEveryParameterCarriesTheStop(
+            ['-ErrorAction', '-erroraction', '-ErrorActio', '-ErrorAc', '-ErrorA']
+        )
+
+    def test_the_documented_alias_of_the_parameter_binds_the_action(self):
+        self._assertEveryParameterCarriesTheStop(['-EA', '-ea'])
+
+    def test_a_member_name_other_than_stop_leaves_the_error_non_terminating(self):
+        self._assertNoActionStops(['Continue', 'SilentlyContinue', 'Ignore'])
+
+    def test_an_abbreviation_of_a_member_other_than_stop_leaves_the_error_non_terminating(self):
+        self._assertNoActionStops(['Cont', 'Sil', 'Ig'])
+
+    def test_the_ordinal_of_a_member_other_than_stop_leaves_the_error_non_terminating(self):
+        self._assertNoActionStops(['0', '2', '4', '0x2'])
+
+    def test_an_action_attached_to_the_parameter_with_a_colon_binds_it(self):
+        commands = ['Get-Item nope -ErrorAction:Stop', 'Get-Item nope -EA:Stop']
+        self.assertEqual(self._verdicts(commands), dict.fromkeys(commands, True))
+
+    def test_a_member_other_than_stop_attached_with_a_colon_leaves_the_error_non_terminating(self):
+        commands = ['Get-Item nope -ErrorAction:Continue', 'Get-Item nope -EA:SilentlyContinue']
+        self.assertEqual(self._verdicts(commands), dict.fromkeys(commands, False))
+
+    def test_a_command_given_no_action_at_all_leaves_the_error_non_terminating(self):
+        self.assertEqual(self._verdicts(['Get-Item nope']), {'Get-Item nope': False})
+
+
+class TestPs1AStopPreferenceIsWhatMakesTheTrapUnderItWorthKeeping(TestBase):
+    """
+    `$ErrorActionPreference = 'Stop'` makes every error a command reports terminating, session-wide,
+    and it is the same write however the target is spelled and however `Stop` is named. Under any of
+    those the command below ends the script where nothing takes its error, so removing the `trap`
+    that does take it changes what runs. Under none of them the command reports and the script
+    carries on to the next statement either way, so the handler may go; `$env:ErrorActionPreference`
+    is a process environment variable no error path reads and belongs to that half.
+    """
+
+    def _removing_the_trap_is_observed(self, assignment: str) -> bool:
+        tree, reach = _model(F"""
+            {assignment}
+            trap {{ continue }}
+            Get-Item nope
+            'after'
+        """)
+        trap = next(node for node in tree.walk_in_order() if isinstance(node, Ps1TrapStatement))
+        return reach.removing_a_handler_is_observed(trap)
+
+    def _observations(self, assignments: list[str]) -> dict[str, bool]:
+        return {
+            assignment: self._removing_the_trap_is_observed(assignment)
+            for assignment in assignments
+        }
+
+    def test_the_trap_may_go_where_nothing_is_written_above_the_command_at_all(self):
+        self.assertFalse(self._removing_the_trap_is_observed(''))
+
+    def test_every_spelling_of_a_write_that_selects_stop_keeps_the_trap(self):
+        assignments = [
+            "$ErrorActionPreference = 'Stop'",
+            "[string]$ErrorActionPreference = 'Stop'",
+            "($ErrorActionPreference) = 'Stop'",
+            "$a, $ErrorActionPreference = 1, 'Stop'",
+            "$global:ErrorActionPreference = 'Stop'",
+            "$script:ErrorActionPreference = 'Stop'",
+            "${ErrorActionPreference} = 'Stop'",
+            '$ErrorActionPreference = 1',
+        ]
+        self.assertEqual(self._observations(assignments), dict.fromkeys(assignments, True))
+
+    def test_a_write_that_selects_no_stop_leaves_the_trap_removable(self):
+        assignments = [
+            "$env:ErrorActionPreference = 'Stop'",
+            "$ErrorActionPreference = 'Continue'",
+            "$ErrorActionPreference = 'SilentlyContinue'",
+            '$ErrorActionPreference = 2',
+        ]
+        self.assertEqual(self._observations(assignments), dict.fromkeys(assignments, False))
