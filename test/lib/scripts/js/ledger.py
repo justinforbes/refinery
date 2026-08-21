@@ -39,10 +39,19 @@ def before_and_after(
     *module* reads the source as an ECMAScript module rather than as a script, which an entry
     pinning an `import` or `export` declaration has to ask for: no script spells one, and the answer
     such a declaration is wrong in is the linker's rather than the parser's.
+
+    It selects the file the oracle writes and nothing else. Both files the oracle can write are the
+    module execution model as
+    `refinery.lib.scripts.js.deobfuscation.options.DeobfuscationOptions` means it, an ES module and
+    a CommonJS file being alike in the one thing that model decides: a top-level declaration is
+    scoped to the file and never reaches the global object. So the deobfuscation is always asked
+    for under that model, and asking for it under the script model instead would rewrite the source
+    for a host the answer is never taken from, which reads as the tool having changed a program it
+    only moved.
     """
     return (
         behavior(source, module=module),
-        behavior(deobfuscate_source(source, module=module), module=module),
+        behavior(deobfuscate_source(source, module=True), module=module),
     )
 
 

@@ -274,8 +274,16 @@ class JsParser:
         so `{ a: 1 b: 2 }` is a file the parser reports having repaired and still prints everything
         that was written in.
         """
-        if not self._eat(kind):
+        if self._eat(kind) is None:
             self._recovered = True
+
+    def _at_identifier_name(self) -> bool:
+        """
+        Whether a word stands here. Every word the language has is an IdentifierName, a keyword no
+        less than a name, so a position taking one takes them all and what this refuses is a token
+        that spells no word at all.
+        """
+        return self._at(JsTokenKind.IDENTIFIER) or self._current.kind.is_keyword
 
     def _is_binding_identifier(self, token: JsToken) -> bool:
         """
@@ -340,12 +348,25 @@ class JsParser:
         )
 
     def _eat_semicolon(self) -> bool:
+        """
+        The semicolon that ends a statement, whether the file wrote it or the language supplies it.
+        ECMA-262 supplies one before a token a line terminator separates from what came before,
+        before a closing brace, and at the end of the file, so those three are the whole of what a
+        statement may end with instead of a semicolon.
+
+        Where none of them stands here the parser writes the semicolon anyway, which is a repair
+        like any other: `x = 1 y = 2` is a file no engine reads, and left unrecorded it comes back
+        as the two statements the parser split it into. The one place the language inserts a
+        semicolon on no such condition is after a `do` loop's `while` clause, which reads the
+        semicolon it may find with `_eat` rather than asking here.
+        """
         if self._eat(JsTokenKind.SEMICOLON):
             return True
         if self._at(JsTokenKind.RBRACE, JsTokenKind.EOF):
             return True
         if self._preceded_by_newline:
             return True
+        self._recovered = True
         return False
 
     @contextmanager
@@ -374,6 +395,13 @@ class JsParser:
         return script
 
     def _parse_statement_list(self, *stop: JsTokenKind) -> list[Statement]:
+        """
+        The statements standing between here and the first of *stop*. A statement the parser could
+        not read at all is the token it stopped on, kept as itself; one it gave up on partway is the
+        whole span it had reached, kept the same way. Handing back nothing for that span is what
+        would delete it: the tokens are already read, so the text they spell appears in no node, and
+        a file that lost a statement prints as a shorter program nobody wrote.
+        """
         body: list[Statement] = []
         while not self._at(*stop):
             mark = self._current.offset
@@ -383,6 +411,8 @@ class JsParser:
                 stmt = self._parse_statement()
             except Exception:
                 stmt = None
+                if self._current.offset != mark:
+                    stmt = self._unread_since(mark, 'a statement that could not be read')
             if stmt is not None:
                 stmt.leading_comments.extend(comments)
                 body.append(stmt)
@@ -629,7 +659,7 @@ class JsParser:
         self._expect(JsTokenKind.LPAREN)
         test = self._parse_expression()
         self._expect(JsTokenKind.RPAREN)
-        self._eat_semicolon()
+        self._eat(JsTokenKind.SEMICOLON)
         return JsDoWhileStatement(test=test, body=body, offset=offset)
 
     def _parse_for_statement(self) -> Statement:
@@ -731,6 +761,7 @@ class JsParser:
         elif self._eat(JsTokenKind.DEFAULT):
             self._expect(JsTokenKind.COLON)
         else:
+            self._recovered = True
             self._advance()
         body: list[Statement] = []
         while not self._at(
@@ -751,6 +782,8 @@ class JsParser:
             handler = self._parse_catch_clause()
         if self._eat(JsTokenKind.FINALLY):
             finalizer = self._parse_block_statement()
+        if handler is None and finalizer is None:
+            self._recovered = True
         return JsTryStatement(
             block=block, handler=handler, finalizer=finalizer, offset=offset)
 
@@ -1159,6 +1192,8 @@ class JsParser:
                     specifiers.append(self._parse_namespace_import())
                 elif self._at(JsTokenKind.LBRACE):
                     specifiers.extend(self._parse_named_imports())
+                else:
+                    self._recovered = True
 
         elif self._at(JsTokenKind.STAR):
             specifiers.append(self._parse_namespace_import())
@@ -1192,7 +1227,16 @@ class JsParser:
         locally, and no module may bind a word its strict code reserves. That rule is not applied
         anywhere yet, so nothing is lost by reading the shorthand here rather than gained by reading
         it as a binding.
+
+        A word and a string literal are the whole of what the grammar writes here, so anything else
+        is a token the parser steps over in order to answer with a name at all, and reading `,` as
+        the name a module exports under is a repair however well it prints back.
         """
+        if not (
+            self._at_identifier_name()
+            or self._at(JsTokenKind.STRING_SINGLE, JsTokenKind.STRING_DOUBLE)
+        ):
+            self._recovered = True
         tok = self._advance()
         return self._name_or_error(tok.value, tok.offset)
 
@@ -1276,6 +1320,7 @@ class JsParser:
             decl = self._parse_function_declaration(is_async=True)
             return JsExportNamedDeclaration(declaration=decl, offset=offset)
 
+        self._recovered = True
         self._advance()
         return JsExportNamedDeclaration(offset=offset)
 
