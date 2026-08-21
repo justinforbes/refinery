@@ -25,10 +25,9 @@ where the two differ the bracket carries meaning, and where they agree the slot 
 way. Both spellings are re-measured by the tests, so a row cannot go stale into a claim nothing
 checks.
 
-The corpus comes in two tables. `HEADS` holds the heads this project reads, and the law below is
-quantified over them. `HEADS_THE_TOOL_MISREADS` holds the heads it does not, which stay here so that
-the engine keeps answering for them, and whose law is pinned in
-`test.lib.scripts.js.test_unfixed_defects`.
+`HEADS` is the whole corpus and the law below is quantified over all of it. Seven of these rows were
+a second table the law had to leave out, each one a head whose `in` the parser read under a ban the
+grammar had already lifted; they are ordinary rows now.
 
 SECURITY: the snippets here are hand-authored and benign, and running them is what makes the engine
 the oracle. Nothing from `samples` may ever be fed to this.
@@ -254,9 +253,6 @@ HEADS = [
         ('of r = [7]', 'of (r = [7])'),
         '[7,7]',
     ),
-]
-
-HEADS_THE_TOOL_MISREADS = [
     Head(
         'for (true ? "k" in b : 0; log.length < 1; ) log.push("ran");',
         '["ran"]',
@@ -300,16 +296,6 @@ HEADS_THE_TOOL_MISREADS = [
         '["q"]',
     ),
 ]
-"""
-Heads whose `in` stands inside a construct that starts a fresh expression, where the restriction the
-head imposes is lifted again and the word is the operator: the arguments of `new`, the block body of
-a function or an arrow, a template substitution, the brackets of a computed member, and the
-consequent of a conditional. Node reads every one of them as the corpus records it and both bracket
-spellings agree, so the brackets carry nothing here and there is nothing for a printer to restore.
-"""
-
-EVERY_HEAD = [*HEADS, *HEADS_THE_TOOL_MISREADS]
-
 
 class TestJsForHeadCorpus(TestBase):
     """
@@ -319,12 +305,12 @@ class TestJsForHeadCorpus(TestBase):
     """
 
     def test_every_head_is_recorded_as_a_program(self):
-        for head in EVERY_HEAD:
+        for head in HEADS:
             with self.subTest(loop=head.loop):
                 self.assertNotEqual(head.prints, NOT_A_PROGRAM)
 
     def test_every_respelling_moves_one_bracket_and_changes_nothing_else(self):
-        for head in EVERY_HEAD:
+        for head in HEADS:
             with self.subTest(loop=head.loop):
                 self.assertEqual(head.loop.count(head.respelling[0]), 1)
                 self.assertNotEqual(head.respelled, head.source)
@@ -340,7 +326,7 @@ class TestJsForHeadSurvivesPrinting(TestBase):
     """
 
     def test_node_reads_both_spellings_of_every_head_as_the_corpus_records_them(self):
-        for head in EVERY_HEAD:
+        for head in HEADS:
             with self.subTest(loop=head.loop):
                 self.assertEqual(node_says(head.source), head.prints)
                 self.assertEqual(node_says(head.respelled), head.respelling_prints)

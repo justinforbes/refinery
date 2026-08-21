@@ -16,11 +16,21 @@ from test.lib.scripts.js.analysis.differential import behavior, deobfuscate_sour
 
 from refinery.lib.scripts import is_well_formed
 from refinery.lib.scripts.js.parser import JsParser
+from refinery.lib.scripts.js.synth import JsSynthesizer
 from refinery.units.scripting.js import js
 
 
 def well_formed(source: str) -> bool:
     return is_well_formed(JsParser(source).parse())
+
+
+def printed(source: str) -> str:
+    """
+    The text `refinery.js` writes for *source* with no pass run over it, which is what the parser
+    read spelled back out. An entry about what a file comes back as reads this; one about what a
+    program does reads `before_and_after`.
+    """
+    return JsSynthesizer().convert(JsParser(source).parse())
 
 
 def folded(source: str) -> str:

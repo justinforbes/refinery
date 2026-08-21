@@ -401,26 +401,33 @@ class JsParser:
         whole span it had reached, kept the same way. Handing back nothing for that span is what
         would delete it: the tokens are already read, so the text they spell appears in no node, and
         a file that lost a statement prints as a shorter program nobody wrote.
+
+        A statement list is where the `for` head's suppression of the `in` operator ends. The head
+        reaches an expression and only an expression, and the one way a statement stands inside one
+        is a function body, which is a fresh context: `for (function () { return 'k' in b; }; ; )`
+        is a program, and `for (q => 'k' in b; ; )` is not, because a concise arrow body is an
+        expression and inherits the suppression rather than ending it.
         """
         body: list[Statement] = []
-        while not self._at(*stop):
-            mark = self._current.offset
-            comments = list(self._pending_comments)
-            self._pending_comments.clear()
-            try:
-                stmt = self._parse_statement()
-            except Exception:
-                stmt = None
-                if self._current.offset != mark:
-                    stmt = self._unread_since(mark, 'a statement that could not be read')
-            if stmt is not None:
-                stmt.leading_comments.extend(comments)
-                body.append(stmt)
-            elif self._current.offset == mark:
-                tok = self._advance()
-                error = JsErrorNode(offset=tok.offset, text=tok.value)
-                error.leading_comments.extend(comments)
-                body.append(error)
+        with self._with_no_in(False):
+            while not self._at(*stop):
+                mark = self._current.offset
+                comments = list(self._pending_comments)
+                self._pending_comments.clear()
+                try:
+                    stmt = self._parse_statement()
+                except Exception:
+                    stmt = None
+                    if self._current.offset != mark:
+                        stmt = self._unread_since(mark, 'a statement that could not be read')
+                if stmt is not None:
+                    stmt.leading_comments.extend(comments)
+                    body.append(stmt)
+                elif self._current.offset == mark:
+                    tok = self._advance()
+                    error = JsErrorNode(offset=tok.offset, text=tok.value)
+                    error.leading_comments.extend(comments)
+                    body.append(error)
         return body
 
     def _parse_program(self) -> JsScript:
@@ -1412,7 +1419,8 @@ class JsParser:
     def _parse_conditional_expression(self) -> Expression:
         expr = self._parse_binary_expression()
         if self._eat(JsTokenKind.QUESTION):
-            consequent = self._parse_assignment_expression()
+            with self._with_no_in(False):
+                consequent = self._parse_assignment_expression()
             self._expect(JsTokenKind.COLON)
             alternate = self._parse_assignment_expression()
             return JsConditionalExpression(
@@ -1504,20 +1512,24 @@ class JsParser:
                 expr = JsMemberExpression(
                     object=expr, property=prop, computed=False, optional=False, offset=expr.offset)
             elif self._at(JsTokenKind.LBRACKET):
-                self._advance()
-                prop = self._parse_expression()
-                self._expect(JsTokenKind.RBRACKET)
                 expr = JsMemberExpression(
-                    object=expr, property=prop, computed=True, optional=False, offset=expr.offset)
+                    object=expr,
+                    property=self._parse_computed_member_key(),
+                    computed=True,
+                    optional=False,
+                    offset=expr.offset,
+                )
             elif self._eat(JsTokenKind.QUESTION_DOT):
                 if self._at(JsTokenKind.LPAREN):
                     expr = self._parse_call_arguments(expr, optional=True)
                 elif self._at(JsTokenKind.LBRACKET):
-                    self._advance()
-                    prop = self._parse_expression()
-                    self._expect(JsTokenKind.RBRACKET)
                     expr = JsMemberExpression(
-                        object=expr, property=prop, computed=True, optional=True, offset=expr.offset)
+                        object=expr,
+                        property=self._parse_computed_member_key(),
+                        computed=True,
+                        optional=True,
+                        offset=expr.offset,
+                    )
                 else:
                     prop = self._member_property()
                     expr = JsMemberExpression(
@@ -1549,18 +1561,38 @@ class JsParser:
         return JsErrorNode(
             text=tok.value, message='expected a property name', offset=tok.offset)
 
+    def _parse_computed_member_key(self) -> Expression:
+        """
+        The expression between the brackets of a computed member read. Like a call's arguments it is
+        written `[+In]`, so `for (t["k" in b] = "set"; ; )` is an ordinary head: the bracket ends the
+        reach of the suppression the head applies to a relational operator standing directly in it.
+        """
+        self._expect(JsTokenKind.LBRACKET)
+        with self._with_no_in(False):
+            key = self._parse_expression()
+        self._expect(JsTokenKind.RBRACKET)
+        return key
+
     def _parse_argument_list(self) -> list[Expression]:
+        """
+        The arguments between the brackets of a call. Each is written `[+In]`, so `in` is an operator
+        here however the call was reached: what a `for` head suppresses is a relational operator
+        standing in the head itself, and a bracket the head encloses is a fresh expression again.
+        Owning that here rather than at each call site is what keeps `for (new Set("k" in b); ; )`
+        reading the same way `for (f("k" in b); ; )` does.
+        """
         args: list[Expression] = []
-        while not self._at(JsTokenKind.RPAREN, JsTokenKind.EOF):
-            if self._at(JsTokenKind.ELLIPSIS):
-                offset = self._current.offset
-                self._advance()
-                arg = self._parse_assignment_expression()
-                args.append(JsSpreadElement(argument=arg, offset=offset))
-            else:
-                args.append(self._parse_assignment_expression())
-            if not self._at(JsTokenKind.RPAREN):
-                self._expect(JsTokenKind.COMMA)
+        with self._with_no_in(False):
+            while not self._at(JsTokenKind.RPAREN, JsTokenKind.EOF):
+                if self._at(JsTokenKind.ELLIPSIS):
+                    offset = self._current.offset
+                    self._advance()
+                    arg = self._parse_assignment_expression()
+                    args.append(JsSpreadElement(argument=arg, offset=offset))
+                else:
+                    args.append(self._parse_assignment_expression())
+                if not self._at(JsTokenKind.RPAREN):
+                    self._expect(JsTokenKind.COMMA)
         self._expect(JsTokenKind.RPAREN)
         return args
 
@@ -1569,9 +1601,8 @@ class JsParser:
         callee: Expression,
         optional: bool,
     ) -> JsCallExpression:
-        with self._with_no_in(False):
-            self._expect(JsTokenKind.LPAREN)
-            args = self._parse_argument_list()
+        self._expect(JsTokenKind.LPAREN)
+        args = self._parse_argument_list()
         return JsCallExpression(
             callee=callee, arguments=args, optional=optional, offset=callee.offset)
 
@@ -1598,11 +1629,12 @@ class JsParser:
                     callee = JsMemberExpression(
                         object=callee, property=prop, computed=False, offset=callee.offset)
                 elif self._at(JsTokenKind.LBRACKET):
-                    self._advance()
-                    prop = self._parse_expression()
-                    self._expect(JsTokenKind.RBRACKET)
                     callee = JsMemberExpression(
-                        object=callee, property=prop, computed=True, offset=callee.offset)
+                        object=callee,
+                        property=self._parse_computed_member_key(),
+                        computed=True,
+                        offset=callee.offset,
+                    )
                 else:
                     break
             args: list[Expression] = []
@@ -1749,7 +1781,8 @@ class JsParser:
         quasis.append(self._template_element(self._advance(), False))
 
         while True:
-            expressions.append(self._parse_expression())
+            with self._with_no_in(False):
+                expressions.append(self._parse_expression())
             if self._at(JsTokenKind.TEMPLATE_TAIL):
                 quasis.append(self._template_element(self._advance(), True))
                 break
@@ -2059,8 +2092,7 @@ class JsParser:
 
             if self._at(JsTokenKind.LPAREN):
                 self._advance()
-                with self._with_no_in(False):
-                    args = self._parse_argument_list()
+                args = self._parse_argument_list()
                 if self._at(JsTokenKind.ARROW) and not self._preceded_by_newline:
                     self._advance()
                     params = [self._to_param(arg) for arg in args]

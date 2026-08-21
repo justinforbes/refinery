@@ -26,7 +26,6 @@ from __future__ import annotations
 import unittest
 
 from collections import Counter
-from collections.abc import Callable
 
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
@@ -41,13 +40,8 @@ from test.lib.scripts.js.ledger import (
     before_and_after,
     each_program_still_prints,
     folded,
+    printed,
     well_formed,
-)
-from test.lib.scripts.js.test_for_statement_head import (
-    HEADS_THE_TOOL_MISREADS,
-    node_says,
-    printed_from_the_parse,
-    printed_without_the_brackets,
 )
 from test.lib.scripts.js.test_parameter_grammar import (
     A_BINDING_THE_KIND_OF_FUNCTION_RESERVES,
@@ -59,12 +53,14 @@ from test.lib.scripts.js.test_parser_recovery import (
 )
 from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_HAS
 
-from refinery.lib.scripts import UnspellableNode
 from refinery.lib.scripts.js.model import (
+    JsBigIntLiteral,
     JsExportAllDeclaration,
     JsExportSpecifier,
     JsIdentifier,
     JsImportSpecifier,
+    JsNumericLiteral,
+    JsProperty,
     JsPropertyDefinition,
     JsStringLiteral,
 )
@@ -75,14 +71,17 @@ from refinery.lib.scripts.js.synth import JsSynthesizer
 _ASTRAL = chr(0x1F600)
 
 
-def _printed(source: str) -> str:
-    return JsSynthesizer().convert(JsParser(source).parse())
-
-
 def _sole_property_definition(source: str) -> JsPropertyDefinition:
     return [
         node for node in JsParser(source).parse().walk()
         if isinstance(node, JsPropertyDefinition)
+    ][0]
+
+
+def _sole_property(source: str) -> JsProperty:
+    return [
+        node for node in JsParser(source).parse().walk()
+        if isinstance(node, JsProperty)
     ][0]
 
 
@@ -91,23 +90,6 @@ def _sole_string_literal(source: str) -> JsStringLiteral:
         node for node in JsParser(source).parse().walk()
         if isinstance(node, JsStringLiteral)
     ][0]
-
-
-def _what_the_engine_says_after(printing: Callable[[str], str]) -> list[str]:
-    """
-    What Node makes of the text *printing* produces for each head of `HEADS_THE_TOOL_MISREADS`, with
-    a refusal to print reported in place of an output: declining to write anything is an answer a
-    route can give, and it is not the one the corpus records either.
-    """
-    answers: list[str] = []
-    for head in HEADS_THE_TOOL_MISREADS:
-        try:
-            printed = printing(head.source)
-        except UnspellableNode as refusal:
-            answers.append(F'{type(refusal.node).__name__} has no spelling')
-        else:
-            answers.append(node_says(printed))
-    return answers
 
 
 def _dropped_source_characters(source: str, printed: str) -> str:
@@ -147,7 +129,7 @@ class TestClassBodyIsItsOwnFunctionContext(TestBase):
         source = 'async function f() { class C { p = await; } }'
         self.assertEqual(type(_sole_property_definition(source).value), JsIdentifier)
         self.assertEqual(
-            _printed(source), 'async function f() {\n  class C {\n    p = await;\n  }\n}'
+            printed(source), 'async function f() {\n  class C {\n    p = await;\n  }\n}'
         )
 
     @unittest.expectedFailure
@@ -255,7 +237,7 @@ class TestAnExpressionNamedByAWordOnlyTheEnclosingKindReservesIsAProgram(TestBas
     def test_printing_one_of_them_gives_a_program_that_runs_the_same_way(self):
         rows = A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES
         self.assertEqual(
-            {source: behavior(_printed(source)) for source in rows},
+            {source: behavior(printed(source)) for source in rows},
             {source: ('', None) for source in rows},
         )
 
@@ -356,59 +338,6 @@ class TestLexicalDeclarationIsNotAStatement(TestBase):
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestTheForHeadBanOnInIsLiftedByWhatOpensAnExpressionOfItsOwn(TestBase):
-    """
-    The head of a `for` loop bans the `in` operator so that the word is free to open a for-in, and
-    every construct that starts an expression of its own lifts the ban again: the arguments of
-    `new`, the block body of a function or an arrow, a template substitution, the brackets of a
-    computed member, and the consequent of a conditional. The heads of
-    `test.lib.scripts.js.test_for_statement_head.HEADS_THE_TOOL_MISREADS` are read with the ban
-    still in force, so the word is not read as the operator where the grammar offers it and what the
-    parser makes of the text is a tree the file does not spell. Each entry below is one of the three
-    routes from a source to an output that the law in that module states, quantified over the heads
-    the law had to leave out.
-    """
-
-    @unittest.expectedFailure
-    def test_printing_a_parsed_head_keeps_what_it_does(self):
-        """
-        Node prints what the corpus records for each of these loops, `[1]` among them for
-        `for (r = new Array("k" in b); ...)`, whose single argument is one boolean. Read with the
-        ban in force, that argument becomes two, and what comes back is a program printing `[2]`:
-        the same file, a different answer, and nothing to say it changed. The rest come back as a
-        `SyntaxError` or not at all, the template head reaching the printer as a run no text spells.
-        """
-        self.assertEqual(
-            _what_the_engine_says_after(printed_from_the_parse),
-            [head.prints for head in HEADS_THE_TOOL_MISREADS],
-        )
-
-    @unittest.expectedFailure
-    def test_printing_a_head_whose_brackets_left_the_tree_keeps_what_it_does(self):
-        """
-        The same heads, printed after every bracket in the tree is replaced by what it holds, which
-        is the tree a pass folding into a bracketed slot leaves behind. Node prints what the corpus
-        records: no bracket in any of these heads carries meaning, so removing them all may not
-        change what the loop does.
-        """
-        self.assertEqual(
-            _what_the_engine_says_after(printed_without_the_brackets),
-            [head.prints for head in HEADS_THE_TOOL_MISREADS],
-        )
-
-    @unittest.expectedFailure
-    def test_deobfuscating_a_head_keeps_what_it_does(self):
-        """
-        The same heads again, this time as the deobfuscation passes leave them. Node prints what the
-        corpus records, which is the whole promise: what an analyst is handed back runs the way the
-        file they handed over ran.
-        """
-        self.assertEqual(
-            _what_the_engine_says_after(deobfuscate_source),
-            [head.prints for head in HEADS_THE_TOOL_MISREADS],
-        )
-
-
 class TestAStringLiteralReadsOnlyTheEscapesTheGrammarHas(TestBase):
     """
     A string literal and a template part company over the escapes each of them reads, but neither
@@ -448,11 +377,11 @@ class TestRecoveryKeepsTheSourceText(TestBase):
         a dropped character is a payload the analyst never sees.
         """
         sources = ['x = y[a b]', 'x = y.replace(/[^a-z']
-        dropped = tuple(_dropped_source_characters(s, _printed(s)) for s in sources)
+        dropped = tuple(_dropped_source_characters(s, printed(s)) for s in sources)
         self.assertEqual(dropped, ('', ''))
 
     @unittest.expectedFailure
-    def test_the_token_a_repair_steps_over_is_still_in_what_is_printed(self):
+    def test_the_token_a_repair_steps_over_is_still_in_what_isprinted(self):
         """
         Node refuses all six of these: `missing ) after argument list` for the two argument lists,
         `Unexpected identifier 'b'` for the two parameter lists, `Unexpected string` for the catch
@@ -472,7 +401,7 @@ class TestRecoveryKeepsTheSourceText(TestBase):
             'switch (x) { case 1 break; }',
         ]
         self.assertEqual(
-            [_dropped_source_characters(source, _printed(source)) for source in sources],
+            [_dropped_source_characters(source, printed(source)) for source in sources],
             [''] * len(sources),
         )
 
@@ -490,8 +419,8 @@ class TestPrintingIsIdempotent(TestBase):
         the parser makes of it is a recovery and its shape is the project's to choose. Whichever
         shape that is, printing the parse of the print must give the print back unchanged.
         """
-        once = _printed('x = /ab+')
-        self.assertEqual(_printed(once), once)
+        once = printed('x = /ab+')
+        self.assertEqual(printed(once), once)
 
     @unittest.expectedFailure
     def test_printing_a_name_the_source_never_wrote_twice_is_stable(self):
@@ -505,8 +434,8 @@ class TestPrintingIsIdempotent(TestBase):
         accessor keyword as the method name.
         """
         sources = ['var', 'var a = 1,', 'x = y.', 'x = a?.', 'delete a.', 'x = { get']
-        once = [_printed(source) for source in sources]
-        self.assertEqual([_printed(text) for text in once], once)
+        once = [printed(source) for source in sources]
+        self.assertEqual([printed(text) for text in once], once)
 
     @unittest.expectedFailure
     def test_printing_a_parameter_list_with_no_arrow_behind_it_twice_is_stable(self):
@@ -522,8 +451,8 @@ class TestPrintingIsIdempotent(TestBase):
         empty, so the arrow arrives on the second print and the text is still growing on the third.
         """
         sources = ['x = ()', 'x = (a,)', 'x = (...a)', 'x = new', 'throw new']
-        once = [_printed(source) for source in sources]
-        self.assertEqual([_printed(text) for text in once], once)
+        once = [printed(source) for source in sources]
+        self.assertEqual([printed(text) for text in once], once)
 
     @unittest.expectedFailure
     def test_printing_a_statement_the_source_never_wrote_twice_is_stable(self):
@@ -542,8 +471,8 @@ class TestPrintingIsIdempotent(TestBase):
             'for (const v of a)',
             'if (a) { f(); } else',
         ]
-        once = [_printed(source) for source in sources]
-        self.assertEqual([_printed(text) for text in once], once)
+        once = [printed(source) for source in sources]
+        self.assertEqual([printed(text) for text in once], once)
 
     @unittest.expectedFailure
     def test_printing_a_heritage_clause_the_source_never_wrote_twice_is_stable(self):
@@ -556,8 +485,8 @@ class TestPrintingIsIdempotent(TestBase):
         nobody wrote, and prints `class D extends {} {}`, which Node accepts: two passes turn a file
         that was cut into a program saying something the file never said.
         """
-        once = _printed('class D extends')
-        self.assertEqual(_printed(once), once)
+        once = printed('class D extends')
+        self.assertEqual(printed(once), once)
 
 
 class TestCommentWithNoFollowingStatement(TestBase):
@@ -574,7 +503,7 @@ class TestCommentWithNoFollowingStatement(TestBase):
         already in the form the printer emits, so each has to print back exactly as written.
         """
         sources = ['x = 1;\n/* note */', 'x = 1;\n// note', 'x = 1;\n/* note']
-        self.assertEqual(tuple(_printed(source) for source in sources), tuple(sources))
+        self.assertEqual(tuple(printed(source) for source in sources), tuple(sources))
 
 
 class TestADecodeReadsBackTheCharactersNoEscapeIntroduced(TestBase):
@@ -1008,7 +937,7 @@ class TestANameTheModuleReservesStaysBehindTheEval(TestBase):
     """
 
     @unittest.expectedFailure
-    def test_a_module_keeps_printing_what_the_eval_printed(self):
+    def test_a_module_keeps_printing_what_the_evalprinted(self):
         source = A_PAYLOAD_ONLY_A_SCRIPT_MAY_SPELL
         self.assertEqual(
             (
@@ -1523,4 +1452,160 @@ class TestAModuleExportNameWrittenAsAStringIsAString(TestBase):
         self.assertEqual(
             {source: well_formed(source) for source in sources},
             {source: False for source in sources},
+        )
+
+
+class TestADeclarationTheGrammarRequiresAnInitializerForIsNoProgram(TestBase):
+    """
+    Two things decide together whether a declaration may be written with nothing assigned to it:
+    the keyword it opens with, and whether what it binds is a name or a pattern. `var` and `let`
+    bind a bare name and leave it undefined, `const` may not, and a destructuring target requires an
+    initializer under every keyword, a pattern having nothing to take apart otherwise.
+    `node --check` over a script gives:
+
+        var x;      OK
+        let x;      OK
+        const x;    SyntaxError: Missing initializer in const declaration
+        var [a];    SyntaxError: Missing initializer in destructuring declaration
+        var {a};    SyntaxError: Missing initializer in destructuring declaration
+        let [a];    SyntaxError: Missing initializer in destructuring declaration
+        let {a};    SyntaxError: Missing initializer in destructuring declaration
+        const [a];  SyntaxError: Missing initializer in destructuring declaration
+        const {a};  SyntaxError: Missing initializer in destructuring declaration
+
+    A `for` head is where the two answers part company. A for-in or a for-of head hands the binding
+    its value on every pass, so a declaration standing there is written with no initializer whatever
+    the keyword and whatever the target, and the host reads all eighteen of those files. The first
+    clause of a C-style head is an ordinary declaration and both rules reach it unchanged: the host
+    refuses `for (const x;;) {}` and `for (var [a];;) {}` with the two messages above, and reads
+    `for (const x of o) {}` and `for (var [a] of o) {}`.
+
+    Every file here comes back as the text it went in as, layout aside, so what they cost is what
+    the four files of `TestABindingNamedByAWordItsFunctionKindReservesIsNoProgram` cost:
+    `refinery.lib.scripts.is_well_formed` answers `True` for a tree that is not a program, which is
+    the domain every fidelity law is stated over.
+    """
+
+    @unittest.expectedFailure
+    def test_only_var_and_let_bind_a_bare_name_with_no_initializer(self):
+        """
+        The nine cells of the keyword against the target, in one answer, with the two files the
+        host reads among them: a refusal that reaches `var x;` or `let x;` is a keyword rule
+        applied where the target decides, and this entry still failing.
+        """
+        rows = {
+            'var x;': True,
+            'let x;': True,
+            'const x;': False,
+            'var [a];': False,
+            'var {a};': False,
+            'let [a];': False,
+            'let {a};': False,
+            'const [a];': False,
+            'const {a};': False,
+        }
+        self.assertEqual({source: well_formed(source) for source in rows}, rows)
+
+    @unittest.expectedFailure
+    def test_a_for_head_lifts_the_requirement_only_where_it_supplies_the_value(self):
+        """
+        The same nine cells in each of the three heads a declaration stands in. The eighteen files
+        of the two heads that iterate are read, so a fix that refuses a bare `const` or a bare
+        pattern wherever it is written takes eighteen programs with it; the nine of the head that
+        does not iterate are refused for the reasons the statement is refused for.
+        """
+        rows = {
+            F'for ({kind} {target} {word} o) {{}}': True
+            for kind in ('var', 'let', 'const')
+            for target in ('x', '[a]', '{a}')
+            for word in ('in', 'of')
+        }
+        rows.update({
+            'for (var x;;) {}': True,
+            'for (let x;;) {}': True,
+            'for (const x;;) {}': False,
+            'for (var [a];;) {}': False,
+            'for (var {a};;) {}': False,
+            'for (let [a];;) {}': False,
+            'for (let {a};;) {}': False,
+            'for (const [a];;) {}': False,
+            'for (const {a};;) {}': False,
+        })
+        self.assertEqual({source: well_formed(source) for source in rows}, rows)
+
+
+class TestAPropertyKeyIsSpelledByAName(TestBase):
+    """
+    An object literal names a property with an IdentifierName, with a string literal, with a
+    numeric literal, or with a bracketed expression, and with nothing else. An IdentifierName is
+    wider than a name the code around it could refer to, every reserved word spelling one, which is
+    what makes `x = { if: 1 };` a program; it is a name all the same, and a punctuator is not one.
+    `node --check` over a script refuses:
+
+        x = { +: 1 };       SyntaxError: Unexpected token '+'
+        x = { ,: 1 };       SyntaxError: Unexpected token ','
+        x = { ;: 1 };       SyntaxError: Unexpected token ';'
+        x = { ): 1 };       SyntaxError: Unexpected token ')'
+        x = { %: 1 };       SyntaxError: Unexpected token '%'
+        x = { ++: 1 };      SyntaxError: Unexpected token '++'
+        x = { =>: 1 };      SyntaxError: Unexpected token '=>'
+        x = { @: 1 };       SyntaxError: Invalid or unexpected token
+        x = { #a: 1 };      SyntaxError: Unexpected identifier '#a'
+        x = { +() {} };     SyntaxError: Unexpected token '+'
+        class C { +() {} }  SyntaxError: Unexpected token '+'
+
+    and reads `{ a: 1 }`, `{ if: 1 }`, `{ 'a b': 1 }`, `{ 1: 1 }`, `{ .5: 1 }`, `{ 08: 1 }`,
+    `{ 1_0: 1 }`, `{ 1n: 1 }` and `{ [k]: 1 }`. Whatever token stands in the position is taken for
+    the name and kept in a `refinery.lib.scripts.js.model.JsIdentifier` spelled by that token's
+    text, so a key named `+` is a name to every consumer that reads one, the file prints back
+    unchanged, and `refinery.lib.scripts.is_well_formed` calls the tree a program. The private name
+    is the same reading one step further on: `#a` names a field of a class and nothing else, and an
+    object literal that borrows it is no program either.
+
+    A numeral carrying the BigInt suffix is what parts a fix from a careless one. It is a
+    NumericLiteral like any other, so `x = { 1n: 1 };` is a program and Node answers the one key
+    `1` for `Object.keys({ 1n: 1 })`. A key position narrowed to an identifier, a string and a
+    plain decimal stops reading a file the language reads.
+    """
+
+    @unittest.expectedFailure
+    def test_a_key_position_holding_no_name_is_not_a_well_formed_program(self):
+        rows = {
+            'x = { a: 1 };': True,
+            'x = { if: 1 };': True,
+            "x = { 'a b': 1 };": True,
+            'x = { 1: 1 };': True,
+            'x = { .5: 1 };': True,
+            'x = { 08: 1 };': True,
+            'x = { 1_0: 1 };': True,
+            'x = { 1n: 1 };': True,
+            'x = { [k]: 1 };': True,
+            'x = { +: 1 };': False,
+            'x = { ,: 1 };': False,
+            'x = { ;: 1 };': False,
+            'x = { ): 1 };': False,
+            'x = { %: 1 };': False,
+            'x = { ++: 1 };': False,
+            'x = { =>: 1 };': False,
+            'x = { @: 1 };': False,
+            'x = { #a: 1 };': False,
+            'x = { +() {} };': False,
+            'class C { +() {} }': False,
+        }
+        self.assertEqual({source: well_formed(source) for source in rows}, rows)
+
+    @unittest.expectedFailure
+    def test_a_numeral_in_a_key_position_is_the_numeral_it_is_anywhere_else(self):
+        """
+        `x = 1n;` is read as the BigInt numeral it spells and `x = { 1n: 1 };` is not, though the
+        same literal is written in both: the key is kept as a name whose text is `1n`, a spelling
+        no identifier may carry and a property no object has. The decimal beside it is read as the
+        numeral it is, so the position is not one that nothing reaches.
+        """
+        self.assertEqual(
+            (
+                type(_sole_property('x = { 1n: 1 };').key),
+                type(_sole_property('x = { 1: 1 };').key),
+            ),
+            (JsBigIntLiteral, JsNumericLiteral),
         )
