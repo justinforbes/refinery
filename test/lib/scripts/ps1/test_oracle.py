@@ -226,6 +226,19 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         '`Ps1Simplifications` rewrites `$($x)` to `$x` before the alias relation is built, minting '
         'a share the script does not have, so the defect is in that pass rather than in the '
         'aliasing.',
+    "trap { continue }; [int]'a'; Write-Host 'after'":
+        'The handler is removed. An implicit terminating error nothing takes at script scope is '
+        'reported and the next statement runs, which is what makes an inert `trap` over one look '
+        'removable — but 5.1 hands such an error to a `catch` anywhere up the call stack, and this '
+        'oracle dot-sources every snippet inside one, so with the handler the snippet writes '
+        '`after` and without it the error leaves the script.',
+    "trap { }; [int]'a'; Write-Host 'after'":
+        'The same handler removed in its other inert spelling, where the disposition is the '
+        'default resumption rather than `continue`.',
+    "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
+        'The same handler removed where the raise stands inside `$( )`. 5.1 abandons the whole '
+        'assignment and resumes at the statement after it, so `$x` holds nothing and the snippet '
+        'writes an empty line; without the handler the error leaves the script instead.',
 }
 
 
@@ -252,6 +265,46 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('INFO\ta',),
     "trap { continue }; throw 'e'; Write-Host 'after'":
         ('INFO\tafter',),
+    "[int]'a'; Write-Host 'after'":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "trap { continue }; [int]'a'; Write-Host 'after'":
+        ('INFO\tafter',),
+    "trap { break }; [int]'a'; Write-Host 'after'":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "trap { }; [int]'a'; Write-Host 'after'":
+        ('ERROR\tInvalidCastFromStringToInteger'
+         '\tSystem.Management.Automation.RuntimeException', 'INFO\tafter'),
+    "Get-Item nope -ErrorAction Stop; Write-Host 'after'":
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+         '\tSystem.Management.Automation.ItemNotFoundException',),
+    "trap { continue }; Get-Item nope -ErrorAction Stop; Write-Host 'after'":
+        ('INFO\tafter',),
+    "Get-Item nope -ErrorAc Stop; Write-Host 'after'":
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+         '\tSystem.Management.Automation.ItemNotFoundException',),
+    "Get-Item nope -ErrorAction:Stop; Write-Host 'after'":
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+         '\tSystem.Management.Automation.ItemNotFoundException',),
+    "Get-Item nope -ErrorAction 1; Write-Host 'after'":
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+         '\tSystem.Management.Automation.ItemNotFoundException',),
+    "Get-Item nope -ErrorAction Continue; Write-Host 'after'":
+        ('ERROR\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+         '\tSystem.Management.Automation.ItemNotFoundException', 'INFO\tafter'),
+    "$ErrorActionPreference = 'Stop'; [int]'a'; Write-Host 'after'":
+        ('THROW\tInvalidCastFromStringToInteger'
+         '\tSystem.Management.Automation.RuntimeException',),
+    "throw 'e'; Write-Host 'after'":
+        ('THROW\te\tSystem.Management.Automation.RuntimeException',),
+    "$x = $(trap { continue }; [int]'a'; 'in'); Write-Host $x":
+        ('INFO\tin',),
+    "$(trap { continue }); [int]'a'; Write-Host 'after'":
+        ('OUT\t\t<null>', 'THROW\tInvalidCastFromStringToInteger'
+         '\tSystem.Management.Automation.RuntimeException'),
+    "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
+        ('INFO\t',),
+    "$x = @(trap { continue }; [int]'a'; 'in'); Write-Host $x":
+        ('INFO\tin',),
     "$x = 'a'; function f { Write-Host $x }; f; $x = 'c'":
         ('INFO\ta',),
     "$v = 'a'; & { Write-Host $v }; $v = 'c'":

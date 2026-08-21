@@ -410,6 +410,10 @@ CONTRIBUTION: dict[str, Contribution] = {
     'Ps1DeadCodeElimination': Contribution(
         lost=(
             "Write-Host 'a'; return; Write-Host 'b'",
+            "throw 'e'; Write-Host 'after'",
+            "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x",
+            "trap { continue }; [int]'a'; Write-Host 'after'",
+            "trap { }; [int]'a'; Write-Host 'after'",
         ),
         changed=(
             'do { 1 } while ($a)',

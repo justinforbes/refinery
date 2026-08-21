@@ -1397,4 +1397,12 @@ FOLDS: dict[str, str] = {
         'openssl enc -d -a -In x',
     'foo.exe -noprofile -file x':
         'foo.exe -NoProfile -File x',
+    "trap { continue }; [int]'a'; Write-Host 'after'":
+        "[int]'a'\nWrite-Host 'after'",
+    "trap { }; [int]'a'; Write-Host 'after'":
+        "[int]'a'\nWrite-Host 'after'",
+    "throw 'e'; Write-Host 'after'":
+        "throw 'e'",
+    "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
+        "$x = $([int]'a'\n'in')\nWrite-Host $x",
 }
