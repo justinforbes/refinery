@@ -4,6 +4,7 @@ import re
 
 
 _ABOVE_THE_BASIC_PLANE = re.compile('[\U00010000-\U0010FFFF]')
+_SURROGATE_PAIR = re.compile('[\ud800-\udbff][\udc00-\udfff]')
 
 
 def code_units(value: int) -> str:
@@ -30,3 +31,23 @@ def to_code_units(text: str) -> str:
     repeat.
     """
     return _ABOVE_THE_BASIC_PLANE.sub(lambda m: code_units(ord(m.group())), text)
+
+
+def from_code_units(text: str) -> str:
+    """
+    The characters *text* spells, undoing `to_code_units`: a pair of surrogates becomes the one code
+    point it encodes. A string held as code units cannot be written to a file as it stands, because
+    a surrogate is not a character any encoding spells, and whatever holds such a string has to spell
+    it out again before anything reads it as text.
+
+    A lone surrogate is left standing, since no pairing rule may invent the partner it lacks, and a
+    string with none in it comes back unchanged.
+    """
+    return _SURROGATE_PAIR.sub(
+        lambda match: chr(
+            0x10000
+            + ((ord(match.group()[0]) - 0xD800) << 10)
+            + (ord(match.group()[1]) - 0xDC00)
+        ),
+        text,
+    )

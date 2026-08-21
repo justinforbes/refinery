@@ -651,6 +651,18 @@ def _is_property_name_position(node: JsIdentifier) -> bool:
 
 
 def _flag_name(ident: JsIdentifier, out: list[StrictViolation]) -> None:
+    """
+    Report *ident* where strict code refuses the name it carries. The name is the one its escapes
+    denote, which is what ECMA-262 states these rules over: a StringValue is asked for, not the
+    text that spelled it.
+
+    V8 asks the text at two of the positions this reaches. `function f(ev\\u0061l) {}` and
+    `argum\\u0065nts = 1` are accepted there under strict where `function f(eval) {}` and
+    `arguments = 1` are refused, though `var ev\\u0061l = 1` is refused like its plain spelling.
+    Reporting all of them is the specification's answer and the deliberate divergence: what reads
+    this decides whether a text may be spliced somewhere, so agreeing with the specification costs
+    a splice nobody writes and disagreeing with it would pass one no other engine runs.
+    """
     if ident.name in _EVAL_ARGS:
         out.append(StrictViolation(ident.offset, 'eval-arguments-target', ident.name))
     elif ident.name in _STRICT_RESERVED:

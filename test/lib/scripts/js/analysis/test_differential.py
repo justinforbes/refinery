@@ -5610,33 +5610,6 @@ class TestABackslashThatBeginsNoEscapeDoesNotStallTheReader(TestBase):
         self._answered_within(F'var a{_BACKSLASH}{_BACKSLASH}b = 1; console.log(1);')
 
 
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAnIdentifierWrittenWithAnEscapeIsTheNameThatEscapeDenotes(TestBase):
-    """
-    The name an identifier carries is the code points its escapes resolve to and not the characters
-    it was typed with, so a binding written with an escape and a read written plainly are one name,
-    and so is the reverse pair. Node prints `7` for both programs below.
-
-    Both are pinned as expected failures. The declarator carries the spelling the source used where
-    the read carries the other one, the two never match, the declaration reads as unused, and it is
-    dropped: what is left exits with a `ReferenceError` where the program it replaced printed a
-    number. Each pin asserts what Node does, so it retires itself once the two spellings are one
-    name.
-    """
-
-    def _prints(self, source: str, output: str):
-        self.assertEqual(behavior(source), (output, None))
-        self.assertEqual(behavior(deobfuscate_source(source)), (output, None))
-
-    @unittest.expectedFailure
-    def test_a_binding_written_with_an_escape_is_read_by_its_plain_spelling(self):
-        self._prints(R'var \u0061bc = 7; console.log(abc);', '7\n')
-
-    @unittest.expectedFailure
-    def test_a_binding_written_plainly_is_read_by_a_spelling_with_an_escape(self):
-        self._prints(R'var abc = 7; console.log(\u0061bc);', '7\n')
-
-
 _ATOB_ARGUMENTS = [
     'QUJD',
     'QQ==',

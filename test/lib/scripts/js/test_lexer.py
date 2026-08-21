@@ -500,16 +500,29 @@ class TestJsLexer(TestBase):
                     (JsTokenKind.EOF, ''),
                 ])
 
-    def test_a_digit_of_another_script_behind_a_name_is_read_as_part_of_that_name(self):
+    def test_a_decimal_digit_of_another_script_is_part_of_a_name_and_no_other_digit_is(self):
         """
-        Node runs the program written with the Arabic-Indic digit, whose general category `Nd` is
-        IdentifierPart, and refuses the one written with the superscript digit, whose category `No`
-        is not. Both are one name here, so the name the lexer reads is the wider of the two.
+        Node runs the two programs written with a digit of general category `Nd` — the Arabic-Indic
+        one and the fullwidth one — and refuses the two written with a digit of category `No`, the
+        superscript and the circled one. IdentifierPart is stated over the category and not over
+        what a reader would call a digit, so a name ends before the digits it does not name.
         """
-        for digit in ['\u0661', '\u00B2']:
+        for digit in ['\u0661', '\uFF11']:
             with self.subTest(digit=F'U+{ord(digit):04X}'):
                 self.assertEqual(self._bounded_tokens(F'x{digit} = 1; y;'), [
                     (JsTokenKind.IDENTIFIER, F'x{digit}'),
+                    (JsTokenKind.EQUALS, '='),
+                    (JsTokenKind.INTEGER, '1'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.IDENTIFIER, 'y'),
+                    (JsTokenKind.SEMICOLON, ';'),
+                    (JsTokenKind.EOF, ''),
+                ])
+        for digit in ['\u00B2', '\u2460']:
+            with self.subTest(digit=F'U+{ord(digit):04X}'):
+                self.assertEqual(self._bounded_tokens(F'x{digit} = 1; y;'), [
+                    (JsTokenKind.IDENTIFIER, 'x'),
+                    (JsTokenKind.ERROR, digit),
                     (JsTokenKind.EQUALS, '='),
                     (JsTokenKind.INTEGER, '1'),
                     (JsTokenKind.SEMICOLON, ';'),

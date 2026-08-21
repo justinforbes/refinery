@@ -7,6 +7,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     escape_js_string,
     escape_js_template_text,
 )
+from refinery.lib.scripts.js.lexer import identifier_string_value
 from refinery.lib.scripts.js.model import (
     JsArrowFunctionExpression,
     JsAssignmentPattern,
@@ -92,6 +93,8 @@ from refinery.lib.scripts.js.precedence import (
     statement_needs_parens,
 )
 from refinery.lib.scripts.js.strict import promoted_use_strict, spelling_states
+from refinery.lib.scripts.js.token import spells_only_a_name
+from refinery.lib.scripts.js.utf16 import from_code_units
 
 _WORD_UNARY_OPS = frozenset({'typeof', 'void', 'delete'})
 
@@ -314,11 +317,28 @@ class JsSynthesizer(Synthesizer):
         self._write('this')
 
     def visit_JsIdentifier(self, node: JsIdentifier):
-        self._write(node.name)
+        self._write(self._encode_identifier(node.name, node.raw))
 
     def visit_JsPrivateIdentifier(self, node: JsPrivateIdentifier):
         self._write('#')
-        self._write(node.name)
+        self._write(self._encode_identifier(node.name, node.raw))
+
+    @staticmethod
+    def _encode_identifier(name: str, raw: str) -> str:
+        """
+        Write a name as itself, unless the bare text would be read as something other than a name.
+        A word the grammar matches as a terminal somewhere is one of those, and the source spelling
+        is then the only text that says which of the two readings the file meant: `var l\\u0065t =
+        [0]; l\\u0065t[0] = 5;` is a program, and the same file with the name written out is not.
+
+        The spelling is trusted only for as long as it spells the name being printed, so a pass
+        that renames a node has nothing to maintain here — what it left behind is a spelling of
+        some other name, and the name itself is written instead. This is the rule
+        `_encode_string` holds for a literal, asked of a name.
+        """
+        if not raw or raw == name or spells_only_a_name(name):
+            return from_code_units(name)
+        return raw if identifier_string_value(raw) == name else from_code_units(name)
 
     def visit_JsErrorNode(self, node: JsErrorNode):
         self._write(node.text)

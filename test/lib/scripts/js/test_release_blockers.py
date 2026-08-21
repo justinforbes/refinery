@@ -21,49 +21,24 @@ import unittest
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation.test_dispatcher import a_dispatcher
+from test.lib.scripts.js.deobfuscation.test_escaped_identifiers import (
+    AN_ESCAPED_ACCESSOR_TERMINAL,
+    AN_ESCAPED_ASYNC_TERMINAL,
+    AN_ESCAPED_KEYWORD_OPERATOR,
+    AN_ESCAPED_STATIC_TERMINAL,
+)
 from test.lib.scripts.js.ledger import (
+    an_accessor_at,
     before_and_after,
     each_program_still_prints,
     evaluated_in_a_body,
     folded,
     printed,
-    returned_from_a_body,
     well_formed,
 )
 from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
 
 from refinery.lib.scripts import UnspellableNode
-
-
-class TestAnIdentifierNamedKeyReadsAsUtf16CodeUnits(TestBase):
-    """
-    An object property key written as a bare identifier is a JavaScript string when it is read
-    back, and it is the same sequence of UTF-16 code units as the identical key written as a string
-    literal. One character above the basic multilingual plane occupies two code units, so a key
-    named by a bare identifier spelled with U+1D465 and the same key named by a string literal are
-    read alike, and each is read as Node reads it. The identifier-named key is read as one code
-    point instead, so the two spellings of the one key disagree.
-    """
-
-    @unittest.expectedFailure
-    def test_a_bare_identifier_key_reads_the_same_code_units_as_its_literal(self):
-        """
-        Node answers `55349` and `56421`, the high and low surrogate of U+1D465, for
-        `Object.keys({K: 1})[0].charCodeAt(0)` and `.charCodeAt(1)` when `K` is that character
-        written as a bare identifier, and answers the same two when `K` is written as the string
-        literal `'K'`: the property key read back is a string of two code units however the key was
-        spelled. The literal-named key is folded to those two, so the identifier-named key has to
-        fold to the same two.
-        """
-        def program(key: str) -> str:
-            return F'console.log({key}.charCodeAt(0), {key}.charCodeAt(1));'
-        identifier_key = F'Object.keys({{{_ASTRAL_LETTER}: 1}})[0]'
-        literal_key = F"Object.keys({{'{_ASTRAL_LETTER}': 1}})[0]"
-        reads_as_the_two_surrogates = 'console.log(55349, 56421);'
-        self.assertEqual(
-            (folded(program(identifier_key)), folded(program(literal_key))),
-            (reads_as_the_two_surrogates, reads_as_the_two_surrogates),
-        )
 
 
 class TestWellFormednessRefusesANonProgram(TestBase):
@@ -118,67 +93,6 @@ class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
         self.assertEqual(
             {name: _refuses_to_print(fold.cut) for name, fold in carved.items()},
             {name: True for name in carved},
-        )
-
-
-_ASTRAL_LETTER = chr(0x1D465)
-
-
-def _spelled_with_an_escaped_identifier(source: str) -> str:
-    """
-    *source* with the placeholder `ESCAPED_A` replaced by the unicode escape denoting the identifier
-    `a`, and `ESCAPED_Q` by the one denoting `q`.
-
-    Both escapes are assembled from `chr(92)` rather than written out. An escape written into this
-    file is one flattening away from being the character it denotes, and an entry that no longer
-    contains the spelling it asks about asks nothing at all.
-    """
-    with_a = source.replace('ESCAPED_A', F'{chr(92)}u0061')
-    return with_a.replace('ESCAPED_Q', F'{chr(92)}u0071')
-
-
-#: A program naming a property by an identifier written with a unicode escape, mapped to what Node
-#: prints for it. The escape is the identifier and not four characters that resemble it, so the
-#: literal writes the key `a`, a plain `.a` reads what it wrote, a plain read finds a key an escaped
-#: spelling wrote, and a membership test over `q` finds the key an escaped `q` wrote.
-A_PROPERTY_KEY_WRITTEN_WITH_AN_ESCAPE = {
-    _spelled_with_an_escaped_identifier(
-        returned_from_a_body("return Object.keys({ ESCAPED_A: 1, b: 2 }).join('|');")
-    ): 'a|b\n',
-    _spelled_with_an_escaped_identifier(
-        returned_from_a_body('return { ESCAPED_A: 7 }.a;')
-    ): '7\n',
-    _spelled_with_an_escaped_identifier(
-        returned_from_a_body('var o = { a: 1 }; return o.ESCAPED_A;')
-    ): '1\n',
-    _spelled_with_an_escaped_identifier(
-        returned_from_a_body("return 'q' in { ESCAPED_Q: 1 };")
-    ): 'true\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAPropertyKeyWrittenWithAnEscapeIsTheNameThatEscapeDenotes(TestBase):
-    """
-    The name a property key carries is the code points its escapes resolve to and not the characters
-    it was typed with, so a key written with an escape and a read written plainly are one name, and
-    so is the reverse pair. Node prints `a|b`, `7`, `1`, and `true` for the four programs of
-    `A_PROPERTY_KEY_WRITTEN_WITH_AN_ESCAPE`.
-
-    `test.lib.scripts.js.analysis.test_differential` pins the same defect where it costs code: a
-    declaration written with an escape never matches the plain read of it, so the declaration reads
-    as unused and is dropped. In a property key it costs an answer instead, which is worse. Each
-    program here folds to a constant, and every one of those constants is wrong: the key comes back
-    spelled with the backslash the file used, the two reads come back `undefined`, and the
-    membership test comes back `false` for a key the object owns.
-    """
-
-    @unittest.expectedFailure
-    def test_a_key_written_with_an_escape_is_the_name_that_escape_denotes(self):
-        rows = A_PROPERTY_KEY_WRITTEN_WITH_AN_ESCAPE
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
         )
 
 
@@ -526,6 +440,234 @@ class TestAKeyTheProgramDeletedIsInNothing(TestBase):
         prints `true`, the answer the same question has with nothing deleted.
         """
         rows = A_MEMBERSHIP_TEST_FOR_A_KEY_THE_PROGRAM_DELETED
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: Programs writing a name onto `Object.prototype` and then reading that name off an object
+#: literal that does not hold it, mapped to what Node prints for each. The four differ in how
+#: the write reaches the prototype and in what it puts there: directly, through a name the file
+#: bound it to, through `Object.defineProperty`, and as an accessor rather than a value, so that
+#: the last of them answers the read by running the program's own code. The last also holds a
+#: second key the literal does write, which the flattening keeps and is right to keep.
+A_NAMESPACE_KEY_THE_CHAIN_ANSWERS = {
+    'Object.prototype.z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+    'var P = Object.prototype; P.z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+    "Object.defineProperty(Object.prototype, 'z', {value: 9});"
+    ' var o = {}; console.log(o.z);':
+        '9\n',
+    an_accessor_at('Object.prototype', 'z')
+    + ' var o = {}; o.k = 1; console.log(o.k, o.z);':
+        '1 G\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestANamespaceKeyTheChainAnswersIsNotAVariable(TestBase):
+    """
+    An object literal a file only ever reads properties off is flattened into plain variables, one
+    per key, and the declaration it was built by is dropped. That is the same program only while a
+    key the literal does not hold reads back `undefined`, and a write to `Object.prototype` is what
+    makes one read back something else: the flattened variable answers nothing where the property
+    answered what the chain holds.
+
+    `refinery.lib.scripts.js.deobfuscation.helpers.property_provably_absent` is the question this
+    is deciding and does not ask. The pass holds back a key the language itself puts on every
+    object, which is the yes-side of it, and takes every other key as absent whatever the file did
+    to the chain.
+
+    `test_a_key_the_namespace_holds_is_flattened` is the other side of it and passes: where the
+    literal owns the key, the chain never answers and the flattening is right.
+    """
+
+    @unittest.expectedFailure
+    def test_a_key_the_chain_answers_is_not_flattened(self):
+        """
+        Node prints `9`, `9`, `9` and `1 G` for the four programs of
+        `A_NAMESPACE_KEY_THE_CHAIN_ANSWERS`, each of which reads a key off an object literal that
+        does not hold it after putting that key on `Object.prototype`. Each deobfuscation answers
+        `undefined` in that key's place, and the accessor row runs no getter at all.
+        """
+        rows = A_NAMESPACE_KEY_THE_CHAIN_ANSWERS
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_key_the_namespace_holds_is_flattened(self):
+        """
+        Node prints `1` for a program that writes the same key onto the literal before reading it,
+        with the same write to `Object.prototype` standing in front of it. The own property is what
+        answers there, so nothing about the chain reaches the read and the flattening keeps it.
+        """
+        source = 'Object.prototype.z = 9; var o = {}; o.z = 1; console.log(o.z);'
+        self.assertEqual(before_and_after(source), (('1\n', None), ('1\n', None)))
+
+
+def _spelled_with_an_escaped_identifier(source: str) -> str:
+    """
+    *source* with each placeholder replaced by the unicode escape spelling the characters it names.
+
+    The escapes are assembled from `chr(92)` rather than written out, because an escape written into
+    this file is one flattening away from being the characters it denotes, and an entry that no
+    longer holds the spelling it asks about asks nothing at all. A source that named a placeholder
+    and came back without a backslash is that flattening having happened, and it is refused here
+    rather than left to be discovered as an entry that quietly stopped asking anything.
+    """
+    result = source.replace('ESCAPED_IF', F'{chr(92)}u0069f')
+    result = result.replace('ESCAPED_AIT', F'{chr(92)}u0061it')
+    result = result.replace('ESCAPED_ET', F'{chr(92)}u0065t')
+    if result != source and chr(92) not in result:
+        raise AssertionError(F'the escape in {source!r} was flattened away')
+    return result
+
+
+#: Files the language refuses although nothing in them was fabricated by the parser, each mapped to
+#: whether it is a module. Every one of them parses cleanly: what refuses them is an early error,
+#: which is a rule about a tree rather than about the text a parser could not read.
+A_FILE_REFUSED_WITH_NOTHING_FABRICATED = {
+    _spelled_with_an_escaped_identifier(source): module
+    for source, module in (
+        ('function ESCAPED_IF(){ return 1; } console.log(2);', False),
+        ('let let = 1; console.log(2);', False),
+        ('var o = { __proto__: null, __proto__: {} }; console.log(2);', False),
+        ('var await = 1; console.log(2);', True),
+        ('var awESCAPED_AIT = 1; console.log(2);', True),
+    )
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAFileRefusedWithNothingFabricatedIsNotAnsweredWithAProgram(TestBase):
+    """
+    A file can parse with every token the source wrote and still be one no engine runs, because the
+    rule refusing it is stated over the tree rather than over the text: a name whose escapes spell a
+    reserved word, a `let` binding named `let`, two `__proto__` keys in one literal, and a module
+    binding `await` are all read without anything being repaired or invented.
+
+    `refinery.lib.scripts.is_well_formed` answers `True` for each, which is the honest answer to the
+    question it asks — nothing was fabricated — and the wrong answer to the one every caller wants,
+    which is whether the tree spells a program. What follows from that is a file the analyst is
+    handed as though it ran: each of these comes back reduced, with the one thing wrong with it
+    removed along with the code it stood in.
+
+    `test.lib.scripts.js.test_parser_recovery` states the other half, where the parser did supply
+    something and says so. Closing this one needs a refusal mechanism that does not exist yet, and
+    the escaped-name row shows the shape it must have: the parser answers with the span it read
+    wherever the model has a node kind for one, and a declared function's name is a slot that holds
+    an identifier and nothing else.
+    """
+
+    @unittest.expectedFailure
+    def test_a_file_the_language_refuses_is_refused(self):
+        """
+        Node refuses every program of `A_FILE_REFUSED_WITH_NOTHING_FABRICATED` with a `SyntaxError`
+        and prints nothing for it. Each deobfuscation prints `2`.
+        """
+        rows = A_FILE_REFUSED_WITH_NOTHING_FABRICATED
+        refused = ('', 'SyntaxError')
+        self.assertEqual(
+            {source: before_and_after(source, module=module) for source, module in rows.items()},
+            {source: (refused, refused) for source in rows},
+        )
+
+
+#: Further shapes of the repair `A_FILE_THE_PARSER_REPAIRED` is about, one written with no escape at
+#: all so that the family is not read as being about escapes, and one spelling `let` where a
+#: declaration would begin.
+A_REPAIR_WITH_NOTHING_ESCAPED_ABOUT_IT = (
+    "console.log('alpha' 'beta');",
+    _spelled_with_an_escaped_identifier('lESCAPED_ET x = 1; console.log(x);'),
+)
+
+
+#: Every file whose parse needed a token the source did not write. Four of the tables come from
+#: `test.lib.scripts.js.deobfuscation.test_escaped_identifiers`, where the law they belong to is
+#: stated: a terminal word of the grammar is matched by the characters typed, so an escaped
+#: spelling of `get`, `set`, `static`, `async`, `instanceof` or `in` is a name standing where the
+#: grammar wanted a word, and the parser writes the separator that would have to be there.
+A_FILE_THE_PARSER_REPAIRED = (
+    *AN_ESCAPED_ACCESSOR_TERMINAL,
+    *AN_ESCAPED_STATIC_TERMINAL,
+    *AN_ESCAPED_ASYNC_TERMINAL,
+    *AN_ESCAPED_KEYWORD_OPERATOR,
+    *A_REPAIR_WITH_NOTHING_ESCAPED_ABOUT_IT,
+)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAFileTheParserRepairedIsNotAnsweredWithAProgram(TestBase):
+    """
+    Standing where the grammar requires one token and finding another, the parser writes the token
+    it wanted and reads on. It records that it did — `refinery.lib.scripts.is_well_formed` answers
+    `False` for every file here — and nothing between that record and the printer reads it, so what
+    comes back is a program built out of text no engine agreed to read.
+
+    Two of these are the expensive shape. `[] instanceof Array` and `'a' in {a: 1}` written with an
+    escaped operator lose the operator and keep both operands, so the file comes back printing them;
+    and `class C { get x(){} }` written the same way comes back declaring a field beside a method,
+    which runs and prints a function where Node refuses the file outright.
+
+    `test_a_file_the_language_refuses_is_refused` states the same cost for the files where nothing
+    was repaired at all. That one needs a refusal mechanism to be built; this one needs only a
+    reader for the record the parser already keeps.
+    """
+
+    @unittest.expectedFailure
+    def test_a_file_the_parser_repaired_is_refused(self):
+        """
+        Node refuses every program of `A_FILE_THE_PARSER_REPAIRED` with a `SyntaxError` and prints
+        nothing for it. Each deobfuscation is a file that parses, and five of them print.
+        """
+        rows = A_FILE_THE_PARSER_REPAIRED
+        refused = ('', 'SyntaxError')
+        self.assertEqual(
+            {source: (well_formed(source), before_and_after(source)) for source in rows},
+            {source: (False, (refused, refused)) for source in rows},
+        )
+
+
+#: A program reaching `eval` through a name it bound to it and asking that name for a local of the
+#: caller, mapped to what Node prints for it. Only a call written as the name `eval` is a direct
+#: eval; every other way of reaching the same function runs the text in the global scope, where the
+#: local is not, so what the program prints is the name of the error that raises.
+AN_EVAL_REACHED_THROUGH_A_NAME_BOUND_TO_IT = {
+    'function f(){ var loc = 7; var g = eval;'
+    " try { return g('loc'); } catch (e) { return e.constructor.name; } }"
+    ' console.log(f());': 'ReferenceError\n',
+    'function f(){ var loc = 7; var g = eval;'
+    " return typeof g('typeof loc'); }"
+    ' console.log(f());': 'string\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestANameBoundToEvalIsNotADirectEval(TestBase):
+    """
+    `eval` is the one function the language treats differently depending on how the call was
+    written. A call whose callee is the name `eval` runs its text in the calling scope; a call
+    reaching the same function any other way runs it in the global scope, where the caller's locals
+    are not. Substituting a name bound to `eval` for its value therefore turns one into the other,
+    and the payload starts seeing bindings it could not have seen.
+
+    `test.lib.scripts.js.deobfuscation.test_simplify` refuses this for two of the three ways of
+    reaching it, `window.eval(code)` and `(0, eval)(code)`. A plain `var g = eval` is the third and
+    is not refused, which is the same rule missing its own case rather than a new rule.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_through_a_name_bound_to_eval_sees_no_local_of_its_caller(self):
+        """
+        Node prints `ReferenceError` for the first program of
+        `AN_EVAL_REACHED_THROUGH_A_NAME_BOUND_TO_IT`, whose payload reads a local of the calling
+        function, and `string` for the second, where a `typeof` guard makes the same read safe. The
+        deobfuscation rewrites the call to a direct one and prints `7` for the first.
+        """
+        rows = AN_EVAL_REACHED_THROUGH_A_NAME_BOUND_TO_IT
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),

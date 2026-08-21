@@ -44,8 +44,20 @@ class JsErrorNode(Expression, Statement, unparsed=True):
 
 
 @dataclass(repr=False, eq=False)
-class JsIdentifier(Expression):
+class JsIdentifier(Expression, spelling='raw'):
+    """
+    A name. `name` is the name the source denotes and `raw` is the text it was written with, which
+    part ways wherever a unicode escape stands between them: `\\u0061bc` and `abc` are one binding
+    written two ways, and every question about names is asked of `name`.
+
+    `raw` is empty wherever the two would be the same text, so it holds something only for a name
+    the source wrote some other way. What it holds is trusted only for as long as it still spells
+    `name`, which is what leaves a pass renaming a node nothing to maintain: the synthesizer asks
+    whether the spelling it was handed spells the name it is printing, and writes the name itself
+    where it does not.
+    """
     name: str = ''
+    raw: str = ''
 
     def has_spelling(self) -> bool:
         """
@@ -58,8 +70,14 @@ class JsIdentifier(Expression):
 
 
 @dataclass(repr=False, eq=False)
-class JsPrivateIdentifier(Expression):
+class JsPrivateIdentifier(Expression, spelling='raw'):
+    """
+    A private name, written with the `#` that opens it left out of `name` and out of `raw` alike.
+    An escape spells one of these as it spells any other name, so `this.#\\u0061` reads the member
+    `#a` declares.
+    """
     name: str = ''
+    raw: str = ''
 
 
 @dataclass(repr=False, eq=False)

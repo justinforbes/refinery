@@ -235,6 +235,45 @@ FUTURE_RESERVED: frozenset[str] = frozenset({
     'static',
 })
 
+RESERVED_WORD_NAMES: frozenset[str] = frozenset(
+    set(KEYWORDS) - {'let', 'of', 'from', 'as', 'async', 'await', 'yield'} | {'enum'}
+)
+"""
+The words no name may be, whatever the mode and whatever encloses it. ECMA-262 refuses a name whose
+StringValue is that of a ReservedWord (12.7.2) with `await` and `yield` excepted, because those two
+are names wherever the enclosing function does not make them operators, which is a question about
+that function rather than about the word.
+
+`KEYWORDS` is every word the scan gives a kind of its own, which is more than these: five of them
+are read as terminals in some positions and as names in others, and `let`, `of`, `from`, `as` and
+`async` name things in programs that run. A word added to `KEYWORDS` therefore has to be put on one
+side of this or the other, and the side is whether any program may use it as a name.
+"""
+
+TERMINAL_IDENTIFIERS: frozenset[str] = frozenset({
+    'get',
+    'set',
+    'static',
+    'target',
+    'meta',
+    'assert',
+})
+"""
+The words a production matches as a terminal although the scan hands them over as identifiers, so
+that a name written as one of them may be read as the terminal instead. `class C { static m(){} }`
+declares one member and `class C { static; m(){} }` declares two.
+"""
+
+
+def spells_only_a_name(name: str) -> bool:
+    """
+    Whether *name* written as itself can be read as nothing but a name. Where it cannot, the source
+    spelling is the only text that says which of the two readings was meant, and a synthesizer that
+    re-spells such a name from what it denotes writes the other one.
+    """
+    return name not in KEYWORDS and name not in TERMINAL_IDENTIFIERS
+
+
 _ASSIGNMENT_SET = frozenset({
     JsTokenKind.EQUALS,
     JsTokenKind.PLUS_ASSIGN,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from dataclasses import dataclass, field
 from typing import Generator
@@ -64,6 +65,46 @@ def _begins_unicode_escape(src: str, pos: int) -> bool:
     return src[pos:pos + 2] == '\\u'
 
 
+_ASCII_NAME_START = frozenset('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$')
+_ASCII_NAME_PART = _ASCII_NAME_START | frozenset('0123456789')
+"""
+The characters almost every name is written with, asked first because asking the Unicode database
+per character is what the scan spends its time on otherwise.
+"""
+
+_ID_START_CATEGORIES = frozenset({'Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'Nl'})
+_ID_CONTINUE_CATEGORIES = _ID_START_CATEGORIES | frozenset({'Mn', 'Mc', 'Nd', 'Pc'})
+_OTHER_ID_START = frozenset('\u1885\u1886\u2118\u212e\u309b\u309c')
+_OTHER_ID_CONTINUE = frozenset(
+    '\u00b7\u0387\u1369\u136a\u136b\u136c\u136d\u136e\u136f\u1370\u1371\u19da')
+"""
+ID_Start and ID_Continue as UAX #31 defines them and ECMA-262 11.6 adopts them, with the two
+lists of characters those properties name outright because their category alone would leave them
+out. A name is written with these and not with what a locale calls a letter: an accent written
+as its own combining character, the middle dot of a Catalan `l·l`, and an undertie are all
+IdentifierPart, and reading a name as though they were not ends it early and reads what follows
+as an operator.
+"""
+
+
+def _opens_a_name(c: str) -> bool:
+    if c in _ASCII_NAME_START:
+        return True
+    return unicodedata.category(c) in _ID_START_CATEGORIES or c in _OTHER_ID_START
+
+
+def _continues_a_name(c: str) -> bool:
+    if c in _ASCII_NAME_PART:
+        return True
+    if unicodedata.category(c) in _ID_CONTINUE_CATEGORIES:
+        return True
+    return (
+        c in _IDENTIFIER_JOINERS
+        or c in _OTHER_ID_START
+        or c in _OTHER_ID_CONTINUE
+    )
+
+
 def _at_identifier_start(src: str, pos: int) -> bool:
     """
     Whether an IdentifierName begins at *pos*. A backslash opens one only where it opens a
@@ -74,7 +115,7 @@ def _at_identifier_start(src: str, pos: int) -> bool:
     c = src[pos:pos + 1]
     if not c:
         return False
-    return c.isalpha() or c in _IDENTIFIER_PUNCTUATION or _begins_unicode_escape(src, pos)
+    return _opens_a_name(c) or _begins_unicode_escape(src, pos)
 
 
 def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int, bool]:
@@ -497,7 +538,7 @@ class JsLexer:
         length = len(src)
         while self.pos < length:
             c = src[self.pos]
-            if c.isalnum() or c in _IDENTIFIER_PUNCTUATION or c in _IDENTIFIER_JOINERS:
+            if _continues_a_name(c):
                 self.pos += 1
             elif _begins_unicode_escape(src, self.pos):
                 self._read_string_escape()
@@ -642,6 +683,75 @@ def _decode_body(text: str) -> tuple[str, bool]:
         if decoded:
             parts.append(decoded)
     return to_code_units(''.join(parts)), valid
+
+
+def _read_unicode_escape(text: str, pos: int) -> tuple[int, int] | None:
+    """
+    The code point the escape at *pos* names and where it ends, or `None` where the text at *pos*
+    is no unicode escape at all. A name admits this escape and no other, so this reads for it alone
+    rather than through `_decode_one_escape`, which answers for every escape a string has and
+    reports a malformed one as the character behind the backslash. That reading is the right one
+    inside a literal and the wrong one here: `\\u061` is a string holding `u061` and is no name.
+
+    What comes back is the code point rather than the units that spell it, because the rule the
+    caller applies is about the code point: `\\ud801\\udc00` names two of them, each half of a pair
+    and neither a character any name may hold, where `\\u{10400}` names the one they would have
+    spelled together.
+    """
+    if text[pos:pos + 1] != 'u':
+        return None
+    pos += 1
+    if text[pos:pos + 1] == '{':
+        end = pos + 1
+        while end < len(text) and text[end] in _HEX:
+            end += 1
+        if end == pos + 1 or text[end:end + 1] != '}':
+            return None
+        value = int(text[pos + 1:end], 16)
+        return None if value > _MAX_CODE_POINT else (value, end + 1)
+    digits = text[pos:pos + 4]
+    if len(digits) != 4 or not _HEX.issuperset(digits):
+        return None
+    return int(digits, 16), pos + 4
+
+
+def identifier_string_value(text: str) -> str | None:
+    """
+    The name *text* spells, or `None` where it spells no name at all. An escape and the character it
+    names are one name written two ways, so this is what says that `\\u0061bc` and `abc` are the
+    same binding, and it is the only reading of an identifier that any question about names may be
+    asked of.
+
+    The answer is code units, like every other string this package holds, so that a name written
+    with a `\\u{...}` escape and the same name written with the character itself compare equal.
+    Validity is decided one escape at a time and before that joining happens, which is the whole of
+    the difference between the two spellings of an astral character: the pair `\\ud801\\udc00`
+    names two lone surrogates, neither of which any name may hold, while `\\u{10400}` names the
+    character they encode.
+
+    Text holding no escape is answered as itself. What the scan read as a name is a name, and
+    this is asked only of what it read: a text no scan produced, `0a`, would come back as
+    itself here and as nothing at all written `\\u0030a`.
+    """
+    if '\\' not in text:
+        return to_code_units(text) or None
+    parts: list[str] = []
+    i = 0
+    length = len(text)
+    while i < length:
+        c = text[i]
+        if c == '\\':
+            escape = _read_unicode_escape(text, i + 1)
+            if escape is None:
+                return None
+            value, i = escape
+            c = chr(value)
+        else:
+            i += 1
+        if not (_opens_a_name(c) if not parts else _continues_a_name(c)):
+            return None
+        parts.append(code_units(ord(c)))
+    return ''.join(parts) or None
 
 
 def decode_js_string_body(text: str) -> str:

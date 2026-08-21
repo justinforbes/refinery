@@ -7,6 +7,7 @@ from refinery.lib.scripts.js.lexer import (
     JsLexerState,
     decode_js_string_body,
     decode_js_template_body,
+    identifier_string_value,
 )
 from refinery.lib.scripts.js.model import (
     Expression,
@@ -94,7 +95,7 @@ from refinery.lib.scripts.js.model import (
     Statement,
 )
 from refinery.lib.scripts.js.strict import mark_directives, mark_module
-from refinery.lib.scripts.js.token import JsToken, JsTokenKind
+from refinery.lib.scripts.js.token import RESERVED_WORD_NAMES, JsToken, JsTokenKind
 
 _PREC_EXPONENTIATION = 15
 
@@ -550,19 +551,60 @@ class JsParser:
             tok = self._advance()
         else:
             tok = self._expect(JsTokenKind.IDENTIFIER)
-        return self._name_or_error(tok.value, offset)
+        return self._name_or_error(tok.value, offset, may_be_reserved=False)
 
-    def _name_or_error(self, name: str, offset: int) -> Expression:
+    def _name_or_error(self, text: str, offset: int, *, may_be_reserved: bool) -> Expression:
         """
         The name a token spells, where it spells one. A file that ends in the middle of a
         declaration leaves the position a name was expected in holding nothing, and a name spelled
         by nothing has no text at all: printing it closes the source up over the gap, so `var` at
         the end of a file would come back as `var ;`. What is handed back instead is the span
         itself, which prints as what was written and states that the parser did not read it.
+
+        Two further texts spell no name. One holds an escape naming no character a name may hold,
+        which is a fact about the text alone and is refused wherever it stands. The other spells a
+        reserved word, which the language refuses only where the name could also be a variable —
+        `o.\\u0069f` reads a member and `var \\u0069f` declares nothing — and *may_be_reserved* is
+        which of the two positions this is. Both come back as the span, so the file prints as it
+        was written and no pass reads a name out of text no engine read one from.
         """
-        if name:
-            return JsIdentifier(name=name, offset=offset)
-        return JsErrorNode(text=name, message='expected a name', offset=offset)
+        if not text:
+            return JsErrorNode(text=text, message='expected a name', offset=offset)
+        name = identifier_string_value(text)
+        if name is None:
+            return JsErrorNode(text=text, message='not a name', offset=offset)
+        if not may_be_reserved and name in RESERVED_WORD_NAMES:
+            return JsErrorNode(text=text, message='reserved word', offset=offset)
+        return JsIdentifier(name=name, raw=text if name != text else '', offset=offset)
+
+    def _identifier(self, tok: JsToken) -> JsIdentifier:
+        """
+        The name a token spells, at a position whose slot holds a name and nothing else. A label
+        and the name a function or class declaration gives itself are these, and a text spelling
+        no name is kept there as it was written: what the model has no shape for, the parser has
+        no way to state.
+        """
+        name = identifier_string_value(tok.value) or tok.value
+        return JsIdentifier(
+            name=name,
+            raw=tok.value if name != tok.value else '',
+            offset=tok.offset,
+        )
+
+    def _private_identifier(self, tok: JsToken, offset: int) -> Expression:
+        """
+        The private name a token spells. The `#` opens the name and is no part of it, so what
+        follows it is an IdentifierName like any other and `this.#\\u0061` reads what `#a` declares.
+        """
+        text = tok.value[1:]
+        name = identifier_string_value(text)
+        if name is None:
+            return JsErrorNode(text=tok.value, message='not a name', offset=offset)
+        return JsPrivateIdentifier(
+            name=name,
+            raw=text if name != text else '',
+            offset=offset,
+        )
 
     def _parse_array_pattern(self) -> JsArrayPattern:
         offset = self._current.offset
@@ -838,7 +880,7 @@ class JsParser:
         label = None
         if not self._preceded_by_newline and self._at_binding_identifier():
             tok = self._advance()
-            label = JsIdentifier(name=tok.value, offset=tok.offset)
+            label = self._identifier(tok)
         self._eat_semicolon()
         return JsBreakStatement(label=label, offset=offset)
 
@@ -848,7 +890,7 @@ class JsParser:
         label = None
         if not self._preceded_by_newline and self._at_binding_identifier():
             tok = self._advance()
-            label = JsIdentifier(name=tok.value, offset=tok.offset)
+            label = self._identifier(tok)
         self._eat_semicolon()
         return JsContinueStatement(label=label, offset=offset)
 
@@ -864,7 +906,7 @@ class JsParser:
         id_node = None
         if self._at_function_name():
             tok = self._advance()
-            id_node = JsIdentifier(name=tok.value, offset=tok.offset)
+            id_node = self._identifier(tok)
         with self._function_body_context(is_async, generator):
             params = self._parse_formal_parameters()
             body = self._parse_block_statement()
@@ -921,12 +963,12 @@ class JsParser:
                 offset=offset,
             )
         tok = self._advance()
-        expr: Expression = JsIdentifier(name=tok.value, offset=tok.offset)
+        expr: Expression = self._name_or_error(tok.value, tok.offset, may_be_reserved=False)
         while self._eat(JsTokenKind.DOT):
             prop = self._advance()
             expr = JsMemberExpression(
                 object=expr,
-                property=JsIdentifier(name=prop.value, offset=prop.offset),
+                property=self._name_or_error(prop.value, prop.offset, may_be_reserved=True),
                 computed=False,
                 offset=expr.offset,
             )
@@ -945,7 +987,7 @@ class JsParser:
         id_node = None
         if self._at_binding_identifier():
             tok = self._advance()
-            id_node = JsIdentifier(name=tok.value, offset=tok.offset)
+            id_node = self._identifier(tok)
         super_class = None
         if self._eat(JsTokenKind.EXTENDS):
             super_class = self._parse_assignment_expression()
@@ -1191,7 +1233,7 @@ class JsParser:
         if self._at_binding_identifier():
             tok = self._advance()
             specifiers.append(JsImportDefaultSpecifier(
-                local=JsIdentifier(name=tok.value, offset=tok.offset),
+                local=self._name_or_error(tok.value, tok.offset, may_be_reserved=False),
                 offset=tok.offset,
             ))
             if self._eat(JsTokenKind.COMMA):
@@ -1245,7 +1287,7 @@ class JsParser:
         ):
             self._recovered = True
         tok = self._advance()
-        return self._name_or_error(tok.value, tok.offset)
+        return self._name_or_error(tok.value, tok.offset, may_be_reserved=True)
 
     def _parse_namespace_import(self) -> JsImportNamespaceSpecifier:
         offset = self._current.offset
@@ -1555,9 +1597,9 @@ class JsParser:
         """
         tok = self._advance()
         if tok.kind is JsTokenKind.PRIVATE_IDENTIFIER:
-            return JsPrivateIdentifier(name=tok.value[1:], offset=tok.offset)
+            return self._private_identifier(tok, tok.offset)
         if tok.kind is JsTokenKind.IDENTIFIER or tok.kind.is_keyword:
-            return JsIdentifier(name=tok.value, offset=tok.offset)
+            return self._name_or_error(tok.value, tok.offset, may_be_reserved=True)
         return JsErrorNode(
             text=tok.value, message='expected a property name', offset=tok.offset)
 
@@ -1620,7 +1662,7 @@ class JsParser:
                 )
             if self._at(JsTokenKind.ASYNC) and not self._at_async_function():
                 tok = self._advance()
-                callee = JsIdentifier(name=tok.value, offset=tok.offset)
+                callee = self._name_or_error(tok.value, tok.offset, may_be_reserved=False)
             else:
                 callee = self._parse_new_expression()
             while True:
@@ -1655,15 +1697,15 @@ class JsParser:
             self._advance()
             if self._at(JsTokenKind.ARROW) and not self._preceded_by_newline:
                 self._advance()
-                param = JsIdentifier(name=tok.value, offset=offset)
+                param = self._name_or_error(tok.value, offset, may_be_reserved=False)
                 body = self._parse_arrow_body()
                 return JsArrowFunctionExpression(
                     params=[param], body=body, offset=offset)
-            return JsIdentifier(name=tok.value, offset=offset)
+            return self._name_or_error(tok.value, offset, may_be_reserved=False)
 
         if self._at(JsTokenKind.PRIVATE_IDENTIFIER):
             self._advance()
-            return JsPrivateIdentifier(name=tok.value[1:], offset=offset)
+            return self._private_identifier(tok, offset)
 
         if self._at(JsTokenKind.IMPORT):
             return self._parse_import_expression(offset)
@@ -1958,9 +2000,9 @@ class JsParser:
             return self._parse_string_literal()
         if self._at(JsTokenKind.PRIVATE_IDENTIFIER):
             self._advance()
-            return JsPrivateIdentifier(name=tok.value[1:], offset=tok.offset)
+            return self._private_identifier(tok, tok.offset)
         self._advance()
-        return self._name_or_error(tok.value, tok.offset)
+        return self._name_or_error(tok.value, tok.offset, may_be_reserved=True)
 
     def _parse_paren_or_arrow(self, is_async: bool = False) -> Expression:
         """
@@ -2085,7 +2127,7 @@ class JsParser:
             ):
                 tok = self._advance()
                 self._advance()
-                param = JsIdentifier(name=tok.value, offset=tok.offset)
+                param = self._name_or_error(tok.value, tok.offset, may_be_reserved=False)
                 body = self._parse_arrow_body(True)
                 return JsArrowFunctionExpression(
                     params=[param], body=body, is_async=True, offset=offset)
