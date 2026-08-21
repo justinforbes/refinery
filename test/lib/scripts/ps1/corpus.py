@@ -412,6 +412,19 @@ CLAIMS: tuple[str, ...] = (
     "Get-Item nope -ErrorAction 1; Write-Host 'after'",
     "Get-Item nope -ErrorAction Continue; Write-Host 'after'",
     "$ErrorActionPreference = 'Stop'; [int]'a'; Write-Host 'after'",
+    "Get-Item nope -e Stop; Write-Host 'after'",
+    "Get-Item nope -errora Stop; Write-Host 'after'",
+    "Get-Item nope -ErrorAction S; Write-Host 'after'",
+    "& { trap { break }; [int]'a' }; Write-Host 'after'",
+    "trap { continue }; & { trap { break }; [int]'a' }; Write-Host 'after'",
+    "trap { continue }; iex 'throw 1'; Write-Host 'after'",
+    "trap { continue }; $s = { throw 'x' }; [int]'a'; Write-Host 'after'",
+    "New-Variable ErrorActionPreference Stop -Force; trap { continue }; [int]'a'; "
+    "Write-Host 'after'",
+    "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'; trap { continue }; Get-Item nope; "
+    "Write-Host 'after'",
+    "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' }; "
+    "Wrap; Write-Host 'after'",
     "throw 'e'; Write-Host 'after'",
     "$x = $(trap { continue }; [int]'a'; 'in'); Write-Host $x",
     "$(trap { continue }); [int]'a'; Write-Host 'after'",

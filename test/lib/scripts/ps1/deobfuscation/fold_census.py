@@ -1405,4 +1405,14 @@ FOLDS: dict[str, str] = {
         "throw 'e'",
     "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
         "$x = $([int]'a'\n'in')\nWrite-Host $x",
+    "trap { continue }; iex 'throw 1'; Write-Host 'after'":
+        'throw 1',
+    "trap { continue }; $s = { throw 'x' }; [int]'a'; Write-Host 'after'":
+        "trap {\n  continue\n}\n$Null = {\n  throw 'x'\n}\n[int]'a'\nWrite-Host 'after'",
+    "New-Variable ErrorActionPreference Stop -Force; trap { continue }; [int]'a'; Write-Host 'after'":
+        "New-Variable ErrorActionPreference Stop -Force\n[int]'a'\nWrite-Host 'after'",
+    "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'; trap { continue }; Get-Item nope; Write-Host 'after'":
+        "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'\nGet-Item nope\nWrite-Host 'after'",
+    "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' }; Wrap; Write-Host 'after'":
+        "function Raise {\n  throw 'e'\n}\nfunction Wrap {\n  Raise\n  Write-Host 'in'\n}\nWrap\nWrite-Host 'after'",
 }

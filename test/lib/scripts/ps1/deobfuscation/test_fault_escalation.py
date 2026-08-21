@@ -39,6 +39,11 @@ _OPAQUE = '$args'
 #: terminating. Left to itself it ends the script, which is the whole difference between the two.
 _STOPPING_RAISE = 'Get-Item nope -ErrorAction Stop'
 
+#: The same command as `_STOPPING_RAISE` with no action of its own, so what it reports is
+#: terminating exactly when a preference says every error is. It is the raise that makes a write of
+#: `$ErrorActionPreference` the only reason a `trap` over it is load bearing.
+_UNSPECIFIED_RAISE = 'Get-Item nope'
+
 
 class _Ps1FaultEscalation(TestPs1):
 
@@ -864,5 +869,368 @@ class TestPs1ATrapIsRemovedOverAnErrorTheScriptItselfSurvives(_Ps1FaultEscalatio
         self._assertKept(F"""
             trap {{}}
             {_RAISE}
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1EverySpellingOfTheStopActionMakesTheTrapOverItLoadBearing(_Ps1FaultEscalation):
+    """
+    `-ErrorAction` takes a `[System.Management.Automation.ActionPreference]`, of which `Stop` is the
+    member whose ordinal is 1. Windows PowerShell 5.1 binds that member from its name, from any
+    abbreviation of the name that no other member of the set answers to, and from any integer
+    spelling of the ordinal. Each script below is therefore the one
+    `TestPs1ACommandToldToStopMakesItsErrorEndTheScript` measures, written differently, and the
+    `trap` is what each of them survives on: without the handler nothing after the command runs.
+    """
+
+    def _assertTheTrapOverTheActionIsKept(self, action: str) -> None:
+        self._assertKept(F"""
+            trap {{ continue }}
+            Get-Item nope -ErrorAction {action}
+            {_FOLLOWER}
+        """)
+
+    def test_the_member_name_selects_stop_however_it_is_cased_or_quoted(self):
+        for action in ['Stop', 'stop', 'STOP', "'Stop'", '"Stop"']:
+            with self.subTest(action):
+                self._assertTheTrapOverTheActionIsKept(action)
+
+    def test_an_abbreviation_no_other_member_answers_to_selects_stop(self):
+        for action in ['St', 'Sto']:
+            with self.subTest(action):
+                self._assertTheTrapOverTheActionIsKept(action)
+
+    def test_the_ordinal_of_stop_selects_it_however_the_integer_is_spelled(self):
+        for action in ['1', '01', '0x1']:
+            with self.subTest(action):
+                self._assertTheTrapOverTheActionIsKept(action)
+
+
+class TestPs1EverySpellingOfTheErrorActionParameterCarriesTheStopItIsGiven(_Ps1FaultEscalation):
+    """
+    Windows PowerShell 5.1 binds a parameter by any prefix of its name that no other parameter of
+    the command answers to, `-EA` is the documented alias of `-ErrorAction`, and an argument may be
+    attached to the parameter with a colon rather than written beside it. Each spelling below hands
+    the command the same `Stop` the written-out name does, so each ends the script over the error
+    the command reports and each leaves the `trap` load bearing.
+    """
+
+    def _assertTheTrapOverTheCommandIsKept(self, command: str) -> None:
+        self._assertKept(F"""
+            trap {{ continue }}
+            {command}
+            {_FOLLOWER}
+        """)
+
+    def _assertTheTrapOverTheParameterIsKept(self, parameter: str) -> None:
+        self._assertTheTrapOverTheCommandIsKept(F'Get-Item nope {parameter} Stop')
+
+    def test_a_prefix_no_other_parameter_answers_to_binds_the_action(self):
+        for parameter in ['-ErrorAction', '-erroraction', '-ErrorActio', '-ErrorAc', '-ErrorA']:
+            with self.subTest(parameter):
+                self._assertTheTrapOverTheParameterIsKept(parameter)
+
+    def test_the_documented_alias_of_the_parameter_binds_the_action(self):
+        for parameter in ['-EA', '-ea']:
+            with self.subTest(parameter):
+                self._assertTheTrapOverTheParameterIsKept(parameter)
+
+    def test_an_action_attached_to_the_parameter_with_a_colon_binds_it(self):
+        for command in ['Get-Item nope -ErrorAction:Stop', 'Get-Item nope -EA:Stop']:
+            with self.subTest(command):
+                self._assertTheTrapOverTheCommandIsKept(command)
+
+
+class TestPs1EverySpellingOfAnActionOtherThanStopLeavesTheTrapRemovable(_Ps1FaultEscalation):
+    """
+    Every member of the set other than `Stop` leaves what the command reports non-terminating, so no
+    `trap` is offered it and the statement after the command runs whether the handler is written or
+    not. These are the shapes a reading keyed to `-ErrorAction` being given at all, or to the
+    argument being one it cannot name, would break.
+    """
+
+    def _assertTheTrapOverTheCommandIsRemoved(self, command: str) -> None:
+        self._assertDeobfuscatesTo(F"""
+            trap {{ continue }}
+            {command}
+            {_FOLLOWER}
+        """, F"""
+            {command}
+            {_FOLLOWER}
+        """)
+
+    def _assertTheTrapOverTheActionIsRemoved(self, action: str) -> None:
+        self._assertTheTrapOverTheCommandIsRemoved(F'Get-Item nope -ErrorAction {action}')
+
+    def test_a_member_name_other_than_stop_leaves_the_trap_removable(self):
+        for action in ['Continue', 'SilentlyContinue', 'Ignore']:
+            with self.subTest(action):
+                self._assertTheTrapOverTheActionIsRemoved(action)
+
+    def test_an_abbreviation_of_a_member_other_than_stop_leaves_the_trap_removable(self):
+        for action in ['Cont', 'Sil', 'Ig']:
+            with self.subTest(action):
+                self._assertTheTrapOverTheActionIsRemoved(action)
+
+    def test_the_ordinal_of_a_member_other_than_stop_leaves_the_trap_removable(self):
+        for action in ['0', '2', '4', '0x2']:
+            with self.subTest(action):
+                self._assertTheTrapOverTheActionIsRemoved(action)
+
+    def test_a_member_other_than_stop_attached_with_a_colon_leaves_the_trap_removable(self):
+        commands = ['Get-Item nope -ErrorAction:Continue', 'Get-Item nope -EA:SilentlyContinue']
+        for command in commands:
+            with self.subTest(command):
+                self._assertTheTrapOverTheCommandIsRemoved(command)
+
+
+class TestPs1AnActionThatArrivesBySplattingIsTheActionTheCommandRunsUnder(_Ps1FaultEscalation):
+    """
+    Splatting binds parameters out of a hashtable, so the same `-ErrorAction` reaches the command
+    without being written beside it. The two scripts below differ only in the member the table
+    carries, and Windows PowerShell 5.1 runs each of them exactly as it runs that member written at
+    the call site: the command ends the script under `Stop`, and reports and resumes under
+    `Continue`. The `trap` is therefore load bearing in the first and dead in the second.
+
+    Only the first is answered. A splat names a table computed at run time, and
+    `refinery.lib.scripts.ps1.analysis.faults` reads every argument it cannot compute as `Stop` —
+    the same reading it gives `Get-Item nope -ErrorAction $x`, whose `$x` a write above may equally
+    settle. So the first passes by that conservatism rather than by reading the table, and the
+    second is what records the cost of it. Retiring the pin means giving the fault model a reading
+    of the value, not narrowing the splat.
+    """
+
+    def test_a_table_that_carries_stop_makes_the_trap_load_bearing(self):
+        self._assertKept(F"""
+            trap {{ continue }}
+            $p = @{{ErrorAction = 'Stop'}}
+            Get-Item nope @p
+            {_FOLLOWER}
+        """)
+
+    @unittest.expectedFailure
+    def test_a_table_that_carries_continue_leaves_the_trap_removable(self):
+        self._assertDeobfuscatesTo(F"""
+            trap {{ continue }}
+            $p = @{{ErrorAction = 'Continue'}}
+            Get-Item nope @p
+            {_FOLLOWER}
+        """, F"""
+            $p = @{{ErrorAction = 'Continue'}}
+            Get-Item nope @p
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1EverySpellingOfTheStopPreferenceMakesTheTrapUnderItLoadBearing(_Ps1FaultEscalation):
+    """
+    `$ErrorActionPreference = 'Stop'` makes every error a command reports terminating, and it is the
+    same write however the target is spelled and however `Stop` is named. The command below then
+    ends the script, so the `trap` is the whole reason the statement after it runs, exactly as it is
+    under the canonical spelling `TestPs1AStopPreferenceMakesEveryTrapLoadBearing` measures. The
+    same command written under none of these reports a non-terminating error no `trap` is offered,
+    which is what `TestPs1AWriteThatArmsNoStopLeavesTheTrapRemovable` records.
+    """
+
+    def _assertTheTrapUnderTheWriteIsKept(self, assignment: str) -> None:
+        self._assertKept(F"""
+            {assignment}
+            trap {{ continue }}
+            {_UNSPECIFIED_RAISE}
+            {_FOLLOWER}
+        """)
+
+    def test_a_plain_write_of_the_preference_arms_every_error(self):
+        self._assertTheTrapUnderTheWriteIsKept("$ErrorActionPreference = 'Stop'")
+
+    def test_a_type_constrained_write_of_the_preference_arms_every_error(self):
+        self._assertTheTrapUnderTheWriteIsKept("[string]$ErrorActionPreference = 'Stop'")
+
+    def test_a_parenthesized_write_of_the_preference_arms_every_error(self):
+        self._assertTheTrapUnderTheWriteIsKept("($ErrorActionPreference) = 'Stop'")
+
+    def test_a_multiple_assignment_that_names_the_preference_arms_every_error(self):
+        self._assertTheTrapUnderTheWriteIsKept("$a, $ErrorActionPreference = 1, 'Stop'")
+
+    def test_a_scope_qualified_write_of_the_preference_arms_every_error(self):
+        self._assertTheTrapUnderTheWriteIsKept("$global:ErrorActionPreference = 'Stop'")
+
+    def test_the_ordinal_of_stop_written_to_the_preference_arms_every_error(self):
+        self._assertTheTrapUnderTheWriteIsKept('$ErrorActionPreference = 1')
+
+
+class TestPs1AWriteThatArmsNoStopLeavesTheTrapRemovable(_Ps1FaultEscalation):
+    """
+    A preference set to a member other than `Stop` leaves what the command reports non-terminating,
+    so the script carries on to the next statement whether the `trap` is written or not and the
+    handler may go, exactly as it may with nothing written above the command at all. These are the
+    shapes a reading keyed to the preference being assigned at all would break.
+    """
+
+    def _assertTheTrapUnderTheWriteIsRemoved(self, assignment: str) -> None:
+        self._assertDeobfuscatesTo(F"""
+            {assignment}
+            trap {{ continue }}
+            {_UNSPECIFIED_RAISE}
+            {_FOLLOWER}
+        """, F"""
+            {assignment}
+            {_UNSPECIFIED_RAISE}
+            {_FOLLOWER}
+        """)
+
+    def test_a_trap_over_a_command_no_write_arms_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            trap {{ continue }}
+            {_UNSPECIFIED_RAISE}
+            {_FOLLOWER}
+        """, F"""
+            {_UNSPECIFIED_RAISE}
+            {_FOLLOWER}
+        """)
+
+    def test_a_preference_set_to_continue_arms_nothing(self):
+        self._assertTheTrapUnderTheWriteIsRemoved("$ErrorActionPreference = 'Continue'")
+
+    def test_a_preference_set_to_the_ordinal_of_continue_arms_nothing(self):
+        self._assertTheTrapUnderTheWriteIsRemoved('$ErrorActionPreference = 2')
+
+
+class TestPs1ATerminatingErrorReachedThroughACallIsInvisible(_Ps1FaultEscalation):
+    """
+    Measured on 5.1: a `throw` in a called function ends the script, and a `trap` in the calling
+    body takes it and resumes — `function Raise { throw 'e' }` under a `Wrap` that traps writes
+    `in` and then `after`, and the same pair without the handler writes nothing at all.
+
+    What reaches the handler is the *call*, and `ends_the_script` reads only the subtree of what
+    reaches it, so the `throw` in the callee is behind a body boundary no graph here crosses.
+    Answering it needs the call graph, which `refinery.lib.scripts.ps1.analysis.faults` has none of
+    by design.
+    """
+
+    @unittest.expectedFailure
+    def test_a_trap_over_a_call_to_a_function_that_throws_is_kept(self):
+        self._assertKept(F"""
+            function Invoke-Raise {{
+              throw 'e'
+            }}
+            function Invoke-Wrapper {{
+              trap {{ continue }}
+              Invoke-Raise
+              {_FOLLOWER}
+            }}
+            Invoke-Wrapper
+            {_ANCHOR}
+        """)
+
+
+class TestPs1ATerminatingErrorInsideAStringThatIsRunIsInvisible(_Ps1FaultEscalation):
+    """
+    A command that runs a string raises whatever the string raises — measured:
+    `trap { continue }; iex 'throw 1'; Write-Host 'after'` writes `after`, and the same script
+    without the handler writes nothing.
+
+    Nothing in the statement's subtree is a `throw`, so the handler is judged removable. **This one
+    inflicts itself**: a later round inlines the string, materialises the `throw` the earlier round
+    answered False for, and drops everything after it as unreachable. Recognising it needs the
+    command name resolved against the world, which is a layer above this one.
+    """
+
+    @unittest.expectedFailure
+    def test_a_trap_over_a_string_that_is_run_and_throws_is_kept(self):
+        self._assertKept(F"""
+            trap {{ continue }}
+            iex 'throw 1'
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1AStopPreferenceACmdletArmsIsInvisible(_Ps1FaultEscalation):
+    """
+    `New-Variable ErrorActionPreference Stop -Force` arms the preference exactly as the assignment
+    does — measured: the cast below is stepped over with the handler and ends the script without
+    it. `_writes_stop_to_the_preference` reads an assignment expression, and a cmdlet that writes a
+    variable by name is not one.
+
+    `Set-Variable ErrorActionPreference Stop` is the same defect and happens to survive, because
+    another pass normalises that spelling into an assignment first. Nothing pins that ordering, so
+    the surviving spelling is an accident rather than a second answer.
+    """
+
+    @unittest.expectedFailure
+    def test_a_trap_under_a_preference_a_cmdlet_arms_is_kept(self):
+        self._assertKept(F"""
+            New-Variable ErrorActionPreference Stop -Force
+            trap {{ continue }}
+            {_RAISE}
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1AStopBoundThroughDefaultParameterValuesIsInvisible(_Ps1FaultEscalation):
+    """
+    `$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'` binds the action into every command that
+    takes one, so the command below ends the script although no action is written beside it and no
+    preference is assigned — measured: `after` is written with the handler and nothing without it.
+
+    Neither gate sees it. No `-ErrorAction` is written at the call site, and the target of the
+    write is an index expression rather than a variable, which is the shape
+    `refinery.lib.scripts.ps1.ast.assignment_target_variables` reports nothing for.
+    """
+
+    @unittest.expectedFailure
+    def test_a_trap_under_a_default_parameter_value_of_stop_is_kept(self):
+        self._assertKept(F"""
+            $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+            trap {{ continue }}
+            {_UNSPECIFIED_RAISE}
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1AnAmbiguousActionPrefixKeepsTheTrapOverIt(_Ps1FaultEscalation):
+    """
+    `-ErrorAction S` reaches `SilentlyContinue`, `Stop` and `Suspend` alike, and 5.1 answers it with
+    a `ParameterBindingException` rather than a choice — measured as
+    `CannotConvertArgumentNoMessage`. That error is statement-terminating, so the command never runs
+    and the script carries on with or without a handler, which makes the `trap` removable.
+
+    It is kept, because an argument that may be `Stop` is read as `Stop`. The cost is recall and the
+    direction is safe; what would retire this is a reading of the member set precise enough to call
+    the prefix ambiguous, which is a different question from the one the gate asks.
+    """
+
+    @unittest.expectedFailure
+    def test_a_trap_over_a_command_whose_action_prefix_is_ambiguous_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            trap {{ continue }}
+            Get-Item nope -ErrorAction S
+            {_FOLLOWER}
+        """, F"""
+            Get-Item nope -ErrorAction S
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1AThrowInsideAnUninvokedBlockKeepsTheTrapBesideIt(_Ps1FaultEscalation):
+    """
+    Storing a script block runs nothing — measured: `$s = { throw 'x' }` beside a failing cast
+    writes `after` whether a `trap` is written above it or not, so the handler is removable.
+
+    `ends_the_script` reads the whole subtree of every statement that reaches the handler, and a
+    stored block is part of that subtree, so the `throw` inside one is read as a raise the handler
+    survives. The docstring calls the width deliberate — a `throw` in a body written inside a
+    statement does run once something calls it — and this is what the width costs.
+    """
+
+    @unittest.expectedFailure
+    def test_a_trap_beside_a_stored_block_that_throws_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            trap {{ continue }}
+            $s = {{ throw 'x' }}
+            {_RAISE}
+            {_FOLLOWER}
+        """, F"""
+            $s = {{ throw 'x' }}
             {_FOLLOWER}
         """)

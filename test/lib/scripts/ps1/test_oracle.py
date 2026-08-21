@@ -239,6 +239,26 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The same handler removed where the raise stands inside `$( )`. 5.1 abandons the whole '
         'assignment and resumes at the statement after it, so `$x` holds nothing and the snippet '
         'writes an empty line; without the handler the error leaves the script instead.',
+    "trap { continue }; iex 'throw 1'; Write-Host 'after'":
+        'The handler is removed, and the removal is self-inflicting: a command that runs a string '
+        'is read as raising nothing, so the `trap` goes in one round, and a later round then '
+        'inlines the string and materialises the very `throw` the first round answered False for. '
+        'What is left is `throw 1` and nothing else.',
+    "New-Variable ErrorActionPreference Stop -Force; trap { continue }; [int]'a'; Write-Host "
+    "'after'":
+        'The handler is removed. The preference is recognised where it is written as an '
+        'assignment and not where a cmdlet sets it, so the script reads as arming nothing and the '
+        'cast error reads as one 5.1 would step over.',
+    "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'; trap { continue }; Get-Item nope; "
+    "Write-Host 'after'":
+        'The handler is removed. The table binds `-ErrorAction Stop` into every command that '
+        'takes one, so no action is written at the call site and no preference is assigned; '
+        'neither gate is looking at an index expression.',
+    "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' "
+    "}; Wrap; Write-Host 'after'":
+        'The handler is removed. What reaches it is the *call*, whose subtree carries no `throw`, '
+        'and the callee is a body of its own; answering this needs the call graph, which the '
+        'fault model deliberately has none of.',
 }
 
 
@@ -271,36 +291,47 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('INFO\tafter',),
     "trap { break }; [int]'a'; Write-Host 'after'":
         ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
-    "trap { }; [int]'a'; Write-Host 'after'":
-        ('ERROR\tInvalidCastFromStringToInteger'
-         '\tSystem.Management.Automation.RuntimeException', 'INFO\tafter'),
-    "Get-Item nope -ErrorAction Stop; Write-Host 'after'":
-        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-         '\tSystem.Management.Automation.ItemNotFoundException',),
+    "trap { }; [int]'a'; Write-Host 'after'": (
+        'ERROR\tInvalidCastFromStringToInteger'
+        '\tSystem.Management.Automation.RuntimeException',
+        'INFO\tafter',
+    ),
+    "Get-Item nope -ErrorAction Stop; Write-Host 'after'": (
+        'THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+        '\tSystem.Management.Automation.ItemNotFoundException',
+    ),
     "trap { continue }; Get-Item nope -ErrorAction Stop; Write-Host 'after'":
         ('INFO\tafter',),
-    "Get-Item nope -ErrorAc Stop; Write-Host 'after'":
-        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-         '\tSystem.Management.Automation.ItemNotFoundException',),
-    "Get-Item nope -ErrorAction:Stop; Write-Host 'after'":
-        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-         '\tSystem.Management.Automation.ItemNotFoundException',),
-    "Get-Item nope -ErrorAction 1; Write-Host 'after'":
-        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-         '\tSystem.Management.Automation.ItemNotFoundException',),
-    "Get-Item nope -ErrorAction Continue; Write-Host 'after'":
-        ('ERROR\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-         '\tSystem.Management.Automation.ItemNotFoundException', 'INFO\tafter'),
-    "$ErrorActionPreference = 'Stop'; [int]'a'; Write-Host 'after'":
-        ('THROW\tInvalidCastFromStringToInteger'
-         '\tSystem.Management.Automation.RuntimeException',),
+    "Get-Item nope -ErrorAc Stop; Write-Host 'after'": (
+        'THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+        '\tSystem.Management.Automation.ItemNotFoundException',
+    ),
+    "Get-Item nope -ErrorAction:Stop; Write-Host 'after'": (
+        'THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+        '\tSystem.Management.Automation.ItemNotFoundException',
+    ),
+    "Get-Item nope -ErrorAction 1; Write-Host 'after'": (
+        'THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+        '\tSystem.Management.Automation.ItemNotFoundException',
+    ),
+    "Get-Item nope -ErrorAction Continue; Write-Host 'after'": (
+        'ERROR\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+        '\tSystem.Management.Automation.ItemNotFoundException',
+        'INFO\tafter',
+    ),
+    "$ErrorActionPreference = 'Stop'; [int]'a'; Write-Host 'after'": (
+        'THROW\tInvalidCastFromStringToInteger'
+        '\tSystem.Management.Automation.RuntimeException',
+    ),
     "throw 'e'; Write-Host 'after'":
         ('THROW\te\tSystem.Management.Automation.RuntimeException',),
     "$x = $(trap { continue }; [int]'a'; 'in'); Write-Host $x":
         ('INFO\tin',),
-    "$(trap { continue }); [int]'a'; Write-Host 'after'":
-        ('OUT\t\t<null>', 'THROW\tInvalidCastFromStringToInteger'
-         '\tSystem.Management.Automation.RuntimeException'),
+    "$(trap { continue }); [int]'a'; Write-Host 'after'": (
+        'OUT\t\t<null>',
+        'THROW\tInvalidCastFromStringToInteger'
+        '\tSystem.Management.Automation.RuntimeException',
+    ),
     "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
         ('INFO\t',),
     "$x = @(trap { continue }; [int]'a'; 'in'); Write-Host $x":
@@ -368,6 +399,37 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('INFO\tset',),
     "$n = 'script:q'; function g($p = (Set-Variable $n 'v')) { }; g; Write-Host $q":
         ('INFO\tv',),
+    "Get-Item nope -e Stop; Write-Host 'after'":
+        ('INFO\tafter',),
+    "Get-Item nope -errora Stop; Write-Host 'after'":
+        (
+            'THROW'
+            '\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
+            '\tSystem.Management.Automation.ItemNotFoundException',
+        ),
+    "Get-Item nope -ErrorAction S; Write-Host 'after'":
+        (
+            'THROW'
+            '\tCannotConvertArgumentNoMessage,Microsoft.PowerShell.Commands.GetItemCommand'
+            '\tSystem.Management.Automation.ParameterBindingException',
+        ),
+    "& { trap { break }; [int]'a' }; Write-Host 'after'":
+        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "trap { continue }; & { trap { break }; [int]'a' }; Write-Host 'after'":
+        ('INFO\tafter',),
+    "trap { continue }; iex 'throw 1'; Write-Host 'after'":
+        ('INFO\tafter',),
+    "trap { continue }; $s = { throw 'x' }; [int]'a'; Write-Host 'after'":
+        ('INFO\tafter',),
+    "New-Variable ErrorActionPreference Stop -Force; trap { continue }; [int]'a'; Write-Host "
+    "'after'":
+        ('INFO\tafter',),
+    "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'; trap { continue }; Get-Item nope; "
+    "Write-Host 'after'":
+        ('INFO\tafter',),
+    "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' "
+    "}; Wrap; Write-Host 'after'":
+        ('INFO\tin', 'INFO\tafter'),
 }
 
 #: What the host's own command tables hold, measured. The tables in `refinery.lib.scripts.ps1.data`
