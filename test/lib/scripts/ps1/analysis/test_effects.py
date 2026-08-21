@@ -658,6 +658,78 @@ class TestPs1StatementEffect(Ps1EffectsTest):
         self.assertIs(self._effect(statement), StatementEffect.EFFECT)
 
 
+class TestPs1ACallThatReturnsNothingEmitsNothing(Ps1EffectsTest):
+    """
+    A bare expression statement writes what its expression produces, so a call to a static method
+    declared `System.Void` writes nothing at all: `[Array]::Reverse` turns its argument around and
+    yields no value, while `[Array]::IndexOf` on the same type yields the `System.Int32` its reader
+    receives.
+
+    Emission is the last question asked and never the only one. A call that acts is an `EFFECT`
+    whatever it returns, and so is one that rewrites storage the script reads back — including
+    through a conversion, because whether `[int[]]$x` or `$x -as [array]` builds a fresh array is a
+    question about the operand's runtime type that nothing reading the source can answer.
+    """
+
+    def test_a_void_static_call_over_a_temporary_writes_nothing(self):
+        for source in (
+            "[Array]::Reverse('abc'.ToCharArray())",
+            "[Array]::Sort('cba'.ToCharArray())",
+            "[Array]::Clear('abc'.ToCharArray(), 0, 2)",
+            "[Array]::Copy('ab'.ToCharArray(), 'cd'.ToCharArray(), 2)",
+            "[Array]::ConstrainedCopy('ab'.ToCharArray(), 0, 'cd'.ToCharArray(), 0, 2)",
+            "[System.Array]::Reverse('abc'.ToCharArray())",
+        ):
+            with self.subTest(source):
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.DISCARD)
+
+    def test_a_static_call_that_produces_a_value_yields_it(self):
+        for source in (
+            "[Array]::IndexOf('abc'.ToCharArray(), [Char]98)",
+            "[Array]::BinarySearch('abc'.ToCharArray(), [Char]98)",
+            '[Math]::Sqrt(36)',
+            '[Math]::Abs(-3)',
+        ):
+            with self.subTest(source):
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.OUTPUT)
+
+    def test_a_void_call_that_writes_to_the_host_is_an_effect(self):
+        for source in ("[Console]::WriteLine('x')", "[Console]::Write('x')", '[Console]::Beep()'):
+            with self.subTest(source):
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.EFFECT)
+
+    def test_a_void_call_over_storage_the_script_reads_back_is_an_effect(self):
+        for source in (
+            '[Array]::Reverse($buffer)',
+            '[Array]::Clear($buffer, 0, 2)',
+            '[Array]::Reverse($this.Items)',
+            '[Array]::Reverse($pair[0])',
+        ):
+            with self.subTest(source):
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.EFFECT)
+
+    def test_a_conversion_before_the_slot_does_not_make_the_argument_a_temporary(self):
+        for source in (
+            '[Array]::Reverse($buffer -as [array])',
+            '[Array]::Reverse([int[]]$buffer)',
+            '[Array]::Reverse(($buffer))',
+        ):
+            with self.subTest(source):
+                self.assertIs(self._effect(self._statement(source)), StatementEffect.EFFECT)
+
+    def test_a_void_member_reached_as_an_instance_call_is_not_read_for_emission(self):
+        self.assertIs(
+            self._effect(self._statement("'abc'.ToCharArray().SetValue([Char]122, 0)")),
+            StatementEffect.EFFECT,
+        )
+
+    def test_an_arity_no_overload_binds_emits_an_error_rather_than_nothing(self):
+        self.assertIs(
+            self._effect(self._statement("[Array]::Reverse('abc'.ToCharArray(), 0)")),
+            StatementEffect.EFFECT,
+        )
+
+
 class TestPs1FaultFreedom(Ps1EffectsTest):
     """
     `is_fault_free` decides whether an expression may be moved out of a `try` whose `catch` is

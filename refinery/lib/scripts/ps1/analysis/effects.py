@@ -379,12 +379,21 @@ def _denotes_shared_storage(node) -> bool:
 
     This is what separates `[Array]::Reverse('ab'.ToCharArray())`, a junk statement whose result
     nothing can read, from `[Array]::Reverse($buffer)`, which rewrites a live variable.
+
+    **A conversion is looked through rather than trusted to allocate**, and `-as` is the reason it
+    has to be. A cast may hand the callee a fresh array built out of what the name holds, and `-as`
+    over a value already of the target type converts by nothing at all: measured on 5.1,
+    `$x = 1, 2, 3; [Array]::Reverse($x -as [array]); Write-Output $x` writes `3 2 1`, so the call
+    turned `$x` itself around. Which of the two a conversion performs is decided by the operand's
+    runtime type and not by its spelling, so both spellings are read as the storage underneath.
     """
     while True:
         if isinstance(node, Ps1ParenExpression):
             node = node.expression
         elif isinstance(node, Ps1CastExpression):
             node = node.operand
+        elif isinstance(node, Ps1BinaryExpression) and node.operator.lower() == '-as':
+            node = node.left
         else:
             break
     return isinstance(node, (Ps1Variable, Ps1MemberAccess, Ps1IndexExpression))
@@ -1155,6 +1164,35 @@ def _is_void_cast(node) -> TypeGuard[Ps1CastExpression]:
     )
 
 
+def _emits_nothing(expr, world: Ps1WorldReach) -> bool:
+    """
+    Whether evaluating *expr* as a standalone statement writes nothing to the output stream.
+
+    PowerShell writes the value of a bare expression statement to the output stream, so a statement
+    emits exactly what its expression produces — and a method declared to return `System.Void`
+    produces no value at all. `[Array]::Reverse($a)` is the shape: it reverses the array and yields
+    nothing, so a script that writes it as a statement is writing a mutation, never an output.
+
+    **Only a static call is read**, because only a static call has a receiver the resolver can name:
+    an instance method would need its receiver's type traced and its overloads selected by argument
+    type, and a guess there is a claim about emission that no measurement backs.
+
+    **The rule is the candidate set, not a walk over the overloads.** Asking whether every overload
+    returns void is vacuously true of a member the metadata does not know, which would call an
+    unknown call silent; asking whether the set of types the call may produce is exactly
+    `{System.Void}` says the same thing about a known member and says nothing about an unknown one,
+    because a member with no metadata contributes the empty set.
+
+    This is emission alone and answers nothing about faults or effects. `[Console]::WriteLine('x')`
+    returns void and writes to the host, and what keeps it out of this is the impurity deny its
+    caller asks first; `[Array]::Clear` returns void and throws on a bad index, and what keeps
+    *that* honest is the removal veto, which asks where the error would go.
+    """
+    if not isinstance(expr, Ps1InvokeMember) or expr.access is not Ps1AccessKind.STATIC:
+        return False
+    return {name.name for name in candidate_types(expr, world)} == {'System.Void'}
+
+
 def _is_null_discard(node) -> TypeGuard[Ps1AssignmentExpression]:
     """
     Whether a node is the `$Null = ...` discard idiom, which evaluates its right-hand side and puts
@@ -1171,9 +1209,13 @@ def statement_effect(stmt, world: Ps1WorldReach) -> StatementEffect:
     """
     Classify the observable effect of a standalone statement as a `StatementEffect`. This is the one
     shared authority the dead-code and junk-removal passes consult so they never disagree about
-    whether a statement carries a body's output: a `DISCARD` emits nothing and can always be
-    dropped, an `OUTPUT` yields a value that emit-safety must protect in a captured body, and an
-    `EFFECT` must always be kept.
+    whether a statement carries a body's output: a `DISCARD` emits nothing, an `OUTPUT` yields a
+    value that emit-safety must protect in a captured body, and an `EFFECT` must always be kept.
+
+    **`DISCARD` is a claim about emission and about nothing else.** It used to be read as *always
+    safe to drop*, which held only because the one thing it admitted was a discard idiom over a pure
+    expression. A call returning `System.Void` emits as little and can still throw, so what decides
+    whether dropping it changes anything is the removal veto — `fault_is_observed` — and not this.
     """
     if not isinstance(stmt, Ps1ExpressionStatement):
         return StatementEffect.EFFECT
@@ -1208,6 +1250,8 @@ def statement_effect(stmt, world: Ps1WorldReach) -> StatementEffect:
             return StatementEffect.DISCARD
         return StatementEffect.EFFECT
     if is_side_effect_free(expr, world):
+        if _emits_nothing(expr, world):
+            return StatementEffect.DISCARD
         return StatementEffect.OUTPUT
     return StatementEffect.EFFECT
 

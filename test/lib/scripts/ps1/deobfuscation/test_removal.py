@@ -531,3 +531,90 @@ class TestPs1DeadCodeEliminationDoesNotUnhookAHandler(TestPs1):
             } catch { }
         """), Ps1DeadCodeElimination)
         self.assertNotIn('trap', result)
+
+
+class TestPs1ACallThatWritesNothingGoesOnlyWhereNothingObservesIt(TestPs1):
+    """
+    A static method declared `System.Void` puts no value on the output stream, so a statement that
+    is nothing but such a call over a temporary the script cannot otherwise reach performs nothing a
+    run can see, and the junk pass deletes it. Two questions stand around that one: a call that acts
+    is impure whatever it returns and is never a candidate, and a call whose error a handler could
+    receive is vetoed although it emits as little as any other.
+    """
+
+    _ANCHOR = "Write-Host 'anchor'"
+
+    #: `[Array]::Clear` raises for a length that runs past the end of the array, so the only trace
+    #: this statement can leave behind is the error a handler receives.
+    _MAY_RAISE = "[Array]::Clear('abc'.ToCharArray(), 0, 99)"
+
+    def test_a_void_static_call_over_a_temporary_is_deleted(self):
+        for call in (
+            "[Array]::Reverse('abc'.ToCharArray())",
+            "[Array]::Sort('cba'.ToCharArray())",
+            "[Array]::Clear('abc'.ToCharArray(), 0, 2)",
+            "[Array]::Copy('ab'.ToCharArray(), 'cd'.ToCharArray(), 2)",
+            "[Array]::ConstrainedCopy('ab'.ToCharArray(), 0, 'cd'.ToCharArray(), 0, 2)",
+        ):
+            with self.subTest(call):
+                self.assertEqual(
+                    self._apply(F'{call}\n{self._ANCHOR}', Ps1JunkStatementRemoval),
+                    self._ANCHOR,
+                )
+
+    def test_a_static_call_that_produces_a_value_is_kept(self):
+        for call in ('[Math]::Sqrt(36)', "[Array]::IndexOf('abc'.ToCharArray(), [Char]98)"):
+            with self.subTest(call):
+                self._assertUnchanged(F'{call}\n{self._ANCHOR}', Ps1JunkStatementRemoval)
+
+    def test_a_void_static_call_that_writes_to_the_host_is_kept(self):
+        for call in ("[Console]::WriteLine('x')", "[Console]::Write('x')"):
+            with self.subTest(call):
+                self._assertUnchanged(F'{call}\n{self._ANCHOR}', Ps1JunkStatementRemoval)
+
+    def test_a_void_static_call_over_a_live_variable_is_kept(self):
+        for call in (
+            '[Array]::Reverse($x)',
+            '[Array]::Reverse($x -as [array])',
+            '[Array]::Reverse([int[]]$x)',
+        ):
+            with self.subTest(call):
+                self._assertUnchanged(
+                    F'$x = 1, 2, 3\n{call}\nWrite-Output $x', Ps1JunkStatementRemoval)
+
+    def test_a_void_static_call_no_handler_can_observe_is_deleted(self):
+        self.assertEqual(
+            self._apply(F'{self._MAY_RAISE}\n{self._ANCHOR}', Ps1JunkStatementRemoval),
+            self._ANCHOR,
+        )
+
+    def test_a_void_static_call_a_handler_can_observe_is_kept(self):
+        self._assertUnchanged(cleandoc(F"""
+            try {{
+              {self._MAY_RAISE}
+              Write-Host 'guarded'
+            }} catch {{
+              Write-Host 'caught'
+            }}
+        """), Ps1JunkStatementRemoval)
+
+    def test_a_void_static_call_in_a_function_a_handler_calls_is_kept(self):
+        self._assertUnchanged(cleandoc(F"""
+            function f {{
+              {self._MAY_RAISE}
+            }}
+            try {{
+              f
+            }} catch {{
+              Write-Host 'caught'
+            }}
+        """), Ps1JunkStatementRemoval)
+
+    def test_the_same_function_no_handler_calls_is_deleted(self):
+        self.assertEqual(self._apply(cleandoc(F"""
+            function f {{
+              {self._MAY_RAISE}
+            }}
+            f
+            {self._ANCHOR}
+        """), Ps1JunkStatementRemoval), self._ANCHOR)
