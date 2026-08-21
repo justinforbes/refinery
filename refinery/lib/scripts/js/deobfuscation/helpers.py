@@ -41,6 +41,8 @@ from refinery.lib.scripts import (
     _remove_from_parent,
     _replace_in_parent,
     set_body,
+    set_child,
+    set_value,
 )
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import side_effect_free
@@ -88,7 +90,6 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
     JsWhileStatement,
-    names_a_property,
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import (
@@ -105,7 +106,7 @@ from refinery.lib.scripts.js.strict import (
     statement_list,
 )
 from refinery.lib.scripts.js.token import FUTURE_RESERVED, KEYWORDS
-from refinery.lib.scripts.js.utf16 import code_units
+from refinery.lib.scripts.js.utf16 import SURROGATE_PAIR, code_units, from_code_units
 
 SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_$][a-zA-Z_$0-9]*$')
 
@@ -700,19 +701,11 @@ def eval_binary_op(op: str, left: float, right: float) -> float | bool | None:
         return None
 
 
-_SURROGATE_PAIR = re.compile('[\ud800-\udbff][\udc00-\udfff]')
-
-
 def _escape_residue(m: re.Match[str]):
     cp = ord(m.group())
     if cp > 0xFF:
         return F'\\u{cp:04X}'
     return F'\\x{cp:02x}'
-
-
-def _combine_surrogate_pair(m: re.Match[str]) -> str:
-    high, low = m.group()
-    return chr(0x10000 + ((ord(high) - 0xD800) << 10) + (ord(low) - 0xDC00))
 
 
 def spell_astral_characters(value: str) -> str:
@@ -725,7 +718,7 @@ def spell_astral_characters(value: str) -> str:
     A surrogate standing alone is left alone. It names no character, so there is nothing to write it
     as, and an escape is the only spelling a file has for it.
     """
-    return _SURROGATE_PAIR.sub(_combine_surrogate_pair, value)
+    return from_code_units(value)
 
 
 def code_points(value: str) -> list[str]:
@@ -740,7 +733,7 @@ def code_points(value: str) -> list[str]:
     index = 0
     length = len(value)
     while index < length:
-        step = 2 if _SURROGATE_PAIR.match(value, index) else 1
+        step = 2 if SURROGATE_PAIR.match(value, index) else 1
         points.append(value[index:index + step])
         index += step
     return points
@@ -1119,13 +1112,16 @@ def is_reference(node: JsIdentifier) -> bool:
     """
     Whether this identifier reads or writes a binding rather than declaring one or naming something
     the program cannot refer to. `is_use_position` answers the second half and is the one statement
-    of it; what is added here are the two declarations a caller with no model can recognize by
-    shape, so that this is the syntactic approximation of `SemanticModel.is_reference` and not a
-    second opinion about what a name is.
+    of it; what is added here are the declarations `is_binding_site` recognizes by shape, so that
+    this is the syntactic approximation of `SemanticModel.is_reference` and not a second opinion
+    about what a name is.
 
-    The approximation is only in the declarations. Every position naming a property, a label or a
-    module specifier is excluded exactly as the model excludes it, and a shorthand property is
-    counted as the read it is.
+    Every position naming a property, a label or a module specifier is excluded exactly as the
+    model excludes it. The approximation is in the declarations, and it is a *permissive* one: a
+    name bound by a destructuring pattern is written like a read and `is_binding_site` sees only a
+    declarator id and a function declaration name, so `var { a } = o` is answered `True` here and
+    `False` by the model. A caller that acts on a `True` answer — one that substitutes or renames
+    rather than one that grows a conservative set — needs the model.
     """
     return not is_binding_site(node) and is_use_position(node)
 
@@ -1506,20 +1502,24 @@ def _introduces_nested_scope(node: Node) -> bool:
 def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
     """
     Put *replacement* where *node* reads a binding, and report whether it did. That *node* reads one
-    is the caller's to establish — with a model through `SemanticModel.is_reference` and without one
-    through `is_reference` — since a name bound by a destructuring pattern is written like a read
-    and no syntactic test tells the two apart.
+    is the caller's to establish, and it takes a model: a name bound by a destructuring pattern is
+    written exactly like a read, so `SemanticModel.is_reference` answers it and the syntactic
+    `is_reference` only approximates it, in the permissive direction.
 
-    A name spelling a property is not such a read and is left alone — `names_a_property` says which
-    positions those are, and substituting into one of them is not a rename but a different program:
-    a replacement with no identifier spelling leaves text no engine parses (`o.5`, `{ -2: 1 }`).
+    A name the program cannot refer to is not such a read and is left alone. `is_use_position` says
+    which positions those are — the four that spell a property, and the label, the re-export name
+    and the specifier halves besides — and substituting into one of them is not a rename but a
+    different program: a replacement with no identifier spelling leaves text no engine parses
+    (`o.5`, `{ -2: 1 }`), and a numeral put where a label stood leaves `5: while (0) break 5;`.
 
     A shorthand property is the one position that is both at once. `{ a }` means `{ a: a }`, so the
     read is the value half and the key must keep the name it wrote; the property is written out in
     full and only the value replaced. Which half a caller hands over depends on where the tree came
     from — the parser builds one node for both and a clone builds two — so the value is asked for
     by identity rather than assumed, and a caller walking both halves substitutes once whichever
-    order it visits them in.
+    order it visits them in. A shorthand carrying a computed key is a shape no source spells, which
+    the parser builds only where it read a program no engine reads, and it is refused rather than
+    written out as one of the two things it might have meant.
 
     `{ __proto__ }` is the one shorthand that does not mean `{ __proto__: __proto__ }`: written out
     with the colon it sets the object's prototype and gives it no property of that name at all, so
@@ -1528,19 +1528,23 @@ def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
 
     The answer is what a caller announcing a change has to read. A pass that reports one for a
     substitution this declined is a pass that reports one every round, and the fixpoint it sits in
-    never reaches one.
+    never reaches one. Nothing is written until the slot the replacement goes into is known, so a
+    declined substitution leaves the tree exactly as it was.
     """
     parent = node.parent
-    if isinstance(parent, JsProperty) and parent.shorthand and not parent.computed:
+    if not is_use_position(node):
+        return False
+    if isinstance(parent, JsProperty) and parent.shorthand:
+        if parent.computed or parent.value is not node:
+            return False
         key = parent.key
-        if parent.value is not node or (isinstance(key, JsIdentifier) and key.name == '__proto__'):
+        if isinstance(key, JsIdentifier) and key.name == PROTO_KEY:
             return False
         if key is node:
-            parent.key = _clone_node(node)
-            parent.key.parent = parent
-        parent.shorthand = False
-    elif names_a_property(node):
-        return False
+            set_child(parent, 'key', _clone_node(node))
+        set_child(parent, 'value', replacement)
+        set_value(parent, 'shorthand', False)
+        return True
     return _replace_in_parent(node, replacement)
 
 

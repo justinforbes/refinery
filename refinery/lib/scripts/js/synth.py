@@ -327,18 +327,21 @@ class JsSynthesizer(Synthesizer):
     def _encode_identifier(name: str, raw: str) -> str:
         """
         Write a name as itself, unless the bare text would be read as something other than a name.
-        A word the grammar matches as a terminal somewhere is one of those, and the source spelling
-        is then the only text that says which of the two readings the file meant: `var l\\u0065t =
-        [0]; l\\u0065t[0] = 5;` is a program, and the same file with the name written out is not.
+        `spells_only_a_name` says which words those are, and for one of them the source spelling is
+        the only text that says which reading the file meant:
+
+            var l\\u0065t = [0]; l\\u0065t[0] = 5;
+
+        is a program, and the same file with the name written out is not.
 
         The spelling is trusted only for as long as it spells the name being printed, so a pass
         that renames a node has nothing to maintain here — what it left behind is a spelling of
         some other name, and the name itself is written instead. This is the rule
         `_encode_string` holds for a literal, asked of a name.
         """
-        if not raw or raw == name or spells_only_a_name(name):
-            return from_code_units(name)
-        return raw if identifier_string_value(raw) == name else from_code_units(name)
+        if raw and not spells_only_a_name(name) and identifier_string_value(raw) == name:
+            return raw
+        return from_code_units(name)
 
     def visit_JsErrorNode(self, node: JsErrorNode):
         self._write(node.text)
@@ -1024,17 +1027,29 @@ class JsSynthesizer(Synthesizer):
         self._write('.')
         self._write(node.property)
 
+    @staticmethod
+    def _renames(written: Node | None, other: Node | None) -> bool:
+        """
+        Whether a specifier writes two names rather than the one a shorthand writes once. `import
+        { a }` holds a single node in both of its slots and `{ a as a }` holds two spelling one
+        name, and neither is written with an `as`; anything else is, whatever kind of node stands
+        there. A module export name written as a string is not a name node at all, and a position
+        the parser could not read is an error node, so deciding this by node class rather than by
+        what the two nodes say would drop the half that carries the meaning.
+        """
+        if written is None or other is None or written is other:
+            return False
+        if isinstance(written, JsIdentifier) and isinstance(other, JsIdentifier):
+            return written.name != other.name
+        return True
+
     def visit_JsImportSpecifier(self, node: JsImportSpecifier):
         if node.imported:
             self.visit(node.imported)
-        if (
-            node.local and node.imported
-            and isinstance(node.local, JsIdentifier)
-            and isinstance(node.imported, JsIdentifier)
-            and node.local.name != node.imported.name
-        ):
+        local = node.local
+        if local is not None and self._renames(local, node.imported):
             self._write(' as ')
-            self.visit(node.local)
+            self.visit(local)
 
     def visit_JsImportDefaultSpecifier(self, node: JsImportDefaultSpecifier):
         if node.local:
@@ -1083,14 +1098,10 @@ class JsSynthesizer(Synthesizer):
     def visit_JsExportSpecifier(self, node: JsExportSpecifier):
         if node.local:
             self.visit(node.local)
-        if (
-            node.exported and node.local
-            and isinstance(node.exported, JsIdentifier)
-            and isinstance(node.local, JsIdentifier)
-            and node.exported.name != node.local.name
-        ):
+        exported = node.exported
+        if exported is not None and self._renames(exported, node.local):
             self._write(' as ')
-            self.visit(node.exported)
+            self.visit(exported)
 
     def visit_JsScript(self, node: JsScript):
         promoted = promoted_use_strict(node.body)

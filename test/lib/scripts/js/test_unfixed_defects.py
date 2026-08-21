@@ -57,10 +57,7 @@ from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_
 from refinery.lib.scripts.js.analysis.model import is_use_position
 from refinery.lib.scripts.js.model import (
     JsBigIntLiteral,
-    JsExportAllDeclaration,
-    JsExportSpecifier,
     JsIdentifier,
-    JsImportSpecifier,
     JsNumericLiteral,
     JsProperty,
     JsPropertyDefinition,
@@ -1375,64 +1372,22 @@ class TestAPropertyWriteThroughAShadowedGlobalAliasSurvives(TestBase):
         )
 
 
-def _the_module_export_name(source: str) -> str | None:
-    """
-    The name the one specifier of *source* reaches across the module boundary with, which is the
-    text denoted by the string literal written in that position. A position holding anything other
-    than a string literal denotes no text at all, and nothing is what that is reported as.
-    """
-    for node in JsParser(source).parse().walk_in_order():
-        if isinstance(node, JsImportSpecifier):
-            written = node.imported
-        elif isinstance(node, (JsExportSpecifier, JsExportAllDeclaration)):
-            written = node.exported
-        else:
-            continue
-        return written.value if isinstance(written, JsStringLiteral) else None
-    return None
-
-
-class TestAModuleExportNameWrittenAsAStringIsAString(TestBase):
+class TestAStringNamedSpecifierTheGrammarBansIsRefused(TestBase):
     """
     An import or export list may name what it reads or writes across the module boundary with a
     string literal instead of a word, which is how a module reaches a name no identifier spells.
-    What such a specifier names is the text the literal denotes: the quotes are how it was written
-    and are no part of it, and an escape in it stands for the character it denotes.
+    What such a specifier names is the text the literal denotes, and
+    `test.lib.scripts.js.test_module_export_names` states that law and the tool's compliance with
+    it.
 
-    The text of every one of these declarations prints back exactly as it was written, and that is
-    not what is wrong. What is wrong is the tree behind it. The literal is read as though it were a
-    word and kept as a `refinery.lib.scripts.js.model.JsIdentifier` whose name is the raw spelling,
-    quotes and all, so a consumer reading that name reads a name no module has, two spellings of
-    the one name are two names, and the rules the grammar attaches to a name written as a string
-    are rules the parser is never in a position to apply.
+    Where the literal may stand is the part that is still wrong. Three positions the grammar bans
+    it in are read all the same, so `refinery.lib.scripts.is_well_formed` answers `True` for a tree
+    that spells no program, which is the domain every fidelity law is stated over. Nothing is
+    answered wrongly: each of the three prints back as the text it was written as.
 
     Every answer below is Node's over a `.mjs` file, a module being the only kind of code these
-    declarations appear in: `node --check` for what it refuses, and running the file for what it
-    prints.
+    declarations appear in.
     """
-
-    @unittest.expectedFailure
-    def test_a_name_written_as_a_string_is_the_text_that_string_denotes(self):
-        """
-        A module re-exporting `{ a as 'b c' }` and one importing `{ 'b c' as v }` from it print `1`
-        together, and so do the same two with the `b` of the importing module's name written as a
-        `u` escape: the name a boundary matches on is the text the literal denotes and not the way
-        that text was spelled. An importing module asking for the name `"'b c'"` instead is refused
-        with `SyntaxError: The requested module './mid.mjs' does not provide an export named
-        ''b c''`, which is those quotes being taken for part of the name.
-        """
-        escaped = F'{chr(92)}u0062 c'
-        sources = [
-            "export { a as 'b c' } from 'm';",
-            F"export {{ a as '{escaped}' }} from 'm';",
-            "import { 'b c' as v } from 'm';",
-            "export * as 'b c' from 'm';",
-            "var a = 1; export { a as 'b c' };",
-        ]
-        self.assertEqual(
-            [_the_module_export_name(source) for source in sources],
-            ['b c'] * len(sources),
-        )
 
     @unittest.expectedFailure
     def test_a_string_named_specifier_the_grammar_bans_is_not_a_well_formed_program(self):

@@ -15,6 +15,11 @@ at all, is not a name either. And a grammar terminal cannot be spelled with an e
 language reads for a terminal word, an escaped spelling of that word does not match it, while a name
 whose escapes spell such a word is still a perfectly good name in every position that holds one.
 
+A fourth is about where a name may stand rather than about what it is. `eval` and `arguments` are
+the two names strict code refuses to bind in a parameter list, and Node decides that over the
+characters typed: the escaped spelling binds what the plain one may not, and the file holding it is
+one the engine reads.
+
 Every case here is decided by Node, which is asked what the program does before the tool is asked to
 agree. The hazard the module is written against is its own: a unicode escape typed into a Python
 string is resolved by Python and reaches JavaScript as the character it names, so every escape here
@@ -410,6 +415,63 @@ THE_SAME_FILE_WITH_NO_ESCAPE_AT_ALL = (
 )
 
 
+#: A program binding a parameter named `eval` or `arguments` with one character written as an
+#: escape, mapped to what Node prints for it. Every one of them is a file the engine reads and every
+#: one of them binds a name the same file could not bind written out, in each of the four places a
+#: parameter list stands: a function declaration, a function expression, a setter, and a class
+#: method whose body is strict with no directive saying so.
+A_PARAMETER_NAMED_EVAL_OR_ARGUMENTS_WITH_AN_ESCAPE = _programs({
+    "'use strict'; function f(evESCAPED[0061]l){ return 1; } console.log(typeof f);":
+        'function\n',
+    "'use strict'; function f(argumentESCAPED[0073]){ return 1; } console.log(typeof f);":
+        'function\n',
+    "'use strict'; var q = function (evESCAPED[0061]l){ return 1; }; console.log(typeof q);":
+        'function\n',
+    "'use strict'; var q = function (argumentESCAPED[0073]){ return 1; }; console.log(typeof q);":
+        'function\n',
+    "'use strict'; var q = { set p(evESCAPED[0061]l){} }; console.log(typeof q);": 'object\n',
+    "'use strict'; var q = { set p(argumentESCAPED[0073]){} }; console.log(typeof q);": 'object\n',
+    'class C { m(evESCAPED[0061]l){} } console.log(typeof C);': 'function\n',
+    'class C { m(argumentESCAPED[0073]){} } console.log(typeof C);': 'function\n',
+})
+
+
+#: The same eight programs with the escape written out, which is the one difference between them and
+#: the eight above.
+THE_SAME_PARAMETER_WRITTEN_OUT = (
+    "'use strict'; function f(eval){ return 1; } console.log(typeof f);",
+    "'use strict'; function f(arguments){ return 1; } console.log(typeof f);",
+    "'use strict'; var q = function (eval){ return 1; }; console.log(typeof q);",
+    "'use strict'; var q = function (arguments){ return 1; }; console.log(typeof q);",
+    "'use strict'; var q = { set p(eval){} }; console.log(typeof q);",
+    "'use strict'; var q = { set p(arguments){} }; console.log(typeof q);",
+    'class C { m(eval){} } console.log(typeof C);',
+    'class C { m(arguments){} } console.log(typeof C);',
+)
+
+
+#: A program written with an escape, mapped to the text the tool writes for it with no pass run over
+#: it. The first three name something an escape is the only unusual thing about, and the plain
+#: spelling of each is the same program, so the escape is spent rather than kept. The last three are
+#: the names for which it is not: two a rule is stated over the text of, and one a production
+#: matches as a terminal.
+A_NAME_WRITTEN_WITH_AN_ESCAPE_AND_THE_TEXT_IT_COMES_BACK_AS = {
+    _spelled_with_escapes(source): expected
+    for source, expected in {
+        'var ESCAPED[0061]bc = 1;': 'var abc = 1;',
+        'console.log(o.ESCAPED[0061]bc);': 'console.log(o.abc);',
+        'class ESCAPED[0043]ls {}': 'class Cls {}',
+        "'use strict'; function f(evESCAPED[0061]l){ return 1; }":
+            _spelled_with_escapes(
+                "'use strict';\nfunction f(evESCAPED[0061]l) {\n  return 1;\n}"),
+        "'use strict'; function f(argumentESCAPED[0073]){ return 1; }":
+            _spelled_with_escapes(
+                "'use strict';\nfunction f(argumentESCAPED[0073]) {\n  return 1;\n}"),
+        'var lESCAPED[0065]t = 1;': _spelled_with_escapes('var lESCAPED[0065]t = 1;'),
+    }.items()
+}
+
+
 #: A program with no escape anywhere, mapped to what Node prints for it. Each is the twin of a
 #: program above and says what that program says without asking anything about a spelling, so a
 #: change that moved one of these would be a change to something else entirely.
@@ -642,11 +704,19 @@ class TestAKeyReadsBackAsTheCodeUnitsItIsSpelledIn(TestBase):
             each_program_still_prints(rows),
         )
 
+
+class TestTheThreeSpellingsOfAnAstralKeyFoldToOneText(TestBase):
+    """
+    The tool's half of `TestAKeyReadsBackAsTheCodeUnitsItIsSpelledIn`, which needs no engine to ask:
+    the three spellings are one key, so the three folds are one text.
+    """
+
     def test_the_three_spellings_of_an_astral_key_fold_to_the_same_text(self):
         """
         Each of the three programs folds to one call, and the constants in it are the ones Node
-        prints. A key held as one code point folds the identifier-named spelling to a different
-        length and a different first unit than the string-literal spelling it is identical to.
+        prints for the class above. A key held as one code point folds the identifier-named spelling
+        to a different length and a different first unit than the string-literal spelling it is
+        identical to.
         """
         self.assertEqual(
             [folded(_reading_back_the_units_of(key)) for key in AN_ASTRAL_KEY_SPELLED_THREE_WAYS],
@@ -765,6 +835,7 @@ class TestAProgramNodeRefusesIsNotAnsweredWithOneThatRuns(TestBase):
         self.assertEqual(_unspelled(rows), [])
         self.assertEqual({source: before_and_after(source) for source in rows}, _refused(rows))
 
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestANameSpellingATerminalWordKeepsTheSpellingThatRuns(TestBase):
     """
@@ -802,13 +873,68 @@ class TestANameSpellingATerminalWordKeepsTheSpellingThatRuns(TestBase):
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAParameterNamedEvalOrArgumentsKeepsTheSpellingThatRuns(TestBase):
+    """
+    `eval` and `arguments` are the two names a parameter list may not bind in strict code, and the
+    engine decides that over the characters typed rather than over the name they denote: the two
+    programs differ in nothing but an escape, and the engine reads one of them and refuses the
+    other. A name is what its escapes denote everywhere else in this module, and this is the one
+    place where writing that name out is not the same file.
+    """
+
+    def test_a_parameter_named_by_an_escape_binds_what_the_plain_spelling_may_not(self):
+        """
+        Node prints `function` for six of the eight programs of
+        `A_PARAMETER_NAMED_EVAL_OR_ARGUMENTS_WITH_AN_ESCAPE` and `object` for the two whose setter
+        stands in an object literal, the parameter being named `eval` or `arguments` with one
+        character written as an escape in a function declaration, a function expression, a setter
+        and a class method.
+        """
+        rows = A_PARAMETER_NAMED_EVAL_OR_ARGUMENTS_WITH_AN_ESCAPE
+        self.assertEqual(_unspelled(rows), [])
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_the_same_parameter_written_out_is_no_program(self):
+        """
+        The control for the test above. Node refuses all eight programs of
+        `THE_SAME_PARAMETER_WRITTEN_OUT` with a `SyntaxError` and prints nothing, the escape being
+        the whole of what separates each from the program above that runs. The two class methods
+        carry no directive, a class body being strict code without one.
+        """
+        rows = THE_SAME_PARAMETER_WRITTEN_OUT
+        self.assertEqual({source: before_and_after(source) for source in rows}, _refused(rows))
+
+
+class TestAnEscapeIsSpentWhereThePlainSpellingIsTheSameProgram(TestBase):
+    """
+    A name is written back out as itself, and the spelling it was typed with is kept only where that
+    spelling is what says which reading the file meant. Two kinds of word are: one a production
+    matches as a terminal, and one a rule is stated over the characters of.
+    """
+
+    def test_a_name_comes_back_written_plainly_wherever_that_is_the_same_program(self):
+        """
+        The six programs of `A_NAME_WRITTEN_WITH_AN_ESCAPE_AND_THE_TEXT_IT_COMES_BACK_AS`, spelled
+        by the synthesizer with no pass run over them. The first three lose the escape, naming a
+        variable, a member and a class; the two parameters and the array named `let` keep it, and
+        the programs `TestAParameterNamedEvalOrArgumentsKeepsTheSpellingThatRuns` and
+        `TestANameSpellingATerminalWordKeepsTheSpellingThatRuns` run are what say they must.
+        """
+        rows = A_NAME_WRITTEN_WITH_AN_ESCAPE_AND_THE_TEXT_IT_COMES_BACK_AS
+        self.assertEqual(_unspelled(rows), [])
+        self.assertEqual({source: printed(source) for source in rows}, rows)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAProgramWithNothingToRespellIsLeftAlone(TestBase):
     """
     The controls the rest of the module rests on. A program with no escape in it must answer the
-    same before and after, or a change reported above was a change to something else; a string that
-    merely looks like a directive is a string, and the escape in it is part of a value rather than
-    part of a name; and a file the tool has nothing to reduce in has to come back as the file it
-    went in as.
+    same before and after, or a change reported above was a change to something else; and a string
+    that merely looks like a directive is a string, the escape in it being part of a value rather
+    than part of a name.
     """
 
     def test_an_equivalent_program_with_no_escape_prints_the_same(self):
@@ -848,6 +974,15 @@ class TestAProgramWithNothingToRespellIsLeftAlone(TestBase):
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
         )
+
+
+class TestAProgramTheToolOnlyMovesComesBackAsItWent(TestBase):
+    """
+    The tool's half of `TestAProgramWithNothingToRespellIsLeftAlone`, which needs no engine to ask.
+    A file the tool has nothing to reduce in has to come back as the file it went in as, and what
+    makes that a question is that writing either name out plainly changes what the program does or
+    whether it is one at all.
+    """
 
     def test_a_program_the_tool_only_moves_comes_back_as_the_same_program(self):
         """

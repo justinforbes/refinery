@@ -52,7 +52,6 @@ parser reads statement by statement, so an exception raised in it is not a diagn
 of the token stream, and every statement behind the escape disappears with it.
 """
 
-_IDENTIFIER_PUNCTUATION = frozenset('_$')
 _IDENTIFIER_JOINERS = frozenset('\u200c\u200d')
 """
 The zero width non-joiner and the zero width joiner, which are IdentifierPart and nothing else: they
@@ -66,43 +65,56 @@ def _begins_unicode_escape(src: str, pos: int) -> bool:
 
 
 _ASCII_NAME_START = frozenset('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$')
-_ASCII_NAME_PART = _ASCII_NAME_START | frozenset('0123456789')
+_ASCII_NAME_PART = _ASCII_NAME_START | _DECIMAL
 """
 The characters almost every name is written with, asked first because asking the Unicode database
-per character is what the scan spends its time on otherwise.
+per character is what the scan spends its time on otherwise. These two are the whole of ASCII that
+a name may hold — `_` is the one Pc below the eighth bit and `$` is in no category IdentifierStart
+names at all — so an ASCII character that is in neither is in no name, and the character that ends
+a name is the one the scan asks about most.
 """
 
 _ID_START_CATEGORIES = frozenset({'Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'Nl'})
 _ID_CONTINUE_CATEGORIES = _ID_START_CATEGORIES | frozenset({'Mn', 'Mc', 'Nd', 'Pc'})
 _OTHER_ID_START = frozenset('\u1885\u1886\u2118\u212e\u309b\u309c')
 _OTHER_ID_CONTINUE = frozenset(
-    '\u00b7\u0387\u1369\u136a\u136b\u136c\u136d\u136e\u136f\u1370\u1371\u19da')
+    '\u00b7\u0387\u1369\u136a\u136b\u136c\u136d\u136e\u136f\u1370\u1371\u19da\u30fb\uff65'
+)
 """
-ID_Start and ID_Continue as UAX #31 defines them and ECMA-262 11.6 adopts them, with the two
-lists of characters those properties name outright because their category alone would leave them
-out. A name is written with these and not with what a locale calls a letter: an accent written
-as its own combining character, the middle dot of a Catalan `l·l`, and an undertie are all
-IdentifierPart, and reading a name as though they were not ends it early and reads what follows
-as an operator.
+ID_Start and ID_Continue as UAX #31 defines them and ECMA-262 11.6 adopts them, with the two lists
+of characters those properties name outright because their category alone would leave them out. A
+name is written with these and not with what a locale calls a letter: an accent written as its own
+combining character, the middle dot of a Catalan `l·l`, the katakana middle dot, and an undertie
+are all IdentifierPart, and reading a name as though they were not ends it early and reads what
+follows as an operator.
+
+Other_ID_Continue is a list Unicode extends, and the two lists here are the ones Unicode 15.1
+names, which is what `unicodedata` on this interpreter answers the categories from. A database
+holding a different revision than these lists were written against disagrees with the categories
+beside them rather than with anything stated here.
+"""
+
+_EXTRA_NAME_PART = _IDENTIFIER_JOINERS | _OTHER_ID_START | _OTHER_ID_CONTINUE
+"""
+Every character IdentifierPart takes beyond what its categories give it, asked as one membership
+so that the tail of the scan's per-character question is a single lookup.
 """
 
 
 def _opens_a_name(c: str) -> bool:
     if c in _ASCII_NAME_START:
         return True
+    if c.isascii():
+        return False
     return unicodedata.category(c) in _ID_START_CATEGORIES or c in _OTHER_ID_START
 
 
 def _continues_a_name(c: str) -> bool:
     if c in _ASCII_NAME_PART:
         return True
-    if unicodedata.category(c) in _ID_CONTINUE_CATEGORIES:
-        return True
-    return (
-        c in _IDENTIFIER_JOINERS
-        or c in _OTHER_ID_START
-        or c in _OTHER_ID_CONTINUE
-    )
+    if c.isascii():
+        return False
+    return unicodedata.category(c) in _ID_CONTINUE_CATEGORIES or c in _EXTRA_NAME_PART
 
 
 def _at_identifier_start(src: str, pos: int) -> bool:

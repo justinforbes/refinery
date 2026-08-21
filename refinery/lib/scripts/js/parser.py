@@ -1277,14 +1277,22 @@ class JsParser:
         anywhere yet, so nothing is lost by reading the shorthand here rather than gained by reading
         it as a binding.
 
-        A word and a string literal are the whole of what the grammar writes here, so anything else
-        is a token the parser steps over in order to answer with a name at all, and reading `,` as
-        the name a module exports under is a repair however well it prints back.
+        A word and a string literal are the whole of what the grammar writes here, and the two
+        are different productions rather than two spellings of one. A string is read as the
+        literal it is, because what it names is the text it denotes and not the way that text
+        was written:
+
+            export { a as 'b c' } from 'm';
+            export { a as 'b\\u0020c' } from 'm';
+
+        reach the one name `b c`, which no word spells, and asking a name reader for either
+        would hand it a text that opens with a quote. Anything else is a token the parser steps
+        over in order to answer with a name at all, and reading `,` as the name a module exports
+        under is a repair however well it prints back.
         """
-        if not (
-            self._at_identifier_name()
-            or self._at(JsTokenKind.STRING_SINGLE, JsTokenKind.STRING_DOUBLE)
-        ):
+        if self._at(JsTokenKind.STRING_SINGLE, JsTokenKind.STRING_DOUBLE):
+            return self._parse_string_literal()
+        if not self._at_identifier_name():
             self._recovered = True
         tok = self._advance()
         return self._name_or_error(tok.value, tok.offset, may_be_reserved=True)

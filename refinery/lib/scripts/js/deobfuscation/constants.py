@@ -526,10 +526,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
                 continue
             if not reaching.value_preserved(binding, entry.value, node):
                 continue
-            if not substitute_use_position(node, _clone_node(entry.value)):
-                continue
-            self.mark_changed()
-            inlined[name] = inlined.get(name, 0) + 1
+            substituted = substitute_use_position(node, _clone_node(entry.value))
+            self._record_inline(substituted, name, inlined)
 
         self._substitute_const_across_functions(
             scope, candidates, decl_ids, bloat_blocked, inlined, effects, dominance,
@@ -549,6 +547,17 @@ class JsConstantInlining(ScopeProcessingTransformer):
         if binding is None:
             return False
         return effects.binding_is_immutable_container(binding)
+
+    def _record_inline(self, substituted: bool, name: str, inlined: dict[str, int]) -> None:
+        """
+        Announce one inlining of *name*, where it happened. Every edit this pass makes reports
+        whether it found the slot it was aiming at, and a pass that announces a change it did not
+        make announces one every round: the fixpoint the pipeline runs it in never closes.
+        """
+        if not substituted:
+            return
+        self.mark_changed()
+        inlined[name] = inlined.get(name, 0) + 1
 
     def _apply_index_access_inline(
         self,
@@ -571,9 +580,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
         element = value.elements[idx]
         if element is None or not is_literal(element):
             return
-        _replace_in_parent(member, _clone_node(element))
-        self.mark_changed()
-        inlined[name] = inlined.get(name, 0) + 1
+        substituted = _replace_in_parent(member, _clone_node(element))
+        self._record_inline(substituted, name, inlined)
 
     def _substitute_const_across_functions(
         self,
@@ -711,10 +719,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
                 and model.lookup(entry.value.name, model.scope_of(node)) is not None
             ):
                 continue
-            if not substitute_use_position(node, _clone_node(entry.value)):
-                continue
-            self.mark_changed()
-            inlined[name] = inlined.get(name, 0) + 1
+            substituted = substitute_use_position(node, _clone_node(entry.value))
+            self._record_inline(substituted, name, inlined)
 
     def _substitute_expressions(
         self,
@@ -779,10 +785,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
                 continue
             if not self._free_variables_preserved(entry.value, node, model, reaching):
                 continue
-            if not substitute_use_position(node, _clone_node(entry.value)):
-                continue
-            self.mark_changed()
-            inlined[name] = inlined.get(name, 0) + 1
+            substituted = substitute_use_position(node, _clone_node(entry.value))
+            self._record_inline(substituted, name, inlined)
         return inlined
 
     @staticmethod
@@ -921,9 +925,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
             element = entry.array.elements[idx]
             if element is None or not is_literal(element):
                 continue
-            _replace_in_parent(node, _clone_node(element))
-            self.mark_changed()
-            inlined[key] = inlined.get(key, 0) + 1
+            substituted = _replace_in_parent(node, _clone_node(element))
+            self._record_inline(substituted, key, inlined)
 
     def _remove_dead_member_arrays(
         self,

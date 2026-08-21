@@ -264,14 +264,38 @@ that a name written as one of them may be read as the terminal instead. `class C
 declares one member and `class C { static; m(){} }` declares two.
 """
 
+SPELLING_REFUSED_NAMES: frozenset[str] = frozenset({
+    'eval',
+    'arguments',
+})
+"""
+The names whose two spellings a running engine tells apart, so that re-spelling one from the name it
+denotes changes what the file does. ECMA-262 states the early error over the StringValue and refuses
+both spellings, and V8 refuses both the moment it compiles the function for real — but it does not
+compile a function it has not been asked to run, and its pre-parser reads the escaped spelling
+without complaint. So `'use strict'; function f(eval) {}` is a file V8 refuses outright and
+`'use strict'; function f(ev\\u0061l) {}` is one it loads, and a file whose function is never called
+runs or does not depending on which of the two was written.
+
+Measured against Node 24 over 28 words in 12 positions: these two in a parameter list are the whole
+of where the spelling decides, and every other word ECMA-262 reserves is refused in both spellings
+alike. Nothing here says the escaped spelling is a program — only that writing the name out is a
+different one, which is the whole of what a synthesizer needs to know.
+"""
+
 
 def spells_only_a_name(name: str) -> bool:
     """
-    Whether *name* written as itself can be read as nothing but a name. Where it cannot, the source
-    spelling is the only text that says which of the two readings was meant, and a synthesizer that
-    re-spells such a name from what it denotes writes the other one.
+    Whether *name* written as itself is read as that name and as nothing else. Two kinds of word
+    are not: one a production matches as a terminal, and one a rule is stated over the spelling of.
+    In either case the source spelling is the only text that says which reading was meant, and a
+    synthesizer that re-spells such a name from what it denotes writes the other one.
     """
-    return name not in KEYWORDS and name not in TERMINAL_IDENTIFIERS
+    return (
+        name not in KEYWORDS
+        and name not in TERMINAL_IDENTIFIERS
+        and name not in SPELLING_REFUSED_NAMES
+    )
 
 
 _ASSIGNMENT_SET = frozenset({

@@ -4,7 +4,13 @@ import re
 
 
 _ABOVE_THE_BASIC_PLANE = re.compile('[\U00010000-\U0010FFFF]')
-_SURROGATE_PAIR = re.compile('[\ud800-\udbff][\udc00-\udfff]')
+
+SURROGATE_PAIR = re.compile('[\ud800-\udbff][\udc00-\udfff]')
+"""
+The two code units that spell one character above the basic plane, which is the one shape both
+readings of such a string have to agree on: what `from_code_units` joins back into a character
+and what a walk over code points takes one step across.
+"""
 
 
 def code_units(value: int) -> str:
@@ -22,32 +28,40 @@ def code_units(value: int) -> str:
     return chr(0xD800 + (value >> 10)) + chr(0xDC00 + (value & 0x3FF))
 
 
+def _spell_as_units(match: re.Match[str]) -> str:
+    return code_units(ord(match.group()))
+
+
+def _join_pair(match: re.Match[str]) -> str:
+    high, low = match.group()
+    return chr(0x10000 + ((ord(high) - 0xD800) << 10) + (ord(low) - 0xDC00))
+
+
 def to_code_units(text: str) -> str:
     """
     The string *text* holds, rewritten so every character is one UTF-16 code unit: a code point
     above the basic plane becomes the surrogate pair that spells it. A code unit is left
     unchanged, so a string already in this form, one holding surrogate pairs or a lone surrogate,
     passes through untouched, which makes applying this at a value's every point of entry safe to
-    repeat.
+    repeat. Text that is all ASCII holds no such character and is handed straight back, which is
+    what almost every name and almost every string is.
     """
-    return _ABOVE_THE_BASIC_PLANE.sub(lambda m: code_units(ord(m.group())), text)
+    if text.isascii():
+        return text
+    return _ABOVE_THE_BASIC_PLANE.sub(_spell_as_units, text)
 
 
 def from_code_units(text: str) -> str:
     """
     The characters *text* spells, undoing `to_code_units`: a pair of surrogates becomes the one code
-    point it encodes. A string held as code units cannot be written to a file as it stands, because
-    a surrogate is not a character any encoding spells, and whatever holds such a string has to spell
-    it out again before anything reads it as text.
+    point it encodes. A string held as code units cannot be written to a file as it stands,
+    because a surrogate is not a character any encoding spells, and whatever holds such a string
+    has to spell it out again before anything reads it as text.
 
     A lone surrogate is left standing, since no pairing rule may invent the partner it lacks, and a
-    string with none in it comes back unchanged.
+    string with none in it comes back unchanged. ASCII text holds no surrogate, so it is handed
+    straight back without a scan.
     """
-    return _SURROGATE_PAIR.sub(
-        lambda match: chr(
-            0x10000
-            + ((ord(match.group()[0]) - 0xD800) << 10)
-            + (ord(match.group()[1]) - 0xDC00)
-        ),
-        text,
-    )
+    if text.isascii():
+        return text
+    return SURROGATE_PAIR.sub(_join_pair, text)

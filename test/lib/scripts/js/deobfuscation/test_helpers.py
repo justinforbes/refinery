@@ -6,8 +6,9 @@ import unittest
 
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
+from test.lib.scripts.js.ledger import printed
 
-from refinery.lib.scripts.js.analysis.model import build_semantic_model
+from refinery.lib.scripts.js.analysis.model import build_semantic_model, is_use_position
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     JS_NULL,
     JsBuffer,
@@ -17,13 +18,18 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     insert_after_prologue,
     make_numeric_literal,
     make_string_literal,
+    substitute_params,
+    substitute_use_position,
     value_to_node,
 )
 from refinery.lib.scripts.js.lexer import decode_js_string_body
 from refinery.lib.scripts.js.model import (
     JsBlockStatement,
     JsExpressionStatement,
+    JsFunctionDeclaration,
     JsIdentifier,
+    JsObjectExpression,
+    JsProperty,
     JsStaticBlock,
     JsStringLiteral,
     JsVariableDeclaration,
@@ -431,3 +437,201 @@ class TestHoistingBehindADirectivePrologue(TestJsDeobfuscator):
             ),
             self._hoisted_into("function f() { 'use strict'; log(1); }", JsBlockStatement),
         )
+
+
+#: A program naming something in a position no value may be put in. Between them the thirteen reach
+#: every such position the language has: the member after a dot, a key of an object literal, the
+#: name of a class method and of a class field, the key of an import attribute, a label and the two
+#: jumps to one, the name a module is re-exported under, both halves of an import specifier, the
+#: local of a default and of a namespace import, and both halves of an export specifier.
+A_NAME_NO_VALUE_MAY_BE_PUT_IN_THE_PLACE_OF = (
+    'console.log(q.zz);',
+    'console.log({ zz: 1 });',
+    'class C { zz(){} }',
+    'class C { zz = 1; }',
+    "import d from 'm' with { zz: 'json' };",
+    'zz: while (0) break zz;',
+    'zz: while (0) continue zz;',
+    "export * as zz from 'm';",
+    "import { zz as q } from 'm';",
+    "import zz from 'm';",
+    "import * as zz from 'm';",
+    'var q = 1; export { q as zz };',
+    "export { zz } from 'm';",
+)
+
+#: The parent node classes the corpus above stands under, which is what says the law over it is
+#: quantified over every kind of position rather than over whichever ones a program happened to
+#: hold.
+THE_KINDS_OF_POSITION_THAT_CORPUS_REACHES = [
+    'JsBreakStatement',
+    'JsContinueStatement',
+    'JsExportAllDeclaration',
+    'JsExportSpecifier',
+    'JsImportAttribute',
+    'JsImportDefaultSpecifier',
+    'JsImportNamespaceSpecifier',
+    'JsImportSpecifier',
+    'JsLabeledStatement',
+    'JsMemberExpression',
+    'JsMethodDefinition',
+    'JsProperty',
+    'JsPropertyDefinition',
+]
+
+#: A shorthand property whose one identifier is read and which is still not written out. `{ x }` is
+#: `{ x: x }` for every name but `__proto__`, which written with the colon sets the object's
+#: prototype and gives it no property of that name at all; and a shorthand carrying a computed key
+#: is a shape no source spells, so there is no one program that writing it out could be said to
+#: mean.
+A_SHORTHAND_READ_BUT_NOT_WRITTEN_OUT = (
+    'var __proto__ = 1; console.log({ __proto__ });',
+    'console.log({ [zz] });',
+)
+
+#: A program naming something a value may stand in the place of, mapped to the program that stands
+#: once it does. The shorthand is the one written out rather than replaced, since its one identifier
+#: is the key as much as it is the read and only the read may move.
+A_NAME_A_VALUE_STANDS_IN_THE_PLACE_OF = {
+    'console.log(zz);': 'console.log(5);',
+    'var q = {}; console.log(q[zz]);': 'var q = {};\nconsole.log(q[5]);',
+    'console.log({ zz });': 'console.log({ zz: 5 });',
+    'console.log({ q: zz });': 'console.log({ q: 5 });',
+    'zz.p = 1;': '(5).p = 1;',
+}
+
+
+class TestTheOneGateEverySubstitutionGoesThrough(TestJsDeobfuscator):
+    """
+    `refinery.lib.scripts.js.deobfuscation.helpers.substitute_use_position` is where every pass puts
+    a substitution, and what it decides is whether the position reads a value at all.
+    `refinery.lib.scripts.js.analysis.model.is_use_position` is the statement of that, and the gate
+    refuses everything it refuses: text standing in one of those positions names a property, a label
+    or a module binding, and a value put there is not a rename but a different program — `o.5`,
+    `{ -2: 1 }`, `5: while (0) break 5;`, `import { 5 } from 'm'`.
+
+    Whether a name in a use position is a *reference* is the caller's question and not this one: a
+    name bound by a destructuring pattern is written like a read and no syntactic test tells the two
+    apart, so a declarator id is answered here exactly as a read of it would be.
+
+    The answer is what a caller announcing a change reads, so a declined substitution has to leave
+    the tree it was handed: a pass that reports a change it did not make reports one every round,
+    and the fixpoint it sits in never arrives.
+    """
+
+    @staticmethod
+    def _identifiers(source: str) -> list[JsIdentifier]:
+        """
+        Every identifier of *source*, once each and in the order a walk reaches them. A shorthand
+        property is one node filling two slots of its parent and a walk arrives at it through both,
+        so counting nodes rather than visits is what keeps `{ q }` from reading as two identifiers.
+        """
+        found: dict[int, JsIdentifier] = {}
+        for node in JsParser(source).parse().walk():
+            if isinstance(node, JsIdentifier):
+                found.setdefault(id(node), node)
+        return list(found.values())
+
+    def _substituted(self, source: str, index: int) -> tuple[bool, str]:
+        """
+        What the gate answers for the identifier standing at *index* in *source*, and the program
+        that stands afterwards. The source is parsed afresh for every question, since the gate
+        rewrites the tree it is given and a second question asked of that tree is a question about
+        some other program.
+        """
+        tree = JsParser(source).parse()
+        found: dict[int, JsIdentifier] = {}
+        for node in tree.walk():
+            if isinstance(node, JsIdentifier):
+                found.setdefault(id(node), node)
+        answer = substitute_use_position(list(found.values())[index], make_numeric_literal(5))
+        return answer, JsSynthesizer().convert(tree)
+
+    def _substituted_by_name(self, source: str, name: str) -> tuple[bool, str]:
+        indices = [
+            index for index, node in enumerate(self._identifiers(source)) if node.name == name
+        ]
+        self.assertEqual(len(indices), 1, source)
+        return self._substituted(source, indices[0])
+
+    def _substituted_shorthand(self, source: str) -> tuple[bool, bool, str]:
+        """
+        Whether the value half of the one shorthand property of *source* reads a value, what the
+        gate answers for it, and the program that stands afterwards.
+        """
+        tree = JsParser(source).parse()
+        shorthand = [
+            node for node in tree.walk()
+            if isinstance(node, JsProperty) and node.shorthand
+        ][0]
+        node = shorthand.value
+        assert isinstance(node, JsIdentifier)
+        answer = substitute_use_position(node, make_numeric_literal(5))
+        return is_use_position(node), answer, JsSynthesizer().convert(tree)
+
+    def _refused_positions(self) -> dict[tuple[str, int], str]:
+        return {
+            (source, index): type(node.parent).__name__
+            for source in A_NAME_NO_VALUE_MAY_BE_PUT_IN_THE_PLACE_OF
+            for index, node in enumerate(self._identifiers(source))
+            if not is_use_position(node)
+        }
+
+    def test_the_corpus_reaches_every_kind_of_position_no_value_may_stand_in(self):
+        self.assertEqual(
+            sorted(set(self._refused_positions().values())),
+            THE_KINDS_OF_POSITION_THAT_CORPUS_REACHES,
+        )
+
+    def test_a_position_the_model_says_reads_nothing_is_refused_and_nothing_moves(self):
+        """
+        Every identifier of `A_NAME_NO_VALUE_MAY_BE_PUT_IN_THE_PLACE_OF` that `is_use_position`
+        refuses, handed to the gate one at a time: the answer is `False` and the program that stands
+        afterwards is the one that stood before.
+        """
+        rows = self._refused_positions()
+        self.assertEqual(
+            {key: self._substituted(*key) for key in rows},
+            {(source, index): (False, printed(source)) for source, index in rows},
+        )
+
+    def test_a_shorthand_the_gate_may_not_write_out_is_refused_although_it_is_read(self):
+        """
+        The two shorthand properties of `A_SHORTHAND_READ_BUT_NOT_WRITTEN_OUT` stand where
+        `is_use_position` says a value is read, and the gate declines both, leaving each program as
+        it found it.
+        """
+        rows = A_SHORTHAND_READ_BUT_NOT_WRITTEN_OUT
+        self.assertEqual(
+            {source: self._substituted_shorthand(source) for source in rows},
+            {source: (True, False, printed(source)) for source in rows},
+        )
+
+    def test_a_position_that_reads_a_value_takes_the_replacement(self):
+        """
+        Each program of `A_NAME_A_VALUE_STANDS_IN_THE_PLACE_OF` with the numeral `5` put where `zz`
+        stood, the gate answering `True` for every one of them.
+        """
+        rows = A_NAME_A_VALUE_STANDS_IN_THE_PLACE_OF
+        self.assertEqual(
+            {source: self._substituted_by_name(source, 'zz') for source in rows},
+            {source: (True, printed(expected)) for source, expected in rows.items()},
+        )
+
+    def test_a_shorthand_whose_halves_are_two_nodes_is_written_out_once(self):
+        """
+        A parse builds one node for both halves of `{ a }` and a clone builds two, so a caller
+        walking a cloned tree offers the gate the key and the value separately and in whichever
+        order it reaches them. `substitute_params` is such a caller: inlining `5` for `a` writes the
+        property out once, and the numeral lands in the half that reads it.
+        """
+        source = 'function f(a) { return { a }; }'
+        function = [
+            node for node in JsParser(source).parse().walk()
+            if isinstance(node, JsFunctionDeclaration)
+        ][0]
+        literal = [
+            node for node in function.walk() if isinstance(node, JsObjectExpression)
+        ][0]
+        substituted = substitute_params(literal, function.params, [make_numeric_literal(5)])
+        self.assertEqual(JsSynthesizer().convert(substituted), '{ a: 5 }')

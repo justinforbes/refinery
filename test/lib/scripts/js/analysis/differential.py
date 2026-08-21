@@ -10,7 +10,9 @@ name through `globalThis` afterwards, which is the only way to observe a declara
 global object — and therefore the only way to observe whether an entrypoint a host would call survived.
 `behavior(source, module=True)` runs it as an ECMAScript module, which is the only one of the three
 that is strict code without a directive saying so, and the only one where `import`, `export`, and
-`import.meta` are available at all.
+`import.meta` are available at all. A declaration in that model names something in another file, so
+a question about an import or export name needs that file to exist: `module_graph_behavior` is the
+same execution with a whole graph of modules written beside the entry.
 
 What a program prints is not all of it: a program also has a value, and `completion_values` reports
 that one. `eval` hands it back to its caller and so does a script run as a unit, so a rewrite that
@@ -32,7 +34,7 @@ import tempfile
 
 from enum import Enum
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from refinery.lib.scripts.js.deobfuscation import deobfuscate
 from refinery.lib.scripts.js.parser import JsParser
@@ -188,15 +190,40 @@ def behavior(source: str, *, module: bool = False, timeout: float = 15.0) -> tup
     written with `\\r\\n` handed Node a `\\r\\r\\n`, and the two sides of the comparison then read
     different programs.
     """
+    return module_graph_behavior(
+        {'snippet.mjs' if module else 'snippet.js': source},
+        'snippet.mjs' if module else 'snippet.js',
+        timeout=timeout,
+    )
+
+
+def module_graph_behavior(
+    files: Mapping[str, str],
+    entry: str,
+    *,
+    timeout: float = 15.0,
+) -> tuple[str, str | None]:
+    """
+    The observable behavior of running *entry* with every file of *files* written beside it, in the
+    same shape `behavior` reports.
+
+    A declaration that names something across the module boundary says nothing on its own: what
+    `import { x } from './m.mjs'` reaches is a name `./m.mjs` exports, and whether it reaches one at
+    all is the linker's answer rather than the parser's. One file can therefore never be asked what
+    such a declaration means, and a graph of them is the smallest thing that can.
+
+    Each file reaches the folder untranslated, for the reason `behavior` gives, and the extension in
+    each key is what decides the goal symbol its file is read under.
+    """
     node = node_executable()
     if node is None:
         raise RuntimeError('node.js is not available')
     with tempfile.TemporaryDirectory() as folder:
-        path = os.path.join(folder, 'snippet.mjs' if module else 'snippet.js')
-        with open(path, 'w', encoding='utf-8', newline='') as stream:
-            stream.write(source)
+        for name, source in files.items():
+            with open(os.path.join(folder, name), 'w', encoding='utf-8', newline='') as stream:
+                stream.write(source)
         proc = subprocess.run(
-            [node, path],
+            [node, os.path.join(folder, entry)],
             capture_output=True,
             text=True,
             encoding='utf-8',

@@ -639,13 +639,16 @@ def names_a_property(node: Node) -> bool:
     four positions the language has for such a name, and in each of them the text is a name the
     value carries rather than one the program looks up.
 
-    A computed key is not one of these: what stands inside the brackets is an expression and is read
-    like any other. Neither is a shorthand property, which is written like a key and is both — `{ x }`
-    means `{ x: x }`, and the one node the parser builds for it is the read as much as it is the key,
-    so calling it a property name would excuse a reference the program really makes.
+    A computed key is not one of these: what stands inside the brackets is an expression and is
+    read like any other. Neither is a shorthand property, which is written like a key and is both:
+    `{ x }` means `{ x: x }`, and the one node the parser builds for it is the read as much as it
+    is the key, so calling it a property name would excuse a reference the program really makes.
 
-    An import attribute answers `True` for a key of any kind, a string as readily as a name, because
-    a with-clause holds nothing a program could refer to: `import d from 'm' with { 'type': 'json' }`
+    An import attribute answers `True` for a key of any kind, a string as readily as a name,
+    because a with-clause holds nothing a program could refer to:
+
+        import d from 'm' with { 'type': 'json' }
+
     names an attribute and not a binding, and so does the same clause written without the quotes.
     """
     parent = node.parent

@@ -3,10 +3,16 @@ from __future__ import annotations
 import inspect
 import itertools
 import unicodedata
+import unittest
 
 from collections.abc import Iterable
 
 from test import TestBase
+from test.lib.scripts.js.analysis.differential import (
+    JsEvaluation,
+    completion_values,
+    node_executable,
+)
 
 from refinery.lib.scripts.js.lexer import JsLexer
 from refinery.lib.scripts.js.parser import JsParser
@@ -55,13 +61,17 @@ A_LINE_BREAK_INSIDE_A_CHARACTER_CLASS = inspect.cleandoc("""
 """)
 
 
+def _named(code_point: int) -> str:
+    """
+    The code point, named. Most of the characters these tests are about have no width and the rest
+    are indistinguishable from a space or from each other, so a failure reporting the character
+    itself reports nothing at all.
+    """
+    return F'U+{code_point:04X}'
+
+
 def _spelled(code_points: Iterable[int]) -> list[str]:
-    """
-    The code points, sorted and named. Most of these characters have no width and the rest are
-    indistinguishable from a space, so a failure reporting the characters themselves reports
-    nothing at all.
-    """
-    return sorted(F'U+{code_point:04X}' for code_point in code_points)
+    return sorted(_named(code_point) for code_point in code_points)
 
 
 def _code_points_of_category(*categories: str) -> set[int]:
@@ -681,3 +691,172 @@ class TestTheWhitespaceProductionsAreThreeSetsAndNotOne(TestBase):
         self.assertEqual(
             _spelled([0x0020]),
             _spelled({ord(c) for c in ASCII_WHITESPACE} & _code_points_of_category('Zs')))
+
+
+#: A character no name opens with and every name may hold. Nine of them are named by
+#: `Other_ID_Continue` and by the two joiners, which no general category IdentifierPart is stated
+#: over holds, and the rest are one character from each category that is: a decimal digit of another
+#: script, a combining accent written as its own character, a spacing mark, and a connector other
+#: than the low line. The two katakana middle dots are `Po` exactly as the halfwidth comma below is,
+#: so a scan reading the category alone ends a name at all three.
+A_CHARACTER_A_NAME_HOLDS_AND_NEVER_OPENS_WITH = (
+    0x00B7,
+    0x0387,
+    0x1369,
+    0x1371,
+    0x19DA,
+    0x30FB,
+    0xFF65,
+    0x200C,
+    0x200D,
+    0x0661,
+    0xFF11,
+    0x0300,
+    0x0903,
+    0x203F,
+    0xFE33,
+)
+
+#: A character a name opens with, and therefore one it may hold anywhere. The low line and the
+#: dollar sign are the two the language names itself; six more are named by `Other_ID_Start`, whose
+#: categories are `Sm`, `So` and `Sk` and would otherwise leave them out; and the rest are one
+#: character from each category IdentifierStart is stated over, the two katakana letters and the
+#: prolonged sound mark standing beside the middle dots the entry above is about.
+A_CHARACTER_A_NAME_OPENS_WITH = (
+    0x005F,
+    0x0024,
+    0x1885,
+    0x1886,
+    0x2118,
+    0x212E,
+    0x309B,
+    0x309C,
+    0x2160,
+    0x01C5,
+    0x00AA,
+    0x30FA,
+    0x30FC,
+    0xFF66,
+    0x3005,
+)
+
+#: A character no name holds anywhere. Four are digits a reader would call digits and the category
+#: `Nd` does not hold, and the rest stand next to a character above in their block, in their
+#: category, or in both.
+A_CHARACTER_NO_NAME_HOLDS = (
+    0x00B2,
+    0x2460,
+    0x00BD,
+    0x19DB,
+    0x00A9,
+    0xFF64,
+    0x00B6,
+    0x00B8,
+    0x058F,
+    0x30A0,
+)
+
+#: Every character above, mapped to whether a name may open with it and whether a name may hold it.
+#: Node is asked both questions of each, and the lexer is required to answer as Node does.
+A_CHARACTER_AND_WHERE_IT_MAY_STAND_IN_A_NAME = {
+    **{code: (False, True) for code in A_CHARACTER_A_NAME_HOLDS_AND_NEVER_OPENS_WITH},
+    **{code: (True, True) for code in A_CHARACTER_A_NAME_OPENS_WITH},
+    **{code: (False, False) for code in A_CHARACTER_NO_NAME_HOLDS},
+}
+
+
+def _a_name_opened_by(character: str) -> str:
+    return F'var {character}ab = 7; {character}ab;'
+
+
+def _a_name_holding(character: str) -> str:
+    return F'var a{character}b = 7; a{character}b;'
+
+
+def _the_name_a_declaration_binds(source: str) -> str | None:
+    """
+    The text of the identifier token the scan reads where *source* binds a name, and nothing where
+    it reads some other token there. A bounded read, for the reason `TestJsLexer._bounded_tokens`
+    gives.
+    """
+    token = next(itertools.islice(JsLexer(source).tokenize(), 1, 2))
+    return token.value if token.kind is JsTokenKind.IDENTIFIER else None
+
+
+def _where_each_character_may_stand() -> dict[str, tuple[bool, bool]]:
+    """
+    The table above, keyed by the name of each code point rather than by the code point, since a
+    failure has to report which character it is about.
+    """
+    return {
+        _named(code): answer
+        for code, answer in A_CHARACTER_AND_WHERE_IT_MAY_STAND_IN_A_NAME.items()
+    }
+
+
+class TestANameIsWrittenWithTheCharactersTheLanguageReadsOneFrom(TestBase):
+    """
+    Where a name ends is decided by two Unicode properties and by nothing a reader would recognize
+    as a rule about letters and digits. A character the scan wrongly reads as ending a name splits
+    one declaration into three statements and prints them back as three, and one it wrongly reads as
+    continuing a name joins two statements into text no engine reads; neither is reported by
+    anything the parser or the printer does.
+
+    `TestTheCharactersNodeReadsANameFrom` asks the engine the same question of the same forty
+    characters, which is what makes the table these are compared against the language rather than a
+    list somebody wrote down. Both halves are pinned separately, since a revision of either party
+    that moved the line would otherwise leave the two agreeing about something new and be reported
+    by nothing.
+    """
+
+    def test_the_lexer_ends_a_name_exactly_where_the_language_ends_one(self):
+        """
+        Each character written once at the start of a name and once inside one: a name the scan
+        reads through is one identifier token spanning every character of it, and one it ends early
+        leaves some other token where the name was.
+        """
+        self.assertEqual(
+            {
+                _named(code): (
+                    _the_name_a_declaration_binds(_a_name_opened_by(chr(code)))
+                    == F'{chr(code)}ab',
+                    _the_name_a_declaration_binds(_a_name_holding(chr(code)))
+                    == F'a{chr(code)}b',
+                )
+                for code in A_CHARACTER_AND_WHERE_IT_MAY_STAND_IN_A_NAME
+            },
+            _where_each_character_may_stand(),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestTheCharactersNodeReadsANameFrom(TestBase):
+    """
+    The engine's half of `TestANameIsWrittenWithTheCharactersTheLanguageReadsOneFrom`: the table the
+    scan is held to is the engine's answer and not this file's opinion, so a Unicode revision that
+    moved the line fails here rather than passing everywhere.
+
+    SECURITY: every program here is written out by this module and Node runs only those. Nothing
+    from `samples` may ever be handed to the engine.
+    """
+
+    def test_node_reads_a_name_opened_by_and_holding_the_characters_pinned_here(self):
+        """
+        Each character is written once at the start of a name and once inside one, and the two
+        declarations are evaluated for the value the name was given. Node answers `7` where the
+        character is part of the name and refuses the program where it is not, since a character
+        that ends the name early leaves a statement beginning with a character no expression opens
+        with.
+        """
+        rows = A_CHARACTER_AND_WHERE_IT_MAY_STAND_IN_A_NAME
+        programs = list(itertools.chain.from_iterable(
+            (_a_name_opened_by(chr(code)), _a_name_holding(chr(code))) for code in rows
+        ))
+        values = completion_values(programs, JsEvaluation.SCRIPT)
+        self.assertEqual(
+            {
+                _named(code): (values[2 * index] == '7', values[2 * index + 1] == '7')
+                for index, code in enumerate(rows)
+            },
+            _where_each_character_may_stand(),
+        )
