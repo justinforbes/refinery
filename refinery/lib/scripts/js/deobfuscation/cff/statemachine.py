@@ -22,6 +22,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     make_numeric_literal,
     member_key,
     property_key,
+    substitute_use_position,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -2052,30 +2053,6 @@ def _substitute_state_vars(stmts: list[Statement], env: _StateEnv) -> list[State
     return result
 
 
-def _place_in_name_slot(identifier: JsIdentifier, replacement: Expression) -> bool:
-    """
-    Settle *identifier* for the slots in which it spells a property name rather than reads a
-    binding, and report whether it occupied one of them. A non-computed member property and a
-    non-computed object key name the property and are left alone; a shorthand property is the one
-    slot that is both at once, so it is expanded — `{ x }` means `{ x: x }` and only the value half
-    is the read.
-
-    Substituting blindly is not merely a rename: a replacement with no identifier spelling, such as
-    a number or a negation, leaves text no engine parses (`o.5`, `{ -2: 1 }`).
-    """
-    parent = identifier.parent
-    if isinstance(parent, JsMemberExpression):
-        return parent.property is identifier and not parent.computed
-    if isinstance(parent, JsProperty) and not parent.computed:
-        if parent.shorthand and parent.value is identifier:
-            replacement.parent = parent
-            parent.value = replacement
-            parent.shorthand = False
-            return True
-        return parent.key is identifier
-    return False
-
-
 def _substitute_in_scope(node: Node, env: _StateEnv) -> None:
     """
     Replace state variable identifiers with numeric literals, skipping into nested functions.
@@ -2085,8 +2062,8 @@ def _substitute_in_scope(node: Node, env: _StateEnv) -> None:
             continue
         if isinstance(child, JsIdentifier) and child.name in env:
             literal = make_numeric_literal(env[child.name])
-            if literal is not None and not _place_in_name_slot(child, literal):
-                _replace_in_parent(child, literal)
+            if literal is not None:
+                substitute_use_position(child, literal)
         else:
             _substitute_in_scope(child, env)
 
@@ -2316,15 +2293,14 @@ def _qualify_bare_walk(node: Node, homes: dict[str, tuple[str, ...]], exempt: se
             continue
         if isinstance(child, JsIdentifier) and child.name in homes and child.name not in exempt:
             parent = child.parent
-            if _place_in_name_slot(child, _make_namespace_node([*homes[child.name], child.name])):
-                continue
             if isinstance(parent, (JsVariableDeclarator, JsRestElement)):
                 exempt.add(child.name)
                 continue
             if isinstance(parent, (JsLabeledStatement, JsContinueStatement, JsBreakStatement)):
                 if getattr(parent, 'label', None) is child:
                     continue
-            _replace_in_parent(child, _make_namespace_node([*homes[child.name], child.name]))
+            substitute_use_position(
+                child, _make_namespace_node([*homes[child.name], child.name]))
             continue
         _qualify_bare_walk(child, homes, exempt)
 
@@ -2818,8 +2794,8 @@ def _rebind_arg_var_in_scope(node: Node, arg_var_name: str, param_name: str) -> 
                 _rebind_arg_var_in_scope(child, arg_var_name, param_name)
             continue
         if isinstance(child, JsIdentifier) and child.name == arg_var_name:
-            if not _place_in_name_slot(child, JsIdentifier(name=param_name)):
-                child.name = param_name
+            substitute_use_position(
+                child, JsIdentifier(name=param_name, offset=child.offset))
             continue
         _rebind_arg_var_in_scope(child, arg_var_name, param_name)
 

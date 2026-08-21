@@ -88,6 +88,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
     JsWhileStatement,
+    names_a_property,
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import (
@@ -1116,21 +1117,17 @@ def is_binding_site(node: JsIdentifier) -> bool:
 
 def is_reference(node: JsIdentifier) -> bool:
     """
-    Return whether this identifier is in a true variable reference position: not a binding site,
-    not a non-computed member property, and not a non-computed object-literal key.
+    Whether this identifier reads or writes a binding rather than declaring one or naming something
+    the program cannot refer to. `is_use_position` answers the second half and is the one statement
+    of it; what is added here are the two declarations a caller with no model can recognize by
+    shape, so that this is the syntactic approximation of `SemanticModel.is_reference` and not a
+    second opinion about what a name is.
+
+    The approximation is only in the declarations. Every position naming a property, a label or a
+    module specifier is excluded exactly as the model excludes it, and a shorthand property is
+    counted as the read it is.
     """
-    p = node.parent
-    if p is None:
-        return False
-    if isinstance(p, JsVariableDeclarator) and p.id is node:
-        return False
-    if isinstance(p, JsFunctionDeclaration) and p.id is node:
-        return False
-    if isinstance(p, JsMemberExpression) and p.property is node and not p.computed:
-        return False
-    if isinstance(p, JsProperty) and p.key is node and not p.computed:
-        return False
-    return True
+    return not is_binding_site(node) and is_use_position(node)
 
 
 def name_is_unbound(node: JsIdentifier, model: SemanticModel) -> bool:
@@ -1461,7 +1458,7 @@ def substitute_params(
     if not _introduces_nested_scope(expression):
         for node in list(cloned.walk()):
             if isinstance(node, JsIdentifier) and node.name in mapping and is_use_position(node):
-                _substitute_use_position(node, _clone_node(mapping[node.name]))
+                substitute_use_position(node, _clone_node(mapping[node.name]))
         return cloned
     root = expression
     while root.parent is not None:
@@ -1483,7 +1480,7 @@ def substitute_params(
         if binding is None or model.resolve(original) is not binding:
             continue
         if isinstance(clone, JsIdentifier) and clone.name == original.name:
-            _substitute_use_position(clone, _clone_node(mapping[original.name]))
+            substitute_use_position(clone, _clone_node(mapping[original.name]))
     return cloned
 
 
@@ -1506,22 +1503,45 @@ def _introduces_nested_scope(node: Node) -> bool:
     )
 
 
-def _substitute_use_position(node: JsIdentifier, replacement: Node) -> None:
+def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
     """
-    Replace use-position identifier *node* with *replacement*. In an object-literal shorthand (`{a}`),
-    one identifier serves as both the property name and the read of the variable, so a plain replacement
-    would rename the property — or emit invalid syntax for a non-identifier argument. Keep the name in
-    that case: never substitute a non-computed property key, and clear the shorthand flag when replacing
-    its value so the property is written out in full. Guarding the key makes the result independent of
-    which of the two cloned occurrences is visited first.
+    Put *replacement* where *node* reads a binding, and report whether it did. That *node* reads one
+    is the caller's to establish — with a model through `SemanticModel.is_reference` and without one
+    through `is_reference` — since a name bound by a destructuring pattern is written like a read
+    and no syntactic test tells the two apart.
+
+    A name spelling a property is not such a read and is left alone — `names_a_property` says which
+    positions those are, and substituting into one of them is not a rename but a different program:
+    a replacement with no identifier spelling leaves text no engine parses (`o.5`, `{ -2: 1 }`).
+
+    A shorthand property is the one position that is both at once. `{ a }` means `{ a: a }`, so the
+    read is the value half and the key must keep the name it wrote; the property is written out in
+    full and only the value replaced. Which half a caller hands over depends on where the tree came
+    from — the parser builds one node for both and a clone builds two — so the value is asked for
+    by identity rather than assumed, and a caller walking both halves substitutes once whichever
+    order it visits them in.
+
+    `{ __proto__ }` is the one shorthand that does not mean `{ __proto__: __proto__ }`: written out
+    with the colon it sets the object's prototype and gives it no property of that name at all, so
+    `Object.keys({ __proto__ })` answers one name and `Object.keys({ __proto__: v })` answers none.
+    Writing that one out is a different program, so it is left as it stands.
+
+    The answer is what a caller announcing a change has to read. A pass that reports one for a
+    substitution this declined is a pass that reports one every round, and the fixpoint it sits in
+    never reaches one.
     """
     parent = node.parent
-    if isinstance(parent, JsProperty) and not parent.computed:
-        if parent.key is node:
-            return
-        if parent.shorthand and parent.value is node:
-            parent.shorthand = False
-    _replace_in_parent(node, replacement)
+    if isinstance(parent, JsProperty) and parent.shorthand and not parent.computed:
+        key = parent.key
+        if parent.value is not node or (isinstance(key, JsIdentifier) and key.name == '__proto__'):
+            return False
+        if key is node:
+            parent.key = _clone_node(node)
+            parent.key.parent = parent
+        parent.shorthand = False
+    elif names_a_property(node):
+        return False
+    return _replace_in_parent(node, replacement)
 
 
 def try_inline_trivial_function(

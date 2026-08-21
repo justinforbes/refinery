@@ -26,6 +26,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     collect_identifier_names,
     is_literal,
     remove_declarator,
+    substitute_use_position,
     walk_scope,
 )
 from refinery.lib.scripts.js.model import (
@@ -525,7 +526,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
                 continue
             if not reaching.value_preserved(binding, entry.value, node):
                 continue
-            _replace_in_parent(node, _clone_node(entry.value))
+            if not substitute_use_position(node, _clone_node(entry.value)):
+                continue
             self.mark_changed()
             inlined[name] = inlined.get(name, 0) + 1
 
@@ -709,7 +711,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
                 and model.lookup(entry.value.name, model.scope_of(node)) is not None
             ):
                 continue
-            _replace_in_parent(node, _clone_node(entry.value))
+            if not substitute_use_position(node, _clone_node(entry.value)):
+                continue
             self.mark_changed()
             inlined[name] = inlined.get(name, 0) + 1
 
@@ -776,7 +779,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
                 continue
             if not self._free_variables_preserved(entry.value, node, model, reaching):
                 continue
-            _replace_in_parent(node, _clone_node(entry.value))
+            if not substitute_use_position(node, _clone_node(entry.value)):
+                continue
             self.mark_changed()
             inlined[name] = inlined.get(name, 0) + 1
         return inlined

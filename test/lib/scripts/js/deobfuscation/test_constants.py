@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import inspect
 
+from test import TestBase
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
+from test.lib.scripts.js.ledger import folded
 
 
 class TestConstantInlining(TestJsDeobfuscator):
@@ -1453,3 +1455,72 @@ class TestRegressionBugs(TestJsDeobfuscator):
             """
         )
         self.assertEqual(source, self._inline(source))
+
+
+#: A program whose object literal names a property by its shorthand, mapped to the text a correct
+#: deobfuscation writes for it. The one identifier of a shorthand is both the name of the property
+#: and a read of the binding, so a constant reaches it the way it reaches any other read, and the
+#: property still needs a name once the value is there. The last three rows are the controls, each
+#: of them a substitution that lands where it belongs: into a key that is spelled out, into the
+#: object a destructuring pattern takes apart, and into the default a shorthand in such a pattern
+#: carries.
+A_CONSTANT_REACHING_A_SHORTHAND_PROPERTY = {
+    'var q = 1;\nconsole.log(JSON.stringify({ q }));\n':
+        'console.log(JSON.stringify({ q: 1 }));',
+    'var q = "a";\nconsole.log(JSON.stringify({ q }));\n':
+        'console.log(JSON.stringify({ q: "a" }));',
+    'var q = 1;\nvar w = 2;\nconsole.log(JSON.stringify({ q, w }));\n':
+        'console.log(JSON.stringify({ q: 1, w: 2 }));',
+    'var q = 1;\nvar o = { q, r: 2 };\nconsole.log(JSON.stringify(o));\n':
+        'var o = { q: 1, r: 2 };\nconsole.log(JSON.stringify(o));',
+    'var q = 1;\nconsole.log(JSON.stringify({ q: q }));\n':
+        'console.log(JSON.stringify({ q: 1 }));',
+    'var p = 5;\nvar o = { q: p };\nvar { q } = o;\nconsole.log(q);\n':
+        'var o = { q: 5 };\nvar { q } = o;\nconsole.log(q);',
+    'var d = 5;\nvar o = {};\nvar { q = d } = o;\nconsole.log(q);\n':
+        'var o = {};\nvar { q = 5 } = o;\nconsole.log(q);',
+}
+
+
+class TestAConstantSubstitutedIntoAShorthandPropertyKeepsItsName(TestBase):
+    """
+    `{ q }` means `{ q: q }`, and what parts the two spellings is that the shorthand writes one
+    identifier where the other writes two: the name of the property and the read of the binding are
+    the same word. Node prints `{"q":1}` for
+
+        var q = 1; console.log(JSON.stringify({ q }));
+
+    and prints `{"q":1}` for `{ q: 1 }` written out in full, which is where the value of that read
+    has to go. A property named by nothing is not a property, so the one thing a substitution here
+    may not do is put the value where the name stood.
+
+    `refinery.lib.scripts.js.deobfuscation.helpers.substitute_use_position` is where that is
+    decided, for this pass and for every other one that puts a value where a name stood: it asks
+    `refinery.lib.scripts.js.model.names_a_property` which positions spell a name, and writes a
+    shorthand out in full so that only its value half is replaced.
+
+    The entry is stated over the text the tool writes rather than over what running it prints,
+    because the corrupt rows are not programs and cannot be run at all: Node answers `SyntaxError`
+    for each of them, and answers it just as readily for any other way of breaking a file, so
+    running them can say that something is wrong but never which value went where. The controls are
+    the second reason. A fix that stopped substituting into an object literal altogether would leave
+    every program here printing what it printed before, since refusing to touch a program cannot
+    change what it does, and a behavior comparison would then report this entry as an unexpected
+    success on the day the defect was covered over instead of fixed.
+
+    Those controls are the last three rows, and each is the text the tool writes today. The first
+    takes the same constant into a key that is spelled out and keeps the name beside it. The other
+    two are the destructuring pattern, which was measured rather than assumed: a shorthand there
+    names the binding the pattern writes and not one it reads, nothing is substituted over it, and a
+    constant reaching the same statement lands on the object being taken apart in one row and on the
+    default the shorthand carries in the other.
+    """
+
+    def test_a_constant_substituted_into_a_shorthand_property_is_written_under_its_name(self):
+        """
+        Node prints `{"q":1}`, `{"q":"a"}`, `{"q":1,"w":2}`, `{"q":1,"r":2}`, `{"q":1}`, `5` and `5`
+        for the seven programs of `A_CONSTANT_REACHING_A_SHORTHAND_PROPERTY`, and prints those same
+        seven lines for the seven texts they are mapped to.
+        """
+        rows = A_CONSTANT_REACHING_A_SHORTHAND_PROPERTY
+        self.assertEqual({source: folded(source) for source in rows}, rows)

@@ -54,6 +54,7 @@ from test.lib.scripts.js.test_parser_recovery import (
 )
 from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_HAS
 
+from refinery.lib.scripts.js.analysis.model import is_use_position
 from refinery.lib.scripts.js.model import (
     JsBigIntLiteral,
     JsExportAllDeclaration,
@@ -1652,3 +1653,98 @@ class TestADispatcherIsKeptWhileACallToItSurvives(TestBase):
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
         )
+
+
+#: Programs asking how many own properties an object literal spelling `__proto__` has, mapped to
+#: what Node prints for each. The three spellings answer differently: the shorthand gives the object
+#: a property of that name, the two written with a colon set its prototype and give it none, and a
+#: computed key gives it one again.
+AN_OBJECT_LITERAL_SPELLING_PROTO = {
+    'var __proto__ = 7; console.log(Object.keys({ __proto__ }).length);': '1\n',
+    "console.log(Object.keys({ '__proto__': 7 }).length);": '0\n',
+    'console.log(Object.keys({ __proto__: 1 }).length);': '0\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnObjectLiteralSpellingProtoIsCounted(TestBase):
+    """
+    `__proto__` written as a key with a colon is not a key at all: it sets the object's prototype
+    and the object has no property of that name, so `Object.keys` of such a literal answers one name
+    fewer than the literal appears to hold. Written as a shorthand, or with the brackets of a
+    computed key, it is an ordinary property like any other.
+
+    Nothing here is answered wrongly — every program comes back doing what it did. What is refused
+    is the fold: the interpreter declines a literal spelling that name at all rather than telling
+    the three shapes apart, so a program whose whole point is the count comes back with the count
+    still in it. The computed spelling is the one it does fold, and it folds correctly.
+
+    `refinery.lib.scripts.js.deobfuscation.helpers.substitute_use_position` is where the shorthand
+    is refused expansion, for the same reason and soundly: writing `{ __proto__ }` out as
+    `{ __proto__: v }` is a different program.
+    """
+
+    @unittest.expectedFailure
+    def test_an_object_literal_spelling_proto_folds_to_the_count_it_has(self):
+        """
+        Node prints `1`, `0` and `0` for the three programs of `AN_OBJECT_LITERAL_SPELLING_PROTO`.
+        Each deobfuscation prints the same, and comes back with the literal and the call to
+        `Object.keys` still standing where the count could have been.
+        """
+        rows = AN_OBJECT_LITERAL_SPELLING_PROTO
+        self.assertEqual(
+            {source: folded(source) for source in rows},
+            {source: F'console.log({prints.strip()});' for source, prints in rows.items()},
+        )
+
+
+#: Declarations carrying an import-attribute clause, mapped to whether that clause is on an `import`
+#: or on a re-`export`. The `import` rows are the controls: the clause is read there, and the two
+#: forms are the same clause in the same place in the grammar.
+A_DECLARATION_CARRYING_IMPORT_ATTRIBUTES = {
+    "import j from './x.json' with { type: 'json' };": True,
+    "import * as ns from './x.json' with { type: 'json' };": True,
+    "export { default as j } from './x.json' with { type: 'json' };": False,
+    "export * from './x.json' with { type: 'json' };": False,
+    "export * as ns from './x.json' with { type: 'json' };": False,
+}
+
+
+class TestAReExportCarriesTheAttributesItWasWrittenWith(TestBase):
+    """
+    An import attribute clause stands on a re-export exactly as it stands on an import, and the
+    parser has it only on the import. What follows the module specifier is read as a `with`
+    statement instead, so `with { type: 'json' }` becomes a statement whose object is a read of a
+    binding named `type` and whose body is the string, and the brace that closed the clause closes
+    nothing: the text that comes back holds one more `}` than any file can.
+
+    `refinery.lib.scripts.is_well_formed` answers `False` for each, so nothing is spliced anywhere,
+    and what is wrong is that `refinery.js` writes the file at all. The attribute key becomes a read
+    besides — `refinery.lib.scripts.js.analysis.model.is_use_position` counts it as one where the
+    import form counts none — so a pass asking which names the module reads is told a name the
+    module never mentions, and a rename would rewrite the key.
+    """
+
+    @unittest.expectedFailure
+    def test_a_re_export_reads_its_attribute_clause_as_a_clause(self):
+        """
+        Each declaration of `A_DECLARATION_CARRYING_IMPORT_ATTRIBUTES` names one attribute, `type`,
+        and no binding of that name, so no occurrence of it is a read. The three re-export rows
+        report one read each and come back as text no engine parses.
+        """
+        rows = A_DECLARATION_CARRYING_IMPORT_ATTRIBUTES
+        self.assertEqual(
+            {source: (well_formed(source), _reads_named_type(source)) for source in rows},
+            {source: (True, 0) for source in rows},
+        )
+
+
+def _reads_named_type(source: str) -> int:
+    """
+    How many occurrences of the name `type` in *source* stand where a binding is read or written.
+    """
+    tree = JsParser(source).parse()
+    return sum(
+        is_use_position(node) for node in tree.walk()
+        if isinstance(node, JsIdentifier) and node.name == 'type'
+    )

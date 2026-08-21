@@ -59,7 +59,6 @@ from refinery.lib.scripts.js.model import (
     JsFunctionExpression,
     JsIdentifier,
     JsIfStatement,
-    JsImportAttribute,
     JsImportDeclaration,
     JsImportDefaultSpecifier,
     JsImportExpression,
@@ -67,14 +66,12 @@ from refinery.lib.scripts.js.model import (
     JsImportSpecifier,
     JsLabeledStatement,
     JsMemberExpression,
-    JsMethodDefinition,
     JsNewExpression,
     JsNumericLiteral,
     JsObjectExpression,
     JsObjectPattern,
     JsParenthesizedExpression,
     JsProperty,
-    JsPropertyDefinition,
     JsRestElement,
     JsScript,
     JsSpreadElement,
@@ -89,6 +86,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
     JsWithStatement,
+    names_a_property,
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import canonical_array_index, exact_integer
@@ -415,28 +413,19 @@ def crosses_dynamic_scope(scope: Scope | None) -> bool:
     return False
 
 
-_KEYED_CLASS_MEMBERS = (JsMethodDefinition, JsPropertyDefinition)
-
-
 def is_use_position(node: JsIdentifier) -> bool:
     """
     Whether an identifier occupies a position where it reads or writes a value, as opposed to naming a
-    property, a key, a label, or an import/export specifier. A key is such a name wherever it is
-    spelled out rather than computed: an object-literal key, a class method or field name, and an
-    import attribute all name a property of the thing being built and read no binding. Binding
-    sites are not excluded here; `SemanticModel.is_reference` is the binding-aware predicate that
-    also excludes them.
+    property, a key, a label, or an import/export specifier. `names_a_property` answers for the four
+    positions that name a property; what is added here is the three that name something else the
+    program cannot refer to — the name a module is re-exported under, a label, and either side of an
+    import or export specifier. Binding sites are not excluded here; `SemanticModel.is_reference` is
+    the binding-aware predicate that also excludes them.
     """
     p = node.parent
     if p is None:
         return False
-    if isinstance(p, JsMemberExpression) and p.property is node and not p.computed:
-        return False
-    if isinstance(p, JsProperty) and p.key is node and not p.computed and not p.shorthand:
-        return False
-    if isinstance(p, _KEYED_CLASS_MEMBERS) and p.key is node and not p.computed:
-        return False
-    if isinstance(p, JsImportAttribute) and p.key is node:
+    if names_a_property(node):
         return False
     if isinstance(p, JsExportAllDeclaration) and p.exported is node:
         return False

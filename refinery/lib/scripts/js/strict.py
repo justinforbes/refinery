@@ -54,14 +54,12 @@ from refinery.lib.scripts.js.model import (
     JsImportNamespaceSpecifier,
     JsImportSpecifier,
     JsLabeledStatement,
-    JsMemberExpression,
     JsMetaProperty,
     JsMethodDefinition,
     JsMethodKind,
     JsNumericLiteral,
     JsObjectPattern,
     JsProperty,
-    JsPropertyDefinition,
     JsPropertyKind,
     JsRestElement,
     JsScript,
@@ -74,6 +72,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWithStatement,
     JsYieldExpression,
+    names_a_property,
     strip_parens,
 )
 
@@ -562,7 +561,7 @@ the tree.
 def _check_kind_reserved(node: Node, out: list[StrictViolation]) -> None:
     if not isinstance(node, JsIdentifier) or node.name not in _KIND_RESERVABLE:
         return
-    if _is_property_name_position(node):
+    if names_a_property(node):
         return
     if node.name in reserved_by_function_kind(node):
         out.append(StrictViolation(node.offset, 'reserved-by-function-kind', node.name))
@@ -628,26 +627,6 @@ def _target_identifiers(target: Node | None) -> list[JsIdentifier]:
         elif isinstance(node, JsRestElement):
             stack.append(node.argument)
     return result
-
-
-def _is_property_name_position(node: JsIdentifier) -> bool:
-    """
-    Whether *node* only names a property and denotes nothing, so that a rule about which names a
-    program may use does not apply to it. `o.yield` and `{ yield: 1 }` name a property and are read
-    wherever a bare `yield` would be refused.
-
-    A shorthand property is not one of these even though it is written like one. `{ yield }` is the
-    key *and* the value, and the parser models both with the same node, so answering `True` for it
-    would excuse a reference that the language refuses just as it refuses a written-out one.
-    """
-    parent = node.parent
-    if isinstance(parent, JsMemberExpression):
-        return parent.property is node and not parent.computed
-    if isinstance(parent, JsProperty):
-        return parent.key is node and not parent.computed and not parent.shorthand
-    if isinstance(parent, (JsMethodDefinition, JsPropertyDefinition)):
-        return parent.key is node and not parent.computed
-    return False
 
 
 def _flag_name(ident: JsIdentifier, out: list[StrictViolation]) -> None:
@@ -782,7 +761,7 @@ def _check_names(
             id(node) not in handled
             and cur_strict
             and node.name in _STRICT_RESERVED
-            and not _is_property_name_position(node)
+            and not names_a_property(node)
         ):
             out.append(StrictViolation(node.offset, 'reserved-word', node.name))
 
