@@ -481,7 +481,7 @@ class Ps1DeadCodeElimination(Transformer):
             ):
                 replacement: list[Statement] = []
             else:
-                pruned = self._try_prune(stmt, world, dominance)
+                pruned = self._try_prune(stmt, world)
                 if pruned is None:
                     continue
                 replacement = pruned
@@ -536,9 +536,7 @@ class Ps1DeadCodeElimination(Transformer):
                 return False
         return saw_node
 
-    def _try_prune(
-        self, stmt: Statement, world: Ps1WorldReach, dominance: DominatorModel,
-    ) -> list[Statement] | None:
+    def _try_prune(self, stmt: Statement, world: Ps1WorldReach) -> list[Statement] | None:
         if isinstance(stmt, Ps1WhileLoop):
             return self._prune_while(stmt)
         if isinstance(stmt, Ps1DoLoop):
@@ -705,9 +703,8 @@ class Ps1DeadCodeElimination(Transformer):
         finally_body = node.finally_block.body if node.finally_block is not None else []
         return survivors + list(finally_body)
 
-    def _prune_trap(
-        self, node: Ps1TrapStatement, world: Ps1WorldReach,
-    ) -> list[Statement] | None:
+    @staticmethod
+    def _prune_trap(node: Ps1TrapStatement, world: Ps1WorldReach) -> list[Statement] | None:
         """
         Remove a `trap` handler whose body produces no observable output and whose scope cannot
         throw a terminating error the trap would intercept. A trap only runs when the code it guards
@@ -716,15 +713,17 @@ class Ps1DeadCodeElimination(Transformer):
         only where nothing they guard actually throws. A body that performs a side effect — a real
         logging handler such as `trap { Write-Host 'err' }` — keeps the trap intact.
 
-        Whether anything the trap guards still raises is not asked here at all. It is the veto's
-        question — `Ps1FaultReach.removing_a_handler_is_observed` in
-        `refinery.lib.scripts.ps1.analysis.faults` — and it is asked of every proposal this pass
-        files, over the exceptional edges the graph wired rather than over a search for the `throw`
-        keyword. A gate here used to answer a narrower version of it, and answering one question
-        twice from two different bodies of evidence is how the two come apart: that one counted a
-        `throw` statement anywhere in the graph and so missed
-        `trap { continue }; Get-Item nope -ErrorAction Stop`, whose error ends the script exactly as
-        a `throw` does.
+        Whether anything the trap guards still raises is not asked here at all. It is the question
+        `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.removing_a_handler_is_observed`
+        answers, and it is asked of every proposal this pass files, over the exceptional edges the
+        graph wired rather than over a search for the `throw` keyword. A gate here used to answer a
+        narrower version of it, and answering one question twice from two different bodies of
+        evidence is how the two come apart: that one counted a `throw` statement anywhere in the
+        graph and so missed
+
+            trap { continue }; Get-Item nope -ErrorAction Stop
+
+        whose error ends the script exactly as a `throw` does.
 
         The gate that is left is purity, not emission: the removal is not provable under strict
         semantics at all, and under the premise that the guarded code does not throw, a body that

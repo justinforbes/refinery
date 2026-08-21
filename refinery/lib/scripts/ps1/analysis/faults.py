@@ -25,9 +25,14 @@ from __future__ import annotations
 
 from typing import Iterator, NamedTuple
 
-from refinery.lib.scripts import Node
+from refinery.lib.scripts import Node, tree_root
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
-from refinery.lib.scripts.ps1.ast import argument_text
+from refinery.lib.scripts.ps1.ast import (
+    argument_text,
+    assignment_target_variables,
+    binding_key,
+    binds_parameter,
+)
 from refinery.lib.scripts.ps1.data import COMMON_PARAMETERS
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
@@ -37,26 +42,47 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1ContinueStatement,
+    Ps1IntegerLiteral,
+    Ps1RealLiteral,
     Ps1Script,
     Ps1ThrowStatement,
     Ps1TrapStatement,
     Ps1Variable,
 )
 
-#: The spellings the `-ErrorAction` parameter answers to, lowercased and without the dash: every
-#: alias the collected command data records for it, and every prefix of the name, because 5.1 binds
-#: a parameter by any unambiguous prefix and `-ErrorAc Stop` is measured to stop. A prefix that is
-#: in fact ambiguous is one 5.1 rejects, so reading one here as this parameter makes a claim about a
-#: script that does not run, and the claim only ever keeps a handler.
+#: The names the `-ErrorAction` parameter answers to, lowercased and without the dash: the parameter
+#: itself and every alias the collected command data records for it. The alias is subscripted rather
+#: than defaulted, so that a collected surface which stops carrying this parameter fails the load
+#: rather than silently dropping the spelling, as `refinery.lib.scripts.ps1.data` does for its own
+#: derived sets.
 _ERROR_ACTION_NAME = 'erroraction'
-_ERROR_ACTION = frozenset((
-    *(_ERROR_ACTION_NAME[:size] for size in range(1, len(_ERROR_ACTION_NAME) + 1)),
-    *COMMON_PARAMETERS.get(_ERROR_ACTION_NAME, ()),
-))
+_ERROR_ACTION = frozenset((_ERROR_ACTION_NAME, *COMMON_PARAMETERS[_ERROR_ACTION_NAME]))
 
-#: The `-ErrorAction` arguments that select `Stop`, in the spellings 5.1 binds to it: the name of
-#: the enumeration member in any case, and the number that member is. Both are measured.
-_STOPS = frozenset({'stop', '1'})
+#: Every name a *common* parameter answers to, so that an abbreviation of one can be told from an
+#: abbreviation that reaches several. A command carrying `-ErrorAction` carries the whole set of
+#: them — that is what makes a command advanced — so a prefix reaching another member of this set
+#: reaches it on the very commands the question is about.
+_COMMON_SURFACES = frozenset(
+    surface
+    for parameter, aliases in COMMON_PARAMETERS.items()
+    for surface in (parameter, *aliases)
+)
+
+#: The `ActionPreference` member that makes an error terminating, and the number that member is.
+#: `Stop` and `1` are the two spellings the corpus measures directly.
+#:
+#: Neither is read literally. The ordinal is read as a *number* rather than as a numeral, because
+#: what selects the member is its value and `0x1`, `01` and `1` all denote it. The name is read by
+#: prefix, because 5.1 resolves `-ErrorAction St` to `Stop`.
+#:
+#: An **ambiguous** member prefix is a third thing, and the reading costs recall rather than
+#: correctness. `-ErrorAction S` reaches `SilentlyContinue`, `Stop` and `Suspend`, and 5.1 answers
+#: it with a `ParameterBindingException` — `CannotConvertArgumentNoMessage`, measured — so the
+#: command never runs at all and the error it reports instead is statement-terminating: the script
+#: carries on. Reading the prefix as `Stop` keeps a handler over that, which is the safe direction
+#: and is what `TestPs1AnAmbiguousActionPrefixKeepsTheTrapOverIt` records.
+_STOP = 'stop'
+_STOP_ORDINAL = 1
 
 #: The automatic variable that decides what a command does with an error it reports. Set to `Stop`
 #: it makes every one of them terminating — a failing cast included, which is otherwise reported
@@ -87,13 +113,62 @@ class Ps1FaultRouting(NamedTuple):
 UNPLACED = None
 
 
-def _selects_stop(text: str | None) -> bool:
+def _binds_the_error_action(written: str) -> bool:
     """
-    Whether an `-ErrorAction` argument spelled *text* selects `Stop`. Text this cannot read is read
-    as selecting it: the question decides whether a handler is load bearing, and an argument
-    computed at run time may be anything.
+    Whether the parameter name *written* at a call site binds `-ErrorAction` and nothing else.
+
+    5.1 binds a parameter by any prefix of its name that no other parameter of the command answers
+    to, which `refinery.lib.scripts.ps1.ast.binds_parameter` reads. What it cannot read on its own
+    is the *ambiguity*, and here that is decidable: every command carrying `-ErrorAction` carries
+    every common parameter, so a prefix reaching a second common name reaches it on exactly the
+    commands this asks about. `-e`, `-er` and `-erro` all reach `-ErrorVariable` as well and are
+    measured not to stop; `-errora` reaches this one alone and is measured to stop.
+
+    Refusing an ambiguous prefix is also what keeps a native command out: `powershell.exe -e <b64>`
+    hands `-e` to a program rather than to a parameter binder, and reading it as an error action
+    pins every handler in the script around the commonest shape in this project's corpus.
     """
-    return text is None or text.strip().lower() in _STOPS
+    reached = {surface for surface in _COMMON_SURFACES if binds_parameter(written, surface)}
+    return bool(reached) and reached <= _ERROR_ACTION
+
+
+def _rethrows(handler: Ps1TrapStatement) -> bool:
+    """
+    Whether *handler* disposes of an error by re-raising it, which a `trap` spells as an unlabelled
+    `break` — measured: `& { trap { break }; [int]'a' }` ends the script where the same block
+    without the handler reports the cast and carries on.
+
+    A `break` written inside a loop of the trap's own body leaves that loop instead and is read here
+    as a rethrow all the same, because the statement list is read rather than the control flow. That
+    keeps a handler rather than dropping one, and the exact reading is the builder's
+    `refinery.lib.scripts.ps1.analysis.cfg` already makes for the block the `trap` is written in.
+    """
+    body = handler.body.body if handler.body is not None else ()
+    return any(
+        isinstance(statement, Ps1BreakStatement) and statement.label is None
+        for statement in body
+    )
+
+
+def _selects_stop(value: Node | None) -> bool:
+    """
+    Whether *value* selects `Stop`, as the argument of `-ErrorAction` or as what a write to
+    `$ErrorActionPreference` stores. A value this cannot read is read as selecting it: the question
+    decides whether a handler is load bearing, and a value computed at run time may be anything.
+
+    A numeral is read for the number it denotes rather than for the text it is written as, because
+    what selects the member is the ordinal and `0x1`, `01` and `1` all denote it.
+    `refinery.lib.scripts.ps1.ast.argument_text` deliberately answers a numeral's spelling, which
+    is the right reading where a bare word names something and the wrong one here. A name is
+    matched by prefix, for the same reason a parameter name is.
+    """
+    if isinstance(value, (Ps1IntegerLiteral, Ps1RealLiteral)):
+        return value.value == _STOP_ORDINAL
+    text = argument_text(value)
+    if text is None:
+        return True
+    text = text.strip().lower()
+    return bool(text) and (text == str(_STOP_ORDINAL) or _STOP.startswith(text))
 
 
 def _stops_on_error(command: Ps1CommandInvocation) -> bool:
@@ -105,32 +180,50 @@ def _stops_on_error(command: Ps1CommandInvocation) -> bool:
     pair by position and only the `-Name:value` spelling arrives as a single named argument, so both
     shapes are read here. A parameter written last with nothing after it binds no value at all,
     which 5.1 rejects, and is read as `Stop` for the same reason an unreadable value is.
+
+    Every occurrence is read rather than the first, so that a name bound by a prefix 5.1 would in
+    fact reject cannot hide the parameter written after it — reading such a name as this one is
+    then the over-approximation the name set claims it is, rather than a verdict on the command. A
+    command carrying a splat is read as carrying the parameter for the same reason: the names it
+    binds are in a table this cannot see into.
     """
-    arguments = command.arguments
+    arguments = [
+        argument for argument in command.arguments
+        if isinstance(argument, Ps1CommandArgument)
+    ]
     for index, argument in enumerate(arguments):
-        if not isinstance(argument, Ps1CommandArgument):
+        value = argument.value
+        if isinstance(value, Ps1Variable) and value.splatted:
+            return True
+        if not _binds_the_error_action(argument.name):
             continue
-        if argument.name.lstrip('-').lower() not in _ERROR_ACTION:
-            continue
-        if argument.kind is Ps1CommandArgumentKind.NAMED:
-            return _selects_stop(argument_text(argument.value))
-        following = arguments[index + 1] if index + 1 < len(arguments) else None
-        if isinstance(following, Ps1CommandArgument):
-            following = following.value
-        return _selects_stop(argument_text(following))
+        if argument.kind is not Ps1CommandArgumentKind.NAMED:
+            following = arguments[index + 1] if index + 1 < len(arguments) else None
+            value = None
+            if following is not None and following.kind is Ps1CommandArgumentKind.POSITIONAL:
+                value = following.value
+        if _selects_stop(value):
+            return True
     return False
 
 
 def _writes_stop_to_the_preference(node: Node) -> bool:
     """
     Whether *node* assigns `$ErrorActionPreference` a value that may be `Stop`.
+
+    The target is read through `refinery.lib.scripts.ps1.ast.assignment_target_variables`, so that
+    a type-constrained, parenthesized or multi-assignment target is the same write as a bare one,
+    and keyed through `refinery.lib.scripts.ps1.ast.binding_key`, so that the unrelated
+    process-global `$env:ErrorActionPreference` is not read as this variable.
     """
     if not isinstance(node, Ps1AssignmentExpression):
         return False
-    target = node.target
-    if not isinstance(target, Ps1Variable) or target.name.lower() != _ERROR_ACTION_PREFERENCE:
+    if not any(
+        binding_key(variable) == _ERROR_ACTION_PREFERENCE
+        for variable in assignment_target_variables(node.target)
+    ):
         return False
-    return _selects_stop(argument_text(node.value))
+    return _selects_stop(node.value)
 
 
 def ends_the_script(element: Node) -> bool:
@@ -151,14 +244,22 @@ def ends_the_script(element: Node) -> bool:
     executable corpus cannot hold as a row because a snippet that exits takes the measuring host
     with it.
 
-    The whole subtree is read, because a construct raises wherever its parts do: `1..2 |
-    ForEach-Object { throw }` ends the script although the `throw` stands in a body of its own. That
-    reaches into a `function` definition written inside the statement as well, whose `throw` runs
-    only once something calls it — an over-approximation, and one that keeps a handler rather than
-    dropping it.
+    The whole subtree is read, because a construct raises wherever its parts do:
+
+        1..2 | ForEach-Object { throw }
+
+    ends the script although the `throw` stands in a body of its own. That reaches into a `function`
+    definition written inside the statement as well, whose `throw` runs only once something calls
+    it — an over-approximation, and one that keeps a handler rather than dropping it.
+
+    A `trap` inside the subtree that re-raises is read the same way, because it *converts*: an error
+    a nested block would have reported and stepped over ends the script once such a handler takes
+    it. See `_rethrows`.
     """
     for node in element.walk():
         if isinstance(node, Ps1ThrowStatement):
+            return True
+        if isinstance(node, Ps1TrapStatement) and _rethrows(node):
             return True
         if isinstance(node, Ps1CommandInvocation) and _stops_on_error(node):
             return True
@@ -204,6 +305,7 @@ class Ps1FaultReach:
         self._forward: dict[int, Ps1FaultRouting] = {}
         self._backward: dict[int, bool] = {}
         self._handled: set[int] | None = None
+        self._ending: dict[int, bool] = {}
         self._stopping: bool | None = None
 
     def routing_at(self, node: Node) -> Ps1FaultRouting | None:
@@ -369,9 +471,9 @@ class Ps1FaultReach:
         raisers = self._raisers(graph, start)
         if not raisers:
             return False
-        if any(ends_the_script(raiser) for raiser in raisers):
-            return True
         if self._stops_on_every_error():
+            return True
+        if any(self._ends_the_script(raiser) for raiser in raisers):
             return True
         element = start.element
         routing = self._routing(graph, start)
@@ -429,6 +531,28 @@ class Ps1FaultReach:
             and not isinstance(node.element, (Ps1CatchClause, Ps1TrapStatement))
         ]
 
+    def _ends_the_script(self, element: Node) -> bool:
+        """
+        `ends_the_script` for *element*, remembered for the life of this model. Every handler judged
+        against the same block is offered the same statements, so the subtree behind each one is
+        read once however many removals ask about it.
+        """
+        remembered = self._ending.get(id(element))
+        if remembered is None:
+            remembered = self._ending[id(element)] = ends_the_script(element)
+        return remembered
+
+    @property
+    def _script(self) -> Node | None:
+        """
+        The tree the graphs were built over, read off a graph's owner rather than taken as an
+        argument: a graph owner is a node of that tree, and a whole-script fact has to be asked of
+        the whole script rather than of the statements the graphs happen to place.
+        """
+        for graph in self._control_flow.graphs.values():
+            return tree_root(graph.owner)
+        return None
+
     def _stops_on_every_error(self) -> bool:
         """
         Whether this script writes `Stop` to `$ErrorActionPreference` anywhere at all, which makes
@@ -439,14 +563,16 @@ class Ps1FaultReach:
         governs everything that runs after it; a script that arms it at all is therefore read as
         arming it throughout. That direction keeps handlers, and what it costs — junk `trap` beside
         a script that arms `Stop` — is a shape an obfuscator has no reason to emit.
+
+        The tree is read rather than the graphs. What the graphs place is statements, and their
+        elements nest, so a walk per placed element reads an inner subtree once per level of
+        nesting around it and still misses what stands at no point they model — a `param` block
+        default among it.
         """
         if self._stopping is None:
-            self._stopping = any(
-                _writes_stop_to_the_preference(node)
-                for graph in self._control_flow.graphs.values()
-                for cfg_node in graph.nodes
-                if cfg_node.element is not None
-                for node in cfg_node.element.walk()
+            root = self._script
+            self._stopping = root is not None and any(
+                _writes_stop_to_the_preference(node) for node in root.walk()
             )
         return self._stopping
 
