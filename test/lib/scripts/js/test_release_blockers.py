@@ -463,6 +463,20 @@ A_FILE_REFUSED_WITH_NOTHING_FABRICATED = {
 }
 
 
+#: Binding positions written as an object pattern whose shorthand names a reserved word. The one
+#: node the parser builds there is the key and the binding at once, so the refusal that reaches
+#: every other binding position — a declarator, an array pattern, a parameter — does not reach this
+#: one, and `var { if: x } = o` is a program, which is why the refusal cannot simply move onto the
+#: key.
+A_BINDING_PATTERN_NAMING_A_RESERVED_WORD = tuple(
+    _spelled_with_an_escaped_identifier(source) for source in (
+        'var { ESCAPED_IF } = { if: 7 }; console.log(1);',
+        'var { ESCAPED_IF = 1 } = {}; console.log(1);',
+        'function f({ ESCAPED_IF }){ return 1; } console.log(f({}));',
+    )
+)
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAFileRefusedWithNothingFabricatedIsNotAnsweredWithAProgram(TestBase):
     """
@@ -495,6 +509,21 @@ class TestAFileRefusedWithNothingFabricatedIsNotAnsweredWithAProgram(TestBase):
         self.assertEqual(
             {source: before_and_after(source, module=module) for source, module in rows.items()},
             {source: (refused, refused) for source in rows},
+        )
+
+    @unittest.expectedFailure
+    def test_a_pattern_binding_a_reserved_word_is_no_program(self):
+        """
+        Node refuses every program of `A_BINDING_PATTERN_NAMING_A_RESERVED_WORD`, each of which
+        binds a name whose escapes spell `if` through an object pattern. What each comes back as is
+        refused too, so nothing runs that should not; what is wrong is that
+        `refinery.lib.scripts.is_well_formed` answers `True` for all three, and that answer is what
+        decides whether such a text may be spliced into a file that does run.
+        """
+        rows = A_BINDING_PATTERN_NAMING_A_RESERVED_WORD
+        self.assertEqual(
+            {source: well_formed(source) for source in rows},
+            {source: False for source in rows},
         )
 
 
@@ -590,6 +619,77 @@ class TestANameBoundToEvalIsNotADirectEval(TestBase):
         deobfuscation rewrites the call to a direct one and prints `7` for the first.
         """
         rows = AN_EVAL_REACHED_THROUGH_A_NAME_BOUND_TO_IT
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: Programs calling a function the `async` keyword marks, mapped to what Node prints for each.
+#: Calling one answers a promise whose resolution is the value the body returned, never that value,
+#: so a program asking anything of what the call answered is asking it of the promise.
+A_CALL_TO_AN_ASYNC_FUNCTION = {
+    'async function m(){ return 7; }'
+    ' m().then(function(v){ console.log(v); });': '7\n',
+    'var o = { async m(){ return 7; } };'
+    ' console.log(typeof o.m().then);': 'function\n',
+    'async function m(){ return 7; }'
+    ' console.log(m() instanceof Promise);': 'true\n',
+}
+
+
+#: The same shapes the fold is right about, which is what says the defect is the `async` keyword in
+#: those two spellings and not the fold: an async function written as an expression or as an arrow,
+#: a generator method, and an async method of a class are all left standing.
+AN_ASYNC_SHAPE_THE_FOLD_LEAVES_ALONE = {
+    'var m = async function(){ return 7; }; console.log(typeof m().then);': 'function\n',
+    'var m = async () => 7; console.log(typeof m().then);': 'function\n',
+    'class C { async m(){ return 7; } } console.log(typeof new C().m().then);': 'function\n',
+    'var o = { *m(){ yield 7; } }; console.log(o.m().next().value);': '7\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestACallToAnAsyncFunctionAnswersAPromise(TestBase):
+    """
+    An `async` function does not answer what its body returned. Calling one answers a promise, and
+    the value the body returned is what that promise resolves to, which is a different object with
+    different members and a different type. Folding the call to the returned value is therefore not
+    a reduction of the program but a replacement of it, and every question the file then asks of
+    what the call answered is asked of the wrong thing.
+
+    Two spellings are folded and four are not.  A declaration and a method of an object literal lose
+    the keyword; the same function written as an expression, as an arrow, or as a method of a class,
+    and a generator method beside them, are all left standing —
+    `AN_ASYNC_SHAPE_THE_FOLD_LEAVES_ALONE` holds those and passes. So what is missing is not the
+    rule but its reach: `refinery.lib.scripts.js.deobfuscation.helpers.try_inline_trivial_function`
+    states the rule outright and whatever answers these two never asks it.
+
+    Measured identical at `45d1e19a2`, so it is older than the work around it.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_to_an_async_function_is_not_folded_to_what_its_body_returned(self):
+        """
+        Node prints `7`, `function` and `true` for the three programs of
+        `A_CALL_TO_AN_ASYNC_FUNCTION`. Each deobfuscation replaces the call with `7`: the first
+        throws a `TypeError` for calling `then` on a number, and the other two print `undefined`
+        and `false`.
+        """
+        rows = A_CALL_TO_AN_ASYNC_FUNCTION
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_an_async_function_written_another_way_is_left_standing(self):
+        """
+        Node prints `function` for the three programs of `AN_ASYNC_SHAPE_THE_FOLD_LEAVES_ALONE`
+        that ask an async call for its `then`, and `7` for the generator. Each deobfuscation prints
+        the same, which is what makes the entry above about two spellings rather than about the
+        keyword.
+        """
+        rows = AN_ASYNC_SHAPE_THE_FOLD_LEAVES_ALONE
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
