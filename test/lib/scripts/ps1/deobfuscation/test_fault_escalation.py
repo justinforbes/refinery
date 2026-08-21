@@ -34,6 +34,11 @@ _ANCHOR = "Write-Host 'ANCHOR_SURVIVES'"
 #: A condition the analysis cannot decide, so that a branch is neither taken nor folded away.
 _OPAQUE = '$args'
 
+#: A command Windows PowerShell 5.1 answers with a *terminating* error rather than with the implicit
+#: one `_RAISE` produces, because `-ErrorAction Stop` makes every error the command reports
+#: terminating. Left to itself it ends the script, which is the whole difference between the two.
+_STOPPING_RAISE = 'Get-Item nope -ErrorAction Stop'
+
 
 class _Ps1FaultEscalation(TestPs1):
 
@@ -737,4 +742,127 @@ class TestPs1ATrapInAFunctionOutlivesTheRaiseWhereAHandlerMayGuardTheCall(_Ps1Fa
             }}
             Invoke-Thing
             {_ANCHOR}
+        """)
+
+
+class TestPs1ACommandToldToStopMakesItsErrorEndTheScript(_Ps1FaultEscalation):
+    """
+    `-ErrorAction Stop` makes every error a command reports a terminating one, so a `trap` over such
+    a command is the whole reason the script survives it: without the handler, nothing written after
+    the command runs. Measured on 5.1 — `Get-Item nope -ErrorAction Stop; Write-Host 'after'` writes
+    nothing and exits non-zero, and the same script under `trap { continue }` writes `after`.
+
+    That is the disposition `throw` decides, reached by a different spelling, which is why both are
+    asked of the fault model rather than of a search for the keyword.
+    """
+
+    def test_a_trap_that_continues_over_a_command_told_to_stop_is_kept(self):
+        self._assertKept(F"""
+            trap {{ continue }}
+            {_STOPPING_RAISE}
+            {_FOLLOWER}
+        """)
+
+    def test_an_empty_trap_over_a_command_told_to_stop_is_kept(self):
+        self._assertKept(F"""
+            trap {{}}
+            {_STOPPING_RAISE}
+            {_FOLLOWER}
+        """)
+
+    def test_a_trap_over_a_command_told_to_stop_inside_a_branch_is_kept(self):
+        self._assertKept(F"""
+            trap {{ continue }}
+            if ({_OPAQUE}) {{
+              {_STOPPING_RAISE}
+            }}
+            {_FOLLOWER}
+        """)
+
+    def test_a_trap_over_a_command_told_to_continue_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            trap {{ continue }}
+            Get-Item nope -ErrorAction Continue
+            {_FOLLOWER}
+        """, F"""
+            Get-Item nope -ErrorAction Continue
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1AnExitIsNoRaiseAnyTrapDisposesOf(_Ps1FaultEscalation):
+    """
+    `exit` ends the script too, and by an exception no `trap` catches: `trap { 'T' }; exit 3` writes
+    neither `T` nor anything else. A `trap` written over one therefore intercepts nothing and stays
+    removable, which is what holds the rule to *errors that end the script* rather than to
+    *statements that end it*.
+    """
+
+    def test_a_trap_over_an_exit_in_a_branch_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            trap {{ continue }}
+            if ({_OPAQUE}) {{
+              exit 3
+            }}
+            {_FOLLOWER}
+        """, F"""
+            if ({_OPAQUE}) {{
+              exit 3
+            }}
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1AStopPreferenceMakesEveryTrapLoadBearing(_Ps1FaultEscalation):
+    """
+    Under `$ErrorActionPreference = 'Stop'` even an implicit terminating error ends the script —
+    measured: `$ErrorActionPreference = 'Stop'; [int]'a'; Write-Host 'after'` writes nothing. A
+    `trap` is then what the script survives on whatever the raise was, so the handler outlives the
+    raise that `TestPs1AStopPreferenceMakesTheRaiseEndTheScript` still records as removed.
+    """
+
+    def test_a_trap_under_a_stop_preference_outlives_the_raise_it_guards(self):
+        self._assertDeobfuscatesTo(F"""
+            $ErrorActionPreference = 'Stop'
+            trap {{ continue }}
+            {_RAISE}
+            {_FOLLOWER}
+        """, F"""
+            $ErrorActionPreference = 'Stop'
+            trap {{ continue }}
+            {_FOLLOWER}
+        """)
+
+
+class TestPs1ATrapIsRemovedOverAnErrorTheScriptItselfSurvives(_Ps1FaultEscalation):
+    """
+    An implicit terminating error nothing handles at script scope is reported and the next statement
+    runs, so at script scope an inert `trap` over one disposes of it exactly as no handler would and
+    is removable. That reading holds only while nothing *outside* the script is guarding it, and
+    these are the shapes where it does not: 5.1 hands a statement-terminating error to a `catch`
+    anywhere up the call stack, so a script dot-sourced inside a `try` — which is how this suite's
+    own 5.1 oracle runs every snippet, and what `iex` and `&` do to a payload — writes `after` with
+    the `trap` and does not write it without.
+
+    Keeping the handler closes that, and costs the injected-noise `trap` that
+    `refinery.lib.scripts.ps1.deobfuscation.deadcode.Ps1DeadCodeElimination._prune_trap` exists to
+    drop: nothing distinguishes a block holding `Write-Host 'keep'` from one holding a raise. The
+    same scripts are carried by `BEHAVIOUR_DEFECTS` in `test_oracle.py`, which reaches the verdict
+    by running both versions on a real host rather than by reading the tree.
+    """
+
+    @unittest.expectedFailure
+    def test_a_trap_that_continues_over_an_implicit_terminating_error_is_kept(self):
+        self._assertKept(F"""
+            trap {{ continue }}
+            {_RAISE}
+            {_FOLLOWER}
+        """)
+
+    @unittest.expectedFailure
+    def test_an_empty_trap_over_an_implicit_terminating_error_is_kept(self):
+        self._assertKept(F"""
+            trap {{}}
+            {_RAISE}
+            {_FOLLOWER}
         """)

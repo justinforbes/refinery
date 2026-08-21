@@ -47,7 +47,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SwitchStatement,
-    Ps1ThrowStatement,
     Ps1TrapStatement,
     Ps1TryCatchFinally,
     Ps1UnaryExpression,
@@ -553,7 +552,7 @@ class Ps1DeadCodeElimination(Transformer):
         if isinstance(stmt, Ps1TryCatchFinally):
             return self._prune_try(stmt, world)
         if isinstance(stmt, Ps1TrapStatement):
-            return self._prune_trap(stmt, world, dominance)
+            return self._prune_trap(stmt, world)
         return None
 
     @staticmethod
@@ -707,7 +706,7 @@ class Ps1DeadCodeElimination(Transformer):
         return survivors + list(finally_body)
 
     def _prune_trap(
-        self, node: Ps1TrapStatement, world: Ps1WorldReach, dominance: DominatorModel,
+        self, node: Ps1TrapStatement, world: Ps1WorldReach,
     ) -> list[Statement] | None:
         """
         Remove a `trap` handler whose body produces no observable output and whose scope cannot
@@ -717,21 +716,21 @@ class Ps1DeadCodeElimination(Transformer):
         only where nothing they guard actually throws. A body that performs a side effect — a real
         logging handler such as `trap { Write-Host 'err' }` — keeps the trap intact.
 
-        The first gate is control flow: the removal rests on the guarded code never throwing, so a
-        `throw` the control-flow graph reports as reachable in the trap's scope makes the trap
-        load-bearing and keeps it. Without it, `trap { continue }; throw 'e'; Write-Host 'after'`
-        would have its handler removed, the throw would escape, and the statement the trap resumes
-        into would never run. A terminating error that is not a `throw` statement — a failing cast,
-        a method call — is modelled as ordinary fall-through by this graph and is not seen here; that
-        residual is no wider than before this gate existed.
+        Whether anything the trap guards still raises is not asked here at all. It is the veto's
+        question — `Ps1FaultReach.removing_a_handler_is_observed` in
+        `refinery.lib.scripts.ps1.analysis.faults` — and it is asked of every proposal this pass
+        files, over the exceptional edges the graph wired rather than over a search for the `throw`
+        keyword. A gate here used to answer a narrower version of it, and answering one question
+        twice from two different bodies of evidence is how the two come apart: that one counted a
+        `throw` statement anywhere in the graph and so missed
+        `trap { continue }; Get-Item nope -ErrorAction Stop`, whose error ends the script exactly as
+        a `throw` does.
 
-        The second gate is purity, not emission: the removal is not provable under strict semantics
-        at all, and under the premise that the guarded code does not throw, a body that merely emits
-        never runs either, so `trap { 5 }` and `trap { Get-Date }` are dropped alike. Only a body
-        whose statements would do something observable is worth keeping the trap for.
+        The gate that is left is purity, not emission: the removal is not provable under strict
+        semantics at all, and under the premise that the guarded code does not throw, a body that
+        merely emits never runs either, so `trap { 5 }` and `trap { Get-Date }` are dropped alike.
+        Only a body whose statements would do something observable is worth keeping the trap for.
         """
-        if self._intercepts_a_reachable_throw(node, dominance):
-            return None
         body = node.body.body if node.body is not None else []
         for stmt in body:
             if isinstance(stmt, (Ps1BreakStatement, Ps1ContinueStatement)):
@@ -743,25 +742,3 @@ class Ps1DeadCodeElimination(Transformer):
                     continue
             return None
         return []
-
-    @staticmethod
-    def _intercepts_a_reachable_throw(node: Ps1TrapStatement, dominance: DominatorModel) -> bool:
-        """
-        Whether a `throw` the control-flow graph reports as reachable lies in the body this trap is
-        written in. That body is wider than the trap's scope — a `trap` catches for the statement
-        block it stands in and for nothing around it, while this counts every reachable `throw` of
-        the whole graph — so what it answers is an over-approximation, and one that keeps a trap
-        rather than dropping it. `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach` answers
-        the exact question, and the plan's veto asks it of this removal; what is left here is a
-        cheap first refusal rather than the decision. A trap this cannot place — one with no graph
-        node — is kept, which is the same safe direction.
-        """
-        located = dominance.locate(node)
-        if located is None:
-            return True
-        graph, _ = located
-        reachable = dominance.reachable(graph.entry, forward=True)
-        return any(
-            id(cfg_node) in reachable and isinstance(cfg_node.element, Ps1ThrowStatement)
-            for cfg_node in graph.nodes
-        )

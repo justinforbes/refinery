@@ -27,13 +27,41 @@ from typing import Iterator, NamedTuple
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
+from refinery.lib.scripts.ps1.ast import argument_text
+from refinery.lib.scripts.ps1.data import COMMON_PARAMETERS
 from refinery.lib.scripts.ps1.model import (
+    Ps1AssignmentExpression,
     Ps1BreakStatement,
     Ps1CatchClause,
+    Ps1CommandArgument,
+    Ps1CommandArgumentKind,
+    Ps1CommandInvocation,
     Ps1ContinueStatement,
     Ps1Script,
+    Ps1ThrowStatement,
     Ps1TrapStatement,
+    Ps1Variable,
 )
+
+#: The spellings the `-ErrorAction` parameter answers to, lowercased and without the dash: every
+#: alias the collected command data records for it, and every prefix of the name, because 5.1 binds
+#: a parameter by any unambiguous prefix and `-ErrorAc Stop` is measured to stop. A prefix that is
+#: in fact ambiguous is one 5.1 rejects, so reading one here as this parameter makes a claim about a
+#: script that does not run, and the claim only ever keeps a handler.
+_ERROR_ACTION_NAME = 'erroraction'
+_ERROR_ACTION = frozenset((
+    *(_ERROR_ACTION_NAME[:size] for size in range(1, len(_ERROR_ACTION_NAME) + 1)),
+    *COMMON_PARAMETERS.get(_ERROR_ACTION_NAME, ()),
+))
+
+#: The `-ErrorAction` arguments that select `Stop`, in the spellings 5.1 binds to it: the name of
+#: the enumeration member in any case, and the number that member is. Both are measured.
+_STOPS = frozenset({'stop', '1'})
+
+#: The automatic variable that decides what a command does with an error it reports. Set to `Stop`
+#: it makes every one of them terminating — a failing cast included, which is otherwise reported
+#: and stepped over.
+_ERROR_ACTION_PREFERENCE = 'erroractionpreference'
 
 
 class Ps1FaultRouting(NamedTuple):
@@ -57,6 +85,84 @@ class Ps1FaultRouting(NamedTuple):
 #: What the graphs place nothing for, and therefore claim nothing about. Every query answers `None`
 #: for a node it cannot place, and every caller reads that as *the error may go anywhere*.
 UNPLACED = None
+
+
+def _selects_stop(text: str | None) -> bool:
+    """
+    Whether an `-ErrorAction` argument spelled *text* selects `Stop`. Text this cannot read is read
+    as selecting it: the question decides whether a handler is load bearing, and an argument
+    computed at run time may be anything.
+    """
+    return text is None or text.strip().lower() in _STOPS
+
+
+def _stops_on_error(command: Ps1CommandInvocation) -> bool:
+    """
+    Whether *command* carries `-ErrorAction Stop`, which turns every error it reports into one that
+    ends the script wherever nothing handles it.
+
+    The parameter and its argument are two arguments rather than one: 5.1 binds a bare `-Name value`
+    pair by position and only the `-Name:value` spelling arrives as a single named argument, so both
+    shapes are read here. A parameter written last with nothing after it binds no value at all,
+    which 5.1 rejects, and is read as `Stop` for the same reason an unreadable value is.
+    """
+    arguments = command.arguments
+    for index, argument in enumerate(arguments):
+        if not isinstance(argument, Ps1CommandArgument):
+            continue
+        if argument.name.lstrip('-').lower() not in _ERROR_ACTION:
+            continue
+        if argument.kind is Ps1CommandArgumentKind.NAMED:
+            return _selects_stop(argument_text(argument.value))
+        following = arguments[index + 1] if index + 1 < len(arguments) else None
+        if isinstance(following, Ps1CommandArgument):
+            following = following.value
+        return _selects_stop(argument_text(following))
+    return False
+
+
+def _writes_stop_to_the_preference(node: Node) -> bool:
+    """
+    Whether *node* assigns `$ErrorActionPreference` a value that may be `Stop`.
+    """
+    if not isinstance(node, Ps1AssignmentExpression):
+        return False
+    target = node.target
+    if not isinstance(target, Ps1Variable) or target.name.lower() != _ERROR_ACTION_PREFERENCE:
+        return False
+    return _selects_stop(argument_text(node.value))
+
+
+def ends_the_script(element: Node) -> bool:
+    """
+    Whether an error raised at *element* stops the script, rather than being reported and stepped
+    over, where no handler takes it.
+
+    PowerShell has two kinds of error a `trap` sees, and they are disposed of differently where
+    there is no `trap` — which is the whole reason this question is worth asking. A
+    **statement-terminating** error ends the statement it was raised in and the next statement runs:
+    a failing cast, a division by zero, a member access on `$null`, an exception out of a .NET
+    method, an unresolved command name. A **terminating** error ends the script, and only `throw`
+    and a command told to stop raise one. Both halves are measured.
+
+    `exit` is neither, and is deliberately absent: it ends the script by an exception no `trap`
+    catches, so a handler over one disposes of nothing and reading `exit` as a raise would keep a
+    handler no run reaches. `trap { 'T' }; exit 3` writes neither `T` nor anything else, which the
+    executable corpus cannot hold as a row because a snippet that exits takes the measuring host
+    with it.
+
+    The whole subtree is read, because a construct raises wherever its parts do: `1..2 |
+    ForEach-Object { throw }` ends the script although the `throw` stands in a body of its own. That
+    reaches into a `function` definition written inside the statement as well, whose `throw` runs
+    only once something calls it — an over-approximation, and one that keeps a handler rather than
+    dropping it.
+    """
+    for node in element.walk():
+        if isinstance(node, Ps1ThrowStatement):
+            return True
+        if isinstance(node, Ps1CommandInvocation) and _stops_on_error(node):
+            return True
+    return False
 
 
 def handler_acts(handler: Ps1CatchClause | Ps1TrapStatement) -> bool:
@@ -98,6 +204,7 @@ class Ps1FaultReach:
         self._forward: dict[int, Ps1FaultRouting] = {}
         self._backward: dict[int, bool] = {}
         self._handled: set[int] | None = None
+        self._stopping: bool | None = None
 
     def routing_at(self, node: Node) -> Ps1FaultRouting | None:
         """
@@ -259,8 +366,13 @@ class Ps1FaultReach:
         return remembered
 
     def _removal_matters(self, graph: ControlFlowGraph, start: CfgNode) -> bool:
-        if not self._raisers(graph, start):
+        raisers = self._raisers(graph, start)
+        if not raisers:
             return False
+        if any(ends_the_script(raiser) for raiser in raisers):
+            return True
+        if self._stops_on_every_error():
+            return True
         element = start.element
         routing = self._routing(graph, start)
         if isinstance(element, Ps1TrapStatement) and routing.leaves_the_body:
@@ -304,14 +416,39 @@ class Ps1FaultReach:
                 handlers.append(node.element)
         return Ps1FaultRouting(tuple(handlers), leaves)
 
-    def _raisers(self, graph: ControlFlowGraph, start: CfgNode) -> bool:
-        for node in self._exceptional_closure(graph, start, forward=False):
-            element = node.element
-            if element is None:
-                continue
-            if not isinstance(element, (Ps1CatchClause, Ps1TrapStatement)):
-                return True
-        return False
+    def _raisers(self, graph: ControlFlowGraph, start: CfgNode) -> list[Node]:
+        """
+        The statements whose errors *start* may be offered, which is the backward walk over the
+        exceptional edges. They are reported rather than counted, because what would become of an
+        error if this handler were gone is a question about the statement that raises it.
+        """
+        return [
+            node.element
+            for node in self._exceptional_closure(graph, start, forward=False)
+            if node.element is not None
+            and not isinstance(node.element, (Ps1CatchClause, Ps1TrapStatement))
+        ]
+
+    def _stops_on_every_error(self) -> bool:
+        """
+        Whether this script writes `Stop` to `$ErrorActionPreference` anywhere at all, which makes
+        every error a command reports a terminating one.
+
+        Position is deliberately not asked. The preference is a variable of the session rather than
+        of a block, so a write in one body governs a raise in another and a write inside a branch
+        governs everything that runs after it; a script that arms it at all is therefore read as
+        arming it throughout. That direction keeps handlers, and what it costs — junk `trap` beside
+        a script that arms `Stop` — is a shape an obfuscator has no reason to emit.
+        """
+        if self._stopping is None:
+            self._stopping = any(
+                _writes_stop_to_the_preference(node)
+                for graph in self._control_flow.graphs.values()
+                for cfg_node in graph.nodes
+                if cfg_node.element is not None
+                for node in cfg_node.element.walk()
+            )
+        return self._stopping
 
     @staticmethod
     def _exceptional_closure(
