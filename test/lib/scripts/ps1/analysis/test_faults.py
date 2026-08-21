@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test import TestBase
 
 from refinery.lib.scripts import Statement
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
-from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach, build_fault_reach, handler_acts
+from refinery.lib.scripts.ps1.analysis.faults import (
+    Ps1FaultReach,
+    Ps1FaultRouting,
+    build_fault_reach,
+    handler_acts,
+)
 from refinery.lib.scripts.ps1.ast import get_body
-from refinery.lib.scripts.ps1.model import Ps1Script, Ps1TrapStatement
+from refinery.lib.scripts.ps1.model import (
+    Ps1ArrayExpression,
+    Ps1Script,
+    Ps1SubExpression,
+    Ps1TrapStatement,
+)
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -402,3 +414,45 @@ class TestPs1RemovingATrapIsJudgedByWhereItsErrorsWouldGoInstead(TestBase):
             acting.body[0].try_block.body[0]))
         self.assertFalse(swallowing_reach.removing_a_handler_is_observed(
             swallowing.body[0].try_block.body[0]))
+
+
+class TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression(TestBase):
+    """
+    `$( )` and `@( )` hold statements, and a `trap` written among them is a handler for those
+    statements and for nothing else. Measured on 5.1: `$x = $(trap { continue }; [int]'a'; 'in')`
+    leaves `in` in `$x`, so the handler took the error and resumption carried on inside the bracket;
+    and `$(trap { continue }); [int]'a'; Write-Host 'after'` writes nothing at all, so the same
+    handler guards no part of the block the bracket is written in.
+
+    The control-flow builder descends into neither bracket, so it places no node for such a `trap`
+    and none for the statements it stands beside. Only the second half of the measurement survives
+    that, and it survives for the wrong reason: the handler is invisible rather than out of scope.
+    """
+
+    def _bracket(self, source: str) -> tuple[Ps1TrapStatement, Statement, Ps1FaultReach]:
+        tree, reach = _model(source)
+        bracket = next(
+            node for node in tree.walk_in_order()
+            if isinstance(node, (Ps1ArrayExpression, Ps1SubExpression))
+        )
+        trap, raise_site = bracket.body
+        if not isinstance(trap, Ps1TrapStatement):
+            self.fail('the bracket does not open with a trap')
+        return trap, raise_site, reach
+
+    @unittest.expectedFailure
+    def test_a_raise_in_a_subexpression_is_offered_to_the_trap_written_beside_it(self):
+        trap, raise_site, reach = self._bracket("$x = $(trap { 'h' }; 'a')")
+        self.assertEqual(reach.routing_at(raise_site), Ps1FaultRouting((trap,), False))
+
+    @unittest.expectedFailure
+    def test_a_raise_in_an_array_expression_is_offered_to_the_trap_written_beside_it(self):
+        trap, raise_site, reach = self._bracket("$x = @(trap { 'h' }; 'a')")
+        self.assertEqual(reach.routing_at(raise_site), Ps1FaultRouting((trap,), False))
+
+    def test_a_raise_outside_the_bracket_is_offered_to_no_trap_written_inside_one(self):
+        tree, reach = _model("""
+            $x = $(trap { 'h' })
+            'a'
+        """)
+        self.assertEqual(reach.routing_at(tree.body[1]), Ps1FaultRouting((), False))

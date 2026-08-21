@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from test import TestBase
 
 from refinery.lib.scripts import Node, Statement
@@ -16,6 +18,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Script,
     Ps1ScriptBlock,
     Ps1TrapStatement,
+    Ps1TryCatchFinally,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
@@ -850,3 +853,37 @@ class TestPs1ControlFlowGraph(TestBase):
         tree = Ps1Parser("switch ($x) { 1 { } }").parse()
         cycles = CycleModel(build_control_flow_model(tree))
         self.assertTrue(cycles.repeats(tree.body[0]))
+
+
+class TestPs1ACatchWhoseTypeFilterCannotBeReadIsNotUnfiltered(TestPs1ControlFlowGraph):
+    """
+    A `catch` carrying no type filter takes every error, and one carrying a filter takes only what
+    the filter matches — so whether a throw the guarded block makes can get past the clause is
+    decided by reading the filter. `Ps1CatchClause.types` spells *no filter written* and *a filter
+    this could not read* the same way, as the empty list, and the graph reads both as unfiltered.
+
+    5.1 rejects `catch [] { }` outright, reporting `MissingTypename`, so the conflation is out of
+    reach of any script a host will run. What pins it is the direction it errs in: a clause read as
+    taking everything closes the exceptional edge the construct would otherwise pass outward, and an
+    enclosing handler then looks like one no error reaches.
+    """
+
+    def _guarded_statement(self, source: str) -> tuple[ControlFlowGraph, Statement]:
+        tree, graph = self._tree_and_graph(source)
+        construct = tree.body[0]
+        if not isinstance(construct, Ps1TryCatchFinally):
+            self.fail('the script does not open with a try construct')
+        guarded = get_body(construct.try_block)
+        if not guarded:
+            self.fail('the try block holds no statement')
+        return graph, guarded[0]
+
+    def test_a_catch_carrying_a_filter_lets_the_error_leave_the_construct(self):
+        graph, guarded = self._guarded_statement(
+            "try { 'a' } catch [System.IO.IOException] { 'b' }")
+        self.assertIn(graph.exit, self._reached_by_an_error_at(graph, guarded))
+
+    @unittest.expectedFailure
+    def test_a_catch_whose_filter_is_an_empty_bracket_lets_the_error_leave_the_construct(self):
+        graph, guarded = self._guarded_statement("try { 'a' } catch [] { 'b' }")
+        self.assertIn(graph.exit, self._reached_by_an_error_at(graph, guarded))
