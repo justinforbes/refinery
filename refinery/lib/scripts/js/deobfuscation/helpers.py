@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable, Iterator, Sequence
 if TYPE_CHECKING:
     from typing import TypeAlias
 
+    from refinery.lib.scripts.js.analysis.effects import EffectModel
     from refinery.lib.scripts.js.model import JsArrowFunctionExpression as _Arrow
     from refinery.lib.scripts.js.model import JsFunctionDeclaration as _FuncDecl
     from refinery.lib.scripts.js.model import JsFunctionExpression as _FuncExpr
@@ -306,12 +307,12 @@ def read_data_property(obj: Value, key: str) -> tuple[MemberRead, Value]:
     it does answer, it answers alone: `length` and an index within range are own properties of a
     string or array, so no prototype can be consulted for them and none can shadow them.
 
-    One list element breaks that: an array literal's elision is held as the `None` an explicit
-    `undefined` element is also held as, and only the first of the two is a hole the prototype
-    answers for. `[1, , 3][1]` reads `Array.prototype[1]` where `[1, undefined, 3][1]` reads the
-    element, and this reports `FOUND` for both. Telling them apart needs a hole the value domain
-    does not have, so a caller that may not read through a polluted prototype — a fold, unlike an
-    emulated execution — must not accept `FOUND` from a list it did not build itself.
+    A list holds a value at every index it has, which is what makes the second of those answerable
+    without a model. An array literal's elision, a `length` grown past its end and a store to an
+    index beyond it all leave a slot the prototype answers for and the value does not, so a list
+    holding one would make `FOUND` a lie: `[1, , 3][1]` reads `Array.prototype[1]` where
+    `[1, undefined, 3][1]` reads the element. Nothing here can tell those apart, which is why the
+    producer refuses to build such a list at all rather than this reporting on one.
 
     *obj* must hold a string the way JavaScript does, as UTF-16 code units — the form the lexer gives
     a literal and the builtin registry gives a produced string. A string of code points read here
@@ -329,6 +330,66 @@ def read_data_property(obj: Value, key: str) -> tuple[MemberRead, Value]:
     elif isinstance(obj, dict) and key in obj:
         return MemberRead.FOUND, obj[key]
     return MemberRead.NOT_DATA, None
+
+
+def property_is_inherited(value_type: type, key: str) -> bool:
+    """
+    Whether *key* names a member the prototype chain of *value_type* supplies, so a value of that
+    type has one whether or not it owns one. This is the yes-side of the question
+    `property_provably_absent` answers the no-side of, and the two are not each other's negation:
+    between them lies every name the tables do not list, which a value has only if the file put it
+    there.
+
+    Only this side can be answered without an effect model, and the asymmetry is the point. Writing
+    a prototype adds a name to a chain, so a name the language already puts there is still there
+    afterwards, while a name it does not put there is one only the file can account for. What that
+    leaves unmodelled is a `delete` of a built-in member, which every table in this file already
+    assumes away.
+    """
+    if key in OBJECT_PROTOTYPE_MEMBERS or key in PROTOTYPE_CHAIN_PROPERTIES:
+        return True
+    if issubclass(value_type, JsBuffer):
+        return False
+    if issubclass(value_type, str):
+        return key in STRING_PROTOTYPE_METHODS
+    if issubclass(value_type, list):
+        return key in ARRAY_PROTOTYPE_METHODS
+    return False
+
+
+def property_provably_absent(effects: EffectModel | None, value_type: type, key: str) -> bool:
+    """
+    Whether reading *key* off a value of *value_type* that does not own *key* provably yields
+    `undefined`, so a caller may answer that in place of the read. This is the inherited half of a
+    property access where `read_data_property` is the own half, and it is one function because every
+    caller is deciding the same thing — what the prototype chain says about a key the value itself
+    does not answer for — and each of them was deciding it alone with a different clause missing.
+
+    Two questions have to answer together. The name must be one no prototype in the chain holds,
+    which is what the tables above enumerate from a real engine rather than from the subset this
+    package can evaluate: `normalize` is a function whether or not we can run it, and answering
+    `undefined` for it would contradict `typeof`. And the chain has to still be the one the language
+    describes, which only *effects* can say — `Object.prototype.z = 9` puts a name there that no
+    table here lists, so deciding from the tables alone answers `undefined` where the program
+    answers `9`.
+
+    A caller with no effect model has nothing to consult and owns that assumption itself, the same
+    way `EffectModel.trusted_intrinsic` leaves it with one. A `JsBuffer` is refused outright: its
+    surface is over a hundred methods that vary between Node versions, so nothing is provably absent
+    on one. So is every receiver this file enumerates no surface for — a function, a number — since
+    the arms below name the three that have one and nothing else falls through them.
+    """
+    if key in OBJECT_PROTOTYPE_MEMBERS or key in PROTOTYPE_CHAIN_PROPERTIES:
+        return False
+    if issubclass(value_type, JsBuffer):
+        return False
+    if effects is not None and not effects.read_chain_intact(value_type):
+        return False
+    if issubclass(value_type, str):
+        return key not in STRING_PROTOTYPE_METHODS and key not in SEQUENCE_DATA_PROPERTIES
+    if issubclass(value_type, list):
+        return key not in ARRAY_PROTOTYPE_METHODS and key not in SEQUENCE_DATA_PROPERTIES
+    return issubclass(value_type, dict)
 
 
 def utf16_code_units(text: str) -> list[str]:

@@ -261,12 +261,22 @@ class JsSimplifications(Transformer):
         Statically resolve `key in name` by asking the model what value *name* holds. A sole function,
         an empty class, or an empty object literal has a bounded property set — the built-in members of
         its type plus the own properties the binding is assigned — so membership is decidable; any other
-        value, or one whose own-property set cannot be bounded, yields `None`. The binding is resolved
-        through the model, so the answer is shadowing-correct across scopes and recognizes the
-        bare-assignment form namespace flattening leaves, not only declarations. The value reads
-        `undefined` until whatever establishes it — a declarator initializer, a class declaration, or a
-        lone assignment — has run, so a `key in name` whose establishing node does not run before the read
-        is left unresolved rather than fold away the `TypeError` a premature read would throw.
+        value, or one whose own-property set cannot be bounded, yields `None`. The binding is
+        resolved through the model, so the answer is shadowing-correct across scopes and recognizes
+        the bare-assignment form namespace flattening leaves, not only declarations. The value
+        reads `undefined` until whatever establishes it — a declarator initializer, a class
+        declaration, or a lone assignment — has run, so a `key in name` whose establishing node does
+        not run before the read is left unresolved rather than fold away the `TypeError` a premature
+        read would throw.
+
+        Bounded is a claim about the prototype chain and holds only while the file leaves that chain
+        alone, which is why answering `False` needs `read_chain_intact` and answering `True` does
+        not: a name the tables list is there whatever the file wrote, while a name they do not list
+        is there too once `Object.prototype.z = 9` has run. The tables are asked for the whole
+        property set and not the inherited half `property_provably_absent` enumerates, an own
+        `length` and `prototype` included, so the membership question stays this one's and only the
+        chain question is shared. A class constructor is a function value, and its chain is a
+        function's.
         """
         right = node.right
         if not isinstance(right, JsIdentifier):
@@ -280,15 +290,15 @@ class JsSimplifications(Transformer):
         if not self.dominance.binding_established_before(binding, right):
             return None
         if isinstance(value, FUNCTION_NODES):
-            members = _FUNCTION_PROPERTIES
+            members, receiver_type = _FUNCTION_PROPERTIES, JsFunctionExpression
         elif isinstance(value, (JsClassDeclaration, JsClassExpression)):
             if value.super_class is not None:
                 return None
             if value.body is not None and value.body.body:
                 return None
-            members = _FUNCTION_PROPERTIES
+            members, receiver_type = _FUNCTION_PROPERTIES, JsFunctionExpression
         elif isinstance(value, JsObjectExpression) and not value.properties:
-            members = _EMPTY_OBJECT_PROPERTIES
+            members, receiver_type = _EMPTY_OBJECT_PROPERTIES, dict
         else:
             return None
         if key in members:
@@ -300,6 +310,8 @@ class JsSimplifications(Transformer):
         if key in present:
             return True
         if any_store:
+            return None
+        if not self.effects.read_chain_intact(receiver_type):
             return None
         return False
 

@@ -1060,6 +1060,118 @@ class TestGlobalAliasStripping(TestJsDeobfuscator):
         self.assertEqual("window.eval('x');", self._simplify("window.eval('x');"))
 
 
+class TestMembershipOverAWrittenPrototypeChain(TestJsDeobfuscator):
+    """
+    `in` asks whether a key is reachable on the receiver or anywhere up its prototype chain, so a
+    receiver whose own keys the pass can read whole decides the question only while the chain behind
+    it is one the program has not written. Each test below is that pair: the same receiver and the
+    same key, folded where nothing wrote the chain and left standing where something did.
+
+    The pair is what makes either half readable. A source that comes back unchanged says nothing on
+    its own about whether a fold was refused or was never available, and a source that folds says
+    nothing about whether the refusal has any reach.
+    """
+
+    def test_absent_key_over_a_function_folds_only_while_its_chain_is_untouched(self):
+        untouched = inspect.cleandoc(
+            """
+            function g() {}
+            var a = 'zz' in g;
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function g() {}
+                var a = false;
+                """
+            ),
+            self._simplify(untouched),
+        )
+        written = inspect.cleandoc(
+            """
+            Object.prototype.qq = 'X';
+            function g() {}
+            var a = 'zz' in g;
+            """
+        )
+        self.assertEqual(written, self._simplify(written))
+
+    def test_absent_key_over_a_class_folds_only_while_its_chain_is_untouched(self):
+        untouched = inspect.cleandoc(
+            """
+            class C {}
+            var a = 'zz' in C;
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                class C {}
+                var a = false;
+                """
+            ),
+            self._simplify(untouched),
+        )
+        written = inspect.cleandoc(
+            """
+            Object.prototype.qq = 'X';
+            class C {}
+            var a = 'zz' in C;
+            """
+        )
+        self.assertEqual(written, self._simplify(written))
+
+    def test_absent_key_over_an_object_literal_folds_only_while_its_chain_is_untouched(self):
+        untouched = inspect.cleandoc(
+            """
+            var obj = {};
+            var a = 'zz' in obj;
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var obj = {};
+                var a = false;
+                """
+            ),
+            self._simplify(untouched),
+        )
+        written = inspect.cleandoc(
+            """
+            Object.prototype.qq = 'X';
+            var obj = {};
+            var a = 'zz' in obj;
+            """
+        )
+        self.assertEqual(written, self._simplify(written))
+
+    def test_absent_key_over_an_object_literal_folds_past_a_write_to_another_chain(self):
+        """
+        `Array.prototype` is not on a plain object's chain, so a write to it cannot answer `'zz' in
+        obj` and cannot be a reason to decline. Refusing here would make any prototype write
+        anywhere in the file the end of this fold rather than a write to the chain that decides it.
+        """
+        source = inspect.cleandoc(
+            """
+            Array.prototype.qq = 'X';
+            var obj = {};
+            var a = 'zz' in obj;
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                Array.prototype.qq = 'X';
+                var obj = {};
+                var a = false;
+                """
+            ),
+            self._simplify(source),
+        )
+
+
 class TestCalleeSequencePreserved(TestJsDeobfuscator):
 
     def test_sequence_folded_in_statement_position(self):

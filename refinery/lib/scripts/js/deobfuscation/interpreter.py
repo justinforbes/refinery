@@ -27,16 +27,12 @@ from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.effects import object_sets_prototype
 from refinery.lib.scripts.js.analysis.model import SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
-    ARRAY_PROTOTYPE_METHODS,
     GLOBAL_VALUE_NAMES,
     JS_NULL,
     LOGICAL_ASSIGNMENT_OPS,
-    OBJECT_PROTOTYPE_MEMBERS,
     PROTO_KEY,
-    PROTOTYPE_CHAIN_PROPERTIES,
     RELATIONAL_OPS,
     SEQUENCE_DATA_PROPERTIES,
-    STRING_PROTOTYPE_METHODS,
     UNARY_OPS,
     JsBuffer,
     MemberRead,
@@ -52,6 +48,8 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     name_is_unbound,
     names_global_value,
     own_property_keys,
+    property_is_inherited,
+    property_provably_absent,
     read_data_property,
     spell_astral_characters,
     to_boolean,
@@ -1587,7 +1585,7 @@ class JsInterpreter:
             test = self._eval(expr.test)
             return self._eval(expr.consequent) if to_boolean(test) else self._eval(expr.alternate)
         if isinstance(expr, JsArrayExpression):
-            return [self._eval(e) if e else None for e in expr.elements]
+            return self._eval_array(expr)
         if isinstance(expr, JsSequenceExpression):
             result: Value = None
             for e in expr.expressions:
@@ -1732,20 +1730,44 @@ class JsInterpreter:
         return result
 
     def _eval_in(self, left: Value, right: Value) -> bool:
-        if isinstance(right, dict):
-            key = to_string(left)
-            if key in right:
-                return True
-            return not self._property_is_absent(right, key)
-        if isinstance(right, list):
-            key = to_string(left)
-            if key in SEQUENCE_DATA_PROPERTIES:
-                return True
-            index = canonical_array_index(key)
-            if index is not None:
-                return index < len(right)
-            return not self._property_is_absent(right, key)
+        """
+        Whether *right* has a property named by *left*, which the operator answers for the whole
+        prototype chain and not for the own properties alone. The three ways that can go are the
+        three this file has words for: the value owns a slot there, the chain supplies the name, or
+        neither does and it is `property_provably_absent`'s to say whether that settles anything.
+
+        A name it will not decide without the chain is one this operator cannot answer `false` for
+        either, so the interpretation stops rather than reporting what the own properties happen to
+        show. `Object.prototype.z = 9` makes `'z' in {}` true, and reading a refusal as an absence
+        is what a program written to be read wrongly is looking for.
+        """
+        if not isinstance(right, (dict, list)):
+            raise InterpreterError
+        key = to_string(left)
+        if read_data_property(right, key)[0] is MemberRead.FOUND:
+            return True
+        if property_is_inherited(type(right), key):
+            return True
+        if self._property_is_absent(right, key):
+            return False
         raise InterpreterError
+
+    def _eval_array(self, expr: JsArrayExpression) -> list[Value]:
+        """
+        The list an array literal builds, refusing one that would hold a hole. An elision is not an
+        element whose value is `undefined`: `[1, , 3][1]` reads `Array.prototype[1]` where
+        `[1, undefined, 3][1]` reads the element, so the two answer differently wherever that
+        prototype is written, and `indexOf` and the callback methods skip the first while visiting
+        the second.
+
+        This value domain has one `None` and it means `undefined`, so a list holding a hole would be
+        a value every one of those questions is answered wrongly from. The domain excludes it rather
+        than growing a second nothing, which is also how the syntax model spells an elision: as no
+        element at all.
+        """
+        if any(element is None for element in expr.elements):
+            raise InterpreterError
+        return [self._eval(element) for element in expr.elements]
 
     def _eval_unary(self, node: JsUnaryExpression) -> Value:
         """
@@ -2236,61 +2258,28 @@ class JsInterpreter:
         half that needs this interpreter: a nullish receiver throws before any key is looked at, and
         a key the value does not own is `undefined` only while the prototype chain is intact.
 
-        An index past the end answers `undefined` without asking that, which is not a rule but a
-        known unsoundness kept for now: `Array.prototype[5] = 'X'` puts a value where this reports
-        there is none, exactly as it does for the names `_property_is_absent` refuses to decide
-        without the chain. It is preserved rather than fixed here because closing it changes what
-        every emulated read of a sparse index answers; `MemberRead.ABSENT` is what a caller
-        unwilling to inherit it — the folder — declines on.
+        An index past the end of an array is such a key and not a value of its own. Writing
+        `Array.prototype[5]` puts a value where the array has no slot, so a read of `a[5]` answers
+        it, and both of the outcomes the value declines to answer therefore ask the same question:
+        the one that names an index is not the shorter road to `undefined` it looks like.
         """
         if obj is None or obj is JS_NULL:
             _js_throw('TypeError', F"Cannot read properties of {to_string(obj)} (reading '{key}')")
         outcome, value = read_data_property(obj, key)
         if outcome is MemberRead.FOUND:
             return value
-        if outcome is MemberRead.ABSENT or self._property_is_absent(obj, key):
+        if self._property_is_absent(obj, key):
             return None
         raise InterpreterError
 
     def _property_is_absent(self, obj: Value, key: str) -> bool:
         """
         Whether *key* provably does not exist anywhere on *obj*'s prototype chain, making a read of it
-        `undefined`. Answering this needs the *language's* vocabulary, not the subset this package
-        implements: `normalize` and `hasOwnProperty` are functions whether or not we can evaluate them,
-        so treating an unimplemented member as absent would contradict `typeof`. A `JsBuffer` carries
-        over a hundred methods that vary between Node versions, so its surface is not enumerable here
-        and nothing can be proven absent on it.
-
-        Absence is a claim about the chain as the language defines it, so it holds only while the program
-        leaves that chain alone. `Object.defineProperty(Array.prototype, 'zz', { get: … })` puts a name
-        there that no table here lists, and answering `undefined` for it both loses the getter's effect and
-        yields the wrong value — which is why this consults the effect model rather than deciding on the
-        tables alone. Without a model there is nothing to consult and the caller owns the assumption, as
-        with `_callee_is_intact`.
+        `undefined`. `property_provably_absent` decides it, so that an emulated execution and a fold
+        answer an inherited read the same way by construction; what is left here is naming the type
+        this interpreter's value is of and handing over the effect model when there is one.
         """
-        if key in OBJECT_PROTOTYPE_MEMBERS or key in PROTOTYPE_CHAIN_PROPERTIES:
-            return False
-        if isinstance(obj, JsBuffer):
-            return False
-        if not self._read_chain_is_intact(type(obj)):
-            return False
-        if isinstance(obj, str):
-            return key not in STRING_PROTOTYPE_METHODS
-        if isinstance(obj, list):
-            return key not in ARRAY_PROTOTYPE_METHODS and key not in _ARRAY_HOF_METHODS
-        return isinstance(obj, dict)
-
-    def _read_chain_is_intact(self, value_type: type) -> bool:
-        """
-        Whether every prototype a plain property read on *value_type* consults is unmodified. This is the
-        read counterpart of `_prototype_is_intact`, which guards a method *call*: a call resolves on the
-        prototype that owns the method, while a read of an arbitrary name walks the whole chain down to
-        `Object.prototype`.
-        """
-        effects = self._effects
-        if effects is None:
-            return True
-        return effects.read_chain_intact(value_type)
+        return property_provably_absent(self._effects, type(obj), key)
 
     def _set_property(self, obj: Value, key: str, value: Value) -> None:
         """
@@ -2303,6 +2292,11 @@ class JsInterpreter:
         shared object, or make the call throw by leaving a primitive there. `EffectModel` refuses such a
         receiver as well, and both refusals are wanted: a widening here that started modelling named array
         properties would need that reasoning restated, not silently dropped.
+
+        Neither of the two it does accept may leave the array longer than the slots it fills.
+        Growing `length`, or storing past the end, opens the holes `_eval_array` refuses to build,
+        and a store is no better a place to build one than a literal is. The separate cap on how far
+        an index may reach answers how much memory a loop may ask for and is untouched by that.
         """
         if isinstance(obj, dict):
             if key == PROTO_KEY and key not in obj:
@@ -2315,20 +2309,18 @@ class JsInterpreter:
         if isinstance(obj, list):
             if key in SEQUENCE_DATA_PROPERTIES:
                 new_len = _to_array_length(value)
-                if new_len < len(obj):
-                    del obj[new_len:]
-                elif new_len > self.max_array_len:
+                if new_len > len(obj):
                     raise InterpreterError
-                else:
-                    obj.extend([None] * (new_len - len(obj)))
+                del obj[new_len:]
                 return
             index = canonical_array_index(key)
             if index is not None:
-                if index >= self.max_array_len:
+                if index > len(obj) or index >= self.max_array_len:
                     raise InterpreterError
-                while len(obj) <= index:
-                    obj.append(None)
-                obj[index] = value
+                if index == len(obj):
+                    obj.append(value)
+                else:
+                    obj[index] = value
                 return
         raise InterpreterError
 

@@ -37,6 +37,41 @@ def folded(source: str) -> str:
     return source.encode('utf8') | js() | str
 
 
+def evaluated_in_a_body(receiver: str, read: str, installs: str = '') -> str:
+    """
+    A script that runs *installs*, then prints what *read* answers for a local holding *receiver*.
+
+    The local inside a function is what puts the read where the tool answers it at all. Written at
+    the top of the file the same read is left standing, so a program that only writes it there
+    reports nothing about how it would have been answered.
+    """
+    body = F'function f() {{ var v = {receiver}; return {read}; }}\nconsole.log(f());\n'
+    return F'{installs}\n{body}' if installs else body
+
+
+def returned_from_a_body(body: str) -> str:
+    """
+    A script whose one function runs *body* and prints what it returned.
+
+    A question asked inside a function is what puts it where the tool answers it at all, for the
+    reason `evaluated_in_a_body` gives. The body is written out whole here, which a receiver built
+    by statements rather than by one literal needs.
+    """
+    return F'function f() {{ {body} }}\nconsole.log(f());\n'
+
+
+def an_accessor_at(prototype: str, key: str) -> str:
+    """
+    A statement installing a getter at *key* on *prototype* that answers `'G'`. A read the prototype
+    chain decides is not merely a read of some other value: where the chain holds an accessor, the
+    read runs the program's own code, and answering it off the receiver drops that code unrun.
+    """
+    return (
+        F"Object.defineProperty({prototype}, '{key}', "
+        F"{{get: function () {{ return 'G'; }}}});"
+    )
+
+
 def before_and_after(
     source: str,
     *,

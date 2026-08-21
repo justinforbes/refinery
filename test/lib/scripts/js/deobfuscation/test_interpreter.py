@@ -820,10 +820,19 @@ class TestInterpreterCompoundAssignment(TestJsDeobfuscator):
 
     def test_logical_assign_on_length_writes_when_not_short_circuiting(self):
         """
-        The companion: an empty array has length `0`, so `||=` does not short-circuit and the store runs,
-        growing the array to three holes.
+        The companion: a nonempty array has a truthy `length`, so `&&=` does not short-circuit and
+        the store runs, truncating the array to the two elements it now reaches. The operator is
+        `&&=` rather than `||=` because the only `||=` that reaches its store on a `length` raises
+        it, and a position raising it passes over is one the array does not hold rather than one
+        holding `undefined`.
         """
-        self.assertEqual('var r = 3;', self._target('var a = []; a.length ||= 3; return a.length;'))
+        self.assertEqual(
+            "var r = '1,2|2';",
+            self._target(
+                'var a = [1, 2, 3]; a.length &&= 2;'
+                ' return a[0] + "," + a[1] + "|" + a.length;'
+            ),
+        )
 
     def test_bitwise_assign_on_array_element(self):
         self.assertEqual('var r = 18;', self._target('var a = [17]; a[0] ^= 3; return a[0];'))

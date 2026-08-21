@@ -22,11 +22,11 @@ from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import EffectModel, object_sets_prototype
 from refinery.lib.scripts.js.analysis.model import Binding, Scope, SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
-    OBJECT_PROTOTYPE_MEMBERS,
     ScopeProcessingTransformer,
     access_key,
     make_undefined_expression,
     property_key,
+    property_provably_absent,
     references_receiver_this,
     remove_declarator,
     try_inline_trivial_function,
@@ -185,7 +185,9 @@ class JsObjectFold(ScopeProcessingTransformer):
                 for value in prop_map.values()
             ):
                 continue
-            changed, can_remove = self._inline_references(model, binding, prop_map, self)
+            changed, can_remove = self._inline_references(
+                model, cache.effects, binding, prop_map, self
+            )
             if changed:
                 if can_remove:
                     remove_declarator(declarator)
@@ -345,19 +347,21 @@ class JsObjectFold(ScopeProcessingTransformer):
     @staticmethod
     def _inline_references(
         model: SemanticModel,
+        effects: EffectModel,
         binding: Binding,
         prop_map: dict[str, Node],
         transformer: Transformer,
     ) -> tuple[bool, bool]:
         """
         Replace each `obj['key']` access through *binding* with the corresponding property value. For
-        function-valued properties called as `obj['key'](args)`, inline the call. When a key is
-        statically known, absent from the property map, and not the name of a member every object
-        inherits from `Object.prototype` (`toString`, `hasOwnProperty`, …), the access provably
-        evaluates to `undefined` and is replaced accordingly; an inherited-member access is left intact
-        (folding `o.toString` to `undefined` would turn `o.toString()` into `undefined()`). Iterating
-        the binding's resolved references (not every textual occurrence of the name) keeps a shadowing
-        inner binding of the same name untouched.
+        function-valued properties called as `obj['key'](args)`, inline the call. A key the property
+        map does not hold is read off the prototype chain instead, so what it evaluates to is
+        `property_provably_absent`'s to say and not this transform's: an inherited member is left
+        intact because folding `o.toString` to `undefined` turns `o.toString()` into `undefined()`,
+        and every key at all is left intact once the file has written to a prototype the read walks,
+        because then `undefined` is not what the read answers. Iterating the binding's resolved
+        references (not every textual occurrence of the name) keeps a shadowing inner binding of the
+        same name untouched.
 
         Two per-reference conditions block a fold that would change meaning at the destination, leaving
         the access intact. A function-valued property is folded only where it is immediately called
@@ -396,7 +400,7 @@ class JsObjectFold(ScopeProcessingTransformer):
                 can_remove = False
                 continue
             if key not in prop_map:
-                if key in OBJECT_PROTOTYPE_MEMBERS:
+                if not property_provably_absent(effects, dict, key):
                     can_remove = False
                     continue
                 _replace_in_parent(member, make_undefined_expression())

@@ -1558,19 +1558,25 @@ class TestFunctionEvaluator(TestJsDeobfuscator):
         assert isinstance(func, JsFunctionDeclaration)
         self.assertEqual([1, 2], JsInterpreter().execute(func, []))
 
-    def test_array_length_grow_pads_with_undefined(self):
+    def test_array_length_grow_is_not_evaluated_to_an_array_of_undefined(self):
+        """
+        Raising `length` moves how far the array reaches and writes nothing into the positions it
+        passes over. Node answers `3 in a` with `false`, `a.indexOf(undefined)` with `-1` and
+        `Object.keys(a)` with `['0', '1', '2']` for this array, and answers the same three questions
+        with `true`, `3` and five keys for `[1, 2, 3, undefined, undefined]`, so an evaluation
+        handing back five elements would report on an array the program never built.
+        """
         source = inspect.cleandoc(
             """
             function f() {
-                var a = [1, 2, 3];
-                a['length'] = 5;
-                return a;
+              var a = [1, 2, 3];
+              a['length'] = 5;
+              return a;
             }
+            var r = f();
             """
         )
-        func = JsParser(source).parse().body[0]
-        assert isinstance(func, JsFunctionDeclaration)
-        self.assertEqual([1, 2, 3, None, None], JsInterpreter().execute(func, []))
+        self.assertEqual(source, self._evaluate(source))
 
     def test_typeof_buffer_is_function(self):
         source = inspect.cleandoc(

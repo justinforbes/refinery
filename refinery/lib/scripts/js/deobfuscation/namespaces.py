@@ -15,6 +15,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     function_binds_name,
     insert_after_prologue,
     is_receiver_binding_call,
+    property_is_inherited,
     references_receiver_this,
 )
 from refinery.lib.scripts.js.model import (
@@ -43,8 +44,8 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
     """
     Replace `NS.prop` member accesses with bare identifiers when `NS` is declared as an empty
     object literal and is only ever used via property access. Emits `var` declarations for the
-    flattened property names. Properties whose names conflict with existing variables in the scope
-    are left on the namespace object.
+    flattened property names. A property whose name conflicts with an existing variable in the
+    scope, or that a plain object inherits, is left on the namespace object.
     """
 
     def __init__(self):
@@ -71,7 +72,7 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
             conflicts = self._find_conflicting_names(model, scope, scope_obj, name, props, declarator)
             receiver_called = self._receiver_called_keys(scope, name)
             this_unsafe = self._this_unsafe_keys(scope, name, receiver_called)
-            held_back = conflicts | this_unsafe
+            held_back = conflicts | this_unsafe | self._inherited_keys(props)
             flattenable = props - held_back
             if not flattenable:
                 continue
@@ -170,6 +171,16 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
                 if key is not None:
                     props.add(key)
         return props
+
+    @staticmethod
+    def _inherited_keys(props: set[str]) -> set[str]:
+        """
+        The subset of *props* naming something every plain object has whether or not one was written
+        into it. An empty namespace object answers such a read off `Object.prototype`, and a bare
+        `var` nothing assigns answers it `undefined`, so `NS.toString` would come back as no
+        function where the language gives one on every object.
+        """
+        return {key for key in props if property_is_inherited(dict, key)}
 
     @staticmethod
     def _find_conflicting_names(

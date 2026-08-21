@@ -20,11 +20,14 @@ import unittest
 
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
+from test.lib.scripts.js.deobfuscation.test_dispatcher import a_dispatcher
 from test.lib.scripts.js.ledger import (
     before_and_after,
     each_program_still_prints,
+    evaluated_in_a_body,
     folded,
     printed,
+    returned_from_a_body,
     well_formed,
 )
 from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
@@ -118,359 +121,6 @@ class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
         )
 
 
-def _evaluated_in_a_body(receiver: str, read: str, installs: str = '') -> str:
-    """
-    A script that runs *installs*, then prints what *read* answers for a local holding *receiver*.
-
-    The local inside a function is what puts the read where the tool answers it at all. Written at
-    the top of the file the same read is left standing, so a program that only writes it there
-    reports nothing about how it would have been answered.
-    """
-    body = F'function f() {{ var v = {receiver}; return {read}; }}\nconsole.log(f());\n'
-    return F'{installs}\n{body}' if installs else body
-
-
-def _an_accessor_at(prototype: str, key: str) -> str:
-    """
-    A statement installing a getter at *key* on *prototype* that answers `'G'`. A read the prototype
-    chain decides is not merely a read of some other value: where the chain holds an accessor, the
-    read runs the program's own code, and answering it off the receiver drops that code unrun.
-    """
-    return (
-        F"Object.defineProperty({prototype}, '{key}', "
-        F"{{get: function () {{ return 'G'; }}}});"
-    )
-
-
-#: A program that installs a property at an index no receiver of the length written holds, and reads
-#: that index, mapped to what Node prints for it. A string and an array own the slots `0` through
-#: their length less one and nothing above, so every one of these reads is the chain's to answer.
-A_READ_OF_AN_INDEX_THE_RECEIVER_DOES_NOT_HOLD = {
-    _evaluated_in_a_body("'abc'", 'v[5]', "String.prototype[5] = 'X';"): 'X\n',
-    _evaluated_in_a_body("''", 'v[0]', "String.prototype[0] = 'X';"): 'X\n',
-    _evaluated_in_a_body("atob('YWJj')", 'v[5]', "String.prototype[5] = 'X';"): 'X\n',
-    _evaluated_in_a_body('[1, 2]', 'v[5]', "Array.prototype[5] = 'X';"): 'X\n',
-    _evaluated_in_a_body('[1, 2]', 'v[5]', "Object.prototype[5] = 'X';"): 'X\n',
-    _evaluated_in_a_body('[1, 2]', 'v[5]', _an_accessor_at('Array.prototype', '5')): 'G\n',
-    _evaluated_in_a_body("'abc'", 'v[5]', _an_accessor_at('String.prototype', '5')): 'G\n',
-}
-
-
-#: A program that installs a property at an index no array of the length written holds, and asks
-#: whether that index is `in` the array, mapped to what Node prints for it.
-A_MEMBERSHIP_TEST_OVER_AN_INDEX_THE_ARRAY_DOES_NOT_HOLD = {
-    _evaluated_in_a_body('[1, 2]', '5 in v', "Array.prototype[5] = 'X';"): 'true\n',
-    _evaluated_in_a_body('[1, 2]', "'5' in v", "Array.prototype[5] = 'X';"): 'true\n',
-    _evaluated_in_a_body('[1, 2]', '5 in v', "Object.prototype[5] = 'X';"): 'true\n',
-    _evaluated_in_a_body(
-        '[1, 2]',
-        '5 in v',
-        "Object.defineProperty(Array.prototype, '5', {value: 'Q'});",
-    ): 'true\n',
-}
-
-
-#: A program that writes one name onto a prototype in the receiver's chain and then asks whether a
-#: different name is `in` the receiver, mapped to what Node prints for it. Nothing here installs the
-#: name being asked about, so each answer is the one an engine nothing has touched would give.
-A_MEMBERSHIP_TEST_FOR_A_KEY_NOBODY_INSTALLED = {
-    _evaluated_in_a_body('{a: 1}', "'zz' in v", "Object.prototype.qq = 'X';"): 'false\n',
-    _evaluated_in_a_body('[1, 2]', "'zz' in v", "Object.prototype.qq = 'X';"): 'false\n',
-    _evaluated_in_a_body('[1, 2]', "'zz' in v", "Array.prototype.qq = 'X';"): 'false\n',
-    _evaluated_in_a_body(
-        '{a: 1}',
-        "'zz' in v",
-        _an_accessor_at('Object.prototype', 'qq'),
-    ): 'false\n',
-}
-
-
-#: A program that installs a property at the index an elision left empty, and reads it, mapped to
-#: what Node prints for it. Each receiver is written with a length the elision counts towards and
-#: with no element at that index, so the read finds nothing on the array and walks the chain.
-A_READ_OF_A_SLOT_AN_ELISION_LEFT_EMPTY = {
-    _evaluated_in_a_body('[1, , 3]', 'v[1]', "Array.prototype[1] = 'X';"): 'X\n',
-    _evaluated_in_a_body('[, 2]', 'v[0]', "Array.prototype[0] = 'X';"): 'X\n',
-    _evaluated_in_a_body('[1, ,]', 'v[1]', "Array.prototype[1] = 'X';"): 'X\n',
-    _evaluated_in_a_body('[1, , 3]', 'v[1]', "Object.prototype[1] = 'X';"): 'X\n',
-    _evaluated_in_a_body(
-        '[0, 1, 2, 3, 4, , 6]',
-        'v[5]',
-        _an_accessor_at('Array.prototype', '5'),
-    ): 'G\n',
-}
-
-
-#: An array literal written with an elision, and a membership test over the index it left empty,
-#: mapped to what Node prints for it in an engine nothing has touched. No prototype is written by
-#: any of these: the slot is simply not in the array, which is the whole of what an elision is.
-A_MEMBERSHIP_TEST_OVER_A_SLOT_AN_ELISION_LEFT_EMPTY = {
-    _evaluated_in_a_body('[1, , 3]', '1 in v'): 'false\n',
-    _evaluated_in_a_body('[, 2]', '0 in v'): 'false\n',
-    _evaluated_in_a_body('[1, ,]', '1 in v'): 'false\n',
-}
-
-
-#: A program that installs a property on `Object.prototype` and reads it off a variable holding an
-#: object literal that does not write it, mapped to what Node prints for it. `Object.prototype`
-#: roots the chain of every object, so a key the literal lacks is always the chain's to answer.
-A_READ_OF_A_KEY_AN_OBJECT_LITERAL_LACKS = {
-    _evaluated_in_a_body('{a: 1}', 'v.zz', "Object.prototype.zz = 'X';"): 'X\n',
-    _evaluated_in_a_body('{a: 1}', "v['zz']", "Object.prototype.zz = 'X';"): 'X\n',
-    _evaluated_in_a_body('{a: 1}', 'v.length', 'Object.prototype.length = 9;'): '9\n',
-    _evaluated_in_a_body('{a: 1}', 'v.zz', _an_accessor_at('Object.prototype', 'zz')): 'G\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAnIndexTheReceiverDoesNotHoldIsTheChainsToAnswer(TestBase):
-    """
-    A string and an array own the slots `0` through their length less one and no others, so an index
-    above that is a name the receiver does not carry, no different in that from `zz`: the prototype
-    chain answers it, and a program is free to put something there before the read runs. Those two
-    reads are told apart all the same. A read of a name the receiver lacks is left to the engine,
-    while a read of an index it lacks is answered `undefined` off the receiver's length alone, with
-    nothing asked about what the program did to `String.prototype`, `Array.prototype`, or the
-    `Object.prototype` below them.
-
-    The `in` operator asks the same question of the same receiver and is answered the same way, by
-    comparing the index against the length, so it reports an index the chain holds to be absent.
-    """
-
-    @unittest.expectedFailure
-    def test_a_read_of_an_index_past_the_end_finds_what_the_chain_holds(self):
-        """
-        Node prints `X` for the five programs of
-        `A_READ_OF_AN_INDEX_THE_RECEIVER_DOES_NOT_HOLD` that store a value on a prototype and `G`
-        for the two that install an accessor there, the receiver being a string literal, the empty
-        string, a string a call produced, or an array literal, and the prototype written being the
-        one that owns the receiver's methods or the `Object.prototype` that roots every chain. Each
-        deobfuscation prints `undefined` instead, and the two accessors never run at all.
-        """
-        rows = A_READ_OF_AN_INDEX_THE_RECEIVER_DOES_NOT_HOLD
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-    @unittest.expectedFailure
-    def test_membership_of_an_index_past_the_end_finds_what_the_chain_holds(self):
-        """
-        Node prints `true` for all four programs of
-        `A_MEMBERSHIP_TEST_OVER_AN_INDEX_THE_ARRAY_DOES_NOT_HOLD`: `in` asks whether a property is
-        reachable at all, which the whole chain answers and not the receiver's own slots. Each
-        deobfuscation prints `false`, so the read and the membership test agree with each other and
-        both disagree with the engine.
-        """
-        rows = A_MEMBERSHIP_TEST_OVER_AN_INDEX_THE_ARRAY_DOES_NOT_HOLD
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAnUnansweredMembershipTestIsNotAYes(TestBase):
-    """
-    `in` reports whether a property is reachable on the receiver or anywhere up its prototype chain.
-    Once a program has written to that chain, what it put there is not a thing this tool can
-    enumerate, so no name can be shown to be missing any more. A read in that position declines and
-    is left for the engine, which is the right answer to a question one cannot answer.
-
-    The membership test instead takes its own failure to prove the key absent for a proof that the
-    key is there, and so answers `true` for every name at once — including all the names the program
-    never installed, which are exactly the names the engine answers `false` for. A single write to
-    one prototype in a receiver's chain, under any name at all, is enough: from then on every
-    membership test over a name that receiver does not own is answered `true`.
-    """
-
-    @unittest.expectedFailure
-    def test_a_key_nobody_installed_is_in_nothing(self):
-        """
-        Node prints `false` for all four programs of
-        `A_MEMBERSHIP_TEST_FOR_A_KEY_NOBODY_INSTALLED`: each writes the one name `qq` onto a
-        prototype the receiver inherits from and then asks about `zz`, which nothing in the program
-        ever defines. Each deobfuscation prints `true`, and the same file with its one write removed
-        prints `false` on both sides, so it is the write and not the question that moved the answer.
-        """
-        rows = A_MEMBERSHIP_TEST_FOR_A_KEY_NOBODY_INSTALLED
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAnElisionWritesNoSlot(TestBase):
-    """
-    An elision writes no element: `[1, , 3]` is three long and holds the slots `0` and `2` only,
-    which is the whole of what tells it apart from `[1, undefined, 3]`, whose middle slot is present
-    and holds `undefined`. The two are held alike here, as three elements the middle of which is
-    `undefined`, and every question that parts them is then answered for the wrong one.
-
-    Two such questions are asked below. Reading the empty slot is the prototype chain's to answer,
-    since the array carries nothing there, and it is answered `undefined` off the element instead.
-    Asking whether that index is `in` the array is answered from the length, so the array reports a
-    slot it does not have — and this one is wrong in an engine no program has touched at all.
-    """
-
-    @unittest.expectedFailure
-    def test_a_read_of_a_slot_an_elision_left_empty_finds_what_the_chain_holds(self):
-        """
-        Node prints `X` for the four programs of `A_READ_OF_A_SLOT_AN_ELISION_LEFT_EMPTY` that store
-        a value on a prototype and `G` for the one that installs an accessor there, the elision
-        standing first, in the middle, or before the closing bracket. Each deobfuscation prints
-        `undefined`, which is the answer the same read has when the element is written `undefined`.
-        """
-        rows = A_READ_OF_A_SLOT_AN_ELISION_LEFT_EMPTY
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-    @unittest.expectedFailure
-    def test_a_slot_an_elision_left_empty_is_in_no_array(self):
-        """
-        Node prints `false` for all three programs of
-        `A_MEMBERSHIP_TEST_OVER_A_SLOT_AN_ELISION_LEFT_EMPTY`, none of which touches a prototype:
-        `1 in [1, , 3]` is `false` and `1 in [1, undefined, 3]` is `true`, and that is the one
-        expression a program has for telling a hole from an element. Each deobfuscation prints
-        `true`, which is the answer to the other array.
-        """
-        rows = A_MEMBERSHIP_TEST_OVER_A_SLOT_AN_ELISION_LEFT_EMPTY
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
-def _returned_from_a_body(body: str) -> str:
-    """
-    A script whose one function runs *body* and prints what it returned.
-
-    A question asked inside a function is what puts it where the tool answers it at all, for the
-    reason `_evaluated_in_a_body` gives. The body is written out whole here because the receivers
-    below are built by statements rather than by one literal.
-    """
-    return F'function f() {{ {body} }}\nconsole.log(f());\n'
-
-
-#: A `for...in` walk over an array holding a position no element was written in, mapped to what Node
-#: prints for it. The walk reports the array's own keys, and such a position is not one of them
-#: however it came about: written as an elision, passed over by a write beyond the end, or passed
-#: over by moving `length` up.
-A_FOR_IN_WALK_OVER_AN_ARRAY_HOLDING_A_HOLE = {
-    _returned_from_a_body(
-        "var v = [1, , 3]; var r = ''; for (var k in v) r += k; return r;"
-    ): '02\n',
-    _returned_from_a_body(
-        "var v = [1]; v[2] = 3; var r = ''; for (var k in v) r += k; return r;"
-    ): '02\n',
-    _returned_from_a_body(
-        "var v = [1]; v.length = 3; var r = ''; for (var k in v) r += k; return r;"
-    ): '0\n',
-}
-
-
-#: A membership test over a position an array grew past without writing anything in it, mapped to
-#: what Node prints for it. Growth moves how far the array reaches and never says that every
-#: position below that was filled.
-A_MEMBERSHIP_TEST_OVER_A_SLOT_GROWTH_PASSED_OVER = {
-    _returned_from_a_body('var v = [1]; v.length = 3; return 1 in v;'): 'false\n',
-    _returned_from_a_body('var v = [1]; v[2] = 3; return 1 in v;'): 'false\n',
-}
-
-
-#: A search of a grown array for the value a position it passed over would hold if it held one,
-#: mapped to what Node prints for it. `indexOf` skips a position the array does not hold, so it
-#: reports `-1` where the same search over `[1, undefined, 3]` reports `1`.
-A_SEARCH_FOR_UNDEFINED_IN_A_SLOT_GROWTH_PASSED_OVER = {
-    _returned_from_a_body('var v = [1]; v.length = 3; return v.indexOf(undefined);'): '-1\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAWalkOfAnArrayVisitsOnlyThePositionsItHolds(TestBase):
-    """
-    `for...in` visits an object's own keys, and an array's own keys are the positions it holds. A
-    position nothing was ever written in is not one of them, so Node prints `02`, `02`, and `0` for
-    the three programs of `A_FOR_IN_WALK_OVER_AN_ARRAY_HOLDING_A_HOLE`.
-
-    Each walk is taken from the length instead and prints `012`, which is the walk of an array whose
-    every position was written. The walk then hands its body an index the array has nothing at, and
-    a body reading `v[k]` for each `k` it is given reads a slot the prototype chain owns.
-
-    A walk of an array a `delete` left a hole in is answered correctly and is stated as law in
-    `test.lib.scripts.js.deobfuscation.test_own_property_order`. The two holes are one hole to an
-    engine, and this entry retires when one representation answers both.
-    """
-
-    @unittest.expectedFailure
-    def test_a_position_no_element_was_written_in_is_visited_by_no_walk(self):
-        rows = A_FOR_IN_WALK_OVER_AN_ARRAY_HOLDING_A_HOLE
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestGrowingAnArrayWritesNoElement(TestBase):
-    """
-    Moving `length` up and writing beyond the end both make an array reach further while leaving
-    every position passed over empty, which is a hole exactly as an elision is. Node prints `false`
-    for both programs of `A_MEMBERSHIP_TEST_OVER_A_SLOT_GROWTH_PASSED_OVER` and `-1` for the one of
-    `A_SEARCH_FOR_UNDEFINED_IN_A_SLOT_GROWTH_PASSED_OVER`.
-
-    Growth is recorded as elements instead, so the passed-over position answers as though it held
-    `undefined`: the membership tests print `true` and the search prints `1`. The same two questions
-    over a hole a `delete` made are answered correctly, which is what says it is growth rather than
-    the hole that has no representation here.
-    """
-
-    @unittest.expectedFailure
-    def test_a_position_growth_passed_over_is_in_no_array(self):
-        rows = A_MEMBERSHIP_TEST_OVER_A_SLOT_GROWTH_PASSED_OVER
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-    @unittest.expectedFailure
-    def test_a_search_finds_no_undefined_in_a_position_growth_passed_over(self):
-        rows = A_SEARCH_FOR_UNDEFINED_IN_A_SLOT_GROWTH_PASSED_OVER
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAKeyAnObjectLiteralLacksIsTheChainsToAnswer(TestBase):
-    """
-    `Object.prototype` roots the chain of every object, so a key an object literal does not write is
-    never the literal's to answer: whatever the program installed there is what the read finds. A
-    variable holding such a literal is read as though the literal were the whole of it, and each key
-    it lacks is answered `undefined` unless the name is one of the handful an untouched
-    `Object.prototype` carries. Which names this program put on `Object.prototype` is not asked, so
-    a value stored under any other name is lost and an accessor stored there never runs.
-    """
-
-    @unittest.expectedFailure
-    def test_a_read_of_a_key_the_literal_lacks_finds_what_the_chain_holds(self):
-        """
-        Node prints `X`, `X`, `9`, and `G` for the four programs of
-        `A_READ_OF_A_KEY_AN_OBJECT_LITERAL_LACKS`, which read the installed key by name, by a string
-        key, under the name `length` that no plain object owns, and through an accessor. Each
-        deobfuscation prints `undefined`.
-        """
-        rows = A_READ_OF_A_KEY_AN_OBJECT_LITERAL_LACKS
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
 _ASTRAL_LETTER = chr(0x1D465)
 
 
@@ -493,16 +143,16 @@ def _spelled_with_an_escaped_identifier(source: str) -> str:
 #: spelling wrote, and a membership test over `q` finds the key an escaped `q` wrote.
 A_PROPERTY_KEY_WRITTEN_WITH_AN_ESCAPE = {
     _spelled_with_an_escaped_identifier(
-        _returned_from_a_body("return Object.keys({ ESCAPED_A: 1, b: 2 }).join('|');")
+        returned_from_a_body("return Object.keys({ ESCAPED_A: 1, b: 2 }).join('|');")
     ): 'a|b\n',
     _spelled_with_an_escaped_identifier(
-        _returned_from_a_body('return { ESCAPED_A: 7 }.a;')
+        returned_from_a_body('return { ESCAPED_A: 7 }.a;')
     ): '7\n',
     _spelled_with_an_escaped_identifier(
-        _returned_from_a_body('var o = { a: 1 }; return o.ESCAPED_A;')
+        returned_from_a_body('var o = { a: 1 }; return o.ESCAPED_A;')
     ): '1\n',
     _spelled_with_an_escaped_identifier(
-        _returned_from_a_body("return 'q' in { ESCAPED_Q: 1 };")
+        returned_from_a_body("return 'q' in { ESCAPED_Q: 1 };")
     ): 'true\n',
 }
 
@@ -786,4 +436,97 @@ class TestScriptCodeHasTwoMoreCommentOpeners(TestBase):
         self.assertEqual(
             {source: behavior(printed(source)) for source in programs},
             {source: (prints, None) for source, prints in programs.items()},
+        )
+
+
+#: A program that installs a value at the index a dispatcher's payload was written with no element
+#: in, and dispatches through it, mapped to what Node prints for it. The dispatcher reaches its
+#: callee's arguments by reading them off the payload, so a position the payload does not hold is
+#: read from the prototype chain like any other.
+A_DISPATCH_WHOSE_PAYLOAD_HOLDS_A_HOLE = {
+    "Array.prototype[1] = 'X';\n" + a_dispatcher(
+        dict_lines=['"f1": function() { var [a, b, c] = p; return a + b + c; }'],
+        tail_lines=['console.log((p = ["first", , "third"], d("f1")));'],
+    ): 'firstXthird\n',
+}
+
+
+#: A program that removes a name the language puts on the receiver's prototype chain and then asks
+#: whether that name is `in` the receiver, mapped to what Node prints for it. Nothing else touches
+#: the chain, so the deletion is the whole of what decides each answer.
+A_MEMBERSHIP_TEST_FOR_A_KEY_THE_PROGRAM_DELETED = {
+    evaluated_in_a_body(
+        '{a: 1}',
+        "'toString' in v",
+        'delete Object.prototype.toString;',
+    ): 'false\n',
+    evaluated_in_a_body(
+        '{a: 1}',
+        "'hasOwnProperty' in v",
+        'delete Object.prototype.hasOwnProperty;',
+    ): 'false\n',
+    evaluated_in_a_body(
+        '[1, 2]',
+        "'join' in v",
+        'delete Array.prototype.join;',
+    ): 'false\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestADispatcherPayloadHoleIsTheChainsToAnswer(TestBase):
+    """
+    Unwrapping a dispatcher into direct calls has to spell out each argument the payload carried,
+    and a position the payload was written with no element in is not one it carries: what reaches
+    the callee there is whatever the prototype chain answers for that index. Spelling it `undefined`
+    is right only while that chain is the one the language describes, and the rewrite asks nothing
+    about it.
+
+    This is the law `test.lib.scripts.js.deobfuscation.test_inherited_reads` states of a read, at a
+    site that decides it in the syntax rather than in the interpreter. The same program with the
+    prototype left alone is `test_dispatcher_sparse_payload_preserves_arity` and prints
+    `firstundefinedthird`, which is what a fix has to keep.
+    """
+
+    @unittest.expectedFailure
+    def test_a_payload_position_no_element_was_written_in_finds_what_the_chain_holds(self):
+        """
+        Node prints `firstXthird` for the one program of `A_DISPATCH_WHOSE_PAYLOAD_HOLDS_A_HOLE`,
+        which writes `X` at index 1 of `Array.prototype` before dispatching a payload whose second
+        position holds no element. The deobfuscation prints `firstundefinedthird`, the answer the
+        same dispatch has with the prototype untouched.
+        """
+        rows = A_DISPATCH_WHOSE_PAYLOAD_HOLDS_A_HOLE
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAKeyTheProgramDeletedIsInNothing(TestBase):
+    """
+    A name is reported present on a receiver's prototype chain from a table of what the language
+    puts there, with nothing asked about what the program did to that chain. The reasoning is that
+    a write to a prototype only ever adds a name, so a name the language already put there is there
+    afterwards too — which is true of a write and false of a `delete`.
+
+    The read side of the same programs is answered correctly, because absence is asked of the effect
+    model and the deletion is recorded there as a write to the prototype's owner. So the model
+    already knows; it is the presence side that does not ask, and telling a deletion from a write
+    is what closes this.
+    """
+
+    @unittest.expectedFailure
+    def test_a_key_the_program_deleted_is_in_nothing(self):
+        """
+        Node prints `false` for all three programs of
+        `A_MEMBERSHIP_TEST_FOR_A_KEY_THE_PROGRAM_DELETED`, each of which deletes one name from a
+        prototype its receiver inherits from and then asks for that same name. Each deobfuscation
+        prints `true`, the answer the same question has with nothing deleted.
+        """
+        rows = A_MEMBERSHIP_TEST_FOR_A_KEY_THE_PROGRAM_DELETED
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
         )

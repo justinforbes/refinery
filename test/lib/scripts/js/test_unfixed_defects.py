@@ -36,6 +36,7 @@ from test.lib.scripts.js.analysis.differential import (
 from test.lib.scripts.js.deobfuscation.test_array_length_reads import (
     A_COUNT_THE_FOLD_DOES_NOT_REACH,
 )
+from test.lib.scripts.js.deobfuscation.test_dispatcher import a_dispatcher
 from test.lib.scripts.js.ledger import (
     before_and_after,
     each_program_still_prints,
@@ -1608,4 +1609,46 @@ class TestAPropertyKeyIsSpelledByAName(TestBase):
                 type(_sole_property('x = { 1: 1 };').key),
             ),
             (JsBigIntLiteral, JsNumericLiteral),
+        )
+
+
+#: A program that dispatches through a callee name built by an expression rather than written as a
+#: string literal, mapped to what Node prints for it. The dispatcher is reached the ordinary way and
+#: answers the ordinary way; only the spelling of the name keeps the unwrapper from rewriting it.
+A_DISPATCH_THROUGH_A_COMPUTED_KEY = {
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a, b, c] = p; return a + b + c; }'],
+        tail_lines=[
+            'var k = "f" + 1;',
+            'console.log((p = ["a", "b", "c"], d(k)));',
+        ],
+    ): 'abc\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestADispatcherIsKeptWhileACallToItSurvives(TestBase):
+    """
+    Unwrapping a dispatcher replaces each call made through it with a direct call to the function
+    that call selects, and then removes the dispatcher declaration. The replacement is attempted per
+    call site and declines the ones it cannot read, while the removal runs whatever it left behind,
+    so a file holding one such call comes back calling a function nothing declares.
+
+    A callee named by an expression is the shape that shows it, since the unwrapper needs a string
+    literal to know which function a call selects. The failure is the removal's rather than that
+    refusal's: what the unwrapper cannot rewrite it is right to leave alone, and what it leaves
+    alone still needs the declaration it reads.
+    """
+
+    @unittest.expectedFailure
+    def test_a_dispatch_through_a_computed_key_keeps_the_dispatcher(self):
+        """
+        Node prints `abc` for the one program of `A_DISPATCH_THROUGH_A_COMPUTED_KEY`, which spells
+        its callee name `"f" + 1`. The deobfuscation prints nothing and throws a `ReferenceError`:
+        the dispatcher declaration is gone and the call to it is not.
+        """
+        rows = A_DISPATCH_THROUGH_A_COMPUTED_KEY
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
         )

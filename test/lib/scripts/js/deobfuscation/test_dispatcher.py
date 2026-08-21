@@ -8,29 +8,41 @@ from refinery.lib.scripts.js.model import JsFunctionDeclaration
 from refinery.lib.scripts.js.parser import JsParser
 
 
+def a_dispatcher(dict_lines: list, tail_lines: list) -> str:
+    """
+    The dispatcher scaffold: one function `d` that looks its callee up in a map by name and
+    reads that callee's arguments out of the one shared payload array `p`. *dict_lines* spell
+    the entries of the map and *tail_lines* the calls made through it.
+
+    It is written here, where the law about unwrapping it is stated, and read from wherever
+    else a program built around one is needed.
+    """
+    return '\n'.join((
+        'var c = Object["create"](null);',
+        'var p;',
+        'function d(name, flag, rtype, lengths) {',
+        '  var output;',
+        '  var fns = {',
+        *dict_lines,
+        '  };',
+        '  if (flag === "initF") { p = []; }',
+        '  if (flag === "createF") {',
+        '    output = c[name] || (c[name] = fns[name]);',
+        '  } else {',
+        '    output = fns[name]();',
+        '  }',
+        '  if (rtype === "wrapF") { return { "wk": output }; }',
+        '  else { return output; }',
+        '}',
+        'function stub() {}',
+        *tail_lines,
+    ))
+
+
 class TestDispatcherUnwrapping(TestJsDeobfuscator):
 
     def _make_dispatcher(self, dict_lines: list, tail_lines: list):
-        return '\n'.join((
-            'var c = Object["create"](null);',
-            'var p;',
-            'function d(name, flag, rtype, lengths) {',
-            '  var output;',
-            '  var fns = {',
-            *dict_lines,
-            '  };',
-            '  if (flag === "initF") { p = []; }',
-            '  if (flag === "createF") {',
-            '    output = c[name] || (c[name] = fns[name]);',
-            '  } else {',
-            '    output = fns[name]();',
-            '  }',
-            '  if (rtype === "wrapF") { return { "wk": output }; }',
-            '  else { return output; }',
-            '}',
-            'function stub() {}',
-            *tail_lines,
-        ))
+        return a_dispatcher(dict_lines, tail_lines)
 
     def test_single_function_direct_call(self):
         source = self._make_dispatcher(
