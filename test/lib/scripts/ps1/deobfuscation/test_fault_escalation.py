@@ -23,6 +23,10 @@ _FOLLOWER = "Write-Host 'FOLLOWER_RAN'"
 #: A handler body that writes to the host, so that a handler which runs is one the output names.
 _HANDLER = "Write-Host 'HANDLER_RAN'"
 
+#: A second handler body, for the shapes where an error raised inside one handler is taken by
+#: another, so that the output names which of the two ran.
+_OUTER_HANDLER = "Write-Host 'OUTER_HANDLER_RAN'"
+
 #: An acting statement that is never a removal candidate, so its survival says only that the pass
 #: did not empty the script wholesale.
 _ANCHOR = "Write-Host 'ANCHOR_SURVIVES'"
@@ -513,4 +517,175 @@ class TestPs1ARaiseNoReadOfErrorFollowsIsRemovable(_Ps1FaultEscalation):
               {_HANDLER}
             }}
             {_ANCHOR}
+        """)
+
+
+class TestPs1ARaiseInATrapBodyEndsThatBody(_Ps1FaultEscalation):
+    """
+    A terminating error raised inside a `trap` body ends that body and escapes it. At script scope
+    the escaped error ends the script, so neither the rest of the `trap` body nor the statement the
+    script would have resumed at runs; inside a function it ends only the function and the caller
+    carries on. Where something does guard the block the `trap` belongs to, the escaped error goes
+    to that guard, and an enclosing `catch` clause or a second, live `trap` runs its body over it.
+    In each of these the raise inside the `trap` body decides what runs next, so it survives.
+
+    The deobfuscator reads a `trap` body as statements no error can leave. It deletes the raise
+    there and runs the remainder of the body that the original abandoned.
+    """
+
+    @unittest.expectedFailure
+    def test_a_raising_cast_before_another_statement_of_the_same_trap_body_is_kept(self):
+        self._assertKept(F"""
+            trap {{
+              {_HANDLER}
+              {_RAISE}
+              {_FOLLOWER}
+            }}
+            {_RAISE}
+            {_ANCHOR}
+        """)
+
+    @unittest.expectedFailure
+    def test_a_raising_cast_in_the_trap_body_of_a_function_is_kept(self):
+        self._assertKept(F"""
+            function Invoke-Thing {{
+              trap {{
+                {_HANDLER}
+                {_RAISE}
+                {_FOLLOWER}
+              }}
+              {_RAISE}
+            }}
+            Invoke-Thing
+            {_ANCHOR}
+        """)
+
+    @unittest.expectedFailure
+    def test_a_raising_cast_in_a_trap_body_an_enclosing_catch_takes_is_kept(self):
+        self._assertKept(F"""
+            try {{
+              trap {{
+                {_HANDLER}
+                {_RAISE}
+                {_FOLLOWER}
+              }}
+              {_RAISE}
+            }} catch {{
+              {_OUTER_HANDLER}
+            }}
+            {_ANCHOR}
+        """)
+
+    @unittest.expectedFailure
+    def test_a_raising_cast_in_a_trap_body_an_enclosing_trap_takes_is_kept(self):
+        self._assertKept(F"""
+            trap {{ {_OUTER_HANDLER} }}
+            if ({_OPAQUE}) {{
+              trap {{
+                {_HANDLER}
+                {_RAISE}
+                {_FOLLOWER}
+              }}
+              {_RAISE}
+            }}
+            {_ANCHOR}
+        """)
+
+
+class TestPs1ATrapBodyNothingTriggersLeavesTheRaiseInItRemovable(_Ps1FaultEscalation):
+    """
+    A `trap` body runs only when its block raises, so with nothing raising there the statements of
+    the body never run and a raise among them ends nothing. It may go while the `trap` stands, and
+    this is the shape a refusal keyed to a raise being written inside a `trap` body would break.
+    """
+
+    def test_a_raising_cast_in_the_body_of_a_trap_no_raise_triggers_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            trap {{
+              {_HANDLER}
+              {_RAISE}
+              {_FOLLOWER}
+            }}
+            {_ANCHOR}
+        """, F"""
+            trap {{
+              {_HANDLER}
+              {_FOLLOWER}
+            }}
+            {_ANCHOR}
+        """)
+
+
+class TestPs1ATrapTakesTheErrorsOfTheNamedBlockItIsWrittenIn(_Ps1FaultEscalation):
+    """
+    An advanced function splits its body across `begin`, `process`, `end` and `dynamicparam`
+    blocks, and a `trap` guards the named block it is written in. A raise in the same named block
+    as a live `trap` is what makes that `trap` run, and execution then resumes at the next statement
+    of that block, so both the raise and what follows it survive.
+
+    The deobfuscator never consults a `trap` when it decides a removal, so it deletes the raise from
+    either block and keeps a handler nothing can trigger.
+    """
+
+    @unittest.expectedFailure
+    def test_a_raising_cast_beside_a_live_trap_in_the_same_process_block_is_kept(self):
+        self._assertKept(F"""
+            function Invoke-Thing {{
+              process {{
+                trap {{ {_HANDLER} }}
+                {_RAISE}
+                {_FOLLOWER}
+              }}
+            }}
+            Invoke-Thing
+        """)
+
+    @unittest.expectedFailure
+    def test_a_raising_cast_beside_a_live_trap_in_the_same_begin_block_is_kept(self):
+        self._assertKept(F"""
+            function Invoke-Thing {{
+              begin {{
+                trap {{ {_HANDLER} }}
+                {_RAISE}
+                {_FOLLOWER}
+              }}
+              process {{
+                {_ANCHOR}
+              }}
+            }}
+            Invoke-Thing
+        """)
+
+
+class TestPs1ATrapInAnotherNamedBlockLeavesTheRaiseRemovable(_Ps1FaultEscalation):
+    """
+    The same `trap`, written in a named block other than the one that raises, is never offered the
+    error: the raise in the `process` block is reported, that block carries on to its next
+    statement, and the `trap` written in `begin` does not run. The script runs the same code with
+    the raise as without it and the raise may go; writing that same `trap` in the block that raises
+    is the whole of what makes it stay.
+    """
+
+    def test_a_raising_cast_in_the_process_block_a_begin_block_trap_never_sees_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            function Invoke-Thing {{
+              begin {{
+                trap {{ {_HANDLER} }}
+              }}
+              process {{
+                {_RAISE}
+                {_FOLLOWER}
+              }}
+            }}
+            Invoke-Thing
+        """, F"""
+            function Invoke-Thing {{
+              begin {{
+                trap {{ {_HANDLER} }}
+              }}
+              process {{
+                {_FOLLOWER}
+              }}
+            }}
+            Invoke-Thing
         """)
