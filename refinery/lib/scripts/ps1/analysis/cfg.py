@@ -232,15 +232,19 @@ class _Builder(CfgBuilder):
         create is never wired at all.
 
         `continue` inside a trap resumes at the statement following the one that threw, which is a
-        shape this graph cannot express exactly. Every resumption point is therefore taken to reach
-        *every* node the block created (`_link_resumptions`), which is the over-approximation: it
-        claims more paths than exist, where claiming fewer would let an analysis call a statement
-        after a trap unreachable, or let a store before one look dead because the resumption that
-        reads it was never modelled.
+        shape no single edge set expresses. It is therefore carried twice, as
+        `refinery.lib.scripts.analysis.cfg.CfgEdge` describes: every resumption point is taken to
+        reach *every* node the block created (`_link_resumptions`), the over-approximation an
+        analysis asking whether any resumption path exists must read — claiming fewer paths would
+        let one call a statement after a trap unreachable, or let a store before one look dead
+        because the resumption that reads it was never modelled — and, alongside it, the precise
+        forward-only half (`_resumable_sequence`), which joins each statement to the one control
+        actually resumes at and is what a flood reads.
         """
         traps = _declared_traps(statements)
         if not traps:
             return self.sequence(statements, frontier)
+        handler_from = len(self.cfg.nodes)
         entries: list[CfgNode] = []
         for trap in traps:
             handler = self.detached_node(trap)
@@ -265,14 +269,67 @@ class _Builder(CfgBuilder):
         self._targets = outer_targets
         self._pending_label = outer_label
         self.close_handler_set(entries, escapes=escapes)
+        if resumes:
+            self.mark_hub_bound(self.cfg.nodes[handler_from:])
         guarded_from = len(self.cfg.nodes)
         self._handlers.append(entries[0])
-        exits = self.sequence(statements, frontier)
+        if resumes:
+            exits = self._resumable_sequence(statements, frontier)
+        else:
+            exits = self.sequence(statements, frontier)
         self._handlers.pop()
         landing = [node for node in self.cfg.nodes[guarded_from:] if node.element is not None]
         if resumes:
             self._link_resumptions(resumes, landing)
         return exits
+
+    def _resumable_sequence(
+        self, statements: Sequence[Node], frontier: list[CfgNode],
+    ) -> list[CfgNode]:
+        """
+        The guarded statements of a block whose `trap` set resumes it, threaded as `sequence` does
+        and additionally wired with the precise, forward-only half of resumption: every node one
+        statement built is joined to the point control resumes at, which is the statement after it.
+
+        What finds that point is one elementless slot per statement, passed in the frontier the
+        statement is built from, so whatever the statement control-*enters* gains an edge from the
+        slot — its own node, the condition of an `if`, the first guarded statement of a nested
+        block. Reading the entry off the nodes the statement created instead answers the wrong one
+        for every construct that builds something before what it runs first: a `try` builds its
+        handler entry first, so the forward edge would reach the `catch` clause and leave the body
+        it guards reachable only through the hub, which is exactly the backward reach the forward
+        half exists to avoid.
+
+        A statement that builds nothing leaves its slot unclaimed — a `trap` declaration is one, and
+        so is an empty nested block — and the slot carries to the statement after it, which is where
+        control really resumes.
+
+        The last statement's slot goes into the returned frontier rather than to the body exit.
+        Control resuming past the end of a guarded block carries on with whatever follows the
+        *block*, and for a nested one that is not the end of the body; only the caller threading
+        this frontier knows where it is.
+        """
+        slot: CfgNode | None = None
+        previous: list[CfgNode] = []
+        for statement in statements:
+            if previous:
+                slot = slot or self.synthetic_node()
+                for node in previous:
+                    self.resumption_forward_edge(node, slot)
+            built_from = len(self.cfg.nodes)
+            frontier = self.statement(
+                statement, frontier if slot is None else [*frontier, slot])
+            previous = [
+                node for node in self.cfg.nodes[built_from:] if node.element is not None
+            ]
+            if slot is not None and slot.successors:
+                slot = None
+        if not previous:
+            return frontier
+        slot = slot or self.synthetic_node()
+        for node in previous:
+            self.resumption_forward_edge(node, slot)
+        return [*frontier, slot]
 
     def _link_resumptions(self, resumes: list[CfgNode], landing: list[CfgNode]) -> None:
         """
@@ -283,14 +340,17 @@ class _Builder(CfgBuilder):
         into no query and generates no dataflow fact — while the edge count falls from the product
         of the two sets to their sum, which is what a guarded body holding hundreds of resumes over
         thousands of landings costs when every resume names every landing directly.
+
+        Every edge here carries `refinery.lib.scripts.analysis.cfg.CfgEdge.RESUMPTION_HUB`, which is
+        what lets a consumer wanting only the paths that go forward decline the whole construct in
+        one test rather than recognising the hub by its shape.
         """
-        hub = CfgNode(None)
-        self.cfg.nodes.append(hub)
-        self.add_edge(hub, self.cfg.exit)
+        hub = self.synthetic_node()
+        self.resumption_hub_edge(hub, self.cfg.exit)
         for node in landing:
-            self.add_edge(hub, node)
+            self.resumption_hub_edge(hub, node)
         for resume in resumes:
-            self.add_edge(resume, hub)
+            self.resumption_hub_edge(resume, hub)
 
     def body_blocks(self, owner: Node) -> Sequence[Sequence[Node]]:
         """
