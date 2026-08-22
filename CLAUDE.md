@@ -108,9 +108,6 @@ Your output must match this exactly so that it can be easily copied and pasted.
 
 # Test Coverage
 
-**Main Rule:** All tests are written by an independent subagent, whose task is only to write a meaningful test.
-Describe to this agent what behavior to test, but never give specific instructions for the test criteria.
-
 When you develop a new piece of code, you should also write tests.
 The goal for test coverage is 95%, but this has very important caveats:
 
