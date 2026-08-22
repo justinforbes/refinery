@@ -5,7 +5,13 @@ import unittest
 from test import TestBase
 
 from refinery.lib.scripts import Node, Statement
-from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph
+from refinery.lib.scripts.analysis.cfg import (
+    CfgEdge,
+    CfgNode,
+    ControlFlowGraph,
+    reachable_forward_from_any,
+    reachable_from_any,
+)
 from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model, build_ps1_control_flow
@@ -51,6 +57,9 @@ _CORPUS = [
     "try { trap { 'h' }\n'a' } catch { 'c' }",
     "try { 'a' } finally { trap { 'h' }\n'b' }",
     "trap { continue }\n'a'",
+    "trap { continue }\n'a'\nthrow 'x'\n'b'",
+    "trap { continue }\n'a'\nthrow 'x'\ntry { 'b' } catch { 'c' }",
+    "if ($c) { trap { continue }\n'a'\nthrow 'x' }\n'b'",
     "trap { break }\n'a'",
     "trap { :t while ($true) { break t } }\n'a'",
     "while ($c) { trap { break }\n'a' }",
@@ -894,3 +903,116 @@ class TestPs1ACatchWhoseTypeFilterCannotBeReadIsNotUnfiltered(_Ps1ControlFlowGra
     def test_a_catch_whose_filter_is_an_empty_bracket_lets_the_error_leave_the_construct(self):
         graph, guarded = self._guarded_statement("try { 'a' } catch [] { 'b' }")
         self.assertIn(graph.exit, self._reached_by_an_error_at(graph, guarded))
+
+
+class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlowGraphs):
+    """
+    A `trap { continue }` resumes the block it guards at the statement *after* the one that threw.
+    Measured on 5.1: `trap { continue }; Write-Host 'one'; throw 'e'; Write-Host 'three'` writes
+    `one` once and then `three`, so nothing above the raiser runs again.
+
+    The graph cannot know which statement threw and so carries the shape twice — see
+    `refinery.lib.scripts.analysis.cfg.CfgEdge`. The tests above read the over-approximate half,
+    which claims a resumption reaches every statement of the block; these read the precise half,
+    which a flood follows through `reachable_forward_from_any` and which is what stops a leak late
+    in a guarded script from poisoning the whole of it.
+    """
+
+    def test_a_guarded_statement_resumes_below_itself_and_not_above(self):
+        tree, graph = self._tree_and_graph("trap { continue }\n'one'\n'two'\n'three'")
+        one, two, three = (self._required_node(graph, tree.body[k]) for k in (1, 2, 3))
+        forward = reachable_forward_from_any(graph, [two])
+        self.assertIn(id(three), forward)
+        self.assertNotIn(id(one), forward)
+        self.assertIn(id(one), reachable_from_any([two]))
+
+    def test_a_terminator_reaches_the_statement_resumption_lands_on(self):
+        """
+        The path only resumption draws. A `throw` has no normal successor at all, so the statement
+        after it is reachable from it through nothing else — and a walk that declined the hub
+        without this edge would report the rest of the block unreachable and vouch for every read
+        in it.
+        """
+        tree, graph = self._tree_and_graph("trap { continue }\n'one'\nthrow 'x'\n'three'")
+        one, raiser, three = (self._required_node(graph, tree.body[k]) for k in (1, 2, 3))
+        forward = reachable_forward_from_any(graph, [raiser])
+        self.assertIn(id(three), forward)
+        self.assertNotIn(id(one), forward)
+
+    def test_resumption_lands_where_control_enters_the_next_statement(self):
+        """
+        A `try` builds its handler entry before the body it guards, so the point control resumes at
+        cannot be read off the order the nodes were created in: that answers the `catch` clause and
+        leaves the guarded body reachable only through the hub, which is the backward reach this
+        half exists to remove.
+        """
+        tree, graph = self._tree_and_graph(
+            "trap { continue }\n'one'\nthrow 'x'\ntry { 'body' } catch { 'clause' }")
+        raiser = self._required_node(graph, tree.body[2])
+        guarded = tree.body[3]
+        self.assertIn(
+            id(self._required_node(graph, guarded.try_block.body[0])),
+            reachable_forward_from_any(graph, [raiser]),
+        )
+
+    def test_a_raise_in_the_last_guarded_statement_resumes_past_the_block(self):
+        """
+        Measured on 5.1: `if ($true) { trap { continue }; Write-Host 'in'; throw 'e' };
+        Write-Host 'after'` writes `in` and then `after`. Resumption past the end of a guarded block
+        carries on with whatever follows the *block*, which for a nested one is not the end of the
+        body — so the fall-off belongs in the frontier the caller threads and not on the body exit.
+        """
+        tree, graph = self._tree_and_graph(
+            "if ($c) { trap { continue }\n'in'\nthrow 'x' }\n'after'")
+        guarded = tree.body[0].clauses[0][1]
+        raiser = self._required_node(graph, guarded.body[2])
+        self.assertIn(
+            id(self._required_node(graph, tree.body[1])),
+            reachable_forward_from_any(graph, [raiser]),
+        )
+
+    def test_a_statement_of_the_handler_is_flooded_through_the_hub_instead(self):
+        """
+        The forward edges join guarded statements to one another, and a statement of the handler is
+        on neither end of one: a precise walk started there would stop at the resumption point,
+        where the run carries on into the block. The graph says so and the flood falls back.
+        """
+        tree, graph = self._tree_and_graph("trap { 'handled'\ncontinue }\n'one'\n'two'")
+        handled = self._required_node(graph, tree.body[0].body.body[0])
+        forward = reachable_forward_from_any(graph, [handled])
+        self.assertTrue(graph.is_hub_bound(handled))
+        self.assertFalse(graph.is_hub_bound(self._required_node(graph, tree.body[1])))
+        self.assertIn(id(self._required_node(graph, tree.body[1])), forward)
+        self.assertIn(id(self._required_node(graph, tree.body[2])), forward)
+
+    def test_a_resumption_edge_is_taken_on_a_throw_and_carries_no_error(self):
+        """
+        The two bits `is_exceptional` used to conflate, told apart. The handler swallowed the error,
+        so nothing travels a resumption edge and `faults` must not read one as a route an error
+        took; the statement it leaves is nonetheless the one that did not finish, so `dataflow` must
+        not read a store it makes as done.
+        """
+        tree, graph = self._tree_and_graph("trap { continue }\n'one'\n'two'")
+        jump = self._node_for(graph, Ps1ContinueStatement)
+        one = self._required_node(graph, tree.body[1])
+        for source, kind in [
+            (jump, CfgEdge.RESUMPTION_HUB),
+            (one, CfgEdge.RESUMPTION_FORWARD),
+        ]:
+            with self.subTest(kind):
+                edges = [
+                    target for target in source.successors
+                    if graph.edge_kind(source, target) is kind
+                ]
+                self.assertEqual(len(edges), 1)
+                self.assertFalse(graph.is_exceptional(source, edges[0]))
+                self.assertTrue(graph.raise_taken(source, edges[0]))
+
+    def test_an_edge_that_carries_an_error_is_one_a_throw_is_needed_to_take(self):
+        for source in _CORPUS:
+            with self.subTest(source):
+                for graph in self._graphs(source).values():
+                    for node in graph.nodes:
+                        for successor in node.successors:
+                            if graph.is_exceptional(node, successor):
+                                self.assertTrue(graph.raise_taken(node, successor))

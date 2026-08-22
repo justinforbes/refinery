@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from test import TestBase
 
 from refinery.lib.scripts.analysis.cycles import CycleModel
@@ -126,6 +128,19 @@ class TestPs1VariableFlow(TestBase):
         """
         self.assertIsNone(
             self._observed("$x = 'a'; trap { $x = 'b'; continue }; throw 'e'; Write-Host $x"))
+
+    @unittest.expectedFailure
+    def test_a_bare_write_in_a_trap_body_leaves_the_write_above_it_standing(self):
+        """
+        The recall the rule above costs. 5.1 compiles a `trap` body as a scope of its own, so the
+        bare write in one is a different binding and the read below still names `'a'` — measured:
+        the script writes `a`. The semantic model binds the two occurrences together and what keeps
+        the answer safe is the completion rule rather than the scope, so the read is refused instead
+        of answered. Only `$env:`, `$script:` and `$global:` escape a trap body, and for those the
+        refusal is the right answer and must survive whatever retires this one.
+        """
+        self.assertEqual(
+            self._observed("$x = 'a'; trap { $x = 'b'; continue }; throw 'e'; Write-Host $x"), 0)
 
     def test_a_foreach_object_body_writing_the_name_kills_it(self):
         self.assertIsNone(

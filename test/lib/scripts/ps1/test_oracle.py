@@ -235,6 +235,14 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
     "trap { }; [int]'a'; Write-Host 'after'":
         'The same handler removed in its other inert spelling, where the disposition is the '
         'default resumption rather than `continue`.',
+    "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
+        'The handler is kept and the `if` around the raise is resolved into the statements it '
+        'holds, which moves the point the handler resumes at: a raise inside a nested block '
+        'abandons the rest of that block and carries on after it, so `tail` does not run, and once '
+        'the two statements stand at script scope the raise resumes at `tail` and it does. '
+        '`Ps1RemovalPlan` refuses to carry a `trap` *out* of the block it is written in '
+        '(`_rescopes_a_handler`); this is the mirror of that, splicing statements *into* a block a '
+        'resuming handler already guards, and nothing asks about it.',
     "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
         'The same handler removed where the raise stands inside `$( )`. 5.1 abandons the whole '
         'assignment and resumes at the statement after it, so `$x` holds nothing and the snippet '
@@ -289,6 +297,14 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
     "trap { continue }; [int]'a'; Write-Host 'after'":
         ('INFO\tafter',),
+    "trap { continue }; Write-Host 'one'; throw 'e'; Write-Host 'three'":
+        ('INFO\tone', 'INFO\tthree'),
+    "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
+        ('INFO\tnext',),
+    "if ($true) { trap { continue }; Write-Host 'in'; throw 'e' }; Write-Host 'after'":
+        ('INFO\tin', 'INFO\tafter'),
+    "$x = 'a'; trap { $x = 'b'; continue }; throw 'e'; Write-Host $x":
+        ('INFO\ta',),
     "trap { break }; [int]'a'; Write-Host 'after'":
         ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
     "trap { }; [int]'a'; Write-Host 'after'": (

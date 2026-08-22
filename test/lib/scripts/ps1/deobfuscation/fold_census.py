@@ -1399,6 +1399,11 @@ FOLDS: dict[str, str] = {
         'foo.exe -NoProfile -File x',
     "trap { continue }; [int]'a'; Write-Host 'after'":
         "[int]'a'\nWrite-Host 'after'",
+    "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
+        "trap {\n  continue\n}\nthrow 'e'\nWrite-Host 'tail'\nWrite-Host 'next'",
+    "if ($true) { trap { continue }; Write-Host 'in'; throw 'e' }; Write-Host 'after'":
+        "if ($True) {\n  trap {\n    continue\n  }\n  Write-Host 'in'\n  throw 'e'\n}"
+        "\nWrite-Host 'after'",
     "trap { }; [int]'a'; Write-Host 'after'":
         "[int]'a'\nWrite-Host 'after'",
     "throw 'e'; Write-Host 'after'":

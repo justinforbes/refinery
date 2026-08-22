@@ -657,6 +657,65 @@ class TestPs1DeadCodeEliminationDoesNotCarryATrapOutOfItsBlock(TestPs1):
         """))
 
 
+class TestPs1DeadCodeEliminationDoesNotCarryStatementsIntoAResumingBlock(TestPs1):
+    """
+    The mirror of the class above, and the half nothing asks about. A `trap { continue }` resumes
+    the block it guards at the statement after the one that threw, so a raise inside a *nested*
+    block abandons the rest of that block and carries on after it — measured on 5.1:
+    `trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'` writes
+    `next` alone.
+
+    Resolving the `if` into the statements it holds puts them at the level the handler resumes into,
+    so the raise now resumes at `tail` and the output writes a line the input never writes. That is
+    a semantics defect and not a recall one: the deobfuscated script runs code the original does
+    not. `Ps1RemovalPlan._vetoed` refuses a replacement that carries a handler *out* of its block;
+    what is missing is the question about the block a replacement is spliced *into*.
+
+    Closing it is a measured trade rather than a one-line gate — a script that wraps its whole body
+    in resuming traps is exactly the shape this pass earns its recall on — so it is pinned here
+    rather than fixed in passing.
+    """
+
+    @unittest.expectedFailure
+    def test_a_branch_resolved_into_a_block_a_resuming_trap_guards_keeps_that_branch(self):
+        self._assertUnchanged(cleandoc("""
+            trap {
+              continue
+            }
+            if ($True) {
+              throw 'e'
+              Write-Host 'tail'
+            }
+            Write-Host 'next'
+        """), Ps1DeadCodeElimination)
+
+    def test_the_same_branch_under_a_trap_that_does_not_resume_is_resolved(self):
+        """
+        The floor under it, differing in the one word that decides the question: a `trap` that
+        rethrows ends the script where the raise stands, so nothing after it runs at either level
+        and moving the statements past it changes nothing. What is left behind is unreachable in
+        the input too — this pass deletes such a statement only where no handler body encloses it.
+        """
+        result = self._apply(cleandoc("""
+            trap {
+              break
+            }
+            if ($True) {
+              throw 'e'
+              Write-Host 'tail'
+            }
+            Write-Host 'next'
+        """), Ps1DeadCodeElimination)
+        self.assertEqual(result, cleandoc("""
+            trap {
+              break
+            }
+            throw 'e'
+            Write-Host 'tail'
+            Write-Host 'next'
+        """))
+
+
 class TestPs1ACallThatWritesNothingGoesOnlyWhereNothingObservesIt(TestPs1):
     """
     A static method declared `System.Void` puts no value on the output stream, so a statement that

@@ -427,6 +427,7 @@ CONTRIBUTION: dict[str, Contribution] = {
             "switch ('b') { 'a' { 'first' } 'b' { 'second' } }",
             'trap [E] { 1 }',
             "trap { continue }; iex 'throw 1'; Write-Host 'after'",
+            "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'",
             'try { 1 } catch [A], [B] { 2 } catch { 3 }',
             'try { 1 } catch { 2 } finally { 3 }',
             'while ($a) { 1 }',
