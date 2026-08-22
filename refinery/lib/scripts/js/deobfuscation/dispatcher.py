@@ -63,6 +63,26 @@ class _DispatcherInfo:
     cache_id: str | None
 
 
+@dataclass
+class _DispatchSite:
+    """
+    One dispatch this pass can read: the expression it is written as, the name of the function it
+    selects, and the arguments that function is reached with. *arguments* is `None` where the site
+    names the function rather than calling it, which the wrapped-reference form does.
+    """
+    node: Node
+    key: str
+    arguments: list | None
+
+    def replacement(self) -> Node:
+        if self.arguments is None:
+            return JsIdentifier(name=self.key)
+        return JsCallExpression(
+            callee=JsIdentifier(name=self.key),
+            arguments=self.arguments,
+        )
+
+
 def _extract_fns_table(
     body: list,
 ) -> tuple[JsVariableDeclarator, dict[str, JsFunctionExpression]] | None:
@@ -386,13 +406,17 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         body: list,
         info: _DispatcherInfo,
     ) -> None:
+        plan = self._plan_call_sites(scope, info)
+        if not self._plan_covers_every_reference(info, plan):
+            return
         extracted: dict[str, JsFunctionDeclaration] = {}
         for key, fn in info.fns_map.items():
             decl = _build_extracted_function(key, fn, info.payload_id)
             if decl is None:
                 return
             extracted[key] = decl
-        self._rewrite_call_sites(scope, info, extracted)
+        for site in plan:
+            _replace_in_parent(site.node, site.replacement())
         insert_idx = body.index(info.decl)
         body.remove(info.decl)
         for i, (key, decl) in enumerate(extracted.items()):
@@ -401,67 +425,114 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         self.mark_changed()
         self._remove_boilerplate(scope, body, info)
 
-    def _rewrite_call_sites(
+    def _plan_call_sites(
         self,
         scope: Node,
         info: _DispatcherInfo,
-        extracted: dict[str, JsFunctionDeclaration],
-    ) -> None:
+    ) -> list[_DispatchSite]:
+        """
+        Every dispatch through *info* that this pass can read, with nothing replaced yet. Whether
+        the dispatcher may be removed at all is a question about the whole set, so the set has to
+        exist before the first replacement does.
+
+        A site nested inside another is dropped: the outer replacement takes the inner one with it,
+        and replacing a node that is no longer in the tree puts the new one nowhere.
+        """
+        planned: list[_DispatchSite] = []
         for node in list(scope.walk()):
             if isinstance(node, JsSequenceExpression):
-                self._try_rewrite_direct_call(node, info, extracted)
+                site = self._read_direct_call(node, info)
             elif isinstance(node, JsMemberExpression):
-                self._try_rewrite_wrapped_ref(node, info, extracted)
+                site = self._read_wrapped_ref(node, info)
             elif isinstance(node, JsCallExpression):
-                self._try_rewrite_bare_call(node, info, extracted)
+                site = self._read_bare_call(node, info)
+            else:
+                continue
+            if site is not None:
+                planned.append(site)
+        nested = {
+            id(inner)
+            for site in planned
+            for inner in site.node.walk()
+            if inner is not site.node
+        }
+        return [site for site in planned if id(site.node) not in nested]
 
-    def _try_rewrite_direct_call(
+    def _plan_covers_every_reference(
+        self,
+        info: _DispatcherInfo,
+        plan: list[_DispatchSite],
+    ) -> bool:
+        """
+        Whether *plan* replaces every reference to the dispatcher, so that removing its declaration
+        leaves nothing naming it. A dispatch this pass cannot read is one it is right to leave
+        alone, and what it leaves alone still calls the function it is leaving, so removing the
+        declaration anyway hands back a file that throws a `ReferenceError` where the original ran.
+
+        The whole unwrap is refused rather than the removal alone, because extraction is not
+        something a surviving dispatcher can share a table with: `_build_extracted_function` reuses
+        the statement nodes of the entry it extracts and strips the payload destructuring out of
+        them in place, so a dispatcher left standing beside the extracted functions calls bodies
+        that no longer read the payload it writes.
+
+        The dispatcher's own body is excluded rather than counted, since it goes with the
+        declaration. Everything else is asked of the model, so a same-named binding in another
+        scope is not mistaken for a use of this one.
+        """
+        assert self._root is not None
+        if not isinstance(info.decl.id, JsIdentifier):
+            return False
+        model = model_cache(self, self._root).model
+        binding = model.binding_of(info.decl.id)
+        rewritten = {id(node) for site in plan for node in site.node.walk()}
+        return not binding_has_references(
+            model,
+            binding,
+            exclude=info.decl,
+            exclude_ids=rewritten,
+        )
+
+    def _read_direct_call(
         self,
         seq: JsSequenceExpression,
         info: _DispatcherInfo,
-        extracted: dict[str, JsFunctionDeclaration],
-    ) -> None:
+    ) -> _DispatchSite | None:
         """
-        Rewrite a sequence expression dispatch call to a direct call:
+        The sequence expression dispatch call *seq* is:
 
             (payload = [args], dispatcher("key"))  ->  key(args)
 
-        Also handles the wrapped variant where the return value is unwrapped via a member access
+        Also reads the wrapped variant where the return value is unwrapped via a member access
         on the wrap key:
 
             (payload = [args], dispatcher("key", s, wrapFlag)["wk"])
         """
         if len(seq.expressions) != 2:
-            return
+            return None
         assign, second = seq.expressions
         if not isinstance(assign, JsAssignmentExpression):
-            return
+            return None
         if assign.operator != '=':
-            return
+            return None
         if not isinstance(assign.left, JsIdentifier) or assign.left.name != info.payload_id:
-            return
+            return None
         if not isinstance(assign.right, JsArrayExpression):
-            return
+            return None
         dispatch_call = self._unwrap_dispatch_call(second, info)
         if dispatch_call is None:
-            return
+            return None
         if not dispatch_call.arguments:
-            return
+            return None
         key_arg = dispatch_call.arguments[0]
         if not isinstance(key_arg, JsStringLiteral):
-            return
-        key = key_arg.value
-        if key not in extracted:
-            return
+            return None
+        if key_arg.value not in info.fns_map:
+            return None
         args = [
             make_undefined_expression() if e is None else e
             for e in assign.right.elements
         ]
-        replacement = JsCallExpression(
-            callee=JsIdentifier(name=key),
-            arguments=args,
-        )
-        _replace_in_parent(seq, replacement)
+        return _DispatchSite(seq, key_arg.value, args)
 
     @staticmethod
     def _unwrap_dispatch_call(
@@ -488,67 +559,58 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
             return None
         return call
 
-    def _try_rewrite_wrapped_ref(
+    def _read_wrapped_ref(
         self,
         member: JsMemberExpression,
         info: _DispatcherInfo,
-        extracted: dict[str, JsFunctionDeclaration],
-    ) -> None:
+    ) -> _DispatchSite | None:
         """
-        Rewrite new-expression dispatch with wrap key access to the resolved function identifier:
+        The new-expression dispatch with wrap key access *member* is, which names the function it
+        selects rather than calling it:
 
             new dispatcher("key", s2, s3)["wrapKey"]  ->  key
         """
         if info.wrap_key is None:
-            return
+            return None
         if access_key(member) != info.wrap_key:
-            return
+            return None
         new_expr = member.object
         if not isinstance(new_expr, JsNewExpression):
-            return
+            return None
         if not isinstance(new_expr.callee, JsIdentifier):
-            return
+            return None
         if new_expr.callee.name != info.dispatcher_id:
-            return
+            return None
         if not new_expr.arguments:
-            return
+            return None
         key_arg = new_expr.arguments[0]
         if not isinstance(key_arg, JsStringLiteral):
-            return
-        key = key_arg.value
-        if key not in extracted:
-            return
-        _replace_in_parent(member, JsIdentifier(name=key))
+            return None
+        if key_arg.value not in info.fns_map:
+            return None
+        return _DispatchSite(member, key_arg.value, None)
 
-    def _try_rewrite_bare_call(
+    def _read_bare_call(
         self,
         call: JsCallExpression,
         info: _DispatcherInfo,
-        extracted: dict[str, JsFunctionDeclaration],
-    ) -> None:
+    ) -> _DispatchSite | None:
         """
-        Rewrite bare `dispatcher("key")` calls (without a preceding payload assignment) to
-        `key()`. These occur when the dispatched function takes no arguments.
+        The bare `dispatcher("key")` call *call* is. These occur without a preceding payload
+        assignment, when the dispatched function takes no arguments.
         """
         if not isinstance(call.callee, JsIdentifier):
-            return
+            return None
         if call.callee.name != info.dispatcher_id:
-            return
+            return None
         if not call.arguments:
-            return
+            return None
         key_arg = call.arguments[0]
         if not isinstance(key_arg, JsStringLiteral):
-            return
-        key = key_arg.value
-        if key not in extracted:
-            return
-        if isinstance(call.parent, JsSequenceExpression):
-            return
-        replacement = JsCallExpression(
-            callee=JsIdentifier(name=key),
-            arguments=[],
-        )
-        _replace_in_parent(call, replacement)
+            return None
+        if key_arg.value not in info.fns_map:
+            return None
+        return _DispatchSite(call, key_arg.value, [])
 
     def _remove_boilerplate(self, scope: Node, body: list, info: _DispatcherInfo) -> None:
         """

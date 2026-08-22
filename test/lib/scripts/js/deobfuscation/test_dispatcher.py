@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import unittest
+
+from test import TestBase
+from test.lib.scripts.js.analysis.differential import node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
+from test.lib.scripts.js.ledger import before_and_after, each_program_still_prints
 
 from refinery.lib.scripts.js.analysis.cache import ModelCache
 from refinery.lib.scripts.js.deobfuscation.dispatcher import JsDispatcherUnwrapper
@@ -133,3 +138,43 @@ class TestDispatcherUnwrapping(TestJsDeobfuscator):
         )
         self.assertEqual(['k'], remaining)
         self.assertIsNone(cache.model.lookup('stub', cache.model.root_scope))
+
+
+#: A program that dispatches through a callee name built by an expression rather than written as a
+#: string literal, mapped to what Node prints for it. The dispatcher is reached the ordinary way and
+#: answers the ordinary way; only the spelling of the name keeps the unwrapper from reading it.
+A_DISPATCH_THROUGH_A_COMPUTED_KEY = {
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a, b, c] = p; return a + b + c; }'],
+        tail_lines=[
+            'var k = "f" + 1;',
+            'console.log((p = ["a", "b", "c"], d(k)));',
+        ],
+    ): 'abc\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestADispatcherIsKeptWhileACallToItSurvives(TestBase):
+    """
+    Unwrapping a dispatcher extracts the functions its table holds, replaces each call made through
+    it with a direct call to the function that call selects, and removes the declaration. A call
+    whose callee name is not written as a string literal is one the pass cannot read, and the whole
+    unwrap is refused where one is present rather than the removal alone.
+
+    Refusing the whole of it is what extraction costs: the extracted function reuses the statement
+    nodes of the table entry it is built from and strips the payload destructuring out of them in
+    place, so a dispatcher left standing beside the extracted functions would call bodies that no
+    longer read the payload it writes.
+    """
+
+    def test_a_dispatch_through_a_computed_key_keeps_the_dispatcher(self):
+        """
+        Node prints `abc` for the one program of `A_DISPATCH_THROUGH_A_COMPUTED_KEY`, which spells
+        its callee name `"f" + 1`, and the deobfuscation prints it too.
+        """
+        rows = A_DISPATCH_THROUGH_A_COMPUTED_KEY
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
