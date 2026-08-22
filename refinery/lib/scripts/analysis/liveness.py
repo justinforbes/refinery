@@ -52,11 +52,11 @@ def solve_liveness(
         use[id(node)], kill[id(node)] = node_sets(graph, node)
         normal_successors[id(node)] = [
             successor for successor in node.successors
-            if not graph.is_exceptional(node, successor)
+            if not graph.raise_taken(node, successor)
         ]
         exceptional_successors[id(node)] = [
             successor for successor in node.successors
-            if graph.is_exceptional(node, successor)
+            if graph.raise_taken(node, successor)
         ]
     live_in: dict[int, set[_T]] = {id(node): set() for node in graph.nodes}
     live_out: dict[int, set[_T]] = {id(node): set() for node in graph.nodes}

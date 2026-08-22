@@ -875,7 +875,8 @@ class Ps1VariableFlow:
         """
         Whether *use* is reached from *definition* only on runs where the statement holding the
         definition ran to completion — that is, whether every path joining them leaves *definition*
-        by an edge that is not exceptional.
+        by an edge no throw is needed to take
+        (`refinery.lib.scripts.analysis.cfg.ControlFlowGraph.raise_taken`).
 
         `try { [int]$x = 'abc' } catch { … }` enters the handler because the cast failed, which is
         exactly the run in which the store never happened, and dominance cannot see it: the handler
@@ -896,14 +897,14 @@ class Ps1VariableFlow:
     ) -> tuple[frozenset[int], frozenset[int]]:
         """
         The ids of the nodes reached from *definition* by first leaving it normally, and the ids of
-        those reached by first leaving it exceptionally.
+        those reached by first leaving it on a run where it threw.
         """
         key = (id(graph), id(definition))
         found = self._exits.get(key)
         if found is None:
             found = self._exits[key] = (
-                self._reached_from(graph, definition, exceptional=False),
-                self._reached_from(graph, definition, exceptional=True),
+                self._reached_from(graph, definition, raising=False),
+                self._reached_from(graph, definition, raising=True),
             )
         return found
 
@@ -912,12 +913,12 @@ class Ps1VariableFlow:
         graph: ControlFlowGraph,
         definition: CfgNode,
         *,
-        exceptional: bool,
+        raising: bool,
     ) -> frozenset[int]:
         seen: set[int] = set()
         stack: list[CfgNode] = []
         for successor in definition.successors:
-            if bool(graph.is_exceptional(definition, successor)) != exceptional:
+            if graph.raise_taken(definition, successor) != raising:
                 continue
             if id(successor) not in seen:
                 seen.add(id(successor))
