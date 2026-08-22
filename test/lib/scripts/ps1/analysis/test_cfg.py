@@ -918,6 +918,20 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
     in a guarded script from poisoning the whole of it.
     """
 
+    @staticmethod
+    def _resumption_landings(graph: ControlFlowGraph) -> list[CfgNode]:
+        """
+        The statements a resuming handler may carry on at, read off the hub the graph joins them
+        through: every element node a hub node reaches.
+        """
+        return [
+            target
+            for node in graph.nodes if node.element is None
+            for target in node.successors
+            if target.element is not None
+            and graph.edge_kind(node, target) & CfgEdge.RESUMPTION_HUB
+        ]
+
     def test_a_guarded_statement_resumes_below_itself_and_not_above(self):
         tree, graph = self._tree_and_graph("trap { continue }\n'one'\n'two'\n'three'")
         one, two, three = (self._required_node(graph, tree.body[k]) for k in (1, 2, 3))
@@ -993,26 +1007,98 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
         not read a store it makes as done.
         """
         tree, graph = self._tree_and_graph("trap { continue }\n'one'\n'two'")
-        jump = self._node_for(graph, Ps1ContinueStatement)
         one = self._required_node(graph, tree.body[1])
-        for source, kind in [
-            (jump, CfgEdge.RESUMPTION_HUB),
-            (one, CfgEdge.RESUMPTION_FORWARD),
-        ]:
-            with self.subTest(kind):
-                edges = [
-                    target for target in source.successors
-                    if graph.edge_kind(source, target) is kind
-                ]
-                self.assertEqual(len(edges), 1)
-                self.assertFalse(graph.is_exceptional(source, edges[0]))
-                self.assertTrue(graph.raise_taken(source, edges[0]))
+        hub, = (target for target in one.predecessors if graph.is_resumption_hub(target))
+        forward, = (
+            target for target in one.successors
+            if graph.edge_kind(one, target) is CfgEdge.RESUMPTION_FORWARD
+        )
+        for source, target in [(hub, one), (one, forward)]:
+            with self.subTest(graph.edge_kind(source, target)):
+                self.assertFalse(graph.is_exceptional(source, target))
+                self.assertTrue(graph.raise_taken(source, target))
 
-    def test_an_edge_that_carries_an_error_is_one_a_throw_is_needed_to_take(self):
+    def test_the_edge_into_a_resumption_hub_is_the_handler_body_completing(self):
+        """
+        The asymmetry of the hub, and the answer it costs to get wrong. What reaches the hub is the
+        handler body running to its end — a statement that *completed*, whose store did happen — so
+        that edge is plain. Reading it as taken-on-a-throw empties the completed-exit walk of every
+        store a `trap` body makes, and no read below one could observe any of them.
+        """
+        tree, graph = self._tree_and_graph("trap { $x = 'b'\ncontinue }\n'one'")
+        jump = self._node_for(graph, Ps1ContinueStatement)
+        hub, = (target for target in jump.successors if graph.is_resumption_hub(target))
+        self.assertFalse(graph.raise_taken(jump, hub))
+        self.assertTrue(graph.raise_taken(hub, self._required_node(graph, tree.body[1])))
+
+    def test_a_trap_written_below_a_statement_leaves_one_resumption_point(self):
+        """
+        A `trap` declaration builds nothing and hands its frontier back, the resumption slot of the
+        statement above it among it. Threading that frontier on without dropping the repetition
+        draws the slot's edge into the next statement once per declaration that passed it along.
+        """
+        tree, graph = self._tree_and_graph(
+            "'one'\ntrap { continue }\ntrap [System.Exception] { continue }\n'two'")
+        one, two = (self._required_node(graph, tree.body[k]) for k in (0, 3))
+        slots = [
+            target for target in one.successors
+            if graph.edge_kind(one, target) is CfgEdge.RESUMPTION_FORWARD
+        ]
+        self.assertEqual(len(slots), 1)
+        self.assertEqual(slots[0].successors, [two])
+
+    def test_every_statement_a_resumption_lands_on_leaves_by_a_forward_edge(self):
+        """
+        What licenses `reachable_forward_from_any` declining the hub. The forward edges may stand
+        for the hub's runs only if every statement the hub lands on carries one of its own —
+        otherwise the precise walk stops where the run carries on, and a read a leak precedes is
+        granted. A statement the graph calls `is_hub_bound` is the exception the flood already
+        handles by walking the hub instead.
+        """
         for source in _CORPUS:
             with self.subTest(source):
+                stranded: list[str] = []
                 for graph in self._graphs(source).values():
-                    for node in graph.nodes:
-                        for successor in node.successors:
-                            if graph.is_exceptional(node, successor):
-                                self.assertTrue(graph.raise_taken(node, successor))
+                    for landing in self._resumption_landings(graph):
+                        if graph.is_hub_bound(landing):
+                            continue
+                        if any(
+                            graph.edge_kind(landing, target) & CfgEdge.RESUMPTION_FORWARD
+                            for target in landing.successors
+                        ):
+                            continue
+                        stranded.append(type(landing.element).__name__)
+                self.assertEqual(stranded, [])
+
+    def test_a_guarded_statement_forward_reaches_every_statement_below_it(self):
+        """
+        The property the test above only tests the existence of an edge for, and the one the flood
+        is sound under: a leak written at a guarded statement must poison every statement of the
+        block after it, whatever the statement is built out of. Shapes whose guarded block holds
+        several statements inside a construct the corpus above only ever guards one statement of —
+        a loop body, a `switch` arm, a `catch` and a `finally` body.
+        """
+        blocks = [
+            "trap { continue }\n'one'\nthrow 'x'\n'three'\n'four'",
+            "while ($c) { trap { continue }\n'one'\nthrow 'x'\n'three'\n'four' }",
+            "do { trap { continue }\n'one'\nthrow 'x'\n'three' } while ($c)",
+            "foreach ($i in $x) { trap { continue }\n'one'\nthrow 'x'\n'three' }",
+            "for ($i = 0; $i -lt 3; $i++) { trap { continue }\n'one'\nthrow 'x'\n'three' }",
+            "switch ($x) { 1 { trap { continue }\n'one'\nthrow 'x'\n'three' } }",
+            "try { trap { continue }\n'one'\nthrow 'x'\n'three' } catch { 'c' }",
+            "try { 'a' } catch { trap { continue }\n'one'\nthrow 'x'\n'three' }",
+            "try { 'a' } finally { trap { continue }\n'one'\nthrow 'x'\n'three' }",
+            "if ($c) { trap { continue }\n'one'\nthrow 'x'\n'three' }\n'after'",
+        ]
+        for source in blocks:
+            with self.subTest(source):
+                tree, graph = self._tree_and_graph(source)
+                guarded = self._the_block_a_trap_is_written_in(tree)[1:]
+                unreached: list[tuple[int, int]] = []
+                for index, statement in enumerate(guarded):
+                    forward = reachable_forward_from_any(
+                        graph, [self._required_node(graph, statement)])
+                    for offset, below in enumerate(guarded[index + 1:], index + 1):
+                        if id(self._required_node(graph, below)) not in forward:
+                            unreached.append((index, offset))
+                self.assertEqual(unreached, [])

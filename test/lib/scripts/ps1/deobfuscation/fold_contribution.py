@@ -198,6 +198,7 @@ CONTRIBUTION: dict[str, Contribution] = {
             "Write-Output ([char]65 + 1); Write-Output ('A' + 1)",
             "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('aGk='))",
             "[string]::Join('', ('a', 'b'))",
+            "trap { continue }; foreach ($i in 1..2) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'",
         ),
         changed=(
             '$a = $null; $b = 5; $t = $a * $b; Write-Output (,$t)',
@@ -416,6 +417,7 @@ CONTRIBUTION: dict[str, Contribution] = {
             "throw 'e'; Write-Host 'after'",
             "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x",
             "trap { continue }; [int]'a'; Write-Host 'after'",
+            "trap { continue }; switch (1) { 1 { throw 'e'; Write-Host 'tail' } }; Write-Host 'next'",
             "trap { }; [int]'a'; Write-Host 'after'",
         ),
         changed=(

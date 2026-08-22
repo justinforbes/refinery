@@ -243,6 +243,10 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         '`Ps1RemovalPlan` refuses to carry a `trap` *out* of the block it is written in '
         '(`_rescopes_a_handler`); this is the mirror of that, splicing statements *into* a block a '
         'resuming handler already guards, and nothing asks about it.',
+    "trap { continue }; switch (1) { 1 { throw 'e'; Write-Host 'tail' } }; Write-Host 'next'":
+        'The same defect reached through the other construct that resolves into the statements '
+        'one of its blocks holds. A `switch` on a constant is folded to the arm that matches, '
+        'and the arm body lands where the handler resumes.',
     "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
         'The same handler removed where the raise stands inside `$( )`. 5.1 abandons the whole '
         'assignment and resumes at the statement after it, so `$x` holds nothing and the snippet '
@@ -300,6 +304,14 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
     "trap { continue }; Write-Host 'one'; throw 'e'; Write-Host 'three'":
         ('INFO\tone', 'INFO\tthree'),
     "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
+        ('INFO\tnext',),
+    "trap { continue }; foreach ($i in 1..2) { throw 'e'; Write-Host 'tail' }; "
+    "Write-Host 'next'":
+        ('INFO\tnext',),
+    "trap { continue }; switch (1) { 1 { throw 'e'; Write-Host 'tail' } }; Write-Host 'next'":
+        ('INFO\tnext',),
+    "trap { continue }; try { throw 'e' } catch { throw 'f'; Write-Host 'tail' }; "
+    "Write-Host 'next'":
         ('INFO\tnext',),
     "if ($true) { trap { continue }; Write-Host 'in'; throw 'e' }; Write-Host 'after'":
         ('INFO\tin', 'INFO\tafter'),

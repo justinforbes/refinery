@@ -405,6 +405,11 @@ CLAIMS: tuple[str, ...] = (
     "trap { continue }; [int]'a'; Write-Host 'after'",
     "trap { continue }; Write-Host 'one'; throw 'e'; Write-Host 'three'",
     "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'",
+    "trap { continue }; foreach ($i in 1..2) { throw 'e'; Write-Host 'tail' }; "
+    "Write-Host 'next'",
+    "trap { continue }; switch (1) { 1 { throw 'e'; Write-Host 'tail' } }; Write-Host 'next'",
+    "trap { continue }; try { throw 'e' } catch { throw 'f'; Write-Host 'tail' }; "
+    "Write-Host 'next'",
     "if ($true) { trap { continue }; Write-Host 'in'; throw 'e' }; Write-Host 'after'",
     "$x = 'a'; trap { $x = 'b'; continue }; throw 'e'; Write-Host $x",
     "trap { break }; [int]'a'; Write-Host 'after'",

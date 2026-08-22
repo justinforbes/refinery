@@ -4,6 +4,8 @@ from test import TestBase
 
 from refinery.lib.scripts import set_body
 from refinery.lib.scripts.ps1.analysis.cache import Ps1ModelCache
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
+from refinery.lib.scripts.ps1.model import Ps1Script
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -60,7 +62,7 @@ class TestPs1FloodsGoForwardThroughAResumingTrap(TestBase):
     refuses.
     """
 
-    def _reach(self, source: str):
+    def _reach(self, source: str) -> tuple[Ps1Script, Ps1WorldReach]:
         script = Ps1Parser(source).parse()
         return script, Ps1ModelCache(script).world_reach
 
