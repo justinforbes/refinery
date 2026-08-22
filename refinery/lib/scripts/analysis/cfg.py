@@ -50,9 +50,15 @@ class CfgEdge(enum.Flag):
     block it guards rather than ending it. The engine carries on at the statement after the one that
     threw, and no graph knows which statement that was, so the shape is carried twice: the hub is
     the over-approximation, joining every resumption point to every statement of the block, and the
-    forward edges are the precise half, joining each statement to the one it would resume at. Both
-    stand for the same runs. An analysis asking whether *any* resumption path exists reads the hub;
-    one asking what a point reaches *going forward* reads the forward edges and skips the hub — see
+    forward edges are the precise half, joining each statement to the one it would resume at.
+
+    The two are *not* interchangeable, and reading one where the other is meant is how this goes
+    wrong. Every run the forward edges draw the hub draws too; the hub draws more, and what it adds
+    is the claim that a resumption point reaches the statements written *above* it — which is the
+    claim the forward half exists to drop. An analysis asking whether *any* resumption path exists
+    reads the hub, since dropping a path there would let it call a live statement unreachable; one
+    asking what a point reaches *going forward* reads the forward edges and skips the hub, since
+    keeping the backward reach there would poison a whole trap-guarded script from one leak — see
     `reachable_forward_from_any`.
 
     The distinction the resumption kinds force is that `ERROR_CARRYING` conflates two bits which
@@ -60,6 +66,12 @@ class CfgEdge(enum.Flag):
     A resumption edge is the first that is the former and not the latter — the handler swallowed the
     error — so a consumer reasoning about whether the source completed must read `RAISE_TAKEN`, and
     only one reasoning about where an error went may read `ERROR_CARRYING` alone.
+
+    Which edges of the hub carry the kind follows from that and is not symmetric. The edges *out*
+    of a hub do: their target is reached only because something threw. The edge *into* one does
+    not, and is plain — its source is the handler body running to its end, which is a statement
+    that completed, and a store it makes did happen. Reading the way in as raise-taken says no read
+    below a `trap` can ever observe a store the handler made.
     """
     NORMAL = 0
     ERROR_CARRYING = enum.auto()
@@ -116,9 +128,13 @@ class CfgNode:
 
 def reachable_from_any(sources: Iterable[CfgNode]) -> frozenset[int]:
     """
-    The ids of the nodes forward-reachable from *any* of *sources*, each source included — the
-    multi-source flood a taint analysis wants from a set of origins. A raw walk over successor
-    edges, which is why it lives with the graph rather than on any model built over it.
+    The ids of the nodes forward-reachable from *any* of *sources*, each source included — every
+    path the graph draws, whatever an edge means. A raw walk over successor edges, which is why it
+    lives with the graph rather than on any model built over it.
+
+    A flood over a graph that may carry resumption edges wants `reachable_forward_from_any` instead:
+    this walk follows the resumption hub, which claims a statement is reached from every later one
+    of its block, so one leak anywhere in a trap-guarded script poisons the whole of it.
 
     Walked as one depth-first sweep seeded with every source rather than a union of per-source
     walks: the union grows the same answer at the cost of one full walk per source, where a single
@@ -153,7 +169,9 @@ class ControlFlowGraph:
         self.nodes: list[CfgNode] = [self.entry, self.exit]
         self._node_of: dict[int, CfgNode] = {}
         self._edge_kinds: dict[tuple[int, int], CfgEdge] = {}
+        self._resumption_hubs: set[int] = set()
         self._hub_bound: set[int] = set()
+        self._resuming = False
         self._fallback: dict[int, CfgNode] = {}
 
     def node_of(self, element: Node) -> CfgNode | None:
@@ -209,15 +227,43 @@ class ControlFlowGraph:
     def is_hub_bound(self, node: CfgNode) -> bool:
         """
         Whether *node* sits where the precise, forward-only projection of resumption does not reach
-        it — inside a handler body that resumes the block around it. The block's forward edges join
-        each *guarded* statement to the one it resumes at; a statement of the handler itself is on
-        neither end of one, and everything it may reach afterwards hangs off the hub.
+        it — inside a handler body that resumes the block around it. That block's forward edges
+        join each *guarded* statement to the one it resumes at; a statement of the handler itself
+        is on neither end of one, and everything it may reach afterwards hangs off the hub. A
+        forward edge it does carry belongs to a block further out — one whose own resuming set
+        guards the statement this handler is written inside — and stands for that block's
+        resumption, not this one, so it says nothing about where this handler carries on.
 
         A forward-only walk seeded at such a node would therefore stop dead where the real run
         carries on, which for a flood is the unsound direction. `reachable_forward_from_any` reads
         this and falls back to the hub for those sources.
         """
         return id(node) in self._hub_bound
+
+    def is_resumption_hub(self, node: CfgNode) -> bool:
+        """
+        Whether *node* is the synthetic fan-out standing for the over-approximate half of a resuming
+        handler — see `CfgEdge`. A walk that wants only the paths going forward declines to enter
+        one.
+
+        The question is asked of the *node* rather than of the edges into it, because an edge kind
+        is keyed by the pair of nodes it joins and `add_edge` builds a multigraph: two edges between
+        the same pair collapse to one entry, so a plain edge drawn beside a hub edge would make the
+        pair read as pure hub and a walk keyed on the kind would decline the plain path too. The
+        node is the thing that is or is not a hub, and no pair of edges can disagree about it.
+        """
+        return id(node) in self._resumption_hubs
+
+    @property
+    def carries_resumption(self) -> bool:
+        """
+        Whether any handler of this body resumes the block it guards, which is the only shape over
+        which the two projections of `CfgEdge` differ. A body with none — every script that writes
+        no `trap`, and every one whose traps rethrow — draws no resumption edge and marks no node
+        hub-bound, so a forward walk over it answers exactly what `reachable_from_any` does and may
+        be answered by the cheaper one.
+        """
+        return self._resuming
 
 
 def reachable_forward_from_any(
@@ -231,16 +277,28 @@ def reachable_forward_from_any(
 
     The hub claims every resumption point reaches every statement of the guarded block, earlier ones
     included. That is the reading a *may* query wants and the ruin of a flood: one leak anywhere in
-    a trap-guarded script poisons the whole of it. The `CfgEdge.RESUMPTION_FORWARD` edges carry the
-    same runs precisely — each statement joined to the one control would resume at — so declining
-    the hub drops no path that goes forward.
+    a trap-guarded script poisons the whole of it. The `CfgEdge.RESUMPTION_FORWARD` edges carry
+    every run that goes forward — each statement joined to the one control would resume at — so
+    declining the hub drops no path that goes forward, only the backward reach the hub adds.
 
     A source the graph reports `is_hub_bound` for is flooded with the hub followed instead, because
     the forward edges carry nothing for such a source and the precise walk would stop at the
     resumption point: an opener written inside a `trap` body would then vouch for the very
     statements the handler resumes into. Its flood is the over-approximate one, which is the
     fail-closed direction.
+
+    Every source must be a node of *graph*. Both facts the walk reads — `is_hub_bound` and
+    `edge_kind` — are keyed by node identity in that graph alone, so a node lifted from a nested
+    body's graph reads as neither hub-bound nor kinded and takes the precise walk over what the
+    graph calls plain flow, which is the fail-open direction.
+
+    A graph that `carries_resumption` reports nothing of is walked by `reachable_from_any`, which
+    is the same answer without the per-node lookup. That is nearly every script — one flood per
+    opener set and one per shadowed command name would otherwise each pay the resumption tax over a
+    graph holding no resumption edge.
     """
+    if not graph.carries_resumption:
+        return reachable_from_any(sources)
     seen: set[int] = set()
     precise: list[CfgNode] = []
     coarse: list[CfgNode] = []
@@ -256,9 +314,7 @@ def reachable_forward_from_any(
     while stack:
         node = stack.pop()
         for successor in node.successors:
-            if id(successor) in seen:
-                continue
-            if graph.edge_kind(node, successor) is CfgEdge.RESUMPTION_HUB:
+            if id(successor) in seen or graph.is_resumption_hub(successor):
                 continue
             seen.add(id(successor))
             stack.append(successor)
@@ -454,24 +510,45 @@ class CfgBuilder:
         """
         An edge carrying *kind*, which every edge but a plain one is drawn through so that the
         adjacency lists and the kind map are never written apart.
+
+        A pair drawn for the first time is stored rather than merged. `enum.Flag.__or__` builds a
+        member through the class constructor and costs an order of magnitude more than the dict
+        write around it, and every kinded edge in a script wrapped in resuming traps passes here.
         """
         self.add_edge(source, target)
+        kinds = self.cfg._edge_kinds
         key = (id(source), id(target))
-        self.cfg._edge_kinds[key] = self.cfg._edge_kinds.get(key, CfgEdge.NORMAL) | kind
+        carried = kinds.get(key)
+        kinds[key] = kind if carried is None else carried | kind
 
     def exceptional_edge(self, source: CfgNode, target: CfgNode) -> None:
         self.kind_edge(source, target, CfgEdge.ERROR_CARRYING)
 
+    def resumption_hub(self) -> CfgNode:
+        """
+        A fresh synthetic node standing for the over-approximate half of a resuming handler: every
+        point the block may resume from joins it, and it joins every point the block may resume at.
+        Recorded as a hub so that `ControlFlowGraph.is_resumption_hub` answers for it, which is what
+        a forward-only walk declines to enter.
+        """
+        node = self.synthetic_node()
+        self.cfg._resumption_hubs.add(id(node))
+        self.cfg._resuming = True
+        return node
+
     def resumption_hub_edge(self, source: CfgNode, target: CfgNode) -> None:
         """
-        An edge of the over-approximate half of a resuming handler — see `CfgEdge`.
+        An edge *out* of a resumption hub — see `CfgEdge`. The way in is drawn plain, because the
+        handler body reaching it completed.
         """
+        self.cfg._resuming = True
         self.kind_edge(source, target, CfgEdge.RESUMPTION_HUB)
 
     def resumption_forward_edge(self, source: CfgNode, target: CfgNode) -> None:
         """
         An edge of the precise, forward-only half of a resuming handler — see `CfgEdge`.
         """
+        self.cfg._resuming = True
         self.kind_edge(source, target, CfgEdge.RESUMPTION_FORWARD)
 
     def mark_hub_bound(self, nodes: Iterable[CfgNode]) -> None:
@@ -479,6 +556,7 @@ class CfgBuilder:
         Record that the forward-only projection of resumption does not reach *nodes* — see
         `ControlFlowGraph.is_hub_bound`.
         """
+        self.cfg._resuming = True
         self.cfg._hub_bound.update(id(node) for node in nodes)
 
     def close_handler_set(self, entries: Sequence[CfgNode], *, escapes: bool) -> None:

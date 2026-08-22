@@ -299,12 +299,22 @@ class Ps1RemovalPlan:
         """
         Whether a single proposal must be skipped although the guards allowed the batch.
 
-        **A rewrite is refused for one reason and one only: it relocates a handler.** Everything
-        else a replacement does is safe on this axis, because it keeps evaluating the original
-        expression and so throws where the original threw, leaving an enclosing handler as
-        reachable as it was. What that argument does not cover is a `trap` carried out of the block
-        it was written in, which changes nothing about where *this* statement's errors go and
-        everything about where the rest of the target body's do; see `_rescopes_a_handler`.
+        **A rewrite is refused here for one reason: it relocates a handler.** A replacement keeps
+        evaluating the original expression and so throws where the original threw, leaving an
+        enclosing handler as reachable as it was. What that argument does not cover is a `trap`
+        carried out of the block it was written in, which changes nothing about where *this*
+        statement's errors go and everything about where the rest of the target body's do; see
+        `_rescopes_a_handler`.
+
+        **The mirror of that question is open**, and this class does not ask it: a replacement
+        spliced *into* a block that a resuming `trap` already guards moves the point that handler
+        carries on at. A raise inside a nested block abandons the rest of that block and resumes
+        after it, so resolving the block into the statements it holds puts them where the handler
+        resumes — measured on 5.1 as
+        `trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'`, which
+        writes `next` alone while the rewritten script writes `tail` too. The corpus row of that
+        name carries the transcript and the `BEHAVIOUR_DEFECTS` entry; closing it is a recall trade
+        that has not been measured, so it is stated here rather than gated.
 
         **A handler and a statement that might fault are opposite questions**, and reading one as
         the other invents a wrong answer in each direction. Deleting a `trap` re-routes errors the

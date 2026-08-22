@@ -43,6 +43,7 @@ from refinery.lib.scripts.analysis.cfg import (
     ControlFlowGraph,
     ControlFlowModel,
     build_control_flow,
+    distinct,
 )
 from refinery.lib.scripts.ps1.ast import get_named_blocks, string_value
 from refinery.lib.scripts.ps1.model import (
@@ -302,7 +303,10 @@ class _Builder(CfgBuilder):
 
         A statement that builds nothing leaves its slot unclaimed — a `trap` declaration is one, and
         so is an empty nested block — and the slot carries to the statement after it, which is where
-        control really resumes.
+        control really resumes. Such a statement also hands the frontier it was given straight back,
+        the slot among it, so the frontier is threaded through
+        `refinery.lib.scripts.analysis.cfg.distinct`: appending the slot to a frontier that already
+        holds it draws the same edge once per statement that passed it on.
 
         The last statement's slot goes into the returned frontier rather than to the body exit.
         Control resuming past the end of a guarded block carries on with whatever follows the
@@ -318,10 +322,10 @@ class _Builder(CfgBuilder):
                     self.resumption_forward_edge(node, slot)
             built_from = len(self.cfg.nodes)
             frontier = self.statement(
-                statement, frontier if slot is None else [*frontier, slot])
-            previous = [
-                node for node in self.cfg.nodes[built_from:] if node.element is not None
-            ]
+                statement,
+                frontier if slot is None else distinct([*frontier, slot]),
+            )
+            previous = [node for node in self.cfg.nodes[built_from:] if node.element is not None]
             if slot is not None and slot.successors:
                 slot = None
         if not previous:
@@ -329,7 +333,7 @@ class _Builder(CfgBuilder):
         slot = slot or self.synthetic_node()
         for node in previous:
             self.resumption_forward_edge(node, slot)
-        return [*frontier, slot]
+        return distinct([*frontier, slot])
 
     def _link_resumptions(self, resumes: list[CfgNode], landing: list[CfgNode]) -> None:
         """
@@ -341,16 +345,20 @@ class _Builder(CfgBuilder):
         of the two sets to their sum, which is what a guarded body holding hundreds of resumes over
         thousands of landings costs when every resume names every landing directly.
 
-        Every edge here carries `refinery.lib.scripts.analysis.cfg.CfgEdge.RESUMPTION_HUB`, which is
-        what lets a consumer wanting only the paths that go forward decline the whole construct in
-        one test rather than recognising the hub by its shape.
+        The hub is a hub the graph knows about
+        (`refinery.lib.scripts.analysis.cfg.ControlFlowGraph.is_resumption_hub`), which is what lets
+        a consumer wanting only the paths that go forward decline the whole construct in one test
+        rather than recognising it by its shape. Its edges *out* carry
+        `refinery.lib.scripts.analysis.cfg.CfgEdge.RESUMPTION_HUB`, because a landing is reached
+        only where something threw; the edges *in* are plain, because what reaches them is a
+        handler body that ran to its end, and a store it made did happen.
         """
-        hub = self.synthetic_node()
+        hub = self.resumption_hub()
         self.resumption_hub_edge(hub, self.cfg.exit)
         for node in landing:
             self.resumption_hub_edge(hub, node)
         for resume in resumes:
-            self.resumption_hub_edge(resume, hub)
+            self.add_edge(resume, hub)
 
     def body_blocks(self, owner: Node) -> Sequence[Sequence[Node]]:
         """

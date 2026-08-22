@@ -50,14 +50,12 @@ def solve_liveness(
     exceptional_successors: dict[int, list[CfgNode]] = {}
     for node in graph.nodes:
         use[id(node)], kill[id(node)] = node_sets(graph, node)
-        normal_successors[id(node)] = [
-            successor for successor in node.successors
-            if not graph.raise_taken(node, successor)
-        ]
-        exceptional_successors[id(node)] = [
-            successor for successor in node.successors
-            if graph.raise_taken(node, successor)
-        ]
+        completed: list[CfgNode] = []
+        raising: list[CfgNode] = []
+        for successor in node.successors:
+            (raising if graph.raise_taken(node, successor) else completed).append(successor)
+        normal_successors[id(node)] = completed
+        exceptional_successors[id(node)] = raising
     live_in: dict[int, set[_T]] = {id(node): set() for node in graph.nodes}
     live_out: dict[int, set[_T]] = {id(node): set() for node in graph.nodes}
     changed = True
