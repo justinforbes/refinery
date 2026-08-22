@@ -812,6 +812,7 @@ class EffectModel:
         self.intrinsics_pristine = _intrinsics_pristine(model)
         self.global_pristine = _global_pristine(model)
         self._globals_written = _globals_written_by_name(model)
+        self._global_keys_written = _global_keys_written_by_name(model)
         self._summaries: dict[int, EffectSummary] = {}
         self._confine_cache: dict[int, Node | None] = {}
         self._immutable_cache: dict[tuple[int, bool], bool] = {}
@@ -1756,6 +1757,26 @@ class EffectModel:
             return False
         return owner not in self._globals_written
 
+    def global_key_written(self, name: str, key: str) -> bool:
+        """
+        Whether the program writes the property *key* on a chain rooted at the global *name*:
+        `Object.prototype.constructor = C`, `delete Object.getPrototypeOf`, or a descriptor
+        installed for that key. The per-name question `_globals_written` answers is too coarse for a
+        caller that cares which property was replaced — a file patching `Object.prototype.z` has
+        written `Object`, and refusing everything about `Object` on that basis refuses the very
+        files the question is asked about.
+
+        The write is attributed to a *name* rather than to a receiver, which is what makes it
+        answerable at all: the receiver of `Object.prototype.constructor = C` is a value no static
+        analysis names, while the chain it is written through is rooted in one that is. A name whose
+        written keys cannot be bounded — one the program writes a computed key on, or installs a
+        descriptor on from a value this analysis cannot read — answers `True` for every key.
+        """
+        if name not in self._global_keys_written:
+            return False
+        keys = self._global_keys_written[name]
+        return keys is None or key in keys
+
     def _prototypes_intact(self, owner: str, roots: frozenset[str]) -> bool:
         """
         Whether *owner* and every prototype in *roots* are all provably unmodified. A property read
@@ -2255,6 +2276,87 @@ def _globals_written_by_name(model: SemanticModel) -> frozenset[str]:
         if base is not None:
             written.update(aliases.names_denoted_by(base))
     return frozenset(written)
+
+
+def _global_keys_written_by_name(model: SemanticModel) -> dict[str, frozenset[str] | None]:
+    """
+    For each global name the program writes a property on, the set of keys it writes there, or `None`
+    where that set cannot be bounded. This is `_globals_written_by_name` keeping what that function
+    discards: the same write targets, read for the property they name rather than only for the name
+    they are rooted at.
+
+    Only the *final* key of a chain is recorded, which is the one a write replaces:
+    `Object.prototype.z = 9` replaces `z` and leaves `prototype` and `constructor` alone, so
+    recording the keys it passes through would report a file as having patched the mechanism a
+    caller is asking about when it did nothing of the kind.
+
+    Binding the name, or assigning to it bare, is not a property write and is not recorded here —
+    `_globals_written` is where that belongs, and a caller that cares whether the name still denotes
+    the intrinsic has to ask the model for its bindings. This answers only what was written *on* it.
+    """
+    written: dict[str, frozenset[str] | None] = {}
+    aliases = _IntrinsicAliases(model)
+
+    def record(names: frozenset[str], key: str | None) -> None:
+        for name in names:
+            if key is None:
+                written[name] = None
+                continue
+            known = written.get(name, frozenset())
+            if known is not None:
+                written[name] = known | {key}
+
+    for node in model.root.walk():
+        if isinstance(node, JsCallExpression):
+            for base in _accessor_install_targets(node):
+                record(aliases.names_denoted_by(base), _installed_key(node))
+            continue
+        target = None
+        if isinstance(node, JsAssignmentExpression):
+            target = node.left
+        elif isinstance(node, JsUpdateExpression):
+            target = node.argument
+        elif isinstance(node, JsUnaryExpression) and node.operator == 'delete':
+            target = node.operand
+        base = _member_chain_root(target)
+        if base is None:
+            continue
+        target = strip_parens(target)
+        key = _written_key(target) if isinstance(target, JsMemberExpression) else None
+        record(aliases.names_denoted_by(base), key)
+    return written
+
+
+def _written_key(member: JsMemberExpression) -> str | None:
+    """
+    The property name *member* accesses, or `None` where it cannot be read as one name. A computed
+    key is read through `_static_string`, so a key a fold would collapse to a literal is already
+    that literal here, for the reason `_static_string` gives.
+    """
+    if not member.computed:
+        prop = member.property
+        return prop.name if isinstance(prop, JsIdentifier) else None
+    return _static_string(member.property)
+
+
+def _installed_key(call: JsCallExpression) -> str | None:
+    """
+    The property name the descriptor install *call* names, or `None` where it names more than one or
+    none this analysis can read. `Object.defineProperty(o, 'k', d)` and `o.__defineGetter__('k', f)`
+    both name it in the argument before the descriptor; `defineProperties` names a whole object of
+    them, which is not one key and is reported as unbounded.
+    """
+    callee = strip_parens(call.callee)
+    if not isinstance(callee, JsMemberExpression) or callee.computed:
+        return None
+    prop = callee.property
+    if not isinstance(prop, JsIdentifier):
+        return None
+    if prop.name == 'defineProperty':
+        return _static_string(call.arguments[1]) if len(call.arguments) > 1 else None
+    if prop.name in ('__defineGetter__', '__defineSetter__'):
+        return _static_string(call.arguments[0]) if call.arguments else None
+    return None
 
 
 def _value_escapes(
