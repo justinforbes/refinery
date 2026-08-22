@@ -66,7 +66,7 @@ from refinery.lib.scripts.analysis.cfg import (
     CfgNode,
     ControlFlowGraph,
     ControlFlowModel,
-    reachable_from_any,
+    reachable_forward_from_any,
 )
 from refinery.lib.scripts.ps1.analysis.world import (
     Ps1ShadowSite,
@@ -287,7 +287,7 @@ def build_world_reach(
         world,
         root=root,
         control_flow=control_flow,
-        poisoned=reachable_from_any(sources),
+        poisoned=reachable_forward_from_any(root_graph, sources),
         shadow_poisoned=_flood_shadow_sites(measurement.shadow_sites, control_flow, root_graph),
         build_version=version,
     )
@@ -300,8 +300,12 @@ def _flood_shadow_sites(
 ) -> dict[str, frozenset[int]]:
     """
     The forward flood from every placed redefinition of each command name, keyed the way the shadow
-    set is keyed. A name any of whose sites cannot be lifted into the root graph gets no entry at
-    all rather than the flood of the sites that could:
+    set is keyed. Forward in the strict sense `reachable_forward_from_any` gives it: a name rebound
+    inside a `trap`-guarded block does not thereby become untrustworthy at the statements written
+    above the rebinding, which is what following the resumption hub would claim.
+
+    A name any of whose sites cannot be lifted into the root graph gets no entry at all
+    rather than the flood of the sites that could:
     `Ps1WorldReach.may_trust_command_name_at` reads a missing entry as a refusal everywhere, which
     is the only sound reading — the unplaced site may rebind the name at a position no flood
     bounds, and a union of the placed ones would vouch for exactly the positions it fails to
@@ -318,7 +322,10 @@ def _flood_shadow_sites(
             landings.pop(name, None)
             continue
         landings.setdefault(name, []).append(landing)
-    return {name: reachable_from_any(nodes) for name, nodes in landings.items()}
+    return {
+        name: reachable_forward_from_any(root_graph, nodes)
+        for name, nodes in landings.items()
+    }
 
 
 def _lift_to_root(
