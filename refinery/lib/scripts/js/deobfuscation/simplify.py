@@ -270,9 +270,9 @@ class JsSimplifications(Transformer):
         read would throw.
 
         Bounded is a claim about the prototype chain and holds only while the file leaves that chain
-        alone, which is why answering `False` needs `read_chain_intact` and answering `True` does
-        not: a name the tables list is there whatever the file wrote, while a name they do not list
-        is there too once `Object.prototype.z = 9` has run. The tables are asked for the whole
+        alone, so **both** answers need the chain asked about. A name the tables do not list is
+        there once `Object.prototype.z = 9` has run, and a name they do list is gone once a
+        `delete` has removed it, so neither side is free. The tables are asked for the whole
         property set and not the inherited half `property_provably_absent` enumerates, an own
         `length` and `prototype` included, so the membership question stays this one's and only the
         chain question is shared. A class constructor is a function value, and its chain is a

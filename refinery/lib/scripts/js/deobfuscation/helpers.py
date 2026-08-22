@@ -342,11 +342,14 @@ def property_is_inherited(value_type: type, key: str) -> bool:
     between them lies every name the tables do not list, which a value has only if the file put it
     there.
 
-    Only this side can be answered without an effect model, and the asymmetry is the point. Writing
-    a prototype adds a name to a chain, so a name the language already puts there is still there
-    afterwards, while a name it does not put there is one only the file can account for. What that
-    leaves unmodelled is a `delete` of a built-in member, which every table in this file already
-    assumes away.
+    The asymmetry was once the point: writing a prototype adds a name to a chain, so a name the
+    language already puts there was taken to be still there afterwards, while a name it does not put
+    there is one only the file can account for. That reasoning is true of a write and **false of a
+    `delete`** — `delete Object.prototype.toString` removes a name every table here lists — so this
+    side needs the model as much as the other one does, and a caller must pair it with
+    `EffectModel.read_chain_intact` or `EffectModel.chain_roots_unwritten` exactly as
+    `property_provably_absent` does. A caller that does not is answering `true` for a name the
+    program removed.
     """
     if key in OBJECT_PROTOTYPE_MEMBERS or key in PROTOTYPE_CHAIN_PROPERTIES:
         return True

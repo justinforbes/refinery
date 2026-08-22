@@ -1800,11 +1800,46 @@ class EffectModel:
         Confirmed against Node in both directions rather than reasoned from the specification: patching
         `Object.prototype.join` leaves `[1, 2].join('-')` intact, while patching `Object.prototype.zz`
         makes `[1, 2].zz` run a getter.
+
+        Two separate facts have to hold and this is their conjunction: no chain root was written,
+        which is `chain_roots_unwritten`, and no reflective surface could have written one without
+        saying so. A caller for which the second costs more than it buys takes the first alone — see
+        the note there for what that trade is and where it is made.
         """
         owner = _PROTOTYPE_OWNERS.get(value_type.__name__)
         if owner is None:
             return False
         return self._prototypes_intact(owner, _INHERITED_CHAIN_ROOTS)
+
+    def chain_roots_unwritten(self, value_type: type) -> bool:
+        """
+        Whether the program writes no prototype a plain property read on a value of *value_type*
+        consults. This is `read_chain_intact` without its reflection term, and the difference is not
+        a weakening of the same question but a different one: `read_chain_intact` also refuses
+        wherever `SemanticModel.has_reflection_surface` holds, and that predicate answers whether
+        code could reference a global *by name* — true of `new Function('return this')`, which
+        writes no prototype at all.
+
+        The distinction is what the answer costs where it is wrong. A caller folding one read pays
+        an unfolded expression for refusing, so it may as well refuse under a surface. A caller
+        deciding whether a whole pass may run pays the pass, and a reflective surface is exactly
+        what the real obfuscated files carry: measured on the samples this project tests against,
+        the surface is present in the input and gone from the finished output, so a pass gated on it
+        never runs and never clears the surface that was gating it. Those callers take this arm and
+        accept that an unresolvable `eval` could in principle have written a prototype — which is no
+        worse than the nothing they asked before.
+
+        The two facts separate cleanly on the evidence rather than by assumption: every program in
+        the defect ledger that reaches a wrong answer here writes a chain root and has no reflective
+        surface, and every sample that has a surface writes no chain root.
+        """
+        owner = _PROTOTYPE_OWNERS.get(value_type.__name__)
+        if owner is None:
+            return False
+        return all(
+            name not in self._globals_written
+            for name in (owner, *_INHERITED_CHAIN_ROOTS)
+        )
 
     def call_is_foldable(
         self,
