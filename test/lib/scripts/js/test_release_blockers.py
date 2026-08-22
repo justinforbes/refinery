@@ -273,6 +273,47 @@ class TestScriptCodeHasTwoMoreCommentOpeners(TestBase):
         )
 
 
+#: Programs that reach `Object.prototype` through a name the file bound the receiver to, rather than
+#: through the literal itself, mapped to what Node prints for each. Reading `__proto__` off a
+#: binding, and handing that binding to a `getPrototypeOf` the file also bound, are the same gadget
+#: written one indirection further out: what the spelling reaches is decided by the value the
+#: binding holds, which the syntax at the write does not show.
+A_PROTOTYPE_REACHED_THROUGH_A_BINDING = {
+    'var a = {}; a.__proto__.z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+    'var a = {}; var g = Object.getPrototypeOf; g(a).z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPrototypeReachedThroughABindingIsStillWritten(TestBase):
+    """
+    `refinery.lib.scripts.js.deobfuscation.protospelling` writes each spelling that reaches an
+    intrinsic prototype out as the name it reaches, which is what puts the write in front of every
+    check already looking for one. It reads the receiver from the syntax, so a receiver held in a
+    binding is one it declines: `test_a_receiver_the_syntax_does_not_decide_is_left_alone` pins that
+    refusal, and these are what the refusal costs.
+
+    Closing it needs the value the binding holds rather than new machinery — the model already
+    answers what a binding is assigned, and the pass would consult it where the receiver is a name.
+    The same is true of the callee: `g` is `Object.getPrototypeOf` and the file said so.
+    """
+
+    @unittest.expectedFailure
+    def test_a_prototype_reached_through_a_binding_answers_the_read(self):
+        """
+        Node prints `9` for both programs of `A_PROTOTYPE_REACHED_THROUGH_A_BINDING`, each of which
+        reaches `Object.prototype` through a name rather than through a literal. Each deobfuscation
+        prints `undefined`, and comes back having replaced the read with a variable nothing writes.
+        """
+        rows = A_PROTOTYPE_REACHED_THROUGH_A_BINDING
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
 #: Programs that reach `Object.prototype` by handing it to something that writes it, rather than by
 #: writing through a member chain, mapped to what Node prints for each. The prototype is an ordinary
 #: argument in each: to `Object.assign`, to `Reflect.set`, to `Reflect.deleteProperty`, and to a
