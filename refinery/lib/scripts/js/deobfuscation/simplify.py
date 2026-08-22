@@ -302,7 +302,7 @@ class JsSimplifications(Transformer):
         else:
             return None
         if key in members:
-            return True
+            return True if self.effects.chain_roots_unwritten(receiver_type) else None
         state = self._own_property_stores(binding, right)
         if state is None:
             return None

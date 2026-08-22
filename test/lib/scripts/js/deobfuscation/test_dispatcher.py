@@ -178,3 +178,46 @@ class TestADispatcherIsKeptWhileACallToItSurvives(TestBase):
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
         )
+
+
+#: A program that installs a value at the index a dispatcher's payload was written with no element
+#: in, and dispatches through it, mapped to what Node prints for it. The dispatcher reaches its
+#: callee's arguments by reading them off the payload, so a position the payload does not hold is
+#: read from the prototype chain like any other.
+A_DISPATCH_WHOSE_PAYLOAD_HOLDS_A_HOLE = {
+    "Array.prototype[1] = 'X';\n" + a_dispatcher(
+        dict_lines=['"f1": function() { var [a, b, c] = p; return a + b + c; }'],
+        tail_lines=['console.log((p = ["first", , "third"], d("f1")));'],
+    ): 'firstXthird\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestADispatcherPayloadHoleIsTheChainsToAnswer(TestBase):
+    """
+    Unwrapping a dispatcher into direct calls has to spell out each argument the payload carried,
+    and a position the payload was written with no element in is not one it carries: what reaches
+    the callee there is whatever the prototype chain answers for that index. Spelling it `undefined`
+    is right only while that chain is the one the language describes, so the rewrite asks the effect
+    model whether it still is, and refuses the dispatch where it is not.
+
+    This is the law `test.lib.scripts.js.deobfuscation.test_inherited_reads` states of a read, at a
+    site that decides it in the syntax rather than in the interpreter. The same program with the
+    prototype left alone is `test_dispatcher_sparse_payload_preserves_arity` and prints
+    `firstundefinedthird`, which is what the refusal here must not cost.
+
+    Retired from `test.lib.scripts.js.test_release_blockers` and kept as the regression it retired
+    into.
+    """
+
+    def test_a_payload_position_no_element_was_written_in_finds_what_the_chain_holds(self):
+        """
+        Node prints `firstXthird` for the one program of `A_DISPATCH_WHOSE_PAYLOAD_HOLDS_A_HOLE`,
+        which writes `X` at index 1 of `Array.prototype` before dispatching a payload whose second
+        position holds no element, and the deobfuscation prints it too.
+        """
+        rows = A_DISPATCH_WHOSE_PAYLOAD_HOLDS_A_HOLE
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )

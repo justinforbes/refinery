@@ -8,6 +8,7 @@ from typing import Iterator, NamedTuple
 from refinery.lib.scripts import Expression, Node, _replace_in_parent
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
+from refinery.lib.scripts.js.analysis.effects import EffectModel
 from refinery.lib.scripts.js.analysis.model import FUNCTION_NODES, Scope, SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
@@ -15,7 +16,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     function_binds_name,
     insert_after_prologue,
     is_receiver_binding_call,
-    property_is_inherited,
+    property_absent_from_written_chain,
     references_receiver_this,
 )
 from refinery.lib.scripts.js.model import (
@@ -72,7 +73,7 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
             conflicts = self._find_conflicting_names(model, scope, scope_obj, name, props, declarator)
             receiver_called = self._receiver_called_keys(scope, name)
             this_unsafe = self._this_unsafe_keys(scope, name, receiver_called)
-            held_back = conflicts | this_unsafe | self._inherited_keys(props)
+            held_back = conflicts | this_unsafe | self._inherited_keys(props, cache.effects)
             flattenable = props - held_back
             if not flattenable:
                 continue
@@ -173,14 +174,27 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
         return props
 
     @staticmethod
-    def _inherited_keys(props: set[str]) -> set[str]:
+    def _inherited_keys(props: set[str], effects: EffectModel) -> set[str]:
         """
-        The subset of *props* naming something every plain object has whether or not one was written
-        into it. An empty namespace object answers such a read off `Object.prototype`, and a bare
-        `var` nothing assigns answers it `undefined`, so `NS.toString` would come back as no
-        function where the language gives one on every object.
+        The subset of *props* the flattening has to leave on the namespace object, because a read of
+        one is answered by something other than that object's own slot.
+
+        Two ways that happens and one question holds back both. A name every plain object has is
+        answered off `Object.prototype`, where a bare `var` nothing assigns answers `undefined`, so
+        `NS.toString` would come back as no function where the language gives one on every object.
+        And a name the file itself put on that prototype is answered the same way, which no table
+        can enumerate: `Object.prototype.z = 9` makes `NS.z` read `9` off a namespace that never
+        held it, while the flattened variable reads nothing.
+
+        `property_absent_from_written_chain` answers both at once — every key it cannot prove reads
+        `undefined` is held back — and it is the arm that does not refuse under a reflective
+        surface, for the reason it gives: refusing here costs the pass rather than one fold, and
+        this pass is among those that clear the surface a stricter question would refuse under.
         """
-        return {key for key in props if property_is_inherited(dict, key)}
+        return {
+            key for key in props
+            if not property_absent_from_written_chain(effects, dict, key)
+        }
 
     @staticmethod
     def _find_conflicting_names(

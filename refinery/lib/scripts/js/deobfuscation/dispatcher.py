@@ -528,11 +528,25 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
             return None
         if key_arg.value not in info.fns_map:
             return None
+        elements = assign.right.elements
+        if any(element is None for element in elements) and not self._a_hole_reads_undefined():
+            return None
         args = [
             make_undefined_expression() if e is None else e
-            for e in assign.right.elements
+            for e in elements
         ]
         return _DispatchSite(seq, key_arg.value, args)
+
+    def _a_hole_reads_undefined(self) -> bool:
+        """
+        Whether a payload position written with no element in it reads `undefined`, which is what
+        spelling it out as `undefined` at the call site claims. A hole is not an element whose value
+        is `undefined`: the callee reaches it by reading that index off the payload array, so what
+        it finds is whatever `Array.prototype` answers there, and a file that wrote that prototype
+        answers something else.
+        """
+        assert self._root is not None
+        return model_cache(self, self._root).effects.chain_roots_unwritten(list)
 
     @staticmethod
     def _unwrap_dispatch_call(
@@ -598,7 +612,14 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         """
         The bare `dispatcher("key")` call *call* is. These occur without a preceding payload
         assignment, when the dispatched function takes no arguments.
+
+        A call standing second in a sequence expression is not one of them however it reads here:
+        the assignment in front of it is what fills the payload its callee takes its arguments from,
+        so rewriting it alone would call that callee with none. It belongs to `_read_direct_call`,
+        which reads the pair, and is left for that one to plan or to refuse whole.
         """
+        if isinstance(call.parent, JsSequenceExpression):
+            return None
         if not isinstance(call.callee, JsIdentifier):
             return None
         if call.callee.name != info.dispatcher_id:

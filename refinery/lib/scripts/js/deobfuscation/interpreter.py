@@ -48,7 +48,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     name_is_unbound,
     names_global_value,
     own_property_keys,
-    property_is_inherited,
+    property_is_inherited_from_unwritten_chain,
     property_provably_absent,
     read_data_property,
     spell_astral_characters,
@@ -1443,6 +1443,20 @@ class JsInterpreter:
                 break
 
     def _exec_for_in(self, node: JsForInStatement) -> None:
+        """
+        Walk the enumerable names of the receiver, which is every name it owns and every enumerable
+        one its prototype chain holds.
+
+        The chain contributes none of its own while the program leaves it alone: measured across
+        sixteen receiver kinds, every name the language installs on a prototype — and every method a
+        class body writes onto one — is non-enumerable. So the own names are the whole answer
+        exactly while no chain root was written, and where one was, the walk is refused rather than
+        answered a name short.
+
+        The question asked is about the whole chain rather than about one key, which over-refuses
+        where an own name shadows an added inherited one: `Object.prototype.z = 9` over a receiver
+        holding its own `z` walks `z` once either way. That costs a fold and never an answer.
+        """
         right = self._eval(node.right)
         if right is None or right is JS_NULL:
             return
@@ -1451,6 +1465,8 @@ class JsInterpreter:
         elif isinstance(right, list):
             keys = [str(i) for i in range(len(right))]
         else:
+            raise InterpreterError
+        if self._effects is not None and not self._effects.chain_roots_unwritten(type(right)):
             raise InterpreterError
         var_name = self._get_loop_var(node.left)
         for key in keys:
@@ -1746,7 +1762,7 @@ class JsInterpreter:
         key = to_string(left)
         if read_data_property(right, key)[0] is MemberRead.FOUND:
             return True
-        if property_is_inherited(type(right), key):
+        if property_is_inherited_from_unwritten_chain(self._effects, type(right), key):
             return True
         if self._property_is_absent(right, key):
             return False

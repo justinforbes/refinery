@@ -37,10 +37,12 @@ from test.lib.scripts.js.deobfuscation.test_array_length_reads import (
     A_COUNT_THE_FOLD_DOES_NOT_REACH,
 )
 from test.lib.scripts.js.ledger import (
+    an_accessor_at,
     before_and_after,
     each_program_still_prints,
     folded,
     printed,
+    returned_from_a_body,
     well_formed,
 )
 from test.lib.scripts.js.test_parameter_grammar import (
@@ -1660,3 +1662,101 @@ def _reads_named_type(source: str) -> int:
         is_use_position(node) for node in tree.walk()
         if isinstance(node, JsIdentifier) and node.name == 'type'
     )
+
+
+def _a_walk_of(receiver: str, installs: str) -> str:
+    """
+    A script that runs *installs* and then prints the names a `for-in` over *receiver* reaches, the
+    same shape `test.lib.scripts.js.deobfuscation.test_inherited_reads` states the law of the walk
+    with.
+    """
+    body = returned_from_a_body(F"var t = ''; for (var k in {receiver}) t += k; return t;")
+    return F'{installs}\n{body}'
+
+
+#: Programs whose `for-in` walk the language alone decides although the file wrote a prototype,
+#: mapped to what Node prints for each. A property installed with `Object.defineProperty` and no
+#: `enumerable` is not enumerable, and neither is an accessor installed the same way, so neither
+#: reaches a walk. A `delete` takes a name off a chain rather than putting one on. And an own key
+#: shadows an inherited one of the same name, so a receiver holding its own `z` walks `z` once
+#: whatever `Object.prototype` holds.
+A_WALK_A_WRITTEN_CHAIN_STILL_DECIDES = {
+    _a_walk_of('{a: 1}', 'Object.defineProperty(Object.prototype, "z", {value: 9});'):
+        'a\n',
+    _a_walk_of('{a: 1}', an_accessor_at('Object.prototype', 'z')):
+        'a\n',
+    _a_walk_of('{a: 1}', 'delete Object.prototype.toString;'):
+        'a\n',
+    _a_walk_of('{z: 1, a: 2}', 'Object.prototype.z = 9;'):
+        'za\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWalkAWrittenChainStillDecidesIsStillWalked(TestBase):
+    """
+    A `for-in` is refused wherever the file wrote any prototype the receiver inherits from, which is
+    a question about the whole chain where the walk is a question about each name on it. The four
+    programs here write one and the walk is still the language's to decide, so each comes back with
+    the loop standing where the names could have been folded in its place.
+
+    The refusal is correct and the cost is recall, which is why this is a ledger entry rather than a
+    release blocker. Closing it needs the per-name question: whether *this* key is enumerable on the
+    chain, and whether the receiver's own slot shadows it. `EffectModel.chain_roots_unwritten` is
+    the whole-chain question the walk asks today, and
+    `refinery.lib.scripts.js.deobfuscation.interpreter.JsInterpreter._exec_for_in` says as much.
+    """
+
+    @unittest.expectedFailure
+    def test_a_walk_a_written_chain_still_decides_is_folded(self):
+        """
+        Node prints `a`, `a`, `a` and `za` for the four programs of
+        `A_WALK_A_WRITTEN_CHAIN_STILL_DECIDES`, and each deobfuscation prints the same. What none of
+        them comes back as is the one `console.log` of those names that a walk over an untouched
+        chain folds to.
+        """
+        rows = A_WALK_A_WRITTEN_CHAIN_STILL_DECIDES
+        self.assertEqual(
+            {source: folded(source) for source in rows},
+            {source: F"console.log('{prints.strip()}');" for source, prints in rows.items()},
+        )
+
+
+#: Reads whose answer the receiver's own slot decides although the file wrote the chain behind it,
+#: mapped to the text each could come back as. The namespace row writes the key onto the object
+#: before reading it, so the chain is never consulted; the membership row asks for a name the
+#: language puts on every object, which a write to a different key cannot take away.
+A_READ_A_WRITTEN_CHAIN_DOES_NOT_REACH = {
+    'Object.prototype.z = 9; var o = {}; o.z = 1; console.log(o.z);':
+        'Object.prototype.z = 9;\nconsole.log(1);',
+    "Object.prototype.q = 1; var o = {}; console.log('toString' in o);":
+        'Object.prototype.q = 1;\nconsole.log(true);',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReadAWrittenChainDoesNotReachIsStillAnswered(TestBase):
+    """
+    The other half of what the chain gate costs. Namespace flattening and the `in` operator both ask
+    whether the file wrote any prototype the receiver inherits from, and hold back every key once
+    one was written — including a key the file writes onto the receiver itself, which the chain
+    never answers for, and a key on the chain that the write did not touch.
+
+    Restoring this needs a write-side model rather than a wider read-side one: measured in Node, a
+    write `o.z = 1` creates an own slot unless the chain holds that key as an accessor or as a
+    non-writable data property, and in strict mode those two cases throw a `TypeError` rather than
+    silently doing nothing. Until that exists, the own slot cannot be told from the chain's answer.
+    """
+
+    @unittest.expectedFailure
+    def test_a_read_a_written_chain_does_not_reach_is_folded(self):
+        """
+        Node prints `1` and `true` for the two programs of `A_READ_A_WRITTEN_CHAIN_DOES_NOT_REACH`,
+        and each deobfuscation prints the same. Neither comes back with the answer folded in place
+        of the read.
+        """
+        rows = A_READ_A_WRITTEN_CHAIN_DOES_NOT_REACH
+        self.assertEqual(
+            {source: folded(source) for source in rows},
+            A_READ_A_WRITTEN_CHAIN_DOES_NOT_REACH,
+        )

@@ -334,6 +334,55 @@ def read_data_property(obj: Value, key: str) -> tuple[MemberRead, Value]:
     return MemberRead.NOT_DATA, None
 
 
+def property_absent_from_written_chain(
+    effects: EffectModel | None,
+    value_type: type,
+    key: str,
+) -> bool:
+    """
+    `property_provably_absent` for a caller whose cost of refusing is a whole pass rather than one
+    fold. The chain is asked `EffectModel.chain_roots_unwritten` instead of
+    `EffectModel.read_chain_intact`, so a file carrying a reflective surface is not treated as one
+    that wrote a prototype. See the note on `chain_roots_unwritten` for what that trade is; the
+    short of it is that such a surface is what the real obfuscated files carry, and clearing it is
+    what the gated pass would have done.
+
+    It is a separate function rather than a parameter because the choice is the caller's to justify
+    and has to be readable where it is made. `property_provably_absent` keeps both arms: a caller
+    that folds one read gains nothing by the weaker question.
+    """
+    if key in OBJECT_PROTOTYPE_MEMBERS or key in PROTOTYPE_CHAIN_PROPERTIES:
+        return False
+    if issubclass(value_type, JsBuffer):
+        return False
+    if effects is not None and not effects.chain_roots_unwritten(value_type):
+        return False
+    if issubclass(value_type, str):
+        return key not in STRING_PROTOTYPE_METHODS and key not in SEQUENCE_DATA_PROPERTIES
+    if issubclass(value_type, list):
+        return key not in ARRAY_PROTOTYPE_METHODS and key not in SEQUENCE_DATA_PROPERTIES
+    return issubclass(value_type, dict)
+
+
+def property_is_inherited_from_unwritten_chain(
+    effects: EffectModel | None,
+    value_type: type,
+    key: str,
+) -> bool:
+    """
+    Whether *key* names a member the prototype chain of *value_type* supplies **and** the program
+    left that chain alone, so a value of that type has one whether or not it owns one.
+
+    This is `property_is_inherited` with the question that one cannot answer added to it. The tables
+    say what the language installs; only the model can say whether the file took it away, and
+    `delete Object.prototype.toString` removes a name every one of those tables lists. A caller with
+    no effect model gets the tables alone and owns that assumption itself.
+    """
+    if not property_is_inherited(value_type, key):
+        return False
+    return effects is None or effects.chain_roots_unwritten(value_type)
+
+
 def property_is_inherited(value_type: type, key: str) -> bool:
     """
     Whether *key* names a member the prototype chain of *value_type* supplies, so a value of that
