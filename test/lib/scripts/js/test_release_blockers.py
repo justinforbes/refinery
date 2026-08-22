@@ -34,6 +34,7 @@ from test.lib.scripts.js.ledger import (
     evaluated_in_a_body,
     folded,
     printed,
+    returned_from_a_body,
     well_formed,
 )
 from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
@@ -428,6 +429,307 @@ class TestANamespaceKeyTheChainAnswersIsNotAVariable(TestBase):
         """
         source = 'Object.prototype.z = 9; var o = {}; o.z = 1; console.log(o.z);'
         self.assertEqual(before_and_after(source), (('1\n', None), ('1\n', None)))
+
+
+#: Programs that remove a name the language puts on a plain object's chain and then ask whether that
+#: name is `in` an object literal that never held it, mapped to what Node prints for each. The
+#: question is asked at the top level, where `simplify` answers it, rather than inside a body where
+#: the interpreter does, so these are the same defect as
+#: `A_MEMBERSHIP_TEST_FOR_A_KEY_THE_PROGRAM_DELETED` at the other of the two sites that decide it.
+A_TOP_LEVEL_MEMBERSHIP_TEST_FOR_A_KEY_THE_PROGRAM_DELETED = {
+    "delete Object.prototype.toString; var o = {}; console.log('toString' in o);":
+        'false\n',
+    "delete Object.prototype.hasOwnProperty; var o = {}; console.log('hasOwnProperty' in o);":
+        'false\n',
+}
+
+
+#: Membership tests whose answer the language alone decides, mapped to the text each comes back as
+#: and what Node prints for it. Two ask a chain nothing touched, and two put a write to a prototype
+#: no plain object inherits from in front of the same question. All four fold today and a fix has to
+#: keep folding them: an entry that only pins a wrong answer is kept green by a pass that stops
+#: answering at all.
+A_MEMBERSHIP_TEST_THE_CHAIN_STILL_ANSWERS = {
+    "var o = {}; console.log('toString' in o);": (
+        'console.log(true);',
+        'true\n',
+    ),
+    "var o = {}; console.log('zz' in o);": (
+        'console.log(false);',
+        'false\n',
+    ),
+    "delete Array.prototype.join; var o = {}; console.log('toString' in o);": (
+        'delete Array.prototype.join;\nconsole.log(true);',
+        'true\n',
+    ),
+    "delete Array.prototype.join; var o = {}; console.log('zz' in o);": (
+        'delete Array.prototype.join;\nconsole.log(false);',
+        'false\n',
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestATopLevelKeyTheProgramDeletedIsInNothing(TestBase):
+    """
+    `TestAKeyTheProgramDeletedIsInNothing` at the other site. The two `in` operators are answered by
+    different code — a question asked inside a function body is the interpreter's and one asked at
+    the top level is `simplify`'s — and each reads the same table of what the language puts on a
+    chain without asking the model what the file did to it.
+
+    `refinery.lib.scripts.js.deobfuscation.simplify.JsSimplifier._resolve_in` says as much: it asks
+    `read_chain_intact` before answering `False` and not before answering `True`, on the reasoning
+    that a name the tables list is there whatever the file wrote. A `delete` is what that reasoning
+    does not cover.
+    """
+
+    @unittest.expectedFailure
+    def test_a_key_the_program_deleted_is_in_nothing(self):
+        """
+        Node prints `false` for both programs of
+        `A_TOP_LEVEL_MEMBERSHIP_TEST_FOR_A_KEY_THE_PROGRAM_DELETED`. Each deobfuscation folds the
+        membership test to `true`, the answer it has with nothing deleted.
+        """
+        rows = A_TOP_LEVEL_MEMBERSHIP_TEST_FOR_A_KEY_THE_PROGRAM_DELETED
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_membership_test_the_chain_answers_is_still_folded(self):
+        """
+        Node prints `true`, `false`, `true` and `false` for the four programs of
+        `A_MEMBERSHIP_TEST_THE_CHAIN_STILL_ANSWERS`, and each deobfuscation comes back with the
+        answer folded in place of the test. Writing `Array.prototype` reaches no chain a plain
+        object has, so the two rows that do it are answered as if nothing had been written, and the
+        `delete` itself stays because it is what puts the file in that state.
+        """
+        rows = A_MEMBERSHIP_TEST_THE_CHAIN_STILL_ANSWERS
+        self.assertEqual(
+            {source: (folded(source), before_and_after(source)) for source in rows},
+            {
+                source: (reduced, ((prints, None), (prints, None)))
+                for source, (reduced, prints) in rows.items()
+            },
+        )
+
+
+def _a_walk_of(receiver: str, installs: str = '') -> str:
+    """
+    A script that runs *installs* and then prints the names a `for-in` over *receiver* reaches, in
+    the order it reaches them. The walk is written inside a function body, which is what puts it
+    where the tool answers it at all: the same loop at the top level is left standing.
+
+    The names are joined by appending to a string rather than through `Array.prototype.join`, so
+    that a row installing something on `Array.prototype` asks only about the walk. Called through
+    `join`, such a row comes back unreduced because the call cannot fold, and would report the walk
+    as refused wherever it was in fact answered.
+    """
+    walk = F"var t = ''; for (var k in {receiver}) t += k; return t;"
+    body = returned_from_a_body(walk)
+    return F'{installs}\n{body}' if installs else body
+
+
+#: Programs that put an enumerable name on `Object.prototype` and then walk a receiver with
+#: `for-in`, mapped to what Node prints for each. The four differ in how the write reaches the
+#: prototype and in what the walk runs over: directly, through a name the file bound it to, through
+#: `Object.defineProperty` asking for an enumerable property, and over an array rather than an
+#: object literal. Every plain object and every array inherits from `Object.prototype`, so the added
+#: name is reached from all of them.
+A_FOR_IN_WALK_REACHING_A_NAME_THE_CHAIN_WAS_GIVEN = {
+    _a_walk_of('{a: 1}', 'Object.prototype.z = 9;'):
+        'az\n',
+    _a_walk_of('{a: 1}', 'var P = Object.prototype; P.z = 9;'):
+        'az\n',
+    _a_walk_of(
+        '{a: 1}',
+        'Object.defineProperty(Object.prototype, "z", {value: 9, enumerable: true});',
+    ):
+        'az\n',
+    _a_walk_of('[7, 8]', 'Object.prototype.z = 9;'):
+        '01z\n',
+}
+
+
+#: Walks whose names the language alone decides, mapped to the text each comes back as and what Node
+#: prints for it. Two run over a chain nothing touched and two put a write to `Array.prototype` in
+#: front of a walk over an object literal, which inherits from `Object.prototype` and not from that
+#: one. All four fold today and a fix has to keep folding them.
+A_FOR_IN_WALK_THE_CHAIN_STILL_ANSWERS = {
+    _a_walk_of('{a: 1, b: 2}'): (
+        "console.log('ab');",
+        'ab\n',
+    ),
+    _a_walk_of('[7, 8]'): (
+        "console.log('01');",
+        '01\n',
+    ),
+    _a_walk_of('{a: 1, b: 2}', 'Array.prototype.z = 9;'): (
+        "Array.prototype.z = 9;\nconsole.log('ab');",
+        'ab\n',
+    ),
+    _a_walk_of('{a: 1, b: 2}', 'delete Array.prototype.join;'): (
+        "delete Array.prototype.join;\nconsole.log('ab');",
+        'ab\n',
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAForInWalkReachesTheNamesTheChainWasGiven(TestBase):
+    """
+    A `for-in` walk visits every enumerable name the receiver's whole prototype chain holds, not the
+    own properties alone, and a name a file writes onto a prototype with an ordinary assignment is
+    enumerable. The interpreter walks the own properties and stops, so a program written to carry a
+    name on the chain comes back having visited one name fewer, with nothing to say it did.
+
+    Everything the language itself puts on a chain is non-enumerable, which is why this is only ever
+    wrong for a name the file put there — and why the whole question is one about what the
+    file did, which the effect model is what knows.
+    """
+
+    @unittest.expectedFailure
+    def test_a_name_written_onto_the_chain_is_walked(self):
+        """
+        Node prints `az`, `az`, `az` and `01z` for the four programs of
+        `A_FOR_IN_WALK_REACHING_A_NAME_THE_CHAIN_WAS_GIVEN`. Each deobfuscation prints the walk with
+        the inherited name missing, which is what the same walk answers with the chain untouched.
+        """
+        rows = A_FOR_IN_WALK_REACHING_A_NAME_THE_CHAIN_WAS_GIVEN
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_walk_the_chain_answers_is_still_folded(self):
+        """
+        Node prints `ab`, `01`, `ab` and `ab` for the four programs of
+        `A_FOR_IN_WALK_THE_CHAIN_STILL_ANSWERS`, and each deobfuscation comes back with the names
+        folded in place of the loop. An object literal does not inherit from `Array.prototype`, so
+        the two rows writing that one are answered as if nothing had been written.
+        """
+        rows = A_FOR_IN_WALK_THE_CHAIN_STILL_ANSWERS
+        self.assertEqual(
+            {source: (folded(source), before_and_after(source)) for source in rows},
+            {
+                source: (reduced, ((prints, None), (prints, None)))
+                for source, (reduced, prints) in rows.items()
+            },
+        )
+
+
+#: Programs that write a name onto `Object.prototype` without ever spelling `Object`, mapped to what
+#: Node prints for each. Every one reaches the same object a literal `Object.prototype` names:
+#: as the `__proto__` of an object literal, as what `Object.getPrototypeOf` answers for one, and
+#: as the `prototype` of what its `constructor` is. These are the shapes a file uses when it does
+#: not want the write found by looking for the name.
+A_PROTOTYPE_WRITTEN_WITHOUT_NAMING_ITS_OWNER = {
+    '({}).__proto__.z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+    'Object.getPrototypeOf({}).z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+    '({}).constructor.prototype.z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+}
+
+
+#: Programs whose `__proto__` reaches a prototype other than the one a plain object inherits
+#: from, or reaches nothing the file may assume, mapped to what Node prints for each. An array
+#: literal's `__proto__` is `Array.prototype`, which a plain object does not inherit from, and a
+#: file that binds the name `Object` to something of its own is not writing the intrinsic at all.
+A_PROTOTYPE_SPELLING_THAT_NAMES_A_DIFFERENT_OBJECT = {
+    '[].__proto__.z = 9; var o = {}; console.log(o.z);':
+        'undefined\n',
+    '[].__proto__.z = 9; var a = [1]; console.log(a.z);':
+        '9\n',
+    'var Object = {prototype: {}}; Object.prototype.z = 9; console.log(({}).z);':
+        'undefined\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPrototypeWrittenWithoutNamingItsOwnerIsStillWritten(TestBase):
+    """
+    A write to a prototype is recorded against the name at the root of the member chain it was
+    written through, so a chain rooted in something other than an identifier is recorded against
+    nothing and every question about that prototype goes on answering as if the file had left it
+    alone. Reaching `Object.prototype` through an object literal is the whole of what a prototype
+    pollution gadget does, and all three spellings here are ways of writing it without the name.
+
+    The read is then flattened into a variable that answers `undefined`, so the value the write put
+    there is gone from the file as well as from the answer.
+    """
+
+    @unittest.expectedFailure
+    def test_a_prototype_written_through_a_literal_answers_the_read(self):
+        """
+        Node prints `9` for all three programs of `A_PROTOTYPE_WRITTEN_WITHOUT_NAMING_ITS_OWNER`,
+        each of which reaches `Object.prototype` without spelling `Object`. Each deobfuscation
+        prints `undefined`, and comes back having replaced the read with a variable nothing writes.
+        """
+        rows = A_PROTOTYPE_WRITTEN_WITHOUT_NAMING_ITS_OWNER
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_spelling_that_names_a_different_object_is_read_as_that_object(self):
+        """
+        Node prints `undefined`, `9` and `undefined` for the three programs of
+        `A_PROTOTYPE_SPELLING_THAT_NAMES_A_DIFFERENT_OBJECT`, and each deobfuscation agrees. An
+        array literal's `__proto__` is `Array.prototype`, and a file that declares `Object` itself
+        names its own object with it.
+        """
+        rows = A_PROTOTYPE_SPELLING_THAT_NAMES_A_DIFFERENT_OBJECT
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: Programs that reach `Object.prototype` by handing it to something that writes it, rather than by
+#: writing through a member chain, mapped to what Node prints for each. The prototype is an ordinary
+#: argument in each: to `Object.assign`, to `Reflect.set`, to `Reflect.deleteProperty`, and to a
+#: function the file declares itself.
+A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT = {
+    'Object.assign(Object.prototype, {z: 9}); var o = {}; console.log(o.z);':
+        '9\n',
+    'Reflect.set(Object.prototype, "z", 9); var o = {}; console.log(o.z);':
+        '9\n',
+    'Reflect.deleteProperty(Object.prototype, "toString");\n'
+    + evaluated_in_a_body('{a: 1}', "'toString' in v"):
+        'false\n',
+    'function patch(p) { p.z = 9; } patch(Object.prototype); var o = {}; console.log(o.z);':
+        '9\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPrototypeHandedToAWriterIsStillWritten(TestBase):
+    """
+    A value that escapes into a call may be written by that call, which the effect model records —
+    but only for the names it watches, and `Object` is not one of them. So a file that hands
+    `Object.prototype` to anything at all keeps its chain reported intact, and every question about
+    that chain is answered from the tables.
+
+    `refinery.lib.scripts.js.analysis.effects` is where the watched set is chosen, and choosing it
+    is what this costs: adding `Object` to it closes every row here and withdraws trust from a file
+    that merely mentions the name, which is what the real samples do. It is deferred to the
+    interprocedural precision that would let the escape be followed rather than assumed.
+    """
+
+    @unittest.expectedFailure
+    def test_a_prototype_handed_to_a_writer_answers_the_read(self):
+        """
+        Node prints `9`, `9`, `false` and `9` for the four programs of
+        `A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT`. Each deobfuscation answers as if the call
+        it was handed to had not written it.
+        """
+        rows = A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
 
 
 def _spelled_with_an_escaped_identifier(source: str) -> str:
