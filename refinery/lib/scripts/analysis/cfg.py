@@ -395,6 +395,29 @@ class _Target:
     continues: list[CfgNode] = field(default_factory=list)
 
 
+@dataclass
+class Resumption:
+    """
+    One statement block being built whose handler set *resumes* it rather than ending it, and the two
+    synthetic nodes that carry the two projections of `CfgEdge` for it.
+
+    `hub` is the over-approximate half: every point the block may resume from joins it, and it joins
+    every node the block owns. `slot` is the precise half for the statement being built right now —
+    the point control resumes at when that statement throws, which is the statement after it — and is
+    created on the first node that needs one, because a statement building no node of its own resumes
+    at the same place the one before it does.
+
+    A frame owns only the nodes built while it is the *innermost* one. A nested resumable block opens
+    a frame of its own and takes the nodes below it; what joins the two is one edge from the outer hub
+    to the inner, and the tail of the inner block's forward chain arriving in the frontier the outer
+    block threads on. Both are edges per nesting *pair*, where naming each node from each enclosing
+    level is edges per node per level, and a script nested sixty-four deep costs twelve thousand
+    edges rather than nine hundred.
+    """
+    hub: CfgNode
+    slot: CfgNode | None = None
+
+
 def distinct(nodes: Iterable[CfgNode]) -> list[CfgNode]:
     """
     *nodes* with every repetition dropped, compared by identity and in first-seen order.
@@ -429,6 +452,7 @@ class CfgBuilder:
         self.cfg = ControlFlowGraph(owner)
         self._handlers: list[CfgNode] = []
         self._targets: list[_Target] = []
+        self._resumptions: list[Resumption] = []
         self._pending_label: str | None = None
 
     def build(self) -> ControlFlowGraph:
@@ -495,10 +519,18 @@ class CfgBuilder:
         clause, which is not a point inside the region that clause guards. The edge outward from
         there says the clause did not take the throw, and whether any run says that is a property of
         the whole handler set, which `guarded` reads once.
+
+        This is the one place an element gets a node, which is why the resumption edges are drawn
+        here rather than by the caller that knows a block resumes. A block's own statements, the
+        arms of a construct nested in it, and the entries of a handler set written inside it are
+        built by three different methods that share nothing but this one, and a level that had to
+        name its nodes afterwards would have to name the ones its nested levels built as well.
         """
         node = CfgNode(element)
         self.cfg.nodes.append(node)
         self.cfg._node_of[id(element)] = node
+        if self._resumptions:
+            self.join_resumption(node)
         return node
 
     @staticmethod
@@ -558,6 +590,50 @@ class CfgBuilder:
         """
         self.cfg._resuming = True
         self.cfg._hub_bound.update(id(node) for node in nodes)
+
+    def open_resumption(self, resumes: Iterable[CfgNode]) -> Resumption:
+        """
+        Begin a block whose handler set resumes it from *resumes*, and take ownership of every node
+        built until the matching `close_resumption` — see `Resumption`.
+
+        The hub is wired here, before the block is walked, because `detached_node` draws the edge out
+        of it as each node appears. Where a resumable block is opened inside one, the outer hub
+        reaches the inner rather than reaching the inner block's nodes one by one: a hub reaches
+        exactly the nodes its block owns and everything those nodes lead to, and an inner hub is one
+        of them.
+        """
+        hub = self.resumption_hub()
+        self.resumption_hub_edge(hub, self.cfg.exit)
+        if self._resumptions:
+            self.resumption_hub_edge(self._resumptions[-1].hub, hub)
+        for resume in resumes:
+            self.add_edge(resume, hub)
+        frame = Resumption(hub)
+        self._resumptions.append(frame)
+        return frame
+
+    def close_resumption(self) -> None:
+        """
+        End the block `open_resumption` began. Nodes built after this belong to whatever level
+        encloses it, or to none.
+        """
+        self._resumptions.pop()
+
+    def join_resumption(self, node: CfgNode) -> None:
+        """
+        Draw both projections of resumption for *node* against the innermost open block: the hub
+        reaches it, and it resumes at the slot standing for the statement being built.
+
+        One edge each. A node reached from the hub of the level above it is reached from this one
+        too, through the edge between the two hubs, and a node resuming at this level's slot carries
+        on to the level above through the frontier the inner block hands back — so neither half loses
+        a path by naming only the innermost level, and both stop costing an edge per level.
+        """
+        frame = self._resumptions[-1]
+        if frame.slot is None:
+            frame.slot = self.synthetic_node()
+        self.resumption_forward_edge(node, frame.slot)
+        self.resumption_hub_edge(frame.hub, node)
 
     def close_handler_set(self, entries: Sequence[CfgNode], *, escapes: bool) -> None:
         """

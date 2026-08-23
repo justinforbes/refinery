@@ -99,6 +99,13 @@ class _Ps1ControlFlowGraphs(TestBase):
     def _graphs(source: str) -> dict[int, ControlFlowGraph]:
         return build_ps1_control_flow(Ps1Parser(source).parse())
 
+    def _edge_count(self, source: str) -> int:
+        return sum(
+            len(node.successors)
+            for graph in self._graphs(source).values()
+            for node in graph.nodes
+        )
+
     def _script_graph(self, source: str) -> ControlFlowGraph:
         tree = Ps1Parser(source).parse()
         return build_ps1_control_flow(tree)[id(tree)]
@@ -669,6 +676,27 @@ class TestPs1ControlFlowGraph(_Ps1ControlFlowGraphs):
         edges = sum(len(node.successors) for node in graph.nodes)
         self.assertLess(edges, 500)
 
+    def test_a_resuming_trap_nested_in_another_costs_the_same_edges_at_every_level(self):
+        """
+        The relation each level of nesting adds is again `resumes * guarded`, and a level that names
+        the nodes of the levels below it pays that relation once per level it is written inside.
+        """
+        # Written that way, a script nested sixty-four deep costs 12867 edges where the shape itself
+        # holds 960, and doubling the depth quadruples the count — the same failure class the hub was
+        # built to prevent, reached through nesting rather than through the size of one block. Both
+        # halves are named against the innermost level alone, so the cost per level is a constant and
+        # the count below is exactly proportional to the depth.
+        def nested(depth: int) -> str:
+            source = "trap { continue }; 'x'; 'y'"
+            for _ in range(depth - 1):
+                source = 'trap { continue }; if ($true) { ' + source + ' }'
+            return source
+
+        self.assertEqual(
+            {depth: self._edge_count(nested(depth)) for depth in (2, 8, 32, 64)},
+            {2: 30, 8: 120, 32: 480, 64: 960},
+        )
+
     def test_dynamicparam_runs_before_the_begin_block(self):
         tree = Ps1Parser("function f { dynamicparam { 'd' } begin { 'b' } end { 'e' } }").parse()
         definition = next(n for n in tree.walk() if isinstance(n, Ps1FunctionDefinition))
@@ -1074,10 +1102,13 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
         """
         What `mark_hub_bound` is recorded for, asserted rather than trusted. The marking is what
         sends a flood seeded inside a `trap` body through the hub instead of the forward edges, and
-        it is recorded by slicing the node list between two indices taken far apart in `block`: a
-        node created between them is marked that should not be, and one created before the first is
-        not marked at all. The second is the silent one — a leak written in a handler body would
-        stop poisoning the block the handler resumes into, and every read in it would be granted.
+        it is recorded from the nodes each handler body built: one missed is the silent direction —
+        a leak written in a handler body would stop poisoning the block the handler resumes into,
+        and every read in it would be granted.
+
+        Asked of everything a body owns and not only the statements written at its top level,
+        because a leak nested in an `if` inside the body reaches the same statements a leak beside
+        it does.
         """
         for source in _CORPUS:
             with self.subTest(source):
@@ -1091,7 +1122,7 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
                             continue
                         if not graph.carries_resumption:
                             continue
-                        for statement in trap.body.body:
+                        for statement in trap.body.walk():
                             node = graph.node_of(statement)
                             if node is not None:
                                 self.assertTrue(graph.is_hub_bound(node))
