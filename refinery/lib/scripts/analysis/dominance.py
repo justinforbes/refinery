@@ -84,6 +84,16 @@ def _immediate_dominators(graph: ControlFlowGraph, order: list[CfgNode]) -> dict
     is how an unreachable predecessor stays out of the answer: it never gains one, so it is skipped
     forever, and a reachable node keeps the dominators its reachable predecessors give it.
 
+    **The placed predecessors are folded deepest first, and that is what keeps the pass linear.**
+    Which order they are folded in cannot change the answer — the ancestor operation is commutative
+    and associative, and the loop runs to a fixpoint either way — but it decides how far `common`
+    climbs. A `catch` clause has one predecessor per statement of the body it guards, and those
+    predecessors are themselves a chain; folded shallowest first, the running answer sits at the top
+    of that chain and every further predecessor climbs the whole way down to it, which is a pass
+    quadratic in the size of the body. Folded deepest first, each predecessor is the immediate
+    dominator of the one before it and the climb is a single step. A body of eight hundred statements
+    is the difference between thirteen hundred thousand steps and thirteen thousand.
+
     **The fixpoint is what makes the answer independent of the shape of the graph.** One pass
     suffices only where every cycle is entered at one point; on a cycle entered at two, a node placed
     from the predecessors seen so far reports a dominator it does not have, which is the direction a
@@ -108,13 +118,14 @@ def _immediate_dominators(graph: ControlFlowGraph, order: list[CfgNode]) -> dict
         for node in order:
             if node is graph.entry:
                 continue
-            candidate: int | None = None
-            for predecessor in node.predecessors:
-                placed = id(predecessor)
-                if placed not in idom:
-                    continue
-                candidate = placed if candidate is None else common(placed, candidate)
-            if candidate is not None and idom.get(id(node)) != candidate:
+            placed = [known for known in map(id, node.predecessors) if known in idom]
+            if not placed:
+                continue
+            placed.sort(key=rank.__getitem__, reverse=True)
+            candidate = placed[0]
+            for other in placed[1:]:
+                candidate = common(other, candidate)
+            if idom.get(id(node)) != candidate:
                 idom[id(node)] = candidate
                 changed = True
     return idom
