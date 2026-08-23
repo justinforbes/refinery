@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from test import TestBase
 
 from refinery.lib.scripts import Node, _remove_from_parent
@@ -1303,3 +1305,49 @@ class TestPs1CommandModelDirectBuild(TestBase):
         self.assertEqual(
             model.denotation(_use(tree, 'Get-Content')),
             Denotation(CommandKind.FUNCTION, 'Get-Content'))
+
+
+class TestPs1AliasResolutionReadsAResumingTrapAsAnyOtherStatement(TestBase):
+    """
+    A `trap { continue }` resumes the block it guards at the statement after the one that threw, so
+    a binder written above a call has run by the time the call does, whatever threw. The graph
+    carries that twice, and this model asks the over-approximate half — which claims a resumption
+    reaches every statement of the block, earlier ones included, and so invents a run in which the
+    first call raises and control carries on *past* the `Set-Alias`. No such run exists: it would
+    resume at the `Set-Alias`, that being the statement after the one that threw.
+
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach` was moved onto the precise half and
+    answers this correctly; `_a_binder_reaches` and `_binder_may_precede` still walk
+    `refinery.lib.scripts.analysis.reaching.ReachabilityQuery`, whose memo is keyed by node and
+    direction with no room for which projection was asked for. Refusing is the safe direction, so
+    the cost is recall — but obfuscated PowerShell wraps its body in resuming traps, which is
+    exactly where this model is asked what a command is.
+    """
+
+    @staticmethod
+    def _below_the_binder(prefix: str) -> Denotation:
+        source = (
+            F'{prefix}Copy-Item a b\n'
+            'Set-Alias Copy-Item Write-Output\n'
+            'Copy-Item c d'
+        )
+        tree = _script(source)
+        use = [
+            node for node in tree.walk_in_order()
+            if isinstance(node, Ps1CommandInvocation)
+            and get_command_name(node) == 'Copy-Item'
+        ][-1]
+        return Ps1ModelCache(tree).commands.denotation(use)
+
+    def test_a_call_below_a_binder_resolves_where_no_handler_resumes(self):
+        for prefix in ['', 'trap { break }\n', 'while ($c) { }\n']:
+            with self.subTest(prefix or 'no prefix'):
+                self.assertEqual(
+                    self._below_the_binder(prefix),
+                    Denotation(CommandKind.ALIAS, 'Write-Output'))
+
+    @unittest.expectedFailure
+    def test_a_call_below_a_binder_resolves_under_a_resuming_trap_too(self):
+        self.assertEqual(
+            self._below_the_binder('trap { continue }\n'),
+            Denotation(CommandKind.ALIAS, 'Write-Output'))

@@ -1070,6 +1070,32 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
                         stranded.append(type(landing.element).__name__)
                 self.assertEqual(stranded, [])
 
+    def test_every_statement_of_a_resuming_handler_is_hub_bound(self):
+        """
+        What `mark_hub_bound` is recorded for, asserted rather than trusted. The marking is what
+        sends a flood seeded inside a `trap` body through the hub instead of the forward edges, and
+        it is recorded by slicing the node list between two indices taken far apart in `block`: a
+        node created between them is marked that should not be, and one created before the first is
+        not marked at all. The second is the silent one — a leak written in a handler body would
+        stop poisoning the block the handler resumes into, and every read in it would be granted.
+        """
+        for source in _CORPUS:
+            with self.subTest(source):
+                tree = Ps1Parser(source).parse()
+                graphs = build_ps1_control_flow(tree)
+                for trap in tree.walk_in_order():
+                    if not isinstance(trap, Ps1TrapStatement) or trap.body is None:
+                        continue
+                    for graph in graphs.values():
+                        if graph.node_of(trap) is None:
+                            continue
+                        if not graph.carries_resumption:
+                            continue
+                        for statement in trap.body.body:
+                            node = graph.node_of(statement)
+                            if node is not None:
+                                self.assertTrue(graph.is_hub_bound(node))
+
     def test_a_guarded_statement_forward_reaches_every_statement_below_it(self):
         """
         The property the test above only tests the existence of an edge for, and the one the flood

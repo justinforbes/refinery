@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from test import TestBase
 
 from refinery.lib.scripts import set_body
@@ -140,3 +142,43 @@ class TestPs1FloodsGoForwardThroughAResumingTrap(TestBase):
             '$Null = Get-Random -Maximum 88176')
         self.assertFalse(reach.may_trust_command_name_at('Get-Random', script.body[1]))
         self.assertFalse(reach.may_trust_command_name_at('Get-Random', script.body[2]))
+
+
+class TestPs1TheStatementAResumptionLandsOnIsTheOneControlEnters(TestBase):
+    """
+    Where the forward half finds the statement control resumes at, and the one shape it finds the
+    wrong one for. A slot is put in front of each guarded statement and joined to whatever that
+    statement is entered by; a statement that enters nothing leaves its slot unclaimed and the slot
+    carries on to the next one, which is right for a `trap` declaration and wrong for a construct
+    that builds nodes without being entered at any of them.
+
+    `try { }` with an empty guarded block is that construct: it builds its `catch` clause and links
+    no frontier, so the slot rolls past the whole `try` and the flood never reaches inside it. The
+    grant costs nothing today — an empty `try` cannot throw, so the clause is dead — which is
+    exactly why it needs pinning rather than trusting: what is wrong is the reading, not the shape,
+    and the next construct built this way need not be dead.
+    """
+
+    def _reach(self, source: str):
+        script = Ps1Parser(source).parse()
+        return script, Ps1ModelCache(script).world_reach
+
+    @staticmethod
+    def _guarded(clause: str) -> str:
+        return (
+            'trap { continue }\n'
+            'Invoke-Expression $env:PAYLOAD\n'
+            F'{clause}\n'
+            '$Null = [Math]::Sqrt(169)'
+        )
+
+    def test_a_read_in_the_handler_of_a_guarded_construct_is_poisoned(self):
+        script, reach = self._reach(self._guarded("try { 'a' } catch { $Null = [Math]::Sqrt(144) }"))
+        read = script.body[2].catch_clauses[0].body.body[0]
+        self.assertFalse(reach.closed_at(read))
+
+    @unittest.expectedFailure
+    def test_the_same_read_is_poisoned_where_the_construct_guards_nothing(self):
+        script, reach = self._reach(self._guarded('try { } catch { $Null = [Math]::Sqrt(144) }'))
+        read = script.body[2].catch_clauses[0].body.body[0]
+        self.assertFalse(reach.closed_at(read))
