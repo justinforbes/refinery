@@ -330,6 +330,12 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
     "function A { Write-Host 'a' }; function B { Write-Host 'b' }; Set-Alias x A; "
     "trap { Set-Alias x B -Scope 1; continue }; throw 'e'; x":
         ('INFO\tb',),
+    "$ErrorActionPreference = 'Stop'; trap { continue }; "
+    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'":
+        (),
+    "$ErrorActionPreference = 'Stop'; trap { continue }; "
+    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; Write-Output 'hi'":
+        ('OUT\tSystem.String\thi',),
     "trap { break }; [int]'a'; Write-Host 'after'":
         ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
     "trap { }; [int]'a'; Write-Host 'after'": (

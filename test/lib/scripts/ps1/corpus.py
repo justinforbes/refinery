@@ -421,6 +421,10 @@ CLAIMS: tuple[str, ...] = (
     "trap { Set-Alias x B; continue }; throw 'e'; x",
     "function A { Write-Host 'a' }; function B { Write-Host 'b' }; Set-Alias x A; "
     "trap { Set-Alias x B -Scope 1; continue }; throw 'e'; x",
+    "$ErrorActionPreference = 'Stop'; trap { continue }; "
+    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'",
+    "$ErrorActionPreference = 'Stop'; trap { continue }; "
+    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; Write-Output 'hi'",
     "trap { break }; [int]'a'; Write-Host 'after'",
     "trap { }; [int]'a'; Write-Host 'after'",
     "Get-Item nope -ErrorAction Stop; Write-Host 'after'",

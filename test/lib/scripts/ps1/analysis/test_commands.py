@@ -18,12 +18,16 @@ from refinery.lib.scripts.ps1.analysis.commands import (
 from refinery.lib.scripts.ps1.analysis.dominance import build_dominance
 from refinery.lib.scripts.ps1.analysis.world import WorldRole
 from refinery.lib.scripts.ps1.ast import get_command_name
+from refinery.lib.scripts.ps1.deobfuscation import deobfuscate
+from refinery.lib.scripts.ps1.synth import Ps1Synthesizer
 from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1CommandInvocation,
     Ps1Script,
 )
 from refinery.lib.scripts.ps1.parser import Ps1Parser
+
+from test.lib.scripts.ps1.test_oracle import CLAIM_TRANSCRIPTS
 
 
 def _script(source: str) -> Ps1Script:
@@ -1351,3 +1355,61 @@ class TestPs1AliasResolutionReadsAResumingTrapAsAnyOtherStatement(TestBase):
         self.assertEqual(
             self._below_the_binder('trap { continue }\n'),
             Denotation(CommandKind.ALIAS, 'Write-Output'))
+
+
+class TestPs1ResolvingAnAliasUnderAResumingTrapCanChangeBehaviour(TestBase):
+    """
+    The counter-case to the xfail above: the forward projection would resolve a call to the
+    definition that dominates it, but a definition dominates a use only in the sense of running
+    first, not of completing. A definition that throws under a `trap { continue }` is resumed past,
+    so the name it was going to bind is never bound when the use runs — and resolving it there
+    rewrites the call to a command the run does not execute.
+    """
+
+    _INPUT = (
+        "$ErrorActionPreference = 'Stop'; trap { continue }; "
+        "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'")
+    _RESOLVED = (
+        "$ErrorActionPreference = 'Stop'; trap { continue }; "
+        "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; Write-Output 'hi'")
+    _NO_TRAP = (
+        "$ErrorActionPreference = 'Stop'; "
+        "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'")
+
+    @staticmethod
+    def _denote_c(source: str) -> Denotation:
+        tree = _script(source)
+        use = [
+            node for node in tree.walk_in_order()
+            if isinstance(node, Ps1CommandInvocation) and get_command_name(node) == 'c'
+        ][-1]
+        return Ps1ModelCache(tree).commands.denotation(use)
+
+    @staticmethod
+    def _deobfuscated(source: str) -> str:
+        tree = _script(source)
+        deobfuscate(tree)
+        return Ps1Synthesizer().convert(tree)
+
+    def test_the_model_refuses_the_alias_where_the_resuming_trap_makes_the_use_live(self):
+        self.assertEqual(self._denote_c(self._INPUT), Denotation(CommandKind.NOTHING, None))
+
+    def test_the_deobfuscator_leaves_the_call_below_the_resuming_trap_alone(self):
+        self.assertEqual(
+            self._deobfuscated(self._INPUT),
+            Ps1Synthesizer().convert(_script(self._INPUT)))
+
+    def test_without_the_trap_the_same_definitions_resolve_the_now_dead_call(self):
+        self.assertEqual(
+            self._denote_c(self._NO_TRAP),
+            Denotation(CommandKind.ALIAS, 'Write-Output'))
+
+    def test_resolving_the_alias_would_make_the_output_disagree_with_the_input(self):
+        # Measured on a Windows PowerShell 5.1 host, recorded in test_oracle.CLAIM_TRANSCRIPTS: the
+        # second Set-Alias throws (the alias is read-only) and $ErrorActionPreference makes it
+        # terminating, so the trap resumes at the call, where c is still Write-Error, whose output
+        # under Stop is itself terminating and swallowed by the trap. The input prints nothing; the
+        # rewrite that resolves c to Write-Output prints 'hi'.
+        self.assertEqual(CLAIM_TRANSCRIPTS[self._INPUT], ())
+        self.assertEqual(CLAIM_TRANSCRIPTS[self._RESOLVED], ('OUT\tSystem.String\thi',))
+        self.assertNotEqual(CLAIM_TRANSCRIPTS[self._INPUT], CLAIM_TRANSCRIPTS[self._RESOLVED])
