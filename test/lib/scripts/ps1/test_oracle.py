@@ -271,6 +271,10 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The handler is removed. What reaches it is the *call*, whose subtree carries no `throw`, '
         'and the callee is a body of its own; answering this needs the call graph, which the '
         'fault model deliberately has none of.',
+    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'":
+        'The call is resolved to `Write-Output`. The second definition is read as a rebind that '
+        'took, but 5.1 refuses it against the read-only entry without raising anything the '
+        'script can see, so `c` still names `Write-Error` when the call runs.',
 }
 
 
