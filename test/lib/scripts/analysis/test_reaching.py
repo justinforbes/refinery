@@ -5,9 +5,8 @@ from typing import Iterable, Sequence
 from test import TestBase
 from test.lib.scripts.analysis import graph_from_edges
 
-from refinery.lib.scripts.analysis.cfg import ControlFlowModel
+from refinery.lib.scripts.analysis.cfg import ControlFlowModel, Projection
 from refinery.lib.scripts.analysis.dominance import DominatorModel
-from refinery.lib.scripts.analysis.cfg import Projection
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 
 STRAIGHT = {'a': ['b'], 'b': ['c'], 'c': []}

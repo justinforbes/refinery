@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from test import TestBase
@@ -1381,8 +1382,9 @@ class TestPs1AProcessBlockRerunsAndTheGraphDoesNotSaySo(TestBase):
     over this graph can take.
 
     An unread binder there is refused — `_project_binder` reports it unordered, the same refusal
-    `worldflow` makes for the same block. A definition this model *did* read is not: the resolution
-    reports that nothing binds the name, where 5.1 runs the alias from the second object on.
+    `worldflow` makes for the same block. A definition this model *did* read is refused the same
+    way, whether the answer the graph would otherwise give is that nothing binds the name or that an
+    older definition does.
     """
 
     _BELOW = (
@@ -1407,10 +1409,40 @@ class TestPs1AProcessBlockRerunsAndTheGraphDoesNotSaySo(TestBase):
             F'process {{ {self._BELOW} }}', 'Copy-Item')
         self.assertEqual(len(model.unread_alias_bindings_reaching(use)), 1)
 
-    @unittest.expectedFailure
     def test_a_definition_below_a_use_in_a_process_block_refuses_the_use(self):
         model, use = self._first_use("process { c 'hi'; Set-Alias c Write-Output }", 'c')
         self.assertEqual(model.denotation(use), Denotation(CommandKind.UNKNOWN, None))
+
+    def test_a_binder_written_in_a_resuming_trap_body_reaches_the_block_it_resumes_into(self):
+        """
+        The handler runs before the statement it resumes at, so a binder written in its body
+        precedes every use below the throw. The forward projection draws no edge saying so — it is
+        what `refinery.lib.scripts.analysis.cfg.CfgNode.is_hub_bound` records — and the walk falls
+        back to the hub for such a source rather than reporting that nothing reaches. Written here
+        rather than beside the trap tests because the binder half is what this class is about: the
+        two shapes below differ only in where the binder stands.
+        """
+        model, use = self._first_use(inspect.cleandoc("""
+            Set-Alias mk Set-Alias -Force
+            trap { mk Copy-Item Write-Output; continue }
+            [int]'a'
+            Copy-Item a b
+        """), 'Copy-Item')
+        self.assertEqual(len(model.unread_alias_bindings_reaching(use)), 1)
+
+    def test_a_rebinding_below_a_use_in_a_process_block_refuses_the_definition_above_it(self):
+        model, use = self._first_use(inspect.cleandoc("""
+            begin { Set-Alias c Write-Host }
+            process { c 'hi'; Set-Alias c Write-Output }
+        """), 'c')
+        self.assertEqual(model.denotation(use), Denotation(CommandKind.UNKNOWN, None))
+
+    def test_a_definition_and_its_use_both_outside_the_process_block_still_resolve(self):
+        model, use = self._first_use(inspect.cleandoc("""
+            begin { Set-Alias c Write-Host; c 'hi' }
+            process { 'x' }
+        """), 'c')
+        self.assertEqual(model.denotation(use), Denotation(CommandKind.ALIAS, 'Write-Host'))
 
 
 class TestPs1AnAliasDefinitionResolvesOnlyWhereItCertainlyCompleted(TestBase):
@@ -1452,6 +1484,13 @@ class TestPs1AnAliasDefinitionResolvesOnlyWhereItCertainlyCompleted(TestBase):
         "Set-Alias c Write-Output; c 'hi'": _REFUSED,
         "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'; trap { continue }; "
         "Set-Alias c Write-Output; c 'hi'": _REFUSED,
+        "Set-Item Variable:ErrorActionPreference Stop; trap { continue }; "
+        "Set-Alias c Write-Output; c 'hi'": _REFUSED,
+        "Invoke-Expression '$ErrorActionPreference = \"Stop\"'; trap { continue }; "
+        "Set-Alias c Write-Output; c 'hi'": _REFUSED,
+        "trap { continue }; $x = \"$(1/0)$(Set-Alias c Write-Output)\"; c 'hi'": _REFUSED,
+        "trap { continue }; $x = @((1/0), (Set-Alias c Write-Output)); c 'hi'": _REFUSED,
+        "trap { continue }; Get-Item nope | Set-Alias c Write-Output; c 'hi'": _REFUSED,
         "$ErrorActionPreference = 'Continue'; trap { continue }; Set-Alias c Write-Output; "
         "c 'hi'": _REFUSED,
     }

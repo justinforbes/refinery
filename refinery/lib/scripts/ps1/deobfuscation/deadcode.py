@@ -457,16 +457,6 @@ class Ps1DeadCodeElimination(Transformer):
         """
         world = cache.world_reach
         dominance = cache.dominance
-        reachable_by_graph: dict[int, frozenset[int]] = {}
-
-        def reachable_of(graph) -> frozenset[int]:
-            reach = reachable_by_graph.get(id(graph))
-            if reach is None:
-                reach = frozenset(dominance.reachable(
-                    graph.entry, forward=True, projection=Projection.MAY))
-                reachable_by_graph[id(graph)] = reach
-            return reach
-
         # A handler body — a `trap`, a `catch`, or a `finally` — runs on a path this deletion does
         # not walk: a `trap` or `catch` only when the code it guards throws, so from normal flow it
         # reads as unreachable exactly when nothing threw, which is not the same as its statements
@@ -479,7 +469,7 @@ class Ps1DeadCodeElimination(Transformer):
             if (
                 deletes_unreachable
                 and not isinstance(stmt, Ps1TrapStatement)
-                and self._is_unreachable(stmt, dominance, reachable_of)
+                and self._is_unreachable(stmt, dominance)
             ):
                 replacement: list[Statement] = []
             else:
@@ -512,7 +502,7 @@ class Ps1DeadCodeElimination(Transformer):
         return False
 
     @staticmethod
-    def _is_unreachable(stmt: Statement, dominance: DominatorModel, reachable_of) -> bool:
+    def _is_unreachable(stmt: Statement, dominance: DominatorModel) -> bool:
         """
         Whether no path reaches any part of `stmt`. A compound statement runs when its first
         executable node is reached, so a `do`/`while` whose tail-tested condition is unreachable
@@ -527,7 +517,7 @@ class Ps1DeadCodeElimination(Transformer):
         if located is None:
             return False
         graph = located[0]
-        reachable = reachable_of(graph)
+        reachable = dominance.reached_from_entry(graph, Projection.MAY)
         saw_node = False
         for descendant in stmt.walk():
             found = dominance.locate(descendant)

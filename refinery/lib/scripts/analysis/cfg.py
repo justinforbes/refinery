@@ -238,9 +238,13 @@ def flood(
     *what reaches this*, and `projection` decides how a resumption is read. A caller that did not
     think about either asked the wrong question.
 
-    The hub-bound fallback is **not** applied here — `reachable_forward_from_any` applies it. It is
-    a property of a *source*, not of the walk, and a walk applying it to every node it met would
-    follow the hub out of any handler body it happened to pass through.
+    **The hub-bound fallback is a property of a source, so it is applied here.** A forward walk
+    under `Projection.FORWARD` seeded at a node the graph calls `CfgNode.is_hub_bound` is walked
+    with the hub followed instead, because the forward edges carry nothing for such a source and the
+    precise walk would stop dead at the resumption point — the fail-open direction, and the one a
+    flood cannot afford. It is applied to the *sources* and never to a node the walk merely met,
+    which would follow the hub out of any handler body the sweep happened to pass through. The two
+    sweeps share one `seen`, so the second never re-walks what the first already reached.
 
     Walked as one depth-first sweep seeded with every source rather than a union of per-source
     walks: the union grows the same answer at the cost of one full walk per source, where a single
@@ -260,8 +264,31 @@ def flood(
             stack.append(source)
     declines = projection.declines_the_hub and any(
         node.graph.carries_resumption for node in stack)
+    if declines and forward:
+        coarse = [node for node in stack if node.is_hub_bound]
+        if coarse:
+            _sweep(coarse, seen, forward=True, declines=False)
+            stack = [node for node in stack if not node.is_hub_bound]
+    _sweep(stack, seen, forward=forward, declines=declines)
+    return seen
+
+
+def _sweep(
+    stack: list[CfgNode], seen: set[int], *, forward: bool, declines: bool,
+) -> None:
+    """
+    One depth-first sweep of `flood`, growing *seen* in place and consuming *stack*.
+
+    *declines* is the `Projection.declines_the_hub` screen, hoisted out of the loop because it is
+    the same for every edge of one sweep. It is asked of the node the walk stands at as well as of
+    each neighbour, which is what makes this the same projection `Projection.successors` and
+    `Projection.predecessors` build a list for: a hub is declined as a *node*, so a walk seeded at
+    one leaves it by no edge at all.
+    """
     while stack:
         node = stack.pop()
+        if declines and node.is_resumption_hub:
+            continue
         for neighbour in (node.successors if forward else node.predecessors):
             if id(neighbour) in seen:
                 continue
@@ -269,7 +296,6 @@ def flood(
                 continue
             seen.add(id(neighbour))
             stack.append(neighbour)
-    return seen
 
 
 def reachable_from_any(sources: Iterable[CfgNode]) -> frozenset[int]:
@@ -393,17 +419,14 @@ def reachable_forward_from_any(
     the forward edges carry nothing for such a source and the precise walk would stop at the
     resumption point: an opener written inside a `trap` body would then vouch for the very
     statements the handler resumes into. Its flood is the over-approximate one, which is the
-    fail-closed direction.
+    fail-closed direction. `flood` performs that fallback, so every door onto the forward reading
+    inherits it rather than only this one.
 
-    Every source must be a node of *graph*. Both facts the walk reads — `is_hub_bound` and
-    `edge_kind` — are keyed by node identity in that graph alone, so a node lifted from a nested
-    body's graph reads as neither hub-bound nor kinded and takes the precise walk over what the
-    graph calls plain flow, which is the fail-open direction.
-
-    A graph that `carries_resumption` reports nothing of is walked by `reachable_from_any`, which
-    is the same answer without the per-node lookup. That is nearly every script — one flood per
-    opener set and one per shadowed command name would otherwise each pay the resumption tax over a
-    graph holding no resumption edge.
+    Every source must be a node of *graph*, which is what this adds over naming the projection at
+    `flood` directly. Both facts the walk reads — `is_hub_bound` and `edge_kind` — are keyed by
+    node identity in that graph alone, so a node lifted from a nested body's graph reads as neither
+    hub-bound nor kinded and takes the precise walk over what the graph calls plain flow, which is
+    the fail-open direction.
     """
     sources = list(sources)
     for source in sources:
@@ -413,13 +436,7 @@ def reachable_forward_from_any(
                 'reads are recorded per graph, so such a source reads as neither a hub nor '
                 'hub-bound and takes the precise walk over what this graph calls plain flow'
             )
-    if not graph.carries_resumption:
-        return reachable_from_any(sources)
-    coarse = [source for source in sources if source.is_hub_bound]
-    precise = [source for source in sources if not source.is_hub_bound]
-    seen = flood(coarse, forward=True, projection=Projection.MAY) if coarse else set()
-    seen.update(flood(precise, forward=True, projection=Projection.FORWARD))
-    return frozenset(seen)
+    return frozenset(flood(sources, forward=True, projection=Projection.FORWARD))
 
 
 class ElementLocator:
@@ -661,8 +678,8 @@ class CfgBuilder:
         """
         A fresh synthetic node standing for the over-approximate half of a resuming handler: every
         point the block may resume from joins it, and it joins every point the block may resume at.
-        Recorded as a hub so that `ControlFlowGraph.is_resumption_hub` answers for it, which is what
-        a forward-only walk declines to enter.
+        Recorded as a hub so that `CfgNode.is_resumption_hub` answers for it, which is what a
+        forward-only walk declines to enter.
         """
         node = self.synthetic_node()
         node.is_resumption_hub = True
@@ -687,10 +704,19 @@ class CfgBuilder:
     def mark_hub_bound(self, nodes: Iterable[CfgNode]) -> None:
         """
         Record that the forward-only projection of resumption does not reach *nodes* — see
-        `ControlFlowGraph.is_hub_bound`.
+        `CfgNode.is_hub_bound`.
+
+        A hub among *nodes* is passed over. A caller naming a handler body names whatever the
+        level it walked appended, and a resumable block written inside that body contributes its
+        own hub — a node the forward reading declines to stand at, not one it fails to reach.
+        Marking it both would leave one node routed to the over-approximate walk as a *source* and
+        refused as a *neighbour* in the same query, and `ControlFlowGraph.hub_bound` would report a
+        fan-out as a statement.
         """
         self.cfg._resuming = True
         for node in nodes:
+            if node.is_resumption_hub:
+                continue
             node.is_hub_bound = True
             self.cfg._hub_bound.add(id(node))
 

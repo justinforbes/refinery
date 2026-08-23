@@ -9,6 +9,8 @@ from refinery.lib.scripts.analysis.cfg import (
     CfgEdge,
     CfgNode,
     ControlFlowGraph,
+    Projection,
+    flood,
     reachable_forward_from_any,
     reachable_from_any,
 )
@@ -1026,6 +1028,45 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
         self.assertFalse(self._required_node(graph, tree.body[1]).is_hub_bound)
         self.assertIn(id(self._required_node(graph, tree.body[1])), forward)
         self.assertIn(id(self._required_node(graph, tree.body[2])), forward)
+
+    def test_every_door_onto_the_forward_reading_falls_back_for_such_a_statement(self):
+        """
+        The fallback belongs to the walk and not to one function that wraps it, so the answer does
+        not depend on which of the two entry points a consumer happened to reach the graph through.
+        `refinery.lib.scripts.analysis.reaching.ReachabilityQuery` is the other one, and a binder it
+        floods from inside a handler body has to reach the block the handler resumes into.
+        """
+        tree, graph = self._tree_and_graph("trap { 'handled'\ncontinue }\n'one'\n'two'")
+        handled = self._required_node(graph, tree.body[0].body.body[0])
+        self.assertEqual(
+            flood([handled], forward=True, projection=Projection.FORWARD),
+            set(reachable_forward_from_any(graph, [handled])),
+        )
+
+    def test_a_forward_walk_seeded_at_a_hub_leaves_it_by_no_edge(self):
+        """
+        The hub is declined as a *node* under the forward reading, which is what
+        `refinery.lib.scripts.analysis.cfg.Projection.successors` says by returning nothing for one.
+        A sweep that screened only the nodes it arrived at would agree everywhere except here, and
+        a caller holding a hub would be handed the over-approximate closure under a forward label.
+        """
+        tree, graph = self._tree_and_graph("trap { continue }\n'one'\n'two'")
+        one = self._required_node(graph, tree.body[1])
+        hub, = (target for target in one.predecessors if target.is_resumption_hub)
+        self.assertEqual(flood([hub], forward=True, projection=Projection.FORWARD), {id(hub)})
+        self.assertEqual(flood([hub], forward=False, projection=Projection.FORWARD), {id(hub)})
+
+    def test_a_hub_of_a_set_nested_in_a_handler_body_is_not_also_hub_bound(self):
+        """
+        The two flags are the two readings of one construct and no node is both: a hub is the node
+        the forward walk declines to stand at, and a hub-bound node is one it fails to reach and
+        floods coarsely instead. A handler body naming everything built while it was walked names
+        the hub of any resumable block written inside it, which is neither of those things.
+        """
+        _, graph = self._tree_and_graph(
+            "trap { if ($q) { trap { continue }\n'p' }\ncontinue }\n'x'\n'y'")
+        self.assertEqual(
+            [node for node in graph.nodes if node.is_hub_bound and node.is_resumption_hub], [])
 
     def test_a_forward_flood_refuses_a_source_belonging_to_another_body(self):
         """

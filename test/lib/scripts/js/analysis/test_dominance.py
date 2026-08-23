@@ -3,7 +3,6 @@ from __future__ import annotations
 from test import TestBase
 
 from refinery.lib.scripts.analysis.cfg import Projection
-
 from refinery.lib.scripts.js.analysis.dominance import build_dominance
 from refinery.lib.scripts.js.analysis.model import build_semantic_model
 from refinery.lib.scripts.js.model import (

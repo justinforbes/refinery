@@ -33,7 +33,7 @@ extra refusal, which `refinery.lib.scripts.analysis.reaching` makes.
 """
 from __future__ import annotations
 
-from typing import Iterator
+from typing import AbstractSet as Set, Iterator
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.cfg import (
@@ -107,6 +107,11 @@ def _immediate_dominators(
     dominator of the one before it and the climb is a single step. A body of eight hundred statements
     is the difference between thirteen hundred thousand steps and thirteen thousand.
 
+    The ordering is taken once, before the fixpoint, and not per pass. Neither the adjacency nor
+    the rank changes while the loop runs; only which predecessors are placed does, and filtering
+    a sorted list leaves it sorted. Reading the adjacency inside the loop would also allocate a
+    fresh predecessor list per node per pass under `Projection.FORWARD`, which builds one.
+
     **The fixpoint is what makes the answer independent of the shape of the graph.** One pass
     suffices only where every cycle is entered at one point; on a cycle entered at two, a node placed
     from the predecessors seen so far reports a dominator it does not have, which is the direction a
@@ -125,23 +130,29 @@ def _immediate_dominators(
                 b = idom[b]
         return a
 
+    ranked = [
+        (
+            id(node),
+            sorted(
+                (known for known in map(id, projection.predecessors(node)) if known in rank),
+                key=rank.__getitem__,
+                reverse=True,
+            ),
+        )
+        for node in order
+        if node is not graph.entry
+    ]
     changed = True
     while changed:
         changed = False
-        for node in order:
-            if node is graph.entry:
-                continue
-            placed = [
-                known for known in map(id, projection.predecessors(node)) if known in idom
-            ]
-            if not placed:
-                continue
-            placed.sort(key=rank.__getitem__, reverse=True)
-            candidate = placed[0]
-            for other in placed[1:]:
-                candidate = common(other, candidate)
-            if idom.get(id(node)) != candidate:
-                idom[id(node)] = candidate
+        for key, predecessors in ranked:
+            candidate: int | None = None
+            for known in predecessors:
+                if known not in idom:
+                    continue
+                candidate = known if candidate is None else common(known, candidate)
+            if candidate is not None and idom.get(key) != candidate:
+                idom[key] = candidate
                 changed = True
     return idom
 
@@ -201,6 +212,18 @@ class DominanceTree:
         order = _reverse_postorder(graph, projection)
         self.idom = _immediate_dominators(graph, order, projection)
         self._entered, self._left = _dominance_intervals(self.idom, graph, order)
+
+    @property
+    def reached(self) -> Set[int]:
+        """
+        The ids of the nodes the entry reaches under the projection this tree was built with, which
+        is exactly the set the tree holds: a node the entry does not reach is not in it at all.
+
+        Read rather than flooded again. A caller asking which statements of a body can run is asking
+        the question the tree already had to answer to exist, and a flood per body per pass over a
+        script whose bodies share one graph is the same walk repeated.
+        """
+        return self._entered.keys()
 
     def dominates(self, a: CfgNode, b: CfgNode) -> bool:
         """
@@ -325,6 +348,17 @@ class DominatorModel:
         if found is None:
             found = self._trees[key] = DominanceTree(graph, key[1])
         return found
+
+    def reached_from_entry(self, graph: ControlFlowGraph, projection: Projection) -> Set[int]:
+        """
+        The ids of the nodes of *graph* the body's entry reaches under *projection*.
+
+        Answered from the dominance tree, which is the same walk and is memoized per graph. A
+        caller deciding which statements of a body can run asks this rather than `reachable` from
+        the entry: a script's bodies share one graph per function, and a pass asking per body pays
+        one flood per body for an answer that does not vary within a graph.
+        """
+        return self.tree_of(graph, projection).reached
 
     def reachable(
         self, start: CfgNode, *, forward: bool, projection: Projection,

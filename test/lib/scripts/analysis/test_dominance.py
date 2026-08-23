@@ -7,8 +7,7 @@ from typing import Iterator
 from test import TestBase
 from test.lib.scripts.analysis import graph_from_edges as _graph
 
-from refinery.lib.scripts.analysis.cfg import CfgNode
-from refinery.lib.scripts.analysis.cfg import Projection
+from refinery.lib.scripts.analysis.cfg import CfgNode, Projection
 from refinery.lib.scripts.analysis.dominance import DominanceTree
 
 SHAPES = {

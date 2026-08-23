@@ -92,12 +92,16 @@ import enum
 from typing import NamedTuple, Sequence
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
+from refinery.lib.scripts.analysis.cfg import (
+    CfgNode,
+    ControlFlowGraph,
+    ControlFlowModel,
+    Projection,
+)
 from refinery.lib.scripts.analysis.dominance import DominatorModel
-from refinery.lib.scripts.analysis.cfg import Projection
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
-from refinery.lib.scripts.ps1.analysis.faults import a_stop_may_be_in_force
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, Ps1BlockReach
+from refinery.lib.scripts.ps1.analysis.faults import a_stop_may_be_in_force
 from refinery.lib.scripts.ps1.analysis.world import (
     WorldRole,
     assigns_an_alias_name,
@@ -425,6 +429,30 @@ def extract_alias_definition(cmd: Ps1CommandInvocation) -> AliasDefinition | Non
         alias_name.lower(), target, cmd, refuse, _has_wildcard(target), throws_if_bound)
 
 
+def _stands_alone(at: CfgNode, definition: AliasDefinition) -> bool:
+    """
+    Whether the statement standing at *at* evaluates nothing beside *definition*, so that a claim
+    about what the defining command can raise is a claim about the whole statement — see
+    `Ps1CommandModel._binding_has_taken`.
+
+    Answered by climbing from the invocation to the node the graph placed and refusing the first
+    level that holds a sibling. What a sibling is worth is not weighed: an array element, a pipeline
+    stage and an interpolated sub-expression are all evaluated by the same statement, any of them
+    may raise before the binding is attempted, and which of them can is a question the fault model
+    answers about a *position* rather than one this can read off an argument list.
+    """
+    element = at.element
+    if element is None:
+        return False
+    cursor: Node = definition.node
+    while cursor is not element:
+        parent = cursor.parent
+        if parent is None or len(parent.children()) != 1:
+            return False
+        cursor = parent
+    return True
+
+
 def _collect_alias_definitions(root: Ps1Script) -> dict[str, list[AliasDefinition]]:
     """
     Every invocation of the script that spells an alias definition, grouped by the name it binds and
@@ -525,15 +553,8 @@ class Ps1CommandModel:
         Whether *node* is written inside the script's own `process` block, which re-runs once per
         object the pipeline hands it — see `_project_binder`.
         """
-        block = self._root.process_block if isinstance(self._root, Ps1Script) else None
-        if block is None:
-            return False
-        cursor: Node | None = node
-        while cursor is not None:
-            if cursor is block:
-                return True
-            cursor = cursor.parent
-        return False
+        block = self._root.process_block
+        return block is not None and node.is_descendant_of(block)
 
     def denotation(self, invocation: Ps1CommandInvocation) -> Denotation:
         """
@@ -961,6 +982,13 @@ class Ps1CommandModel:
         script defines no such name there is nothing to invalidate and the answer is the same either
         way: what a binder may have bound to a name this model never saw defined is the open-world
         residual `_resolve` declares, not a fact the alias table holds.
+
+        **A definition in the script's own `process` block that is not the one reaching is a
+        refusal, by the same reading `_project_binder` makes of a binder there.** That block runs
+        once per object the pipeline hands the script and the per-body graph draws it straight
+        through, so a definition dominance places *after* the use has in fact bound the name for
+        every object but the first. Ordering it by this graph reports a binding that is not the one
+        the run observes, and answers with a command spelling rather than a refusal.
         """
         definitions = self._alias_defs.get(name, ())
         if not definitions:
@@ -979,16 +1007,20 @@ class Ps1CommandModel:
             if candidates:
                 kills = [id(site) for site in self._binder_sites_in(graph) if site is not use]
                 reaching = self._reach.reaching_definition(graph, use, candidates, kills)
+                if any(
+                    definition is not reaching and self._in_the_process_block(definition.node)
+                    for definition, _ in candidates
+                ):
+                    return _Binding(None, True)
                 if reaching is not None:
-                    placed = self._flow.locate(reaching.node)
-                    if placed is None or not self._binding_has_taken(
-                        graph, placed[1], use, reaching
-                    ):
+                    at = next(node for definition, node in candidates if definition is reaching)
+                    if not self._binding_has_taken(graph, at, use, reaching):
                         return _Binding(None, True)
                     return _Binding(reaching, False)
-                if self._a_binder_reaches(graph, use):
-                    return _Binding(None, True)
-                if id(use) not in self._reach.reachable(graph.entry, forward=True):
+                if (
+                    self._a_binder_reaches(graph, use)
+                    or id(use) not in self._reach.reachable(graph.entry, forward=True)
+                ):
                     return _Binding(None, True)
             owner = graph.owner
             if not isinstance(owner, Ps1ScriptBlock):
@@ -1022,13 +1054,23 @@ class Ps1CommandModel:
         terminating error in the first place, which `_cannot_raise` decides. A plainly written
         `Set-Alias name value` is the second, and that is the shape obfuscated PowerShell wraps in
         resuming traps.
+
+        **The second way out is about a command and the edges are about a statement, so it is asked
+        only where the two are the same thing.** The raise-taken edges hang off the node the graph
+        places, which is the whole statement; `_cannot_raise` reads the defining invocation and its
+        arguments. Where the statement holds anything else — an operand beside it in an array, a
+        stage upstream of it in a pipeline, an interpolation before it in a string — that other
+        thing may raise before the binding is ever attempted, and the handler resumes past the whole
+        statement with the name still unbound. `_stands_alone` is that question, and without it a
+        `trap { continue }` over `$x = "$(1/0)$(Set-Alias zzq Get-Date)"` resolves a use of `zzq`
+        below it to a command the run never binds.
         """
         raising = [target for target in at.successors if graph.raise_taken(at, target)]
         if not any(
             id(use) in self._reach.reachable(target, forward=True) for target in raising
         ):
             return True
-        return self._cannot_raise(definition)
+        return _stands_alone(at, definition) and self._cannot_raise(definition)
 
     def _cannot_raise(self, definition: AliasDefinition) -> bool:
         """
@@ -1286,7 +1328,13 @@ def build_command_model(
     have nothing left to say.
     """
     seed = Ps1CommandModel(
-        root, control_flow, ReachabilityQuery(dominance, Projection.FORWARD), blocks, functions, shadowed)
+        root,
+        control_flow,
+        ReachabilityQuery(dominance, Projection.FORWARD),
+        blocks,
+        functions,
+        shadowed,
+    )
     settled = _settle_alias_definitions(seed)
     unread = {id(node) for node in settled.unread}
     read = frozenset(

@@ -25,8 +25,8 @@ from __future__ import annotations
 from typing import Iterator
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.analysis.cfg import Projection
+from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.js.analysis.cfg import CfgNode, ControlFlowGraph
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import EffectModel

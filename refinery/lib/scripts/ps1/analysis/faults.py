@@ -232,7 +232,7 @@ def _writes_stop_to_the_preference(node: Node) -> bool:
 #: it. Spelled as names rather than as assignment shapes because `a_stop_may_be_in_force` asks
 #: whether either is *touched* at all, however it is spelled.
 _STOP_BEARING_NAMES = frozenset({
-    'erroractionpreference',
+    _ERROR_ACTION_PREFERENCE,
     'psdefaultparametervalues',
 })
 
@@ -255,12 +255,22 @@ def a_stop_may_be_in_force(root: Node) -> bool:
     makes. So this asks the wider question: does the script touch either name at all, in any way,
     including naming one in a string that a command could set it through. What that costs is the
     recall of every script that so much as mentions the preference, which is a shape worth refusing.
+
+    A variable occurrence must carry the name exactly; a string value need only *contain* one,
+    which is the same asymmetry `refinery.lib.scripts.ps1.analysis.worldflow._names_own_path`
+    makes, and for the same reason. A provider path spells the name inside a larger word, and
+    `Set-Item Variable:ErrorActionPreference Stop` arms it as surely as the assignment does — as
+    does a payload handed to `Invoke-Expression`. Matching the whole literal instead reads a script
+    that really arms `Stop` as arming nothing, which is the one direction that rewrites a call the
+    run does not make.
     """
     for node in root.walk():
         if isinstance(node, Ps1Variable) and binding_key(node) in _STOP_BEARING_NAMES:
             return True
         written = string_value(node)
-        if written is not None and written.strip().lower() in _STOP_BEARING_NAMES:
+        if written is not None and any(
+            name in written.lower() for name in _STOP_BEARING_NAMES
+        ):
             return True
     return False
 

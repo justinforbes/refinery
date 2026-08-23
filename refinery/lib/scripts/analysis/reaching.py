@@ -100,7 +100,7 @@ class ReachabilityQuery:
         downstream = self.reachable(source, forward=True) & candidates
         if not downstream:
             return False
-        if self._projection is Projection.FORWARD and downstream & graph.hub_bound:
+        if self._projection.declines_the_hub and downstream & graph.hub_bound:
             return True
         return bool(downstream & self.reachable(target, forward=False))
 
