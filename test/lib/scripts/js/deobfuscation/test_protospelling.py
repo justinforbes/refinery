@@ -110,3 +110,142 @@ class TestASpellingThatReachesSomethingElseIsNotRewritten(TestJsDeobfuscator):
             ' console.log(({}).constructor.prototype.q);'
         )
         self.assertEqual(before_and_after(source), (('', 'ReferenceError'), ('', 'ReferenceError')))
+
+
+#: Spellings standing where the language wants a reference rather than a value, mapped to what Node
+#: prints for each read as a module. The object each spelling reaches is the same one either way,
+#: but the reference is not: an object literal's prototype slot is writable and deletable where
+#: `Object.prototype` and `Array.prototype` are neither, so writing the identity out here answers
+#: with a `TypeError` where the original answered with nothing.
+A_SPELLING_STANDING_WHERE_A_REFERENCE_GOES = {
+    '({}).__proto__ = {q: 1};\nconsole.log(1);':
+        '1\n',
+    '[].__proto__ = null;\nconsole.log("ok");':
+        'ok\n',
+    'console.log(delete ({}).__proto__);':
+        'true\n',
+}
+
+
+#: Spellings whose receiver the rewrite would drop unevaluated, mapped to what Node prints for each.
+#: The receiver is the one part of the spelling `Owner.prototype` does not keep, so an element that
+#: runs code and a spread that iterates its argument both have to be kept.
+A_RECEIVER_THE_REWRITE_MAY_NOT_DROP = {
+    'var n = 0;\nfunction f() { n++; return 1; }\nvar p = [f()].__proto__;\nconsole.log(n);':
+        '1\n',
+    'try { var p = [...null].__proto__; console.log("none"); }'
+    ' catch (e) { console.log(e.constructor.name); }':
+        'TypeError\n',
+}
+
+
+#: Programs that replace one of the mechanisms a spelling goes through, by a route that names the
+#: mechanism under a name other than the one the spelling is gated on, mapped to what Node prints
+#: for each. An own `__proto__` on `Array.prototype` shadows the accessor for arrays alone, and a
+#: prototype handed to a call, bound to a parameter, or written through a pattern is written by a
+#: name the write target does not spell.
+A_MECHANISM_WRITTEN_UNDER_ANOTHER_NAME = {
+    'Object.defineProperty(Array.prototype, "__proto__",'
+    ' {get: function () { return {q: 5}; }});\nconsole.log([].__proto__.q);':
+        '5\n',
+    'Object.setPrototypeOf(Array.prototype, null);\nconsole.log([].__proto__);':
+        'undefined\n',
+    'function patch(A) { A.prototype.constructor = function C() {}; }\npatch(Array);'
+    '\n[].constructor.prototype.q = 5;\nconsole.log([].q);':
+        'undefined\n',
+    'var G = Object;\nfunction patch(o) { o.getPrototypeOf = function () { return {q: 7}; }; }'
+    '\npatch(G);\nconsole.log(Object.getPrototypeOf({}).q);':
+        '7\n',
+    '(function (Object) { Object.prototype.constructor = function C() {}; })(Object);'
+    '\nconsole.log(({}).constructor.prototype === Object.prototype);':
+        'false\n',
+    'function C() {}\nC.prototype.q = 5;\n[Object.prototype.constructor] = [C];'
+    '\nconsole.log(({}).constructor.prototype.q);':
+        '5\n',
+    'function C() {}\nC.prototype.q = 5;\nglobalThis.Object.prototype.constructor = C;'
+    '\nconsole.log(({}).constructor.prototype.q);':
+        '5\n',
+    'globalThis.Object.getPrototypeOf = function () { return {q: 5}; };'
+    '\nconsole.log(Object.getPrototypeOf({}).q);':
+        '5\n',
+}
+
+
+#: Programs where a scope can give the name the rewrite would introduce a meaning of its own, mapped
+#: to what Node prints for each. A `with` object carrying an `Object` property answers a read of the
+#: bare name from itself, so a spelling rewritten inside one reaches that object rather than the
+#: prototype the spelling reached.
+A_NAME_A_SCOPE_CAN_ANSWER = {
+    'var o = {Object: {prototype: {q: 3}}};\nwith (o) { console.log(({}).__proto__.q); }':
+        'undefined\n',
+    'var o = {Object: {prototype: {q: 3}, getPrototypeOf: function () { return {q: 7}; }}};'
+    '\nwith (o) { console.log(Object.getPrototypeOf({}).q); }':
+        '7\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestASpellingIsOnlyRewrittenWhereItIsRead(TestJsDeobfuscator):
+    """
+    `({}).__proto__` and `Object.prototype` denote one object, which settles a spelling read as a
+    value and settles nothing about one the language reads as a reference. The deobfuscation writes
+    modules, and a module is strict: a write or a delete the original performed on a throwaway's own
+    slot becomes one performed on a property the language made neither writable nor configurable.
+    """
+
+    def test_a_spelling_standing_where_a_reference_goes_is_left_alone(self):
+        rows = A_SPELLING_STANDING_WHERE_A_REFERENCE_GOES
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReceiverTheRewriteDropsIsFirstAskedWhatItRuns(TestJsDeobfuscator):
+    """
+    The rewrite keeps no part of the receiver it reads the owner from, so whatever that receiver
+    would have done is gone with it. Which prototype an array literal inherits is settled by its
+    being one, and that says nothing about what filling it costs.
+    """
+
+    def test_a_receiver_that_runs_something_is_left_alone(self):
+        rows = A_RECEIVER_THE_REWRITE_MAY_NOT_DROP
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAMechanismWrittenUnderAnotherNameStillRefusesTheRewrite(TestJsDeobfuscator):
+    """
+    Each identity rests on the mechanism the language installs, and the gate asks the effect model
+    whether the file replaced it. The question has to be asked of every name the mechanism can be
+    reached under: the receiver's own prototype shadows the one `Object` holds, a value handed to a
+    call is written by a name the call spells, a parameter shadowing the intrinsic is a name of its
+    own, and a destructuring target writes a property while naming no member target at the top.
+    """
+
+    def test_a_mechanism_written_under_another_name_is_still_written(self):
+        rows = A_MECHANISM_WRITTEN_UNDER_ANOTHER_NAME
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestANameAScopeCanAnswerIsNotTheIntrinsic(TestJsDeobfuscator):
+    """
+    The rewrite introduces a bare name where the file had none, so the name has to still reach the
+    host at that position. A declaration is one way it does not, and a `with` body is another: the
+    lookup consults the object first, which a file can give a property of that name.
+    """
+
+    def test_a_name_a_scope_can_answer_is_left_alone(self):
+        rows = A_NAME_A_SCOPE_CAN_ANSWER
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )

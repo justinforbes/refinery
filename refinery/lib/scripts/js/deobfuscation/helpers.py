@@ -348,8 +348,10 @@ def property_absent_from_written_chain(
     what the gated pass would have done.
 
     It is a separate function rather than a parameter because the choice is the caller's to justify
-    and has to be readable where it is made. `property_provably_absent` keeps both arms: a caller
-    that folds one read gains nothing by the weaker question.
+    and has to be readable where it is made, and because there are only two callers entitled to it:
+    namespace flattening and the dispatcher unwrapper, the two whose refusal costs the pipeline a
+    pass rather than an expression. Every caller that folds one expression takes
+    `property_provably_absent`, which keeps both arms and gains nothing by the weaker question.
     """
     if key in OBJECT_PROTOTYPE_MEMBERS or key in PROTOTYPE_CHAIN_PROPERTIES:
         return False
@@ -364,23 +366,30 @@ def property_absent_from_written_chain(
     return issubclass(value_type, dict)
 
 
-def property_is_inherited_from_unwritten_chain(
+def property_is_inherited_from_an_intact_chain(
     effects: EffectModel | None,
     value_type: type,
     key: str,
 ) -> bool:
     """
-    Whether *key* names a member the prototype chain of *value_type* supplies **and** the program
-    left that chain alone, so a value of that type has one whether or not it owns one.
+    Whether *key* names a member the prototype chain of *value_type* supplies **and** that chain is
+    still the one the language describes, so a value of that type has the member whether or not it
+    owns one.
 
     This is `property_is_inherited` with the question that one cannot answer added to it. The tables
     say what the language installs; only the model can say whether the file took it away, and
     `delete Object.prototype.toString` removes a name every one of those tables lists. A caller with
     no effect model gets the tables alone and owns that assumption itself.
+
+    It asks `EffectModel.read_chain_intact` and not the write arm, so that it refuses wherever
+    `property_provably_absent` refuses. The two are the halves of one read, and a half that answers
+    under a reflective surface the other half declines under is a read decided by which half
+    happened to be asked: an unresolvable `eval` that deleted `toString` would leave
+    `'toString' in o` folding to `true` while `'zz' in o` refused.
     """
     if not property_is_inherited(value_type, key):
         return False
-    return effects is None or effects.chain_roots_unwritten(value_type)
+    return effects is None or effects.read_chain_intact(value_type)
 
 
 def property_is_inherited(value_type: type, key: str) -> bool:

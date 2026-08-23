@@ -270,9 +270,10 @@ class JsSimplifications(Transformer):
         read would throw.
 
         Bounded is a claim about the prototype chain and holds only while the file leaves that chain
-        alone, so **both** answers need the chain asked about. A name the tables do not list is
-        there once `Object.prototype.z = 9` has run, and a name they do list is gone once a
-        `delete` has removed it, so neither side is free. The tables are asked for the whole
+        alone, so **both** answers need the chain asked about, and both ask it the same way. A name
+        the tables do not list is there once `Object.prototype.z = 9` has run, and a name they do
+        list is gone once a `delete` has removed it, so neither side is free and neither may be
+        answered under a surface the other refuses under. The tables are asked for the whole
         property set and not the inherited half `property_provably_absent` enumerates, an own
         `length` and `prototype` included, so the membership question stays this one's and only the
         chain question is shared. A class constructor is a function value, and its chain is a
@@ -302,7 +303,7 @@ class JsSimplifications(Transformer):
         else:
             return None
         if key in members:
-            return True if self.effects.chain_roots_unwritten(receiver_type) else None
+            return True if self.effects.read_chain_intact(receiver_type) else None
         state = self._own_property_stores(binding, right)
         if state is None:
             return None

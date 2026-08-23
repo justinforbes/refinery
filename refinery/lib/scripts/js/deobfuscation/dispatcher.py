@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from refinery.lib.scripts import (
     Node,
+    _clone_node,
     _remove_from_parent,
     _replace_in_parent,
 )
@@ -39,6 +40,7 @@ from refinery.lib.scripts.js.model import (
     JsNewExpression,
     JsNullLiteral,
     JsObjectExpression,
+    JsParenthesizedExpression,
     JsProperty,
     JsReturnStatement,
     JsScript,
@@ -46,7 +48,20 @@ from refinery.lib.scripts.js.model import (
     JsStringLiteral,
     JsVariableDeclaration,
     JsVariableDeclarator,
+    strip_parens,
 )
+
+
+def _governing_parent(node: Node) -> Node | None:
+    """
+    The nearest ancestor of *node* that is not merely a parenthesization of it, so that a guard
+    about what a dispatch stands inside reads the construct governing it rather than a grouping the
+    file happens to have written around it.
+    """
+    parent = node.parent
+    while isinstance(parent, JsParenthesizedExpression):
+        parent = parent.parent
+    return parent
 
 
 @dataclass
@@ -66,11 +81,18 @@ class _DispatcherInfo:
 @dataclass
 class _DispatchSite:
     """
-    One dispatch this pass can read: the expression it is written as, the name of the function it
-    selects, and the arguments that function is reached with. *arguments* is `None` where the site
-    names the function rather than calling it, which the wrapped-reference form does.
+    One dispatch this pass can read: the expression it is written as, the identifier naming the
+    dispatcher within it, the name of the function it selects, and the arguments that function is
+    reached with. *arguments* is `None` where the site names the function rather than calling it,
+    which the wrapped-reference form does.
+
+    *reference* is the one occurrence of the dispatcher name this site consumes, and it is what the
+    coverage question is asked over. Asking it over the site's whole subtree instead would count a
+    dispatch this pass cannot read as covered merely for standing inside one it can, and a payload
+    argument is carried into the replacement rather than discarded with the rest of it.
     """
     node: Node
+    reference: JsIdentifier
     key: str
     arguments: list | None
 
@@ -321,13 +343,20 @@ def _build_extracted_function(
     The kind is carried rather than defaulted: an entry that was `async` returns a promise and one
     that was a generator returns an iterator, and a declaration that dropped either would compute a
     different value — a `yield` left in a body no longer marked `*` does not even parse.
+
+    The body is cloned before anything is taken out of it, so that building a declaration leaves
+    the entry it was built from exactly as it stood. Reading the statements out of the entry itself
+    would make extraction destructive, and extraction is attempted for every entry of a table
+    before any of them is installed: a later entry this pass cannot read would then abandon the
+    unwrap over a table whose earlier entries had already had their payload destructuring taken
+    away, which is a dispatcher whose callees name parameters nothing declares.
     """
     params = _extract_params(fn, payload_id)
     if params is None:
         return None
-    body = fn.body
-    if not isinstance(body, JsBlockStatement):
+    if not isinstance(fn.body, JsBlockStatement):
         return None
+    body = _clone_node(fn.body)
     new_body_stmts = list(body.body)
     if new_body_stmts and params:
         first = new_body_stmts[0]
@@ -435,8 +464,12 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         the dispatcher may be removed at all is a question about the whole set, so the set has to
         exist before the first replacement does.
 
-        A site nested inside another is dropped: the outer replacement takes the inner one with it,
-        and replacing a node that is no longer in the tree puts the new one nowhere.
+        A site nested inside another is kept rather than dropped, because the outer replacement does
+        not always take the inner one with it: the direct-call form carries the payload elements
+        into the call it builds, so a dispatch written into a payload survives the rewrite of the
+        dispatch it is an argument of. The order the walk yields is what makes both replaceable —
+        an ancestor comes first, and building its replacement adopts the arguments it reuses, so the
+        inner node is still reachable from its new holder when its own turn comes.
         """
         planned: list[_DispatchSite] = []
         for node in list(scope.walk()):
@@ -450,13 +483,7 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
                 continue
             if site is not None:
                 planned.append(site)
-        nested = {
-            id(inner)
-            for site in planned
-            for inner in site.node.walk()
-            if inner is not site.node
-        }
-        return [site for site in planned if id(site.node) not in nested]
+        return planned
 
     def _plan_covers_every_reference(
         self,
@@ -469,11 +496,15 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         alone, and what it leaves alone still calls the function it is leaving, so removing the
         declaration anyway hands back a file that throws a `ReferenceError` where the original ran.
 
-        The whole unwrap is refused rather than the removal alone, because extraction is not
-        something a surviving dispatcher can share a table with: `_build_extracted_function` reuses
-        the statement nodes of the entry it extracts and strips the payload destructuring out of
-        them in place, so a dispatcher left standing beside the extracted functions calls bodies
-        that no longer read the payload it writes.
+        The whole unwrap is refused rather than the removal alone, because a dispatcher left
+        standing beside the extracted functions would still have to route through its own table,
+        and the payload the surviving dispatch writes is read by no extracted body.
+
+        What each site accounts for is the one occurrence of the name it consumes, not everything
+        standing inside it. A dispatch this pass cannot read is often written *within* one it can,
+        a payload argument being the ordinary place for a call, and the replacement carries such an
+        argument over rather than discarding it, so counting a subtree as covered would clear the
+        very reference that survives.
 
         The dispatcher's own body is excluded rather than counted, since it goes with the
         declaration. Everything else is asked of the model, so a same-named binding in another
@@ -484,12 +515,11 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
             return False
         model = model_cache(self, self._root).model
         binding = model.binding_of(info.decl.id)
-        rewritten = {id(node) for site in plan for node in site.node.walk()}
         return not binding_has_references(
             model,
             binding,
             exclude=info.decl,
-            exclude_ids=rewritten,
+            exclude_ids={id(site.reference) for site in plan},
         )
 
     def _read_direct_call(
@@ -535,7 +565,8 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
             make_undefined_expression() if e is None else e
             for e in elements
         ]
-        return _DispatchSite(seq, key_arg.value, args)
+        assert isinstance(dispatch_call.callee, JsIdentifier)
+        return _DispatchSite(seq, dispatch_call.callee, key_arg.value, args)
 
     def _a_hole_reads_undefined(self) -> bool:
         """
@@ -561,10 +592,10 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
 
         Returns the call node or `None`.
         """
-        call = node
-        if isinstance(node, JsMemberExpression) and info.wrap_key is not None:
-            if access_key(node) == info.wrap_key:
-                call = node.object
+        call = strip_parens(node)
+        if isinstance(call, JsMemberExpression) and info.wrap_key is not None:
+            if access_key(call) == info.wrap_key:
+                call = strip_parens(call.object)
         if not isinstance(call, (JsCallExpression, JsNewExpression)):
             return None
         if not isinstance(call.callee, JsIdentifier):
@@ -602,7 +633,7 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
             return None
         if key_arg.value not in info.fns_map:
             return None
-        return _DispatchSite(member, key_arg.value, None)
+        return _DispatchSite(member, new_expr.callee, key_arg.value, None)
 
     def _read_bare_call(
         self,
@@ -616,9 +647,24 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         A call standing second in a sequence expression is not one of them however it reads here:
         the assignment in front of it is what fills the payload its callee takes its arguments from,
         so rewriting it alone would call that callee with none. It belongs to `_read_direct_call`,
-        which reads the pair, and is left for that one to plan or to refuse whole.
+        which reads the pair, and is left for that one to plan or to refuse whole. The parent is
+        read through any parentheses around the call, since a file that writes the grouping means
+        the same dispatch by it.
+
+        A call whose result is unwrapped on the wrap key is not one of them either: what that
+        member expression denotes is the callee's return value, so replacing the call alone leaves
+        the unwrap standing over a value that carries no such key. This pass has no reading of that
+        form, and an unread dispatch is what `_plan_covers_every_reference` refuses the unwrap on.
         """
-        if isinstance(call.parent, JsSequenceExpression):
+        parent = _governing_parent(call)
+        if isinstance(parent, JsSequenceExpression):
+            return None
+        if (
+            info.wrap_key is not None
+            and isinstance(parent, JsMemberExpression)
+            and strip_parens(parent.object) is call
+            and access_key(parent) == info.wrap_key
+        ):
             return None
         if not isinstance(call.callee, JsIdentifier):
             return None
@@ -631,7 +677,7 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
             return None
         if key_arg.value not in info.fns_map:
             return None
-        return _DispatchSite(call, key_arg.value, [])
+        return _DispatchSite(call, call.callee, key_arg.value, [])
 
     def _remove_boilerplate(self, scope: Node, body: list, info: _DispatcherInfo) -> None:
         """

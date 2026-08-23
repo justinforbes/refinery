@@ -31,6 +31,7 @@ import unittest
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import node_executable
 from test.lib.scripts.js.ledger import (
+    a_walk_of,
     an_accessor_at,
     before_and_after,
     each_program_still_prints,
@@ -413,6 +414,32 @@ A_READ_OF_AN_ABSENT_KEY_BEHIND_AN_UNRESOLVABLE_EVAL = evaluated_in_a_body(
 A_READ_OF_AN_ABSENT_KEY_WITH_NOTHING_BEFORE_IT = evaluated_in_a_body('{a: 1}', 'v.zz')
 
 
+#: A membership test for a name the language does put on the chain, behind the same unresolvable
+#: `eval`, asked inside a body where the interpreter answers it and at the top level where
+#: `simplify` does. A write to a prototype only ever adds a name, but a `delete` takes one off, so a
+#: statement that may have run either is one both sides of the question have to refuse under.
+A_MEMBERSHIP_TEST_FOR_AN_INHERITED_KEY_BEHIND_AN_UNRESOLVABLE_EVAL = (
+    evaluated_in_a_body('{a: 1}', "'toString' in v", 'eval(payload);'),
+    "eval(payload); var o = {}; console.log('toString' in o);",
+)
+
+
+#: The same two questions with the call to `eval` taken out.
+A_MEMBERSHIP_TEST_FOR_AN_INHERITED_KEY_WITH_NOTHING_BEFORE_IT = (
+    evaluated_in_a_body('{a: 1}', "'toString' in v"),
+    "var o = {}; console.log('toString' in o);",
+)
+
+
+#: A `for-in` walk behind the same unresolvable `eval`, and the same walk with it taken out. Such an
+#: `eval` may have put an enumerable name on `Object.prototype`, which every plain object inherits.
+A_WALK_BEHIND_AN_UNRESOLVABLE_EVAL = 'eval(payload);' + returned_from_a_body(
+    "var t = ''; for (var k in {a: 1, b: 2}) t += k; return t;")
+
+A_WALK_WITH_NOTHING_BEFORE_IT = returned_from_a_body(
+    "var t = ''; for (var k in {a: 1, b: 2}) t += k; return t;")
+
+
 #: The same program with the call to `eval` replaced by an ordinary call to the same unresolved
 #: name. Both calls read a name the program never binds; only one of them can install a property.
 A_READ_OF_AN_ABSENT_KEY_BEHIND_AN_ORDINARY_UNRESOLVED_CALL = evaluated_in_a_body(
@@ -454,6 +481,68 @@ class TestAnUnresolvableEvalCostsTheReadsItCouldHaveAnswered(TestBase):
             'console.log(void 0);',
             folded(A_READ_OF_AN_ABSENT_KEY_WITH_NOTHING_BEFORE_IT),
         )
+
+    def test_a_membership_test_for_an_inherited_key_is_left_standing_too(self):
+        """
+        The presence side of the same question. `delete Object.prototype.toString` is a statement
+        such an `eval` may have run, so a name every table here lists is no more certain than a name
+        none of them lists, and both sides are left standing.
+        """
+        self.assertEqual(
+            [folded(source) for source in
+             A_MEMBERSHIP_TEST_FOR_AN_INHERITED_KEY_BEHIND_AN_UNRESOLVABLE_EVAL],
+            [
+                inspect.cleandoc(
+                    """
+                    eval(payload);
+                    function f() {
+                      var v = { a: 1 };
+                      return 'toString' in v;
+                    }
+                    console.log(f());
+                    """
+                ),
+                inspect.cleandoc(
+                    """
+                    eval(payload);
+                    var o = {};
+                    console.log('toString' in o);
+                    """
+                ),
+            ],
+        )
+
+    def test_the_same_membership_tests_fold_with_the_eval_taken_out(self):
+        self.assertEqual(
+            [folded(source) for source in
+             A_MEMBERSHIP_TEST_FOR_AN_INHERITED_KEY_WITH_NOTHING_BEFORE_IT],
+            ['console.log(true);', 'console.log(true);'],
+        )
+
+    def test_a_walk_is_left_standing_behind_an_unresolvable_eval(self):
+        """
+        Such an `eval` may have put an enumerable name on `Object.prototype`, which every plain
+        object inherits, so the own names are no longer the whole of what the walk reaches.
+        """
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                eval(payload);
+                function f() {
+                  var t = '';
+                  for (var k in { a: 1, b: 2 }) {
+                    t += k;
+                  }
+                  return t;
+                }
+                console.log(f());
+                """
+            ),
+            folded(A_WALK_BEHIND_AN_UNRESOLVABLE_EVAL),
+        )
+
+    def test_the_same_walk_folds_with_the_eval_taken_out(self):
+        self.assertEqual("console.log('ab');", folded(A_WALK_WITH_NOTHING_BEFORE_IT))
 
     def test_the_same_read_folds_behind_an_ordinary_call_to_an_unresolved_name(self):
         self.assertEqual(
@@ -670,22 +759,6 @@ class TestATopLevelKeyTheProgramDeletedIsInNothing(TestBase):
         )
 
 
-def _a_walk_of(receiver: str, installs: str = '') -> str:
-    """
-    A script that runs *installs* and then prints the names a `for-in` over *receiver* reaches, in
-    the order it reaches them. The walk is written inside a function body, which is what puts it
-    where the tool answers it at all: the same loop at the top level is left standing.
-
-    The names are joined by appending to a string rather than through `Array.prototype.join`, so
-    that a row installing something on `Array.prototype` asks only about the walk. Called through
-    `join`, such a row comes back unreduced because the call cannot fold, and would report the walk
-    as refused wherever it was in fact answered.
-    """
-    walk = F"var t = ''; for (var k in {receiver}) t += k; return t;"
-    body = returned_from_a_body(walk)
-    return F'{installs}\n{body}' if installs else body
-
-
 #: Programs that put an enumerable name on `Object.prototype` and then walk a receiver with
 #: `for-in`, mapped to what Node prints for each. The four differ in how the write reaches the
 #: prototype and in what the walk runs over: directly, through a name the file bound it to, through
@@ -693,16 +766,16 @@ def _a_walk_of(receiver: str, installs: str = '') -> str:
 #: object literal. Every plain object and every array inherits from `Object.prototype`, so the added
 #: name is reached from all of them.
 A_FOR_IN_WALK_REACHING_A_NAME_THE_CHAIN_WAS_GIVEN = {
-    _a_walk_of('{a: 1}', 'Object.prototype.z = 9;'):
+    a_walk_of('{a: 1}', 'Object.prototype.z = 9;'):
         'az\n',
-    _a_walk_of('{a: 1}', 'var P = Object.prototype; P.z = 9;'):
+    a_walk_of('{a: 1}', 'var P = Object.prototype; P.z = 9;'):
         'az\n',
-    _a_walk_of(
+    a_walk_of(
         '{a: 1}',
         'Object.defineProperty(Object.prototype, "z", {value: 9, enumerable: true});',
     ):
         'az\n',
-    _a_walk_of('[7, 8]', 'Object.prototype.z = 9;'):
+    a_walk_of('[7, 8]', 'Object.prototype.z = 9;'):
         '01z\n',
 }
 
@@ -712,19 +785,19 @@ A_FOR_IN_WALK_REACHING_A_NAME_THE_CHAIN_WAS_GIVEN = {
 #: front of a walk over an object literal, which inherits from `Object.prototype` and not from that
 #: one. All four fold today and a fix has to keep folding them.
 A_FOR_IN_WALK_THE_CHAIN_STILL_ANSWERS = {
-    _a_walk_of('{a: 1, b: 2}'): (
+    a_walk_of('{a: 1, b: 2}'): (
         "console.log('ab');",
         'ab\n',
     ),
-    _a_walk_of('[7, 8]'): (
+    a_walk_of('[7, 8]'): (
         "console.log('01');",
         '01\n',
     ),
-    _a_walk_of('{a: 1, b: 2}', 'Array.prototype.z = 9;'): (
+    a_walk_of('{a: 1, b: 2}', 'Array.prototype.z = 9;'): (
         "Array.prototype.z = 9;\nconsole.log('ab');",
         'ab\n',
     ),
-    _a_walk_of('{a: 1, b: 2}', 'delete Array.prototype.join;'): (
+    a_walk_of('{a: 1, b: 2}', 'delete Array.prototype.join;'): (
         "delete Array.prototype.join;\nconsole.log('ab');",
         'ab\n',
     ),

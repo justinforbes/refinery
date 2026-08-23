@@ -38,7 +38,7 @@ from __future__ import annotations
 import enum
 
 from dataclasses import dataclass, field
-from typing import Callable, Iterator, Sequence
+from typing import Callable, Iterator, NamedTuple, Sequence
 
 from refinery.lib.scripts import Expression, Node
 from refinery.lib.scripts.js.analysis.model import (
@@ -63,6 +63,8 @@ from refinery.lib.scripts.js.model import (
     JsBooleanLiteral,
     JsCallExpression,
     JsConditionalExpression,
+    JsForInStatement,
+    JsForOfStatement,
     JsFunctionDeclaration,
     JsFunctionExpression,
     JsIdentifier,
@@ -323,6 +325,22 @@ _INHERITED_CHAIN_ROOTS = frozenset({'Object'})
 The prototypes every value inherits from beyond the one that owns its own methods. `Object.prototype` roots
 every chain, so a getter installed there is reached by a plain read on an array literal and on `Math`
 alike — which is why reading a property is a strictly stronger requirement than calling a method.
+"""
+
+_KEYED_WRITE_ROOTS = (
+    _PURE_INTRINSIC_ROOTS
+    | _INHERITED_CHAIN_ROOTS
+    | frozenset(_PROTOTYPE_OWNERS.values())
+)
+"""
+The global names whose written property keys `EffectModel.global_key_written` bounds. A name outside
+this set is one the scan records no key for, so answering `False` about it would read an absence of
+evidence as evidence of absence; that predicate answers `True` for every key of such a name instead.
+
+The set is the union of the names this module already watches for a reason: the intrinsics whose
+methods are trusted, the roots a plain property read walks through, and the owners of the prototypes
+that supply each value type's members. A caller asking about a name outside it is asking a question
+this scan was not built to answer, and is told so.
 """
 
 _INTRINSIC_CHAIN_ROOTS = frozenset({'Object', 'Function'})
@@ -811,8 +829,7 @@ class EffectModel:
         self.model = model
         self.intrinsics_pristine = _intrinsics_pristine(model)
         self.global_pristine = _global_pristine(model)
-        self._globals_written = _globals_written_by_name(model)
-        self._global_keys_written = _global_keys_written_by_name(model)
+        self._globals_written, self._global_keys_written = _global_writes_by_name(model)
         self._summaries: dict[int, EffectSummary] = {}
         self._confine_cache: dict[int, Node | None] = {}
         self._immutable_cache: dict[tuple[int, bool], bool] = {}
@@ -1748,7 +1765,7 @@ class EffectModel:
         The owning intrinsic is looked up rather than assumed, and then asked the same per-name question a
         named callee gets — `String.prototype.toUpperCase = f` and
         `Object.defineProperty(Array.prototype, ...)` are both already recorded as writes to `String` and
-        `Array` by `_globals_written_by_name`. A type with no known owner is never trusted.
+        `Array` by `_global_writes_by_name`. A type with no known owner is never trusted.
         """
         owner = _PROTOTYPE_OWNERS.get(value_type.__name__)
         if owner is None:
@@ -1769,23 +1786,34 @@ class EffectModel:
         The write is attributed to a *name* rather than to a receiver, which is what makes it
         answerable at all: the receiver of `Object.prototype.constructor = C` is a value no static
         analysis names, while the chain it is written through is rooted in one that is. A name whose
-        written keys cannot be bounded — one the program writes a computed key on, or installs a
-        descriptor on from a value this analysis cannot read — answers `True` for every key.
+        written keys cannot be bounded — one the program binds, hands to code this analysis cannot
+        read, writes a computed key on, or installs a descriptor on from a value it cannot read —
+        answers `True` for every key, and so does a name outside `_KEYED_WRITE_ROOTS`, which the
+        scan records nothing about at all.
         """
-        if name not in self._global_keys_written:
-            return False
-        keys = self._global_keys_written[name]
+        if name not in _KEYED_WRITE_ROOTS:
+            return True
+        keys = self._global_keys_written.get(name, frozenset())
         return keys is None or key in keys
+
+    def _roots_unwritten(self, owner: str, roots: frozenset[str]) -> bool:
+        """
+        Whether the program writes neither *owner* nor any prototype in *roots*. A property read
+        resolves against the whole prototype chain rather than one prototype, so each name the chain
+        passes through has to answer the same question `trusted_prototype` asks of the owner alone.
+        """
+        return all(name not in self._globals_written for name in (owner, *roots))
 
     def _prototypes_intact(self, owner: str, roots: frozenset[str]) -> bool:
         """
-        Whether *owner* and every prototype in *roots* are all provably unmodified. A property read
-        resolves against the whole prototype chain rather than one prototype, so each name the chain passes
-        through has to answer the same question `trusted_prototype` asks of the owner alone.
+        `_roots_unwritten` with the reflection term, which is what separates the two questions
+        `read_chain_intact` and `chain_roots_unwritten` ask. Neither is spelled out twice, so a
+        term added to one chain question reaches both arms rather than only the one it was
+        written into.
         """
         if self.model.has_reflection_surface():
             return False
-        return all(name not in self._globals_written for name in (owner, *roots))
+        return self._roots_unwritten(owner, roots)
 
     def read_chain_intact(self, value_type: type) -> bool:
         """
@@ -1820,14 +1848,16 @@ class EffectModel:
         code could reference a global *by name* — true of `new Function('return this')`, which
         writes no prototype at all.
 
-        The distinction is what the answer costs where it is wrong. A caller folding one read pays
-        an unfolded expression for refusing, so it may as well refuse under a surface. A caller
-        deciding whether a whole pass may run pays the pass, and a reflective surface is exactly
-        what the real obfuscated files carry: measured on the samples this project tests against,
-        the surface is present in the input and gone from the finished output, so a pass gated on it
-        never runs and never clears the surface that was gating it. Those callers take this arm and
-        accept that an unresolvable `eval` could in principle have written a prototype — which is no
-        worse than the nothing they asked before.
+        The distinction is what the answer costs where it is wrong, and it decides who may ask this
+        rather than being a judgement each caller makes for itself. A caller folding one expression
+        pays an unfolded expression for refusing, so it may as well refuse under a surface, and
+        every one of them asks `read_chain_intact`. A caller deciding whether a whole *pass* may run
+        pays the pass, and a reflective surface is exactly what the real obfuscated files carry:
+        measured on the samples this project tests against, the surface is present in the input and
+        gone from the finished output, so a pass gated on it never runs and never clears the surface
+        that was gating it. Only those callers ask this — today namespace flattening and the
+        dispatcher unwrapper — and they accept that an unresolvable `eval` could in principle have
+        written a prototype, which is no worse than the nothing they asked before.
 
         The two facts separate cleanly on the evidence rather than by assumption: every program in
         the defect ledger that reaches a wrong answer here writes a chain root and has no reflective
@@ -1836,10 +1866,7 @@ class EffectModel:
         owner = _PROTOTYPE_OWNERS.get(value_type.__name__)
         if owner is None:
             return False
-        return all(
-            name not in self._globals_written
-            for name in (owner, *_INHERITED_CHAIN_ROOTS)
-        )
+        return self._roots_unwritten(owner, _INHERITED_CHAIN_ROOTS)
 
     def call_is_foldable(
         self,
@@ -2256,12 +2283,30 @@ def _body_nodes(func: Node) -> Iterator[Node]:
         stack.extend(reversed(node.children()))
 
 
-def _globals_written_by_name(model: SemanticModel) -> frozenset[str]:
+class _GlobalWrites(NamedTuple):
     """
-    The set of global names the program does anything with beyond reading them: binding the name in any
-    scope, assigning to it, writing or updating or deleting a property anywhere along a chain rooted at it
-    (`Object.prototype.x = 1`, `Math.PI++`), or installing a descriptor on it with
-    `Object.defineProperty`.
+    What one scan of a program says about the globals it writes: *names*, the set a caller asks
+    about a whole name with, and *keys*, the properties each of the watched names was written at —
+    or `None` for a name whose written keys this scan cannot bound.
+
+    The two are produced together because they are read off the same nodes and must not disagree:
+    a name recorded in one for a reason the other cannot express is a name one caller refuses and
+    the other clears. Where a write cannot be pinned to a key, *keys* records the name unbounded
+    rather than omitting it, so `keys` never reports less about a name than `names` does.
+    """
+    names: frozenset[str]
+    keys: dict[str, frozenset[str] | None]
+
+
+def _global_writes_by_name(model: SemanticModel) -> _GlobalWrites:
+    """
+    The set of global names the program does anything with beyond reading them, and the property
+    keys it writes on each of the names whose keys are watched.
+
+    A name belongs to the first for binding it in any scope, assigning to it, writing or updating or
+    deleting a property anywhere along a chain rooted at it (`Object.prototype.x = 1`,
+    `Math.PI++`), installing a descriptor on it with `Object.defineProperty`, or handing it to
+    code whose writes this analysis cannot enumerate.
 
     This is the per-name counterpart of `_intrinsics_pristine`, which answers the same question for a
     fixed root set but collapses it to one program-wide flag. Keeping the answer per name is what lets a
@@ -2281,67 +2326,51 @@ def _globals_written_by_name(model: SemanticModel) -> frozenset[str]:
     whose writes this analysis cannot enumerate — `patch(Math)` for a `patch` it cannot resolve — leaves
     the name looking untouched while its properties are replaced, so an intrinsic that escapes is recorded
     as written. `_value_escapes` decides which uses hand the value over.
+
+    The keyed answer is the same scan read for the property a write names rather than only for the
+    name it is rooted at, and it exists because the per-name question is too coarse for a caller
+    that cares which property was replaced — a file patching `Object.prototype.z` has written
+    `Object`, and refusing everything about `Object` on that basis refuses the very files the
+    question is asked about.
+
+    Only the *final* key of a chain is recorded, which is the one a write replaces:
+    `Object.prototype.z = 9` replaces `z` and leaves `prototype` and `constructor` alone, so
+    recording the keys it passes through would report a file as having patched the mechanism a
+    caller is asking about when it did nothing of the kind. Every other route by which a name's
+    properties can change — a binding that shadows it, a value that escapes, a computed key, a
+    descriptor read from a value this analysis cannot read — bounds no key at all and is recorded as
+    unbounded.
     """
-    written: set[str] = set()
+    names: set[str] = set()
+    keys: dict[str, set[str] | None] = {}
+
+    def record_keys(found: frozenset[str], key: str | None) -> None:
+        for name in found & _KEYED_WRITE_ROOTS:
+            if key is None:
+                keys[name] = None
+                continue
+            known = keys.setdefault(name, set())
+            if known is not None:
+                known.add(key)
+
+    def record(found: frozenset[str], key: str | None) -> None:
+        names.update(found)
+        record_keys(found, key)
+
     pending = [model.root_scope]
     while pending:
         scope = pending.pop()
-        written.update(scope.bindings)
+        record(frozenset(scope.bindings), None)
         pending.extend(scope.children)
     aliases = _IntrinsicAliases(model)
     for node in model.root.walk():
         if isinstance(node, JsIdentifier):
             if reference_role(node) is Role.READ:
-                names = aliases.names_denoted_by(node) & _PURE_INTRINSIC_ROOTS
-                if names and _value_escapes(model, aliases, node, names):
-                    written.update(names)
+                watched = aliases.names_denoted_by(node) & _KEYED_WRITE_ROOTS
+                if watched and _value_escapes(model, aliases, node, watched):
+                    record_keys(watched, None)
+                    names.update(watched & _PURE_INTRINSIC_ROOTS)
             continue
-        if isinstance(node, JsCallExpression):
-            for base in _accessor_install_targets(node):
-                written.update(aliases.names_denoted_by(base))
-            continue
-        target = None
-        if isinstance(node, JsAssignmentExpression):
-            target = node.left
-        elif isinstance(node, JsUpdateExpression):
-            target = node.argument
-        elif isinstance(node, JsUnaryExpression) and node.operator == 'delete':
-            target = node.operand
-        base = _member_chain_root(target)
-        if base is not None:
-            written.update(aliases.names_denoted_by(base))
-    return frozenset(written)
-
-
-def _global_keys_written_by_name(model: SemanticModel) -> dict[str, frozenset[str] | None]:
-    """
-    For each global name the program writes a property on, the set of keys it writes there, or `None`
-    where that set cannot be bounded. This is `_globals_written_by_name` keeping what that function
-    discards: the same write targets, read for the property they name rather than only for the name
-    they are rooted at.
-
-    Only the *final* key of a chain is recorded, which is the one a write replaces:
-    `Object.prototype.z = 9` replaces `z` and leaves `prototype` and `constructor` alone, so
-    recording the keys it passes through would report a file as having patched the mechanism a
-    caller is asking about when it did nothing of the kind.
-
-    Binding the name, or assigning to it bare, is not a property write and is not recorded here —
-    `_globals_written` is where that belongs, and a caller that cares whether the name still denotes
-    the intrinsic has to ask the model for its bindings. This answers only what was written *on* it.
-    """
-    written: dict[str, frozenset[str] | None] = {}
-    aliases = _IntrinsicAliases(model)
-
-    def record(names: frozenset[str], key: str | None) -> None:
-        for name in names:
-            if key is None:
-                written[name] = None
-                continue
-            known = written.get(name, frozenset())
-            if known is not None:
-                written[name] = known | {key}
-
-    for node in model.root.walk():
         if isinstance(node, JsCallExpression):
             for base in _accessor_install_targets(node):
                 record(aliases.names_denoted_by(base), _installed_key(node))
@@ -2353,13 +2382,33 @@ def _global_keys_written_by_name(model: SemanticModel) -> dict[str, frozenset[st
             target = node.argument
         elif isinstance(node, JsUnaryExpression) and node.operator == 'delete':
             target = node.operand
-        base = _member_chain_root(target)
-        if base is None:
-            continue
-        target = strip_parens(target)
-        key = _written_key(target) if isinstance(target, JsMemberExpression) else None
-        record(aliases.names_denoted_by(base), key)
-    return written
+        elif isinstance(node, (JsForInStatement, JsForOfStatement)):
+            target = node.left
+        for member in _written_members(target):
+            base = _member_chain_root(member)
+            if base is not None:
+                record(aliases.names_denoted_by(base), _written_key(member))
+    return _GlobalWrites(
+        frozenset(names),
+        {name: None if written is None else frozenset(written) for name, written in keys.items()},
+    )
+
+
+def _written_members(target: Node | None) -> Iterator[JsMemberExpression]:
+    """
+    Every member access a write to *target* may store through. A plain member target is that one
+    access; a pattern holds one per position it assigns into, which `[Object.prototype.z] = [9]` and
+    `({k: Object.prototype.z} = o)` both write a property through while naming no member target at
+    the top. A pattern is read by walking it, so a member standing in a computed key inside one is
+    yielded too — which over-reports a write and is the direction this whole scan fails in.
+    """
+    cursor = strip_parens(target)
+    if isinstance(cursor, JsMemberExpression):
+        yield cursor
+    elif cursor is not None and not isinstance(cursor, JsIdentifier):
+        for node in cursor.walk():
+            if isinstance(node, JsMemberExpression):
+                yield node
 
 
 def _written_key(member: JsMemberExpression) -> str | None:
@@ -2578,7 +2627,7 @@ def _unambiguous_callee(
     The function *call* certainly invokes for a consumer that cannot order the call against a reassignment
     of the callee's name, or `None`. The module-scope form of `EffectModel.unambiguous_callee`, which
     delegates here: the answer needs only the model, so a caller that runs before an `EffectModel`'s caches
-    exist — `_globals_written_by_name` is computed during construction — can still ask it.
+    exist — `_global_writes_by_name` is computed during construction — can still ask it.
     """
     callee = call.callee
     if isinstance(callee, (JsFunctionExpression, JsArrowFunctionExpression)):

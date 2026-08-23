@@ -37,12 +37,12 @@ from test.lib.scripts.js.deobfuscation.test_array_length_reads import (
     A_COUNT_THE_FOLD_DOES_NOT_REACH,
 )
 from test.lib.scripts.js.ledger import (
+    a_walk_of,
     an_accessor_at,
     before_and_after,
     each_program_still_prints,
     folded,
     printed,
-    returned_from_a_body,
     well_formed,
 )
 from test.lib.scripts.js.test_parameter_grammar import (
@@ -1664,16 +1664,6 @@ def _reads_named_type(source: str) -> int:
     )
 
 
-def _a_walk_of(receiver: str, installs: str) -> str:
-    """
-    A script that runs *installs* and then prints the names a `for-in` over *receiver* reaches, the
-    same shape `test.lib.scripts.js.deobfuscation.test_inherited_reads` states the law of the walk
-    with.
-    """
-    body = returned_from_a_body(F"var t = ''; for (var k in {receiver}) t += k; return t;")
-    return F'{installs}\n{body}'
-
-
 #: Programs whose `for-in` walk the language alone decides although the file wrote a prototype,
 #: mapped to what Node prints for each. A property installed with `Object.defineProperty` and no
 #: `enumerable` is not enumerable, and neither is an accessor installed the same way, so neither
@@ -1681,13 +1671,13 @@ def _a_walk_of(receiver: str, installs: str) -> str:
 #: shadows an inherited one of the same name, so a receiver holding its own `z` walks `z` once
 #: whatever `Object.prototype` holds.
 A_WALK_A_WRITTEN_CHAIN_STILL_DECIDES = {
-    _a_walk_of('{a: 1}', 'Object.defineProperty(Object.prototype, "z", {value: 9});'):
+    a_walk_of('{a: 1}', 'Object.defineProperty(Object.prototype, "z", {value: 9});'):
         'a\n',
-    _a_walk_of('{a: 1}', an_accessor_at('Object.prototype', 'z')):
+    a_walk_of('{a: 1}', an_accessor_at('Object.prototype', 'z')):
         'a\n',
-    _a_walk_of('{a: 1}', 'delete Object.prototype.toString;'):
+    a_walk_of('{a: 1}', 'delete Object.prototype.toString;'):
         'a\n',
-    _a_walk_of('{z: 1, a: 2}', 'Object.prototype.z = 9;'):
+    a_walk_of('{z: 1, a: 2}', 'Object.prototype.z = 9;'):
         'za\n',
 }
 
@@ -1759,4 +1749,54 @@ class TestAReadAWrittenChainDoesNotReachIsStillAnswered(TestBase):
         self.assertEqual(
             {source: folded(source) for source in rows},
             A_READ_A_WRITTEN_CHAIN_DOES_NOT_REACH,
+        )
+
+
+#: Programs that disable one of the mechanisms a prototype spelling goes through by writing it
+#: through another such spelling, mapped to what Node prints for each. The first replaces the
+#: `constructor` every plain object inherits, and the second replaces the `__proto__` accessor with
+#: an own data property that shadows it; both write `Object.prototype` without naming `Object`.
+A_MECHANISM_WRITTEN_THROUGH_A_SPELLING_OF_ITS_OWN = {
+    'function C() {}\nC.prototype.q = 5;\n({}).__proto__.constructor = C;'
+    '\nconsole.log(({}).constructor.prototype.q);':
+        '5\n',
+    'Object.defineProperty(({}).constructor.prototype, "__proto__", {value: 1});'
+    '\n({}).__proto__.z = 9;\nconsole.log(({}).z);':
+        'undefined\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAMechanismWrittenThroughASpellingIsStillWritten(TestBase):
+    """
+    `refinery.lib.scripts.js.deobfuscation.protospelling` gates each rewrite on
+    `refinery.lib.scripts.js.analysis.effects.EffectModel.global_key_written`, which attributes a
+    write to the name at the root of the chain it is written through. A chain rooted in a literal is
+    attributed to no name, which is the whole reason the pass exists, so a write that disables one
+    spelling's mechanism, made through another spelling, is invisible to the gate that would have
+    refused it. The pass then rewrites a read of a mechanism the file had already replaced.
+
+    Rewriting the write first does not close it. The gate is a question about the whole program and
+    the write may stand anywhere, before or after the read, so no order of rewrites answers it: the
+    facts have to be complete before the first rewrite is decided.
+
+    Closing it means attributing the write rather than rewriting it — teaching
+    `refinery.lib.scripts.js.analysis.effects` that a member chain rooted in a literal receiver is
+    rooted at the name `_PROTOTYPE_OWNERS` gives that receiver's prototype, so that one model build
+    sees both spellings. The same step answers `var a = {}; a.__proto__.z = 9`, which
+    `test.lib.scripts.js.test_release_blockers` records the pass as unable to read.
+    """
+
+    @unittest.expectedFailure
+    def test_a_mechanism_written_through_a_spelling_is_still_written(self):
+        """
+        Node prints `5` and `undefined` for the two programs of
+        `A_MECHANISM_WRITTEN_THROUGH_A_SPELLING_OF_ITS_OWN`, and each deobfuscation prints the
+        same. Each comes back having rewritten a read whose mechanism the file replaced, and prints
+        the answer that read has with the mechanism left alone.
+        """
+        rows = A_MECHANISM_WRITTEN_THROUGH_A_SPELLING_OF_ITS_OWN
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
         )

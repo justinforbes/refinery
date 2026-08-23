@@ -221,3 +221,106 @@ class TestADispatcherPayloadHoleIsTheChainsToAnswer(TestBase):
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
         )
+
+
+#: Programs whose dispatch is written inside another dispatch's payload, mapped to what Node prints
+#: for each. The direct-call rewrite carries the payload elements into the call it builds, so a
+#: dispatch standing in one is not taken away with the dispatch it is an argument of: the first row
+#: is one this pass can read and has to rewrite as well, and the second is one it cannot, which
+#: leaves a call the declaration is still needed for.
+A_DISPATCH_WRITTEN_INTO_ANOTHER_DISPATCHS_PAYLOAD = {
+    a_dispatcher(
+        dict_lines=[
+            '"f1": function() { var [a] = p; return "A" + a; },',
+            '"f2": function() { var [b] = p; return "B" + b; }',
+        ],
+        tail_lines=['console.log((p = [(p = ["x"], d("f1"))], d("f2")));'],
+    ): 'BAx\n',
+    a_dispatcher(
+        dict_lines=[
+            '"f1": function() { var [a] = p; return "A" + a; },',
+            '"f2": function() { var [b] = p; return "B" + b; }',
+        ],
+        tail_lines=[
+            'var k = "f" + 1;',
+            'console.log((p = [(p = ["x"], d(k))], d("f2")));',
+        ],
+    ): 'BAx\n',
+}
+
+
+#: Dispatches written in forms this pass reads only in part, mapped to what Node prints for each.
+#: The first two unwrap the return value on the wrap key, which is the callee's result rather than
+#: the callee, and the third writes the ordinary payload pair with a grouping around the call.
+#: Reading any of them as a bare zero-argument dispatch calls the callee with no arguments at all.
+#: The second stands where the payload pair is refused, which is what leaves the unwrap to be read
+#: by whoever else claims the call inside it.
+A_DISPATCH_SPELLED_AROUND_THE_CALL = {
+    a_dispatcher(
+        dict_lines=['"f1": function() { return 5; }'],
+        tail_lines=['console.log(d("f1", "x", "wrapF")["wk"]);'],
+    ): '5\n',
+    "Array.prototype[1] = 'X';\n" + a_dispatcher(
+        dict_lines=['"f1": function() { var [a, b, c] = p; return a + b + c; }'],
+        tail_lines=['console.log((p = ["first", , "third"], d("f1", "x", "wrapF")["wk"]));'],
+    ): 'firstXthird\n',
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a, b, c] = p; return a + b + c; }'],
+        tail_lines=['console.log((p = ["a", "b", "c"], (d("f1"))));'],
+    ): 'abc\n',
+}
+
+
+#: A dispatcher one of whose table entries this pass cannot extract, mapped to what Node prints for
+#: it. The second entry destructures the payload with a hole in it, which `_extract_params` refuses,
+#: and the first is an entry the extraction would otherwise take the payload destructuring out of.
+A_TABLE_HOLDING_AN_ENTRY_THAT_CANNOT_BE_EXTRACTED = {
+    a_dispatcher(
+        dict_lines=[
+            '"f1": function() { var [a, b] = p, x = 1; return a + b + x; },',
+            '"f2": function() { var [c, , e] = p; return c + e; }',
+        ],
+        tail_lines=['console.log((p = [1, 2], d("f1")));'],
+    ): '4\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestEveryDispatchThroughADispatcherIsAccountedFor(TestBase):
+    """
+    Removing the declaration is right exactly while no reference to it survives, so the plan has to
+    account for each reference one by one. A dispatch nested in a payload is the shape that shows
+    it: what the rewrite of the outer dispatch does with that payload is carry it over, so the
+    inner dispatch is still there afterwards and is either rewritten too or is a reason to refuse.
+    """
+
+    def test_a_dispatch_written_into_another_dispatchs_payload_is_accounted_for(self):
+        rows = A_DISPATCH_WRITTEN_INTO_ANOTHER_DISPATCHS_PAYLOAD
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_dispatch_spelled_around_the_call_is_not_read_as_a_bare_one(self):
+        rows = A_DISPATCH_SPELLED_AROUND_THE_CALL
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestATableEntryIsExtractedWithoutBeingTakenApart(TestBase):
+    """
+    Extraction is attempted for every entry of a table before any of them is installed, and an
+    entry this pass cannot read is a reason to abandon the whole unwrap. What it must not be is a
+    reason to abandon it half done: an entry built from the statements of the table entry itself
+    would leave that entry stripped of the payload destructuring its body still reads.
+    """
+
+    def test_an_entry_that_cannot_be_extracted_leaves_the_table_as_it_stands(self):
+        rows = A_TABLE_HOLDING_AN_ENTRY_THAT_CANNOT_BE_EXTRACTED
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )

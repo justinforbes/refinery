@@ -60,6 +60,22 @@ def returned_from_a_body(body: str) -> str:
     return F'function f() {{ {body} }}\nconsole.log(f());\n'
 
 
+def a_walk_of(receiver: str, installs: str = '') -> str:
+    """
+    A script that runs *installs* and then prints the names a `for-in` over *receiver* reaches, in
+    the order it reaches them. The walk is written inside a function body, which is what puts it
+    where the tool answers it at all: the same loop at the top level is left standing.
+
+    The names are joined by appending to a string rather than through `Array.prototype.join`, so
+    that a row installing something on `Array.prototype` asks only about the walk. Called through
+    `join`, such a row comes back unreduced because the call cannot fold, and would report the walk
+    as refused wherever it was in fact answered.
+    """
+    walk = F"var t = ''; for (var k in {receiver}) t += k; return t;"
+    body = returned_from_a_body(walk)
+    return F'{installs}\n{body}' if installs else body
+
+
 def an_accessor_at(prototype: str, key: str) -> str:
     """
     A statement installing a getter at *key* on *prototype* that answers `'G'`. A read the prototype
