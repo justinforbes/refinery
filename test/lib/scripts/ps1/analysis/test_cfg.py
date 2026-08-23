@@ -1022,10 +1022,26 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
         tree, graph = self._tree_and_graph("trap { 'handled'\ncontinue }\n'one'\n'two'")
         handled = self._required_node(graph, tree.body[0].body.body[0])
         forward = reachable_forward_from_any(graph, [handled])
-        self.assertTrue(graph.is_hub_bound(handled))
-        self.assertFalse(graph.is_hub_bound(self._required_node(graph, tree.body[1])))
+        self.assertTrue(handled.is_hub_bound)
+        self.assertFalse(self._required_node(graph, tree.body[1]).is_hub_bound)
         self.assertIn(id(self._required_node(graph, tree.body[1])), forward)
         self.assertIn(id(self._required_node(graph, tree.body[2])), forward)
+
+    def test_a_forward_flood_refuses_a_source_belonging_to_another_body(self):
+        """
+        The precondition, made a refusal rather than a comment. Both facts the walk reads are
+        recorded per graph, so a node of another body reads as neither a hub nor hub-bound and the
+        walk takes the precise route over what this graph calls plain flow — the fail-open direction,
+        and one no caller could see going wrong.
+        """
+        tree = Ps1Parser("trap { continue }\nfunction f { 'in' }\n'out'").parse()
+        graphs = build_ps1_control_flow(tree)
+        script = graphs[id(tree)]
+        definition = next(
+            node for node in tree.walk() if isinstance(node, Ps1FunctionDefinition))
+        inside = self._required_node(graphs[id(definition.body)], definition.body.body[0])
+        with self.assertRaises(ValueError):
+            reachable_forward_from_any(script, [inside])
 
     def test_a_resumption_edge_is_taken_on_a_throw_and_carries_no_error(self):
         """
@@ -1036,7 +1052,7 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
         """
         tree, graph = self._tree_and_graph("trap { continue }\n'one'\n'two'")
         one = self._required_node(graph, tree.body[1])
-        hub, = (target for target in one.predecessors if graph.is_resumption_hub(target))
+        hub, = (target for target in one.predecessors if target.is_resumption_hub)
         forward, = (
             target for target in one.successors
             if graph.edge_kind(one, target) is CfgEdge.RESUMPTION_FORWARD
@@ -1055,7 +1071,7 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
         """
         tree, graph = self._tree_and_graph("trap { $x = 'b'\ncontinue }\n'one'")
         jump = self._node_for(graph, Ps1ContinueStatement)
-        hub, = (target for target in jump.successors if graph.is_resumption_hub(target))
+        hub, = (target for target in jump.successors if target.is_resumption_hub)
         self.assertFalse(graph.raise_taken(jump, hub))
         self.assertTrue(graph.raise_taken(hub, self._required_node(graph, tree.body[1])))
 
@@ -1088,7 +1104,7 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
                 stranded: list[str] = []
                 for graph in self._graphs(source).values():
                     for landing in self._resumption_landings(graph):
-                        if graph.is_hub_bound(landing):
+                        if landing.is_hub_bound:
                             continue
                         if any(
                             graph.edge_kind(landing, target) & CfgEdge.RESUMPTION_FORWARD
@@ -1125,7 +1141,7 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
                         for statement in trap.body.walk():
                             node = graph.node_of(statement)
                             if node is not None:
-                                self.assertTrue(graph.is_hub_bound(node))
+                                self.assertTrue(node.is_hub_bound)
 
     def test_a_guarded_statement_forward_reaches_every_statement_below_it(self):
         """

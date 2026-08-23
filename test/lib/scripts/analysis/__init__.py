@@ -16,7 +16,7 @@ def graph_from_edges(edges: dict[str, list[str]]) -> tuple[ControlFlowGraph, dic
     """
     graph = ControlFlowGraph(Script())
     graph.nodes.clear()
-    named = {name: CfgNode(None) for name in edges}
+    named = {name: CfgNode(graph, None) for name in edges}
     graph.entry = named[next(iter(edges))]
     graph.nodes.extend(named.values())
     for name, successors in edges.items():

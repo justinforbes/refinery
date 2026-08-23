@@ -36,7 +36,12 @@ from __future__ import annotations
 from typing import Iterator
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
+from refinery.lib.scripts.analysis.cfg import (
+    CfgNode,
+    ControlFlowGraph,
+    ControlFlowModel,
+    flood,
+)
 
 
 def _reverse_postorder(graph: ControlFlowGraph) -> list[CfgNode]:
@@ -295,18 +300,12 @@ class DominatorModel:
         """
         The ids of the control-flow nodes reachable from *start* — over successor edges when
         *forward*, over predecessor edges otherwise — including *start* itself. Exceptional edges are
-        followed like any other, since they live in the same successor and predecessor lists.
+        followed like any other, since they live in the same successor and predecessor lists, and so
+        is the resumption hub: this is the *may* reading, which a caller asking whether two points
+        can be ordered has to have.
 
         The two directions are kept separate rather than offered as one path-between query because a
         caller intersecting them memoizes each side independently: one definition is asked against
         many uses, and the forward set from the definition is the same every time.
         """
-        seen: set[int] = {id(start)}
-        stack = [start]
-        while stack:
-            node = stack.pop()
-            for neighbour in (node.successors if forward else node.predecessors):
-                if id(neighbour) not in seen:
-                    seen.add(id(neighbour))
-                    stack.append(neighbour)
-        return seen
+        return flood([start], forward=forward, projected=False)

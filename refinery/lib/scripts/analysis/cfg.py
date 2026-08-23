@@ -110,7 +110,14 @@ class CfgNode:
     """
     One vertex of a control-flow graph. `element` is the AST node it stands for — a statement, or a
     loop-head expression whose reads and writes occur at this point — or `None` for the synthetic
-    entry and exit. `successors` lists the nodes control may pass to next.
+    entry and exit. `successors` lists the nodes control may pass to next. `graph` is the body this
+    vertex belongs to, which is what makes the questions below answerable of a node alone.
+
+    Those questions are properties of the *node*, and every layer that had to ask them of a graph it
+    was separately handed could be handed the wrong one: a node lifted from a nested body reads as
+    neither a hub nor hub-bound against the graph around it, and the walk that asked takes the wrong
+    branch without anything failing. The facts are recorded on the graph, because the builder that
+    knows them holds one, and they are read here.
 
     `eq=False` is load bearing. Every map in every layer above is keyed by `id(node)`, and two
     structurally equal statements are two distinct points in the program.
@@ -121,20 +128,67 @@ class CfgNode:
     interpreter's stack, and a handful of branches produces megabytes. A debugger, a failing
     assertion, or `pytest --showlocals` would print one.
     """
+    graph: ControlFlowGraph
     element: Node | None
     successors: list[CfgNode] = field(default_factory=list)
     predecessors: list[CfgNode] = field(default_factory=list)
 
+    @property
+    def is_resumption_hub(self) -> bool:
+        """
+        Whether this is the synthetic fan-out standing for the over-approximate half of a resuming
+        handler — see `CfgEdge`. A walk that wants only the paths going forward declines to enter
+        one, and declines to leave one, which makes it a *projection* of the graph rather than a
+        filter on its edges.
 
-def reachable_from_any(sources: Iterable[CfgNode]) -> frozenset[int]:
+        The question is asked of the node rather than of the edges into it, because an edge kind is
+        keyed by the pair of nodes it joins and `CfgBuilder.add_edge` builds a multigraph: two edges
+        between the same pair collapse to one entry, so a plain edge drawn beside a hub edge would
+        make the pair read as pure hub and a walk keyed on the kind would decline the plain path
+        too. The node is the thing that is or is not a hub, and no pair of edges can disagree about
+        it.
+        """
+        return id(self) in self.graph._resumption_hubs
+
+    @property
+    def is_hub_bound(self) -> bool:
+        """
+        Whether the precise, forward-only projection of resumption does not reach this node — it
+        sits inside a handler body that resumes the block around it. That block's forward edges join
+        each *guarded* statement to the one it resumes at; a statement of the handler itself is on
+        neither end of one, and everything it may reach afterwards hangs off the hub. A forward edge
+        it does carry belongs to a block further out — one whose own resuming set guards the
+        statement this handler is written inside — and stands for that block's resumption, not this
+        one, so it says nothing about where this handler carries on.
+
+        A forward-only walk seeded here would therefore stop dead where the real run carries on,
+        which for a flood is the unsound direction. `reachable_forward_from_any` reads this and
+        falls back to the hub for such a source.
+        """
+        return id(self) in self.graph._hub_bound
+
+
+def flood(sources: Iterable[CfgNode], *, forward: bool, projected: bool) -> set[int]:
     """
-    The ids of the nodes forward-reachable from *any* of *sources*, each source included — every
-    path the graph draws, whatever an edge means. A raw walk over successor edges, which is why it
-    lives with the graph rather than on any model built over it.
+    The ids of the nodes reachable from *any* of *sources*, each source included: over successor
+    edges when *forward* and over predecessor edges otherwise, and over the projection that declines
+    the resumption hub when *projected*.
 
-    A flood over a graph that may carry resumption edges wants `reachable_forward_from_any` instead:
-    this walk follows the resumption hub, which claims a statement is reached from every later one
-    of its block, so one leak anywhere in a trap-guarded script poisons the whole of it.
+    The one walk every reachability question over these graphs is asked through, so that a caller
+    choosing a direction or a projection chooses it by naming an argument rather than by writing a
+    fourth copy of the sweep that quietly disagrees with the other three about what an edge means.
+    Neither dimension has a default: `forward` decides whether the answer is *what this reaches* or
+    *what reaches this*, and `projected` decides whether a resumption is read as going forward only
+    or as going anywhere in its block. A caller that did not think about either asked the wrong
+    question.
+
+    Declining the hub declines it as a *node*, in both directions. Filtering the edges instead would
+    let a walk cross a hub the moment some other edge joined the same pair, and would leave a
+    backward walk inside hubs it can never leave.
+
+    The hub-bound fallback is **not** applied here — `reachable_forward_from_any` applies it. It is
+    a property of a *source*, not of the walk, and a walk applying it to every node it met would
+    follow the hub out of any handler body it happened to pass through.
 
     Walked as one depth-first sweep seeded with every source rather than a union of per-source
     walks: the union grows the same answer at the cost of one full walk per source, where a single
@@ -149,11 +203,26 @@ def reachable_from_any(sources: Iterable[CfgNode]) -> frozenset[int]:
             stack.append(source)
     while stack:
         node = stack.pop()
-        for successor in node.successors:
-            if id(successor) not in seen:
-                seen.add(id(successor))
-                stack.append(successor)
-    return frozenset(seen)
+        for neighbour in (node.successors if forward else node.predecessors):
+            if id(neighbour) in seen:
+                continue
+            if projected and neighbour.is_resumption_hub:
+                continue
+            seen.add(id(neighbour))
+            stack.append(neighbour)
+    return seen
+
+
+def reachable_from_any(sources: Iterable[CfgNode]) -> frozenset[int]:
+    """
+    The ids of the nodes forward-reachable from *any* of *sources*, each source included — every
+    path the graph draws, whatever an edge means.
+
+    A flood over a graph that may carry resumption edges wants `reachable_forward_from_any` instead:
+    this walk follows the resumption hub, which claims a statement is reached from every later one
+    of its block, so one leak anywhere in a trap-guarded script poisons the whole of it.
+    """
+    return frozenset(flood(sources, forward=True, projected=False))
 
 
 class ControlFlowGraph:
@@ -164,15 +233,15 @@ class ControlFlowGraph:
 
     def __init__(self, owner: Node):
         self.owner = owner
-        self.entry = CfgNode(None)
-        self.exit = CfgNode(None)
-        self.nodes: list[CfgNode] = [self.entry, self.exit]
         self._node_of: dict[int, CfgNode] = {}
         self._edge_kinds: dict[tuple[int, int], CfgEdge] = {}
         self._resumption_hubs: set[int] = set()
         self._hub_bound: set[int] = set()
         self._resuming = False
         self._fallback: dict[int, CfgNode] = {}
+        self.entry = CfgNode(self, None)
+        self.exit = CfgNode(self, None)
+        self.nodes: list[CfgNode] = [self.entry, self.exit]
 
     def node_of(self, element: Node) -> CfgNode | None:
         """
@@ -224,36 +293,6 @@ class ControlFlowGraph:
         """
         return bool(self.edge_kind(source, target) & RAISE_TAKEN)
 
-    def is_hub_bound(self, node: CfgNode) -> bool:
-        """
-        Whether *node* sits where the precise, forward-only projection of resumption does not reach
-        it — inside a handler body that resumes the block around it. That block's forward edges
-        join each *guarded* statement to the one it resumes at; a statement of the handler itself
-        is on neither end of one, and everything it may reach afterwards hangs off the hub. A
-        forward edge it does carry belongs to a block further out — one whose own resuming set
-        guards the statement this handler is written inside — and stands for that block's
-        resumption, not this one, so it says nothing about where this handler carries on.
-
-        A forward-only walk seeded at such a node would therefore stop dead where the real run
-        carries on, which for a flood is the unsound direction. `reachable_forward_from_any` reads
-        this and falls back to the hub for those sources.
-        """
-        return id(node) in self._hub_bound
-
-    def is_resumption_hub(self, node: CfgNode) -> bool:
-        """
-        Whether *node* is the synthetic fan-out standing for the over-approximate half of a resuming
-        handler — see `CfgEdge`. A walk that wants only the paths going forward declines to enter
-        one.
-
-        The question is asked of the *node* rather than of the edges into it, because an edge kind
-        is keyed by the pair of nodes it joins and `add_edge` builds a multigraph: two edges between
-        the same pair collapse to one entry, so a plain edge drawn beside a hub edge would make the
-        pair read as pure hub and a walk keyed on the kind would decline the plain path too. The
-        node is the thing that is or is not a hub, and no pair of edges can disagree about it.
-        """
-        return id(node) in self._resumption_hubs
-
     @property
     def carries_resumption(self) -> bool:
         """
@@ -297,27 +336,20 @@ def reachable_forward_from_any(
     opener set and one per shadowed command name would otherwise each pay the resumption tax over a
     graph holding no resumption edge.
     """
+    sources = list(sources)
+    for source in sources:
+        if source.graph is not graph:
+            raise ValueError(
+                'a source of a forward flood belongs to another body: the two facts this walk '
+                'reads are recorded per graph, so such a source reads as neither a hub nor '
+                'hub-bound and takes the precise walk over what this graph calls plain flow'
+            )
     if not graph.carries_resumption:
         return reachable_from_any(sources)
-    seen: set[int] = set()
-    precise: list[CfgNode] = []
-    coarse: list[CfgNode] = []
-    for source in sources:
-        (coarse if graph.is_hub_bound(source) else precise).append(source)
-    if coarse:
-        seen.update(reachable_from_any(coarse))
-    stack: list[CfgNode] = []
-    for source in precise:
-        if id(source) not in seen:
-            seen.add(id(source))
-            stack.append(source)
-    while stack:
-        node = stack.pop()
-        for successor in node.successors:
-            if id(successor) in seen or graph.is_resumption_hub(successor):
-                continue
-            seen.add(id(successor))
-            stack.append(successor)
+    coarse = [source for source in sources if source.is_hub_bound]
+    precise = [source for source in sources if not source.is_hub_bound]
+    seen = flood(coarse, forward=True, projected=False) if coarse else set()
+    seen.update(flood(precise, forward=True, projected=True))
     return frozenset(seen)
 
 
@@ -507,7 +539,7 @@ class CfgBuilder:
         what lets one stand in for a set of edges between real nodes without an analysis reading it
         as a statement.
         """
-        node = CfgNode(None)
+        node = CfgNode(self.cfg, None)
         self.cfg.nodes.append(node)
         return node
 
@@ -526,7 +558,7 @@ class CfgBuilder:
         built by three different methods that share nothing but this one, and a level that had to
         name its nodes afterwards would have to name the ones its nested levels built as well.
         """
-        node = CfgNode(element)
+        node = CfgNode(self.cfg, element)
         self.cfg.nodes.append(node)
         self.cfg._node_of[id(element)] = node
         if self._resumptions:
