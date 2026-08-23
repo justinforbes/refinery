@@ -1410,6 +1410,17 @@ FOLDS: dict[str, str] = {
     "if ($true) { trap { continue }; Write-Host 'in'; throw 'e' }; Write-Host 'after'":
         "if ($True) {\n  trap {\n    continue\n  }\n  Write-Host 'in'\n  throw 'e'\n}"
         "\nWrite-Host 'after'",
+    "trap { Write-Host 'outer'; continue }; if ($true) { trap { Write-Host 'inner'; continue }; "
+    "throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
+        "trap {\n  Write-Host 'outer'\n  continue\n}\nif ($True) {\n  trap {"
+        "\n    Write-Host 'inner'\n    continue\n  }\n  throw 'e'\n  Write-Host 'tail'\n}"
+        "\nWrite-Host 'next'",
+    "trap { Write-Host 'outer'; continue }; if ($true) { "
+    "trap [System.IO.IOException] { Write-Host 'inner'; continue }; "
+    "throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
+        "trap {\n  Write-Host 'outer'\n  continue\n}\nif ($True) {"
+        "\n  trap [System.IO.IOException] {\n    Write-Host 'inner'\n    continue\n  }"
+        "\n  throw 'e'\n  Write-Host 'tail'\n}\nWrite-Host 'next'",
     "trap { }; [int]'a'; Write-Host 'after'":
         "[int]'a'\nWrite-Host 'after'",
     "throw 'e'; Write-Host 'after'":

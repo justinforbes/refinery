@@ -412,6 +412,15 @@ CLAIMS: tuple[str, ...] = (
     "Write-Host 'next'",
     "if ($true) { trap { continue }; Write-Host 'in'; throw 'e' }; Write-Host 'after'",
     "$x = 'a'; trap { $x = 'b'; continue }; throw 'e'; Write-Host $x",
+    "trap { Write-Host 'outer'; continue }; if ($true) { trap { Write-Host 'inner'; continue }; "
+    "throw 'e'; Write-Host 'tail' }; Write-Host 'next'",
+    "trap { Write-Host 'outer'; continue }; if ($true) { "
+    "trap [System.IO.IOException] { Write-Host 'inner'; continue }; "
+    "throw 'e'; Write-Host 'tail' }; Write-Host 'next'",
+    "function A { Write-Host 'a' }; function B { Write-Host 'b' }; Set-Alias x A; "
+    "trap { Set-Alias x B; continue }; throw 'e'; x",
+    "function A { Write-Host 'a' }; function B { Write-Host 'b' }; Set-Alias x A; "
+    "trap { Set-Alias x B -Scope 1; continue }; throw 'e'; x",
     "trap { break }; [int]'a'; Write-Host 'after'",
     "trap { }; [int]'a'; Write-Host 'after'",
     "Get-Item nope -ErrorAction Stop; Write-Host 'after'",

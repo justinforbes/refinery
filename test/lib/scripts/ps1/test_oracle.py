@@ -317,6 +317,19 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('INFO\tin', 'INFO\tafter'),
     "$x = 'a'; trap { $x = 'b'; continue }; throw 'e'; Write-Host $x":
         ('INFO\ta',),
+    "trap { Write-Host 'outer'; continue }; if ($true) { trap { Write-Host 'inner'; continue }; "
+    "throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
+        ('INFO\tinner', 'INFO\ttail', 'INFO\tnext'),
+    "trap { Write-Host 'outer'; continue }; if ($true) { "
+    "trap [System.IO.IOException] { Write-Host 'inner'; continue }; "
+    "throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
+        ('INFO\touter', 'INFO\tnext'),
+    "function A { Write-Host 'a' }; function B { Write-Host 'b' }; Set-Alias x A; "
+    "trap { Set-Alias x B; continue }; throw 'e'; x":
+        ('INFO\ta',),
+    "function A { Write-Host 'a' }; function B { Write-Host 'b' }; Set-Alias x A; "
+    "trap { Set-Alias x B -Scope 1; continue }; throw 'e'; x":
+        ('INFO\tb',),
     "trap { break }; [int]'a'; Write-Host 'after'":
         ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
     "trap { }; [int]'a'; Write-Host 'after'": (
