@@ -66,26 +66,27 @@ class JsPrototypeSpellingNormalization(ScriptLevelTransformer):
         """
         Rewrite every recognized spelling in *node*.
 
-        The models are held for the whole walk rather than re-read per rewrite, which the pinning
-        contract allows here because every rewrite this pass makes attributes a write to a name
-        that had none: the answers it reads can only become more restrictive, never more
-        permissive. Re-reading them instead rebuilds the semantic and effect models once per
-        rewrite, which is the product of the two costs.
+        The models are re-read per rewrite rather than held for the walk, which is the one direction
+        the pinning contract in `refinery.lib.scripts.js.analysis.cache.ModelCache.pinned` leaves
+        open to a pass whose rewrites make the facts it reads **more** restrictive. Every rewrite
+        here attributes a write to a name that had none — `({}).__proto__.constructor = C` becomes
+        a write of `constructor` on `Object`, which is exactly what the gate on the next spelling
+        asks about — so a held model would answer that gate from a program state its own rewrites
+        have already left behind, and clear a rewrite the current facts refuse.
 
         A candidate an earlier rewrite has taken out of the tree is passed over. Its holder is no
         longer reachable from the script, so replacing it would write into a subtree the output
         does not contain and report a change nothing can observe.
         """
-        with model_cache(self, node).pinned() as cache:
-            model, effects = cache.model, cache.effects
-            for candidate in list(node.walk()):
-                owner = self._owner_whose_prototype_is_named(candidate, model, effects)
-                if owner is None:
-                    continue
-                if not candidate.is_descendant_of(node):
-                    continue
-                _replace_in_parent(candidate, _a_prototype_of(owner))
-                self.mark_changed()
+        cache = model_cache(self, node)
+        for candidate in list(node.walk()):
+            if not candidate.is_descendant_of(node):
+                continue
+            owner = self._owner_whose_prototype_is_named(candidate, cache.model, cache.effects)
+            if owner is None:
+                continue
+            _replace_in_parent(candidate, _a_prototype_of(owner))
+            self.mark_changed()
 
     def _owner_whose_prototype_is_named(
         self,

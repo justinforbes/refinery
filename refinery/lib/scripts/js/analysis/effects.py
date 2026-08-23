@@ -2338,8 +2338,8 @@ def _global_writes_by_name(model: SemanticModel) -> _GlobalWrites:
     recording the keys it passes through would report a file as having patched the mechanism a
     caller is asking about when it did nothing of the kind. Every other route by which a name's
     properties can change — a binding that shadows it, a value that escapes, a computed key, a
-    descriptor read from a value this analysis cannot read — bounds no key at all and is recorded as
-    unbounded.
+    descriptor read from a value this analysis cannot read — bounds no key at all and is recorded
+    as unbounded.
     """
     names: set[str] = set()
     keys: dict[str, set[str] | None] = {}

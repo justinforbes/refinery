@@ -249,3 +249,39 @@ class TestANameAScopeCanAnswerIsNotTheIntrinsic(TestJsDeobfuscator):
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
         )
+
+
+#: Programs whose own rewrite makes the write that the gate on a second rewrite asks about, mapped
+#: to what Node prints for each. `({}).__proto__.constructor = C` writes `Object.prototype` through
+#: a chain rooted at no name, which no gate can see; rewritten it becomes a write of `constructor`
+#: on `Object`, which every gate can. The read is written where the walk reaches it after the
+#: write, so the facts the second gate needs exist by the time it is asked and only a model held
+#: across the rewrite can miss them.
+A_MECHANISM_THIS_PASS_ITSELF_MAKES_VISIBLE = {
+    'function C() {}\nC.prototype.q = 5;\n'
+    'function r() { return ({}).constructor.prototype.q; }\n'
+    '({}).__proto__.constructor = C;\nconsole.log(r());':
+        '5\n',
+    'function C() {}\nC.prototype.q = 5;\n'
+    'function r() { return [].constructor.prototype.q; }\n'
+    '[].__proto__.constructor = C;\nconsole.log(r());':
+        '5\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWriteThisPassSpellsOutIsAskedAboutByTheNextGate(TestJsDeobfuscator):
+    """
+    Every rewrite this pass makes attributes a write to a name that had none, which is the direction
+    that makes a *held* model unsound rather than merely stale: the gate on the next spelling asks
+    exactly what the last rewrite just made visible, so an answer read before that rewrite clears a
+    rewrite the file's own facts refuse. The models are therefore re-read per rewrite, and what that
+    costs is one model build per spelling found.
+    """
+
+    def test_a_write_this_pass_spells_out_refuses_the_next_rewrite(self):
+        rows = A_MECHANISM_THIS_PASS_ITSELF_MAKES_VISIBLE
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )

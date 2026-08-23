@@ -505,7 +505,7 @@ def reference_role(node: JsIdentifier | JsMemberExpression) -> Role:
     return Role.READ
 
 
-def _enclosing_operator(node: Node) -> Node | None:
+def enclosing_operator(node: Node) -> Node | None:
     """
     The nearest ancestor of *node* that is not merely a parenthesization of it — the construct whose
     operator actually governs *node*.
@@ -537,7 +537,7 @@ def _governing_target(node: Node) -> tuple[Node | None, Node]:
     target or a `for-of` rest element — cannot be missed by one and not another.
     """
     cursor: Node = node
-    parent = _enclosing_operator(cursor)
+    parent = enclosing_operator(cursor)
     while parent is not None:
         if isinstance(parent, JsProperty):
             value = strip_parens(parent.value)
@@ -553,7 +553,7 @@ def _governing_target(node: Node) -> tuple[Node | None, Node]:
         elif not isinstance(parent, _PATTERN_CONTAINERS):
             break
         cursor = parent
-        parent = _enclosing_operator(cursor)
+        parent = enclosing_operator(cursor)
     return parent, cursor
 
 
@@ -574,7 +574,7 @@ def _is_unary_operand(governor: Node | None, node: Node, operators: frozenset[st
     operand, looked through parentheses, is *node*. The single test behind every question of the
     form `does this operator stand in front of this reference`, so a parenthesization or
     operand-shape case fixed once is fixed for all of them; a caller that has not already resolved
-    the governing construct obtains it from `_enclosing_operator`.
+    the governing construct obtains it from `enclosing_operator`.
     """
     return (
         isinstance(governor, JsUnaryExpression)
@@ -588,7 +588,7 @@ def tolerates_unresolvable(node: Node) -> bool:
     Whether the operator governing *node* reads it without demanding that the name resolve, so a
     free name standing there names nothing and still yields a value rather than throwing.
     """
-    return _is_unary_operand(_enclosing_operator(node), node, _UNRESOLVABLE_TOLERANT_OPERATORS)
+    return _is_unary_operand(enclosing_operator(node), node, _UNRESOLVABLE_TOLERANT_OPERATORS)
 
 
 def container_reference_role(node: JsIdentifier | JsMemberExpression) -> ContainerRole:
@@ -606,16 +606,16 @@ def container_reference_role(node: JsIdentifier | JsMemberExpression) -> Contain
     read. This is the per-reference primitive the EffectModel composes over a binding's whole reference
     set (with alias-following and callee summaries) to decide container immutability.
     """
-    parent = _enclosing_operator(node)
+    parent = enclosing_operator(node)
     if isinstance(parent, JsMemberExpression) and strip_parens(parent.object) is node:
         member: Node = parent
         while True:
-            outer = _enclosing_operator(member)
+            outer = enclosing_operator(member)
             if isinstance(outer, JsMemberExpression) and strip_parens(outer.object) is member:
                 member = outer
                 continue
             break
-        if _is_invocation_of(_enclosing_operator(member), member):
+        if _is_invocation_of(enclosing_operator(member), member):
             return ContainerRole.MEMBER_CALL
         return ContainerRole.MEMBER_WRITE if is_member_write_target(member) else ContainerRole.MEMBER_READ
     if isinstance(parent, JsAssignmentExpression) and strip_parens(parent.left) is node and parent.operator == '=':
@@ -647,7 +647,7 @@ def is_invocation_target(node: Node) -> bool:
     that asks instead whether the value it is about to write down will be invoked at all wants
     `is_constructed_or_invoked`.
     """
-    return _is_invocation_of(_enclosing_operator(node), node)
+    return _is_invocation_of(enclosing_operator(node), node)
 
 
 def is_constructed_or_invoked(node: Node) -> bool:
@@ -663,7 +663,7 @@ def is_constructed_or_invoked(node: Node) -> bool:
     """
     if is_invocation_target(node):
         return True
-    operator = _enclosing_operator(node)
+    operator = enclosing_operator(node)
     return isinstance(operator, JsNewExpression) and strip_parens(operator.callee) is node
 
 
@@ -847,7 +847,7 @@ def _is_delete_operand(node: Node) -> bool:
     for such a reference as it does for a compound assignment, because both keep the name live as a
     read; only the assignment puts a value under the name.
     """
-    return _is_unary_operand(_enclosing_operator(node), node, _DELETE_OPERATOR)
+    return _is_unary_operand(enclosing_operator(node), node, _DELETE_OPERATOR)
 
 
 def _displaces_arguments(
@@ -911,9 +911,9 @@ def _enclosing_member_access(node: Node) -> JsMemberExpression | None:
     The member access *node* is the receiver of, looking through any parentheses written around it,
     or `None` where *node* is used as something other than a receiver. `(arguments)[0]` reaches its
     element exactly as `arguments[0]` does, so a receiver is recognized through a grouping the way
-    every other operand in this module is — through the one climb `_enclosing_operator` performs.
+    every other operand in this module is — through the one climb `enclosing_operator` performs.
     """
-    parent = _enclosing_operator(node)
+    parent = enclosing_operator(node)
     if isinstance(parent, JsMemberExpression) and strip_parens(parent.object) is node:
         return parent
     return None
@@ -1976,7 +1976,7 @@ class SemanticModel:
                             self._record_alias_reference(params[index], access, role)
                         continue
                 if access is None:
-                    governor = _enclosing_operator(node)
+                    governor = enclosing_operator(node)
                     if _observes_identity_alone(governor, node):
                         continue
                     if _reads_every_element_alone(governor, node):

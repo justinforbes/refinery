@@ -324,3 +324,109 @@ class TestATableEntryIsExtractedWithoutBeingTakenApart(TestBase):
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
         )
+
+
+#: Dispatches whose flag arguments say the expression means something other than the reading its
+#: shape suggests, mapped to what Node prints for each. The key selects the table entry and the two
+#: flags behind it select the branch: emptying the payload, handing back the entry instead of what
+#: calling it returned, and wrapping that result in an object under the wrap key. A `new` dispatch
+#: hands back the object the dispatcher returned only where it returned one, which is the wrapper
+#: branch alone.
+A_DISPATCH_WHOSE_FLAGS_SAY_SOMETHING_ELSE = {
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a] = p; return "A" + a; }'],
+        tail_lines=['console.log((p = ["x"], d("f1", "initF")));'],
+    ): 'Aundefined\n',
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a] = p; return "A" + a; }'],
+        tail_lines=['console.log(typeof (p = ["x"], d("f1", "createF")));'],
+    ): 'function\n',
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a] = p; return "A" + a; }'],
+        tail_lines=['console.log((p = ["x"], d("f1")["wk"]));'],
+    ): 'undefined\n',
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a] = p; return "A" + a; }'],
+        tail_lines=['console.log((p = ["x"], d("f1", "y", "wrapF")).wk);'],
+    ): 'Ax\n',
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a] = p; return "A" + a; }'],
+        tail_lines=['console.log(typeof (p = ["x"], new d("f1")));'],
+    ): 'object\n',
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a] = p; return "A" + a; }'],
+        tail_lines=[
+            'p = ["x"];',
+            'console.log(typeof new d("f1", "zz", "wrapF")["wk"]);',
+        ],
+    ): 'string\n',
+}
+
+
+#: A bare dispatch over a payload something else filled, mapped to what Node prints for it. Reading
+#: one as a call with no arguments is a claim about the payload rather than about the site: the
+#: callee takes its arguments out of the array, and a dispatch that does not empty it first reaches
+#: whatever the last one left there.
+A_BARE_DISPATCH_OVER_A_PAYLOAD_SOMETHING_ELSE_FILLED = {
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a] = p; return "A" + a; }'],
+        tail_lines=['p = ["x"];', 'console.log(d("f1"));'],
+    ): 'Ax\n',
+}
+
+
+#: Dispatches carrying an argument the replacement keeps no room for, mapped to what Node prints for
+#: each. The dispatcher takes its arguments out of the payload, so everything the site writes after
+#: the key is read by the dispatcher alone and is gone from the call this pass builds — which makes
+#: what evaluating it did the site's to account for. The second writes a whole dispatch there, which
+#: no payload carries over.
+A_DISPATCH_ARGUMENT_THE_REWRITE_WOULD_DROP = {
+    a_dispatcher(
+        dict_lines=['"f1": function() { var [a] = p; return "A" + a; }'],
+        tail_lines=[
+            'var n = 0;',
+            'function s() { n++; return "z"; }',
+            'console.log((p = ["x"], d("f1", s())));',
+            'console.log(n);',
+        ],
+    ): 'Ax\n1\n',
+    a_dispatcher(
+        dict_lines=[
+            '"f1": function() { var [a] = p; return "A" + a; },',
+            '"f2": function() { var [b] = p; return "B" + b; }',
+        ],
+        tail_lines=['console.log((p = ["a"], d("f1", (p = ["b"], d("f2")))));'],
+    ): 'Ab\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestADispatchIsReadPastItsKey(TestBase):
+    """
+    The key names the table entry and settles nothing else. Which branch of the dispatcher runs, and
+    therefore what the expression standing at the site denotes, is decided by the two flags behind
+    the key and by whether the site spelled `new` — and the payload the callee reads its arguments
+    from is filled by the dispatch before it, not by the one being read. A reading that takes the
+    key alone answers a value the original never computed.
+    """
+
+    def test_a_dispatch_whose_flags_say_something_else_is_left_alone(self):
+        rows = A_DISPATCH_WHOSE_FLAGS_SAY_SOMETHING_ELSE
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_bare_dispatch_does_not_claim_the_payload_is_empty(self):
+        rows = A_BARE_DISPATCH_OVER_A_PAYLOAD_SOMETHING_ELSE_FILLED
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_dispatch_argument_the_rewrite_would_drop_is_first_asked_what_it_runs(self):
+        rows = A_DISPATCH_ARGUMENT_THE_REWRITE_WOULD_DROP
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )

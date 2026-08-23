@@ -15,6 +15,7 @@ from refinery.lib.scripts import (
     _replace_in_parent,
 )
 from refinery.lib.scripts.js.analysis.cache import model_cache
+from refinery.lib.scripts.js.analysis.model import enclosing_operator
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
     access_key,
@@ -40,7 +41,6 @@ from refinery.lib.scripts.js.model import (
     JsNewExpression,
     JsNullLiteral,
     JsObjectExpression,
-    JsParenthesizedExpression,
     JsProperty,
     JsReturnStatement,
     JsScript,
@@ -52,30 +52,66 @@ from refinery.lib.scripts.js.model import (
 )
 
 
-def _governing_parent(node: Node) -> Node | None:
+class _Unreadable:
     """
-    The nearest ancestor of *node* that is not merely a parenthesization of it, so that a guard
-    about what a dispatch stands inside reads the construct governing it rather than a grouping the
-    file happens to have written around it.
+    What a dispatch argument this pass cannot read as a fixed string is reported as, kept apart from
+    the `None` an absent argument gives: an argument that is not there is one the dispatcher sees as
+    `undefined` and compares unequal to every flag, while one that is there and unreadable may be
+    any of them and may run something on the way.
     """
-    parent = node.parent
-    while isinstance(parent, JsParenthesizedExpression):
-        parent = parent.parent
-    return parent
+
+
+_UNREADABLE = _Unreadable()
+
+
+def _flag_argument(
+    call: JsCallExpression | JsNewExpression,
+    index: int,
+) -> str | None | _Unreadable:
+    """
+    The string the argument of *call* at *index* certainly evaluates to, `None` where the call has
+    no such argument, and `_UNREADABLE` where it has one this pass cannot read as a fixed string.
+    """
+    if len(call.arguments) <= index:
+        return None
+    argument = strip_parens(call.arguments[index])
+    if isinstance(argument, JsStringLiteral):
+        return argument.value
+    return _UNREADABLE
+
+
+def _reads_the_payload(fn: JsFunctionExpression, payload_id: str) -> bool:
+    """
+    Whether the table entry *fn* takes its arguments out of the payload, so what the payload holds
+    when it is reached decides what it computes.
+    """
+    return _extract_params(fn, payload_id) != []
 
 
 @dataclass
 class _DispatcherInfo:
     """
     All structurally-extracted metadata about a single dispatcher function.
+
+    The three flag strings are carried beside the things they select, because what a dispatch means
+    is decided by the arguments after the key and not by the key alone. *init_flag* is the value of
+    the second parameter that empties the payload, so a dispatch passing it reaches its callee with
+    no arguments however the payload was filled. *create_flag* is the value that makes the
+    dispatcher hand back the table entry instead of calling it, so a dispatch passing it names a
+    function where every other one names a result. *wrap_flag* is the value of the third parameter
+    that wraps the result in an object under `wrap_key`, so a dispatch passing it denotes that
+    object and only the access on that key denotes the result.
     """
     decl: JsFunctionDeclaration
     dispatcher_id: str
     fns_map: dict[str, JsFunctionExpression]
     fns_declarator: JsVariableDeclarator
     payload_id: str
+    init_flag: str
     wrap_key: str | None
+    wrap_flag: str | None
     cache_id: str | None
+    create_flag: str | None
 
 
 @dataclass
@@ -150,27 +186,40 @@ def _extract_fns_table(
     return None
 
 
-def _find_payload_id(body: list, second_param: str) -> str | None:
+def _guarded_flag(stmt: Node, param: str) -> str | None:
+    """
+    The string *stmt*'s guard compares *param* to, or `None` where *stmt* is not an `if` guarded
+    that way. Every branch this pass reads out of a dispatcher body is selected by one such
+    comparison, and the value compared against is what a dispatch has to spell to take the branch —
+    so the same read serves finding the branch and deciding whether a call site enters it.
+    """
+    if not isinstance(stmt, JsIfStatement):
+        return None
+    test = stmt.test
+    if not isinstance(test, JsBinaryExpression) or test.operator != '===':
+        return None
+    if not isinstance(test.left, JsIdentifier) or test.left.name != param:
+        return None
+    if not isinstance(test.right, JsStringLiteral):
+        return None
+    return test.right.value
+
+
+def _find_payload_id(body: list, second_param: str) -> tuple[str, str] | None:
     """
     Find the payload-init guard:
 
         if (p1 === "...") { payload = []; }
 
-    and return the payload identifier name. The guard compares the function's second parameter to a
-    string literal and assigns an empty array to the payload variable.
+    and return the payload identifier name together with the flag that empties it. The guard
+    compares the function's second parameter to a string literal and assigns an empty array to the
+    payload variable.
     """
     for stmt in body:
-        if not isinstance(stmt, JsIfStatement):
+        flag = _guarded_flag(stmt, second_param)
+        if flag is None:
             continue
-        test = stmt.test
-        if not isinstance(test, JsBinaryExpression) or test.operator != '===':
-            continue
-        if not (
-            isinstance(test.left, JsIdentifier)
-            and test.left.name == second_param
-            and isinstance(test.right, JsStringLiteral)
-        ):
-            continue
+        assert isinstance(stmt, JsIfStatement)
         cons = stmt.consequent
         if isinstance(cons, JsBlockStatement) and len(cons.body) == 1:
             cons = cons.body[0]
@@ -181,30 +230,23 @@ def _find_payload_id(body: list, second_param: str) -> str | None:
             continue
         if isinstance(expr.left, JsIdentifier) and isinstance(expr.right, JsArrayExpression):
             if not expr.right.elements:
-                return expr.left.name
+                return expr.left.name, flag
     return None
 
 
-def _find_wrap_key(body: list, third_param: str) -> str | None:
+def _find_wrap_key(body: list, third_param: str) -> tuple[str, str] | None:
     """
     Find the return-type wrapper:
 
         if (p2 === "...") { return { "wrapKey": output }; }
 
-    and return the wrapper property name.
+    and return the wrapper property name together with the flag that asks for it.
     """
     for stmt in body:
-        if not isinstance(stmt, JsIfStatement):
+        flag = _guarded_flag(stmt, third_param)
+        if flag is None:
             continue
-        test = stmt.test
-        if not isinstance(test, JsBinaryExpression) or test.operator != '===':
-            continue
-        if not (
-            isinstance(test.left, JsIdentifier)
-            and test.left.name == third_param
-            and isinstance(test.right, JsStringLiteral)
-        ):
-            continue
+        assert isinstance(stmt, JsIfStatement)
         cons = stmt.consequent
         if isinstance(cons, JsBlockStatement) and len(cons.body) == 1:
             inner = cons.body[0]
@@ -221,21 +263,24 @@ def _find_wrap_key(body: list, third_param: str) -> str | None:
         if isinstance(prop, JsProperty):
             key = property_key(prop)
             if key is not None:
-                return key
+                return key, flag
     return None
 
 
-def _find_cache_id(body: list, first_param: str) -> str | None:
+def _find_cache_id(body: list, first_param: str, second_param: str) -> tuple[str, str] | None:
     """
-    Find the cache variable from the create-flag branch. Looks for an `if` whose body contains a
-    logical-or assignment like
+    Find the cache variable from the create-flag branch. Looks for an `if` guarded on the second
+    parameter whose body contains a logical-or assignment like
 
         cache[p0] || (cache[p0] = ...)
 
-    Returns the cache identifier.
+    Returns the cache identifier together with the flag that reaches that branch. The guard is read
+    rather than skipped past, because the branch does not call the entry it looks up: a dispatch
+    that spells this flag names the function, and one that does not names what calling it returned.
     """
     for stmt in body:
-        if not isinstance(stmt, JsIfStatement):
+        flag = _guarded_flag(stmt, second_param)
+        if flag is None:
             continue
         for node in stmt.walk():
             if not isinstance(node, JsMemberExpression):
@@ -248,7 +293,7 @@ def _find_cache_id(body: list, first_param: str) -> str | None:
             ):
                 parent = node.parent
                 if isinstance(parent, JsLogicalExpression) and parent.operator == '||':
-                    return node.object.name
+                    return node.object.name, flag
     return None
 
 
@@ -280,19 +325,23 @@ def _detect_dispatcher(func: JsFunctionDeclaration) -> _DispatcherInfo | None:
     if result is None:
         return None
     fns_declarator, fns_map = result
-    payload_id = _find_payload_id(body, second_param)
-    if payload_id is None:
+    payload = _find_payload_id(body, second_param)
+    if payload is None:
         return None
-    wrap_key = _find_wrap_key(body, third_param)
-    cache_id = _find_cache_id(body, first_param)
+    payload_id, init_flag = payload
+    wrap = _find_wrap_key(body, third_param)
+    cache = _find_cache_id(body, first_param, second_param)
     return _DispatcherInfo(
         decl=func,
         dispatcher_id=func.id.name,
         fns_map=fns_map,
         fns_declarator=fns_declarator,
         payload_id=payload_id,
-        wrap_key=wrap_key,
-        cache_id=cache_id,
+        init_flag=init_flag,
+        wrap_key=None if wrap is None else wrap[0],
+        wrap_flag=None if wrap is None else wrap[1],
+        cache_id=None if cache is None else cache[0],
+        create_flag=None if cache is None else cache[1],
     )
 
 
@@ -536,6 +585,11 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         on the wrap key:
 
             (payload = [args], dispatcher("key", s, wrapFlag)["wk"])
+
+        A `new` dispatch is read only in that wrapped variant. `new` hands back the object the
+        dispatcher returned only where it returned one, and the wrapper is the one branch that
+        does: everywhere else `new` yields the fresh instance and the result the call computed is
+        thrown away, which the call this would build hands back instead.
         """
         if len(seq.expressions) != 2:
             return None
@@ -548,8 +602,11 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
             return None
         if not isinstance(assign.right, JsArrayExpression):
             return None
-        dispatch_call = self._unwrap_dispatch_call(second, info)
-        if dispatch_call is None:
+        read = self._unwrap_dispatch_call(second, info)
+        if read is None:
+            return None
+        dispatch_call, through_the_wrap_key = read
+        if isinstance(dispatch_call, JsNewExpression) and not through_the_wrap_key:
             return None
         if not dispatch_call.arguments:
             return None
@@ -557,6 +614,14 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         if not isinstance(key_arg, JsStringLiteral):
             return None
         if key_arg.value not in info.fns_map:
+            return None
+        if not self._flags_agree_with_the_reading(
+            dispatch_call,
+            info,
+            unwrapped=through_the_wrap_key,
+            selects_without_calling=False,
+            carries_the_payload=True,
+        ):
             return None
         elements = assign.right.elements
         if any(element is None for element in elements) and not self._a_hole_reads_undefined():
@@ -579,30 +644,81 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         assert self._root is not None
         return model_cache(self, self._root).effects.chain_roots_unwritten(list)
 
+    def _flags_agree_with_the_reading(
+        self,
+        call: JsCallExpression | JsNewExpression,
+        info: _DispatcherInfo,
+        *,
+        unwrapped: bool,
+        selects_without_calling: bool,
+        carries_the_payload: bool,
+    ) -> bool:
+        """
+        Whether the arguments after the key say the dispatch is the one the site reading it built.
+        The key alone selects the table entry; which of the dispatcher's branches runs, and what the
+        expression standing at the site therefore denotes, is decided by the two flags behind it.
+
+        Three readings can disagree with the flags, and each is a value the replacement would get
+        wrong rather than a shape it cannot spell. A dispatch spelling the wrap flag denotes the
+        wrapper object, so the access on the wrap key belongs to it and a reading without one hands
+        back the result the wrapper held. A dispatch spelling the create flag is handed the table
+        entry rather than what calling it returned, which is the wrapped-reference form's whole
+        premise and the ruin of every other one. And a dispatch spelling the init flag reaches its
+        callee with the payload emptied, so a reading that carries the payload elements into a call
+        passes arguments the original threw away.
+
+        Every argument beyond the third is dropped by the replacement, so it has to be one nothing
+        can miss. An argument this pass cannot read as a fixed string is refused outright in the
+        two flag positions, since such an argument may be any flag and may run something on the way
+        to being one.
+        """
+        assert self._root is not None
+        flag = _flag_argument(call, 1)
+        rtype = _flag_argument(call, 2)
+        if isinstance(flag, _Unreadable) or isinstance(rtype, _Unreadable):
+            return False
+        if (info.wrap_flag is not None and rtype == info.wrap_flag) is not unwrapped:
+            return False
+        selects = info.create_flag is not None and flag == info.create_flag
+        if selects is not selects_without_calling:
+            return False
+        if carries_the_payload and flag == info.init_flag:
+            return False
+        effects = model_cache(self, self._root).effects
+        return all(
+            effects.is_side_effect_free(argument, discarded=True)
+            for argument in call.arguments[3:]
+        )
+
     @staticmethod
     def _unwrap_dispatch_call(
         node: Node,
         info: _DispatcherInfo,
-    ) -> JsCallExpression | JsNewExpression | None:
+    ) -> tuple[JsCallExpression | JsNewExpression, bool] | None:
         """
         Extract a dispatcher call from *node*, which may be a bare call or a member access of
         the form:
 
             dispatcher(...)["wrapKey"]
 
-        Returns the call node or `None`.
+        Returns the call node together with whether the wrap-key access was read off it, or `None`.
+        The second half is what the caller checks the dispatch's own return-type flag against: the
+        access and the flag asking for the object it reads from are one fact written twice, and a
+        site holding one without the other denotes something else entirely.
         """
         call = strip_parens(node)
+        through_the_wrap_key = False
         if isinstance(call, JsMemberExpression) and info.wrap_key is not None:
             if access_key(call) == info.wrap_key:
                 call = strip_parens(call.object)
+                through_the_wrap_key = True
         if not isinstance(call, (JsCallExpression, JsNewExpression)):
             return None
         if not isinstance(call.callee, JsIdentifier):
             return None
         if call.callee.name != info.dispatcher_id:
             return None
-        return call
+        return call, through_the_wrap_key
 
     def _read_wrapped_ref(
         self,
@@ -613,13 +729,17 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         The new-expression dispatch with wrap key access *member* is, which names the function it
         selects rather than calling it:
 
-            new dispatcher("key", s2, s3)["wrapKey"]  ->  key
+            new dispatcher("key", createFlag, wrapFlag)["wrapKey"]  ->  key
+
+        Both flags are what make it that. The create flag is what has the dispatcher hand the table
+        entry back instead of calling it, so without it this member denotes a *result*, and the wrap
+        flag is what puts that entry under the key being read.
         """
         if info.wrap_key is None:
             return None
         if access_key(member) != info.wrap_key:
             return None
-        new_expr = member.object
+        new_expr = strip_parens(member.object)
         if not isinstance(new_expr, JsNewExpression):
             return None
         if not isinstance(new_expr.callee, JsIdentifier):
@@ -632,6 +752,14 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         if not isinstance(key_arg, JsStringLiteral):
             return None
         if key_arg.value not in info.fns_map:
+            return None
+        if not self._flags_agree_with_the_reading(
+            new_expr,
+            info,
+            unwrapped=True,
+            selects_without_calling=True,
+            carries_the_payload=False,
+        ):
             return None
         return _DispatchSite(member, new_expr.callee, key_arg.value, None)
 
@@ -655,8 +783,14 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         member expression denotes is the callee's return value, so replacing the call alone leaves
         the unwrap standing over a value that carries no such key. This pass has no reading of that
         form, and an unread dispatch is what `_plan_covers_every_reference` refuses the unwrap on.
+
+        The zero arguments this reading gives its callee are a claim about the payload, not about
+        the site: the callee reads its arguments off the payload array, which a dispatch that does
+        not spell the init flag leaves holding whatever the last one put there. So an entry that
+        reads the payload at all is planned here only behind that flag, and an entry that reads
+        none is planned whatever the payload holds.
         """
-        parent = _governing_parent(call)
+        parent = enclosing_operator(call)
         if isinstance(parent, JsSequenceExpression):
             return None
         if (
@@ -676,6 +810,19 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
         if not isinstance(key_arg, JsStringLiteral):
             return None
         if key_arg.value not in info.fns_map:
+            return None
+        if not self._flags_agree_with_the_reading(
+            call,
+            info,
+            unwrapped=False,
+            selects_without_calling=False,
+            carries_the_payload=False,
+        ):
+            return None
+        if (
+            _flag_argument(call, 1) != info.init_flag
+            and _reads_the_payload(info.fns_map[key_arg.value], info.payload_id)
+        ):
             return None
         return _DispatchSite(call, call.callee, key_arg.value, [])
 

@@ -1776,9 +1776,12 @@ class TestAMechanismWrittenThroughASpellingIsStillWritten(TestBase):
     spelling's mechanism, made through another spelling, is invisible to the gate that would have
     refused it. The pass then rewrites a read of a mechanism the file had already replaced.
 
-    Rewriting the write first does not close it. The gate is a question about the whole program and
-    the write may stand anywhere, before or after the read, so no order of rewrites answers it: the
-    facts have to be complete before the first rewrite is decided.
+    Rewriting the write first closes only what the order reaches. The pass does re-read the models
+    per rewrite, so a write spelled where the walk meets it before the read is attributed in time
+    and the read behind it is refused —
+    `test.lib.scripts.js.deobfuscation.test_protospelling` pins that much. What no order answers is
+    the rest: the gate is a question about the whole program and the write may stand anywhere the
+    walk reaches after the read, which the rows here are written to stand at.
 
     Closing it means attributing the write rather than rewriting it — teaching
     `refinery.lib.scripts.js.analysis.effects` that a member chain rooted in a literal receiver is

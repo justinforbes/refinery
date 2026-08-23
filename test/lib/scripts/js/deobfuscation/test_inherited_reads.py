@@ -433,11 +433,9 @@ A_MEMBERSHIP_TEST_FOR_AN_INHERITED_KEY_WITH_NOTHING_BEFORE_IT = (
 
 #: A `for-in` walk behind the same unresolvable `eval`, and the same walk with it taken out. Such an
 #: `eval` may have put an enumerable name on `Object.prototype`, which every plain object inherits.
-A_WALK_BEHIND_AN_UNRESOLVABLE_EVAL = 'eval(payload);' + returned_from_a_body(
-    "var t = ''; for (var k in {a: 1, b: 2}) t += k; return t;")
+A_WALK_BEHIND_AN_UNRESOLVABLE_EVAL = a_walk_of('{a: 1, b: 2}', 'eval(payload);')
 
-A_WALK_WITH_NOTHING_BEFORE_IT = returned_from_a_body(
-    "var t = ''; for (var k in {a: 1, b: 2}) t += k; return t;")
+A_WALK_WITH_NOTHING_BEFORE_IT = a_walk_of('{a: 1, b: 2}')
 
 
 #: The same program with the call to `eval` replaced by an ordinary call to the same unresolved

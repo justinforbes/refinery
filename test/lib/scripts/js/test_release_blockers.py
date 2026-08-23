@@ -317,7 +317,9 @@ class TestAPrototypeReachedThroughABindingIsStillWritten(TestBase):
 #: Programs that reach `Object.prototype` by handing it to something that writes it, rather than by
 #: writing through a member chain, mapped to what Node prints for each. The prototype is an ordinary
 #: argument in each: to `Object.assign`, to `Reflect.set`, to `Reflect.deleteProperty`, and to a
-#: function the file declares itself.
+#: function the file declares itself. The last row hands over `Object` rather than its prototype,
+#: which reaches the same chain through one more member access and is a route of its own: the write
+#: is spelled inside the callee, so nothing at the call site names the property it replaces.
 A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT = {
     'Object.assign(Object.prototype, {z: 9}); var o = {}; console.log(o.z);':
         '9\n',
@@ -328,27 +330,34 @@ A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT = {
         'false\n',
     'function patch(p) { p.z = 9; } patch(Object.prototype); var o = {}; console.log(o.z);':
         '9\n',
+    'function patch(o) { o.prototype.zz = 9; }\npatch(Object);\n'
+    + evaluated_in_a_body('{a: 1}', 'v.zz'):
+        '9\n',
 }
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAPrototypeHandedToAWriterIsStillWritten(TestBase):
     """
-    A value that escapes into a call may be written by that call, which the effect model records —
-    but only for the names it watches, and `Object` is not one of them. So a file that hands
-    `Object.prototype` to anything at all keeps its chain reported intact, and every question about
-    that chain is answered from the tables.
+    A value that escapes into a call may be written by that call. `refinery.lib.scripts.js.analysis
+    .effects` records that escape against the *keys* of every name it watches, `Object` among them,
+    which is why `EffectModel.global_key_written` refuses each of these — and against the name
+    itself only for the roots whose methods a fold is trusted to run, which `Object` is not. So
+    `EffectModel.read_chain_intact` reports the chain intact, and every question about it is
+    answered from the tables.
 
-    `refinery.lib.scripts.js.analysis.effects` is where the watched set is chosen, and choosing it
-    is what this costs: adding `Object` to it closes every row here and withdraws trust from a file
-    that merely mentions the name, which is what the real samples do. It is deferred to the
-    interprocedural precision that would let the escape be followed rather than assumed.
+    A correct implementation records the escape once, against the name as much as against its keys,
+    so that the two questions asked about one escape cannot disagree. Doing that and nothing else
+    withdraws every chain answer from a file that hands `Object` to a call it cannot resolve, which
+    the real samples do: `test.units.scripting.test_js` measures two of them coming back unreduced.
+    So the escape has to be *followed* rather than assumed, which is the interprocedural precision
+    this is deferred to — a callee whose writes are enumerable is a callee whose escape is not one.
     """
 
     @unittest.expectedFailure
     def test_a_prototype_handed_to_a_writer_answers_the_read(self):
         """
-        Node prints `9`, `9`, `false` and `9` for the four programs of
+        Node prints `9`, `9`, `false`, `9` and `9` for the five programs of
         `A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT`. Each deobfuscation answers as if the call
         it was handed to had not written it.
         """
