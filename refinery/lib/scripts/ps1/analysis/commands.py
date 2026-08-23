@@ -94,7 +94,9 @@ from typing import NamedTuple, Sequence
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
+from refinery.lib.scripts.analysis.cfg import Projection
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
+from refinery.lib.scripts.ps1.analysis.faults import a_stop_may_be_in_force
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, Ps1BlockReach
 from refinery.lib.scripts.ps1.analysis.world import (
     WorldRole,
@@ -474,6 +476,7 @@ class Ps1CommandModel:
         self._shadowed = shadowed
         self._alias_defs = (
             _collect_alias_definitions(root) if definitions is None else definitions)
+        self._stop_in_force: bool | None = None
         self._binders = binders
         self._binder_reach = tuple(self._project_binder(binder) for binder in binders)
         self._binders_run_unordered = any(reach.unordered for reach in self._binder_reach)
@@ -493,7 +496,16 @@ class Ps1CommandModel:
         A binder the projection cannot carry out to the script — one in a function body, one in a
         block held as a value, one in no graph at all — runs at a time nothing here orders, and is
         reported as such rather than as reaching a particular few nodes.
+
+        **A binder in the script's own `process` block is one of them.** That block runs once per
+        object the pipeline hands the script, and the per-body graph draws it straight through with
+        no edge back to its first statement — so a binder written below a use reaches it on the
+        second object and on every one after, along a path no walk over this graph can take. This is
+        the refusal `refinery.lib.scripts.ps1.analysis.worldflow.build_world_reach` already makes for
+        the same block and the same reason.
         """
+        if self._in_the_process_block(binder):
+            return _BinderReach(binder, {}, True)
         sites: dict[int, CfgNode] = {}
         located = self._flow.locate(binder)
         while located is not None:
@@ -507,6 +519,21 @@ class Ps1CommandModel:
                 break
             located = self._flow.locate(facts.site)
         return _BinderReach(binder, sites, True)
+
+    def _in_the_process_block(self, node: Node) -> bool:
+        """
+        Whether *node* is written inside the script's own `process` block, which re-runs once per
+        object the pipeline hands it — see `_project_binder`.
+        """
+        block = self._root.process_block if isinstance(self._root, Ps1Script) else None
+        if block is None:
+            return False
+        cursor: Node | None = node
+        while cursor is not None:
+            if cursor is block:
+                return True
+            cursor = cursor.parent
+        return False
 
     def denotation(self, invocation: Ps1CommandInvocation) -> Denotation:
         """
@@ -953,8 +980,15 @@ class Ps1CommandModel:
                 kills = [id(site) for site in self._binder_sites_in(graph) if site is not use]
                 reaching = self._reach.reaching_definition(graph, use, candidates, kills)
                 if reaching is not None:
+                    placed = self._flow.locate(reaching.node)
+                    if placed is None or not self._binding_has_taken(
+                        graph, placed[1], use, reaching
+                    ):
+                        return _Binding(None, True)
                     return _Binding(reaching, False)
                 if self._a_binder_reaches(graph, use):
+                    return _Binding(None, True)
+                if id(use) not in self._reach.reachable(graph.entry, forward=True):
                     return _Binding(None, True)
             owner = graph.owner
             if not isinstance(owner, Ps1ScriptBlock):
@@ -964,6 +998,63 @@ class Ps1CommandModel:
                 break
             located = self._flow.locate(facts.site)
         return _Binding(None, False)
+
+    def _binding_has_taken(
+        self,
+        graph: ControlFlowGraph,
+        at: CfgNode,
+        use: CfgNode,
+        definition: AliasDefinition,
+    ) -> bool:
+        """
+        Whether the definition standing at `definition` has certainly bound its name by the time
+        `use` runs.
+
+        Dominance says the definition *runs first* on every path to the use. It does not say the
+        definition *finished*: a statement that raises an error a handler takes has run and bound
+        nothing, and where that handler resumes the block — or where a `catch` beside it carries on
+        past the construct — the use runs anyway. Resolving there rewrites the call to whatever the
+        definition was going to bind, which is a command the run does not execute.
+
+        Two ways out, and the second is what keeps the recall this exists to have. Either no run
+        leaves the definition on a raise and still reaches the use — every edge out of it that is
+        taken only on a throw leads somewhere the use is not — or the definition cannot raise a
+        terminating error in the first place, which `_cannot_raise` decides. A plainly written
+        `Set-Alias name value` is the second, and that is the shape obfuscated PowerShell wraps in
+        resuming traps.
+        """
+        raising = [target for target in at.successors if graph.raise_taken(at, target)]
+        if not any(
+            id(use) in self._reach.reachable(target, forward=True) for target in raising
+        ):
+            return True
+        return self._cannot_raise(definition)
+
+    def _cannot_raise(self, definition: AliasDefinition) -> bool:
+        """
+        Whether running `definition` certainly ends in the binding being made, so that a use below
+        it observes it however the block it is written in carries on.
+
+        A definition this model resolves through carries nothing but its name and its target, both
+        statically spelled: every other parameter — `-Force`, `-Option`, an `-ErrorAction`, a third
+        positional — makes `AliasDefinition.refuse` true, and an argument with no static reading
+        leaves the target unread, which does the same. So the only errors left are the ones the
+        engine reports for the binding itself, and 5.1 reports those *non-terminating*: a rebinding
+        refused against a read-only entry writes an error record and control carries straight on.
+        A `trap` is offered nothing, and this is a completion.
+
+        That reading holds only while nothing has armed `Stop`, which turns every reported error
+        into one a handler takes — so `a_stop_may_be_in_force` is asked of the whole script, in its
+        strict spelling rather than the fault model's lax one.
+
+        `New-Alias` is the exception among the defining commands: it raises rather than rebinding
+        where the name already has a binding, and that error is terminating.
+        """
+        if definition.refuse or definition.throws_if_bound:
+            return False
+        if self._stop_in_force is None:
+            self._stop_in_force = a_stop_may_be_in_force(self._root)
+        return not self._stop_in_force
 
     def _binder_sites_in(self, graph: ControlFlowGraph) -> list[CfgNode]:
         found = self._sites_by_graph.get(id(graph))
@@ -1195,7 +1286,7 @@ def build_command_model(
     have nothing left to say.
     """
     seed = Ps1CommandModel(
-        root, control_flow, ReachabilityQuery(dominance), blocks, functions, shadowed)
+        root, control_flow, ReachabilityQuery(dominance, Projection.FORWARD), blocks, functions, shadowed)
     settled = _settle_alias_definitions(seed)
     unread = {id(node) for node in settled.unread}
     read = frozenset(
@@ -1208,7 +1299,7 @@ def build_command_model(
     return Ps1CommandModel(
         root,
         control_flow,
-        ReachabilityQuery(dominance),
+        ReachabilityQuery(dominance, Projection.FORWARD),
         blocks,
         functions,
         shadowed,

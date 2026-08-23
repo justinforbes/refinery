@@ -12,6 +12,7 @@ from refinery.lib.scripts.ps1.analysis.commands import (
     AliasDefinition,
     CommandKind,
     Denotation,
+    Ps1CommandModel,
     build_command_model,
     extract_alias_definition,
 )
@@ -1314,18 +1315,11 @@ class TestPs1CommandModelDirectBuild(TestBase):
 class TestPs1AliasResolutionReadsAResumingTrapAsAnyOtherStatement(TestBase):
     """
     A `trap { continue }` resumes the block it guards at the statement after the one that threw, so
-    a binder written above a call has run by the time the call does, whatever threw. The graph
-    carries that twice, and this model asks the over-approximate half — which claims a resumption
-    reaches every statement of the block, earlier ones included, and so invents a run in which the
-    first call raises and control carries on *past* the `Set-Alias`. No such run exists: it would
-    resume at the `Set-Alias`, that being the statement after the one that threw.
-
-    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach` was moved onto the precise half and
-    answers this correctly; `_a_binder_reaches` and `_binder_may_precede` still walk
-    `refinery.lib.scripts.analysis.reaching.ReachabilityQuery`, whose memo is keyed by node and
-    direction with no room for which projection was asked for. Refusing is the safe direction, so
-    the cost is recall — but obfuscated PowerShell wraps its body in resuming traps, which is
-    exactly where this model is asked what a command is.
+    a binder written above a call has run by the time the call does, whatever threw. Read through
+    the over-approximate half of the graph — which claims a resumption reaches every statement of
+    the block, earlier ones included — this invents a run in which the first call raises and control
+    carries on *past* the `Set-Alias`. No such run exists: it would resume at the `Set-Alias`, that
+    being the statement after the one that threw.
     """
 
     @staticmethod
@@ -1350,11 +1344,123 @@ class TestPs1AliasResolutionReadsAResumingTrapAsAnyOtherStatement(TestBase):
                     self._below_the_binder(prefix),
                     Denotation(CommandKind.ALIAS, 'Write-Output'))
 
-    @unittest.expectedFailure
     def test_a_call_below_a_binder_resolves_under_a_resuming_trap_too(self):
         self.assertEqual(
             self._below_the_binder('trap { continue }\n'),
             Denotation(CommandKind.ALIAS, 'Write-Output'))
+
+    def test_the_deobfuscator_resolves_the_call_where_the_resuming_trap_survives(self):
+        """
+        The model answering is only half of it: the trap above is removed as junk before the
+        rewrite ever asks, so a shape whose handler *acts* is what shows the recall end to end.
+        Both scripts are in `corpus.CLAIMS` and measured to print the same thing on 5.1.
+        """
+        source = (
+            "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; c 'hi'")
+        tree = _script(source)
+        deobfuscate(tree)
+        self.assertEqual(
+            Ps1Synthesizer().convert(tree).splitlines(),
+            [
+                "trap {",
+                "  Write-Host 'e'",
+                "  continue",
+                "}",
+                "[int]'a'",
+                "Set-Alias c Write-Output",
+                "Write-Output 'hi'",
+            ],
+        )
+
+
+class TestPs1AProcessBlockRerunsAndTheGraphDoesNotSaySo(TestBase):
+    """
+    A script's `process` block runs once per object the pipeline hands it, and the per-body graph
+    draws it straight through with no edge back to its first statement. A definition written below a
+    use therefore binds that use on the second object and on every one after, along a path no walk
+    over this graph can take.
+
+    An unread binder there is refused — `_project_binder` reports it unordered, the same refusal
+    `worldflow` makes for the same block. A definition this model *did* read is not: the resolution
+    reports that nothing binds the name, where 5.1 runs the alias from the second object on.
+    """
+
+    _BELOW = (
+        'trap { continue }; Copy-Item a b; '
+        'Set-Alias mk Set-Alias -Force; mk Copy-Item Write-Output')
+
+    @staticmethod
+    def _first_use(source: str, name: str) -> tuple[Ps1CommandModel, Ps1CommandInvocation]:
+        tree = _script(source)
+        use = [
+            node for node in tree.walk_in_order()
+            if isinstance(node, Ps1CommandInvocation) and get_command_name(node) == name
+        ][0]
+        return Ps1ModelCache(tree).commands, use
+
+    def test_a_binder_written_below_a_use_at_the_root_does_not_reach_it(self):
+        model, use = self._first_use(self._BELOW, 'Copy-Item')
+        self.assertEqual(model.unread_alias_bindings_reaching(use), ())
+
+    def test_a_binder_written_below_a_use_in_a_process_block_reaches_it(self):
+        model, use = self._first_use(
+            F'process {{ {self._BELOW} }}', 'Copy-Item')
+        self.assertEqual(len(model.unread_alias_bindings_reaching(use)), 1)
+
+    @unittest.expectedFailure
+    def test_a_definition_below_a_use_in_a_process_block_refuses_the_use(self):
+        model, use = self._first_use("process { c 'hi'; Set-Alias c Write-Output }", 'c')
+        self.assertEqual(model.denotation(use), Denotation(CommandKind.UNKNOWN, None))
+
+
+class TestPs1AnAliasDefinitionResolvesOnlyWhereItCertainlyCompleted(TestBase):
+    """
+    Which definition shapes survive the completion gate and which do not, in one table, so that the
+    line between the recall this recovers and the soundness it keeps is measured rather than argued.
+
+    A definition is resolved through when no run leaves it on a throw and still reaches the use, or
+    when it cannot raise a terminating error at all. Everything else is `UNKNOWN`: the name denotes
+    a command this cannot spell, which is the answer a binding that may not have been made leaves.
+    """
+
+    @staticmethod
+    def _denote_c(source: str) -> Denotation:
+        tree = _script(source)
+        use = [
+            node for node in tree.walk_in_order()
+            if isinstance(node, Ps1CommandInvocation) and get_command_name(node) == 'c'
+        ][-1]
+        return Ps1ModelCache(tree).commands.denotation(use)
+
+    _RESOLVED = Denotation(CommandKind.ALIAS, 'Write-Output')
+    _REFUSED = Denotation(CommandKind.UNKNOWN, None)
+
+    _SHAPES = {
+        "Set-Alias c Write-Output; c 'hi'": _RESOLVED,
+        "trap { continue }; Set-Alias c Write-Output; c 'hi'": _RESOLVED,
+        "trap { break }; Set-Alias c Write-Output; c 'hi'": _RESOLVED,
+        "try { Set-Alias c Write-Output } catch { }; c 'hi'": _RESOLVED,
+        "sal c Write-Output; c 'hi'": _RESOLVED,
+        "trap { continue }; sal c Write-Output; c 'hi'": _RESOLVED,
+        "New-Alias c Write-Output; c 'hi'": _RESOLVED,
+        "trap { continue }; New-Alias c Write-Output; c 'hi'": _REFUSED,
+        "trap { continue }; Set-Alias c Write-Output -Force; c 'hi'": _REFUSED,
+        "trap { continue }; Set-Alias c Write-Output -ErrorAction Stop; c 'hi'": _REFUSED,
+        "$ErrorActionPreference = 'Stop'; trap { continue }; Set-Alias c Write-Output; "
+        "c 'hi'": _REFUSED,
+        "New-Variable ErrorActionPreference Stop -Force; trap { continue }; "
+        "Set-Alias c Write-Output; c 'hi'": _REFUSED,
+        "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'; trap { continue }; "
+        "Set-Alias c Write-Output; c 'hi'": _REFUSED,
+        "$ErrorActionPreference = 'Continue'; trap { continue }; Set-Alias c Write-Output; "
+        "c 'hi'": _REFUSED,
+    }
+
+    def test_each_shape_resolves_or_refuses_as_recorded(self):
+        self.assertEqual(
+            {source: self._denote_c(source) for source in self._SHAPES},
+            dict(self._SHAPES),
+        )
 
 
 class TestPs1ResolvingAnAliasUnderAResumingTrapCanChangeBehaviour(TestBase):
@@ -1392,7 +1498,12 @@ class TestPs1ResolvingAnAliasUnderAResumingTrapCanChangeBehaviour(TestBase):
         return Ps1Synthesizer().convert(tree)
 
     def test_the_model_refuses_the_alias_where_the_resuming_trap_makes_the_use_live(self):
-        self.assertEqual(self._denote_c(self._INPUT), Denotation(CommandKind.NOTHING, None))
+        """
+        `UNKNOWN` and not `NOTHING`: the name denotes a command this cannot put a spelling to, which
+        is what a definition that may not have finished leaves behind. `NOTHING` would say 5.1
+        raises here, and 5.1 runs `Write-Error`.
+        """
+        self.assertEqual(self._denote_c(self._INPUT), Denotation(CommandKind.UNKNOWN, None))
 
     def test_the_deobfuscator_leaves_the_call_below_the_resuming_trap_alone(self):
         self.assertEqual(

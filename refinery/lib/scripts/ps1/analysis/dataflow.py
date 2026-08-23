@@ -83,6 +83,7 @@ from refinery.lib.scripts.analysis.cfg import (
     CfgNode,
     ControlFlowGraph,
     ControlFlowModel,
+    Projection,
     distinct,
 )
 from refinery.lib.scripts.analysis.cycles import CycleModel
@@ -173,7 +174,7 @@ class Ps1VariableFlow:
         self.dominators = dominators
         self.blocks = blocks
         self.cycles = cycles
-        self._between = ReachabilityQuery(dominators)
+        self._between = ReachabilityQuery(dominators, Projection.MAY)
         self._unknowns: dict[int, Ps1FlowUnknown] = {}
         self._exits: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]] = {}
         self._kills: dict[tuple[int, str], frozenset[int]] = {}
@@ -296,7 +297,7 @@ class Ps1VariableFlow:
             placed = self.flow.locate(link.definition)
             if placed is None or placed[0] is not graph or placed[1] is store[1]:
                 return False
-            if not self.dominators.dominates_node(graph, placed[1], store[1]):
+            if not self.dominators.dominates_node(graph, placed[1], store[1], Projection.MAY):
                 return False
             rebinds: set[int] = set()
             for side in (link.first, link.second):
@@ -312,7 +313,7 @@ class Ps1VariableFlow:
                     if where[1] is store[1]:
                         return False
                     rebinds.add(id(where[1]))
-            if self._between.any_between(placed[1], store[1], rebinds):
+            if self._between.any_between(graph, placed[1], store[1], rebinds):
                 return False
         return True
 
@@ -373,7 +374,7 @@ class Ps1VariableFlow:
                 return Ps1ObservedWrite.UNKNOWN
             return found
         blocking = kills | frozenset(id(node) for _, node in definitions)
-        if self._between.any_between(graph.entry, use, blocking):
+        if self._between.any_between(graph, graph.entry, use, blocking):
             return Ps1ObservedWrite.UNKNOWN
         return Ps1ObservedWrite.NOTHING
 
@@ -421,7 +422,7 @@ class Ps1VariableFlow:
                 continue
             if at is not use:
                 if (
-                    self.dominators.dominates_node(graph, at, use)
+                    self.dominators.dominates_node(graph, at, use, Projection.MAY)
                     and self._observes_completed_store(graph, at, use)
                 ):
                     return True
@@ -500,7 +501,7 @@ class Ps1VariableFlow:
             if use is None:
                 return True
             kills = self._block_kills(graph, binding.name)
-            if self._between.any_between(graph.entry, use, kills):
+            if self._between.any_between(graph, graph.entry, use, kills):
                 return True
         return False
 
@@ -824,7 +825,7 @@ class Ps1VariableFlow:
         if use is None:
             return not self._any_placed_unattributable_write()
         kills = self._unattributable_kills(graph, read, use)
-        return not self._between.any_between(graph.entry, use, kills)
+        return not self._between.any_between(graph, graph.entry, use, kills)
 
     def _any_placed_unattributable_write(self) -> bool:
         """

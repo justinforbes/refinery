@@ -6,13 +6,13 @@ from test import TestBase
 from test.lib.scripts.ps1.corpus import executable
 
 from refinery.lib.scripts.analysis import dominance
-from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph
+from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, Projection
 from refinery.lib.scripts.ps1.analysis.cfg import build_ps1_control_flow
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
 def _immediate_dominators_from_sets(
-    graph: ControlFlowGraph, order: list[CfgNode]
+    graph: ControlFlowGraph, order: list[CfgNode], projection: Projection
 ) -> dict[int, int]:
     """
     The immediate dominator of every node in *order*, keyed by node identity, computed the textbook
@@ -36,7 +36,7 @@ def _immediate_dominators_from_sets(
                 continue
             found = frozenset({id(node)}).union(frozenset.intersection(*[
                 sets[known]
-                for known in map(id, node.predecessors)
+                for known in map(id, projection.predecessors(node))
                 if known in reachable
             ]))
             if found != sets[id(node)]:
@@ -57,12 +57,13 @@ class TestPs1ImmediateDominators(TestBase):
         for source in executable():
             tree = Ps1Parser(source).parse()
             for index, graph in enumerate(build_ps1_control_flow(tree).values()):
-                order = dominance._reverse_postorder(graph)
-                with self.subTest(source=source, graph=index):
-                    self.assertEqual(
-                        dominance._immediate_dominators(graph, order),
-                        _immediate_dominators_from_sets(graph, order),
-                    )
+                for projection in Projection:
+                    order = dominance._reverse_postorder(graph, projection)
+                    with self.subTest(source=source, graph=index, projection=projection.name):
+                        self.assertEqual(
+                            dominance._immediate_dominators(graph, order, projection),
+                            _immediate_dominators_from_sets(graph, order, projection),
+                        )
 
 
 class TestPs1DominanceCostsABoundedClimbPerStatement(TestBase):
@@ -106,7 +107,10 @@ class TestPs1DominanceCostsABoundedClimbPerStatement(TestBase):
         try:
             for graph in graphs.values():
                 dominance._immediate_dominators(
-                    graph, dominance._reverse_postorder(graph))
+                    graph,
+                    dominance._reverse_postorder(graph, Projection.MAY),
+                    Projection.MAY,
+                )
         finally:
             sys.settrace(previous)
         return counted

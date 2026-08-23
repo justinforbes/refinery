@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Iterable, Sequence, TypeVar
 
-from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph
+from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, Projection
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 
 _D = TypeVar('_D')
@@ -29,16 +29,24 @@ _D = TypeVar('_D')
 
 class ReachabilityQuery:
     """
-    Memoized forward and backward reachability over one `DominatorModel`, the path-between question
-    asked from them, and the `reaching_definition` selection asked from that.
+    Memoized forward and backward reachability over one `DominatorModel` under one
+    `refinery.lib.scripts.analysis.cfg.Projection`, the path-between question asked from them, and the
+    `reaching_definition` selection asked from that.
 
     The memo is the reason this is an object rather than a function. One definition is asked against
     many uses, so the forward set from the definition is computed once and reused; the graphs do not
     change for as long as the model lives, so nothing invalidates it.
+
+    **The projection belongs to the instance and not to the call.** Every set this holds was computed
+    under one reading of the graph, and the memo is keyed by node and direction with no room for a
+    third dimension; a caller allowed to name a projection per call would be served whichever reading
+    happened to be computed first. A consumer wanting the other reading builds a query of its own,
+    which costs it its own memo and nothing else.
     """
 
-    def __init__(self, dominators: DominatorModel):
+    def __init__(self, dominators: DominatorModel, projection: Projection):
         self._dominators = dominators
+        self._projection = projection
         self._reach: dict[tuple[int, bool], frozenset[int]] = {}
 
     def reachable(self, node: CfgNode, *, forward: bool) -> frozenset[int]:
@@ -51,22 +59,40 @@ class ReachabilityQuery:
         key = (id(node), forward)
         cached = self._reach.get(key)
         if cached is None:
-            cached = frozenset(self._dominators.reachable(node, forward=forward))
+            cached = frozenset(self._dominators.reachable(
+                node, forward=forward, projection=self._projection))
             self._reach[key] = cached
         return cached
 
     def any_between(
-        self, source: CfgNode, target: CfgNode, candidates: Iterable[int],
+        self,
+        graph: ControlFlowGraph,
+        source: CfgNode,
+        target: CfgNode,
+        candidates: Iterable[int],
     ) -> bool:
         """
-        Whether any node in *candidates* — given as node ids — lies on some path from *source* to
-        *target*.
+        Whether any node in *candidates* — given as node ids of *graph* — lies on some path from
+        *source* to *target*.
 
         Asked as two walks rather than one path enumeration: a node lies between the two exactly when
         it is reachable forward from *source* and *target* is reachable forward from it, and the
         second half is the same as it being reachable backward from *target*. The forward set is
         intersected first and the backward walk is skipped entirely when that comes back empty, which
         is the common case for a caller whose candidate set is small.
+
+        Candidates stay *ids* rather than becoming nodes, which is why *graph* is asked for. Every
+        layer above builds these sets as ids and memoizes them that way, and a signature taking nodes
+        would be satisfied by whatever a caller could still name — quietly dropping the candidates it
+        had only ids for, which is the fail-open direction and one nothing would report.
+
+        **Under `Projection.FORWARD` the backward walk is not the transpose of the forward one**, and
+        a candidate the graph calls hub-bound counts as between as soon as it is reachable forward
+        from *source*. Such a candidate stands inside a handler body that resumes the block around
+        it; where the run carries on afterwards is exactly what the forward edges do not draw, so the
+        backward walk from *target* will not find it however certainly the real run passes through
+        it. Answering from the walk alone would say a binder written in a `trap` body does not lie
+        between a definition and a use it in fact rebinds.
         """
         candidates = frozenset(candidates)
         if not candidates:
@@ -74,6 +100,8 @@ class ReachabilityQuery:
         downstream = self.reachable(source, forward=True) & candidates
         if not downstream:
             return False
+        if self._projection is Projection.FORWARD and downstream & graph.hub_bound:
+            return True
         return bool(downstream & self.reachable(target, forward=False))
 
     def reaching_definition(
@@ -110,7 +138,9 @@ class ReachabilityQuery:
         qualifying: list[tuple[_D, CfgNode]] = []
         seen: set[int] = set()
         for value, node in definitions:
-            if node is use or not self._dominators.dominates_node(graph, node, use):
+            if node is use or not self._dominators.dominates_node(
+                graph, node, use, self._projection
+            ):
                 continue
             if id(node) in seen:
                 return None
@@ -120,10 +150,10 @@ class ReachabilityQuery:
             return None
         nearest, nearest_node = qualifying[0]
         for value, node in qualifying[1:]:
-            if self._dominators.dominates_node(graph, nearest_node, node):
+            if self._dominators.dominates_node(graph, nearest_node, node, self._projection):
                 nearest, nearest_node = value, node
         blocking = {id(node) for _, node in definitions if node is not nearest_node}
         blocking.update(kills)
-        if self.any_between(nearest_node, use, blocking):
+        if self.any_between(graph, nearest_node, use, blocking):
             return None
         return nearest

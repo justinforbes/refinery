@@ -427,6 +427,8 @@ CLAIMS: tuple[str, ...] = (
     "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; Write-Output 'hi'",
     "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'",
     "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; Write-Output 'hi'",
+    "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; c 'hi'",
+    "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; Write-Output 'hi'",
     "trap { break }; [int]'a'; Write-Host 'after'",
     "trap { }; [int]'a'; Write-Host 'after'",
     "Get-Item nope -ErrorAction Stop; Write-Host 'after'",

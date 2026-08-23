@@ -40,15 +40,17 @@ from refinery.lib.scripts.analysis.cfg import (
     CfgNode,
     ControlFlowGraph,
     ControlFlowModel,
+    Projection,
     flood,
 )
 
 
-def _reverse_postorder(graph: ControlFlowGraph) -> list[CfgNode]:
+def _reverse_postorder(graph: ControlFlowGraph, projection: Projection) -> list[CfgNode]:
     """
-    The nodes of *graph* that its entry reaches, ordered so that a node precedes every successor a
-    depth-first walk first arrived at through it. The entry comes first, and an unreachable node does
-    not appear at all — which is what confines every later step to the reachable part.
+    The nodes of *graph* that its entry reaches under *projection*, ordered so that a node precedes
+    every successor a depth-first walk first arrived at through it. The entry comes first, and a node
+    the projection does not reach does not appear at all — which is what confines every later step to
+    the part of the graph the projection draws.
 
     The walk is iterative rather than recursive. A body of five thousand statements is a walk five
     thousand deep, and the interpreter's stack is not.
@@ -56,7 +58,7 @@ def _reverse_postorder(graph: ControlFlowGraph) -> list[CfgNode]:
     order: list[CfgNode] = []
     seen: set[int] = {id(graph.entry)}
     stack: list[tuple[CfgNode, Iterator[CfgNode]]] = [
-        (graph.entry, iter(graph.entry.successors))
+        (graph.entry, iter(projection.successors(graph.entry)))
     ]
     while stack:
         node, successors = stack[-1]
@@ -64,7 +66,7 @@ def _reverse_postorder(graph: ControlFlowGraph) -> list[CfgNode]:
             if id(successor) in seen:
                 continue
             seen.add(id(successor))
-            stack.append((successor, iter(successor.successors)))
+            stack.append((successor, iter(projection.successors(successor))))
             break
         else:
             order.append(node)
@@ -73,7 +75,9 @@ def _reverse_postorder(graph: ControlFlowGraph) -> list[CfgNode]:
     return order
 
 
-def _immediate_dominators(graph: ControlFlowGraph, order: list[CfgNode]) -> dict[int, int]:
+def _immediate_dominators(
+    graph: ControlFlowGraph, order: list[CfgNode], projection: Projection,
+) -> dict[int, int]:
     """
     The immediate dominator of every node in *order*, keyed by node identity. The entry is seeded as
     its own, which is the conventional answer and, more to the point here, what marks it as placed
@@ -87,7 +91,11 @@ def _immediate_dominators(graph: ControlFlowGraph, order: list[CfgNode]) -> dict
 
     A predecessor with no immediate dominator yet is skipped rather than intersected against, which
     is how an unreachable predecessor stays out of the answer: it never gains one, so it is skipped
-    forever, and a reachable node keeps the dominators its reachable predecessors give it.
+    forever, and a reachable node keeps the dominators its reachable predecessors give it. *That is
+    also what would carry the projection on its own* — a node *order* leaves out never gains an
+    immediate dominator and is therefore skipped forever — but the adjacency is read through
+    *projection* here as well, so that this function and the ordering above cannot come to disagree
+    about which graph they are walking.
 
     **The placed predecessors are folded deepest first, and that is what keeps the pass linear.**
     Which order they are folded in cannot change the answer — the ancestor operation is commutative
@@ -123,7 +131,9 @@ def _immediate_dominators(graph: ControlFlowGraph, order: list[CfgNode]) -> dict
         for node in order:
             if node is graph.entry:
                 continue
-            placed = [known for known in map(id, node.predecessors) if known in idom]
+            placed = [
+                known for known in map(id, projection.predecessors(node)) if known in idom
+            ]
             if not placed:
                 continue
             placed.sort(key=rank.__getitem__, reverse=True)
@@ -187,9 +197,9 @@ class DominanceTree:
     see the module docstring on why an unreachable node dominates nothing.
     """
 
-    def __init__(self, graph: ControlFlowGraph):
-        order = _reverse_postorder(graph)
-        self.idom = _immediate_dominators(graph, order)
+    def __init__(self, graph: ControlFlowGraph, projection: Projection):
+        order = _reverse_postorder(graph, projection)
+        self.idom = _immediate_dominators(graph, order, projection)
         self._entered, self._left = _dominance_intervals(self.idom, graph, order)
 
     def dominates(self, a: CfgNode, b: CfgNode) -> bool:
@@ -218,7 +228,7 @@ class DominatorModel:
 
     def __init__(self, flow: ControlFlowModel):
         self._flow = flow
-        self._trees: dict[int, DominanceTree] = {}
+        self._trees: dict[tuple[int, Projection], DominanceTree] = {}
 
     def locate(self, element: Node) -> tuple[ControlFlowGraph, CfgNode] | None:
         """
@@ -258,9 +268,14 @@ class DominatorModel:
         evaluating *b* runs. Reflexive — *a* and *b* in the same statement share one control-flow
         node, so a node dominates itself. `False` when either element is unlocatable, when the two
         lie in different graphs, or when the statement holding either cannot be reached at all.
+
+        The `Projection.MAY` reading, which is the one an ordering question wants: it accepts *a*
+        only where it runs first on *every* path the graph draws, and a path the forward projection
+        declines to draw is a path the run can still take. A caller that means the forward reading —
+        one flooding rather than ordering — asks `dominates_node` and names it.
         """
         located = self.locate_pair(a, b)
-        return located is not None and self.dominates_node(*located)
+        return located is not None and self.dominates_node(*located, Projection.MAY)
 
     def strictly_dominates(self, a: Node, b: Node) -> bool:
         """
@@ -273,39 +288,55 @@ class DominatorModel:
         located = self.locate_pair(a, b)
         if located is None or located[1] is located[2]:
             return False
-        return self.dominates_node(*located)
+        return self.dominates_node(*located, Projection.MAY)
 
-    def dominates_node(self, graph: ControlFlowGraph, a: CfgNode, b: CfgNode) -> bool:
+    def dominates_node(
+        self, graph: ControlFlowGraph, a: CfgNode, b: CfgNode, projection: Projection,
+    ) -> bool:
         """
         Whether control-flow node *a* dominates *b* within *graph*, which must be the graph both
-        belong to. Reflexive. The node-level counterpart of `dominates`, for a caller that has
-        already located the two.
+        belong to, under *projection*. Reflexive. The node-level counterpart of `dominates`, for a
+        caller that has already located the two.
 
         *graph* is asked for rather than looked up because it is the key the dominance tree is
         memoized under, and because a caller holding two nodes has already had to establish that they
         share a body for the question to mean anything.
-        """
-        return self.tree_of(graph).dominates(a, b)
 
-    def tree_of(self, graph: ControlFlowGraph) -> DominanceTree:
+        *projection* is asked for and has no default, because the two readings disagree exactly where
+        this is hardest to check: under `Projection.MAY` a statement guarded by a resuming `trap`
+        dominates nothing below it, since the hub draws a run arriving from every later statement,
+        and under `Projection.FORWARD` it dominates what follows it. Both answers are right about
+        different questions, and a caller that did not choose got whichever this happened to be
+        written with.
         """
-        The dominance tree of *graph*, computed on first use and kept thereafter.
+        return self.tree_of(graph, projection).dominates(a, b)
+
+    def tree_of(self, graph: ControlFlowGraph, projection: Projection) -> DominanceTree:
         """
-        found = self._trees.get(id(graph))
+        The dominance tree of *graph* under *projection*, computed on first use and kept thereafter.
+
+        A graph that `carries_resumption` reports nothing of has one tree and not two: the projections
+        draw the same edges over it, so both keys answer from the `Projection.MAY` entry. That is
+        nearly every script, and it is what keeps a second consumer asking the forward reading from
+        doubling the dominance work of the whole run.
+        """
+        key = (id(graph), projection if graph.carries_resumption else Projection.MAY)
+        found = self._trees.get(key)
         if found is None:
-            found = self._trees[id(graph)] = DominanceTree(graph)
+            found = self._trees[key] = DominanceTree(graph, key[1])
         return found
 
-    def reachable(self, start: CfgNode, *, forward: bool) -> set[int]:
+    def reachable(
+        self, start: CfgNode, *, forward: bool, projection: Projection,
+    ) -> set[int]:
         """
-        The ids of the control-flow nodes reachable from *start* — over successor edges when
-        *forward*, over predecessor edges otherwise — including *start* itself. Exceptional edges are
-        followed like any other, since they live in the same successor and predecessor lists, and so
-        is the resumption hub: this is the *may* reading, which a caller asking whether two points
-        can be ordered has to have.
+        The ids of the control-flow nodes reachable from *start* under *projection* — over successor
+        edges when *forward*, over predecessor edges otherwise — including *start* itself. Exceptional
+        edges are followed like any other, since they live in the same successor and predecessor
+        lists.
 
         The two directions are kept separate rather than offered as one path-between query because a
         caller intersecting them memoizes each side independently: one definition is asked against
         many uses, and the forward set from the definition is the same every time.
         """
-        return flood([start], forward=forward, projected=False)
+        return flood([start], forward=forward, projection=projection)

@@ -32,6 +32,7 @@ from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     binding_key,
     binds_parameter,
+    string_value,
 )
 from refinery.lib.scripts.ps1.data import COMMON_PARAMETERS
 from refinery.lib.scripts.ps1.model import (
@@ -224,6 +225,44 @@ def _writes_stop_to_the_preference(node: Node) -> bool:
     ):
         return False
     return _selects_stop(node.value)
+
+
+#: The automatic variables through which a `Stop` can be armed for commands that did not ask for
+#: one: the preference itself, and the table that binds `-ErrorAction` into every command that takes
+#: it. Spelled as names rather than as assignment shapes because `a_stop_may_be_in_force` asks
+#: whether either is *touched* at all, however it is spelled.
+_STOP_BEARING_NAMES = frozenset({
+    'erroractionpreference',
+    'psdefaultparametervalues',
+})
+
+
+def a_stop_may_be_in_force(root: Node) -> bool:
+    """
+    Whether anything in *root* may make an error a command reports into a terminating one — the
+    strict counterpart of the whole-script question `Ps1FaultReach` asks itself, and a different
+    question from it.
+
+    That one reads an assignment of `Stop` to `$ErrorActionPreference`, and reads it *laxly* on
+    purpose: it decides whether a handler may be removed, where a missed arming keeps a handler that
+    could have gone and costs recall on junk. Two spellings it is known to miss are ledgered as
+    behaviour defects — `New-Variable ErrorActionPreference Stop -Force`, and a `-ErrorAction` entry
+    written into `$PSDefaultParameterValues`.
+
+    A caller asking whether a *statement completed* cannot inherit those. Reading a script as arming
+    nothing where it does says a command that in fact raised ran to its end, and a value it was going
+    to establish is then resolved through at every use below it — which rewrites calls a run never
+    makes. So this asks the wider question: does the script touch either name at all, in any way,
+    including naming one in a string that a command could set it through. What that costs is the
+    recall of every script that so much as mentions the preference, which is a shape worth refusing.
+    """
+    for node in root.walk():
+        if isinstance(node, Ps1Variable) and binding_key(node) in _STOP_BEARING_NAMES:
+            return True
+        written = string_value(node)
+        if written is not None and written.strip().lower() in _STOP_BEARING_NAMES:
+            return True
+    return False
 
 
 def ends_the_script(element: Node) -> bool:

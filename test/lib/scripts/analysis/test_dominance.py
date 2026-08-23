@@ -8,6 +8,7 @@ from test import TestBase
 from test.lib.scripts.analysis import graph_from_edges as _graph
 
 from refinery.lib.scripts.analysis.cfg import CfgNode
+from refinery.lib.scripts.analysis.cfg import Projection
 from refinery.lib.scripts.analysis.dominance import DominanceTree
 
 SHAPES = {
@@ -90,7 +91,7 @@ class TestDominanceTree(TestBase):
         For every node, the names the tree reports as dominating it, asked one pair at a time.
         """
         graph, named = _graph(edges)
-        tree = DominanceTree(graph)
+        tree = DominanceTree(graph, Projection.MAY)
         return {
             below: {above for above, node in named.items() if tree.dominates(node, target)}
             for below, target in named.items()
@@ -115,7 +116,7 @@ class TestDominanceTree(TestBase):
         for name, edges in SHAPES.items():
             with self.subTest(name):
                 graph, named = _graph(edges)
-                tree = DominanceTree(graph)
+                tree = DominanceTree(graph, Projection.MAY)
                 relation = self._relation(edges)
                 for below, above in relation.items():
                     for first in above:
@@ -128,7 +129,7 @@ class TestDominanceTree(TestBase):
 
     def test_a_reachable_node_dominates_itself(self):
         graph, named = _graph(SHAPES['branch'])
-        tree = DominanceTree(graph)
+        tree = DominanceTree(graph, Projection.MAY)
         for name, node in named.items():
             self.assertTrue(tree.dominates(node, node), name)
 
@@ -139,7 +140,7 @@ class TestDominanceTree(TestBase):
         a definition there reach a use there.
         """
         graph, named = _graph(SHAPES['unreachable_cycle'])
-        tree = DominanceTree(graph)
+        tree = DominanceTree(graph, Projection.MAY)
         self.assertFalse(tree.dominates(named['u'], named['u']))
         self.assertFalse(tree.dominates(named['u'], named['v']))
         self.assertFalse(tree.dominates(named['a'], named['u']))
@@ -188,7 +189,7 @@ class TestDominanceTree(TestBase):
 
     def test_the_entry_is_its_own_immediate_dominator(self):
         graph, named = _graph(SHAPES['branch'])
-        tree = DominanceTree(graph)
+        tree = DominanceTree(graph, Projection.MAY)
         self.assertEqual(tree.idom[id(graph.entry)], id(named['a']))
         self.assertEqual(tree.idom[id(named['j'])], id(named['a']))
 
@@ -213,7 +214,7 @@ class TestDominanceTree(TestBase):
         edges = {name: [names[index + 1]] for index, name in enumerate(names[:-1])}
         edges[names[-1]] = []
         graph, named = _graph(edges)
-        tree = DominanceTree(graph)
+        tree = DominanceTree(graph, Projection.MAY)
         self.assertTrue(tree.dominates(named[names[0]], named[names[-1]]))
         self.assertFalse(tree.dominates(named[names[-1]], named[names[0]]))
 
@@ -230,7 +231,7 @@ class TestDominanceTree(TestBase):
         graph, named = _graph(edges)
         tracemalloc.start()
         try:
-            tree = DominanceTree(graph)
+            tree = DominanceTree(graph, Projection.MAY)
             peak = tracemalloc.get_traced_memory()[1]
         finally:
             tracemalloc.stop()

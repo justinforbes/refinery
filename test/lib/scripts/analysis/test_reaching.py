@@ -7,6 +7,7 @@ from test.lib.scripts.analysis import graph_from_edges
 
 from refinery.lib.scripts.analysis.cfg import ControlFlowModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
+from refinery.lib.scripts.analysis.cfg import Projection
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 
 STRAIGHT = {'a': ['b'], 'b': ['c'], 'c': []}
@@ -29,7 +30,8 @@ class TestReachingDefinition(TestBase):
         name of the node evaluating it.
         """
         graph, named = graph_from_edges(edges)
-        query = ReachabilityQuery(DominatorModel(ControlFlowModel({id(graph.owner): graph})))
+        query = ReachabilityQuery(
+            DominatorModel(ControlFlowModel({id(graph.owner): graph})), Projection.MAY)
         return query.reaching_definition(
             graph,
             named[use],

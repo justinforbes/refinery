@@ -285,6 +285,10 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
 #: `INFO` is what `Write-Host` produces, which since 5.0 writes an information record rather than
 #: going straight to the console. An empty one is a read of a variable that holds nothing.
 CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
+    "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; c 'hi'":
+        ('INFO	e', 'OUT	System.String	hi'),
+    "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; Write-Output 'hi'":
+        ('INFO	e', 'OUT	System.String	hi'),
     "$x = 'a'; . { Remove-Variable x }; Write-Host $x":
         ('INFO\t',),
     "$x = 'a'; . { New-Variable x 'b' -Force }; Write-Host $x":

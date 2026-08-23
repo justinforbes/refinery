@@ -26,6 +26,7 @@ from typing import Iterator
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
+from refinery.lib.scripts.analysis.cfg import Projection
 from refinery.lib.scripts.js.analysis.cfg import CfgNode, ControlFlowGraph
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import EffectModel
@@ -53,7 +54,7 @@ class ReachingModel:
         self.model = effects.model
         self._kill_cache: dict[tuple[int, int, int], frozenset[int] | None] = {}
         self._call_cache: dict[int, list[tuple[JsCallExpression, CfgNode]]] = {}
-        self._between = ReachabilityQuery(dominance)
+        self._between = ReachabilityQuery(dominance, Projection.MAY)
 
     def value_preserved(self, binding: Binding, definition: Node, use: Node) -> bool:
         """
@@ -76,12 +77,12 @@ class ReachingModel:
             return False
         if node_d is node_u:
             return False
-        if not self.dominance.dominates_node(graph_d, node_d, node_u):
+        if not self.dominance.dominates_node(graph_d, node_d, node_u, Projection.MAY):
             return False
         kills = self._kill_nodes(binding, graph_d, definition)
         if kills is None:
             return False
-        return not self._between.any_between(node_d, node_u, kills)
+        return not self._between.any_between(graph_d, node_d, node_u, kills)
 
     def _kill_nodes(
         self, binding: Binding, graph: ControlFlowGraph, definition: Node,

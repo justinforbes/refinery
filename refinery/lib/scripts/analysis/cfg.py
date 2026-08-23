@@ -31,7 +31,7 @@ from __future__ import annotations
 import enum
 
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import AbstractSet as Set, Iterable, Sequence
 
 from refinery.lib.scripts import Node
 
@@ -83,6 +83,68 @@ class CfgEdge(enum.Flag):
 #: store the source makes may not have happened at the other end of one, whichever of the three it
 #: is, which is the one question every flow-sensitive consumer asks of the kind.
 RAISE_TAKEN = CfgEdge.ERROR_CARRYING | CfgEdge.RESUMPTION_HUB | CfgEdge.RESUMPTION_FORWARD
+
+
+class Projection(enum.Enum):
+    """
+    Which reading of a resuming handler a walk over a control-flow graph is asked for — the two
+    halves `CfgEdge` describes, named so that a walk states which one it means.
+
+    `MAY` — every path the graph draws, the resumption hub among them. A resumption point is taken
+    to reach every statement of its block, the ones written above it included. This is the reading a
+    caller asking whether something *can* happen has to have: dropping a path there would let it
+    call a live statement unreachable, or a store that is read dead.
+
+    `FORWARD` — the paths a run takes going forward. The hub is declined, so a resumption reaches
+    only the statement control would resume at and what follows it. This is the reading a flood
+    needs: under `MAY` one leak anywhere in a trap-guarded block poisons the whole of it, the
+    statements above the leak included.
+
+    Neither is the safe one. `MAY` claims runs that cannot happen and `FORWARD` drops the fact that a
+    handler body carries on somewhere the forward edges do not name, so which of them fails closed
+    depends on what is asked. That is why every walk here names one rather than taking a default.
+
+    The hub is declined as a *node*, and in both directions. Filtering the edges instead would let a
+    walk cross a hub the moment some other edge joined the same pair, and would strand a backward
+    walk inside a hub it can never leave.
+
+    **The forward reading is sound by excision.** Take any run: the segment where it is inside a
+    resuming handler body is exactly the part the forward edges do not draw, and cutting that segment
+    out leaves a path over the guarded statements that the forward edges do draw — the statement that
+    threw, then the one after it. So every ordering the forward projection reports holds of the real
+    run, over a subset of the nodes the run visited. What it does *not* report is where a statement
+    of the handler body itself leads, which is why a source inside one is walked under `MAY` instead
+    (`CfgNode.is_hub_bound`).
+    """
+    MAY = enum.auto()
+    FORWARD = enum.auto()
+
+    def successors(self, node: CfgNode) -> list[CfgNode]:
+        """
+        The nodes control may pass to from *node* under this reading.
+        """
+        if self is Projection.MAY:
+            return node.successors
+        if node.is_resumption_hub:
+            return []
+        return [target for target in node.successors if not target.is_resumption_hub]
+
+    def predecessors(self, node: CfgNode) -> list[CfgNode]:
+        """
+        The nodes control may arrive at *node* from under this reading.
+        """
+        if self is Projection.MAY:
+            return node.predecessors
+        if node.is_resumption_hub:
+            return []
+        return [source for source in node.predecessors if not source.is_resumption_hub]
+
+    def neighbours(self, node: CfgNode, *, forward: bool) -> list[CfgNode]:
+        """
+        `successors` or `predecessors` by direction, so that a walk parameterised over both reads one
+        adjacency rather than choosing between two attribute names of its own.
+        """
+        return self.successors(node) if forward else self.predecessors(node)
 
 
 class ArmFlow(enum.Enum):
@@ -168,7 +230,9 @@ class CfgNode:
         return id(self) in self.graph._hub_bound
 
 
-def flood(sources: Iterable[CfgNode], *, forward: bool, projected: bool) -> set[int]:
+def flood(
+    sources: Iterable[CfgNode], *, forward: bool, projection: Projection,
+) -> set[int]:
     """
     The ids of the nodes reachable from *any* of *sources*, each source included: over successor
     edges when *forward* and over predecessor edges otherwise, and over the projection that declines
@@ -178,13 +242,8 @@ def flood(sources: Iterable[CfgNode], *, forward: bool, projected: bool) -> set[
     choosing a direction or a projection chooses it by naming an argument rather than by writing a
     fourth copy of the sweep that quietly disagrees with the other three about what an edge means.
     Neither dimension has a default: `forward` decides whether the answer is *what this reaches* or
-    *what reaches this*, and `projected` decides whether a resumption is read as going forward only
-    or as going anywhere in its block. A caller that did not think about either asked the wrong
-    question.
-
-    Declining the hub declines it as a *node*, in both directions. Filtering the edges instead would
-    let a walk cross a hub the moment some other edge joined the same pair, and would leave a
-    backward walk inside hubs it can never leave.
+    *what reaches this*, and `projection` decides how a resumption is read. A caller that did not
+    think about either asked the wrong question.
 
     The hub-bound fallback is **not** applied here — `reachable_forward_from_any` applies it. It is
     a property of a *source*, not of the walk, and a walk applying it to every node it met would
@@ -203,13 +262,10 @@ def flood(sources: Iterable[CfgNode], *, forward: bool, projected: bool) -> set[
             stack.append(source)
     while stack:
         node = stack.pop()
-        for neighbour in (node.successors if forward else node.predecessors):
-            if id(neighbour) in seen:
-                continue
-            if projected and neighbour.is_resumption_hub:
-                continue
-            seen.add(id(neighbour))
-            stack.append(neighbour)
+        for neighbour in projection.neighbours(node, forward=forward):
+            if id(neighbour) not in seen:
+                seen.add(id(neighbour))
+                stack.append(neighbour)
     return seen
 
 
@@ -222,7 +278,7 @@ def reachable_from_any(sources: Iterable[CfgNode]) -> frozenset[int]:
     this walk follows the resumption hub, which claims a statement is reached from every later one
     of its block, so one leak anywhere in a trap-guarded script poisons the whole of it.
     """
-    return frozenset(flood(sources, forward=True, projected=False))
+    return frozenset(flood(sources, forward=True, projection=Projection.MAY))
 
 
 class ControlFlowGraph:
@@ -294,6 +350,16 @@ class ControlFlowGraph:
         return bool(self.edge_kind(source, target) & RAISE_TAKEN)
 
     @property
+    def hub_bound(self) -> Set[int]:
+        """
+        The ids of the nodes `CfgNode.is_hub_bound` answers for, for a caller holding node *ids*
+        rather than nodes. `refinery.lib.scripts.analysis.reaching.ReachabilityQuery` is one: its
+        candidate sets are ids because the layers above memoize them that way, and turning them back
+        into nodes to ask each one is what those caches exist to avoid.
+        """
+        return self._hub_bound
+
+    @property
     def carries_resumption(self) -> bool:
         """
         Whether any handler of this body resumes the block it guards, which is the only shape over
@@ -348,8 +414,8 @@ def reachable_forward_from_any(
         return reachable_from_any(sources)
     coarse = [source for source in sources if source.is_hub_bound]
     precise = [source for source in sources if not source.is_hub_bound]
-    seen = flood(coarse, forward=True, projected=False) if coarse else set()
-    seen.update(flood(precise, forward=True, projected=True))
+    seen = flood(coarse, forward=True, projection=Projection.MAY) if coarse else set()
+    seen.update(flood(precise, forward=True, projection=Projection.FORWARD))
     return frozenset(seen)
 
 

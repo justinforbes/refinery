@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from test import TestBase
 
+from refinery.lib.scripts.analysis.cfg import Projection
+
 from refinery.lib.scripts.js.analysis.dominance import build_dominance
 from refinery.lib.scripts.js.analysis.model import build_semantic_model
 from refinery.lib.scripts.js.model import (
@@ -255,9 +257,9 @@ class TestDominance(TestBase):
         assert located_a is not None and located_b is not None
         graph, na = located_a
         nb = located_b[1]
-        self.assertTrue(dom.dominates_node(graph, na, na))
-        self.assertTrue(dom.dominates_node(graph, na, nb))
-        self.assertFalse(dom.dominates_node(graph, nb, na))
+        self.assertTrue(dom.dominates_node(graph, na, na, Projection.MAY))
+        self.assertTrue(dom.dominates_node(graph, na, nb, Projection.MAY))
+        self.assertFalse(dom.dominates_node(graph, nb, na, Projection.MAY))
 
     def test_strictly_dominates_orders_sequential_statements(self):
         ast, dom = self._dominance('var a = 1; var b = 2;')

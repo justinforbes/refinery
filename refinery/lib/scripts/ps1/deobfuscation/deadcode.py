@@ -10,6 +10,7 @@ from refinery.lib.scripts import (
     Statement,
     Transformer,
 )
+from refinery.lib.scripts.analysis.cfg import Projection
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.ps1.analysis.cache import Ps1ModelCache, model_cache
 from refinery.lib.scripts.ps1.analysis.effects import (
@@ -461,7 +462,8 @@ class Ps1DeadCodeElimination(Transformer):
         def reachable_of(graph) -> frozenset[int]:
             reach = reachable_by_graph.get(id(graph))
             if reach is None:
-                reach = frozenset(dominance.reachable(graph.entry, forward=True))
+                reach = frozenset(dominance.reachable(
+                    graph.entry, forward=True, projection=Projection.MAY))
                 reachable_by_graph[id(graph)] = reach
             return reach
 
