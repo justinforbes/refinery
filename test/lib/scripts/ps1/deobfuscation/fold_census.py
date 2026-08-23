@@ -1427,6 +1427,10 @@ FOLDS: dict[str, str] = {
         "Set-Alias c Write-Error -Option ReadOnly\nSet-Alias c Write-Output\nWrite-Output 'hi'",
     "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; c 'hi'":
         "trap {\n  Write-Host 'e'\n  continue\n}\n[int]'a'\nSet-Alias c Write-Output\nWrite-Output 'hi'",
+    "trap { continue }; 1/0; Write-Host 'after'":
+        "1 / 0\nWrite-Host 'after'",
+    "trap { continue }; $x = \"$(1/0)$(Set-Alias zzq Write-Output)\"; zzq 'hi'":
+        "$Null = \"$(1 / 0)$(Set-Alias zzq Write-Output)\"\nWrite-Output 'hi'",
     "throw 'e'; Write-Host 'after'":
         "throw 'e'",
     "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":

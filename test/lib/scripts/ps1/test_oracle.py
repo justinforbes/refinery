@@ -266,6 +266,17 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The handler is removed. The table binds `-ErrorAction Stop` into every command that '
         'takes one, so no action is written at the call site and no preference is assigned; '
         'neither gate is looking at an index expression.',
+    "trap { continue }; 1/0; Write-Host 'after'":
+        'The handler is removed and the script then dies on the division. A failing cast, a '
+        'division by zero and a member access on `$null` all raise errors a `trap` resumes '
+        'on, and the fault model reads none of them as raising anything: only a written '
+        '`throw` and an explicit `-ErrorAction Stop` are raisers, so a handler guarding any '
+        'of the others reads as guarding nothing.',
+    "trap { continue }; $x = \"$(1/0)$(Set-Alias zzq Write-Output)\"; zzq 'hi'":
+        'The same removal reached through a sub-expression, and it costs a second answer: '
+        'with the handler gone nothing carries past the division, so the `Set-Alias` beside '
+        'it reads as having run and the call below is resolved to `Write-Output`. 5.1 '
+        'resumes past the whole assignment with the name still unbound.',
     "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' "
     "}; Wrap; Write-Host 'after'":
         'The handler is removed. What reaches it is the *call*, whose subtree carries no `throw`, '
@@ -285,6 +296,10 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
 #: `INFO` is what `Write-Host` produces, which since 5.0 writes an information record rather than
 #: going straight to the console. An empty one is a read of a variable that holds nothing.
 CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
+    "trap { continue }; 1/0; Write-Host 'after'":
+        ('INFO\tafter',),
+    "trap { continue }; $x = \"$(1/0)$(Set-Alias zzq Write-Output)\"; zzq 'hi'":
+        (),
     "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; c 'hi'":
         ('INFO	e', 'OUT	System.String	hi'),
     "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; Write-Output 'hi'":
