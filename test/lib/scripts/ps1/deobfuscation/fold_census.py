@@ -1423,6 +1423,8 @@ FOLDS: dict[str, str] = {
         "\n  throw 'e'\n  Write-Host 'tail'\n}\nWrite-Host 'next'",
     "trap { }; [int]'a'; Write-Host 'after'":
         "[int]'a'\nWrite-Host 'after'",
+    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'":
+        "Set-Alias c Write-Error -Option ReadOnly\nSet-Alias c Write-Output\nWrite-Output 'hi'",
     "throw 'e'; Write-Host 'after'":
         "throw 'e'",
     "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":

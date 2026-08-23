@@ -336,6 +336,17 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
     "$ErrorActionPreference = 'Stop'; trap { continue }; "
     "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; Write-Output 'hi'":
         ('OUT\tSystem.String\thi',),
+    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'": (
+        'ERROR\tAliasNotWritable,Microsoft.PowerShell.Commands.SetAliasCommand'
+        '\tSystem.Management.Automation.SessionStateUnauthorizedAccessException',
+        'ERROR\tMicrosoft.PowerShell.Commands.WriteErrorException'
+        '\tMicrosoft.PowerShell.Commands.WriteErrorException',
+    ),
+    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; Write-Output 'hi'": (
+        'ERROR\tAliasNotWritable,Microsoft.PowerShell.Commands.SetAliasCommand'
+        '\tSystem.Management.Automation.SessionStateUnauthorizedAccessException',
+        'OUT\tSystem.String\thi',
+    ),
     "trap { break }; [int]'a'; Write-Host 'after'":
         ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
     "trap { }; [int]'a'; Write-Host 'after'": (
