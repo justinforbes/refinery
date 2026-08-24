@@ -1819,6 +1819,45 @@ def binding_has_references(
     return False
 
 
+def nothing_still_names(model: SemanticModel, removed: Sequence[Node]) -> bool:
+    """
+    Whether deleting the nodes of *removed* would leave nothing naming what it takes away. A binding
+    whose declarations all lie inside these nodes ceases to exist with them, so a reference to one
+    from outside is a name the output would no longer declare, while a reference from within is one
+    the deletion carries off and does not count. A name that is declared elsewhere as well survives
+    the deletion and is not asked about.
+
+    This is the question a pass asks before deleting the machinery it has finished reading: the calls
+    it could answer are gone, and what is left decides whether the machinery may go too. Asking it of
+    the model rather than of the call shapes the pass recognizes is what makes the answer cover a call
+    the pass could not resolve, a name handed to something else, and an alias taken through a form the
+    pass does not match. None of those is a call the pass would find, and each of them is a reference
+    the model reports.
+
+    A name inside a `with` body is asked for separately, because it resolves to no binding at all:
+    the object supplies it or the binding does, and which one is a runtime question. It is counted as
+    a reference here, since a removal made on the strength of it denoting the object is a removal that
+    strands it whenever the object does not carry the property.
+    """
+    inside = {id(node) for root in removed for node in root.walk()}
+    asked: set[Binding] = set()
+    for root in removed:
+        for node in root.walk():
+            if not isinstance(node, JsIdentifier):
+                continue
+            binding = model.binding_of(node)
+            if binding is None or binding in asked:
+                continue
+            asked.add(binding)
+            if any(id(site) not in inside for site in binding.declarations):
+                continue
+            if binding_has_references(model, binding, exclude_ids=inside):
+                return False
+            if any(id(ref) not in inside for ref in model.dynamic_references(binding)):
+                return False
+    return True
+
+
 class BodyProcessingTransformer(Transformer):
     """
     Intermediate base for JS deobfuscation transformers that process the statement list (body) of

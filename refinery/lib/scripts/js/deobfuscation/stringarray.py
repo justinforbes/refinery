@@ -21,10 +21,12 @@ from refinery.lib.scripts import (
     _remove_from_parent,
     _replace_in_parent,
 )
+from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     BINARY_OPS,
     ScopeProcessingTransformer,
     make_string_literal,
+    nothing_still_names,
     property_key,
     remove_declarator,
     string_value,
@@ -46,6 +48,7 @@ from refinery.lib.scripts.js.model import (
     JsParenthesizedExpression,
     JsProperty,
     JsReturnStatement,
+    JsScript,
     JsSequenceExpression,
     JsStringLiteral,
     JsUnaryExpression,
@@ -1068,71 +1071,56 @@ def _replace_accessor_calls(
     return count
 
 
-def _find_remaining_calls(
-    root: Node,
-    aliases: set[str],
-    wrapper_names: set[str],
-    wrappers: dict[str, AccessorWrapperInfo] | None = None,
-    prop_maps: dict[str, dict[str, int | str]] | None = None,
-) -> tuple[bool, set[int]]:
-    """
-    Determine whether unresolved accessor or wrapper calls remain in the AST, excluding calls that
-    are inside dead wrapper function bodies (which will be removed) and calls that cannot possibly
-    be accessor calls (wrong argument structure). Returns a `(bool, set)` pair: whether any
-    outstanding calls exist, and the set of dead-node ids for reuse during cleanup.
-    """
-    dead_nodes: set[int] = set()
-    local_accessors = frozenset(aliases)
-    for n in root.walk():
-        if isinstance(n, JsFunctionDeclaration) and n.id is not None and n.id.name in wrapper_names:
-            dead_nodes.add(id(n))
-        elif (
-            isinstance(n, JsCallExpression)
-            and isinstance(n.callee, JsIdentifier)
-            and (n.callee.name in aliases or n.callee.name in wrapper_names)
-        ):
-            try:
-                _resolve_accessor_call(n, local_accessors, wrappers, prop_maps)
-            except _EvalError:
-                continue
-            p = n.parent
-            while p is not None:
-                if id(p) in dead_nodes:
-                    break
-                p = p.parent
-            else:
-                return True, dead_nodes
-    return False, dead_nodes
-
-
-def _cleanup_infrastructure(
+def _infrastructure_nodes(
     root: Node,
     array: ArrayFunction,
     accessors: list[AccessorFunction],
     rotation: RotationIIFE | None,
-    dead_nodes: set[int],
+    wrapper_names: set[str],
     aliases: set[str],
-) -> None:
+) -> list[Node]:
     """
-    Remove the string-array infrastructure (array function, accessor functions, rotation IIFE, dead
-    wrapper declarations, and accessor alias declarators) once all calls have been resolved.
+    Every node the string-array infrastructure occupies: the array function, the accessor functions,
+    the rotation IIFE that puts the strings in order, the wrapper declarations that forward to an
+    accessor, and the declarators that alias one. They are collected before anything is removed, so
+    that the names they declare can be asked about together — a reference from one of them into
+    another goes with the removal, and only a reference from outside all of them keeps the
+    infrastructure alive.
     """
-    _remove_from_parent(array.node)
-    for accessor in accessors:
-        _remove_from_parent(accessor.node)
+    nodes: list[Node] = [array.node]
+    nodes.extend(accessor.node for accessor in accessors)
     if rotation is not None:
-        _remove_from_parent(rotation.node)
-    for n in list(root.walk()):
-        if id(n) in dead_nodes:
-            _remove_from_parent(n)
-        elif (
-            isinstance(n, JsVariableDeclarator)
-            and isinstance(n.id, JsIdentifier)
-            and n.id.name in aliases
-            and isinstance(n.init, JsIdentifier)
-            and n.init.name in aliases
+        nodes.append(rotation.node)
+    for node in root.walk():
+        if (
+            isinstance(node, JsFunctionDeclaration)
+            and node.id is not None
+            and node.id.name in wrapper_names
         ):
-            remove_declarator(n)
+            nodes.append(node)
+        elif (
+            isinstance(node, JsVariableDeclarator)
+            and isinstance(node.id, JsIdentifier)
+            and node.id.name in aliases
+            and isinstance(node.init, JsIdentifier)
+            and node.init.name in aliases
+        ):
+            nodes.append(node)
+    return nodes
+
+
+def _remove_infrastructure(nodes: Sequence[Node]) -> None:
+    """
+    Delete the nodes `_infrastructure_nodes` collected, each the way its kind is deleted: a
+    declarator through `refinery.lib.scripts.js.deobfuscation.helpers.remove_declarator`, so that the
+    declaration holding it goes too once it holds nothing else, and every other node out of the
+    statement list it sits in.
+    """
+    for node in nodes:
+        if isinstance(node, JsVariableDeclarator):
+            remove_declarator(node)
+        else:
+            _remove_from_parent(node)
 
 
 class _CachedResolution(NamedTuple):
@@ -1150,6 +1138,14 @@ _CACHE_ATTR = '_stringarray_cache'
 
 
 class JsStringArrayResolver(ScopeProcessingTransformer):
+
+    def __init__(self):
+        super().__init__()
+        self._root: JsScript | None = None
+
+    def visit_JsScript(self, node: JsScript):
+        self._root = node
+        return super().visit_JsScript(node)
 
     def _process_scope_body(self, scope: Node, body: list[Statement]) -> None:
         array = _find_array_function(body)
@@ -1211,12 +1207,12 @@ class JsStringArrayResolver(ScopeProcessingTransformer):
         replaced = _replace_accessor_calls(
             scope, aliases, raw_lookup, encoding_map, all_wrappers, all_prop_maps,
         )
-        wrapper_names = set(all_wrappers)
-        has_remaining, dead_nodes = _find_remaining_calls(
-            scope, aliases, wrapper_names, all_wrappers, all_prop_maps,
+        assert self._root is not None
+        infrastructure = _infrastructure_nodes(
+            scope, array, accessors, rotation, set(all_wrappers), aliases,
         )
-        if not has_remaining:
-            _cleanup_infrastructure(scope, array, accessors, rotation, dead_nodes, aliases)
+        if nothing_still_names(model_cache(self, self._root).model, infrastructure):
+            _remove_infrastructure(infrastructure)
             self.mark_changed()
         elif replaced > 0:
             self.mark_changed()

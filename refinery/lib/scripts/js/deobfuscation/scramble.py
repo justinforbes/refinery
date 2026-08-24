@@ -13,11 +13,13 @@ from typing import NamedTuple, Sequence
 
 from refinery.lib.fast.scramble import decrypt_round as _decrypt_round
 from refinery.lib.scripts import Node, _remove_from_parent, _replace_in_parent
+from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     GLOBAL_OBJECT_ALIASES,
     ScriptLevelTransformer,
     access_key,
     make_string_literal,
+    nothing_still_names,
     remove_declarator,
 )
 from refinery.lib.scripts.js.model import (
@@ -243,9 +245,10 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
             instance.rounds,
         )
         count = self._substitute_calls(node, decode_names, cipher)
-        if count > 0:
-            self._remove_infrastructure(body, class_node, instance, decode_names)
-            self.mark_changed()
+        if count <= 0:
+            return
+        self.mark_changed()
+        self._remove_infrastructure(node, body, class_node, instance, decode_names)
 
     def _find_scramble_class(self, body: Sequence[Node]) -> JsClassDeclaration | None:
         for stmt in body:
@@ -393,11 +396,18 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
 
     def _remove_infrastructure(
         self,
+        root: JsScript,
         body: Sequence[Node],
         class_node: JsClassDeclaration,
         instance: _InstanceInfo,
         decode_names: set[str],
     ) -> None:
+        """
+        Delete the cipher class, the instance it is constructed into, and every decode function and
+        alias that reaches it — but only once nothing outside them names any of it. A call whose
+        argument the pass could not read is left standing, and deleting the function that call names
+        would hand back a program throwing where it ran.
+        """
         removals: list[Node] = [class_node]
         declarator_removals: list[JsVariableDeclarator] = []
         global_name_vars: set[str] = set()
@@ -439,6 +449,9 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
                     and expr.left.name in decode_names
                 ):
                     removals.append(stmt)
+        model = model_cache(self, root).model
+        if not nothing_still_names(model, [*removals, *declarator_removals]):
+            return
         for decl in declarator_removals:
             remove_declarator(decl)
         for stmt in removals:

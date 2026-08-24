@@ -57,13 +57,13 @@ class TestStringArray(TestJsDeobfuscator):
     def test_string_array_preset_beside_non_finite_accessor_call_indices(self):
         """
         The same three values as the argument of an accessor call, which is the other place a
-        resolved constant is read as an index into the string array.
+        resolved constant is read as an index into the string array. No folding turns one into a
+        position, so those calls stand and the accessor stands with them; what is pinned here is
+        that the one call the pass can answer is answered all the same. What the machinery left
+        standing costs is `test.lib.scripts.js.test_unfixed_defects`.
         """
-        source = self._default_preset() + (
-            'function unused() {'
-            ' return _0xe6abe5(1e400 + 0) + _0xe6abe5(1e400 * 0) + _0xe6abe5(1e308 * 10); }'
-        )
-        self.assertEqual("console.log('test string');", self._deobfuscate(source))
+        result = self._deobfuscate(A_PRESET_BESIDE_AN_ACCESSOR_CALL_NOTHING_CAN_ANSWER)
+        self.assertEqual("console.log('test string');", result.splitlines()[-1])
 
     def test_string_array_rotation_iife_with_parenthesised_callee(self):
         preset = self._default_preset()
@@ -408,3 +408,12 @@ class TestStringArray(TestJsDeobfuscator):
             """
         )
         self.assertEqual(self._run_transformer(source, JsStringArrayResolver), expected)
+
+
+#: The default preset beside a function whose accessor calls read a non-finite index. No constant
+#: folding turns one into a position in the string array, so the pass can answer neither call and
+#: the accessor keeps the name each of them stands on.
+A_PRESET_BESIDE_AN_ACCESSOR_CALL_NOTHING_CAN_ANSWER = TestStringArray._default_preset() + (
+    'function unused() {'
+    ' return _0xe6abe5(1e400 + 0) + _0xe6abe5(1e400 * 0) + _0xe6abe5(1e308 * 10); }'
+)
