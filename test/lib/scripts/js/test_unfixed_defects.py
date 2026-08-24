@@ -36,6 +36,9 @@ from test.lib.scripts.js.analysis.differential import (
 from test.lib.scripts.js.deobfuscation.test_array_length_reads import (
     A_COUNT_THE_FOLD_DOES_NOT_REACH,
 )
+from test.lib.scripts.js.deobfuscation.test_call_answers_a_wrapper import (
+    a_string_array_whose_rotation_runs,
+)
 from test.lib.scripts.js.deobfuscation.test_stringarray import (
     A_PRESET_BESIDE_AN_ACCESSOR_CALL_NOTHING_CAN_ANSWER,
 )
@@ -1835,4 +1838,67 @@ class TestTheStringArrayMachineryGoesOnceNothingReadsIt(TestBase):
         self.assertEqual(
             "console.log('test string');",
             deobfuscate_source(A_PRESET_BESIDE_AN_ACCESSOR_CALL_NOTHING_CAN_ANSWER),
+        )
+
+
+#: A call to a wrapper whose answer nothing keeps the wrapping of: the first `await`s it, and
+#: awaiting a promise and awaiting the value it resolves to differ only in how many turns pass; the
+#: second discards it, and a promise nobody holds is a value nobody reads. Each is mapped to the text
+#: a fold that could see the call site would produce, measured by answering
+#: `refinery.lib.scripts.js.model.wraps_return` with False.
+A_WRAPPING_THE_CALL_SITE_TAKES_BACK_OFF = {
+    "async function w(a) { return 'b'; }\n"
+    '(async function () { console.log(await w(2)); })();\n':
+        "(async function() {\n  console.log(await 'b');\n})();",
+    'function send(u) { return u; }\n'
+    'async function get(u) { return send(u); }\n'
+    "get('http://example.test/payload');\n":
+        "'http://example.test/payload';",
+}
+
+
+class TestAWrappingTheCallSiteTakesBackOffIsStillInlined(TestBase):
+    """
+    Refusing to answer a call to an `async` function is decided from the callee, and there are two
+    call sites where the wrapping the callee adds is taken back off at once: an `await`ed call, and a
+    call whose value is discarded. Both are reductions the guards give up, and the second is the one
+    that costs triage — a downloader whose URL the fold used to surface now keeps the URL inside a
+    body nothing reads out.
+
+    Recovering them means a rule about the call site rather than about the callee, and the call site
+    does not settle it on its own. A discarded wrapper that throws gives an unhandled rejection after
+    the statement that follows it, where the direct call throws before it; an `await`ed one differs
+    from its inlined form by up to two turns when the return is itself promise-valued. Terser
+    (`inline.js:352`) and Closure (`InlineFunctions.java:357-362`) both refuse on the same predicate.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_whose_wrapping_is_taken_off_is_answered(self):
+        rows = A_WRAPPING_THE_CALL_SITE_TAKES_BACK_OFF
+        self.assertEqual({source: folded(source) for source in rows}, rows)
+
+
+class TestAStringArrayHolderNoLoopReadsIsStillResolved(TestBase):
+    """
+    The string array's rotation loop is what reads what the holder answered, and an `async` holder
+    answers a promise, which has no `shift`. Where the loop actually turns the array over that makes
+    the program throw, which is what
+    `test.lib.scripts.js.deobfuscation.test_call_answers_a_wrapper` states. Where the checksum meets
+    its target on the first pass the loop never touches the promise, the holder has already replaced
+    itself with a plain function, and every later read answers the array — so the strings are
+    resolvable and are no longer resolved.
+
+    Separating the two means deciding whether the loop rotates before deciding whether the holder may
+    be read, which is the rotation simulation the pass runs after it has recognized the holder.
+    """
+
+    @unittest.expectedFailure
+    def test_a_holder_the_rotation_never_reads_is_answered(self):
+        """
+        Node prints `3`: the loop breaks on its first pass, so `arr` being a promise is never read,
+        and `A` has replaced itself with the plain function every later call reads.
+        """
+        self.assertEqual(
+            "console.log('3');",
+            folded(a_string_array_whose_rotation_runs('async ', target=3)),
         )

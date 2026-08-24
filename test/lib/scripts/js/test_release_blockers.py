@@ -563,3 +563,47 @@ class TestANameBoundToEvalIsNotADirectEval(TestBase):
         )
 
 
+#: An argument to a method the object fold answers, whose evaluation the answer has to keep. The
+#: first is used by nothing the body returns, so folding the call away takes the call to `g` with it
+#: and the write to `SIDE` never happens; the second pair is used in the other order than it is
+#: written, and substituting the arguments into the body puts their effects in the body's order.
+#: Each is mapped to what Node prints for it.
+AN_ARGUMENT_WHOSE_EFFECT_THE_FOLD_OWES = {
+    'function g() { SIDE = 1; return 2; }'
+    ' var o = { m: function (a) { return 7; } };'
+    ' console.log(o.m(g()));'
+    ' console.log(SIDE);': '7\n1\n',
+    "var LOG = '';"
+    " function p() { LOG += 'p'; return 1; }"
+    " function q() { LOG += 'q'; return 2; }"
+    ' var o = { m: function (a, b) { return b + a; } };'
+    ' console.log(o.m(p(), q()), LOG);': '3 pq\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnArgumentIsEvaluatedWhereItIsWritten(TestBase):
+    """
+    Substituting call-site arguments into a method body moves each argument to wherever the body
+    reads it — which may be nowhere, and may be in another order. An argument the body never reads is
+    then never evaluated, and a pair the body reads back to front runs back to front.
+
+    `refinery.lib.scripts.js.deobfuscation.helpers.is_safe_iife_inline` states the rule this needs:
+    an effectful argument must be used exactly once, unconditionally, and in declaration order.
+    `refinery.lib.scripts.js.deobfuscation.objectfold` does not ask it, and asks
+    `try_inline_trivial_function` for a substitution that admission would have refused.
+    """
+
+    @unittest.expectedFailure
+    def test_each_argument_runs_once_and_in_the_order_it_is_written(self):
+        """
+        Node prints `7` then `1` for the first program of `AN_ARGUMENT_WHOSE_EFFECT_THE_FOLD_OWES`
+        and `3 pq` for the second. The deobfuscation drops the call to `g` from the first, so it
+        prints `7` and then throws `ReferenceError` for `SIDE`, and reverses the pair in the second,
+        so it prints `3 qp`.
+        """
+        rows = AN_ARGUMENT_WHOSE_EFFECT_THE_FOLD_OWES
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
