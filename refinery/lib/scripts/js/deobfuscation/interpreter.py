@@ -13,15 +13,10 @@ import urllib.parse
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Callable, Mapping, TypeAlias
+    from typing import Callable, Mapping
 
     from refinery.lib.scripts.js.analysis.effects import EffectModel
     from refinery.lib.scripts.js.deobfuscation.helpers import Value
-    from refinery.lib.scripts.js.model import JsArrowFunctionExpression as _Arrow
-    from refinery.lib.scripts.js.model import JsFunctionDeclaration as _FuncDecl
-    from refinery.lib.scripts.js.model import JsFunctionExpression as _FuncExpr
-
-    _FuncNode: TypeAlias = _FuncDecl | _FuncExpr | _Arrow
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.effects import object_sets_prototype
@@ -76,6 +71,7 @@ from refinery.lib.scripts.js.model import (
     JsForStatement,
     JsFunctionDeclaration,
     JsFunctionExpression,
+    JsFunctionNode,
     JsIdentifier,
     JsIfStatement,
     JsLogicalExpression,
@@ -100,6 +96,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
     JsWhileStatement,
+    wraps_return,
 )
 from refinery.lib.scripts.js.numbers import (
     TRIMMABLE_WHITESPACE,
@@ -1204,7 +1201,7 @@ class JsInterpreter:
         model: SemanticModel | None = None,
         closure: Mapping[str, Value] | None = None,
         closure_env: Mapping[int, Mapping[str, Value]] | None = None,
-        established: Callable[[_FuncNode], bool] | None = None,
+        established: Callable[[JsFunctionNode], bool] | None = None,
         depth: int = 0,
     ):
         self.max_iterations = max_iterations
@@ -1619,7 +1616,7 @@ class JsInterpreter:
             return self._eval(expr.expression)
         raise InterpreterError
 
-    def _resolve_function_node(self, node: JsIdentifier) -> _FuncNode | None:
+    def _resolve_function_node(self, node: JsIdentifier) -> JsFunctionNode | None:
         """
         The single function *node* names, or `None`. Delegates to `EffectModel.unambiguous_function`: a
         function declaration or a bare-assignment (`var f; f = function(){}`) resolves, but a name
@@ -2039,7 +2036,7 @@ class JsInterpreter:
             return True
         return effects.trusted_prototype(value_type)
 
-    def _callback_is_contained(self, callback: _FuncNode) -> bool:
+    def _callback_is_contained(self, callback: JsFunctionNode) -> bool:
         """
         Whether running *callback* for its return values alone loses nothing. A higher-order method is
         evaluated here for the value it produces, so a callback that also writes a binding outside itself
@@ -2173,8 +2170,18 @@ class JsInterpreter:
                 return True
         return False
 
-    def _call_function(self, func, args: list[Value]) -> Value:
+    def _call_function(self, func: JsFunctionNode, args: list[Value]) -> Value:
+        """
+        The value a call to *func* answers, which is the value its body returned only where a call
+        answers that value at all. An `async` function answers a promise and a generator answers a
+        generator object whose body has not run, so `wraps_return` ends the interpretation rather
+        than reporting a value the call never had. `InterpreterError` is what ends it and not
+        `IrreducibleExpression`: the latter hands the caller the body's return expression to splice
+        into the call site, which is the same wrong answer written a second way.
+        """
         if self._depth >= self.max_recursion:
+            raise InterpreterError
+        if wraps_return(func):
             raise InterpreterError
         if self._mutates_captured_binding(func):
             raise InterpreterError

@@ -63,6 +63,7 @@ from refinery.lib.scripts.js.model import (
     is_generator_function,
     wraps_return,
 )
+from refinery.lib.scripts.js.deobfuscation.interpreter import JsInterpreter
 from refinery.lib.scripts.js.parser import JsParser
 
 NL = chr(10)
@@ -654,7 +655,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_global_finder(self):
         rows = A_CALL_ANSWERING_A_WRAPPER['globalfinder']
         self.assertEqual(
@@ -662,7 +662,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_callback_an_array_method_runs(self):
         """
         Node prints `2` for each: every promise and every generator object is truthy, so `filter`
@@ -674,7 +673,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_callback_inside_a_function_body(self):
         rows = A_CALL_ANSWERING_A_WRAPPER['interpreter inside a body']
         self.assertEqual(
@@ -860,4 +858,108 @@ class TestAnAsyncCallAnswersAPromiseInEverySpelling(TestBase):
                 for source in AN_ASYNC_SHAPE_WRITTEN_ANOTHER_WAY
             },
             each_program_still_prints(AN_ASYNC_SHAPE_WRITTEN_ANOTHER_WAY),
+        )
+
+
+#: Every route by which the deobfuscation reaches `JsInterpreter._call_function`, with a plain
+#: function at the end of it, mapped to what Node prints and what the deobfuscation folds it to. The
+#: guard added there is one line nine callers share, so a guard refusing more than the keyword empties
+#: all of them at once.
+#:
+#: `_eval_inline_call` has no row: traced over the whole harvest it is never entered, because an
+#: immediately called function expression is folded before the interpreter is asked about it. A row
+#: written for it would report the guard admits what it should while never reaching the guard.
+A_CALL_THE_INTERPRETER_MAY_RUN = {
+    'console.log((function () { var g = function (a) { return a + a; };'
+    ' var s = 0; for (var i = 0; i < 2; i++) s += g(i); return s; })());': (
+        '2' + NL, 'console.log(2);'),
+    'function t(a) { return a + a; }'
+    ' console.log((function () { var s = 0;'
+    ' for (var i = 0; i < 2; i++) s += t(i); return s; })());': (
+        '2' + NL, 'console.log(2);'),
+    'console.log((function () { var g = function (a) { return a + a; };'
+    ' var s = 0; for (var i = 0; i < 2; i++) s += g.call(null, i); return s; })());': (
+        '2' + NL, 'console.log(2);'),
+    'console.log((function () { var g = function (a) { return a + a; };'
+    ' var s = 0; for (var i = 0; i < 2; i++) s += g.apply(null, [i]); return s; })());': (
+        '2' + NL, 'console.log(2);'),
+    'console.log([1, 2].every(function (x) { return x > 0; }));': (
+        'true' + NL, 'console.log(true);'),
+    'console.log([1, 2].some(function (x) { return x > 1; }));': (
+        'true' + NL, 'console.log(true);'),
+    'console.log([1, 2].map(function (x) { return x + 1; }).join(","));': (
+        '2,3' + NL, "console.log('2,3');"),
+    'console.log([1, 2].filter(function (x) { return x > 1; }).length);': (
+        '1' + NL, 'console.log(1);'),
+    'console.log([1, 2].find(function (x) { return x > 1; }));': (
+        '2' + NL, 'console.log(2);'),
+    'console.log([1, 2].findIndex(function (x) { return x > 1; }));': (
+        '1' + NL, 'console.log(1);'),
+    'function f() { var n = [1, 2].length;'
+    ' [1, 2].forEach(function (x) { return x; }); return n; }'
+    ' console.log(f());': (
+        '2' + NL, 'console.log(2);'),
+    'console.log([1, 2].reduce(function (a, x) { return a + x; }, 0));': (
+        '3' + NL, 'console.log(3);'),
+}
+
+
+def _folded_while_watching_the_interpreter(source: str) -> tuple[str, bool]:
+    """
+    What *source* folds to, and whether the guarded call was entered while it folded.
+    """
+    original = JsInterpreter._call_function
+    entered: list[object] = []
+
+    def counted(interpreter, func, args):
+        entered.append(func)
+        return original(interpreter, func, args)
+
+    JsInterpreter._call_function = counted
+    try:
+        return folded(source), bool(entered)
+    finally:
+        JsInterpreter._call_function = original
+
+
+class TestTheInterpreterStillRunsACallItMayRun(TestBase):
+    """
+    The admission control for the guard on the interpreter's trunk. Each row states the text it folds
+    to, and states that the guarded method was entered while it folded — without the second, a row
+    some other pass began answering would go on reporting that the guard admits what it should.
+    """
+
+    def test_each_route_folds_to_the_text_it_folds_to(self):
+        self.assertEqual(
+            {
+                source: _folded_while_watching_the_interpreter(source)[0]
+                for source in A_CALL_THE_INTERPRETER_MAY_RUN
+            },
+            {source: text for source, (_, text) in A_CALL_THE_INTERPRETER_MAY_RUN.items()},
+        )
+
+    def test_each_route_reaches_the_guarded_call(self):
+        self.assertEqual(
+            {
+                source: _folded_while_watching_the_interpreter(source)[1]
+                for source in A_CALL_THE_INTERPRETER_MAY_RUN
+            },
+            {source: True for source in A_CALL_THE_INTERPRETER_MAY_RUN},
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestEveryRouteIntoTheInterpreterPrintsWhatItPrinted(TestBase):
+    """
+    The same rows against Node, so that a fold which keeps its shape but changes its value is caught.
+    """
+
+    def test_each_route_prints_what_it_printed(self):
+        rows = {
+            source: prints
+            for source, (prints, _) in A_CALL_THE_INTERPRETER_MAY_RUN.items()
+        }
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
         )
