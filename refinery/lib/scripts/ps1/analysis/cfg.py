@@ -42,9 +42,7 @@ from refinery.lib.scripts.analysis.cfg import (
     CfgNode,
     ControlFlowGraph,
     ControlFlowModel,
-    Resumption,
     build_control_flow,
-    distinct,
 )
 from refinery.lib.scripts.ps1.ast import get_named_blocks, string_value
 from refinery.lib.scripts.ps1.model import (
@@ -243,7 +241,7 @@ class _Builder(CfgBuilder):
         shape no single edge set expresses. It is therefore carried twice, as
         `refinery.lib.scripts.analysis.cfg.CfgEdge` describes: every resumption point is taken to
         reach *every* node the block owns, through the hub
-        `refinery.lib.scripts.analysis.cfg.CfgBuilder.open_resumption` wires — the over-approximation
+        `refinery.lib.scripts.analysis.cfg.CfgBuilder.resumption` wires — the over-approximation
         an analysis asking whether any resumption path exists must read, since claiming fewer paths
         would let one call a statement after a trap unreachable, or let a store before one look dead
         because the resumption that reads it was never modelled — and, alongside it, the precise
@@ -293,36 +291,28 @@ class _Builder(CfgBuilder):
             exits = self.sequence(statements, frontier)
         else:
             self.mark_hub_bound(handling)
-            frame = self.open_resumption(resumes)
-            exits = self._resumable_sequence(statements, frontier, frame)
-            self.close_resumption()
+            with self.resumption(resumes):
+                exits = self._resumable_sequence(statements, frontier)
         self._handlers.pop()
         return exits
 
     def _resumable_sequence(
-        self, statements: Sequence[Node], frontier: list[CfgNode], frame: Resumption,
+        self, statements: Sequence[Node], frontier: list[CfgNode],
     ) -> list[CfgNode]:
         """
         The guarded statements of a block whose `trap` set resumes it, threaded as `sequence` does,
-        with the precise forward-only half of resumption drawn against *frame* as each node appears.
+        with the precise forward-only half of resumption drawn against the open block as each node
+        appears.
 
         What finds the point control resumes at is one elementless slot per statement, which
-        `refinery.lib.scripts.analysis.cfg.CfgBuilder.join_resumption` creates for the first node the
-        statement builds and every later one joins. The slot is then passed in the frontier the
-        *next* statement is built from, so whatever that statement control-*enters* gains an edge
-        from it — its own node, the condition of an `if`, the first guarded statement of a nested
-        block. Reading the entry off the nodes a statement created instead answers the wrong one for
-        every construct that builds something before what it runs first: a `try` builds its handler
-        entry first, so the forward edge would reach the `catch` clause and leave the body it guards
-        reachable only through the hub, which is exactly the backward reach the forward half exists
-        to avoid.
-
-        A statement that builds nothing claims no slot — a `trap` declaration is one, and so is an
-        empty nested block — and the slot of the statement before it stays in the frontier and
-        carries on to the next, which is where control really resumes. The frontier is threaded
-        through `refinery.lib.scripts.analysis.cfg.distinct` for that reason: such a statement hands
-        the frontier it was given straight back, the slot among it, and appending the slot again
-        would draw the same edge once per statement that passed it on.
+        `refinery.lib.scripts.analysis.cfg.CfgBuilder.resume_past` reports once the statement is
+        built. The slot is then passed in the frontier the *next* statement is built from, so that
+        whatever that statement control-*enters* gains an edge from it — its own node, the condition
+        of an `if`, the first guarded statement of a nested block. Reading the entry off the nodes a
+        statement created instead answers the wrong one for every construct that builds something
+        before what it runs first: a `try` builds its handler entry first, so the forward edge would
+        reach the `catch` clause and leave the body it guards reachable only through the hub, which
+        is exactly the backward reach the forward half exists to avoid.
 
         The last statement's slot goes into the returned frontier rather than to the body exit.
         Control resuming past the end of a guarded block carries on with whatever follows the
@@ -338,10 +328,7 @@ class _Builder(CfgBuilder):
         where the resumption can go, not where it went.
         """
         for statement in statements:
-            frame.slot = None
-            frontier = self.statement(statement, frontier)
-            if frame.slot is not None:
-                frontier = distinct([*frontier, frame.slot])
+            frontier = self.resume_past(self.statement(statement, frontier))
         return frontier
 
     def body_blocks(self, owner: Node) -> Sequence[Sequence[Node]]:

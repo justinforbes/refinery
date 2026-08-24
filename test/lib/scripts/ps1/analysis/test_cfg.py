@@ -6,6 +6,7 @@ from test import TestBase
 
 from refinery.lib.scripts import Node, Statement
 from refinery.lib.scripts.analysis.cfg import (
+    CfgBuilder,
     CfgEdge,
     CfgNode,
     ControlFlowGraph,
@@ -1216,3 +1217,26 @@ class TestPs1TrapResumptionIsCarriedForwardAsWellAsThroughTheHub(_Ps1ControlFlow
                         if id(self._required_node(graph, below)) not in forward:
                             unreached.append((index, offset))
                 self.assertEqual(unreached, [])
+
+
+class _BuildFailed(Exception):
+    pass
+
+
+class TestPs1AResumableBlockTakesOnlyTheNodesBuiltInsideIt(TestBase):
+    """
+    A resumable block claims every node built while it is open, so leaving it has to end that claim
+    on every path out of it. A build that raises part-way through a guarded block would otherwise
+    leave the frame on the stack, and every node built afterwards would draw both halves of
+    resumption against a handler that no longer guards anything.
+    """
+
+    def test_a_node_built_after_an_error_left_a_resumable_block_carries_no_resumption(self):
+        tree = Ps1Parser("'a'\n'b'").parse()
+        builder = CfgBuilder(tree)
+        guarded, following = tree.body
+        with self.assertRaises(_BuildFailed):
+            with builder.resumption([builder.detached_node(guarded)]):
+                raise _BuildFailed
+        node = builder.detached_node(following)
+        self.assertEqual((node.predecessors, node.successors), ([], []))

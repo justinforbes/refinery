@@ -30,8 +30,9 @@ from __future__ import annotations
 
 import enum
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import AbstractSet as Set, Iterable, Sequence
+from typing import AbstractSet as Set, Iterable, Iterator, Sequence
 
 from refinery.lib.scripts import Node
 
@@ -513,7 +514,7 @@ class _Target:
     continues: list[CfgNode] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(eq=False)
 class Resumption:
     """
     One statement block being built whose handler set *resumes* it rather than ending it, and the two
@@ -720,16 +721,22 @@ class CfgBuilder:
             node.is_hub_bound = True
             self.cfg._hub_bound.add(id(node))
 
-    def open_resumption(self, resumes: Iterable[CfgNode]) -> Resumption:
+    @contextmanager
+    def resumption(self, resumes: Iterable[CfgNode]) -> Iterator[None]:
         """
-        Begin a block whose handler set resumes it from *resumes*, and take ownership of every node
-        built until the matching `close_resumption` — see `Resumption`.
+        Build the enclosed block as one whose handler set resumes it from *resumes*, taking
+        ownership of every node built inside it — see `Resumption`.
 
-        The hub is wired here, before the block is walked, because `detached_node` draws the edge out
-        of it as each node appears. Where a resumable block is opened inside one, the outer hub
-        reaches the inner rather than reaching the inner block's nodes one by one: a hub reaches
-        exactly the nodes its block owns and everything those nodes lead to, and an inner hub is one
-        of them.
+        The hub is wired on the way in, before the block is walked, because `detached_node` draws
+        the edge out of it as each node appears. Where a resumable block is opened inside one, the
+        outer hub reaches the inner rather than reaching the inner block's nodes one by one: a hub
+        reaches exactly the nodes its block owns and everything those nodes lead to, and an inner
+        hub is one of them.
+
+        Ownership ends on every way out, which is why this is a block and not a pair of calls. A
+        build abandoned part-way through a guarded statement would otherwise leave the frame open,
+        and every node built afterwards would draw both halves of resumption against a handler set
+        that does not guard it.
         """
         hub = self.resumption_hub()
         self.resumption_hub_edge(hub, self.cfg.exit)
@@ -737,16 +744,33 @@ class CfgBuilder:
             self.resumption_hub_edge(self._resumptions[-1].hub, hub)
         for resume in resumes:
             self.add_edge(resume, hub)
-        frame = Resumption(hub)
-        self._resumptions.append(frame)
-        return frame
+        self._resumptions.append(Resumption(hub))
+        try:
+            yield
+        finally:
+            self._resumptions.pop()
 
-    def close_resumption(self) -> None:
+    def resume_past(self, frontier: list[CfgNode]) -> list[CfgNode]:
         """
-        End the block `open_resumption` began. Nodes built after this belong to whatever level
-        encloses it, or to none.
+        *frontier* extended by the point control resumes at when the statement just built throws,
+        with the innermost open block left ready for the statement after it.
+
+        `join_resumption` claims the slot for the first node the statement builds and joins every
+        later one to it, so there is one here exactly when the statement built a node of its own. A
+        statement that built none claims nothing — a `trap` declaration is one, and so is an empty
+        nested block — and the slot of the statement before it stays in the frontier and carries
+        on to the next, which is where control really resumes.
+
+        Claiming and clearing the slot are one step here so that no caller holds the frame or has to
+        remember to reset it between statements. `distinct` is what keeps a statement that hands its
+        incoming frontier straight back from drawing the same edge once per statement that passed it
+        on.
         """
-        self._resumptions.pop()
+        frame = self._resumptions[-1]
+        slot, frame.slot = frame.slot, None
+        if slot is None:
+            return frontier
+        return distinct([*frontier, slot])
 
     def join_resumption(self, node: CfgNode) -> None:
         """
