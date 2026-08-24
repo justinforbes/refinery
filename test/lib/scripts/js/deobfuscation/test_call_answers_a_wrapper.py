@@ -636,7 +636,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
     deobfuscation prints it too, with neither of the two throwing.
     """
 
-    @unittest.expectedFailure
     def test_a_call_wrapper(self):
         """
         Node prints `function` for each: `w(7)` answers a promise for `async`, a generator object for
@@ -648,7 +647,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_an_iife(self):
         rows = A_CALL_ANSWERING_A_WRAPPER['simplify']
         self.assertEqual(
@@ -750,12 +748,12 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
 class TestNeitherEscapeLeavesAProgramNothingCanSpell(TestBase):
     """
     `await` and `yield` mean what they mean because of the body they stand in. Lifting the body's
-    return expression to the call site takes that body away, and what comes back is not a program:
-    `refinery.lib.scripts.is_well_formed`, reached through `test.lib.scripts.js.ledger.well_formed`,
-    answers `False` for both.
+    return expression to the call site would take that body away, and what came back would not be a
+    program at all: `await` outside an `async` body and `yield` outside a generator are both syntax
+    errors. `refinery.lib.scripts.is_well_formed`, reached through
+    `test.lib.scripts.js.ledger.well_formed`, answers for what comes back.
     """
 
-    @unittest.expectedFailure
     def test_the_fold_leaves_both_of_them_spellable(self):
         self.assertEqual(
             [well_formed(folded(source)) for source in AN_OPERATOR_THE_BODY_GAVE_MEANING_TO],
@@ -808,4 +806,58 @@ class TestTheKindOfAFunctionIsAnsweredForEverySpellingOfOne(TestBase):
                 source: is_async or is_generator
                 for source, (is_async, is_generator, _) in A_FUNCTION_OF_EVERY_KIND.items()
             },
+        )
+
+
+#: Programs calling a function the `async` keyword marks, mapped to what Node prints for each.
+#: Calling one answers a promise whose resolution is the value the body returned, never that value,
+#: so a program asking anything of what the call answered is asking it of the promise. Two of the
+#: three were folded to the returned value until the call wrapper and the IIFE inliner began asking
+#: what a call answers.
+A_CALL_TO_AN_ASYNC_FUNCTION = {
+    'async function m(){ return 7; }'
+    ' m().then(function(v){ console.log(v); });': '7\n',
+    'var o = { async m(){ return 7; } };'
+    ' console.log(typeof o.m().then);': 'function\n',
+    'async function m(){ return 7; }'
+    ' console.log(m() instanceof Promise);': 'true\n',
+}
+
+
+#: The same rule reached through the other spellings of a function: an async function expression, an
+#: async arrow, an async method of a class, and a generator method. These were answered correctly
+#: before the fold learned the rule, so they say the fix did not buy one spelling at another's cost.
+AN_ASYNC_SHAPE_WRITTEN_ANOTHER_WAY = {
+    'var m = async function(){ return 7; }; console.log(typeof m().then);': 'function\n',
+    'var m = async () => 7; console.log(typeof m().then);': 'function\n',
+    'class C { async m(){ return 7; } } console.log(typeof new C().m().then);': 'function\n',
+    'var o = { *m(){ yield 7; } }; console.log(o.m().next().value);': '7\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnAsyncCallAnswersAPromiseInEverySpelling(TestBase):
+    """
+    The rows the release ledger carried as a blocker until the two general inliners began asking what
+    a call answers, and the four spellings beside them that were never folded. Each row asks the call
+    for something only the promise or the generator object has, so a fold to the returned value
+    prints something else or throws where Node prints a value.
+    """
+
+    def test_a_call_to_an_async_function_is_not_folded_to_what_its_body_returned(self):
+        self.assertEqual(
+            {
+                source: before_and_after(source)
+                for source in A_CALL_TO_AN_ASYNC_FUNCTION
+            },
+            each_program_still_prints(A_CALL_TO_AN_ASYNC_FUNCTION),
+        )
+
+    def test_an_async_function_written_another_way_prints_what_it_printed(self):
+        self.assertEqual(
+            {
+                source: before_and_after(source)
+                for source in AN_ASYNC_SHAPE_WRITTEN_ANOTHER_WAY
+            },
+            each_program_still_prints(AN_ASYNC_SHAPE_WRITTEN_ANOTHER_WAY),
         )

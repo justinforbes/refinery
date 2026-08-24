@@ -19,8 +19,7 @@ from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
-    _param_written,
-    extract_identifier_params,
+    expression_a_call_answers,
     is_closed_expression,
     substitute_params,
 )
@@ -28,7 +27,6 @@ from refinery.lib.scripts.js.model import (
     JsCallExpression,
     JsFunctionDeclaration,
     JsIdentifier,
-    JsReturnStatement,
     JsScript,
 )
 
@@ -51,31 +49,26 @@ def _detect_wrapper(node: JsFunctionDeclaration) -> _WrapperInfo | None:
        whose arguments are closed over the wrapper's parameters and literal constants.
     2. **Constant functions** (zero parameters): the body is a single return of an expression that
        is closed (no free variables — only literal constants).
+
+    Neither is recognized where a call to the function answers a wrapper around the return
+    expression rather than the expression itself, which
+    `refinery.lib.scripts.js.deobfuscation.helpers.expression_a_call_answers` decides.
     """
-    if node.id is None or node.body is None:
+    if node.id is None:
         return None
-    param_names = extract_identifier_params(node.params)
-    if param_names is None:
+    answered = expression_a_call_answers(node)
+    if answered is None:
         return None
-    body = node.body.body
-    if len(body) != 1:
-        return None
-    stmt = body[0]
-    if not isinstance(stmt, JsReturnStatement) or stmt.argument is None:
-        return None
-    expr = stmt.argument
+    expr, param_names = answered
     if param_names:
         if not isinstance(expr, JsCallExpression):
             return None
         if not isinstance(expr.callee, JsIdentifier):
             return None
-        param_set = set(param_names)
-        allowed_names = param_set | {expr.callee.name}
+        allowed_names = set(param_names) | {expr.callee.name}
         for arg in expr.arguments:
             if not is_closed_expression(arg, allowed_names):
                 return None
-        if _param_written(expr, param_set):
-            return None
     else:
         if not is_closed_expression(expr, set()):
             return None

@@ -18,7 +18,7 @@ import re
 
 from collections import Counter
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Callable, Iterator, Sequence
+from typing import TYPE_CHECKING, Callable, Iterator, NamedTuple, Sequence
 
 if TYPE_CHECKING:
     from typing import TypeAlias
@@ -71,6 +71,7 @@ from refinery.lib.scripts.js.model import (
     JsForOfStatement,
     JsFunctionDeclaration,
     JsFunctionExpression,
+    JsFunctionNode,
     JsIdentifier,
     JsLogicalExpression,
     JsMemberExpression,
@@ -1422,6 +1423,40 @@ def _param_written(expr: Node, param_names: set[str]) -> bool:
     )
 
 
+class ReturnedExpression(NamedTuple):
+    """
+    The one expression a call to a function answers, and the names its parameters bind.
+    """
+    return_expression: Expression
+    param_names: list[str]
+
+
+def expression_a_call_answers(func: JsFunctionNode) -> ReturnedExpression | None:
+    """
+    The expression a call to *func* answers, where a call answers an expression at all: a body that
+    is one `return` of something, parameters that are all plain names, none of them written by that
+    expression, and a call that answers the value rather than a wrapper around it.
+
+    Whether that expression may be lifted to any particular call site is a different question and the
+    caller's: which names it is allowed to be closed over, and which arguments may be substituted for
+    which parameter, differ per site and are not decided here.
+    """
+    if wraps_return(func):
+        return None
+    body = func.body
+    if not isinstance(body, JsBlockStatement) or len(body.body) != 1:
+        return None
+    stmt = body.body[0]
+    if not isinstance(stmt, JsReturnStatement) or stmt.argument is None:
+        return None
+    param_names = extract_identifier_params(func.params)
+    if param_names is None:
+        return None
+    if _param_written(stmt.argument, set(param_names)):
+        return None
+    return ReturnedExpression(stmt.argument, param_names)
+
+
 def is_safe_iife_inline(
     expr: Node,
     param_names: Sequence[str],
@@ -1503,6 +1538,12 @@ def substitute_params(
     resolve each occurrence against the binding it reads. When *transformer* is given, that model is
     taken from its shared analysis cache; otherwise it is built standalone.
     """
+    if len(arguments) < len(params):
+        raise ValueError(
+            F'{len(params)} parameters were handed {len(arguments)} arguments: substituting the '
+            F'ones that were handed leaves the rest standing, where each reads whatever the call '
+            F'site binds to its name.'
+        )
     cloned = _clone_node(expression)
     mapping = {
         param.name: argument
@@ -1626,29 +1667,16 @@ def try_inline_trivial_function(
     When *relaxed* is True, only arguments used more than once in the return expression need to be
     simple (prevents duplicating side effects while allowing complex single-use arguments).
 
-    An async or generator function is never inlined: calling it produces a promise or an iterator, not
-    the bare value of its return expression, so substituting the expression in for the call would drop
-    that wrapping and change the value's type.
+    Which functions have a return expression to inline at all is `expression_a_call_answers`, which
+    is where the refusal to inline an async function or a generator lives.
     """
-    if wraps_return(func):
+    answered = expression_a_call_answers(func)
+    if answered is None:
         return None
-    if func.body is None or not isinstance(func.body, JsBlockStatement):
-        return None
-    body = func.body.body
-    if len(body) != 1:
-        return None
-    stmt = body[0]
-    if not isinstance(stmt, JsReturnStatement) or stmt.argument is None:
-        return None
-    param_names = extract_identifier_params(func.params)
-    if param_names is None:
-        return None
+    expr, param_names = answered
     if len(call_args) != len(param_names):
         return None
-    expr = stmt.argument
     if not is_closed_expression(expr, set(param_names)):
-        return None
-    if _param_written(expr, set(param_names)):
         return None
     if relaxed:
         for i, name in enumerate(param_names):

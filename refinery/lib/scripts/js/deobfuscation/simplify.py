@@ -31,7 +31,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     denoted_value,
     escape_js_string,
     eval_binary_op,
-    extract_identifier_params,
+    expression_a_call_answers,
     extract_literal_value,
     is_closed_expression,
     is_literal,
@@ -60,7 +60,6 @@ from refinery.lib.scripts.js.model import (
     JsArrowFunctionExpression,
     JsAssignmentExpression,
     JsBinaryExpression,
-    JsBlockStatement,
     JsBooleanLiteral,
     JsCallExpression,
     JsClassDeclaration,
@@ -76,7 +75,6 @@ from refinery.lib.scripts.js.model import (
     JsObjectExpression,
     JsParenthesizedExpression,
     JsProperty,
-    JsReturnStatement,
     JsScript,
     JsSequenceExpression,
     JsSpreadElement,
@@ -439,9 +437,7 @@ class JsSimplifications(Transformer):
 
     def visit_JsCallExpression(self, node: JsCallExpression):
         self.generic_visit(node)
-        fn = node.callee
-        if isinstance(fn, JsParenthesizedExpression):
-            fn = fn.expression
+        fn = strip_parens(node.callee)
         if isinstance(fn, JsFunctionExpression):
             return self._try_inline_iife(
                 node,
@@ -469,18 +465,12 @@ class JsSimplifications(Transformer):
         call_established: Callable[..., bool],
         transformer: Transformer,
     ) -> Node | None:
-        if fn.body is None or not isinstance(fn.body, JsBlockStatement):
+        answered = expression_a_call_answers(fn)
+        if answered is None:
             return None
-        body = fn.body.body
-        if len(body) != 1:
+        expr, param_names = answered
+        if len(node.arguments) != len(param_names):
             return None
-        stmt = body[0]
-        if not isinstance(stmt, JsReturnStatement) or stmt.argument is None:
-            return None
-        param_names = extract_identifier_params(fn.params)
-        if param_names is None or len(node.arguments) != len(param_names):
-            return None
-        expr = stmt.argument
         if not is_closed_expression(expr, set(param_names)):
             return None
         if not is_safe_iife_inline(
