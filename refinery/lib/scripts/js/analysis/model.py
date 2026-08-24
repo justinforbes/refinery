@@ -35,6 +35,7 @@ from typing import Iterator
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.model import (
+    FUNCTION_NODES,
     JsArrayExpression,
     JsArrayPattern,
     JsArrowFunctionExpression,
@@ -57,6 +58,7 @@ from refinery.lib.scripts.js.model import (
     JsForStatement,
     JsFunctionDeclaration,
     JsFunctionExpression,
+    JsFunctionNode,
     JsIdentifier,
     JsIfStatement,
     JsImportDeclaration,
@@ -92,14 +94,10 @@ from refinery.lib.scripts.js.model import (
 from refinery.lib.scripts.js.numbers import canonical_array_index, exact_integer
 from refinery.lib.scripts.js.strict import has_simple_parameters, strict_mode_at
 
-FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)
-
 # A class static block hoists its own `var`/function declarations, so it bounds the hoist walk like a
 # function body. It is deliberately absent from FUNCTION_NODES so the effect model stays transparent to
 # it: its statements run once, at class-definition time, as part of the enclosing function.
 HOIST_BOUNDARY = FUNCTION_NODES + (JsStaticBlock,)
-
-_FunctionNode = JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression
 
 GLOBAL_OBJECT_ALIASES = frozenset({'globalThis', 'global', 'window', 'self', 'top', 'frames'})
 
@@ -2109,7 +2107,7 @@ class _ScopeBuilder:
             for child in node.children():
                 self._visit(child, scope)
 
-    def _visit_function(self, node: _FunctionNode, enclosing: Scope):
+    def _visit_function(self, node: JsFunctionNode, enclosing: Scope):
         fscope = self._new_scope(ScopeKind.FUNCTION, node, enclosing)
         is_arrow = isinstance(node, JsArrowFunctionExpression)
         if isinstance(node, JsFunctionExpression) and node.id is not None:

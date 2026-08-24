@@ -91,6 +91,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsYieldExpression,
     strip_parens,
+    wraps_return,
 )
 
 _PURE_INTRINSIC_METHODS = frozenset({
@@ -1248,7 +1249,7 @@ class EffectModel:
 
     def _scan(self, func: Node) -> EffectSummary:
         summary = EffectSummary()
-        if getattr(func, 'is_async', False) or getattr(func, 'generator', False):
+        if isinstance(func, FUNCTION_NODES) and wraps_return(func):
             summary.wraps_return = True
         for node in _body_nodes(func):
             if isinstance(node, JsThrowStatement):

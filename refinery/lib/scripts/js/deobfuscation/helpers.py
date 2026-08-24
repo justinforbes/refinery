@@ -91,6 +91,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
     strip_parens,
+    wraps_return,
 )
 from refinery.lib.scripts.js.numbers import (
     canonical_array_index,
@@ -1629,7 +1630,7 @@ def try_inline_trivial_function(
     the bare value of its return expression, so substituting the expression in for the call would drop
     that wrapping and change the value's type.
     """
-    if func.is_async or func.generator:
+    if wraps_return(func):
         return None
     if func.body is None or not isinstance(func.body, JsBlockStatement):
         return None

@@ -1,3 +1,12 @@
+"""
+The JavaScript syntax tree: one node type per production of the grammar, and the few predicates that
+answer a question about a node from the node alone.
+
+A node states what was written and nothing about what it means. `strip_parens` and `names_a_property`
+live here because the answer is in the shape; anything needing a scope, a binding or an effect
+belongs in `refinery.lib.scripts.js.analysis` instead, which is why nothing here imports that package.
+Nothing here holds state either, so a pass may ask any of it at any point of a rewrite.
+"""
 from __future__ import annotations
 
 import enum
@@ -618,6 +627,40 @@ class JsScript(Statement, spelling=('module', 'recovered')):
 
     def is_recovered(self) -> bool:
         return self.recovered
+
+
+#: The three nodes that hold a function body. A class or object method holds a
+#: `JsFunctionExpression` as its value, so it needs no entry of its own.
+FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)
+
+JsFunctionNode = JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression
+
+
+def is_async_function(func: JsFunctionNode) -> bool:
+    """
+    Whether *func* is written `async`.
+    """
+    return func.is_async
+
+
+def is_generator_function(func: JsFunctionNode) -> bool:
+    """
+    Whether *func* is written `function*`. An arrow holds no such field, because the language has no
+    generator arrow to write, and answers `False` rather than raising: a caller deciding what kind of
+    function to rebuild asks this about whatever it holds, and a raise there would be an arrow the
+    rebuild refuses rather than one it rebuilds as an arrow.
+    """
+    return isinstance(func, (JsFunctionDeclaration, JsFunctionExpression)) and func.generator
+
+
+def wraps_return(func: JsFunctionNode) -> bool:
+    """
+    Whether calling *func* answers something wrapped around what the body returned: a promise for an
+    `async` function, a generator object for a generator, an async generator object for both. In none
+    of the three is the call the value the body returned, so a pass that answers such a call with the
+    body's return expression hands back a program computing something else.
+    """
+    return is_async_function(func) or is_generator_function(func)
 
 
 def strip_parens(node: Node | None) -> Node | None:

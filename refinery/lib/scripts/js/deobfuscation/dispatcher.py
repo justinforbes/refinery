@@ -48,6 +48,8 @@ from refinery.lib.scripts.js.model import (
     JsStringLiteral,
     JsVariableDeclaration,
     JsVariableDeclarator,
+    is_async_function,
+    is_generator_function,
     strip_parens,
 )
 
@@ -428,8 +430,8 @@ def _build_extracted_function(
         id=JsIdentifier(name=key),
         params=list(params),
         body=new_body,
-        generator=fn.generator,
-        is_async=fn.is_async,
+        generator=is_generator_function(fn),
+        is_async=is_async_function(fn),
     )
     return decl
 

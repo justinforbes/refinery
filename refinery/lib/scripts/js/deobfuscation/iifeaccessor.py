@@ -60,7 +60,10 @@ from refinery.lib.scripts.js.model import (
     JsUpdateExpression,
     JsVariableDeclaration,
     JsVariableDeclarator,
+    is_async_function,
+    is_generator_function,
     strip_parens,
+    wraps_return,
 )
 from refinery.lib.scripts.js.strict import directive_prologue
 
@@ -105,7 +108,7 @@ def _detect(declarator: JsVariableDeclarator) -> _Pattern | None:
     callee = strip_parens(init.callee)
     if not isinstance(callee, (JsFunctionExpression, JsArrowFunctionExpression)):
         return None
-    if callee.is_async or (isinstance(callee, JsFunctionExpression) and callee.generator):
+    if wraps_return(callee):
         return None
     if callee.params:
         return None
@@ -247,8 +250,8 @@ class JsIIFEAccessorPromoter(ScriptLevelTransformer):
             id=JsIdentifier(name=pattern.name),
             params=[_clone_node(p) for p in inner.params],
             body=JsBlockStatement(body=new_body_stmts),
-            generator=isinstance(inner, JsFunctionExpression) and inner.generator,
-            is_async=inner.is_async,
+            generator=is_generator_function(inner),
+            is_async=is_async_function(inner),
         )
         _replace_in_parent(pattern.declaration, new_func)
         self.mark_changed()

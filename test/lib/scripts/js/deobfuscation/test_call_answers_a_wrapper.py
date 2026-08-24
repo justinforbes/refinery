@@ -52,12 +52,16 @@ from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.model import FUNCTION_NODES
 from refinery.lib.scripts.js.model import (
     JsCallExpression,
+    JsFunctionNode,
     JsIdentifier,
     JsMemberExpression,
     JsMethodDefinition,
     JsProperty,
     JsStringLiteral,
     JsVariableDeclarator,
+    is_async_function,
+    is_generator_function,
+    wraps_return,
 )
 from refinery.lib.scripts.js.parser import JsParser
 
@@ -462,6 +466,47 @@ AN_OPERATOR_THE_BODY_GAVE_MEANING_TO = (
 )
 
 
+#: Every way the language has of writing a function, against the kind each one is: whether it is
+#: `async`, whether it is a generator, and whether a call to it therefore answers a wrapper rather
+#: than what the body returned. The answers are the syntax and nothing else — `async function*` is
+#: both, an arrow is never a generator because none can be written.
+A_FUNCTION_OF_EVERY_KIND = {
+    'function f() {}': (False, False, False),
+    'async function f() {}': (True, False, True),
+    'function* f() {}': (False, True, True),
+    'async function* f() {}': (True, True, True),
+    '(function () {});': (False, False, False),
+    '(async function () {});': (True, False, True),
+    '(function* () {});': (False, True, True),
+    '(async function* () {});': (True, True, True),
+    '(() => 0);': (False, False, False),
+    '(async () => 0);': (True, False, True),
+    '({ m() {} });': (False, False, False),
+    '({ async m() {} });': (True, False, True),
+    '({ *m() {} });': (False, True, True),
+    '({ async *m() {} });': (True, True, True),
+    '(class { async m() {} });': (True, False, True),
+    '(class { *m() {} });': (False, True, True),
+}
+
+
+def _the_only_function_in(source: str) -> JsFunctionNode:
+    root = JsParser(source).parse()
+    functions = [node for node in root.walk() if isinstance(node, FUNCTION_NODES)]
+    if len(functions) != 1:
+        raise AssertionError(F'{source!r} holds {len(functions)} functions, not one')
+    return functions[0]
+
+
+def _the_kind_the_predicates_answer(source: str) -> tuple[bool, bool, bool]:
+    func = _the_only_function_in(source)
+    return (
+        is_async_function(func),
+        is_generator_function(func),
+        wraps_return(func),
+    )
+
+
 def _wraps_what_it_returns(node: Node | None) -> bool:
     return isinstance(node, FUNCTION_NODES) and bool(
         getattr(node, 'is_async', False) or getattr(node, 'generator', False)
@@ -734,4 +779,33 @@ class TestARefusalStillLetsTheRunEnd(TestBase):
         self.assertEqual(
             [deobfuscate_within(source, 30.0) is not None for source in rows],
             [True] * len(rows),
+        )
+
+
+class TestTheKindOfAFunctionIsAnsweredForEverySpellingOfOne(TestBase):
+    """
+    The three predicates the guards are written in terms of, asked for every way the language has of
+    writing a function. An arrow carries no `generator` field at all, because there is no generator
+    arrow to write, so the generator question has to be answered for one without reading it.
+    """
+
+    def test_each_spelling_answers_the_kind_it_is_written_with(self):
+        self.assertEqual(
+            {
+                source: _the_kind_the_predicates_answer(source)
+                for source in A_FUNCTION_OF_EVERY_KIND
+            },
+            A_FUNCTION_OF_EVERY_KIND,
+        )
+
+    def test_wrapping_is_exactly_being_async_or_being_a_generator(self):
+        self.assertEqual(
+            {
+                source: wraps_return(_the_only_function_in(source))
+                for source in A_FUNCTION_OF_EVERY_KIND
+            },
+            {
+                source: is_async or is_generator
+                for source, (is_async, is_generator, _) in A_FUNCTION_OF_EVERY_KIND.items()
+            },
         )

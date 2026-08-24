@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from refinery.lib.scripts import Node, Statement
 from refinery.lib.scripts.js.lexer import has_legacy_numeric_escape
 from refinery.lib.scripts.js.model import (
+    FUNCTION_NODES,
     JsArrayPattern,
     JsArrowFunctionExpression,
     JsAssignmentExpression,
@@ -47,6 +48,7 @@ from refinery.lib.scripts.js.model import (
     JsForOfStatement,
     JsFunctionDeclaration,
     JsFunctionExpression,
+    JsFunctionNode,
     JsIdentifier,
     JsIfStatement,
     JsImportDeclaration,
@@ -129,11 +131,6 @@ def spelling_states(body: str) -> tuple[bool, bool]:
     return body == 'use strict', has_legacy_numeric_escape(body)
 
 
-_FUNCTION_NODES = (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)
-
-_FunctionNode = JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression
-
-
 def statement_list(node: Node | None) -> list[Statement] | None:
     """
     The statement list *node* holds directly, or `None` when it holds none. Only the three node types
@@ -160,7 +157,7 @@ def is_prologue_host(node: Node | None) -> bool:
         return True
     if isinstance(node, JsBlockStatement):
         owner = node.parent
-        return isinstance(owner, _FUNCTION_NODES) and owner.body is node
+        return isinstance(owner, FUNCTION_NODES) and owner.body is node
     return False
 
 
@@ -403,13 +400,13 @@ def strict_mode_at(node: Node) -> bool:
             return True
         if is_prologue_host(cursor) and declares_use_strict(cursor):
             return True
-        if isinstance(cursor, _FUNCTION_NODES) and declares_use_strict(cursor.body):
+        if isinstance(cursor, FUNCTION_NODES) and declares_use_strict(cursor.body):
             return True
         cursor = cursor.parent
     return False
 
 
-def has_simple_parameters(fn: _FunctionNode) -> bool:
+def has_simple_parameters(fn: JsFunctionNode) -> bool:
     """
     Whether *fn* has a simple parameter list (§15.1.3): every parameter is a plain identifier, with no
     default, no rest element and no destructuring. An empty list is simple — nothing in it is anything
@@ -450,7 +447,7 @@ _METHOD_ACCESSORS = {
 }
 
 
-def parameter_grammar(fn: _FunctionNode) -> ParameterGrammar:
+def parameter_grammar(fn: JsFunctionNode) -> ParameterGrammar:
     """
     Which grammar *fn* takes its parameters through. An arrow always takes `UniqueFormalParameters`;
     a method, a getter and a setter take theirs through the member that holds them, so the member is
@@ -487,7 +484,7 @@ def _child_strictness(node: Node, strict: bool) -> bool:
         return strict or node.module or declares_use_strict(node)
     if isinstance(node, (JsClassDeclaration, JsClassExpression)):
         return True
-    if not isinstance(node, _FUNCTION_NODES):
+    if not isinstance(node, FUNCTION_NODES):
         return strict
     body = node.body
     if isinstance(body, JsBlockStatement):
@@ -495,7 +492,7 @@ def _child_strictness(node: Node, strict: bool) -> bool:
     return strict
 
 
-def _reserved_by_own_kind(fn: _FunctionNode) -> frozenset[str]:
+def _reserved_by_own_kind(fn: JsFunctionNode) -> frozenset[str]:
     """
     The names *fn* reserves by being the kind of function it is: a generator reserves `yield` and an
     async function reserves `await`, because inside one the word is an operator and cannot also name
@@ -533,7 +530,7 @@ def reserved_by_function_kind(node: Node) -> frozenset[str]:
     cursor: Node = node
     parent = cursor.parent
     while parent is not None:
-        if isinstance(parent, _FUNCTION_NODES):
+        if isinstance(parent, FUNCTION_NODES):
             if isinstance(parent, JsFunctionExpression) and cursor is parent.id:
                 return _reserved_by_own_kind(parent)
             names_itself = isinstance(parent, JsFunctionDeclaration) and cursor is parent.id
@@ -655,7 +652,7 @@ def _flag_bound(target: Node | None, strict: bool, out: list[StrictViolation], h
             _flag_name(ident, out)
 
 
-def _suspend_operator_in_parameters(fn: _FunctionNode) -> Node | None:
+def _suspend_operator_in_parameters(fn: JsFunctionNode) -> Node | None:
     """
     A `yield` or `await` operator written into *fn*'s parameter list, or `None` where none is. No
     parameter list may hold either, in any kind of function and in either mode: a default value is
@@ -674,14 +671,14 @@ def _suspend_operator_in_parameters(fn: _FunctionNode) -> Node | None:
         node = stack.pop()
         if isinstance(node, (JsYieldExpression, JsAwaitExpression)):
             return node
-        if isinstance(node, _FUNCTION_NODES):
+        if isinstance(node, FUNCTION_NODES):
             continue
         stack.extend(reversed(node.children()))
     return None
 
 
 def _check_function(
-    fn: _FunctionNode,
+    fn: JsFunctionNode,
     strict: bool,
     out: list[StrictViolation],
     handled: set[int],

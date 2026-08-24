@@ -32,6 +32,8 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclaration,
     JsVariableDeclarator,
     JsVarKind,
+    is_async_function,
+    is_generator_function,
 )
 
 
@@ -436,8 +438,8 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
                 id=JsIdentifier(name=name),
                 params=func_expr.params or [],
                 body=func_expr.body,
-                generator=func_expr.generator,
-                is_async=func_expr.is_async,
+                generator=is_generator_function(func_expr),
+                is_async=is_async_function(func_expr),
             ))
         if declarations:
             insert_after_prologue(scope, declarations)
