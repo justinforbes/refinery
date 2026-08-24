@@ -56,6 +56,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsWhileStatement,
     Statement,
+    wraps_return,
 )
 from refinery.lib.scripts.js.numbers import exact_integer, js_parse_int
 
@@ -119,6 +120,8 @@ def _find_array_function(body: Sequence[Node]) -> ArrayFunction | None:
     """
     for statement in body:
         if not isinstance(statement, JsFunctionDeclaration):
+            continue
+        if wraps_return(statement):
             continue
         if statement.id is None or statement.body is None:
             continue
@@ -186,6 +189,8 @@ def _find_all_accessor_functions(
     results: list[AccessorFunction] = []
     for stmt in body:
         if not isinstance(stmt, JsFunctionDeclaration):
+            continue
+        if wraps_return(stmt):
             continue
         if stmt.id is None or stmt.body is None:
             continue
@@ -517,6 +522,8 @@ def _match_wrapper(
     Check whether a function declaration is a wrapper that forwards to *accessor_name* with
     reordered arguments and a constant offset. Returns a `AccessorWrapperInfo` on match, else None.
     """
+    if wraps_return(fn):
+        return None
     if fn.id is None or fn.body is None:
         return None
     if len(fn.body.body) < 1 or len(fn.params) < 2:

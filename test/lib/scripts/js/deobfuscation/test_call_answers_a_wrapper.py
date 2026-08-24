@@ -157,6 +157,34 @@ def a_string_array(accessor_kw: str = '', holder_kw: str = '', read: str = 'ACC(
     )
 
 
+def a_string_array_whose_rotation_runs(holder_kw: str = '', target: int = 3) -> str:
+    """
+    The same three parts written the way an obfuscator emits them: the checksum is read through the
+    accessor, so it answers differently at each rotation, and a target the written order does not
+    meet makes the loop turn the array over before it breaks.
+
+    The loop is what reads what the holder answered. In `a_string_array` it breaks before it touches
+    the array, which is why that program agrees with Node for an `async` holder and this one does
+    not: here `arr` is the promise the holder answered, and a promise has no `shift`.
+    """
+    return _lines(
+        F"{holder_kw}function A() {{ var s = ['3', '5'];"
+        ' A = function () { return s; }; return A(); }',
+        'function ACC(i, k) { i = i - 0; var a = A();'
+        ' var r = a[i]; return r; }',
+        '(function (getArray, target) {',
+        '  var arr = getArray();',
+        '  while (!![]) {',
+        '    try {',
+        '      var sum = parseInt(ACC(0)) / 1;',
+        "      if (sum === target) break; else arr['push'](arr['shift']());",
+        "    } catch (e) { arr['push'](arr['shift']()); }",
+        '  }',
+        F'}})(A, {target});',
+        'console.log(ACC(0));',
+    )
+
+
 AN_ENCODED_STRING = 'hJQxp9Pvj3X2QId3C4RuMOe1C4EpuSg2b/8JyqzSWjrQm+VgNNg='
 
 
@@ -407,15 +435,10 @@ A_CALL_ANSWERING_A_WRAPPER = {
 
 
 #: Shapes in which the keyword sits on a function whose call the pass is right to answer, so that a
-#: guard written per pass rather than per function is caught. The string array's `async` holder
-#: replaces itself on its first call and the rotation calls it before anything else does, so every
-#: later call reads the plain replacement; the dispatcher's entries are built with the keyword
-#: carried, which `dispatcher._build_extracted_function` already does.
+#: guard written per pass rather than per function is caught. The dispatcher's entries are built
+#: with the keyword carried, which `dispatcher._build_extracted_function` already does, and an
+#: async arrow immediately called is answered by the value of its own body.
 A_WRAPPER_THE_PASS_IS_RIGHT_TO_ANSWER = {
-    a_string_array(holder_kw='async '): (
-        'hello' + NL,
-        "console.log('hello');",
-    ),
     an_iife('typeof (async (a) => a)(7).then'): (
         'function' + NL,
         'console.log(typeof (async a => a)(7).then);',
@@ -455,6 +478,22 @@ A_WRAPPER_THE_PASS_IS_RIGHT_TO_ANSWER = {
             'console.log(log.join(","));',
         ).rstrip(NL),
     ),
+}
+
+
+#: What Node makes of a string array whose rotation loop actually turns the array over, per kind of
+#: holder. This is the row that says an `async` holder is not an answer the pass may give: the loop
+#: indexes what the holder answered, and what an `async` holder answers is a promise, which has no
+#: `shift`. Node throws where the pass used to print the rotated string.
+#:
+#: The plain holder beside them is the control, and it is also why `a_string_array` cannot state
+#: this on its own: its loop breaks before it touches the array, so every kind of holder agrees
+#: there.
+A_ROTATION_THAT_READS_WHAT_THE_HOLDER_ANSWERED = {
+    a_string_array_whose_rotation_runs(target=5): ('5' + NL, None),
+    a_string_array_whose_rotation_runs('async ', target=5): ('', 'TypeError'),
+    a_string_array_whose_rotation_runs('function* ', target=5).replace(
+        'function* function A', 'function* A'): ('', 'TypeError'),
 }
 
 
@@ -620,7 +659,6 @@ class TestTheDeobfuscationStillCallsAWrappingFunction(TestBase):
     regression is reported on a machine with no Node.js as well.
     """
 
-    @unittest.expectedFailure
     def test_no_site_answers_a_call_to_one(self):
         rows = {
             source: prints
@@ -680,7 +718,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_rotation(self):
         rows = A_CALL_ANSWERING_A_WRAPPER['unshuffle']
         self.assertEqual(
@@ -688,7 +725,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_string_array(self):
         """
         Node prints `function` for the two accessor rows. The generator *holder* prints `undefined`:
@@ -701,7 +737,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_scramble_decoder(self):
         rows = A_CALL_ANSWERING_A_WRAPPER['scramble']
         self.assertEqual(
@@ -709,7 +744,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_base91_table(self):
         """
         The keyword is asked for on the accessor and on the decoder, because the accessor answers
@@ -722,7 +756,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_self_disabling_wrapper_in_expression_position(self):
         """
         Node prints `function a`: the call answers a promise, and the argument ran on the way. The
@@ -734,7 +767,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
             each_program_still_prints(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_dispatcher(self):
         rows = A_CALL_ANSWERING_A_WRAPPER['dispatcher']
         self.assertEqual(
@@ -962,4 +994,21 @@ class TestEveryRouteIntoTheInterpreterPrintsWhatItPrinted(TestBase):
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestARotationReadsWhatTheHolderAnswered(TestBase):
+    """
+    The string array's holder is called by the rotation loop before anything else reads it, and the
+    loop indexes what it answered. A holder that answers a promise or a generator object makes that
+    indexing throw, so a pass that resolved the strings anyway handed back a program that runs where
+    the input did not.
+    """
+
+    def test_each_kind_of_holder_does_what_it_does(self):
+        rows = A_ROTATION_THAT_READS_WHAT_THE_HOLDER_ANSWERED
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
         )

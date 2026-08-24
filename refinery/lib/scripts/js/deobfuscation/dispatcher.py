@@ -51,6 +51,7 @@ from refinery.lib.scripts.js.model import (
     is_async_function,
     is_generator_function,
     strip_parens,
+    wraps_return,
 )
 
 
@@ -304,6 +305,8 @@ def _detect_dispatcher(func: JsFunctionDeclaration) -> _DispatcherInfo | None:
     Structurally detect whether `func` is a dispatcher function. Returns the extracted metadata or
     `None` if the function does not match the pattern.
     """
+    if wraps_return(func):
+        return None
     if not isinstance(func.id, JsIdentifier):
         return None
     if not isinstance(func.body, JsBlockStatement):

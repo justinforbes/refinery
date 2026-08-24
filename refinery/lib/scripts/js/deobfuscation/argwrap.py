@@ -25,6 +25,7 @@ from refinery.lib.scripts.js.model import (
     JsSpreadElement,
     JsSwitchCase,
     JsUnaryExpression,
+    wraps_return,
 )
 
 
@@ -67,13 +68,18 @@ def _is_expression_wrapper(node: JsFunctionDeclaration) -> bool:
     return True
 
 
-def _find_expression_wrappers(root: Node) -> set[str]:
-    names: set[str] = set()
+def _find_expression_wrappers(root: Node) -> dict[str, JsFunctionDeclaration]:
+    """
+    The self-disabling wrappers in *root*, by the name each one answers to. The declaration is kept
+    rather than the name alone because what a call to it answers decides which of the two expansions
+    is available, and that is a property of the function rather than of the call.
+    """
+    wrappers: dict[str, JsFunctionDeclaration] = {}
     for node in root.walk():
         if isinstance(node, JsFunctionDeclaration) and _is_expression_wrapper(node):
             assert node.id is not None
-            names.add(node.id.name)
-    return names
+            wrappers[node.id.name] = node
+    return wrappers
 
 
 class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
@@ -81,6 +87,11 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
     Detect self-disabling wrapper functions and expand their call sites: a call in statement position
     becomes the individual argument statements, and a call embedded in a larger expression becomes the
     equivalent comma sequence in place, so evaluation order is preserved.
+
+    Only the statement-position expansion is available for a wrapper whose call answers a promise or
+    a generator object. In statement position what the call answered is discarded, so every kind of
+    wrapper expands alike; the sequence answers `undefined`, which is what the call answers only when
+    the wrapper is a plain function.
     """
 
     @staticmethod
@@ -96,8 +107,8 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
         return JsSequenceExpression(expressions=[*arguments, void_0])
 
     def _process_script(self, node: JsScript):
-        wrapper_names = _find_expression_wrappers(node)
-        if not wrapper_names:
+        wrappers = _find_expression_wrappers(node)
+        if not wrappers:
             return
         unwrapped = False
         for ast_node in list(node.walk()):
@@ -105,7 +116,7 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
                 continue
             if not isinstance(ast_node.callee, JsIdentifier):
                 continue
-            if ast_node.callee.name not in wrapper_names:
+            if ast_node.callee.name not in wrappers:
                 continue
             if any(isinstance(arg, JsSpreadElement) for arg in ast_node.arguments):
                 continue
@@ -125,7 +136,7 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
                 for stmt in new_stmts:
                     stmt.parent = pp
                 unwrapped = True
-            else:
+            elif not wraps_return(wrappers[ast_node.callee.name]):
                 _replace_in_parent(ast_node, self._sequence_lowering(ast_node.arguments))
                 unwrapped = True
         if not unwrapped:
@@ -137,7 +148,7 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
                 continue
             if ast_node.id is None:
                 continue
-            if ast_node.id.name not in wrapper_names:
+            if ast_node.id.name not in wrappers:
                 continue
             binding = model.binding_of(ast_node.id)
             if not binding_has_references(model, binding, exclude=ast_node):

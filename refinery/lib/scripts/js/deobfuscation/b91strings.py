@@ -36,6 +36,7 @@ from refinery.lib.scripts.js.model import (
     JsStringLiteral,
     JsVariableDeclaration,
     JsVariableDeclarator,
+    wraps_return,
 )
 from refinery.lib.scripts.js.numbers import exact_integer
 
@@ -177,6 +178,8 @@ def _find_decoders(root: Node) -> list[_DecoderInfo]:
     decoders: list[_DecoderInfo] = []
     for node in root.walk():
         if isinstance(node, JsFunctionDeclaration):
+            if wraps_return(node):
+                continue
             if node.id is None or node.body is None:
                 continue
             if len(node.params) != 1:
@@ -189,6 +192,8 @@ def _find_decoders(root: Node) -> list[_DecoderInfo]:
         elif isinstance(node, JsAssignmentExpression) and isinstance(node.left, JsIdentifier):
             func = node.right
             if not isinstance(func, JsFunctionExpression):
+                continue
+            if wraps_return(func):
                 continue
             if len(func.params) != 1:
                 continue
@@ -244,6 +249,8 @@ def _find_accessors(
     accessors: list[_AccessorInfo] = []
     for node in root.walk():
         if isinstance(node, JsFunctionDeclaration):
+            if wraps_return(node):
+                continue
             if node.id is None or node.body is None:
                 continue
             if len(node.params) != 1:
@@ -266,6 +273,8 @@ def _find_accessors(
         elif isinstance(node, JsAssignmentExpression) and isinstance(node.left, JsIdentifier):
             func = node.right
             if not isinstance(func, JsFunctionExpression):
+                continue
+            if wraps_return(func):
                 continue
             if func.body is None or not isinstance(func.body, JsBlockStatement):
                 continue

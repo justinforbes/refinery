@@ -34,6 +34,7 @@ from refinery.lib.scripts.js.model import (
     JsUpdateExpression,
     JsVariableDeclaration,
     JsVariableDeclarator,
+    wraps_return,
 )
 from refinery.lib.scripts.js.numbers import exact_integer
 
@@ -47,6 +48,8 @@ def _is_push_shift_rotation(func: JsFunctionDeclaration | JsFunctionExpression) 
 
     and returns `param1`.
     """
+    if wraps_return(func):
+        return False
     if len(func.params) != 2:
         return False
     p0, p1 = func.params

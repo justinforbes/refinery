@@ -42,6 +42,7 @@ from refinery.lib.scripts.js.model import (
     JsThisExpression,
     JsVariableDeclaration,
     JsVariableDeclarator,
+    wraps_return,
 )
 from refinery.lib.scripts.js.numbers import exact_integer
 
@@ -107,7 +108,7 @@ def _is_scramble_class(node: Node) -> bool:
             continue
         name = _method_name(method)
         if name == 'decode':
-            has_decode = True
+            has_decode = method.value is not None and not wraps_return(method.value)
         elif name == 'constructor':
             has_pbkdf2 = _constructor_has_pbkdf2(method)
     return has_decode and has_pbkdf2
@@ -321,6 +322,8 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
     def _is_decode_wrapper(
         self, fn: JsFunctionDeclaration | JsFunctionExpression, instance_name: str,
     ) -> bool:
+        if wraps_return(fn):
+            return False
         if fn.body is None or len(fn.body.body) != 1:
             return False
         stmt = fn.body.body[0]
