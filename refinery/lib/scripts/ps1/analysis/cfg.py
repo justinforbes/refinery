@@ -1,34 +1,7 @@
 """
-PowerShell's contribution to the shared control-flow substrate: which node types are which
-control-flow shape, and where the parts of each are stored.
-
-Everything structural lives in `refinery.lib.scripts.analysis.cfg`. What is here is the dispatch, the
-accessors, and the places PowerShell's answer differs from the shape JavaScript established:
-
-- **`switch` does not fall through, it keeps matching.** Every clause is tested against the value and
-  every matching one runs, so an arm's exits may reach any *later* arm rather than only the next.
-  That is `refinery.lib.scripts.analysis.cfg.ArmFlow.CUMULATIVE`, and reading it as C-style
-  fallthrough would drop the path in which the first and third clauses match and the second does not.
-  It also *enumerates its input*, so `continue` inside it advances to the next input value rather
-  than to an enclosing loop, and a `default` clause does not make it exhaustive: over an empty
-  collection no clause runs at all.
-- **`if`/`elseif` is one flat statement**, not a nest, so the chain of tests is built through
-  `branch_chain` and each `elseif` condition gets a node of its own.
-- **`trap` guards the statement block it is written in**, not the scope around it: it catches for
-  that block entire, statements written above it included, and for nothing outside it, so one
-  written inside an `if` body is no handler for the body around it. Where blocks nest, the innermost
-  block declaring one is the only set consulted, and a set that may fail to match passes the error
-  outward rather than letting it resume. `continue` inside it resumes at the statement after the one
-  that threw. See `_Builder.block`.
-- **`exit` is a terminator like `return`**, modelled as one: control does not continue in this body.
-  That it leaves the *script* rather than the function is a claim about the caller's body, which a
-  per-body graph does not make; keeping the caller's paths is the conservative reading.
-- **A label is a field of the construct**, not a statement wrapping it, so `park_label` is called
-  from the dispatch rather than through `labelled`, and the `:` the lexer keeps on the declaration
-  is stripped before a jump can be matched against it.
-
-`Ps1Code` also splits one body across `begin`/`process`/`end`/`dynamicparam` blocks, so `owner.body`
-alone is not what an advanced function runs.
+PowerShell's dispatch over the shared control-flow builder: which node types are which shape, and
+where the parts of each are stored. Everything structural lives in
+`refinery.lib.scripts.analysis.cfg`.
 """
 from __future__ import annotations
 
@@ -66,17 +39,8 @@ from refinery.lib.scripts.ps1.model import (
     Ps1WhileLoop,
 )
 
-#: The nodes that own a control-flow graph of their own, beside the script itself. A script block is
-#: PowerShell's anonymous function: it is a *value* where it is written and runs somewhere else
-#: entirely — as the body of `ForEach-Object`, through `&` or `.`, or as the body of a function,
-#: which is the only script block a `Ps1FunctionDefinition` has and why keying on the definition
-#: instead adds no graph but leaves every other block without one. A block with no graph is climbed
-#: out of, so its statements are reported as running where the block is *written*: they claim to
-#: precede everything after that point and lose their order among themselves.
-#:
-#: This is the same partition `refinery.lib.scripts.ps1.analysis.model.Ps1SemanticModel.scope_of`
-#: makes — one body, one scope, one graph. A `trap` divides more finely still: it belongs to the
-#: statement block it is written in, of which a body is only the outermost.
+#: The nodes owning a control-flow graph of their own, beside the script itself. A script block is
+#: PowerShell's anonymous function, and the only one a `Ps1FunctionDefinition` holds.
 FUNCTION_NODES = (Ps1ScriptBlock,)
 
 _LOOP_NODES = (
@@ -87,18 +51,10 @@ _LOOP_NODES = (
 )
 
 
-#: The type names a `catch` clause may carry that take every terminating error Windows PowerShell
-#: 5.1 raises, in the spellings 5.1 resolves. `System.Exception` is the root of the .NET hierarchy
-#: and matches by definition; `RuntimeException` is what the engine wraps a terminating error in,
-#: measured to match a failed cast, a division by zero, `throw` of a string, `throw` of a .NET
-#: exception, a method that threw, a member access on `$null`, and a cmdlet stopped by
-#: `-ErrorAction Stop`.
-#:
-#: The spellings are the measurement too, and they are not symmetric: a bare name is resolved
-#: against `System` alone, so `[Exception]` names `System.Exception` while `[RuntimeException]`
-#: names nothing at all and the clause it filters matches no error whatsoever. Listing the short
-#: form of the second would grant a clause that in fact declines everything, which is the one
-#: direction that deletes code.
+#: The type names a `catch` clause may carry that take every terminating error 5.1 raises, in the
+#: spellings 5.1 resolves. A bare name resolves against `System` alone, so `[Exception]` names
+#: `System.Exception` while `[RuntimeException]` names nothing and its clause matches no error at
+#: all — which is why the short form of the second is absent here.
 _CATCHES_EVERY_ERROR = frozenset({
     'exception',
     'system.exception',
@@ -108,86 +64,34 @@ _CATCHES_EVERY_ERROR = frozenset({
 
 
 def _names_every_error(name: str) -> bool:
-    """
-    Whether *name* is a type filter every terminating error matches. An empty name is no filter at
-    all, which is the same answer for a different reason and the reason a `catch` clause and a
-    `trap` can ask one question: both spell *unfiltered* as nothing written.
-    """
     return not name.strip() or name.strip().lower() in _CATCHES_EVERY_ERROR
 
 
 def _catch_takes_every_error(clause: Ps1CatchClause) -> bool:
-    """
-    Whether *clause* is certain to be the one that takes a throw the guarded block makes: it carries
-    no type filter at all, or one of the filters it carries names a type every terminating error is.
-
-    A clause carrying several types matches when *any* of them does, so one universal name among
-    them settles it however narrow the others are.
-    """
     if not clause.types:
         return True
     return any(_names_every_error(name) for name in clause.types)
 
 
 def _jump_label(statement: Ps1Jump) -> str | None:
-    """
-    The label a `break` or `continue` names, or `None` when it names none or names one this cannot
-    read. PowerShell allows the label to be any expression — `break $name` is legal — and a label
-    that is not a static string is one no lexical target can be matched against, so it is treated as
-    unlabelled, which resolves to the innermost enclosing target and is the conservative reading.
-    """
     return string_value(statement.label) if statement.label is not None else None
 
 
 def _construct_label(label: str | None) -> str | None:
-    """
-    The name a labelled loop or `switch` declares, without the `:` the lexer keeps on the token.
-
-    A jump names its target without the colon, so the declaration and the reference are two
-    spellings of one name and comparing them unnormalized never matches — which resolves every
-    labelled jump to nothing and sends it out of the body instead of out of the construct it names.
-    """
     return label[1:] if label is not None and label.startswith(':') else label
 
 
 def _declared_traps(statements: Sequence[Node]) -> list[Ps1TrapStatement]:
-    """
-    The `trap` statements *statements* declares, in source order.
-
-    A `trap` belongs to the statement block it is written in and to no other: it catches for that
-    block entire, including the statements written above it, and an error raised outside the block
-    is never offered to it. Collecting the traps of a nested block for the block around it hands
-    those errors to a handler no run reaches, and — where the nested one is typed — reports a filter
-    that may miss as guarding statements it does not guard at all.
-    """
     return [statement for statement in statements if isinstance(statement, Ps1TrapStatement)]
 
 
 @dataclass
 class _TrapBody:
-    """
-    What building one `trap` body reported back: the nodes at which control resumes the block the
-    `trap` guards, and whether the body reaches the `break` that rethrows.
-
-    `resumes` collects the explicit `continue` spellings only. A body that runs off its end resumes
-    too — the error record is written and the block carries on — but that is its exit frontier,
-    which the caller already holds.
-
-    `rethrows` is decided through the builder's jump-target stack rather than by finding the
-    keyword: a `break` naming a loop written inside the body leaves that loop, and the `trap` goes
-    on swallowing. The stack the body is built against holds nothing from outside it — see
-    `_Builder.block` — because a `trap` body is a scope of its own and a jump in it can name no
-    construct the block is written inside.
-    """
     resumes: list[CfgNode] = field(default_factory=list)
     rethrows: bool = False
 
 
 class _Builder(CfgBuilder):
-    """
-    The PowerShell dispatch over `refinery.lib.scripts.analysis.cfg.CfgBuilder`.
-    """
-
     def __init__(self, owner: Node):
         super().__init__(owner)
         self._trap_body: _TrapBody | None = None
@@ -195,66 +99,8 @@ class _Builder(CfgBuilder):
     def block(self, statements: Sequence[Node], frontier: list[CfgNode]) -> list[CfgNode]:
         """
         One statement block, with every `trap` it declares installed as a handler over the whole of
-        it.
-
-        A `trap` is not a guarded block. It is declared somewhere in the block and catches for that
-        block entire, including the statements written above it, so it cannot be pushed at the point
-        it appears the way a `try` is — it is pushed before the block is walked at all. Several
-        traps in one block are peers and are chained the way
-        `refinery.lib.scripts.analysis.cfg.CfgBuilder.guarded` chains several `catch` clauses,
-        because which one runs depends on the type of the error and none of them is guaranteed.
-
-        Where blocks nest, the innermost one declaring a `trap` is the only set the error is offered
-        to, which pushing that set on the handler stack already says. The set passes the error
-        outward — to the `catch` or `trap` guarding the block, and to the body exit when nothing
-        guards it — exactly when it may fail to take it: every `trap` in it carrying a filter no
-        error is known to match, or one of them reaching the `break` that runs the body and
-        rethrows. Nothing else in a body reaches the exit on an exceptional edge without a handler
-        having been offered the error, which is what tells an error that ends the script apart from
-        one that is reported and stepped over.
-
-        A trap does not guard itself: an error raised inside a trap body is offered to whatever
-        the set itself unwinds to, so the trap bodies are built under that and only the block's own
-        statements are built under the set. Building them under the set instead gives every node of
-        every trap body an exceptional edge back to a handler that already has a normal edge into
-        it, which is a cycle through the trap that no run can take — and reads as a body that
-        repeats. `refinery.lib.scripts.analysis.cfg.CfgBuilder.guarded` pops before building its
-        `catch` bodies for the same reason. Where nothing guards the block, the trap body unwinds to
-        the body exit: the error ends the body, which is the one place a `trap` turns a fault that
-        would have been reported and stepped over into one that stops everything after it.
-
-        **A trap body is built against an empty jump-target stack**, because 5.1 compiles one as a
-        scope of its own: `break` in it ends the trap and rethrows, and `continue` in it resumes the
-        guarded block, whatever loop or `switch` the block itself is written inside. Leaving the
-        enclosing construct's targets in place resolves both keywords to that construct instead —
-        the `break` stops being a rethrow, so the set reads as swallowing an error that in fact ends
-        the body, and the `continue` becomes a back-jump, so the resumption the trap exists to
-        create is never wired at all.
-
-        The *resumption* stack is deliberately not cleared the same way. A jump names a construct and
-        a trap body encloses none of them; a resumption names a place control carries on at, and a
-        trap body written inside a block some outer set resumes is a place that outer set carries on
-        from. Clearing it would leave the body's nodes on neither projection of the level that does
-        guard them.
-
-        `continue` inside a trap resumes at the statement following the one that threw, which is a
-        shape no single edge set expresses. It is therefore carried twice, as
-        `refinery.lib.scripts.analysis.cfg.CfgEdge` describes: every resumption point is taken to
-        reach *every* node the block owns, through the hub
-        `refinery.lib.scripts.analysis.cfg.CfgBuilder.resumption` wires — the over-approximation
-        an analysis asking whether any resumption path exists must read, since claiming fewer paths
-        would let one call a statement after a trap unreachable, or let a store before one look dead
-        because the resumption that reads it was never modelled — and, alongside it, the precise
-        forward-only half (`_resumable_sequence`), which joins each statement to the one control
-        actually resumes at and is what a flood reads.
-
-        **The set is opened after its own handler entries and bodies are built, and that ordering is
-        load bearing.** A `trap` declared in a nested block is a statement of the block around it, so
-        its entries and body belong to the *enclosing* resumable level and are wired against that
-        one. Opening this level first would take them, and the forward projection would then have no
-        edge saying where control goes when the inner set *declines* an error — the enclosing set
-        takes it and resumes past the whole nested block, which is the one path a typed inner trap
-        makes observable.
+        it: a `trap` catches for the block it is written in entire, statements above it included, so
+        the set cannot be pushed at the point it appears the way a `try` is.
         """
         traps = _declared_traps(statements)
         if not traps:
@@ -300,32 +146,8 @@ class _Builder(CfgBuilder):
         self, statements: Sequence[Node], frontier: list[CfgNode],
     ) -> list[CfgNode]:
         """
-        The guarded statements of a block whose `trap` set resumes it, threaded as `sequence` does,
-        with the precise forward-only half of resumption drawn against the open block as each node
-        appears.
-
-        What finds the point control resumes at is one elementless slot per statement, which
-        `refinery.lib.scripts.analysis.cfg.CfgBuilder.resume_past` reports once the statement is
-        built. The slot is then passed in the frontier the *next* statement is built from, so that
-        whatever that statement control-*enters* gains an edge from it — its own node, the condition
-        of an `if`, the first guarded statement of a nested block. Reading the entry off the nodes a
-        statement created instead answers the wrong one for every construct that builds something
-        before what it runs first: a `try` builds its handler entry first, so the forward edge would
-        reach the `catch` clause and leave the body it guards reachable only through the hub, which
-        is exactly the backward reach the forward half exists to avoid.
-
-        The last statement's slot goes into the returned frontier rather than to the body exit.
-        Control resuming past the end of a guarded block carries on with whatever follows the
-        *block*, and for a nested one that is not the end of the body; only the caller threading
-        this frontier knows where it is.
-
-        A statement inside a nested resumable block claims that block's slot and not this one's,
-        which is what makes the edge count linear in the nesting depth rather than quadratic. It
-        loses no path: the nested block hands its own last slot back in the frontier this loop
-        threads on, so a statement inside it still reaches the statement after the nested block. The
-        slot a node draws to is the *representative* of a resumption, not the exact statement control
-        lands at — no graph knows which statement threw — and what every consumer reads off it is
-        where the resumption can go, not where it went.
+        The guarded statements of a block whose `trap` set resumes it, threaded as `sequence` does
+        and joined to the forward-only half of resumption as each statement is built.
         """
         for statement in statements:
             frontier = self.resume_past(self.statement(statement, frontier))
@@ -333,18 +155,9 @@ class _Builder(CfgBuilder):
 
     def body_blocks(self, owner: Node) -> Sequence[Sequence[Node]]:
         """
-        The statement blocks *owner* runs, in the order it runs them.
-
-        An advanced function fills `begin`/`process`/`end`/`dynamicparam` instead of `body`, and
-        reading only `body` for one would report an empty graph for a function that runs a great
-        deal — the same trap `refinery.lib.scripts.ps1.ast.get_named_blocks` exists to warn about.
-        `dynamicparam` is pulled to the front because the engine evaluates it during parameter
-        binding, before `begin`, while that accessor reports the blocks in the order they are
-        declared in.
-
-        They are kept apart rather than concatenated because each is a statement block of its own: a
-        `trap` written in `begin` is offered nothing that `process` raises, and joining them hands
-        it errors no run ever will.
+        The statement blocks *owner* runs, `dynamicparam` first: the engine evaluates it during
+        parameter binding, before `begin`. They stay apart because each is a statement block of its
+        own, and a `trap` written in `begin` is offered nothing `process` raises.
         """
         if not isinstance(owner, Ps1Code):
             return []
@@ -404,25 +217,12 @@ class _Builder(CfgBuilder):
     def _resume(
         self, resumes: list[CfgNode], statement: Node, frontier: list[CfgNode],
     ) -> list[CfgNode]:
-        """
-        A `continue` inside a `trap` body, which is not a back-jump: it resumes the guarded block at
-        the statement after the one that threw. The node is recorded for `block` to link to every
-        landing point once that block exists, and control does not fall through it here.
-
-        Reading it as a loop back-jump instead resolves it to nothing and wires it to the body exit,
-        which deletes the one path the trap exists to create — and leaves the whole resumption model
-        unexercised, because this is the spelling that resumes.
-        """
         node = self.node(statement)
         self.link(frontier, node)
         resumes.append(node)
         return []
 
     def _if(self, statement: Ps1IfStatement, frontier: list[CfgNode]) -> list[CfgNode]:
-        """
-        The chain, keyed so that the whole statement is the first test's node: a caller that locates
-        the `if` itself must reach a node, and the first condition is where control first arrives.
-        """
         clauses: list[tuple[Node, Node | None]] = []
         for index, (condition, block) in enumerate(statement.clauses):
             clauses.append((statement if index == 0 else condition, block))
@@ -432,17 +232,9 @@ class _Builder(CfgBuilder):
 
     def _switch(self, statement: Ps1SwitchStatement, frontier: list[CfgNode]) -> list[CfgNode]:
         """
-        The clauses as arms of an iterated, cumulative dispatch.
-
-        A `default` clause does not make the construct exhaustive the way it does in a language
-        whose `switch` tests one value: PowerShell's enumerates its input, and over an empty
-        collection no clause runs at all — not even `default`. Reporting it exhaustive drops the
-        edge that leaves the switch without entering any arm, which is what makes the statement
-        after it look unreachable.
-
-        An arm is handed over as the block it is rather than as the statements in it, because a
-        clause body is a statement block of its own and a `trap` written in one guards that clause
-        and nothing else.
+        The clauses as arms of an iterated, cumulative dispatch. A `default` clause does not make
+        the construct exhaustive: PowerShell's `switch` enumerates its input, and over an empty
+        collection no clause runs at all.
         """
         arms: list[Sequence[Node]] = [
             [block] if block is not None else [] for _, block in statement.clauses
@@ -458,19 +250,6 @@ class _Builder(CfgBuilder):
         )
 
     def _try(self, statement: Ps1TryCatchFinally, frontier: list[CfgNode]) -> list[CfgNode]:
-        """
-        PowerShell allows several typed `catch` clauses where JavaScript allows one binding, so the
-        clauses are chained: the guarded block reaches the first, and each clause reaches the next,
-        because which one runs depends on the exception type and none of them is guaranteed.
-
-        A clause certain to take every error leaves nothing to pass outward — which is what makes
-        an empty `catch` shield the `catch` or `trap` around it where a typed one hands the error
-        straight on to it. Carrying no type is one way to be certain and naming `System.Exception`
-        is another; see `_catch_takes_every_error`.
-
-        The `finally` body travels as its block for the same reason a `switch` arm does: it is a
-        statement block, and a `trap` written in one guards it alone.
-        """
         clauses = statement.catch_clauses
         finalizer = statement.finally_block
         return self.guarded(
@@ -484,14 +263,8 @@ class _Builder(CfgBuilder):
 
 
 def build_ps1_control_flow(root: Ps1Script) -> dict[int, ControlFlowGraph]:
-    """
-    One control-flow graph per script block — see `FUNCTION_NODES` — and one for the script itself.
-    """
     return build_control_flow(root, _Builder, FUNCTION_NODES)
 
 
 def build_control_flow_model(root: Ps1Script) -> ControlFlowModel:
-    """
-    The `refinery.lib.scripts.analysis.cfg.ControlFlowModel` for a script root.
-    """
     return ControlFlowModel(build_ps1_control_flow(root))
