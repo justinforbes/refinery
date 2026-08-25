@@ -374,6 +374,69 @@ BEHAVIOURS: tuple[str, ...] = (
     '$sb = { param($a) [Array]::Reverse($a) }; $x = 1, 2, 3; & $sb $x; Write-Output $x',
     '$x = 1, 2, 3; function f { , $script:x }; $y = f; $y[0] = 9; Write-Output $x[0]',
     '$x = 1, 2, 3; $a, $b = $x, 9; [Array]::Reverse($a); Write-Output $x',
+
+    #: What observes the removal of a statement or of a function definition. A junk remover argues
+    #: that nothing sees what it drops, and each of these names one thing that does: the statements
+    #: a fault would have skipped, the parameter binder, the automatic success variable, a read of
+    #: the function table, a reader of the command table, the text a stored block renders as, and a
+    #: second binding the name already had. Written in pairs wherever the same shape has a benign
+    #: twin, so that a refusal covering both says nothing.
+    "function K { $Null = [Int]'abc' }; K; Write-Host 'A'",
+    "$Null = [Int]'abc'; Write-Host 'A'",
+    "$Null = 1 / 0; Write-Host 'A'",
+    "$Null = [Int]'42'; Write-Host 'A'",
+    "function K { param([int] $x = 'abc') }; K; Write-Host 'A'",
+    "function K { param([int] $x = '42') }; K; Write-Host 'A'",
+    "function K { $Null = 1 }; Write-Error 'e'; K; Write-Host $?",
+    'function K { $Null = 1 }; K; Write-Host ($function:K -ne $Null)',
+    "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'",
+    "$Null = (Get-Command K).Name; function K { $Null = 1 }; K; Write-Host 'A'",
+    "function vnMTH { $Null = 1 }; vnMTH; $Null = (Get-Command *vnMT*).Name; Write-Host 'A'",
+    'K; function K { $Null = 1 }; Write-Host $?',
+    'function K { $Null = 1 }; K; $b = { K }; Write-Host $b',
+    'function Measure-Object { $Null = 1 }; Measure-Object; 1, 2, 3 | measure',
+    "function Get-Language { $Null = 668 }; language; Write-Host 'A'",
+    "function q { $Null = 1 }; ${function:q} = { Write-Host 'P' }; q",
+    "$n = 'q'; function K { $Null = 1 }; Set-Alias $n K; q; Write-Host 'A'",
+    "function K { [Alias('q')] param() $Null = 1 }; q; Write-Host 'A'",
+    "$env:B = 'function K { Write-Host P }'; Invoke-Expression $env:B; function K { 42 }; "
+    "$x = K; Write-Output $x; $env:C = 'K'; Invoke-Expression $env:C",
+
+    #: A member the Extended Type System re-points is not the member the collected metadata
+    #: describes, which is the whole reason the closed-world model exists. Each of these mutates one
+    #: and then reads it; the pair beneath them reads the same member with nothing mutated, so a
+    #: refusal covering both says nothing.
+    "Update-TypeData -TypeName System.String -MemberName Zq -MemberType ScriptProperty "
+    "-Value { Write-Host 'S' }; $Null = 'abc'.Zq; Write-Host 'A'",
+    "Update-TypeData -Force -TypeName System.String -MemberName Length -MemberType ScriptProperty "
+    "-Value { 99 }; Write-Host 'abc'.Length",
+    "$Null = 'abc'.Length; Write-Host 'A'",
+    "Write-Host 'abc'.Length",
+
+    #: What a raise abandons. A bareword carrying an assignment marker is the shape an obfuscator
+    #: pads with, and 5.1 answers it with `CommandNotFoundException` — terminating at script scope,
+    #: caught by an empty `catch` inside a `try`. Either way the statements it skips do not run, and
+    #: a rewrite that drops the raise has to drop them with it.
+    "try { zzq0000=5; 'tail' } catch {}; 'next'",
+    "function f { try { zzq0000=5; 'tail' } catch {} }; Write-Host (f)",
+    "function f { try { 'tail' } catch {} }; Write-Host (f)",
+    "try { zzq0000=5 } catch {}; 'next'",
+    "zzqfoo1; function zzqfoo1 { 'boom' }; zzqfoo1",
+    "function zzqfoo1 { 'boom' }; zzqfoo1",
+
+    #: What the empty `catch` around a noise bareword is claimed to swallow. A clause with a type
+    #: filter that misses swallows nothing and 5.1 ends the run; a clause that matches leaves the
+    #: error in `$Error` and `$?` all the same. Each is paired with the form the removal is entitled
+    #: to, so a refusal covering both says nothing.
+    "try { zzqq0 =5 } catch [System.IO.IOException] {}; Write-Host 'after'",
+    "try { zzqq0 =5 } catch {}; Write-Host 'after'",
+    "$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count",
+    "$Error.Clear(); Write-Host $Error.Count",
+    "try { zzqq0 =5 } catch {}; Write-Host $?",
+    "try { item =5 } catch {}; Write-Host 'after'",
+    "trap { continue }; zzq0000=5; Write-Host 'after'",
+    "trap { Write-Host 'trapped'; continue }; zzq0000=5; Write-Host 'after'",
+    "try { zzq0000=5 } finally { Write-Host 'fin' }; Write-Host 'after'",
 )
 
 

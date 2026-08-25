@@ -286,6 +286,104 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The call is resolved to `Write-Output`. The second definition is read as a rebind that '
         'took, but 5.1 refuses it against the read-only entry without raising anything the '
         'script can see, so `c` still names `Write-Error` when the call runs.',
+    "function K { $Null = [Int]'abc' }; K; Write-Host 'A'":
+        'The body is read as inert and the definition and its call are removed together, but the '
+        'cast raises a terminating error, so 5.1 never reaches the statement below. The output '
+        'writes `A` where the snippet writes nothing at all.',
+    "$Null = [Int]'abc'; Write-Host 'A'":
+        'The same fault standing at script scope rather than in a body: the statement is removed '
+        'because no `catch` and no `trap` observes it, and the statement it would have skipped is '
+        'the observer nothing asked about.',
+    "$Null = 1 / 0; Write-Host 'A'":
+        'The same defect in its other spelling, so that neither entry rests on the cast.',
+    "function K { param([int] $x = 'abc') }; K; Write-Host 'A'":
+        'The body is empty and the definition and its call are removed, but binding the parameter '
+        'runs the conversion its type constraint names and `abc` has none, so every call raises '
+        'before the body would run. The fault is the binder\'s, and an inert body says nothing '
+        'about it.',
+    "function K { $Null = 1 }; Write-Error 'e'; K; Write-Host $?":
+        'The call is removed, and with it the write to `$?` that a command performs by running. '
+        'The snippet reports `True` because `K` succeeded after the failure; the output reports '
+        '`False` because the failure is now the last thing that ran.',
+    'function K { $Null = 1 }; K; Write-Host ($function:K -ne $Null)':
+        'The definition is removed although the script reads it back out of the function table. '
+        '`Ps1CommandModel.introspected_names` collects the `alias:` namespace only, so the '
+        '`function:` spelling reaches no reader and the read reports `False` where it reported '
+        '`True`.',
+    "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'":
+        'The definition is removed although `Get-Command` names it literally. A literal name that '
+        'matches nothing writes a `CommandNotFoundException` to the error stream whatever is done '
+        'with the result, so the output writes an error record the snippet does not. A pattern '
+        'that matches nothing writes none, which is the neighbouring `*vnMT*` row.',
+    'K; function K { $Null = 1 }; Write-Host $?':
+        'The pair is removed although the call stands above the only definition of its name, so '
+        'nothing is bound when it runs. 5.1 answers it with a terminating `CommandNotFoundException` '
+        'and the script stops; the output runs to completion and reports `True`.',
+    'function K { $Null = 1 }; K; $b = { K }; Write-Host $b':
+        'The call inside the stored block is removed along with the definition, but a `ScriptBlock` '
+        'renders as its own source text, so the block the snippet writes out is no longer the block '
+        'it wrote.',
+    "$env:B = 'function K { Write-Host P }'; Invoke-Expression $env:B; function K { 42 }; "
+    "$x = K; Write-Output $x; $env:C = 'K'; Invoke-Expression $env:C":
+        'The `function` definition shadows one an `Invoke-Expression` above it bound under the same '
+        'name, and removing it uncovers the shadowed body rather than leaving the name unbound. Both '
+        'strings are resolved, so the output holds the payload definition and calls it, where the '
+        'snippet calls the definition standing in its own text. This is the risk a name-keyed '
+        'removal takes when it stops requiring that the tree be the whole story: not a call to a '
+        'name nothing defines, but a call to a body the input never ran.',
+    "function K { [Alias('q')] param() $Null = 1 }; q; Write-Host 'A'":
+        'The definition is removed and the call under its attribute alias is left standing. An '
+        '`[Alias]` attribute on a `param` block binds a second command name for the function when '
+        'the definition runs, and nothing here reads it as a binding, so the output calls a name it '
+        'no longer defines.',
+    "Update-TypeData -TypeName System.String -MemberName Zq -MemberType ScriptProperty "
+    "-Value { Write-Host 'S' }; $Null = 'abc'.Zq; Write-Host 'A'":
+        'The read is discarded and removed, but the member it names is a script property the '
+        'statement above it installed, so reading it runs that body. A member read reaches the '
+        'closed-world gate through its receiver, and a literal receiver never asks it: the '
+        'value domain answers from the literal alone.',
+    "Update-TypeData -Force -TypeName System.String -MemberName Length -MemberType ScriptProperty "
+    "-Value { 99 }; Write-Host 'abc'.Length":
+        'The same gap reached through folding rather than removal, and aimed at a member the '
+        'metadata proves inert: `Length` is re-pointed to a script property and the read is '
+        'folded to the number the metadata carries, so the output prints a value 5.1 never '
+        'produces.',
+    "try { zzq0000=5; 'tail' } catch {}; 'next'":
+        'The bareword is dropped as injected noise and the statement below it is carried out '
+        'of the `try`, but the bareword raises, so 5.1 abandons the rest of the block and '
+        '`tail` never runs. What the guess claims is that the statement raised; carrying '
+        'anything past it contradicts the claim the removal rests on.',
+    "zzqfoo1; function zzqfoo1 { 'boom' }; zzqfoo1":
+        'The call above the definition is resolved to the body and folded, so the output emits '
+        'twice. 5.1 binds the name where the `function` statement runs, so the first call '
+        'raises `CommandNotFoundException`, which is terminating at script scope and emits '
+        'nothing at all.',
+    "try { zzqq0 =5 } catch [System.IO.IOException] {}; Write-Host 'after'":
+        'The noise bareword is dropped because the `catch` bodies are empty, but a clause with '
+        'a type filter that misses catches nothing: 5.1 lets the error out and ends the run. '
+        'The rule asks whether a handler acts and never whether one matches.',
+    "$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count":
+        'The handler does match, so the run continues either way — but a caught terminating '
+        'error is still recorded, and dropping the statement drops the record. The snippet '
+        'reports one error and the output reports none.',
+    "try { zzqq0 =5 } catch {}; Write-Host $?":
+        'The same record seen through the automatic success variable rather than the error '
+        'list. Held apart because a script may read either without the other.',
+    "trap { continue }; zzq0000=5; Write-Host 'after'":
+        'The handler is removed as inert, but `continue` is what makes the run survive the '
+        'bareword: the snippet resumes at the statement below and prints, and the output ends '
+        'there instead. What the removal costs is control flow rather than anything the '
+        'handler emits.',
+    "try { zzq0000=5 } finally { Write-Host 'fin' }; Write-Host 'after'":
+        'The construct has no `catch` at all, so nothing swallows the bareword and 5.1 runs '
+        'the `finally` and then ends. The rule asks whether every `catch` body is empty, '
+        'which is vacuously true where there are none, and the statements below the construct '
+        'then run in the output where the snippet never reaches them.',
+    "function f { try { zzq0000=5; 'tail' } catch {} }; Write-Host (f)":
+        'The same carried statement seen where its output has a consumer. The bareword raises '
+        'into the empty `catch`, so the function returns nothing and the snippet writes a '
+        'blank line; the output writes `tail`. Held beside the script-scope spelling because '
+        'only here does the carried value survive junk removal to be compared.',
 }
 
 

@@ -1445,4 +1445,76 @@ FOLDS: dict[str, str] = {
         "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'\nGet-Item nope\nWrite-Host 'after'",
     "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' }; Wrap; Write-Host 'after'":
         "function Raise {\n  throw 'e'\n}\nfunction Wrap {\n  Raise\n  Write-Host 'in'\n}\nWrap\nWrite-Host 'after'",
+    "function K { $Null = [Int]'abc' }; K; Write-Host 'A'":
+        "Write-Host 'A'",
+    "$Null = [Int]'abc'; Write-Host 'A'":
+        "Write-Host 'A'",
+    "$Null = 1 / 0; Write-Host 'A'":
+        "Write-Host 'A'",
+    "$Null = [Int]'42'; Write-Host 'A'":
+        "Write-Host 'A'",
+    "function K { param([int] $x = 'abc') }; K; Write-Host 'A'":
+        "Write-Host 'A'",
+    "function K { param([int] $x = '42') }; K; Write-Host 'A'":
+        "Write-Host 'A'",
+    "function K { $Null = 1 }; Write-Error 'e'; K; Write-Host $?":
+        "Write-Error 'e'\nWrite-Host $?",
+    'function K { $Null = 1 }; K; Write-Host ($function:K -ne $Null)':
+        'Write-Host ($function:K -NE $Null)',
+    "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'":
+        "$Null = (Get-Command K).Name\nWrite-Host 'A'",
+    "function vnMTH { $Null = 1 }; vnMTH; $Null = (Get-Command *vnMT*).Name; Write-Host 'A'":
+        "$Null = (Get-Command *vnMT*).Name\nWrite-Host 'A'",
+    'K; function K { $Null = 1 }; Write-Host $?':
+        'Write-Host $?',
+    'function K { $Null = 1 }; K; $b = { K }; Write-Host $b':
+        '$b = {}\nWrite-Host $b',
+    'function Measure-Object { $Null = 1 }; Measure-Object; 1, 2, 3 | measure':
+        'function Measure-Object {}\nMeasure-Object\n1, 2, 3 | Measure-Object',
+    "function Get-Language { $Null = 668 }; language; Write-Host 'A'":
+        "function Get-Language {}\nlanguage\nWrite-Host 'A'",
+    "function q { $Null = 1 }; ${function:q} = { Write-Host 'P' }; q":
+        "function q {}\n$function:q = {\n  Write-Host 'P'\n}\nq",
+    "$n = 'q'; function K { $Null = 1 }; Set-Alias $n K; q; Write-Host 'A'":
+        "Write-Host 'A'",
+    "function K { [Alias('q')] param() $Null = 1 }; q; Write-Host 'A'":
+        "q\nWrite-Host 'A'",
+    "$env:B = 'function K { Write-Host P }'; Invoke-Expression $env:B; function K { 42 }; $x = K; Write-Output $x; $env:C = 'K'; Invoke-Expression $env:C":
+        'function K {\n  Write-Host P\n}\nWrite-Output 42\nK',
+    "$Null = (Get-Command K).Name; function K { $Null = 1 }; K; Write-Host 'A'":
+        "$Null = (Get-Command K).Name\nWrite-Host 'A'",
+    "Update-TypeData -TypeName System.String -MemberName Zq -MemberType ScriptProperty -Value { Write-Host 'S' }; $Null = 'abc'.Zq; Write-Host 'A'":
+        "Update-TypeData -TypeName System.String -MemberName Zq -MemberType ScriptProperty -Value {\n  Write-Host 'S'\n}\nWrite-Host 'A'",
+    "Update-TypeData -Force -TypeName System.String -MemberName Length -MemberType ScriptProperty -Value { 99 }; Write-Host 'abc'.Length":
+        'Update-TypeData -Force -TypeName System.String -MemberName Length -MemberType ScriptProperty -Value {\n  99\n}\nWrite-Host 3',
+    "$Null = 'abc'.Length; Write-Host 'A'":
+        "Write-Host 'A'",
+    "Write-Host 'abc'.Length":
+        'Write-Host 3',
+    "try { zzq0000=5; 'tail' } catch {}; 'next'":
+        "'tail'\n'next'",
+    "try { zzq0000=5 } catch {}; 'next'":
+        "'next'",
+    "zzqfoo1; function zzqfoo1 { 'boom' }; zzqfoo1":
+        "'boom'\n'boom'",
+    "function zzqfoo1 { 'boom' }; zzqfoo1":
+        "'boom'",
+    "try { zzqq0 =5 } catch [System.IO.IOException] {}; Write-Host 'after'":
+        "Write-Host 'after'",
+    "try { zzqq0 =5 } catch {}; Write-Host 'after'":
+        "Write-Host 'after'",
+    '$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count':
+        '$Error.Clear()\nWrite-Host $Error.Count',
+    'try { zzqq0 =5 } catch {}; Write-Host $?':
+        'Write-Host $?',
+    "try { item =5 } catch {}; Write-Host 'after'":
+        "try {\n  Get-Item =5\n} catch {}\nWrite-Host 'after'",
+    "trap { continue }; zzq0000=5; Write-Host 'after'":
+        "zzq0000=5\nWrite-Host 'after'",
+    "try { zzq0000=5 } finally { Write-Host 'fin' }; Write-Host 'after'":
+        "Write-Host 'fin'\nWrite-Host 'after'",
+    "function f { try { zzq0000=5; 'tail' } catch {} }; Write-Host (f)":
+        "Write-Host 'tail'",
+    "function f { try { 'tail' } catch {} }; Write-Host (f)":
+        "Write-Host 'tail'",
 }
