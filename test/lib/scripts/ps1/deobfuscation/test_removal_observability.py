@@ -373,7 +373,6 @@ class TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock(TestPs1):
     statements it does carry.
     """
 
-    @unittest.expectedFailure
     def test_a_value_below_a_dropped_noise_bareword_is_not_carried_out_of_the_try(self):
         self._assertKept("""
             function f { try { zzq0000=5; 'tail' } catch {} }
@@ -411,13 +410,13 @@ class TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock(TestPs1):
 class TestPs1TheHandlerAroundANoiseBarewordHasToMatchIt(TestPs1):
     """
     Dropping a noise bareword rests on its `CommandNotFoundException` landing in a handler that
-    swallows it. `_prune_try` requires every `catch` body to be empty and never requires a clause to
-    match, so a type filter that misses lets the error out — and at script scope that ends the run.
-    Even where a clause does match, the error is recorded, so a script reading `$Error` or `$?` sees
-    the removal.
+    swallows it, so the construct needs a clause that takes every error. An empty body is not that
+    answer: a clause whose type filter misses has an empty body and takes nothing, a `try` with no
+    `catch` at all takes nothing either, and at script scope the error then ends the run. Even where
+    a clause does match, the error is recorded, so a script reading `$Error` or `$?` sees the
+    removal — and a `trap` that resumes past the bareword is the reason the run survived it.
     """
 
-    @unittest.expectedFailure
     def test_a_noise_bareword_under_a_catch_that_cannot_match_is_kept(self):
         self._assertKept(F"""
             try {{
@@ -426,7 +425,6 @@ class TestPs1TheHandlerAroundANoiseBarewordHasToMatchIt(TestPs1):
             {_ANCHOR}
         """)
 
-    @unittest.expectedFailure
     def test_a_noise_bareword_under_a_try_with_no_catch_at_all_is_kept(self):
         self._assertKept(F"""
             try {{

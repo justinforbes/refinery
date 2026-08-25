@@ -126,6 +126,13 @@ BEHAVIOUR_DIVERGENCES: dict[str, str] = {
         "separate defect stands beside this one: `Write-Output 'caught'` in the same place survives, "
         "so the strip recognises implicit output and not explicit, where it should ask the output "
         "model about both alike. That asymmetry is a question for the output model, not this table.",
+    "try { zzq0000=5; 'tail' } catch {}; 'next'":
+        'Nothing is carried out of the `try` any more: the drop claims the bareword raised, and a '
+        'raise abandons the rest of its block. What runs first at script scope is the strip, which '
+        'takes both bare values, and a body left holding the bareword alone then dissolves — so '
+        'the snippet writes `next` and the default writes nothing. `ps1 -k` emits the input '
+        'unchanged. The carry itself is measured where the value has a consumer that the strip '
+        'leaves alone, which is its function-scope spelling in the corpus.',
 }
 
 #: Snippets whose deobfuscation does not behave like the snippet. Each is a semantics defect: the
@@ -348,20 +355,11 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'metadata proves inert: `Length` is re-pointed to a script property and the read is '
         'folded to the number the metadata carries, so the output prints a value 5.1 never '
         'produces.',
-    "try { zzq0000=5; 'tail' } catch {}; 'next'":
-        'The bareword is dropped as injected noise and the statement below it is carried out '
-        'of the `try`, but the bareword raises, so 5.1 abandons the rest of the block and '
-        '`tail` never runs. What the guess claims is that the statement raised; carrying '
-        'anything past it contradicts the claim the removal rests on.',
     "zzqfoo1; function zzqfoo1 { 'boom' }; zzqfoo1":
         'The call above the definition is resolved to the body and folded, so the output emits '
         'twice. 5.1 binds the name where the `function` statement runs, so the first call '
         'raises `CommandNotFoundException`, which is terminating at script scope and emits '
         'nothing at all.',
-    "try { zzqq0 =5 } catch [System.IO.IOException] {}; Write-Host 'after'":
-        'The noise bareword is dropped because the `catch` bodies are empty, but a clause with '
-        'a type filter that misses catches nothing: 5.1 lets the error out and ends the run. '
-        'The rule asks whether a handler acts and never whether one matches.',
     "$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count":
         'The handler does match, so the run continues either way — but a caught terminating '
         'error is still recorded, and dropping the statement drops the record. The snippet '
@@ -374,16 +372,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'bareword: the snippet resumes at the statement below and prints, and the output ends '
         'there instead. What the removal costs is control flow rather than anything the '
         'handler emits.',
-    "try { zzq0000=5 } finally { Write-Host 'fin' }; Write-Host 'after'":
-        'The construct has no `catch` at all, so nothing swallows the bareword and 5.1 runs '
-        'the `finally` and then ends. The rule asks whether every `catch` body is empty, '
-        'which is vacuously true where there are none, and the statements below the construct '
-        'then run in the output where the snippet never reaches them.',
-    "function f { try { zzq0000=5; 'tail' } catch {} }; Write-Host (f)":
-        'The same carried statement seen where its output has a consumer. The bareword raises '
-        'into the empty `catch`, so the function returns nothing and the snippet writes a '
-        'blank line; the output writes `tail`. Held beside the script-scope spelling because '
-        'only here does the carried value survive junk removal to be compared.',
 }
 
 

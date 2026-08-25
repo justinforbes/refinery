@@ -1492,15 +1492,13 @@ FOLDS: dict[str, str] = {
     "Write-Host 'abc'.Length":
         'Write-Host 3',
     "try { zzq0000=5; 'tail' } catch {}; 'next'":
-        "'tail'\n'next'",
+        '',
     "try { zzq0000=5 } catch {}; 'next'":
         "'next'",
     "zzqfoo1; function zzqfoo1 { 'boom' }; zzqfoo1":
         "'boom'\n'boom'",
     "function zzqfoo1 { 'boom' }; zzqfoo1":
         "'boom'",
-    "try { zzqq0 =5 } catch [System.IO.IOException] {}; Write-Host 'after'":
-        "Write-Host 'after'",
     "try { zzqq0 =5 } catch {}; Write-Host 'after'":
         "Write-Host 'after'",
     '$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count':
@@ -1511,10 +1509,6 @@ FOLDS: dict[str, str] = {
         "try {\n  Get-Item =5\n} catch {}\nWrite-Host 'after'",
     "trap { continue }; zzq0000=5; Write-Host 'after'":
         "zzq0000=5\nWrite-Host 'after'",
-    "try { zzq0000=5 } finally { Write-Host 'fin' }; Write-Host 'after'":
-        "Write-Host 'fin'\nWrite-Host 'after'",
-    "function f { try { zzq0000=5; 'tail' } catch {} }; Write-Host (f)":
-        "Write-Host 'tail'",
     "function f { try { 'tail' } catch {} }; Write-Host (f)":
         "Write-Host 'tail'",
 }

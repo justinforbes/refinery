@@ -102,9 +102,21 @@ class TestPs1ParserModeRescan(TestPs1):
             '''
         ))
 
-    def test_an_empty_typed_catch_after_a_command_try_body_dissolves_alone(self):
+    def test_an_empty_typed_catch_after_a_command_try_body_keeps_the_script_below_it(self):
+        """
+        The same lexer bug reached through a body that would dissolve under a handler taking every
+        error. `[A]` takes none, so the construct stands, and what this measures is that the handler
+        and the statement below it come back as themselves rather than as the type name's tail.
+        """
         result = self._deobfuscate_iterative("try { foo =5 } catch [A] {}\nWrite-Host 'keep'")
-        self.assertEqual(result, "Write-Host 'keep'")
+        self.assertEqual(result, cleandoc(
+            """
+            try {
+              foo =5
+            } catch [A] {}
+            Write-Host 'keep'
+            """
+        ))
 
 
 class TestPs1ClassEnum(TestPs1):

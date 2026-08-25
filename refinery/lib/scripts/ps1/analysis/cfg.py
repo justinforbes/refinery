@@ -129,6 +129,22 @@ def _catch_takes_every_error(clause: Ps1CatchClause) -> bool:
     return any(_names_every_error(name) for name in clause.types)
 
 
+def swallows_every_error(statement: Ps1TryCatchFinally) -> bool:
+    """
+    Whether every terminating error the `try` body of *statement* raises is certain to land in one
+    of that statement's own `catch` clauses.
+
+    The quantifier is the whole question, and it is an `any`: one clause that takes everything
+    settles it however narrow the others are, and a construct carrying no `catch` at all swallows
+    nothing, which an `all` reads as vacuously true. Answering it wrong in that direction hands a
+    caller a raise it believes confined.
+
+    What this licenses is confinement and not invisibility. A caught error is still recorded, and
+    whether the script reads that record back is a different question with a different owner.
+    """
+    return any(_catch_takes_every_error(clause) for clause in statement.catch_clauses)
+
+
 def _jump_label(statement: Ps1Jump) -> str | None:
     """
     The label a `break` or `continue` names, or `None` when it names none or names one this cannot
@@ -475,7 +491,7 @@ class _Builder(CfgBuilder):
             finalizer,
             (finalizer,) if finalizer is not None else (),
             frontier,
-            escapes=not any(_catch_takes_every_error(clause) for clause in clauses),
+            escapes=not swallows_every_error(statement),
         )
 
 

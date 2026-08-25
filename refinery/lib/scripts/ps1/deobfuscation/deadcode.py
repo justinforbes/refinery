@@ -13,6 +13,7 @@ from refinery.lib.scripts import (
 from refinery.lib.scripts.analysis.cfg import Projection
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.ps1.analysis.cache import Ps1ModelCache, model_cache
+from refinery.lib.scripts.ps1.analysis.cfg import swallows_every_error
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     is_fault_free,
@@ -152,9 +153,13 @@ def _hoisted_initializer(expr: Expression) -> Ps1ExpressionStatement:
     return store_dropped_to_value(expr)
 
 
-def _try_body_survivors(body: list[Statement], world: Ps1WorldReach) -> list[Statement] | None:
+def _try_body_survivors(
+    node: Ps1TryCatchFinally,
+    world: Ps1WorldReach,
+) -> list[Statement] | None:
     """
-    What a try body leaves behind once its construct is dissolved, or `None` when it cannot be.
+    What the try body of `node` leaves behind once its construct is dissolved, or `None` when it
+    cannot be.
 
     A statement survives dissolution only if it means the same thing outside the construct as
     inside it, which asks two questions of it and not one. It must not raise, or the empty `catch`
@@ -167,17 +172,32 @@ def _try_body_survivors(body: list[Statement], world: Ps1WorldReach) -> list[Sta
     which is dropped rather than carried. That is a heuristic and it is the reason this returns a
     body that is *believed* inert rather than one proven so; a bareword the script redefines runs
     that definition and is never such a guess, which is one of the facts the `world` carries.
+
+    The drop is a claim that the statement *raised*, and two things follow from the claim that the
+    carry does not need. The raise has to be confined to this construct, which is
+    `swallows_every_error` and not the empty-body test the caller makes: a clause whose type filter
+    misses has an empty body and takes nothing, and a construct carrying no `catch` at all takes
+    nothing either. And a raise abandons the rest of its block, so nothing below a dropped statement
+    may be carried out — a statement written above one is reached before the raise and is carried as
+    it always was. A second padding bareword below the first is dropped rather than carried, and
+    rests on the first having raised.
     """
+    body = node.try_block.body if node.try_block is not None else []
+    confined = swallows_every_error(node)
     survivors: list[Statement] = []
+    dropped = False
     for stmt in body:
         if not isinstance(stmt, Ps1ExpressionStatement):
             return None
         if stmt.expression is None:
             continue
         if is_fault_free(stmt.expression):
+            if dropped:
+                return None
             survivors.append(stmt)
             continue
-        if _is_injected_noise_bareword(stmt.expression, world):
+        if confined and _is_injected_noise_bareword(stmt.expression, world):
+            dropped = True
             continue
         return None
     return survivors
@@ -688,8 +708,7 @@ class Ps1DeadCodeElimination(Transformer):
         for clause in node.catch_clauses:
             if clause.body is not None and clause.body.body:
                 return None
-        try_body = node.try_block.body if node.try_block is not None else []
-        survivors = _try_body_survivors(try_body, world)
+        survivors = _try_body_survivors(node, world)
         if survivors is None:
             return None
         finally_body = node.finally_block.body if node.finally_block is not None else []

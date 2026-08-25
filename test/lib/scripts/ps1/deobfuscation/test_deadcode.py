@@ -602,6 +602,30 @@ class TestPs1UnreachableStatementRemoval(TestPs1):
         ), Ps1DeadCodeElimination)
 
 
+class TestPs1ATryWhoseBodyCannotRaiseDissolvesWhateverItsHandlerTakes(TestPs1):
+    """
+    A handler that matches is a precondition on *dropping* a statement that raises, not on
+    dissolving a construct. A body that cannot raise reaches the statements below it whether a
+    clause matches it, misses it, or is absent altogether, so the construct around it means nothing
+    and goes.
+    """
+
+    def test_a_constant_body_under_a_catch_that_cannot_match_dissolves(self):
+        self.assertEqual(
+            self._apply('try { 5 } catch [System.IO.IOException] {}', Ps1DeadCodeElimination),
+            '5')
+
+    def test_an_empty_body_under_a_catch_that_cannot_match_dissolves(self):
+        self.assertEqual(
+            self._apply('try {} catch [System.IO.IOException] {}', Ps1DeadCodeElimination),
+            '')
+
+    def test_a_constant_body_with_no_catch_at_all_hoists_its_finally(self):
+        self.assertEqual(
+            self._apply("try { 5 } finally { Write-Host 'f' }", Ps1DeadCodeElimination),
+            "5\nWrite-Host 'f'")
+
+
 class TestPs1InjectedNoiseBareword(TestPs1):
     """
     An artifact is a mis-lexed two-token assignment and nothing else, so a real invocation carrying

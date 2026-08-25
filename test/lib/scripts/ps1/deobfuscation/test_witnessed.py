@@ -17,13 +17,18 @@ from test.lib.scripts.ps1.deobfuscation import (
     test_folding,
     test_iexinline,
     test_removal,
+    test_removal_observability,
     test_unused,
     test_wildcards,
 )
 
 from refinery.lib.scripts import Node, owning_list
 from refinery.lib.scripts.ps1.analysis import callgraph, effects, faults
-from refinery.lib.scripts.ps1.analysis.effects import OutputSink, is_side_effect_free
+from refinery.lib.scripts.ps1.analysis.effects import (
+    OutputSink,
+    is_fault_free,
+    is_side_effect_free,
+)
 from refinery.lib.scripts.ps1.deobfuscation import (
     deadcode,
     emulator,
@@ -67,10 +72,14 @@ _IEX_REDIRECTIONS = _witness(test_iexinline.TestPs1IexRedirections)
 _INTEGRATION = _witness(test_deobfuscation.TestPs1Integration)
 _KEPT_EITHER_WAY = _witness(test_unused.TestPs1OutputSomethingElseHoldsIsKeptEitherWay)
 _KEPT_WHEN_ASKED = _witness(test_unused.TestPs1BareOutputIsKeptWhenAsked)
+_MATCHING_HANDLER = _witness(
+    test_removal_observability.TestPs1TheHandlerAroundANoiseBarewordHasToMatchIt)
 _NESTED_GUARD = _witness(test_fault_observability.TestPs1AStatementNestedInAGuardedTryBlock)
 _PLAN = _witness(test_removal.TestPs1RemovalPlan)
 _PROTECTED_BODY = _witness(test_removal.TestPs1RemovalDoesNotEmptyAProtectedTryBody)
 _QUALIFIED = _witness(test_unused.TestPs1AQualifiedCallKeepsTheNameItResolvesOnto)
+_RAISE_ABANDONS = _witness(
+    test_removal_observability.TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
 _SELECTION_COUNT = _witness(test_folding.TestPs1CountingAnArrayKeepsWhatBuildingItDid)
@@ -177,26 +186,42 @@ def _leaves_anything_counting_its_own_residue(original: Callable) -> staticmetho
     return staticmethod(mutated)
 
 
-def _try_body_survivors_hoisting_anything_pure(body: list, oracle) -> list | None:
+def _try_body_survivors_relaxing(*, fault_freedom: bool, abandonment: bool) -> Callable:
     """
-    The two predicates as they read before fault-freedom separated them: a body qualifies if every
-    statement is side-effect free, and every side-effect-free statement is carried out. Purity is
-    not an answer to whether a statement raises, so this hoists `[Int]'abc'` past the empty `catch`
-    that was swallowing it.
+    The survivor walk with one of its rules taken out, so that each is measured alone.
+
+    Without `fault_freedom` the two predicates read as they did before fault-freedom separated
+    them: a statement is carried out when it is merely side-effect free, which hoists `[Int]'abc'`
+    past the empty `catch` that was swallowing it. Without `abandonment` a statement written below
+    a dropped bareword is carried out, although the raise the drop claims never reaches it.
+
+    The third rule is not among these: it is `swallows_every_error`, mutated where it is named.
     """
-    survivors = []
-    for stmt in body:
-        if not isinstance(stmt, Ps1ExpressionStatement):
+    def mutated(node: Ps1TryCatchFinally, oracle) -> list | None:
+        body = node.try_block.body if node.try_block is not None else []
+        confined = deadcode.swallows_every_error(node)
+        survivors = []
+        dropped = False
+        for stmt in body:
+            if not isinstance(stmt, Ps1ExpressionStatement):
+                return None
+            if stmt.expression is None:
+                continue
+            if fault_freedom:
+                carried = is_fault_free(stmt.expression)
+            else:
+                carried = is_side_effect_free(stmt.expression, oracle)
+            if carried:
+                if dropped and abandonment:
+                    return None
+                survivors.append(stmt)
+                continue
+            if confined and deadcode._is_injected_noise_bareword(stmt.expression, oracle):
+                dropped = True
+                continue
             return None
-        if stmt.expression is None:
-            continue
-        if is_side_effect_free(stmt.expression, oracle):
-            survivors.append(stmt)
-            continue
-        if deadcode._is_injected_noise_bareword(stmt.expression, oracle):
-            continue
-        return None
-    return survivors
+        return survivors
+    return mutated
 
 
 def _fault_observed_where_the_clause_is_written(stmt: Node, reach: faults.Ps1FaultReach) -> bool:
@@ -412,8 +437,23 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
         self._assertWitnessed(
             [_DEAD_CODE_EXTRA],
             patch.object(
-                deadcode, '_try_body_survivors', _try_body_survivors_hoisting_anything_pure),
+                deadcode, '_try_body_survivors',
+                _try_body_survivors_relaxing(fault_freedom=False, abandonment=True)),
             notices='test_a_try_body_that_may_raise_keeps_its_construct')
+
+    def test_abandoning_what_a_dropped_bareword_raised_past_is_witnessed(self):
+        self._assertWitnessed(
+            [_RAISE_ABANDONS],
+            patch.object(
+                deadcode, '_try_body_survivors',
+                _try_body_survivors_relaxing(fault_freedom=True, abandonment=False)),
+            notices='test_a_value_below_a_dropped_noise_bareword_is_not_carried_out_of_the_try')
+
+    def test_dropping_only_under_a_handler_that_takes_the_error_is_witnessed(self):
+        self._assertWitnessed(
+            [_MATCHING_HANDLER],
+            patch.object(deadcode, 'swallows_every_error', lambda node: True),
+            notices='test_a_noise_bareword_under_a_catch_that_cannot_match_is_kept')
 
     def test_discarding_a_hoisted_for_initializer_is_witnessed(self):
         # `for (5; $False; ) { }` puts nothing on the output; the bare statement `5` does. Hoisting
