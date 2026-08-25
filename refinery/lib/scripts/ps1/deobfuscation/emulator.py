@@ -1455,10 +1455,11 @@ class Ps1FunctionEvaluator(Transformer):
             # Without the gate a `.psm1` lost the definition here, and the value it had been folded
             # into was then a bare literal at the root that junk removal stripped as console text.
             #
-            # `exports_a_name` and not `is_readable`, deliberately. The other three unknowns that
-            # verdict carries — an open world, an opaque dispatch, an identity binding — are risks
-            # this pass has always taken in exchange for resolving the `iex` trampolines obfuscators
-            # are built out of. An export is not a risk taken for anything.
+            # `exports_a_name` and not `is_readable`, deliberately. The other four unknowns that
+            # verdict carries — an open world, an opaque dispatch, an identity binding, a call
+            # resolving onto a name this script defines — are risks this pass has always taken in
+            # exchange for resolving the `iex` trampolines obfuscators are built out of. An export
+            # is not a risk taken for anything.
             if not exports:
                 self._remove_resolved_definitions(node)
             return None

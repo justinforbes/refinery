@@ -498,7 +498,7 @@ class TestPs1EmulatorExtra(TestPs1):
                 self.assertIn('FOLDED', result)
 
     def test_a_definition_no_export_names_is_still_removed_after_folding(self):
-        # The other three unknowns `is_readable` carries are risks this pass takes deliberately, so
+        # The other four unknowns `is_readable` carries are risks this pass takes deliberately, so
         # gating on the whole verdict would stop it resolving the `iex` trampolines above. Only the
         # export withholds.
         for opener in ('', 'Invoke-Expression $code\n', '& $dispatch\n'):
