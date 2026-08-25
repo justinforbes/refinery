@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import codecs
+
 from refinery.lib.structures import MemoryFile
-from refinery.lib.types import Param
+from refinery.lib.types import buf, Param
 from refinery.units import Arg, Unit
 
 
@@ -25,14 +27,20 @@ class pdfcrypt(Unit):
 
     def __init__(
         self,
-        password: Param[str, Arg.String(help='The password to be set.')] = '',
+        password: Param[str | buf, Arg.Binary(help='The password to be set.')] = b'',
         user: Param[bool, Arg.Switch('-u', help='For encryption: Only set a user password.')] = False,
     ):
         super().__init__(password=password, user=user)
 
+    def _password(self):
+        pwd = self.args.password
+        if not isinstance(pwd, str):
+            pwd = codecs.decode(pwd, self.codec)
+        return pwd
+
     def _ingest(self, data):
         pdf = self._mupdf.open(stream=data, filetype='pdf')
-        if pdf.is_encrypted and (pwd := self.args.password):
+        if pdf.is_encrypted and (pwd := self._password()):
             pdf.authenticate(pwd)
         if pdf.is_encrypted:
             raise ValueError('The given password was incorrect.')
@@ -47,7 +55,7 @@ class pdfcrypt(Unit):
     def reverse(self, data):
         with self._ingest(data) as pdf, MemoryFile() as out:
             out.name = None
-            upwd = self.args.password
+            upwd = self._password()
             opwd = upwd if not self.args.user else None
             pdf.save(out, encryption=self._mupdf.mupdf.PDF_ENCRYPT_AES_256, user_pw=upwd, owner_pw=opwd)
             return out.getvalue()
