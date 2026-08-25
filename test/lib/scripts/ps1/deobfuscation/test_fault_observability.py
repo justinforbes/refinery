@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
@@ -51,33 +52,7 @@ _OPAQUE = '$args'
 _REQUEST = 'Invoke-WebRequest $u'
 
 
-class _Ps1FaultObservability(TestPs1):
-
-    def _assertDeobfuscatesTo(self, source: str, expected: str) -> None:
-        """
-        Both arguments are written as ordinary indented PowerShell, and `expected` is rendered
-        through the synthesizer before the comparison, so that brace layout cannot be mistaken for a
-        statement having been removed.
-        """
-        self.assertEqual(
-            self._deobfuscate(inspect.cleandoc(source)),
-            self._apply(inspect.cleandoc(expected)),
-        )
-
-    def _assertKept(self, source: str) -> None:
-        self._assertDeobfuscatesTo(source, source)
-
-    def _assertRemoved(self, source: str, statement: str) -> None:
-        """
-        The expected output is `source` with `statement` gone and nothing else touched, so the pair
-        of arguments spells out one removal rather than a whole rewritten script. Naming a statement
-        that `source` does not contain would leave the expectation saying nothing, so it is refused.
-        """
-        self.assertIn(statement, source)
-        self._assertDeobfuscatesTo(source, source.replace(statement, ''))
-
-
-class TestPs1ARaisingStatementDirectlyInAGuardedTryBlockIsKept(_Ps1FaultObservability):
+class TestPs1ARaisingStatementDirectlyInAGuardedTryBlockIsKept(TestPs1):
     """
     A `catch` clause with a body runs when the `try` block it belongs to raises a terminating error,
     so deleting the only statement that can raise means the handler no longer runs. The statement
@@ -105,7 +80,7 @@ class TestPs1ARaisingStatementDirectlyInAGuardedTryBlockIsKept(_Ps1FaultObservab
         """)
 
 
-class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
+class TestPs1AStatementNestedInAGuardedTryBlock(TestPs1):
     """
     A `catch` clause observes an error raised anywhere inside its `try` block, not only one raised
     by a statement written directly in it. A branch body, a loop body, a `switch` case body and a
@@ -243,7 +218,7 @@ class TestPs1AStatementNestedInAGuardedTryBlock(_Ps1FaultObservability):
         """, _QUIET_DIVISION)
 
 
-class TestPs1AStatementInAFunctionAGuardedTryBlockCalls(_Ps1FaultObservability):
+class TestPs1AStatementInAFunctionAGuardedTryBlockCalls(TestPs1):
     """
     A terminating error raised in a function reaches the `catch` clause guarding the call, so a
     function body is inside the `try` block for this purpose even though it is written outside it.
@@ -282,7 +257,7 @@ class TestPs1AStatementInAFunctionAGuardedTryBlockCalls(_Ps1FaultObservability):
         """, _QUIET_CONCATENATION)
 
 
-class TestPs1AnEmptyCatchSwallowsSoTheRaisingStatementIsRemovable(_Ps1FaultObservability):
+class TestPs1AnEmptyCatchSwallowsSoTheRaisingStatementIsRemovable(TestPs1):
     """
     An empty `catch` swallows the error and lets execution resume after the construct, so a script
     whose `try` block holds only the raising statement runs on to the same next statement whether
@@ -327,7 +302,7 @@ class TestPs1AnEmptyCatchSwallowsSoTheRaisingStatementIsRemovable(_Ps1FaultObser
         """)
 
 
-class TestPs1AFinallyAloneDoesNotGuardTheRaisingStatement(_Ps1FaultObservability):
+class TestPs1AFinallyAloneDoesNotGuardTheRaisingStatement(TestPs1):
     """
     A `finally` body runs on the faulting path and on the non-faulting path, so no removal can
     change whether it runs. A `try` with no `catch` clause therefore leaves the raising statement
@@ -344,7 +319,7 @@ class TestPs1AFinallyAloneDoesNotGuardTheRaisingStatement(_Ps1FaultObservability
         """)
 
 
-class TestPs1AnInnerFinallyDoesNotShieldAnOuterCatch(_Ps1FaultObservability):
+class TestPs1AnInnerFinallyDoesNotShieldAnOuterCatch(TestPs1):
     """
     Because a `finally` does not swallow, the error raised under one goes on to the nearest
     enclosing `catch`, which here has a body. The raising statement is what makes that handler run
@@ -390,7 +365,7 @@ class TestPs1AnInnerFinallyDoesNotShieldAnOuterCatch(_Ps1FaultObservability):
         """)
 
 
-class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
+class TestPs1ALiveTrapGuardsItsWholeScope(TestPs1):
     """
     A `trap` handles a terminating error raised anywhere in the statement block it is written in,
     whether it stands above the raising statement or below it, and whether the error is raised at
@@ -472,7 +447,7 @@ class TestPs1ALiveTrapGuardsItsWholeScope(_Ps1FaultObservability):
         """, _QUIET_COUNT)
 
 
-class TestPs1ATrapThatSwallowsOrIsOutOfScopeLeavesTheStatementRemovable(_Ps1FaultObservability):
+class TestPs1ATrapThatSwallowsOrIsOutOfScopeLeavesTheStatementRemovable(TestPs1):
     """
     A `trap { continue }` suppresses the error and resumes at the next statement of its scope, so
     the script reaches the same statement either way and the removal is not observable — the
@@ -508,36 +483,51 @@ class TestPs1ATrapThatSwallowsOrIsOutOfScopeLeavesTheStatementRemovable(_Ps1Faul
         """)
 
 
-class TestPs1ARaisingStatementNoHandlerGuardsIsRemoved(_Ps1FaultObservability):
+class TestPs1ARaisingStatementIsObservedByTheStatementsItSkips(TestPs1):
     """
-    With no `catch` and no `trap` anywhere, there is no handler whose running the removal could
-    change, and the raising statement is junk the pass exists to delete. It is deleted wherever it
-    stands: at script scope, in a branch body, or in the body of a function that is called.
+    A terminating error ends the enclosing script block, so the statements written below a raising
+    one do not run. Deleting the raising statement lets them run, which is a behaviour change with
+    no handler standing anywhere: the statements it skips observe it as surely as a `catch` body
+    does. Measured against a 5.1 host and recorded in
+    `test.lib.scripts.ps1.test_oracle.BEHAVIOUR_DEFECTS`.
+
+    The quiet twin runs to completion, so nothing below it is skipped and its removal is the job.
     """
 
-    def test_a_raising_cast_at_script_scope_with_no_handler_is_removed(self):
-        self._assertDeobfuscatesTo(F"""
+    @unittest.expectedFailure
+    def test_a_raising_cast_above_a_statement_at_script_scope_is_kept(self):
+        self._assertKept(F"""
             {_RAISE}
             {_ANCHOR}
-        """, _ANCHOR)
+        """)
 
-    def test_a_raising_cast_in_a_branch_body_with_no_handler_is_removed(self):
-        self._assertDeobfuscatesTo(F"""
+    @unittest.expectedFailure
+    def test_a_raising_division_above_a_statement_at_script_scope_is_kept(self):
+        self._assertKept(F"""
+            {_RAISE_DIV}
+            {_ANCHOR}
+        """)
+
+    @unittest.expectedFailure
+    def test_a_raising_cast_in_a_called_function_above_a_statement_is_kept(self):
+        self._assertKept(F"""
+            function Invoke-Thing {{ {_RAISE} }}
+            Invoke-Thing
+            {_ANCHOR}
+        """)
+
+    @unittest.expectedFailure
+    def test_a_raising_cast_above_a_statement_in_the_same_branch_body_is_kept(self):
+        self._assertKept(F"""
             if ({_OPAQUE}) {{
               {_RAISE}
               Write-Host 'BRANCH_RUNS'
             }}
             {_ANCHOR}
-        """, F"""
-            if ({_OPAQUE}) {{
-              Write-Host 'BRANCH_RUNS'
-            }}
-            {_ANCHOR}
         """)
 
-    def test_a_raising_cast_in_a_called_function_with_no_handler_is_removed(self):
-        self._assertDeobfuscatesTo(F"""
-            function Invoke-Thing {{ {_RAISE} }}
-            Invoke-Thing
+    def test_a_quiet_cast_above_a_statement_at_script_scope_is_removed(self):
+        self._assertRemoved(F"""
+            {_QUIET_CAST}
             {_ANCHOR}
-        """, _ANCHOR)
+        """, _QUIET_CAST)

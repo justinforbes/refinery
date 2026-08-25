@@ -55,3 +55,42 @@ class TestPs1TheWorldGateHoldsForEverythingButTheCast(TestPs1):
         self.assertEqual(
             self._deobfuscate(F'$q = [Int]"45" + 5\nWrite-Host $q'),
             'Write-Host 50')
+
+#: A mutation of the Extended Type System, which re-points one member of one type. It is the
+#: narrowest opener there is: the metadata still describes every other member of every other type,
+#: so a refusal that covers this covers the whole reason the closed-world model exists.
+_RETYPE = (
+    "Update-TypeData -TypeName System.String -MemberName Zq -MemberType ScriptProperty"
+    " -Value { Write-Host 'S' }")
+
+#: The same mutation aimed at a member the metadata proves inert, so the read below it folds to a
+#: value 5.1 does not produce rather than merely running code.
+_REPOINT_LENGTH = (
+    "Update-TypeData -Force -TypeName System.String -MemberName Length -MemberType ScriptProperty"
+    " -Value { 99 }")
+
+
+class TestPs1AMemberReadOnALiteralIsNotAskedAboutTheWorld(TestPs1):
+    """
+    A member read reaches the world gate through the receiver, and a literal receiver never asks it:
+    the value domain answers from the literal alone. So a script that re-points a member and then
+    reads it has that read deleted, and one that re-points `Length` has it folded to the number the
+    metadata carries. Measured against a 5.1 host and recorded in
+    `test.lib.scripts.ps1.test_oracle.BEHAVIOUR_DEFECTS`.
+    """
+
+    @unittest.expectedFailure
+    def test_a_discarded_read_of_a_re_pointed_member_is_kept(self):
+        source = F"{_RETYPE}\n$Null = 'abc'.Zq\n{_ANCHOR}"
+        self.assertEqual(self._deobfuscate(source), self._apply(source))
+
+    @unittest.expectedFailure
+    def test_a_read_of_a_re_pointed_member_is_not_folded(self):
+        source = F"{_REPOINT_LENGTH}\nWrite-Host 'abc'.Length"
+        self.assertEqual(self._deobfuscate(source), self._apply(source))
+
+    def test_a_discarded_read_with_no_mutation_anywhere_is_removed(self):
+        self._assertDeobfuscatesTo(F"$Null = 'abc'.Length\n{_ANCHOR}", _ANCHOR)
+
+    def test_a_read_with_no_mutation_anywhere_is_folded(self):
+        self._assertDeobfuscatesTo("Write-Host 'abc'.Length", 'Write-Host 3')

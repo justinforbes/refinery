@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 from test import TestBase
 
 from refinery.lib.scripts.ps1.deobfuscation import deobfuscate
@@ -34,6 +36,29 @@ class TestPs1(TestBase):
             ):
                 break
         return Ps1Synthesizer().convert(ast)
+
+    def _assertDeobfuscatesTo(self, source: str, expected: str) -> None:
+        """
+        Both arguments are written as ordinary indented PowerShell, and `expected` is rendered
+        through the synthesizer before the comparison, so that brace layout cannot be mistaken for a
+        statement having been removed.
+        """
+        self.assertEqual(
+            self._deobfuscate(inspect.cleandoc(source)),
+            self._apply(inspect.cleandoc(expected)),
+        )
+
+    def _assertKept(self, source: str) -> None:
+        self._assertDeobfuscatesTo(source, source)
+
+    def _assertRemoved(self, source: str, statement: str) -> None:
+        """
+        The expected output is `source` with `statement` gone and nothing else touched, so the pair
+        of arguments spells out one removal rather than a whole rewritten script. Naming a statement
+        that `source` does not contain would leave the expectation saying nothing, so it is refused.
+        """
+        self.assertIn(statement, source)
+        self._assertDeobfuscatesTo(source, source.replace(statement, ''))
 
     def _transform(self, source: str, *transforms) -> Ps1Script:
         ast = Ps1Parser(source).parse()
