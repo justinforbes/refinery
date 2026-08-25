@@ -427,6 +427,9 @@ class TestPs1CommandRedefinition(TestPs1):
 
     A scope qualifier selects which scope table the definition lands in and is not part of the name,
     so every qualified spelling has to shadow what the unqualified call resolves to.
+
+    The shadow reaches forward from where the definition runs and no further, so each form here
+    writes the definition above the call it has to save.
     """
 
     def test_a_shadowed_commands_effect_survives_every_deletion_form(self):
@@ -448,6 +451,23 @@ class TestPs1CommandRedefinition(TestPs1):
         for name, body in forms.items():
             with self.subTest(name):
                 self.assertIn('Start-Process', self._deobfuscate_iterative(body + anchor))
+
+    def test_a_bareword_written_above_the_definition_that_shadows_it_is_still_removed(self):
+        # 5.1 prints only what the handler prints: the name is unbound where the bareword stands and
+        # the definition below it binds nothing retroactively.
+        self.assertEqual(
+            self._deobfuscate_iterative(
+                'try { Zzz =5 } catch {}\n'
+                'function Zzz { Start-Process calc }\n'
+                'Zzz\n'
+                "Write-Output 'keep'\n"),
+            cleandoc("""
+                function Zzz {
+                  Start-Process calc
+                }
+                Zzz
+                Write-Output 'keep'
+            """))
 
     def test_a_multi_assignment_redefinition_keeps_the_call_it_shadows(self):
         # The payload text survives inside the assignment whatever happens, so asserting on it would

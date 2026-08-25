@@ -28,12 +28,12 @@ class TestPs1WorldReachIsBoundToTheTreeItMeasured(TestBase):
         read = script.body[0]
         self.assertTrue(reach.closed_for_the_whole_run)
         self.assertTrue(reach.closed_at(read))
-        self.assertTrue(reach.may_trust_command_name('write-host'))
+        self.assertTrue(reach.may_trust_command_name_at('write-host', read))
         opener = Ps1Parser('Invoke-Expression $env:PAYLOAD').parse().body[0]
         set_body(script, [*script.body, opener])
         self.assertFalse(reach.closed_for_the_whole_run)
         self.assertFalse(reach.closed_at(read))
-        self.assertFalse(reach.may_trust_command_name('write-host'))
+        self.assertFalse(reach.may_trust_command_name_at('write-host', read))
 
 
 class TestPs1CommandTrustIsPositionalWhereTheWorldStaysClosed(TestBase):
@@ -43,13 +43,32 @@ class TestPs1CommandTrustIsPositionalWhereTheWorldStaysClosed(TestBase):
             '$Null = Get-Random -Maximum 88175\n'
             'function Get-Random { Start-Process calc }\n'
             'Get-Random').parse()
-        reach = Ps1ModelCache(script).world_reach
+        cache = Ps1ModelCache(script)
+        reach = cache.world_reach
         call_before, _, call_after = script.body
         self.assertTrue(reach.closed_for_the_whole_run)
-        self.assertTrue(reach.may_trust_command_name('Start-Process'))
-        self.assertFalse(reach.may_trust_command_name('Get-Random'))
+        self.assertTrue(cache.closed_world.may_trust_command_name('Start-Process'))
+        self.assertFalse(cache.closed_world.may_trust_command_name('Get-Random'))
         self.assertTrue(reach.may_trust_command_name_at('Get-Random', call_before))
         self.assertFalse(reach.may_trust_command_name_at('Get-Random', call_after))
+
+    def test_a_name_the_whole_run_trusts_is_trusted_at_every_position(self):
+        """
+        The positional query is a widening of the whole-run one and never a second opinion: it
+        short-circuits on the whole-run verdict, so it grants wherever that grants and the flood is
+        consulted only where it refuses. A shadow site sits below to keep the flood in play for the
+        name it spells, and the untouched name has to stay trusted on both sides of it.
+        """
+        script = Ps1Parser(
+            '$Null = Get-Random -Maximum 88175\n'
+            'function Get-Random { Start-Process calc }\n'
+            'Write-Host done').parse()
+        cache = Ps1ModelCache(script)
+        self.assertTrue(cache.closed_world.may_trust_command_name('Start-Process'))
+        for index, statement in enumerate(script.body):
+            with self.subTest(index):
+                self.assertTrue(
+                    cache.world_reach.may_trust_command_name_at('Start-Process', statement))
 
 
 class TestPs1FloodsGoForwardThroughAResumingTrap(TestBase):
@@ -131,7 +150,6 @@ class TestPs1FloodsGoForwardThroughAResumingTrap(TestBase):
             '$Null = Get-Random -Maximum 88175\n'
             'function Get-Random { Start-Process calc }\n'
             'Get-Random')
-        self.assertFalse(reach.may_trust_command_name('Get-Random'))
         self.assertTrue(reach.may_trust_command_name_at('Get-Random', script.body[1]))
         self.assertFalse(reach.may_trust_command_name_at('Get-Random', script.body[3]))
 

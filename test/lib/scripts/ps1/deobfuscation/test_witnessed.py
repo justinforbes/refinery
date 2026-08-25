@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 
 from collections.abc import Callable
@@ -23,7 +24,13 @@ from test.lib.scripts.ps1.deobfuscation import (
 )
 
 from refinery.lib.scripts import Node, owning_list
-from refinery.lib.scripts.ps1.analysis import callgraph, commands, effects, faults
+from refinery.lib.scripts.ps1.analysis import (
+    callgraph,
+    commands,
+    effects,
+    faults,
+    worldflow,
+)
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     is_fault_free,
@@ -89,6 +96,8 @@ _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault
 _SWALLOWING_TRAP = _witness(
     test_fault_escalation.TestPs1ATrapThatTakesTheErrorAndSwallowsLeavesTheRaiseRemovable)
 _TREE = _witness(test_unused.TestPs1RemovalLeavesTheTreeConsistent)
+_TRUST_BY_POSITION = _witness(
+    test_unused.TestPs1CommandNameTrustIsReadWhereTheBarewordStands)
 _UNREACHED_TRAP = _witness(
     test_fault_escalation.TestPs1ATrapTheRaisingBlockDoesNotReachLeavesItRemovable)
 _UNUSED = _witness(test_unused.TestPs1UnusedVariableRemoval)
@@ -456,6 +465,23 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_ERROR_RECORD],
             patch.object(commands.Ps1CommandModel, 'reads_the_error_record', lambda self: False),
             notices='test_a_noise_bareword_is_kept_where_the_script_reads_the_error_list')
+
+    def test_refusing_where_the_record_is_spelled_only_in_text_is_witnessed(self):
+        # The half that has no variable node to find the read by. Patched to a pattern nothing
+        # matches rather than to the whole method, so the node walk beside it stays in force and
+        # only the text scan is taken away.
+        self._assertWitnessed(
+            [_ERROR_RECORD],
+            patch.object(commands, '_ERROR_RECORD_SPELLED_OUT', re.compile('(?!)')),
+            notices='test_a_noise_bareword_is_kept_where_the_read_arrives_through_a_resolved_payload')
+
+    def test_reading_command_name_trust_at_the_position_is_witnessed(self):
+        self._assertWitnessed(
+            [_TRUST_BY_POSITION],
+            patch.object(
+                worldflow.Ps1WorldReach, 'may_trust_command_name_at',
+                lambda self, name, node: True),
+            notices='test_a_bareword_below_a_leak_is_kept')
 
     def test_dropping_only_under_a_handler_that_takes_the_error_is_witnessed(self):
         self._assertWitnessed(

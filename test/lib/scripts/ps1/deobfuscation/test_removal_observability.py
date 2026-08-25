@@ -468,10 +468,12 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
     grows an entry, `$?` goes false and `$StackTrace` is filled, so a script reading any of them
     reads a different answer once the statement is gone.
 
-    A read the script hides in a payload counts as soon as the payload is resolved: the inline
-    lands before any removal is taken, so a read spelled `$c = '$Error.Count'; iex $c` reaches this
-    as an ordinary variable. Saying the name is not reading it, and a script that prints the text
-    keeps nothing alive.
+    A read the script hides in a payload has no variable node to be found by until the payload is
+    inlined, and the drop is taken first — so the names are looked for in text as well, by the
+    spelling that makes them a read rather than by the word. What that costs is stated here rather
+    than left to be discovered: a script that only *prints* `'$Error.Count'` reads nothing and is
+    kept anyway. What it does not reach is a payload nothing decodes, which is
+    `TestPs1ANoiseBarewordIsDroppedAboveAPayloadTheWalkCannotRead` below.
     """
 
     def test_a_noise_bareword_is_kept_where_the_script_reads_the_error_list(self):
@@ -512,15 +514,69 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
             $Error.Count
         """)
 
-    def test_a_noise_bareword_beside_a_message_that_prints_the_name_is_removed(self):
-        self._assertDeobfuscatesTo(F"""
+    def test_a_noise_bareword_is_kept_where_the_read_is_spelled_in_a_payload_nothing_resolves(self):
+        self._assertKept("""
+            try {
+              zzqq0 =5
+            } catch {}
+            & $env:ZZQCOMMAND '$Error.Count'
+        """)
+
+    @unittest.expectedFailure
+    def test_a_noise_bareword_is_kept_where_the_record_is_read_through_get_variable(self):
+        self._assertKept("""
+            try {
+              zzqq0 =5
+            } catch {}
+            $v = Get-Variable Error
+            Write-Host $v.Value.Count
+        """)
+
+    def test_a_noise_bareword_is_kept_where_that_same_read_is_resolved_to_the_variable(self):
+        self._assertDeobfuscatesTo("""
+            try {
+              zzqq0 =5
+            } catch {}
+            Write-Host (Get-Variable Error).Value.Count
+        """, """
+            try {
+              zzqq0 =5
+            } catch {}
+            Write-Host $Error.Count
+        """)
+
+    def test_a_noise_bareword_beside_a_message_that_only_prints_the_name_is_kept_as_well(self):
+        self._assertKept(F"""
             try {{
               zzqq0 =5
             }} catch {{}}
             Write-Host '$Error.Count'
             {_ANCHOR}
+        """)
+
+    def test_a_noise_bareword_beside_a_message_that_says_the_word_without_the_sigil_is_removed(
+        self
+    ):
+        self._assertDeobfuscatesTo(F"""
+            try {{
+              zzqq0 =5
+            }} catch {{}}
+            Write-Host 'an error occurred'
+            {_ANCHOR}
         """, F"""
-            Write-Host '$Error.Count'
+            Write-Host 'an error occurred'
+            {_ANCHOR}
+        """)
+
+    def test_a_noise_bareword_beside_a_longer_name_sharing_the_prefix_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            try {{
+              zzqq0 =5
+            }} catch {{}}
+            Write-Host '$ErrorActionPreference = Stop'
+            {_ANCHOR}
+        """, F"""
+            Write-Host '$ErrorActionPreference = Stop'
             {_ANCHOR}
         """)
 
@@ -529,11 +585,10 @@ class TestPs1ANoiseBarewordIsAnsweredWhereItStands(TestPs1):
     """
     A `function` statement binds its name when it runs, so the same bareword answers differently
     above and below it: above, it names nothing and raises into the empty handler, and below, it
-    calls the function with `=5` as an argument. The trust gate asks whether the script rebinds a
-    command name anywhere rather than where, so today both are kept and the first is recall lost.
+    calls the function with `=5` as an argument. The trust gate asks where the script rebinds a
+    command name and not merely whether, so the two get the two answers.
     """
 
-    @unittest.expectedFailure
     def test_a_noise_bareword_above_a_definition_of_its_own_name_is_removed(self):
         self._assertDeobfuscatesTo("""
             try {
@@ -572,13 +627,12 @@ class TestPs1ANoiseBarewordIsDroppedAboveAPayloadTheWalkCannotRead(TestPs1):
     What it costs is unobservable by construction. Measured on 5.1,
     `$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count` writes 1 where the same
     script without the construct writes 0, so a payload reading `$Error.Count` sees a different
-    number than the input gave it, and no scan over text this cannot decode can find that read.
-    Where the read *is* visible the removal must refuse, which is
-    `test_a_noise_bareword_is_kept_where_the_script_reads_the_error_list` above; this class is the
-    half no gate can cover.
+    number than the input gave it. Wherever the read is visible at all — as a variable, or as text
+    the script still holds — the removal refuses, which is
+    `TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead` above. Text that arrives only after
+    the payload has run is neither, and this class is that half.
     """
 
-    @unittest.expectedFailure
     def test_a_noise_bareword_above_an_environment_payload_is_removed(self):
         self._assertDeobfuscatesTo("""
             try {
@@ -587,7 +641,6 @@ class TestPs1ANoiseBarewordIsDroppedAboveAPayloadTheWalkCannotRead(TestPs1):
             Invoke-Expression $env:ZZQPAYLOAD
         """, 'Invoke-Expression $env:ZZQPAYLOAD')
 
-    @unittest.expectedFailure
     def test_a_noise_bareword_above_a_dispatch_through_a_name_it_cannot_read_is_removed(self):
         self._assertDeobfuscatesTo("""
             try {

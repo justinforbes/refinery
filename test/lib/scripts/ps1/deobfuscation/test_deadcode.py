@@ -405,7 +405,7 @@ class TestPs1DeadCodeExtra(TestPs1):
                     """
                 ), Ps1DeadCodeElimination)
 
-    def test_a_noise_bareword_in_a_try_is_kept_when_the_world_is_open(self):
+    def test_a_noise_bareword_below_an_open_world_is_kept(self):
         # A bareword is dropped on a guess that nothing defines it, and `iex` can have defined it.
         self._assertUnchanged(cleandoc(
             """
@@ -416,6 +416,18 @@ class TestPs1DeadCodeExtra(TestPs1):
             Write-Host 'keep'
             """
         ), Ps1DeadCodeElimination)
+
+    def test_a_noise_bareword_above_the_statement_that_opens_the_world_is_removed(self):
+        result = self._apply(cleandoc(
+            """
+            try {
+              foo =5
+            } catch {}
+            iex $x
+            Write-Host 'keep'
+            """
+        ), Ps1DeadCodeElimination)
+        self.assertEqual(result, "iex $x\nWrite-Host 'keep'")
 
     def test_try_function_return_value_preserved(self):
         result = self._apply(

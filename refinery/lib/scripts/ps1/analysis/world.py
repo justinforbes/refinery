@@ -267,8 +267,8 @@ class Ps1TypeWorld:
     The verdict of `build_closed_world`: whether the running script leaves the type system and
     command table intact. It carries both command-table facts the purity gate needs — the
     whole-run verdict (`closed_for_the_whole_run`) and the set of command names the script redefines
-    (`command_shadowed`) — so the two cannot drift apart, and the one question a caller actually
-    asks of the pair (`may_trust_command_name`). Held in a
+    (`command_shadowed`) — so the two cannot drift apart, and the one question asked of the pair
+    (`may_trust_command_name`). Held in a
     `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot and passed to the effect layer.
 
     A world nothing was measured over is spelled `Ps1TypeWorld(False, frozenset())` — open, trusting
@@ -353,14 +353,16 @@ class Ps1TypeWorld:
         set alone would trust every name in exactly the scripts able to rebind them, and that set
         holds only the two spellings the classifier sees.
 
-        This is the whole-run verdict, position free by construction — the right question for a
-        caller reasoning about a definition's liveness, which outlives any one position. Whether
-        the name may be trusted at *one particular node* — which depends on where that node sits
-        relative to the openers and to the redefinitions of this very name — is
+        This is the whole-run verdict, position free by construction. Whether the name may be
+        trusted at *one particular node* — which depends on where that node sits relative to the
+        openers and to the redefinitions of this very name — is
         `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach.may_trust_command_name_at`,
         layered on this verdict the way `closed_at` is layered on `closed_for_the_whole_run`. A
         verdict of trusted here means that model grants at every position; only when this refuses
-        does the position start to matter.
+        does the position start to matter. That short-circuit is the whole of what reads this in
+        the package today — every pass asks the positional query — and it is why the verdict stays
+        here rather than moving into the layer above it: the wider question is answered by
+        narrowing this one, so this one has to exist first.
 
         Named for the question a caller actually has rather than for the shadow set, because the
         answer is wider than the set: a reader who takes this for "is it redefined?" and narrows it

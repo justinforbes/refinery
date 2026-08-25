@@ -88,6 +88,7 @@ read.
 from __future__ import annotations
 
 import enum
+import re
 
 from typing import NamedTuple, Sequence
 
@@ -125,9 +126,11 @@ from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandArgumentKind,
     Ps1CommandInvocation,
+    Ps1HereString,
     Ps1ScopeModifier,
     Ps1Script,
     Ps1ScriptBlock,
+    Ps1StringLiteral,
     Ps1Variable,
 )
 
@@ -232,6 +235,20 @@ _SUCCESS_VARIABLE = '?'
 #: `$LASTEXITCODE` is not among them: measured on 5.1, a caught `CommandNotFoundException`
 #: leaves it at whatever the last native program put there.
 _ERROR_RECORD_VARIABLES = frozenset({'error', 'stacktrace'})
+
+#: The same names as they are spelled inside text a payload is written in, where no variable
+#: node exists to be walked. The sigil is what makes a spelling a read and the word alone is
+#: not, which is why this is a pattern where
+#: `refinery.lib.scripts.ps1.analysis.worldflow._names_own_path` gets by with containment: the
+#: names it looks for are coined ones nothing else says, and `error` is a word English uses.
+#: The trailing boundary is load-bearing in the other direction — `$ErrorActionPreference` and
+#: `$ErrorView` are ordinary settings that no raise writes and no handler clears.
+_ERROR_RECORD_SPELLED_OUT = re.compile(
+    R'\$(?:\{)?(?:[A-Za-z]+:)?(?:'
+    + R'|'.join(sorted(_ERROR_RECORD_VARIABLES))
+    + R')\b|\$\?',
+    re.IGNORECASE,
+)
 
 #: The command a definition must denote for its removal to be nothing but the unbinding of a name.
 _SET_ALIAS = 'set-alias'
@@ -762,14 +779,28 @@ class Ps1CommandModel:
         deletes the record the raise wrote. `reads_command_success` answers the `$?` half of that;
         this asks the other two names beside it, over the same variable nodes.
 
-        A read the script spells inside a payload counts once the payload is resolved, which is why
-        nothing here scans text. Measured over every payload spelling the passes can decode — an
-        `Invoke-Expression` of a stored string, of a concatenation of two, of a base64 blob — the
-        inline lands before any removal is taken, and by the time this is asked the read is an
-        ordinary variable node. Scanning text on top of that changes exactly one kind of answer: a
-        script that *prints* `'$Error.Count'` and reads nothing is refused for saying the word.
-        What no scan reaches is a payload the walk cannot decode at all, and there the record is
-        read by code this never sees.
+        A read spelled inside a payload has no variable node until the payload is inlined, and the
+        removals that ask this run before that happens. Measured over the payload spellings the
+        passes decode — an `Invoke-Expression` of a stored string, of a concatenation of two, of a
+        base64 blob — the drop is taken on an earlier fixpoint iteration than the inline, so a walk
+        over variable nodes alone reports no read for any of them. Text is therefore scanned beside
+        the nodes, and by spelling rather than by word: what a script says is a read of `$Error` is
+        the sigil, so `Write-Host 'an error occurred'` is not one.
+
+        Its cost is one kind of false refusal, and it is the mirror of what the scan is for: a
+        script that *prints* `'$Error.Count'` and reads nothing is kept for saying the words. Its
+        limit is the payload no walk decodes at all, where the record is read by code no scan here
+        ever sees; that residual belongs to the caller, and
+        `refinery.lib.scripts.ps1.deobfuscation.deadcode._is_injected_noise_bareword` states it.
+
+        Reading the record through `Get-Variable` reaches neither half where nothing resolves the
+        cmdlet away: the name arrives as a bareword argument carrying no sigil, and matching it
+        would mean matching the word. `(Get-Variable Error).Value` is resolved to `$Error` by an
+        earlier pass and is caught by the node walk as an ordinary read; a spelling that stores the
+        result first is not, and that is a measured wrong answer carried in
+        `test.lib.scripts.ps1.test_oracle.BEHAVIOUR_DEFECTS`. Reading a variable through the cmdlet
+        that names it is the question `introspected_names` answers for the alias drive, and it is
+        that fact this would extend, not this scan.
 
         Memoized for as long as the tree is unchanged, like every other whole-tree answer here.
         """
@@ -781,8 +812,13 @@ class Ps1CommandModel:
 
     def _collect_reads_the_error_record(self) -> bool:
         for node in self._root.walk():
-            if isinstance(node, Ps1Variable) and node.name.lower() in _ERROR_RECORD_VARIABLES:
-                return True
+            if isinstance(node, Ps1Variable):
+                if node.name.lower() in _ERROR_RECORD_VARIABLES:
+                    return True
+                continue
+            if isinstance(node, (Ps1StringLiteral, Ps1HereString)):
+                if _ERROR_RECORD_SPELLED_OUT.search(node.value):
+                    return True
         return False
 
     def world_role(self, invocation: Ps1CommandInvocation) -> WorldRole:

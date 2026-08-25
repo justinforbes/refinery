@@ -1584,25 +1584,180 @@ class TestPs1ALeakThatPrecedesEveryPosition(TestPs1):
             """) + '\n')
 
 
-class TestPs1CommandNameTrustIsAWholeRunVerdict(TestPs1):
+class TestPs1CommandNameTrustIsReadWhereTheBarewordStands(TestPs1):
     """
-    Dropping a noise bareword rests on trusting that no command bears its name, and a script that
-    rebinds command names anywhere revokes that trust everywhere: the artifact is kept even where
-    no rebinding has run before it.
+    Dropping a noise bareword rests on trusting that no command bears its name, and a rebinding
+    revokes that trust from where it stands rather than everywhere in the file: a bareword above
+    the rebinding runs before it and is dropped, one below it is kept.
+
+    A `Set-Alias` and an `Invoke-Expression` are openers, which can rebind any name and so poison
+    every bareword below them; a `function` statement is a shadow site, which poisons only the name
+    it spells. Both floods run forward, and the rows here are the same two statements in the two
+    orders, which is the whole of the difference from the whole-run verdict this replaces.
     """
 
-    def test_a_noise_bareword_ahead_of_a_set_alias_is_kept(self):
+    _NOISE = cleandoc("""
+        try {
+          foo =5
+        } catch {}
+    """)
+
+    def test_a_bareword_above_an_aliasing_cmdlet_is_dropped(self):
+        self.assertEqual(
+            self._deobfuscate(F'{self._NOISE}\nSet-Alias wq i*x\nwq'),
+            cleandoc("""
+                Set-Alias wq i*x
+                wq
+            """))
+
+    def test_a_bareword_below_an_aliasing_cmdlet_is_kept(self):
+        source = F'Set-Alias wq i*x\nwq\n{self._NOISE}'
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_bareword_above_a_leak_is_dropped(self):
+        self.assertEqual(
+            self._deobfuscate(F'{self._NOISE}\nInvoke-Expression $c'),
+            'Invoke-Expression $c')
+
+    def test_a_bareword_below_a_leak_is_kept(self):
+        source = F'Invoke-Expression $c\n{self._NOISE}'
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_a_bareword_above_a_redefinition_of_its_own_name_is_dropped(self):
+        self.assertEqual(
+            self._deobfuscate(F'{self._NOISE}\nfunction foo {{ Write-Host D }}\nfoo'),
+            cleandoc("""
+                function foo {
+                  Write-Host D
+                }
+                foo
+            """))
+
+    def test_a_bareword_below_a_redefinition_of_its_own_name_is_kept(self):
         source = cleandoc("""
+            function foo {
+              Write-Host D
+            }
+            foo
             try {
               foo =5
             } catch {}
-            Set-Alias wq i*x
-            wq
         """)
         self.assertEqual(self._deobfuscate(source), source)
 
 
-class TestPs1AddingALeakNeverDeletesMore(TestPs1):
+class TestPs1ARedefinitionSiteTheGraphsCannotPlaceRefusesItsName(TestPs1):
+    """
+    A `function` statement written where the control-flow graphs place no node rebinds its name at
+    a time nothing here orders, so every bareword spelling that name is refused — including the ones
+    written above it, which a placed site would have granted. A missing entry in the per-name flood
+    is that report and never an empty poison set.
+
+    The definition sits in a parameter default of a function the script calls, because a definition
+    nothing calls is deleted by an earlier pass and takes the site with it, leaving a row that
+    measures the ordinary flood instead.
+    """
+
+    def test_a_bareword_above_a_definition_inside_a_parameter_default_is_kept(self):
+        source = cleandoc("""
+            try {
+              foo =5
+            } catch {}
+            function g {
+              Param($p = $(function foo {}
+              1))
+              Write-Host $p
+            }
+            g
+            foo
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1ABarewordTheGraphsCannotPlaceIsKeptWhereTheWorldIsOpen(TestPs1):
+    """
+    The positional gate answers over the root graph, and a bareword inside a script block locates
+    into that block's own graph instead — a body a later call can enter again, after statements the
+    intraprocedural graphs never ordered it against. Each such node is refused rather than granted,
+    the same fail-closed direction `_position_in_root` takes for every placeless node.
+
+    With no opener anywhere the question never reaches that refusal: the whole-run verdict already
+    trusts the name, and the nested bareword is dropped like any other.
+    """
+
+    def test_a_nested_bareword_below_an_opener_is_kept(self):
+        source = cleandoc("""
+            Set-Alias wq i*x
+            wq
+            & {
+              try {
+                foo =5
+              } catch {}
+            }
+        """)
+        self.assertEqual(self._deobfuscate(source), source)
+
+    def test_the_same_nested_bareword_is_dropped_where_nothing_opens_the_world(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                & {
+                  try {
+                    foo =5
+                  } catch {}
+                }
+                Write-Host keep
+            """)),
+            cleandoc("""
+                & {}
+                Write-Host keep
+            """))
+
+
+class TestPs1ALoopCarriesALeakBackOverTheBarewordAboveIt(TestPs1):
+    """
+    A leak written below a bareword in the same loop body runs before it on every iteration after
+    the first, so the forward flood has to follow the back edge and keep it. The same leak written
+    after the loop never precedes the bareword, and the bareword goes.
+
+    All four loop keywords are here because each builds its own graph shape, and a back edge missing
+    from one of them is a wrong grant no other row would catch.
+    """
+
+    _NOISE = cleandoc("""
+        try {
+          foo =5
+        } catch {}
+    """)
+
+    _SHAPES = {
+        'foreach': 'foreach ($i in 1..2) {{\n{0}\n}}',
+        'while': 'while ($env:Z) {{\n{0}\n}}',
+        'do-while': 'do {{\n{0}\n}} while ($env:Z)',
+        'for': 'for ($i = 0; $i -lt 2; $i++) {{\n{0}\n}}',
+    }
+
+    def test_a_leak_inside_the_loop_body_keeps_the_bareword_above_it(self):
+        for keyword, shape in self._SHAPES.items():
+            with self.subTest(keyword):
+                body = F'{self._NOISE}\nInvoke-Expression $c'
+                self.assertIn('foo =5', self._deobfuscate(shape.format(body)))
+
+    def test_a_leak_after_the_loop_drops_the_same_bareword(self):
+        for keyword, shape in self._SHAPES.items():
+            with self.subTest(keyword):
+                source = F'{shape.format(self._NOISE)}\nInvoke-Expression $c'
+                self.assertNotIn('foo =5', self._deobfuscate(source))
+
+
+class TestPs1ALeakOnlyEverKeepsMore(TestPs1):
+    """
+    A leak can make a statement effectful and never inert, so adding one to a script takes removals
+    away and adds none. The rows are the exact outputs rather than a subset relation over line sets:
+    a subset assertion is satisfied by the whole-run short-circuit in
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach.may_trust_command_name_at` whatever
+    the passes above it do, which is a property of that one line and is pinned as one in
+    `test.lib.scripts.ps1.analysis.test_worldflow`.
+    """
 
     _QUIET_SCRIPT = cleandoc("""
         $Null = [Math]::Sqrt(144)
@@ -1619,15 +1774,24 @@ class TestPs1AddingALeakNeverDeletesMore(TestPs1):
                 Write-Host omega
             """))
 
-    def test_an_appended_leak_deletes_nothing_the_leak_free_run_kept(self):
-        kept = set(self._deobfuscate(self._QUIET_SCRIPT).splitlines())
-        leaked = set(self._deobfuscate(F'{self._QUIET_SCRIPT}\nInvoke-Expression $c').splitlines())
-        self.assertLessEqual(kept, leaked)
+    def test_a_leak_appended_below_every_read_takes_no_removal_away(self):
+        self.assertEqual(
+            self._deobfuscate(F'{self._QUIET_SCRIPT}\nInvoke-Expression $c'),
+            cleandoc("""
+                Write-Host alpha
+                Write-Host omega
+                Invoke-Expression $c
+            """))
 
-    def test_a_prepended_leak_deletes_nothing_the_leak_free_run_kept(self):
-        kept = set(self._deobfuscate(self._QUIET_SCRIPT).splitlines())
-        leaked = set(self._deobfuscate(F'Invoke-Expression $c\n{self._QUIET_SCRIPT}').splitlines())
-        self.assertLessEqual(kept, leaked)
+    def test_a_leak_prepended_above_every_read_keeps_the_read_it_reaches(self):
+        self.assertEqual(
+            self._deobfuscate(F'Invoke-Expression $c\n{self._QUIET_SCRIPT}'),
+            cleandoc("""
+                Invoke-Expression $c
+                $Null = [Math]::Sqrt(144)
+                Write-Host alpha
+                Write-Host omega
+            """))
 
 
 class TestPs1ALeakTheGraphCannotPlaceKeepsEveryRead(TestPs1):

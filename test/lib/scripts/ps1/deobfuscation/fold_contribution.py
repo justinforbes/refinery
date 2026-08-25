@@ -425,6 +425,7 @@ CONTRIBUTION: dict[str, Contribution] = {
             "trap { continue }; switch (1) { 1 { throw 'e'; Write-Host 'tail' } }; Write-Host 'next'",
             "trap { continue }; zzq0000=5; Write-Host 'after'",
             "trap { }; [int]'a'; Write-Host 'after'",
+            'try { zzqfoo =5 } catch {}; $v = Get-Variable Error; Write-Host $v.Value.Count',
             "try { zzqq0 =5 } catch {}; Write-Host 'after'",
         ),
         changed=(

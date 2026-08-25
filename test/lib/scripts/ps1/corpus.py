@@ -240,6 +240,8 @@ BEHAVIOURS: tuple[str, ...] = (
     "'a{0}c' -f 'b'",
     "function echo { 'from-function' }; echo 'from-alias'",
     "zzq 'early'; Set-Alias zzq Write-Output",
+    'try { zzqfoo =5 } catch {}; $v = Get-Variable Error; Write-Host $v.Value.Count',
+    "$s = { try { zzqfoo =5 } catch { 'caught' }; Set-Alias -Scope Script zzqfoo Write-Output }; & $s; & $s",
     "function f { Set-Alias zzq Write-Output }; f; zzq 'leaked'",
     "Set-Alias zzq Write-Output; zzq 'resolved'",
     "Set-Alias zzq iex; zzq 'Write-Output loaded'",

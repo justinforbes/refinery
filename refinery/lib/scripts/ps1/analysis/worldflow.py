@@ -94,14 +94,12 @@ class Ps1WorldReach:
     `may_trust_command_name_at`, which asks the same of a command name's identity. Held in a
     `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot and threaded through
     `refinery.lib.scripts.ps1.analysis.effects` in place of the leaf world. It answers only the
-    four questions the passes ask of it — the two positional ones, `may_trust_command_name`, and
-    `closed_for_the_whole_run`; the remaining leaf facts are read straight off
-    `Ps1ModelCache.closed_world`, which no staleness can touch because the cache rebuilds it, so
-    mirroring them here would be answers with no reader.
-
-    `may_trust_command_name` stays the whole-run verdict beside its positional twin, because a
-    caller reasoning about a definition's liveness asks about the run entire, not about one node
-    (see `Ps1TypeWorld.may_trust_command_name`).
+    three questions the passes ask of it — the two positional ones and `closed_for_the_whole_run`;
+    the remaining leaf facts are read straight off `Ps1ModelCache.closed_world`, which no staleness
+    can touch because the cache rebuilds it, so mirroring them here would be answers with no reader.
+    The whole-run `Ps1TypeWorld.may_trust_command_name` is one of those, and no pass reads it: it
+    is the verdict `may_trust_command_name_at` short-circuits on, which is a fact about the leaf
+    model and stays with it.
 
     Built without flow context — `Ps1WorldReach(world)` — it answers each positional query with
     the whole-run verdict at every position, which is what a caller that did not build the graphs,
@@ -110,7 +108,7 @@ class Ps1WorldReach:
 
     Every answer is bound to the tree the model was built over: `build_world_reach` stamps that
     tree's version onto the wrapper, and once the tree changes under it every answer returns its
-    fail-closed pole — all four questions read `False`. A transform reading this through the fresh
+    fail-closed pole — all three questions read `False`. A transform reading this through the fresh
     `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot never sees a stale one, since the
     cache rebuilds it on the same version bump. A pass that instead captures the wrapper and holds
     it across its own edits reads the fail-closed pole from the first edit on: it loses recall until
@@ -150,9 +148,6 @@ class Ps1WorldReach:
     @property
     def closed_for_the_whole_run(self) -> bool:
         return not self._stale and self._world.closed_for_the_whole_run
-
-    def may_trust_command_name(self, name: str) -> bool:
-        return not self._stale and self._world.may_trust_command_name(name)
 
     def may_trust_command_name_at(self, name: str, node) -> bool:
         """
