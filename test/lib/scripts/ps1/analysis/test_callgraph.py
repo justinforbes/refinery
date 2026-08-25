@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import unittest
+
 from test import TestBase
 
 from refinery.lib.scripts.ps1.analysis.callgraph import build_call_graph
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld, build_closed_world
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 #: A world with nothing shadowed and nothing imported, so that `is_readable` answers on the rows
@@ -91,3 +93,84 @@ class TestPs1CallGraphReadability(TestBase):
             "& 'Microsoft.PowerShell.Core\\Export-ModuleMember' -Function f\nfunction f { 'P' }")
         self.assertTrue(graph.exports_a_name)
         self.assertFalse(graph.is_readable)
+
+#: Every construct `refinery.lib.scripts.ps1.analysis.world` counts as opening the world, one per
+#: reason it gives. The first group can put a command into this script's tables under a name no
+#: statement here spells; the second cannot reach the command namespace at all, and reads as an
+#: opener only because the call graph is seeded from the type world's verdict.
+_COMMAND_NAMESPACE_OPENERS = (
+    ". '.\\stage2.ps1'",
+    'Invoke-Expression $code',
+    'Import-Module .\\m.psm1',
+    'New-Module { }',
+    'Invoke-Command -ScriptBlock $s',
+    'Start-Job -ScriptBlock $s',
+    'Set-Alias q $t',
+    'New-Alias q Write-Output',
+    'Import-Alias .\\a.csv',
+    '& $dispatch',
+    '[ScriptBlock]::Create($c)',
+    '$ExecutionContext.InvokeCommand.InvokeScript($c)',
+    'Set-Item alias:q Write-Output',
+    '${function:Qzmr} = $b',
+)
+
+
+class TestPs1CallGraphReadabilityAnswersOverAMeasuredWorld(TestBase):
+    """
+    The rows above are quantified over a world stated by hand, so the one `build_call_graph` is
+    actually seeded from — `world.closed_for_the_whole_run` — is answered by nothing there. These
+    ask it over the world a real script measures.
+
+    A construct that mutates the type system binds no command name: a `class` puts a type into the
+    session, `Add-Type` compiles one, and `Update-TypeData` and `Add-Member` re-point members of one.
+    None of them can make a bareword run something else, so none of them says this tree is not the
+    whole story about what a command name denotes.
+    """
+
+    @staticmethod
+    def _graph(source: str):
+        root = Ps1Parser(source).parse()
+        return build_call_graph(root, build_closed_world(root))
+
+    def _readability_beside(self, opener: str) -> bool:
+        return self._graph(F'function Qzmr {{ }}\nQzmr\n{opener}').is_readable
+
+    def test_a_script_that_opens_no_world_is_readable(self):
+        self.assertTrue(self._readability_beside("Write-Host 'A'"))
+
+    def test_every_command_namespace_opener_makes_the_graph_unreadable(self):
+        for opener in _COMMAND_NAMESPACE_OPENERS:
+            with self.subTest(opener):
+                self.assertFalse(self._readability_beside(opener))
+
+    @unittest.expectedFailure
+    def test_a_class_definition_leaves_the_graph_readable(self):
+        self.assertTrue(self._readability_beside('class C { }'))
+
+    @unittest.expectedFailure
+    def test_an_enum_definition_leaves_the_graph_readable(self):
+        self.assertTrue(self._readability_beside('enum E { A }'))
+
+    @unittest.expectedFailure
+    def test_add_type_leaves_the_graph_readable(self):
+        self.assertTrue(self._readability_beside("Add-Type -TypeDefinition 'public class Z {}'"))
+
+    @unittest.expectedFailure
+    def test_update_type_data_leaves_the_graph_readable(self):
+        self.assertTrue(self._readability_beside(
+            'Update-TypeData -Force -TypeName System.String -MemberName Q -Value 1'))
+
+    @unittest.expectedFailure
+    def test_a_type_accelerator_mutation_leaves_the_graph_readable(self):
+        self.assertTrue(self._readability_beside(
+            "[System.Management.Automation.PSObject+TypeAccelerators]::Add('z', [int])"))
+
+    @unittest.expectedFailure
+    def test_a_psobject_member_mutation_leaves_the_graph_readable(self):
+        self.assertTrue(self._readability_beside('$o.PSObject.Members.Add($m)'))
+
+    @unittest.expectedFailure
+    def test_add_member_leaves_the_graph_readable(self):
+        self.assertTrue(self._readability_beside(
+            'Add-Member -InputObject $o -Name Q -Value 1 -MemberType NoteProperty'))
