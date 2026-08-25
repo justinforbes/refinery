@@ -228,6 +228,11 @@ _READ_NAME_PARAMS = frozenset({'na', 'nam', 'name'})
 #: so removing one is visible to any read of it.
 _SUCCESS_VARIABLE = '?'
 
+#: The automatic variables a terminating error writes and a handler does not clear, beside `$?`.
+#: `$LASTEXITCODE` is not among them: measured on 5.1, a caught `CommandNotFoundException`
+#: leaves it at whatever the last native program put there.
+_ERROR_RECORD_VARIABLES = frozenset({'error', 'stacktrace'})
+
 #: The command a definition must denote for its removal to be nothing but the unbinding of a name.
 _SET_ALIAS = 'set-alias'
 
@@ -514,6 +519,7 @@ class Ps1CommandModel:
         self._introspected: frozenset[str] | None = None
         self._introspected_known = False
         self._reads_success: bool | None = None
+        self._reads_error_record: bool | None = None
 
     def _project_binder(self, binder: Node) -> _BinderReach:
         """
@@ -746,6 +752,38 @@ class Ps1CommandModel:
             and node.name == _SUCCESS_VARIABLE
             for node in self._root.walk()
         )
+
+    def reads_the_error_record(self) -> bool:
+        """
+        Whether the script can read back what a terminating error leaves behind after a handler has
+        caught it: `$Error`, `$?` and `$StackTrace`.
+
+        A removal resting on a statement having raised and the raise having been swallowed still
+        deletes the record the raise wrote. `reads_command_success` answers the `$?` half of that;
+        this asks the other two names beside it, over the same variable nodes.
+
+        A read the script spells inside a payload counts once the payload is resolved, which is why
+        nothing here scans text. Measured over every payload spelling the passes can decode — an
+        `Invoke-Expression` of a stored string, of a concatenation of two, of a base64 blob — the
+        inline lands before any removal is taken, and by the time this is asked the read is an
+        ordinary variable node. Scanning text on top of that changes exactly one kind of answer: a
+        script that *prints* `'$Error.Count'` and reads nothing is refused for saying the word.
+        What no scan reaches is a payload the walk cannot decode at all, and there the record is
+        read by code this never sees.
+
+        Memoized for as long as the tree is unchanged, like every other whole-tree answer here.
+        """
+        if self._reads_error_record is None:
+            self._reads_error_record = (
+                self.reads_command_success()
+                or self._collect_reads_the_error_record())
+        return self._reads_error_record
+
+    def _collect_reads_the_error_record(self) -> bool:
+        for node in self._root.walk():
+            if isinstance(node, Ps1Variable) and node.name.lower() in _ERROR_RECORD_VARIABLES:
+                return True
+        return False
 
     def world_role(self, invocation: Ps1CommandInvocation) -> WorldRole:
         """

@@ -1501,10 +1501,6 @@ FOLDS: dict[str, str] = {
         "'boom'",
     "try { zzqq0 =5 } catch {}; Write-Host 'after'":
         "Write-Host 'after'",
-    '$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count':
-        '$Error.Clear()\nWrite-Host $Error.Count',
-    'try { zzqq0 =5 } catch {}; Write-Host $?':
-        'Write-Host $?',
     "try { item =5 } catch {}; Write-Host 'after'":
         "try {\n  Get-Item =5\n} catch {}\nWrite-Host 'after'",
     "trap { continue }; zzq0000=5; Write-Host 'after'":

@@ -413,8 +413,8 @@ class TestPs1TheHandlerAroundANoiseBarewordHasToMatchIt(TestPs1):
     swallows it, so the construct needs a clause that takes every error. An empty body is not that
     answer: a clause whose type filter misses has an empty body and takes nothing, a `try` with no
     `catch` at all takes nothing either, and at script scope the error then ends the run. Even where
-    a clause does match, the error is recorded, so a script reading `$Error` or `$?` sees the
-    removal — and a `trap` that resumes past the bareword is the reason the run survived it.
+    a clause does match the run continues, which is what the class below asks about instead. A
+    `trap` that resumes past the bareword is the reason the run survived it and is answered here.
     """
 
     def test_a_noise_bareword_under_a_catch_that_cannot_match_is_kept(self):
@@ -461,7 +461,19 @@ class TestPs1TheHandlerAroundANoiseBarewordHasToMatchIt(TestPs1):
             {_ANCHOR}
         """, _ANCHOR)
 
-    @unittest.expectedFailure
+
+class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
+    """
+    A handler that matches keeps the run alive; it does not unwrite what the raise wrote. `$Error`
+    grows an entry, `$?` goes false and `$StackTrace` is filled, so a script reading any of them
+    reads a different answer once the statement is gone.
+
+    A read the script hides in a payload counts as soon as the payload is resolved: the inline
+    lands before any removal is taken, so a read spelled `$c = '$Error.Count'; iex $c` reaches this
+    as an ordinary variable. Saying the name is not reading it, and a script that prints the text
+    keeps nothing alive.
+    """
+
     def test_a_noise_bareword_is_kept_where_the_script_reads_the_error_list(self):
         self._assertKept("""
             try {
@@ -470,13 +482,46 @@ class TestPs1TheHandlerAroundANoiseBarewordHasToMatchIt(TestPs1):
             Write-Host $Error.Count
         """)
 
-    @unittest.expectedFailure
     def test_a_noise_bareword_is_kept_where_the_script_reads_the_success_variable(self):
         self._assertKept("""
             try {
               zzqq0 =5
             } catch {}
             Write-Host $?
+        """)
+
+    def test_a_noise_bareword_is_kept_where_the_stack_trace_is_read(self):
+        self._assertKept("""
+            try {
+              zzqq0 =5
+            } catch {}
+            Write-Host $StackTrace
+        """)
+
+    def test_a_noise_bareword_is_kept_where_the_read_arrives_through_a_resolved_payload(self):
+        self._assertDeobfuscatesTo("""
+            $zzqc = '$Error.Count'
+            try {
+              zzqq0 =5
+            } catch {}
+            Invoke-Expression $zzqc
+        """, """
+            try {
+              zzqq0 =5
+            } catch {}
+            $Error.Count
+        """)
+
+    def test_a_noise_bareword_beside_a_message_that_prints_the_name_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            try {{
+              zzqq0 =5
+            }} catch {{}}
+            Write-Host '$Error.Count'
+            {_ANCHOR}
+        """, F"""
+            Write-Host '$Error.Count'
+            {_ANCHOR}
         """)
 
 

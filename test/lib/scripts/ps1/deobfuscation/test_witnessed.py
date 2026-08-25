@@ -23,7 +23,7 @@ from test.lib.scripts.ps1.deobfuscation import (
 )
 
 from refinery.lib.scripts import Node, owning_list
-from refinery.lib.scripts.ps1.analysis import callgraph, effects, faults
+from refinery.lib.scripts.ps1.analysis import callgraph, commands, effects, faults
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     is_fault_free,
@@ -63,6 +63,8 @@ _DIRECT_GUARD = _witness(
     test_fault_observability.TestPs1ARaisingStatementDirectlyInAGuardedTryBlockIsKept)
 _EMPTY_CATCH = _witness(
     test_fault_observability.TestPs1AnEmptyCatchSwallowsSoTheRaisingStatementIsRemovable)
+_ERROR_RECORD = _witness(
+    test_removal_observability.TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead)
 _EMULATOR = _witness(test_emulator.TestPs1FunctionEvaluator)
 _EMULATOR_EXTRA = _witness(test_emulator.TestPs1EmulatorExtra)
 _ESCALATION = _witness(test_faults.TestPs1FaultIsObservedWhereAHandlerActsOrATrapMayDecline)
@@ -197,7 +199,7 @@ def _try_body_survivors_relaxing(*, fault_freedom: bool, abandonment: bool) -> C
 
     The third rule is not among these: it is `swallows_every_error`, mutated where it is named.
     """
-    def mutated(node: Ps1TryCatchFinally, oracle) -> list | None:
+    def mutated(node: Ps1TryCatchFinally, cache) -> list | None:
         body = node.try_block.body if node.try_block is not None else []
         confined = deadcode.swallows_every_error(node)
         survivors = []
@@ -210,13 +212,13 @@ def _try_body_survivors_relaxing(*, fault_freedom: bool, abandonment: bool) -> C
             if fault_freedom:
                 carried = is_fault_free(stmt.expression)
             else:
-                carried = is_side_effect_free(stmt.expression, oracle)
+                carried = is_side_effect_free(stmt.expression, cache.world_reach)
             if carried:
                 if dropped and abandonment:
                     return None
                 survivors.append(stmt)
                 continue
-            if confined and deadcode._is_injected_noise_bareword(stmt.expression, oracle):
+            if confined and deadcode._is_injected_noise_bareword(stmt.expression, cache):
                 dropped = True
                 continue
             return None
@@ -448,6 +450,12 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
                 deadcode, '_try_body_survivors',
                 _try_body_survivors_relaxing(fault_freedom=True, abandonment=False)),
             notices='test_a_value_below_a_dropped_noise_bareword_is_not_carried_out_of_the_try')
+
+    def test_refusing_where_the_record_of_the_raise_is_read_is_witnessed(self):
+        self._assertWitnessed(
+            [_ERROR_RECORD],
+            patch.object(commands.Ps1CommandModel, 'reads_the_error_record', lambda self: False),
+            notices='test_a_noise_bareword_is_kept_where_the_script_reads_the_error_list')
 
     def test_dropping_only_under_a_handler_that_takes_the_error_is_witnessed(self):
         self._assertWitnessed(

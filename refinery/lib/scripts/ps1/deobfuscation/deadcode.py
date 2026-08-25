@@ -20,7 +20,6 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     is_side_effect_free,
     output_sink,
 )
-from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.analysis.values import integer_of, is_truthy, read
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS, KNOWN_CMDLETS
@@ -87,7 +86,7 @@ def _carries_assignment_marker(cmd: Ps1CommandInvocation, name: str) -> bool:
     )
 
 
-def _is_injected_noise_bareword(expr: Expression, world: Ps1WorldReach) -> bool:
+def _is_injected_noise_bareword(expr: Expression, cache: Ps1ModelCache) -> bool:
     """
     Return `True` when `expr` is a bareword command carrying an assignment marker and no argument
     that does anything — the shape an obfuscator injects to pad a script, which the passes below
@@ -110,6 +109,15 @@ def _is_injected_noise_bareword(expr: Expression, world: Ps1WorldReach) -> bool:
     is a proof about a known built-in, where relaxing by position only widens what a proof already
     covers, while this is a guess about an artifact, and a guess should not grow bolder with flow
     analysis until that is measured as its own increment.
+
+    The drop is also refused wherever the script can read the record the raise leaves behind, which
+    is `Ps1CommandModel.reads_the_error_record`. A caught terminating error still fills `$Error`,
+    sets `$?` and writes `$StackTrace`, so deleting the statement that raised is visible to a script
+    that reads any of the three even though the handler swallowed the error itself. The exposure is
+    not this recognizer's alone — every statement remover in this package shares it, as the gate
+    list in `refinery.lib.scripts.ps1.deobfuscation.aliases` says outright — and the general answer
+    belongs beside removal rather than here. What sits here is the half this guess cannot be made
+    without.
     """
     if not isinstance(expr, Ps1CommandInvocation):
         return False
@@ -119,6 +127,9 @@ def _is_injected_noise_bareword(expr: Expression, world: Ps1WorldReach) -> bool:
     name_lower = name.lower()
     if not _carries_assignment_marker(expr, name):
         return False
+    if cache.commands.reads_the_error_record():
+        return False
+    world = cache.world_reach
     if name_lower in KNOWN_CMDLETS or not world.may_trust_command_name(name_lower):
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
@@ -155,7 +166,7 @@ def _hoisted_initializer(expr: Expression) -> Ps1ExpressionStatement:
 
 def _try_body_survivors(
     node: Ps1TryCatchFinally,
-    world: Ps1WorldReach,
+    cache: Ps1ModelCache,
 ) -> list[Statement] | None:
     """
     What the try body of `node` leaves behind once its construct is dissolved, or `None` when it
@@ -171,7 +182,7 @@ def _try_body_survivors(
     The one exception is a bareword `_is_injected_noise_bareword` recognizes as obfuscator padding,
     which is dropped rather than carried. That is a heuristic and it is the reason this returns a
     body that is *believed* inert rather than one proven so; a bareword the script redefines runs
-    that definition and is never such a guess, which is one of the facts the `world` carries.
+    that definition and is never such a guess, which is one of the facts the models carry.
 
     The drop is a claim that the statement *raised*, and two things follow from the claim that the
     carry does not need. The raise has to be confined to this construct, which is
@@ -196,7 +207,7 @@ def _try_body_survivors(
                 return None
             survivors.append(stmt)
             continue
-        if confined and _is_injected_noise_bareword(stmt.expression, world):
+        if confined and _is_injected_noise_bareword(stmt.expression, cache):
             dropped = True
             continue
         return None
@@ -451,11 +462,11 @@ class Ps1DeadCodeElimination(Transformer):
         Rewrite each statement of one body into what its condition has already been proved to make
         of it, or leave it alone.
 
-        The world and the reachability graph are read fresh from the version-keyed cache per body,
-        not captured across the walk: a prune advances the tree version, and a held world would then
-        answer at its fail-closed pole for every later body of the same pass. A body whose prune
-        bumps the version rebuilds both; a body that changes nothing reads the same cached objects
-        back.
+        The models travel as the version-keyed cache and are read out of it where they are used,
+        never bound at the top and carried across the walk: a prune advances the tree version, and a
+        held world would then answer at its fail-closed pole for every later body of the same pass.
+        A body whose prune bumps the version rebuilds them; a body that changes nothing reads the
+        same cached objects back.
 
         This pass used to also drop bare constants wherever it read the body's value as unobserved,
         which was the narrowest slice of `StatementEffect.OUTPUT` and still a slice of it: `42` at
@@ -475,7 +486,6 @@ class Ps1DeadCodeElimination(Transformer):
         the script — before any statement runs — so one inside a branch that never executes still
         defines its type, and deleting it changes what the surviving script resolves that name to.
         """
-        world = cache.world_reach
         dominance = cache.dominance
         # A handler body — a `trap`, a `catch`, or a `finally` — runs on a path this deletion does
         # not walk: a `trap` or `catch` only when the code it guards throws, so from normal flow it
@@ -493,7 +503,7 @@ class Ps1DeadCodeElimination(Transformer):
             ):
                 replacement: list[Statement] = []
             else:
-                pruned = self._try_prune(stmt, world)
+                pruned = self._try_prune(stmt, cache)
                 if pruned is None:
                     continue
                 replacement = pruned
@@ -548,7 +558,7 @@ class Ps1DeadCodeElimination(Transformer):
                 return False
         return saw_node
 
-    def _try_prune(self, stmt: Statement, world: Ps1WorldReach) -> list[Statement] | None:
+    def _try_prune(self, stmt: Statement, cache: Ps1ModelCache) -> list[Statement] | None:
         if isinstance(stmt, Ps1WhileLoop):
             return self._prune_while(stmt)
         if isinstance(stmt, Ps1DoLoop):
@@ -560,9 +570,9 @@ class Ps1DeadCodeElimination(Transformer):
         if isinstance(stmt, Ps1SwitchStatement):
             return self._prune_switch(stmt)
         if isinstance(stmt, Ps1TryCatchFinally):
-            return self._prune_try(stmt, world)
+            return self._prune_try(stmt, cache)
         if isinstance(stmt, Ps1TrapStatement):
-            return self._prune_trap(stmt, world)
+            return self._prune_trap(stmt, cache)
         return None
 
     @staticmethod
@@ -687,7 +697,7 @@ class Ps1DeadCodeElimination(Transformer):
             return body[0]
         return []
 
-    def _prune_try(self, node: Ps1TryCatchFinally, world: Ps1WorldReach) -> list[Statement] | None:
+    def _prune_try(self, node: Ps1TryCatchFinally, cache: Ps1ModelCache) -> list[Statement] | None:
         """
         Resolve a `try`/`catch`/`finally` into what its `try` body leaves behind, followed by the
         `finally` body, which always runs. An empty or absent try body needs no separate case
@@ -708,14 +718,14 @@ class Ps1DeadCodeElimination(Transformer):
         for clause in node.catch_clauses:
             if clause.body is not None and clause.body.body:
                 return None
-        survivors = _try_body_survivors(node, world)
+        survivors = _try_body_survivors(node, cache)
         if survivors is None:
             return None
         finally_body = node.finally_block.body if node.finally_block is not None else []
         return survivors + list(finally_body)
 
     @staticmethod
-    def _prune_trap(node: Ps1TrapStatement, world: Ps1WorldReach) -> list[Statement] | None:
+    def _prune_trap(node: Ps1TrapStatement, cache: Ps1ModelCache) -> list[Statement] | None:
         """
         Remove a `trap` handler whose body produces no observable output and whose scope cannot
         throw a terminating error the trap would intercept. A trap only runs when the code it guards
@@ -748,7 +758,9 @@ class Ps1DeadCodeElimination(Transformer):
                     return None
                 continue
             if isinstance(stmt, Ps1ExpressionStatement):
-                if stmt.expression is None or is_side_effect_free(stmt.expression, world):
+                if stmt.expression is None or is_side_effect_free(
+                    stmt.expression, cache.world_reach
+                ):
                     continue
             return None
         return []

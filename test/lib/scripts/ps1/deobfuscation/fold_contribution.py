@@ -413,7 +413,6 @@ CONTRIBUTION: dict[str, Contribution] = {
     ),
     'Ps1DeadCodeElimination': Contribution(
         lost=(
-            '$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count',
             "$PSDefaultParameterValues['*:ErrorAction'] = 'Stop'; trap { continue }; Get-Item nope; Write-Host 'after'",
             "New-Variable ErrorActionPreference Stop -Force; trap { continue }; [int]'a'; Write-Host 'after'",
             "Write-Host 'a'; return; Write-Host 'b'",
@@ -426,7 +425,6 @@ CONTRIBUTION: dict[str, Contribution] = {
             "trap { continue }; switch (1) { 1 { throw 'e'; Write-Host 'tail' } }; Write-Host 'next'",
             "trap { continue }; zzq0000=5; Write-Host 'after'",
             "trap { }; [int]'a'; Write-Host 'after'",
-            'try { zzqq0 =5 } catch {}; Write-Host $?',
             "try { zzqq0 =5 } catch {}; Write-Host 'after'",
         ),
         changed=(

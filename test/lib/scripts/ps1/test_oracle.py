@@ -360,13 +360,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'twice. 5.1 binds the name where the `function` statement runs, so the first call '
         'raises `CommandNotFoundException`, which is terminating at script scope and emits '
         'nothing at all.',
-    "$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count":
-        'The handler does match, so the run continues either way — but a caught terminating '
-        'error is still recorded, and dropping the statement drops the record. The snippet '
-        'reports one error and the output reports none.',
-    "try { zzqq0 =5 } catch {}; Write-Host $?":
-        'The same record seen through the automatic success variable rather than the error '
-        'list. Held apart because a script may read either without the other.',
     "trap { continue }; zzq0000=5; Write-Host 'after'":
         'The handler is removed as inert, but `continue` is what makes the run survive the '
         'bareword: the snippet resumes at the statement below and prints, and the output ends '
