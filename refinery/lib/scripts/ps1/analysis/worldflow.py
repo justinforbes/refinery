@@ -154,10 +154,11 @@ class Ps1WorldReach:
         Whether the collected metadata still describes what the command `name` runs at `node`: no
         statement that could rebind it — an opener, which can rebind any name, or a classified
         redefinition of this very name — can have run on any path that reaches the statement
-        evaluating `node`. The positional successor of `may_trust_command_name`, exactly as
-        `closed_at` succeeds `closed_for_the_whole_run`: a name the whole run trusts is trusted at
-        every position, and one it refuses is refused wherever either flood reaches, plus
-        everywhere the graphs cannot place.
+        evaluating `node`. The positional successor of `Ps1TypeWorld.may_trust_command_name`, which
+        lives on the leaf model and not on this one, exactly as `closed_at` succeeds
+        `closed_for_the_whole_run`: a name the whole run trusts is trusted at every position, and
+        one it refuses is refused wherever either flood reaches, plus everywhere the graphs cannot
+        place.
 
         The opener check deliberately overlaps the `closed_at` that a purity verdict also routes
         through `refinery.lib.scripts.ps1.analysis.effects._grant`: at the discard-sink
@@ -197,7 +198,7 @@ class Ps1WorldReach:
         """
         if self._stale:
             return False
-        if self._world.closed_for_the_whole_run:
+        if self.closed_for_the_whole_run:
             return True
         position = self._position_in_root(node)
         return position is not None and id(position) not in self._poisoned

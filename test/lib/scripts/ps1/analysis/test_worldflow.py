@@ -6,6 +6,7 @@ from test import TestBase
 
 from refinery.lib.scripts import set_body
 from refinery.lib.scripts.ps1.analysis.cache import Ps1ModelCache
+from refinery.lib.scripts.ps1.analysis.world import build_closed_world
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.model import Ps1Script
 from refinery.lib.scripts.ps1.parser import Ps1Parser
@@ -150,6 +151,7 @@ class TestPs1FloodsGoForwardThroughAResumingTrap(TestBase):
             '$Null = Get-Random -Maximum 88175\n'
             'function Get-Random { Start-Process calc }\n'
             'Get-Random')
+        self.assertFalse(build_closed_world(script).may_trust_command_name('Get-Random'))
         self.assertTrue(reach.may_trust_command_name_at('Get-Random', script.body[1]))
         self.assertFalse(reach.may_trust_command_name_at('Get-Random', script.body[3]))
 

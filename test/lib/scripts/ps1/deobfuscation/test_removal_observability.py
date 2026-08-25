@@ -523,6 +523,47 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
         """)
 
     @unittest.expectedFailure
+    def test_a_noise_bareword_is_kept_where_the_read_is_spelled_across_two_strings(self):
+        """
+        The scan asks each literal on its own, so a spelling cut through the middle of the name
+        matches neither half. The passes join the two anyway — the expected output is the resolved
+        read — so this is a payload the tool *does* decode, and the record is read by code the
+        output holds rather than by code no scan ever sees.
+        """
+        self._assertDeobfuscatesTo("""
+            $zzqa = '$Err'
+            $zzqb = 'or.Count'
+            try {
+              zzqq0 =5
+            } catch {}
+            Invoke-Expression ($zzqa + $zzqb)
+        """, """
+            try {
+              zzqq0 =5
+            } catch {}
+            $Error.Count
+        """)
+
+    @unittest.expectedFailure
+    def test_a_noise_bareword_is_kept_where_the_read_is_built_out_of_characters(self):
+        """
+        The same miss reached without splitting a literal at all: no literal in the input spells
+        any part of the name, and the output spells the whole of it.
+        """
+        self._assertDeobfuscatesTo("""
+            try {
+              zzqq0 =5
+            } catch {}
+            $zzqc = -join [char[]](36, 69, 114, 114, 111, 114, 46, 67, 111, 117, 110, 116)
+            Invoke-Expression $zzqc
+        """, """
+            try {
+              zzqq0 =5
+            } catch {}
+            $Error.Count
+        """)
+
+    @unittest.expectedFailure
     def test_a_noise_bareword_is_kept_where_the_record_is_read_through_get_variable(self):
         self._assertKept("""
             try {
@@ -624,13 +665,17 @@ class TestPs1ANoiseBarewordIsDroppedAboveAPayloadTheWalkCannotRead(TestPs1):
     of a leak is the whole-run verdict these removals exist to replace, and it takes the whole
     increment with it: on the motivating sample every noise bareword stands above one.
 
-    What it costs is unobservable by construction. Measured on 5.1,
+    What it costs is unobservable only where the payload really is opaque. Measured on 5.1,
     `$Error.Clear(); try { zzqq0 =5 } catch {}; Write-Host $Error.Count` writes 1 where the same
     script without the construct writes 0, so a payload reading `$Error.Count` sees a different
-    number than the input gave it. Wherever the read is visible at all — as a variable, or as text
-    the script still holds — the removal refuses, which is
-    `TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead` above. Text that arrives only after
-    the payload has run is neither, and this class is that half.
+    number than the input gave it. The rows here hand the payload to the host through a name this
+    never learns, so no reading of the input decides what they run.
+
+    Where the read *is* visible the removal has to refuse, which is
+    `TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead` above — and its two `expectedFailure`
+    rows are the boundary this class does not own: a payload the passes decode into the output,
+    whose spelling the scan misses because the sigil and the name never stand in one literal. Those
+    are wrong answers rather than the half no gate can cover.
     """
 
     def test_a_noise_bareword_above_an_environment_payload_is_removed(self):
@@ -668,8 +713,10 @@ class TestPs1AProgramOnThePathIsSpelledLikeANoiseBareword(TestPs1):
 
     `test_deadcode.TestPs1NoiseBarewordSpellings` asks the same of a closed-world script, where the
     trust gate grants and the marker answers alone. These are the leaking half, which is the
-    population an obfuscated script is actually drawn from, and where the whole-run gate is doing
-    the work today.
+    population an obfuscated script is actually drawn from, and where the marker now answers alone
+    as well: the trust gate is asked at the position, and a bareword written above the leak is one
+    it grants. Both rows here survive on their argument lists, so the row below carries the shape
+    that has only the marker left between it and deletion.
     """
 
     def test_a_downloader_whose_arguments_carry_no_marker_is_kept_beside_a_leak(self):
@@ -687,3 +734,19 @@ class TestPs1AProgramOnThePathIsSpelledLikeANoiseBareword(TestPs1):
             } catch {}
             Invoke-Expression $env:ZZQPAYLOAD
         """)
+
+    def test_a_program_whose_whole_argument_list_is_the_marker_is_dropped_beside_a_leak(self):
+        """
+        The shape the marker alone decides, held at a name the host really has: one unquoted
+        argument beginning with `=` and nothing else, which is what `_carries_assignment_marker`
+        was written to accept and what no downloader is spelled as. `certutil` reached this way
+        writes its usage to the host and raises nothing, so the drop is a real deletion of output
+        and not a refusal of one — it is taken because the marker says padding, and this row is
+        where that judgement is recorded rather than inferred from the rows above.
+        """
+        self._assertDeobfuscatesTo("""
+            try {
+              certutil =http://host/payload.exe
+            } catch {}
+            Invoke-Expression $env:ZZQPAYLOAD
+        """, 'Invoke-Expression $env:ZZQPAYLOAD')

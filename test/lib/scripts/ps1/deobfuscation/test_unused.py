@@ -1584,6 +1584,16 @@ class TestPs1ALeakThatPrecedesEveryPosition(TestPs1):
             """) + '\n')
 
 
+#: The obfuscator padding whose removal every class below is about, written once so that a change
+#: to the construct reaches all of them: a bareword the metadata knows nothing about, carrying the
+#: assignment marker that is the whole basis of the guess, inside a handler that takes every error.
+_NOISE_BAREWORD = cleandoc("""
+    try {
+      foo =5
+    } catch {}
+""")
+
+
 class TestPs1CommandNameTrustIsReadWhereTheBarewordStands(TestPs1):
     """
     Dropping a noise bareword rests on trusting that no command bears its name, and a rebinding
@@ -1596,36 +1606,30 @@ class TestPs1CommandNameTrustIsReadWhereTheBarewordStands(TestPs1):
     orders, which is the whole of the difference from the whole-run verdict this replaces.
     """
 
-    _NOISE = cleandoc("""
-        try {
-          foo =5
-        } catch {}
-    """)
-
     def test_a_bareword_above_an_aliasing_cmdlet_is_dropped(self):
         self.assertEqual(
-            self._deobfuscate(F'{self._NOISE}\nSet-Alias wq i*x\nwq'),
+            self._deobfuscate(F'{_NOISE_BAREWORD}\nSet-Alias wq i*x\nwq'),
             cleandoc("""
                 Set-Alias wq i*x
                 wq
             """))
 
     def test_a_bareword_below_an_aliasing_cmdlet_is_kept(self):
-        source = F'Set-Alias wq i*x\nwq\n{self._NOISE}'
+        source = F'Set-Alias wq i*x\nwq\n{_NOISE_BAREWORD}'
         self.assertEqual(self._deobfuscate(source), source)
 
     def test_a_bareword_above_a_leak_is_dropped(self):
         self.assertEqual(
-            self._deobfuscate(F'{self._NOISE}\nInvoke-Expression $c'),
+            self._deobfuscate(F'{_NOISE_BAREWORD}\nInvoke-Expression $c'),
             'Invoke-Expression $c')
 
     def test_a_bareword_below_a_leak_is_kept(self):
-        source = F'Invoke-Expression $c\n{self._NOISE}'
+        source = F'Invoke-Expression $c\n{_NOISE_BAREWORD}'
         self.assertEqual(self._deobfuscate(source), source)
 
     def test_a_bareword_above_a_redefinition_of_its_own_name_is_dropped(self):
         self.assertEqual(
-            self._deobfuscate(F'{self._NOISE}\nfunction foo {{ Write-Host D }}\nfoo'),
+            self._deobfuscate(F'{_NOISE_BAREWORD}\nfunction foo {{ Write-Host D }}\nfoo'),
             cleandoc("""
                 function foo {
                   Write-Host D
@@ -1634,15 +1638,13 @@ class TestPs1CommandNameTrustIsReadWhereTheBarewordStands(TestPs1):
             """))
 
     def test_a_bareword_below_a_redefinition_of_its_own_name_is_kept(self):
-        source = cleandoc("""
+        definition = cleandoc("""
             function foo {
               Write-Host D
             }
             foo
-            try {
-              foo =5
-            } catch {}
         """)
+        source = F'{definition}\n{_NOISE_BAREWORD}'
         self.assertEqual(self._deobfuscate(source), source)
 
 
@@ -1719,34 +1721,33 @@ class TestPs1ALoopCarriesALeakBackOverTheBarewordAboveIt(TestPs1):
     the first, so the forward flood has to follow the back edge and keep it. The same leak written
     after the loop never precedes the bareword, and the bareword goes.
 
-    All four loop keywords are here because each builds its own graph shape, and a back edge missing
-    from one of them is a wrong grant no other row would catch.
+    Every iterated construct the language has is here because each builds its own graph shape, and
+    a back edge missing from one of them is a wrong grant no other row would catch. `switch` is one
+    of them and not a branch: it runs its arms once per element of its input, so an arm end carries
+    back to the head exactly as a loop body does.
     """
-
-    _NOISE = cleandoc("""
-        try {
-          foo =5
-        } catch {}
-    """)
 
     _SHAPES = {
         'foreach': 'foreach ($i in 1..2) {{\n{0}\n}}',
         'while': 'while ($env:Z) {{\n{0}\n}}',
         'do-while': 'do {{\n{0}\n}} while ($env:Z)',
         'for': 'for ($i = 0; $i -lt 2; $i++) {{\n{0}\n}}',
+        'switch': 'switch (1..2) {{\n  default {{\n{0}\n}}\n}}',
     }
 
     def test_a_leak_inside_the_loop_body_keeps_the_bareword_above_it(self):
         for keyword, shape in self._SHAPES.items():
             with self.subTest(keyword):
-                body = F'{self._NOISE}\nInvoke-Expression $c'
+                body = F'{_NOISE_BAREWORD}\nInvoke-Expression $c'
                 self.assertIn('foo =5', self._deobfuscate(shape.format(body)))
 
     def test_a_leak_after_the_loop_drops_the_same_bareword(self):
         for keyword, shape in self._SHAPES.items():
             with self.subTest(keyword):
-                source = F'{shape.format(self._NOISE)}\nInvoke-Expression $c'
-                self.assertNotIn('foo =5', self._deobfuscate(source))
+                source = F'{shape.format(_NOISE_BAREWORD)}\nInvoke-Expression $c'
+                dropped = self._deobfuscate(source)
+                self.assertNotIn('foo =5', dropped)
+                self.assertIn('Invoke-Expression $c', dropped)
 
 
 class TestPs1ALeakOnlyEverKeepsMore(TestPs1):

@@ -402,9 +402,10 @@ def _command_candidates(
     whole-run verdict grants *and* wherever neither flood reaches — a widening, not a narrowing.
     It is sound because the two floods bound every position at which a rebinding could have run,
     and because what is granted here is a proof about a known built-in rather than a guess about
-    an artifact: relaxing such a proof by position only widens what it already covers. That is the
-    distinction `refinery.lib.scripts.ps1.deobfuscation.deadcode` draws for its own bareword gate,
-    which stays whole-run for the opposite reason.
+    an artifact: relaxing such a proof by position only widens what it already covers.
+    `refinery.lib.scripts.ps1.deobfuscation.deadcode._is_injected_noise_bareword` reads the same
+    query for a guess rather than a proof, and states there what that costs; the soundness argument
+    above is this site's own and does not carry over to it.
     """
     name = get_command_name(cmd)
     if name is None:

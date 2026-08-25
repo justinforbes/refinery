@@ -234,19 +234,38 @@ _SUCCESS_VARIABLE = '?'
 #: The automatic variables a terminating error writes and a handler does not clear, beside `$?`.
 #: `$LASTEXITCODE` is not among them: measured on 5.1, a caught `CommandNotFoundException`
 #: leaves it at whatever the last native program put there.
-_ERROR_RECORD_VARIABLES = frozenset({'error', 'stacktrace'})
+#:
+#: Case-folded on the way in rather than by the hand that writes an entry. One of the two readers
+#: compares against a lowered name and the other is `re.IGNORECASE`, so a name added in PowerShell's
+#: own casing would keep every text row green while the node walk silently stopped seeing it.
+_ERROR_RECORD_VARIABLES = frozenset(name.lower() for name in ('Error', 'StackTrace'))
 
-#: The same names as they are spelled inside text a payload is written in, where no variable
-#: node exists to be walked. The sigil is what makes a spelling a read and the word alone is
-#: not, which is why this is a pattern where
-#: `refinery.lib.scripts.ps1.analysis.worldflow._names_own_path` gets by with containment: the
-#: names it looks for are coined ones nothing else says, and `error` is a word English uses.
-#: The trailing boundary is load-bearing in the other direction — `$ErrorActionPreference` and
-#: `$ErrorView` are ordinary settings that no raise writes and no handler clears.
+#: The record names as one alternation, escaped, so that a name added to `_ERROR_RECORD_VARIABLES`
+#: reaches the pattern below and none of them can turn into regular-expression syntax on the way:
+#: `?` and `^` are automatic variables whose unescaped spelling is a quantifier and an anchor.
+_ERROR_RECORD_NAMES = '|'.join(
+    re.escape(name) for name in sorted(_ERROR_RECORD_VARIABLES))
+
+#: Every name a removal that rests on a raise disturbs — the two the record is written under and
+#: `_SUCCESS_VARIABLE` beside them — spelled the way text a payload is written in spells them, where
+#: no variable node exists to be walked. Built from those two constants rather than written out, so
+#: that neither can be extended without this following.
+#:
+#: The sigil is what makes a spelling a read and the word alone is not, which is why this is a
+#: pattern where `refinery.lib.scripts.ps1.analysis.worldflow._names_own_path` gets by with
+#: containment: the names it looks for are coined ones nothing else says, and `error` is a word
+#: English uses. The trailing boundary is load-bearing in the other direction —
+#: `$ErrorActionPreference` and `$ErrorView` are ordinary settings that no raise writes and no
+#: handler clears.
+#:
+#: Two spellings it answers `True` for that read nothing, both wider than the one the method
+#: docstring owns. A scope prefix is any word, so `$env:Error` — an environment variable — is read
+#: as the record; and the success variable is matched wherever its two characters stand, so a
+#: regular expression written for an optional leading dollar sign is read as a use of it. Both only
+#: ever keep a statement, which is why they are stated rather than narrowed: narrowing either is a
+#: decision to delete more.
 _ERROR_RECORD_SPELLED_OUT = re.compile(
-    R'\$(?:\{)?(?:[A-Za-z]+:)?(?:'
-    + R'|'.join(sorted(_ERROR_RECORD_VARIABLES))
-    + R')\b|\$\?',
+    RF'\${{?(?:[A-Za-z]+:)?(?:{_ERROR_RECORD_NAMES})\b|\${re.escape(_SUCCESS_VARIABLE)}',
     re.IGNORECASE,
 )
 
@@ -776,21 +795,35 @@ class Ps1CommandModel:
         caught it: `$Error`, `$?` and `$StackTrace`.
 
         A removal resting on a statement having raised and the raise having been swallowed still
-        deletes the record the raise wrote. `reads_command_success` answers the `$?` half of that;
-        this asks the other two names beside it, over the same variable nodes.
+        deletes the record the raise wrote. `reads_command_success` answers the `$?` half of that
+        over variable nodes and this asks all three, that half included, over the nodes and over
+        text beside them. The two therefore answer the same fact differently for a `$?` a script
+        spells only in text: this one sees it and that one does not, and
+        `refinery.lib.scripts.ps1.deobfuscation.aliases`, which reads that one, keeps its narrower
+        answer. Widening it there would refuse an alias batch over text no payload runner can
+        reach, since the gate beside it already refuses every script that can run text.
 
         A read spelled inside a payload has no variable node until the payload is inlined, and the
-        removals that ask this run before that happens. Measured over the payload spellings the
-        passes decode — an `Invoke-Expression` of a stored string, of a concatenation of two, of a
-        base64 blob — the drop is taken on an earlier fixpoint iteration than the inline, so a walk
-        over variable nodes alone reports no read for any of them. Text is therefore scanned beside
-        the nodes, and by spelling rather than by word: what a script says is a read of `$Error` is
-        the sigil, so `Write-Host 'an error occurred'` is not one.
+        removals that ask this run before that happens: measured, the drop is taken on an earlier
+        fixpoint iteration than the inline, so a walk over variable nodes alone reports no read.
+        Text is therefore scanned beside the nodes, and by spelling rather than by word: what a
+        script says is a read of `$Error` is the sigil, so `Write-Host 'an error occurred'` is not
+        one.
 
-        Its cost is one kind of false refusal, and it is the mirror of what the scan is for: a
-        script that *prints* `'$Error.Count'` and reads nothing is kept for saying the words. Its
-        limit is the payload no walk decodes at all, where the record is read by code no scan here
-        ever sees; that residual belongs to the caller, and
+        **The sigil and the name have to stand in one literal**, which is narrower than "the payload
+        can be decoded" and is the whole of what this reaches. A payload the passes fold into one
+        string before the drop — `Invoke-Expression $c` over a stored `'$Error.Count'` — is caught;
+        the same read split across two of them is not, and neither is one built out of characters.
+        Measured, `$a = '$Err'; $b = 'or.Count'; iex ($a + $b)` and
+        `$c = -join [char[]](36, 69, 114, 114, 111, 114); iex $c` both leave `$Error` standing in
+        the output while the statement that filled it is deleted, so the output reads a different
+        number than the input gave it. Those are wrong answers rather than the residual below, and
+        they are pinned in `test.lib.scripts.ps1.deobfuscation.test_removal_observability`.
+
+        Its cost in the other direction is one kind of false refusal, and it is the mirror of what
+        the scan is for: a script that *prints* `'$Error.Count'` and reads nothing is kept for
+        saying the words. Its limit is the payload no walk decodes at all, where the record is read
+        by code no scan here ever sees; that residual belongs to the caller, and
         `refinery.lib.scripts.ps1.deobfuscation.deadcode._is_injected_noise_bareword` states it.
 
         Reading the record through `Get-Variable` reaches neither half where nothing resolves the
@@ -815,9 +848,9 @@ class Ps1CommandModel:
             if isinstance(node, Ps1Variable):
                 if node.name.lower() in _ERROR_RECORD_VARIABLES:
                     return True
-                continue
-            if isinstance(node, (Ps1StringLiteral, Ps1HereString)):
-                if _ERROR_RECORD_SPELLED_OUT.search(node.value):
+            elif isinstance(node, (Ps1StringLiteral, Ps1HereString)):
+                value = node.value
+                if '$' in value and _ERROR_RECORD_SPELLED_OUT.search(value):
                     return True
         return False
 
