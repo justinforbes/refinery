@@ -7,8 +7,14 @@ from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 from refinery.lib.scripts.js.deobfuscation.evaluator import JsFunctionEvaluator
 from refinery.lib.scripts.js.deobfuscation.interpreter import IrreducibleExpression, JsInterpreter
 from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
-from refinery.lib.scripts.js.model import JsFunctionDeclaration, JsIdentifier
+from refinery.lib.scripts.js.deobfuscation.helpers import JsBuffer
+from refinery.lib.scripts.js.model import (
+    JsFunctionDeclaration,
+    JsIdentifier,
+    JsReturnStatement,
+)
 from refinery.lib.scripts.js.parser import JsParser
+from refinery.lib.scripts.js.synth import JsSynthesizer
 
 
 class TestFunctionEvaluator(TestJsDeobfuscator):
@@ -2387,3 +2393,49 @@ class TestEvaluatorAstralStringEncoding(TestJsDeobfuscator):
             "var x = '%F0%9F%98%80';",
             self._fold("encodeURIComponent('\U0001F600')"),
         )
+
+
+class TestASplicedBodyReadsNoParameterThatKeptItsName(TestJsDeobfuscator):
+    """
+    Where the interpreter cannot compute a call but the body is one expression, the evaluator splices
+    that expression into the call site and replaces each parameter with the argument the call handed
+    it. A value with no faithful literal form has no node to be replaced by, and a parameter left
+    holding its own name reads whatever the call site binds to that name rather than the argument.
+
+    No program reaches this: every value that survives the admission ahead of the splice is one
+    `refinery.lib.scripts.js.deobfuscation.helpers.value_to_node` spells, and a parameter that is not
+    a plain name is refused earlier still. The rule is therefore stated against the substitution
+    itself, which is where a program that ever did reach it would be answered.
+    """
+
+    def _the_body_of(self, source: str):
+        script = JsParser(source).parse()
+        func = next(n for n in script.walk() if isinstance(n, JsFunctionDeclaration))
+        returned = next(n for n in func.walk() if isinstance(n, JsReturnStatement))
+        return func, returned.argument
+
+    SOURCE = 'function f(n, k) { switch (n) { case 5: return externalThing + k; } }'
+
+    def test_a_parameter_whose_value_has_a_literal_form_is_substituted(self):
+        func, returned = self._the_body_of(self.SOURCE)
+        spliced = JsFunctionEvaluator._substitute_params_in_clone(
+            returned, func, [5.0, 'INNER'], JsFunctionEvaluator())
+        self.assertEqual("externalThing + 'INNER'", JsSynthesizer().convert(spliced))
+
+    def test_a_parameter_whose_value_has_no_literal_form_refuses_the_splice(self):
+        func, returned = self._the_body_of(self.SOURCE)
+        self.assertIsNone(JsFunctionEvaluator._substitute_params_in_clone(
+            returned, func, [5.0, JsBuffer(b'A')], JsFunctionEvaluator()))
+
+    def test_a_parameter_the_spliced_expression_does_not_read_is_no_obstacle(self):
+        func, returned = self._the_body_of(
+            'function f(n, k) { switch (n) { case 5: return externalThing + n; } }')
+        spliced = JsFunctionEvaluator._substitute_params_in_clone(
+            returned, func, [5.0, JsBuffer(b'A')], JsFunctionEvaluator())
+        self.assertEqual('externalThing + 5', JsSynthesizer().convert(spliced))
+
+    def test_a_parameter_that_is_not_a_plain_name_refuses_the_splice(self):
+        func, returned = self._the_body_of(
+            'function f(n, { k }) { switch (n) { case 5: return externalThing + k; } }')
+        self.assertIsNone(JsFunctionEvaluator._substitute_params_in_clone(
+            returned, func, [5.0, {'k': 'INNER'}], JsFunctionEvaluator()))

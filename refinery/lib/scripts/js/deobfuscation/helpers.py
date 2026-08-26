@@ -1553,12 +1553,6 @@ def substitute_params(
     resolve each occurrence against the binding it reads. When *transformer* is given, that model is
     taken from its shared analysis cache; otherwise it is built standalone.
     """
-    if len(arguments) < len(params):
-        raise ValueError(
-            F'{len(params)} parameters were handed {len(arguments)} arguments: substituting the '
-            F'ones that were handed leaves the rest standing, where each reads whatever the call '
-            F'site binds to its name.'
-        )
     cloned = _clone_node(expression)
     mapping = {
         param.name: argument

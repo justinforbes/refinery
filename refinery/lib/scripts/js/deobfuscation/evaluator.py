@@ -685,6 +685,8 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
             if self._substitution_would_break(irr.node, func, node):
                 return False
             replacement = self._substitute_params_in_clone(irr.node, func, args, self)
+            if replacement is None:
+                return False
             _replace_in_parent(node, replacement)
             self.mark_changed()
             return True
@@ -1007,15 +1009,30 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
         func: JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression,
         args: list[Value],
         transformer: Transformer,
-    ) -> Node:
+    ) -> Node | None:
+        """
+        A clone of *node* with every parameter of *func* replaced by the argument the call handed it,
+        or None where a parameter *node* reads has nothing to be replaced by.
+
+        A parameter is left standing when the value handed to it has no faithful literal form, and a
+        parameter that is not a plain name binds no single node to substitute at all. Either way it
+        keeps its own name, and a name spliced into the call site reads whatever is bound to it there
+        rather than the value the call made. Refusing leaves the call standing, which reduces less
+        and states nothing false.
+        """
         params: list[Node] = []
         arguments: list[Node] = []
-        for i, p in enumerate(func.params):
-            if not isinstance(p, JsIdentifier):
+        standing: set[str] = set()
+        for index, param in enumerate(func.params):
+            argument = None
+            if isinstance(param, JsIdentifier):
+                argument = value_to_node(args[index] if index < len(args) else None)
+            if argument is None:
+                standing.update(ident.name for ident in pattern_identifiers(param))
                 continue
-            arg_node = value_to_node(args[i] if i < len(args) else None)
-            if arg_node is None:
-                continue
-            params.append(p)
-            arguments.append(arg_node)
+            params.append(param)
+            arguments.append(argument)
+        for child in node.walk():
+            if isinstance(child, JsIdentifier) and child.name in standing:
+                return None
         return substitute_params(node, params, arguments, transformer=transformer)
