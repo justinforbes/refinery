@@ -161,6 +161,38 @@ class TestRegressionBugs(TestJsDeobfuscator):
             ),
         )
 
+    def test_parenthesized_callee_expanded_only_once_the_parentheses_are_gone(self):
+        """
+        The callee this pass expands is the identifier a call names, and a parenthesized one is not
+        that identifier. `JsSimplifications` strips the parentheses before this pass sees the call,
+        so the refusal is what a single pass answers and never what the pipeline does.
+        """
+        source = inspect.cleandoc(
+            """
+            function wr() { wr = function() {}; }
+            (wr)(x = 1);
+            g(x);
+            """
+        )
+        self.assertEqual(
+            self._run_transformer(source, JsAssignmentsAsFunctionArgs),
+            inspect.cleandoc(
+                """
+                function wr() {
+                  wr = function() {};
+                }
+                (wr)(x = 1);
+                g(x);
+                """
+            ),
+        )
+        self.assertEqual(self._deobfuscate_iterative(source), inspect.cleandoc(
+            """
+            x = 1;
+            g(x);
+            """
+        ))
+
     def test_spread_argument_call_not_expanded(self):
         """
         A spread argument cannot become a comma-sequence operand (or a bare statement) without
