@@ -1900,5 +1900,5 @@ class TestAStringArrayHolderNoLoopReadsIsStillResolved(TestBase):
         """
         self.assertEqual(
             "console.log('3');",
-            folded(a_string_array_whose_rotation_runs('async ', target=3)),
+            folded(a_string_array_whose_rotation_runs('async function', target=3)),
         )

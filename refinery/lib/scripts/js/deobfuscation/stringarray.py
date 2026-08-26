@@ -32,6 +32,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     string_value,
 )
 from refinery.lib.scripts.js.model import (
+    FUNCTION_NODES,
     JsArrayExpression,
     JsAssignmentExpression,
     JsBinaryExpression,
@@ -56,6 +57,8 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsWhileStatement,
     Statement,
+    is_generator_function,
+    strip_parens,
     wraps_return,
 )
 from refinery.lib.scripts.js.numbers import exact_integer, js_parse_int
@@ -106,6 +109,18 @@ class ChecksumInfo(NamedTuple):
     prop_maps: dict[str, dict[str, int | str]]
 
 
+def _answers_a_wrapper(node: Node | None) -> bool:
+    """
+    Whether *node* denotes a function a call to which answers a promise or a generator object.
+
+    A recognizer here reads the function it can see, but what the program calls is often the one a
+    self-replacing shape installs in its place. The replacement is read through this, so that the
+    keyword is asked of the function whose answer the pass goes on to substitute for.
+    """
+    node = strip_parens(node)
+    return isinstance(node, FUNCTION_NODES) and wraps_return(node)
+
+
 def _find_array_function(body: Sequence[Node]) -> ArrayFunction | None:
     """
     Detect the array-holder function pattern:
@@ -152,7 +167,7 @@ def _find_array_function(body: Sequence[Node]) -> ArrayFunction | None:
                 and isinstance(assign.left, JsIdentifier)
                 and assign.left.name == name
             ):
-                has_self_reassignment = True
+                has_self_reassignment = not _answers_a_wrapper(assign.right)
         if array_literal is not None and has_self_reassignment:
             return ArrayFunction(statement, name, array_literal)
     return None
@@ -253,6 +268,8 @@ def _extract_self_overwriting_offset(
             continue
         if not isinstance(assign.right, JsFunctionExpression):
             continue
+        if wraps_return(assign.right):
+            continue
         inner_fn = assign.right
         if inner_fn.body is None or len(inner_fn.params) < 2:
             continue
@@ -294,6 +311,11 @@ def _find_rotation_iife(
           while (true) { try { ... parseInt ... push(shift) } catch { push(shift) } }
         })(ARRAY_FN, TARGET_NUMBER);
 
+    A generator is refused and an `async` function is not, which is where the two kinds a call wraps
+    the answer of part company: this IIFE is read for its effect on the array and never for what the
+    call answered, and calling a generator runs no body at all, where an `async` body with no
+    `await` in it runs to completion before the call returns.
+
     Returns (statement_node, target_checksum, iife_body_statements) or None. Also handles the case
     where the rotation call is an element of a comma-separated sequence expression.
     """
@@ -315,6 +337,8 @@ def _find_rotation_iife(
             if isinstance(fn, JsParenthesizedExpression):
                 fn = fn.expression
             if not isinstance(fn, JsFunctionExpression):
+                continue
+            if is_generator_function(fn):
                 continue
             if len(call.arguments) != 2:
                 continue

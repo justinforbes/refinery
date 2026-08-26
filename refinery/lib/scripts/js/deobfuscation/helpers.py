@@ -83,6 +83,7 @@ from refinery.lib.scripts.js.model import (
     JsReturnStatement,
     JsScript,
     JsSequenceExpression,
+    JsSpreadElement,
     JsStringLiteral,
     JsTaggedTemplateExpression,
     JsThisExpression,
@@ -1431,6 +1432,20 @@ class ReturnedExpression(NamedTuple):
     param_names: list[str]
 
 
+def arguments_substitutable(arguments: Sequence[Node], param_names: Sequence[str]) -> bool:
+    """
+    Whether *arguments* stand one for one against *param_names*, so that each parameter has exactly
+    one node to be replaced by.
+
+    A spread element denotes however many values the iterable behind it holds, which is not one and
+    is not a count the syntax states. Counting it as one argument binds a parameter to the spread
+    itself, and substituting that into an expression writes `...xs` where a value belongs.
+    """
+    if len(arguments) != len(param_names):
+        return False
+    return not any(isinstance(argument, JsSpreadElement) for argument in arguments)
+
+
 def expression_a_call_answers(func: JsFunctionNode) -> ReturnedExpression | None:
     """
     The expression a call to *func* answers, where a call answers an expression at all: a body that
@@ -1674,7 +1689,7 @@ def try_inline_trivial_function(
     if answered is None:
         return None
     expr, param_names = answered
-    if len(call_args) != len(param_names):
+    if not arguments_substitutable(call_args, param_names):
         return None
     if not is_closed_expression(expr, set(param_names)):
         return None

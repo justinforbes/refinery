@@ -61,6 +61,8 @@ def _is_expression_wrapper(node: JsFunctionDeclaration) -> bool:
     rhs = expr.right
     if not isinstance(rhs, JsFunctionExpression):
         return False
+    if wraps_return(rhs):
+        return False
     if rhs.params:
         return False
     if isinstance(rhs.body, JsBlockStatement) and rhs.body.body:
@@ -68,18 +70,27 @@ def _is_expression_wrapper(node: JsFunctionDeclaration) -> bool:
     return True
 
 
-def _find_expression_wrappers(root: Node) -> dict[str, JsFunctionDeclaration]:
+def _find_expression_wrappers(root: Node) -> set[str]:
     """
-    The self-disabling wrappers in *root*, by the name each one answers to. The declaration is kept
-    rather than the name alone because what a call to it answers decides which of the two expansions
-    is available, and that is a property of the function rather than of the call.
+    The names the self-disabling wrappers in *root* answer to, less any name a wrapper whose call
+    answers a promise or a generator object answers to.
+
+    Expanding a call site takes the wrapper's body with it, and that body is the assignment that
+    disables the wrapper. The expansion is therefore only ever equivalent where nothing reads a
+    wrapper the input had already disabled, which no expansion of a single site can promise: an
+    `async` body runs to completion on the first call, so a call this pass leaves standing beside an
+    expanded one answers a promise where the input answered `undefined`.
+
+    The name is dropped rather than the declaration because this pass matches a callee by its name,
+    and a name settles nothing about which of several declarations a given call site reads.
     """
-    wrappers: dict[str, JsFunctionDeclaration] = {}
+    wrappers: set[str] = set()
+    wrapping: set[str] = set()
     for node in root.walk():
         if isinstance(node, JsFunctionDeclaration) and _is_expression_wrapper(node):
             assert node.id is not None
-            wrappers[node.id.name] = node
-    return wrappers
+            (wrapping if wraps_return(node) else wrappers).add(node.id.name)
+    return wrappers - wrapping
 
 
 class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
@@ -88,10 +99,8 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
     becomes the individual argument statements, and a call embedded in a larger expression becomes the
     equivalent comma sequence in place, so evaluation order is preserved.
 
-    Only the statement-position expansion is available for a wrapper whose call answers a promise or
-    a generator object. In statement position what the call answered is discarded, so every kind of
-    wrapper expands alike; the sequence answers `undefined`, which is what the call answers only when
-    the wrapper is a plain function.
+    Neither expansion is available for a wrapper whose call answers a promise or a generator object;
+    `_find_expression_wrappers` gives the reason.
     """
 
     @staticmethod
@@ -136,7 +145,7 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
                 for stmt in new_stmts:
                     stmt.parent = pp
                 unwrapped = True
-            elif not wraps_return(wrappers[ast_node.callee.name]):
+            else:
                 _replace_in_parent(ast_node, self._sequence_lowering(ast_node.arguments))
                 unwrapped = True
         if not unwrapped:

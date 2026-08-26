@@ -64,6 +64,8 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
     JsWithStatement,
+    is_async_function,
+    is_generator_function,
 )
 from refinery.lib.scripts.js.strict import keeping_directives
 
@@ -507,7 +509,7 @@ def _match_generator_cff(body: list[Statement], idx: int) -> _GeneratorCFFMatch 
     stmt = body[idx]
     if not isinstance(stmt, JsFunctionDeclaration):
         return None
-    if not stmt.generator:
+    if not is_generator_function(stmt) or is_async_function(stmt):
         return None
     if stmt.id is None:
         return None
@@ -2248,6 +2250,8 @@ def _convert_function_declarations(
                     id=None,
                     params=stmt.params,
                     body=stmt.body,
+                    generator=is_generator_function(stmt),
+                    is_async=is_async_function(stmt),
                 )
                 target = _make_namespace_node([*homes[name], name])
                 assignment = JsAssignmentExpression(operator='=', left=target, right=func_expr)

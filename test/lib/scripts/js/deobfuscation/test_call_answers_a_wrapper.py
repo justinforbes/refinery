@@ -91,13 +91,19 @@ def an_iife(read: str = '(function (a) { return a; })(7)') -> str:
     return _lines(F'console.log({read});')
 
 
-def a_global_finder(kw: str = '', read: str = 'g() === globalThis') -> str:
+def a_global_finder(
+    kw: str = '', read: str = 'g() === globalThis', closure_head: str = 'function',
+) -> str:
     """
     A function every return of which names the global object, reached through a call it makes.
+
+    *closure_head* writes the keyword onto the closure the call reaches rather than onto the finder,
+    which is where the finder's own effect summary cannot answer for it: `EffectSummary.absorb`
+    leaves `wraps_return` out, so a callee's wrapping never reaches its caller's summary.
     """
     return _lines(
         F'{kw}function g() {{',
-        '  var a = [function () { return globalThis; }];',
+        F'  var a = [{closure_head} () {{ return globalThis; }}];',
         '  var r = a[0]();',
         '  return r;',
         '}',
@@ -157,7 +163,12 @@ def a_string_array(accessor_kw: str = '', holder_kw: str = '', read: str = 'ACC(
     )
 
 
-def a_string_array_whose_rotation_runs(holder_kw: str = '', target: int = 3) -> str:
+def a_string_array_whose_rotation_runs(
+    holder_head: str = 'function',
+    target: int = 3,
+    replacement_head: str = 'function',
+    rotation_head: str = 'function',
+) -> str:
     """
     The same three parts written the way an obfuscator emits them: the checksum is read through the
     accessor, so it answers differently at each rotation, and a target the written order does not
@@ -166,13 +177,21 @@ def a_string_array_whose_rotation_runs(holder_kw: str = '', target: int = 3) -> 
     The loop is what reads what the holder answered. In `a_string_array` it breaks before it touches
     the array, which is why that program agrees with Node for an `async` holder and this one does
     not: here `arr` is the promise the holder answered, and a promise has no `shift`.
+
+    Each of the three functions takes its whole head rather than a keyword written in front of one,
+    because a generator is spelled `function*` and a prefix cannot produce that.
+
+    *replacement_head* writes the head of the function the holder installs in its own place, which
+    is the one every call after the first reaches. *rotation_head* writes the head of the loop's
+    own function: calling a generator never runs its body, so a generator rotation turns the array
+    over in the pass and not in the program.
     """
     return _lines(
-        F"{holder_kw}function A() {{ var s = ['3', '5'];"
-        ' A = function () { return s; }; return A(); }',
+        F"{holder_head} A() {{ var s = ['3', '5'];"
+        F' A = {replacement_head} () {{ return s; }}; return A(); }}',
         'function ACC(i, k) { i = i - 0; var a = A();'
         ' var r = a[i]; return r; }',
-        '(function (getArray, target) {',
+        F'({rotation_head} (getArray, target) {{',
         '  var arr = getArray();',
         '  while (!![]) {',
         '    try {',
@@ -285,6 +304,48 @@ def a_self_disabling_wrapper_as_a_statement(kw: str = '') -> str:
     )
 
 
+def a_self_disabling_wrapper_called_twice(
+    head: str = 'function', read: str = 'typeof W(b())',
+) -> str:
+    """
+    A wrapper called once as a statement and once where its value is read.
+
+    Expanding a call site takes the wrapper's body with it, and that body is the assignment that
+    disables the wrapper. The second call therefore reads a wrapper the input had already disabled,
+    which for an `async` wrapper answers a promise where the input answered `undefined`. A generator
+    is not disabled in the input either, because a call never runs its body.
+    """
+    return _lines(
+        F'{head} W() {{ W = function () {{}}; }}',
+        'var log = [];',
+        "function a() { log.push('a'); return 1; }",
+        "function b() { log.push('b'); return 2; }",
+        'W(a());',
+        F'console.log({read}, log.join(","));',
+    )
+
+
+def a_self_disabling_wrapper_a_plain_one_shares_a_name_with(
+    head: str = 'async function', read: str = 'typeof W(a()).then',
+) -> str:
+    """
+    A wrapper whose call this pass may not answer, under a name a plain wrapper elsewhere in the
+    file also answers to. The pass matches a callee by its name, so an answer kept per declaration
+    is read off whichever of the two the walk reached last.
+    """
+    return _lines(
+        'function W() { W = function () {}; }',
+        'W(0);',
+        'var log = [];',
+        "function a() { log.push('a'); return 1; }",
+        'function inner() {',
+        F'  {head} W() {{ W = function () {{}}; }}',
+        F'  return {read};',
+        '}',
+        'console.log(inner(), log.join(","));',
+    )
+
+
 A_DISPATCH = '(params = ["a", "b"], d("f1"))'
 
 
@@ -385,6 +446,10 @@ A_CALL_ANSWERING_A_WRAPPER = {
         a_global_finder('async ', 'typeof g().then'): 'function\n',
         a_global_finder('function* ', 'typeof g().next').replace(
             'function* function g', 'function* g'): 'function\n',
+        a_global_finder(
+            read='typeof g().then', closure_head='async function'): 'function' + NL,
+        a_global_finder(
+            read='typeof g().next', closure_head='function*'): 'function' + NL,
     },
     'interpreter': {
         a_callback('[1, 2].filter(async function (x) { return x > 1; }).length'): '2\n',
@@ -425,6 +490,13 @@ A_CALL_ANSWERING_A_WRAPPER = {
         a_self_disabling_wrapper('async ', 'typeof W(a()).then'): 'function a\n',
         a_self_disabling_wrapper('function* ', 'typeof W(a()).next').replace(
             'function* function W', 'function* W'): 'function a\n',
+        a_self_disabling_wrapper_a_plain_one_shares_a_name_with(): 'function a\n',
+        a_self_disabling_wrapper_a_plain_one_shares_a_name_with(
+            'function*', 'typeof W(a()).next'): 'function a\n',
+    },
+    'argwrap in statement position': {
+        a_self_disabling_wrapper_called_twice('async function'): 'undefined a,b\n',
+        a_self_disabling_wrapper_called_twice('function*'): 'object a,b\n',
     },
     'dispatcher': {
         a_dispatcher(outer='async ', read=F'typeof {A_DISPATCH}.then'): 'function\n',
@@ -438,7 +510,17 @@ A_CALL_ANSWERING_A_WRAPPER = {
 #: guard written per pass rather than per function is caught. The dispatcher's entries are built
 #: with the keyword carried, which `dispatcher._build_extracted_function` already does, and an
 #: async arrow immediately called is answered by the value of its own body.
+#:
+#: The `async` rotation IIFE is the row that says the two kinds do not always answer together: that
+#: loop is read for its effect on the array and never for what the call answered, and an `async`
+#: body holding no `await` runs to completion before the call returns, so the array really is
+#: rotated. Its generator twin, which rotates nothing, sits in
+#: `A_ROTATION_THAT_READS_WHAT_THE_HOLDER_ANSWERED`.
 A_WRAPPER_THE_PASS_IS_RIGHT_TO_ANSWER = {
+    a_string_array_whose_rotation_runs(target=5, rotation_head='async function'): (
+        '5' + NL,
+        "console.log('5');",
+    ),
     an_iife('typeof (async (a) => a)(7).then'): (
         'function' + NL,
         'console.log(typeof (async a => a)(7).then);',
@@ -466,34 +548,31 @@ A_WRAPPER_THE_PASS_IS_RIGHT_TO_ANSWER = {
             'console.log(typeof f1("a", "b").next);',
         ).rstrip(NL),
     ),
-    a_self_disabling_wrapper_as_a_statement('async '): (
-        'a' + NL,
-        _lines(
-            'var log = [];',
-            'function a() {',
-            "  log.push('a');",
-            '  return 1;',
-            '}',
-            'a();',
-            'console.log(log.join(","));',
-        ).rstrip(NL),
-    ),
 }
 
 
 #: What Node makes of a string array whose rotation loop actually turns the array over, per kind of
-#: holder. This is the row that says an `async` holder is not an answer the pass may give: the loop
-#: indexes what the holder answered, and what an `async` holder answers is a promise, which has no
-#: `shift`. Node throws where the pass used to print the rotated string.
+#: each function the three parts are built from. The holder rows say an `async` holder is not an
+#: answer the pass may give: the loop indexes what the holder answered, and what an `async` holder
+#: answers is a promise, which has no `shift`. Node throws where the pass used to print the rotated
+#: string.
 #:
-#: The plain holder beside them is the control, and it is also why `a_string_array` cannot state
-#: this on its own: its loop breaks before it touches the array, so every kind of holder agrees
-#: there.
+#: The replacement rows ask the same of the function the holder installs in its own place, which is
+#: what every call after the first reaches, and the rotation row asks it of the loop's own function:
+#: calling a generator never runs its body, so the array Node hands the accessor is the one written.
+#:
+#: The plain row beside them is the control, and it is also why `a_string_array` cannot state this
+#: on its own: its loop breaks before it touches the array, so every kind agrees there.
 A_ROTATION_THAT_READS_WHAT_THE_HOLDER_ANSWERED = {
     a_string_array_whose_rotation_runs(target=5): ('5' + NL, None),
-    a_string_array_whose_rotation_runs('async ', target=5): ('', 'TypeError'),
-    a_string_array_whose_rotation_runs('function* ', target=5).replace(
-        'function* function A', 'function* A'): ('', 'TypeError'),
+    a_string_array_whose_rotation_runs('async function', target=5): ('', 'TypeError'),
+    a_string_array_whose_rotation_runs('function*', target=5): ('', 'TypeError'),
+    a_string_array_whose_rotation_runs(
+        target=5, replacement_head='async function'): ('', 'TypeError'),
+    a_string_array_whose_rotation_runs(
+        target=5, replacement_head='function*'): ('', 'TypeError'),
+    a_string_array_whose_rotation_runs(
+        target=5, rotation_head='function*'): ('3' + NL, None),
 }
 
 
@@ -762,6 +841,19 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
         expansion writes `(a(), void 0)`, which has the argument's effect and no `.then`.
         """
         rows = A_CALL_ANSWERING_A_WRAPPER['argwrap in expression position']
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_self_disabling_wrapper_in_statement_position(self):
+        """
+        Node prints `undefined a,b` for the `async` wrapper: its body ran on the first call and
+        disabled it, so the second call answers `undefined`. Expanding the first call takes that
+        body away, and the second call then answers a promise. The generator beside it prints
+        `object a,b` because a call never runs its body, so nothing disables it either way.
+        """
+        rows = A_CALL_ANSWERING_A_WRAPPER['argwrap in statement position']
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),

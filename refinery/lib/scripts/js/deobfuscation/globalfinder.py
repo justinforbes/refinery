@@ -52,6 +52,7 @@ from refinery.lib.scripts.js.model import (
     JsThisExpression,
     JsVariableDeclarator,
     strip_parens,
+    wraps_return,
 )
 
 _CLOSURE_NODES = (JsFunctionExpression, JsArrowFunctionExpression)
@@ -253,6 +254,16 @@ def _array_closures(binding: Binding | None, func: Node, model: SemanticModel) -
 
 
 def _closure_returns_global(closure: Node, model: SemanticModel, visiting: set[int]) -> bool:
+    """
+    Whether calling *closure* answers the global object. What the body returns decides that only
+    where the call answers what the body returned: an `async` closure answers a promise and a
+    generator answers a generator object, neither of which is the global object however the body
+    ends. `_is_finder` asks `is_expression_replaceable` of the finder itself, which cannot cover
+    this — `refinery.lib.scripts.js.analysis.effects.EffectSummary.absorb` deliberately leaves
+    `wraps_return` out, so a callee's wrapping never reaches its caller's summary.
+    """
+    if isinstance(closure, FUNCTION_NODES) and wraps_return(closure):
+        return False
     if id(closure) in visiting:
         return False
     visiting = visiting | {id(closure)}

@@ -1227,6 +1227,17 @@ class JsInterpreter:
         func: JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression,
         arguments: list[Value],
     ) -> Value:
+        """
+        The value a call to *func* with *arguments* answers, which is the value its body returned
+        only where a call answers that value at all. An `async` function answers a promise and a
+        generator answers a generator object whose body has not run, so `wraps_return` ends the
+        interpretation rather than reporting a value the call never had. `InterpreterError` is what
+        ends it and not `IrreducibleExpression`: the latter hands the caller the body's return
+        expression to splice into the call site, which is the same wrong answer written a second
+        way.
+        """
+        if wraps_return(func):
+            raise InterpreterError
         params = func.params
         param_names: list[str] = []
         for p in params:
@@ -2172,16 +2183,11 @@ class JsInterpreter:
 
     def _call_function(self, func: JsFunctionNode, args: list[Value]) -> Value:
         """
-        The value a call to *func* answers, which is the value its body returned only where a call
-        answers that value at all. An `async` function answers a promise and a generator answers a
-        generator object whose body has not run, so `wraps_return` ends the interpretation rather
-        than reporting a value the call never had. `InterpreterError` is what ends it and not
-        `IrreducibleExpression`: the latter hands the caller the body's return expression to splice
-        into the call site, which is the same wrong answer written a second way.
+        The value a call to *func* answers, computed by a child interpreter. What a call answers at
+        all is `execute`'s question and is refused there, so that the refusal covers the entry a
+        caller outside this class reaches as well.
         """
         if self._depth >= self.max_recursion:
-            raise InterpreterError
-        if wraps_return(func):
             raise InterpreterError
         if self._mutates_captured_binding(func):
             raise InterpreterError

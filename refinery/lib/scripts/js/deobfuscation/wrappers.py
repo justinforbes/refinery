@@ -19,6 +19,7 @@ from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
+    arguments_substitutable,
     expression_a_call_answers,
     is_closed_expression,
     substitute_params,
@@ -111,7 +112,7 @@ class JsCallWrapperInliner(ScriptLevelTransformer):
             info = by_node.get(id(target))
             if info is None:
                 continue
-            if len(ast_node.arguments) != len(info.param_names):
+            if not arguments_substitutable(ast_node.arguments, info.param_names):
                 continue
             if not all(effects.is_side_effect_free(a) for a in ast_node.arguments):
                 continue

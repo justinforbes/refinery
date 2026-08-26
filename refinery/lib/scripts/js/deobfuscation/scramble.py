@@ -98,20 +98,28 @@ def _method_name(method: JsMethodDefinition) -> str | None:
 
 
 def _is_scramble_class(node: Node) -> bool:
+    """
+    Whether *node* is a class an instance of which decodes a string through a key its constructor
+    derives. Only members an instance call reaches are read: a static member of either name is
+    reached through the class and never through `instance.decode(x)`, and where two members answer
+    to one name the later one is the member the instance has.
+    """
     body: JsClassBody | None = getattr(node, 'body', None)
     if body is None:
         return False
-    has_decode = False
-    has_pbkdf2 = False
+    decode: JsMethodDefinition | None = None
+    constructor: JsMethodDefinition | None = None
     for method in body.body:
-        if not isinstance(method, JsMethodDefinition):
+        if not isinstance(method, JsMethodDefinition) or method.is_static:
             continue
         name = _method_name(method)
-        if name == 'decode':
-            has_decode = method.value is not None and not wraps_return(method.value)
+        if name == 'decode' and method.kind is JsMethodKind.METHOD:
+            decode = method
         elif name == 'constructor':
-            has_pbkdf2 = _constructor_has_pbkdf2(method)
-    return has_decode and has_pbkdf2
+            constructor = method
+    if decode is None or decode.value is None or wraps_return(decode.value):
+        return False
+    return constructor is not None and _constructor_has_pbkdf2(constructor)
 
 
 def _constructor_has_pbkdf2(method: JsMethodDefinition) -> bool:

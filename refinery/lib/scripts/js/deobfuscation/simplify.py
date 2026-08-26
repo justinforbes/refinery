@@ -27,6 +27,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     MemberRead,
     access_key,
     allocated_object_type,
+    arguments_substitutable,
     converts_uninterceptably,
     denoted_value,
     escape_js_string,
@@ -469,7 +470,7 @@ class JsSimplifications(Transformer):
         if answered is None:
             return None
         expr, param_names = answered
-        if len(node.arguments) != len(param_names):
+        if not arguments_substitutable(node.arguments, param_names):
             return None
         if not is_closed_expression(expr, set(param_names)):
             return None
