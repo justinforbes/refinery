@@ -105,6 +105,13 @@ class DeobfuscationPipeline:
                 raise ValueError(F'unknown group in invalidators: {name!r}')
             if unknown := targets - all_names:
                 raise ValueError(F'group {name!r} invalidates unknown groups: {unknown}')
+        # TODO: refuse an invalidation set that omits a group depending on this one. Absent from
+        # `invalidators` a group invalidates everything, so an entry is an optimization that has to
+        # keep listing every group transitively downstream of it by hand, and dropping one is
+        # silent: that group stays stable and never sees the tree the groups it depends on went on
+        # to change. The `js` pipeline has such a gap today — `cleanup` depends on `fold` and
+        # appears in no invalidation set, so nothing re-opens it once it has run. Adding the check
+        # here means fixing that in the same commit, which is why it waits for the `js` branch.
 
     def run(
         self,

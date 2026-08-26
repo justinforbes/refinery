@@ -474,6 +474,23 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
     than left to be discovered: a script that only *prints* `'$Error.Count'` reads nothing and is
     kept anyway. What it does not reach is a payload nothing decodes, which is
     `TestPs1ANoiseBarewordIsDroppedAboveAPayloadTheWalkCannotRead` below.
+
+    **The two `expectedFailure` rows below are one defect, and scanning text is not what would fix
+    it.** The drop is decided in the `fold` group and `Invoke-Expression` is inlined in `finalize`,
+    so the question is asked while the read is still a string held in a variable. A scan reaches the
+    spellings that survive as one literal and misses every one cut between two of them; measured, a
+    payload assembled from `'$Err' + 'or.Count'`, from `[char[]]`, or through a variable an earlier
+    pass has not yet folded away comes out with `$Error` standing in the output beside the deleted
+    statement that filled it.
+
+    Deciding a removal on an absence — no read found — before the passes that make reads appear have
+    finished is not this recognizer's mistake alone, and closing it here would fix one member of a
+    family: `refinery.lib.scripts.ps1.deobfuscation.deadcode._is_injected_noise_bareword` says as
+    much about `$Error` itself, naming `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`
+    as where the general answer belongs. Every other statement remover in the package asks its own
+    absence question, and whether any of them is asked too early is unmeasured. Scheduling the drop
+    after `finalize` was measured to fix both rows at no cost to the sample, and was not taken
+    because the family question outranks the one member.
     """
 
     def test_a_noise_bareword_is_kept_where_the_script_reads_the_error_list(self):
@@ -525,10 +542,8 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
     @unittest.expectedFailure
     def test_a_noise_bareword_is_kept_where_the_read_is_spelled_across_two_strings(self):
         """
-        The scan asks each literal on its own, so a spelling cut through the middle of the name
-        matches neither half. The passes join the two anyway — the expected output is the resolved
-        read — so this is a payload the tool *does* decode, and the record is read by code the
-        output holds rather than by code no scan ever sees.
+        The passes join the two strings and the expected output is the resolved read, so this is a
+        payload the tool *does* decode — it is decoded after the drop rather than before it.
         """
         self._assertDeobfuscatesTo("""
             $zzqa = '$Err'
@@ -547,7 +562,7 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
     @unittest.expectedFailure
     def test_a_noise_bareword_is_kept_where_the_read_is_built_out_of_characters(self):
         """
-        The same miss reached without splitting a literal at all: no literal in the input spells
+        The same defect reached without splitting a literal at all: no literal in the input spells
         any part of the name, and the output spells the whole of it.
         """
         self._assertDeobfuscatesTo("""
