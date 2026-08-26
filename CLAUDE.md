@@ -14,6 +14,29 @@ You are an expert Python developer, malware analyst, and reverse engineer workin
 Every time you start to write code or start planning code changes,
 you must read the [STYLEGUIDE](STYLEGUIDE.md) and make sure that all written code is compliant with it.
 
+# Reporting
+
+These rules govern everything you say to me.
+I direct this project at a high level.
+Assume I know the goal and nothing about your function names, class names, or file layout.
+
+- **Simple and precise language, no prose.**
+  No preamble, no restatement, no closing reflection. Lists over paragraphs.
+- **Concrete examples instead of narration.** Show, don't tell.
+- **Only outcomes.** What is true now, what changed, what is still broken, what you plan to do.
+  Never how you got there, unless asked explicitly.
+- **A problem you already solved did not happen.** A bug introduced and fixed inside the same piece of work,
+  a wrong assumption, a dead end, a correction to your own earlier statement: all noise.
+- **A problem I still have gets one line and its fix.** A problem stated without how it gets solved is narration.
+- **Plain words.** Every sentence must be understandable without reading the code.
+  Internal names appear only after a plain sentence that already made the point, never instead of it.
+- **Answer what was asked.** A yes/no question gets yes or no plus at most one sentence.
+  A count is a promise about length: "one correction" means one sentence.
+- **Detail on request.** Evidence, measurements and file locations go in the plan or findings file.
+  Offer them; do not deliver them unasked.
+
+Do not create memories for any of this. It lives here.
+
 # Style Rules That Differ From PEP 8
 
 The following rules contradict common Python conventions. Check them explicitly:
@@ -65,7 +88,7 @@ The following rules contradict common Python conventions. Check them explicitly:
   Restricting to 6 workers ensures that not too much memory is used.
 - Use the `temp` subdirectory of the project root for creating temporary scripts and files.
   When generating samples for testing, create a subfolder in `temp` with an appropriate name for this.
-- When making commits on the user's behalf, do not include a comment about AI co-authorship.
+- When making commits on my behalf, do not include a comment about AI co-authorship.
 - When asked to commit changes to git, only use one-line commit messages.
 
 # Architecture is P0
@@ -82,7 +105,7 @@ The following rules contradict common Python conventions. Check them explicitly:
 # Planning
 
 Whenever you make or substantially change a plan:
-Offer a prompt to the user where they can select any number of the following agents to challenge the plan:
+Offer a prompt to me where they can select any number of the following agents to challenge the plan:
 
 1. architectural: enforces "Architecture is P0"
 2. testability: design is testable
@@ -91,6 +114,10 @@ Offer a prompt to the user where they can select any number of the following age
 
 Run these plus a separate general purpose adversarial critic in parallel and revise the plan according to their feedback.
 After planning, pause to compact before implementation.
+
+- When I do no approve a plan and ask a question, do not show it again. Answer what I asked and wait.
+- If a decision cannot be explained in plain words with a concrete example, do not ask me.
+  Decide it under "Architecture is P0" and tell me what you decided and why.
 
 # Code Review Context
 
@@ -121,7 +148,7 @@ The goal for test coverage is 95%, but this has very important caveats:
 - One exception to this is the following:
   It is permitted to use code to modify authentic test data in order to cover error-specific code paths.
 - For example, never write code to synthesize an archive format:
-  Use the original archive software to produce test samples or ask the user to provide them.
+  Use the original archive software to produce test samples or ask me to provide them.
 
 The name of a test and its code should make its purpose and the correctness of its assertion obvious.
 The goal is that a test requires no further narration via comment or docstring.
