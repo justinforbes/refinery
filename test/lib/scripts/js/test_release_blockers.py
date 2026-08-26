@@ -382,46 +382,6 @@ class TestAnArgumentIsEvaluatedWhereItIsWritten(TestBase):
         )
 
 
-#: A call to a function that only shares its name with a self-disabling wrapper, mapped to what Node
-#: prints for it. Measured against
-#: `refinery.lib.scripts.js.deobfuscation.argwrap._find_expression_wrappers` answering nothing, which
-#: leaves the program standing whole.
-A_CALL_TO_A_FUNCTION_A_WRAPPER_SHARES_A_NAME_WITH = {
-    'function W() { W = function () {}; }\n'
-    'function outer() {\n'
-    "  function W(a) { console.log('real', a); }\n"
-    '  W(1);\n'
-    '}\n'
-    'outer();\n'
-    'W(2);\n': 'real 1\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestACallIsExpandedOnlyWhereItReachesTheWrapper(TestBase):
-    """
-    The self-disabling wrapper this pass expands is recognized per declaration, and the call sites it
-    then expands are picked out by the callee's name. A name settles nothing about which declaration
-    a call reads, so a call to any function answering to the same name is lowered to its bare
-    arguments and that function's declaration goes with it.
-
-    The pass already builds a `refinery.lib.scripts.js.analysis.model.SemanticModel`. Resolving the
-    callee through it is the rule the name is standing in for.
-    """
-
-    @unittest.expectedFailure
-    def test_a_call_to_a_function_that_is_not_the_wrapper_is_left_standing(self):
-        """
-        Node prints `real 1` for `A_CALL_TO_A_FUNCTION_A_WRAPPER_SHARES_A_NAME_WITH`. The
-        deobfuscation emits `void 0;` and `2;`, which print nothing.
-        """
-        rows = A_CALL_TO_A_FUNCTION_A_WRAPPER_SHARES_A_NAME_WITH
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
 #: An accessor an IIFE answers, over a closure the answered function writes through a member of or
 #: reads the identity of, mapped to what Node prints for it. Measured against
 #: `refinery.lib.scripts.js.deobfuscation.iifeaccessor._is_safe_to_promote` answering False, which

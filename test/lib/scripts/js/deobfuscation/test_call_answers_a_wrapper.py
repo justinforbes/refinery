@@ -52,11 +52,14 @@ from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.model import FUNCTION_NODES
 from refinery.lib.scripts.js.model import (
     JsCallExpression,
+    JsFunctionDeclaration,
+    JsFunctionExpression,
     JsFunctionNode,
     JsIdentifier,
     JsMemberExpression,
     JsMethodDefinition,
     JsProperty,
+    JsScript,
     JsStringLiteral,
     JsVariableDeclarator,
     is_async_function,
@@ -330,8 +333,9 @@ def a_self_disabling_wrapper_a_plain_one_shares_a_name_with(
 ) -> str:
     """
     A wrapper whose call this pass may not answer, under a name a plain wrapper elsewhere in the
-    file also answers to. The pass matches a callee by its name, so an answer kept per declaration
-    is read off whichever of the two the walk reached last.
+    file also answers to. The refusal is kept per declaration, and the plain wrapper's own call is
+    expanded all the same: the two calls read two bindings, which their shared name says nothing
+    about.
     """
     return _lines(
         'function W() { W = function () {}; }',
@@ -632,17 +636,16 @@ def _wraps_what_it_returns(node: Node | None) -> bool:
     )
 
 
-def _the_names_a_wrapping_function_answers_to(root: Node) -> set[str]:
+def _the_keys_a_wrapping_function_is_held_under(root: Node) -> set[str]:
+    """
+    The property and method names a wrapping function in *root* is reached through. A member access
+    names no binding, so this is all a reading of the text can say about `o.m()`.
+    """
     names: set[str] = set()
     for node in root.walk():
         if not _wraps_what_it_returns(node):
             continue
-        own = getattr(node, 'id', None)
-        if isinstance(own, JsIdentifier):
-            names.add(own.name)
         owner = node.parent
-        if isinstance(owner, JsVariableDeclarator) and isinstance(owner.id, JsIdentifier):
-            names.add(owner.id.name)
         if isinstance(owner, (JsProperty, JsMethodDefinition)):
             key = getattr(owner, 'key', None)
             if isinstance(key, JsIdentifier):
@@ -652,20 +655,73 @@ def _the_names_a_wrapping_function_answers_to(root: Node) -> set[str]:
     return names
 
 
-def _names_a_wrapping_function(callee: Node | None, names: set[str]) -> bool:
+def _the_scopes_around(node: Node):
+    """
+    The functions and the script holding *node*, innermost first.
+    """
+    owner = node.parent
+    while owner is not None:
+        if isinstance(owner, (JsScript, *FUNCTION_NODES)):
+            yield owner
+        owner = owner.parent
+
+
+def _what_a_scope_declares(scope: Node, name: str) -> list[Node | None]:
+    """
+    What *scope* itself declares under *name*, as the functions declared or a `None` for a name
+    holding something else. A function below it declares into its own scope and not into this one.
+    """
+    declared: list[Node | None] = []
+    own = getattr(scope, 'id', None)
+    if isinstance(scope, JsFunctionExpression) and isinstance(own, JsIdentifier):
+        if own.name == name:
+            declared.append(scope)
+    for param in getattr(scope, 'params', None) or ():
+        if isinstance(param, JsIdentifier) and param.name == name:
+            declared.append(None)
+    for node in scope.walk():
+        if node is scope or next(_the_scopes_around(node), None) is not scope:
+            continue
+        if isinstance(node, JsFunctionDeclaration) and isinstance(node.id, JsIdentifier):
+            if node.id.name == name:
+                declared.append(node)
+        if isinstance(node, JsVariableDeclarator) and isinstance(node.id, JsIdentifier):
+            if node.id.name == name:
+                declared.append(node.init)
+    return declared
+
+
+def _the_name_reaches_a_wrapping_function(reference: JsIdentifier) -> bool:
+    """
+    Whether the name read at *reference* reaches a function that wraps what its body returns, read
+    the way a reader reads it: the innermost scope around the reference that declares the name at
+    all is the one that answers, and a name declared nowhere reaches nothing.
+
+    A file-global set of the names a wrapping function answers to cannot say this. It counts a call
+    to a plain function elsewhere in the file as a call to the wrapping one, so a pass that answers
+    the plain call — which it may — reads as having answered the wrapping one.
+    """
+    for scope in _the_scopes_around(reference):
+        declared = _what_a_scope_declares(scope, reference.name)
+        if declared:
+            return any(_wraps_what_it_returns(node) for node in declared)
+    return False
+
+
+def _calls_a_wrapping_function(callee: Node | None, keys: set[str]) -> bool:
     if _wraps_what_it_returns(callee):
         return True
     if isinstance(callee, JsIdentifier):
-        return callee.name in names
+        return _the_name_reaches_a_wrapping_function(callee)
     if isinstance(callee, JsMemberExpression) and not callee.computed:
         key = callee.property
-        return isinstance(key, JsIdentifier) and key.name in names
+        return isinstance(key, JsIdentifier) and key.name in keys
     return False
 
 
 def _what_wraps_and_what_calls_it(source: str) -> tuple[int, int]:
     """
-    How many functions in *source* wrap what their body returns, and how many calls name one.
+    How many functions in *source* wrap what their body returns, and how many calls reach one.
 
     A pass that answers such a call takes the call away, and usually the function with it, so this
     pair moving is what a wrong answer looks like from outside the engine. A pass that reshapes
@@ -673,13 +729,13 @@ def _what_wraps_and_what_calls_it(source: str) -> tuple[int, int]:
     entry — carries the keyword along and leaves the pair where it was.
     """
     root = JsParser(source).parse()
-    names = _the_names_a_wrapping_function_answers_to(root)
+    keys = _the_keys_a_wrapping_function_is_held_under(root)
     wrapping = 0
     calls = 0
     for node in root.walk():
         if _wraps_what_it_returns(node):
             wrapping += 1
-        if isinstance(node, JsCallExpression) and _names_a_wrapping_function(node.callee, names):
+        if isinstance(node, JsCallExpression) and _calls_a_wrapping_function(node.callee, keys):
             calls += 1
     return wrapping, calls
 

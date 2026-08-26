@@ -72,11 +72,11 @@ class Row(NamedTuple):
 
 
 #: A program the expansion is not equivalent for, mapped to what Node makes of it and to the text
-#: the deobfuscation has to answer with. Every one of them is a live wrong answer today: the pass
-#: recognizes the wrapper per declaration and then picks its call sites, and the declaration it
-#: removes, by the callee's name. A name settles nothing about which binding a call reads, whether
-#: that binding still holds the wrapper when the call runs, or whether anything observes that the
-#: call disabled it.
+#: the deobfuscation has to answer with. Each of them holds a name that answers to a wrapper and
+#: says something other than the wrapper about what a call to it runs: a second declaration the call
+#: reads instead, a value put into the name before the call, or a read that tells the wrapper from
+#: what the call left behind. Every one of them was a wrong answer while the pass picked its call
+#: sites, and the declaration it removed, by that name.
 A_WRAPPER_THE_EXPANSION_IS_WRONG_FOR = {
     _a_program(
         'function W() { W = function () {}; }',
@@ -333,9 +333,9 @@ A_WRAPPER_THE_EXPANSION_IS_RIGHT_FOR = {
 }
 
 
-#: A program the pass reduces today and answers correctly, and stops reducing once a call site has
-#: to reach the wrapper before it is expanded. Nothing here was ever a wrong answer, and each row
-#: states what the rule costs: a name read for anything other than the call it makes, and a
+#: A program the pass answered correctly while it read names, and no longer reduces now that a call
+#: has to reach the wrapper before it is expanded. Nothing here was ever a wrong answer, and each
+#: row states what the rule costs: a name read for anything other than the call it makes, and a
 #: declaration another file may name.
 A_REDUCTION_THE_ADMISSION_GIVES_UP = {
     _a_program(
@@ -381,7 +381,6 @@ class TestOnlyACallThatReachesTheWrapperIsExpanded(TestBase):
     reported on a machine with no Node.js as well.
     """
 
-    @unittest.expectedFailure
     def test_a_wrapper_the_expansion_is_wrong_for_is_left_standing(self):
         rows = A_WRAPPER_THE_EXPANSION_IS_WRONG_FOR
         self.assertEqual(
@@ -396,7 +395,6 @@ class TestOnlyACallThatReachesTheWrapperIsExpanded(TestBase):
             _the_text_each_program_has_to_come_back_as(rows),
         )
 
-    @unittest.expectedFailure
     def test_a_reduction_the_admission_gives_up_is_given_up(self):
         rows = A_REDUCTION_THE_ADMISSION_GIVES_UP
         self.assertEqual(
@@ -412,7 +410,6 @@ class TestTheProgramPrintsWhatItPrinted(TestBase):
     text the deobfuscation answers with, have to be the same thing.
     """
 
-    @unittest.expectedFailure
     def test_a_wrapper_the_expansion_is_wrong_for_prints_what_it_printed(self):
         rows = A_WRAPPER_THE_EXPANSION_IS_WRONG_FOR
         self.assertEqual(_what_each_program_prints(rows), _what_each_program_printed(rows))
