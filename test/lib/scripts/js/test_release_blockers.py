@@ -607,3 +607,86 @@ class TestAnArgumentIsEvaluatedWhereItIsWritten(TestBase):
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
         )
+
+
+#: A call to a function that only shares its name with a self-disabling wrapper, mapped to what Node
+#: prints for it. Measured against
+#: `refinery.lib.scripts.js.deobfuscation.argwrap._find_expression_wrappers` answering nothing, which
+#: leaves the program standing whole.
+A_CALL_TO_A_FUNCTION_A_WRAPPER_SHARES_A_NAME_WITH = {
+    'function W() { W = function () {}; }\n'
+    'function outer() {\n'
+    "  function W(a) { console.log('real', a); }\n"
+    '  W(1);\n'
+    '}\n'
+    'outer();\n'
+    'W(2);\n': 'real 1\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestACallIsExpandedOnlyWhereItReachesTheWrapper(TestBase):
+    """
+    The self-disabling wrapper this pass expands is recognized per declaration, and the call sites it
+    then expands are picked out by the callee's name. A name settles nothing about which declaration
+    a call reads, so a call to any function answering to the same name is lowered to its bare
+    arguments and that function's declaration goes with it.
+
+    The pass already builds a `refinery.lib.scripts.js.analysis.model.SemanticModel`. Resolving the
+    callee through it is the rule the name is standing in for.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_to_a_function_that_is_not_the_wrapper_is_left_standing(self):
+        """
+        Node prints `real 1` for `A_CALL_TO_A_FUNCTION_A_WRAPPER_SHARES_A_NAME_WITH`. The
+        deobfuscation emits `void 0;` and `2;`, which print nothing.
+        """
+        rows = A_CALL_TO_A_FUNCTION_A_WRAPPER_SHARES_A_NAME_WITH
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: An accessor an IIFE answers, over a closure the answered function writes through a member of or
+#: reads the identity of, mapped to what Node prints for it. Measured against
+#: `refinery.lib.scripts.js.deobfuscation.iifeaccessor._is_safe_to_promote` answering False, which
+#: leaves both programs standing whole.
+A_CLOSURE_THE_PROMOTED_ACCESSOR_STOPS_SHARING = {
+    'var acc = (function () {\n'
+    '  var t = [0];\n'
+    '  return function (i) { t[0] = t[0] + i; return t[0]; };\n'
+    '})();\n'
+    'console.log(acc(1), acc(1));\n': '1 2\n',
+    'var acc = (function () {\n'
+    "  var t = ['a'];\n"
+    '  return function () { return t; };\n'
+    '})();\n'
+    'console.log(acc() === acc());\n': 'true\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPromotedClosureIsStillOneObjectAcrossCalls(TestBase):
+    """
+    An IIFE answering a function is inlined by moving what the IIFE declared into the answered
+    function's body, which builds those declarations afresh on every call. That is equivalent only
+    where nothing carries a value or an identity from one call to the next, and `_is_safe_to_promote`
+    asks it of a closure name written through a bare identifier and of nothing else: a closure
+    written through a member keeps no count, and one whose identity is compared is a different object
+    each time it is answered.
+    """
+
+    @unittest.expectedFailure
+    def test_a_closure_the_accessor_keeps_writing_or_comparing_is_not_promoted(self):
+        """
+        Node prints `1 2` for the first program of `A_CLOSURE_THE_PROMOTED_ACCESSOR_STOPS_SHARING`
+        and `true` for the second. The deobfuscation folds them to `console.log(1, 1);` and
+        `console.log(['a'] === ['a']);`, which print `1 1` and `false`.
+        """
+        rows = A_CLOSURE_THE_PROMOTED_ACCESSOR_STOPS_SHARING
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
