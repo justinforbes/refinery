@@ -3,8 +3,9 @@ A ledger of JavaScript defects that are known, understood, and not yet fixed.
 
 The ones a release is held for are not here: `test.lib.scripts.js.test_release_blockers` holds
 those, under the same rules, so that the question of whether the tool is fit to ship has one file
-for an answer. An entry belongs there rather than here when what it hands back looks clean and is
-wrong; one that refuses to reduce something, or reduces it to something uglier, belongs here. Which
+for an answer. An entry belongs there rather than here when a program an engine runs comes back
+behaving differently; one that refuses to reduce something, reduces it to something uglier, or
+mishandles a file no engine runs, belongs here. Which
 file an entry sits in says what it costs and never how well it is understood, so an entry moves
 across when that is reassessed.
 
@@ -39,6 +40,12 @@ from test.lib.scripts.js.deobfuscation.test_array_length_reads import (
 from test.lib.scripts.js.deobfuscation.test_call_answers_a_wrapper import (
     a_string_array_whose_rotation_runs,
 )
+from test.lib.scripts.js.deobfuscation.test_escaped_identifiers import (
+    AN_ESCAPED_ACCESSOR_TERMINAL,
+    AN_ESCAPED_ASYNC_TERMINAL,
+    AN_ESCAPED_KEYWORD_OPERATOR,
+    AN_ESCAPED_STATIC_TERMINAL,
+)
 from test.lib.scripts.js.deobfuscation.test_stringarray import (
     A_PRESET_BESIDE_AN_ACCESSOR_CALL_NOTHING_CAN_ANSWER,
 )
@@ -60,7 +67,9 @@ from test.lib.scripts.js.test_parser_recovery import (
     A_WORD_NO_MODULE_MAY_BIND,
 )
 from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_HAS
+from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
 
+from refinery.lib.scripts import UnspellableNode
 from refinery.lib.scripts.js.analysis.model import is_use_position
 from refinery.lib.scripts.js.model import (
     JsBigIntLiteral,
@@ -1901,4 +1910,327 @@ class TestAStringArrayHolderNoLoopReadsIsStillResolved(TestBase):
         self.assertEqual(
             "console.log('3');",
             folded(a_string_array_whose_rotation_runs('async function', target=3)),
+        )
+
+
+class TestWellFormednessRefusesANonProgram(TestBase):
+    """
+    `refinery.lib.scripts.is_well_formed` is the domain over which fidelity is stated: it holds
+    when every node in the tree spells something a parser agreed to read. A source no engine
+    accepts is not such a tree, and a caller that is told otherwise compares a fabrication against
+    the file it came from.
+
+    What is left here is the class the parser reads without repairing anything: an assignment
+    target the grammar refuses. A file that stops in the middle of a construct is answered
+    correctly and its law lives in `test.lib.scripts.js.test_parser_recovery`.
+    """
+
+    @unittest.expectedFailure
+    def test_an_arrow_function_is_not_an_update_target(self):
+        """
+        Node refuses `f = a => {}++` with `SyntaxError: Unexpected token '++'`. An update operator
+        needs an operand it can write back to, and a function made on the spot is not a reference.
+        """
+        self.assertEqual(well_formed('f = a => {}++'), False)
+
+    @unittest.expectedFailure
+    def test_a_function_expression_is_not_an_update_target(self):
+        """
+        Node refuses `f = function () {}++` with `SyntaxError: Invalid left-hand side expression in
+        postfix operation`, naming the same missing target the arrow form lacks.
+        """
+        self.assertEqual(well_formed('f = function () {}++'), False)
+
+
+class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
+    """
+    A buffer carved out of memory can stop in the middle of a literal, and the literal it stopped
+    inside is then spelled by no text at all. Refusing to print is the only answer that keeps that
+    visible, because an analyst holding a clean program has no way left to tell that the file they
+    handed over was cut.
+    """
+
+    @unittest.expectedFailure
+    def test_a_fold_that_reaches_a_literal_the_cut_left_open_is_refused(self):
+        """
+        Node refuses every carved file in
+        `test.lib.scripts.js.test_truncated_source.FOLDS_ANSWERED_WITH_A_PROGRAM` and accepts each
+        of them with its delimiter restored, so the missing quote is the whole of the difference
+        between a program and a buffer that is not one. In each of these the declaration the cut
+        left open is read by nothing before the cut, so it is dropped as dead code and the literal
+        no text spells never reaches the printer: what comes back is the head of the file, whole,
+        and it says nothing about what was lost.
+        """
+        carved = FOLDS_ANSWERED_WITH_A_PROGRAM
+        self.assertEqual(
+            {name: _refuses_to_print(fold.cut) for name, fold in carved.items()},
+            {name: True for name in carved},
+        )
+
+
+def _refuses_to_print(source: str) -> bool:
+    """
+    Whether `refinery.js` declines to write anything for *source*, which is the only answer that can
+    be given for a buffer holding a literal no text spells.
+    """
+    try:
+        folded(source)
+    except UnspellableNode:
+        return True
+    else:
+        return False
+
+
+def _spelled_with_an_escaped_identifier(source: str) -> str:
+    """
+    *source* with each placeholder replaced by the unicode escape spelling the characters it names.
+
+    The escapes are assembled from `chr(92)` rather than written out, because an escape written into
+    this file is one flattening away from being the characters it denotes, and an entry that no
+    longer holds the spelling it asks about asks nothing at all. A source that named a placeholder
+    and came back without a backslash is that flattening having happened, and it is refused here
+    rather than left to be discovered as an entry that quietly stopped asking anything.
+    """
+    result = source.replace('ESCAPED_IF', F'{chr(92)}u0069f')
+    result = result.replace('ESCAPED_AIT', F'{chr(92)}u0061it')
+    result = result.replace('ESCAPED_ET', F'{chr(92)}u0065t')
+    if result != source and chr(92) not in result:
+        raise AssertionError(F'the escape in {source!r} was flattened away')
+    return result
+
+
+#: Files the language refuses although nothing in them was fabricated by the parser, each mapped to
+#: whether it is a module. Every one of them parses cleanly: what refuses them is an early error,
+#: which is a rule about a tree rather than about the text a parser could not read.
+A_FILE_REFUSED_WITH_NOTHING_FABRICATED = {
+    _spelled_with_an_escaped_identifier(source): module
+    for source, module in (
+        ('function ESCAPED_IF(){ return 1; } console.log(2);', False),
+        ('let let = 1; console.log(2);', False),
+        ('var o = { __proto__: null, __proto__: {} }; console.log(2);', False),
+        ('var await = 1; console.log(2);', True),
+        ('var awESCAPED_AIT = 1; console.log(2);', True),
+    )
+}
+
+
+#: Binding positions written as an object pattern whose shorthand names a reserved word. The one
+#: node the parser builds there is the key and the binding at once, so the refusal that reaches
+#: every other binding position — a declarator, an array pattern, a parameter — does not reach this
+#: one, and `var { if: x } = o` is a program, which is why the refusal cannot simply move onto the
+#: key.
+A_BINDING_PATTERN_NAMING_A_RESERVED_WORD = tuple(
+    _spelled_with_an_escaped_identifier(source) for source in (
+        'var { ESCAPED_IF } = { if: 7 }; console.log(1);',
+        'var { ESCAPED_IF = 1 } = {}; console.log(1);',
+        'function f({ ESCAPED_IF }){ return 1; } console.log(f({}));',
+    )
+)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAFileRefusedWithNothingFabricatedIsNotAnsweredWithAProgram(TestBase):
+    """
+    A file can parse with every token the source wrote and still be one no engine runs, because the
+    rule refusing it is stated over the tree rather than over the text: a name whose escapes spell a
+    reserved word, a `let` binding named `let`, two `__proto__` keys in one literal, and a module
+    binding `await` are all read without anything being repaired or invented.
+
+    `refinery.lib.scripts.is_well_formed` answers `True` for each, which is the honest answer to the
+    question it asks — nothing was fabricated — and the wrong answer to the one every caller wants,
+    which is whether the tree spells a program. What follows from that is a file the analyst is
+    handed as though it ran: each of these comes back reduced, with the one thing wrong with it
+    removed along with the code it stood in.
+
+    `test.lib.scripts.js.test_parser_recovery` states the other half, where the parser did supply
+    something and says so. Closing this one needs a refusal mechanism that does not exist yet, and
+    the escaped-name row shows the shape it must have: the parser answers with the span it read
+    wherever the model has a node kind for one, and a declared function's name is a slot that holds
+    an identifier and nothing else.
+    """
+
+    @unittest.expectedFailure
+    def test_a_file_the_language_refuses_is_refused(self):
+        """
+        Node refuses every program of `A_FILE_REFUSED_WITH_NOTHING_FABRICATED` with a `SyntaxError`
+        and prints nothing for it. Each deobfuscation prints `2`.
+        """
+        rows = A_FILE_REFUSED_WITH_NOTHING_FABRICATED
+        refused = ('', 'SyntaxError')
+        self.assertEqual(
+            {source: before_and_after(source, module=module) for source, module in rows.items()},
+            {source: (refused, refused) for source in rows},
+        )
+
+    @unittest.expectedFailure
+    def test_a_pattern_binding_a_reserved_word_is_no_program(self):
+        """
+        Node refuses every program of `A_BINDING_PATTERN_NAMING_A_RESERVED_WORD`, each of which
+        binds a name whose escapes spell `if` through an object pattern. What each comes back as is
+        refused too, so nothing runs that should not; what is wrong is that
+        `refinery.lib.scripts.is_well_formed` answers `True` for all three, and that answer is what
+        decides whether such a text may be spliced into a file that does run.
+        """
+        rows = A_BINDING_PATTERN_NAMING_A_RESERVED_WORD
+        self.assertEqual(
+            {source: well_formed(source) for source in rows},
+            {source: False for source in rows},
+        )
+
+
+#: Further shapes of the repair `A_FILE_THE_PARSER_REPAIRED` is about, one written with no escape at
+#: all so that the family is not read as being about escapes, and one spelling `let` where a
+#: declaration would begin.
+A_REPAIR_WITH_NOTHING_ESCAPED_ABOUT_IT = (
+    "console.log('alpha' 'beta');",
+    _spelled_with_an_escaped_identifier('lESCAPED_ET x = 1; console.log(x);'),
+)
+
+
+#: Every file whose parse needed a token the source did not write. Four of the tables come from
+#: `test.lib.scripts.js.deobfuscation.test_escaped_identifiers`, where the law they belong to is
+#: stated: a terminal word of the grammar is matched by the characters typed, so an escaped
+#: spelling of `get`, `set`, `static`, `async`, `instanceof` or `in` is a name standing where the
+#: grammar wanted a word, and the parser writes the separator that would have to be there.
+A_FILE_THE_PARSER_REPAIRED = (
+    *AN_ESCAPED_ACCESSOR_TERMINAL,
+    *AN_ESCAPED_STATIC_TERMINAL,
+    *AN_ESCAPED_ASYNC_TERMINAL,
+    *AN_ESCAPED_KEYWORD_OPERATOR,
+    *A_REPAIR_WITH_NOTHING_ESCAPED_ABOUT_IT,
+)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAFileTheParserRepairedIsNotAnsweredWithAProgram(TestBase):
+    """
+    Standing where the grammar requires one token and finding another, the parser writes the token
+    it wanted and reads on. It records that it did — `refinery.lib.scripts.is_well_formed` answers
+    `False` for every file here — and nothing between that record and the printer reads it, so what
+    comes back is a program built out of text no engine agreed to read.
+
+    Two of these are the expensive shape. `[] instanceof Array` and `'a' in {a: 1}` written with an
+    escaped operator lose the operator and keep both operands, so the file comes back printing them;
+    and `class C { get x(){} }` written the same way comes back declaring a field beside a method,
+    which runs and prints a function where Node refuses the file outright.
+
+    `test_a_file_the_language_refuses_is_refused` states the same cost for the files where nothing
+    was repaired at all. That one needs a refusal mechanism to be built; this one needs only a
+    reader for the record the parser already keeps.
+    """
+
+    @unittest.expectedFailure
+    def test_a_file_the_parser_repaired_is_refused(self):
+        """
+        Node refuses every program of `A_FILE_THE_PARSER_REPAIRED` with a `SyntaxError` and prints
+        nothing for it. Each deobfuscation is a file that parses, and five of them print.
+        """
+        rows = A_FILE_THE_PARSER_REPAIRED
+        refused = ('', 'SyntaxError')
+        self.assertEqual(
+            {source: (well_formed(source), before_and_after(source)) for source in rows},
+            {source: (False, (refused, refused)) for source in rows},
+        )
+
+
+#: A self-disabling wrapper called inside a `with` body whose scope object carries the wrapper's
+#: name, mapped to what Node prints for it.
+A_WITH_OBJECT_CARRYING_A_WRAPPER_NAME = {
+    "var o = { W: function (a) { console.log('real', a); } };\n"
+    'function W() { W = function () {}; }\n'
+    'with (o) { W(1); }\n': 'real 1\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWithObjectMayCarryTheNameAWrapperAnswersTo(TestBase):
+    """
+    A call inside a `with` body reads the scope object first, and the wrapper only where the object
+    lacks the name. The wrapper expansion assumes the object lacks it. The assumption is
+    deliberate: the files the pass exists for call their wrappers inside `with` dispatch blocks
+    whose objects never carry the wrapper's name - an obfuscator that put it there would break its
+    own program - and refusing every call a `with` body makes is measured to forfeit the whole
+    recovery of one of the three real samples. Deciding the property's absence instead would take
+    interprocedural object facts the analysis does not have.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_the_scope_object_answers_is_left_standing(self):
+        """
+        Node prints `real 1` for the program of `A_WITH_OBJECT_CARRYING_A_WRAPPER_NAME`: the scope
+        object's own `W` answers the call. The deobfuscation lowers the call to its argument and
+        prints nothing.
+        """
+        rows = A_WITH_OBJECT_CARRYING_A_WRAPPER_NAME
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_a_call_the_scope_object_does_not_answer_is_still_expanded(self):
+        """
+        The acceptance's other half, and the fizzbuzz-03 recovery in miniature: where the scope
+        object lacks the name, the call is the wrapper's and still expands. A guard refusing every
+        call a `with` body makes would flip the entry above to an unexpected success by forfeiting
+        exactly this.
+        """
+        self.assertEqual(
+            folded(
+                'var o = { p: 1 };\n'
+                'function W() { W = function () {}; }\n'
+                'with (o) { W(console.log(1)); }\n'
+                'console.log(2);\n'
+            ),
+            'var o = { p: 1 };\n'
+            'with (o) {\n'
+            '  console.log(1);\n'
+            '}\n'
+            'console.log(2);',
+        )
+
+
+#: A self-disabling wrapper rebound by a direct `eval` of a string no fold can read, mapped to
+#: what Node prints for it.
+A_WRAPPER_REBOUND_BY_AN_UNREADABLE_EVAL = {
+    'function W() { W = function () {}; }\n'
+    'eval(String(Math.random() < 2 && "W = function (a) { console.log(7, a); }"));\n'
+    'W(1);\n': '7 1\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnUnreadableEvalMayRebindAWrapper(TestBase):
+    """
+    A direct `eval` of a string nothing can fold may write any name in its scope, so after one
+    runs, a wrapper's name may hold anything. The wrapper expansion accepts this: it is the
+    acceptance namespace flattening and the dispatcher unwrapper already record, made because a
+    reflective surface is exactly what the real obfuscated files carry on the way in, and a pass
+    gated on one never runs and never clears the surface that was gating it. An `eval` a fold can
+    read is not covered here: its assignment is inlined as real code before the expansion decides,
+    and the expansion then sees the write.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_after_the_eval_reaches_what_it_bound(self):
+        """
+        Node prints `7 1` for the program of `A_WRAPPER_REBOUND_BY_AN_UNREADABLE_EVAL`: the `eval`
+        argument always evaluates to an assignment rebinding `W`. The deobfuscation lowers the
+        call to its argument and prints nothing.
+        """
+        rows = A_WRAPPER_REBOUND_BY_AN_UNREADABLE_EVAL
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_the_eval_argument_is_still_unread(self):
+        """
+        The entry above pins the acceptance only while nothing reads the string: a fold that
+        learns to decide `Math.random() < 2` would flip it to an unexpected success by making the
+        rebind visible, not by closing the acceptance. This holds the string unread.
+        """
+        source, = A_WRAPPER_REBOUND_BY_AN_UNREADABLE_EVAL
+        self.assertEqual(
+            folded(source),
+            'eval(String(Math.random() < 2 && "W = function (a) { console.log(7, a); }"));\n1;',
         )

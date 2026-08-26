@@ -317,7 +317,7 @@ AN_ESCAPE_NAMING_NO_CODE_POINT = tuple(
 #: A program spelling `get` or `set` with an escape where an accessor's name follows it. The
 #: language reads a terminal word there, and a terminal word is matched by the characters typed.
 #: The law over this table is not stated here: the tool answers these files with programs that
-#: run, and `test.lib.scripts.js.test_release_blockers` pins that.
+#: run, and `test.lib.scripts.js.test_unfixed_defects` pins that.
 AN_ESCAPED_ACCESSOR_TERMINAL = tuple(
     _spelled_with_escapes(source) for source in (
         'var o = { ESCAPED[0067]et x(){ return 1; } }; console.log(o.x);',
@@ -330,7 +330,7 @@ AN_ESCAPED_ACCESSOR_TERMINAL = tuple(
 #: A program spelling `static` with an escape where a class member follows it, in both the member
 #: and the initialization-block form.
 #: The law over this table is not stated here: the tool answers these files with programs that
-#: run, and `test.lib.scripts.js.test_release_blockers` pins that.
+#: run, and `test.lib.scripts.js.test_unfixed_defects` pins that.
 AN_ESCAPED_STATIC_TERMINAL = tuple(
     _spelled_with_escapes(source) for source in (
         'class C { ESCAPED[0073]tatic m(){ return 1; } } console.log(C.m());',
@@ -341,7 +341,7 @@ AN_ESCAPED_STATIC_TERMINAL = tuple(
 
 #: A program spelling `async` with an escape before the `function` it modifies.
 #: The law over this table is not stated here: the tool answers these files with programs that
-#: run, and `test.lib.scripts.js.test_release_blockers` pins that.
+#: run, and `test.lib.scripts.js.test_unfixed_defects` pins that.
 AN_ESCAPED_ASYNC_TERMINAL = tuple(
     _spelled_with_escapes(source) for source in (
         'ESCAPED[0061]sync function f(){ return 1; } console.log(typeof f);',
@@ -370,7 +370,7 @@ AN_ESCAPED_TARGET_TERMINAL = tuple(
 #: exactly as `if` and `else` are, so an escaped spelling of one is not that operator and the
 #: program holding it is not a program.
 #: The law over this table is not stated here: the tool answers these files with programs that
-#: run, and `test.lib.scripts.js.test_release_blockers` pins that.
+#: run, and `test.lib.scripts.js.test_unfixed_defects` pins that.
 AN_ESCAPED_KEYWORD_OPERATOR = tuple(
     _spelled_with_escapes(source) for source in (
         'console.log([] ESCAPED[0069]nstanceof Array);',

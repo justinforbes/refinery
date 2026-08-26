@@ -8,11 +8,13 @@ an unexpected success and leaves this file only by being fixed. Where the questi
 JavaScript rather than about this project, the answer was established with Node.js and is quoted in
 the docstring of the test that pins it.
 
-What sets these apart is what they cost rather than what they are. Each one hands back a file that
-looks clean and is wrong: nothing throws, nothing is left half-rewritten, and the analyst reading it
-gets no signal that the answer is not the one the language gives. An entry that merely refuses to
-reduce something, or reduces it to something uglier, belongs in the other file. This file emptying
-is the release gate.
+What sets these apart is what they cost rather than what they are. Each one takes a program an
+engine runs and hands back one that behaves differently: nothing throws, nothing is left
+half-rewritten, and the analyst reading it gets no signal that the answer is not the one the
+language gives. An entry that merely refuses to reduce something, or reduces it to something
+uglier, belongs in the other file, and so does everything about a file no engine runs, however
+clean the answer for one looks: mishandling invalid input is never what a release is held for.
+This file emptying is the release gate.
 """
 from __future__ import annotations
 
@@ -20,12 +22,6 @@ import unittest
 
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
-from test.lib.scripts.js.deobfuscation.test_escaped_identifiers import (
-    AN_ESCAPED_ACCESSOR_TERMINAL,
-    AN_ESCAPED_ASYNC_TERMINAL,
-    AN_ESCAPED_KEYWORD_OPERATOR,
-    AN_ESCAPED_STATIC_TERMINAL,
-)
 from test.lib.scripts.js.ledger import (
     before_and_after,
     each_program_still_prints,
@@ -34,77 +30,6 @@ from test.lib.scripts.js.ledger import (
     printed,
     well_formed,
 )
-from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
-
-from refinery.lib.scripts import UnspellableNode
-
-
-class TestWellFormednessRefusesANonProgram(TestBase):
-    """
-    `refinery.lib.scripts.is_well_formed` is the domain over which fidelity is stated: it holds
-    when every node in the tree spells something a parser agreed to read. A source no engine
-    accepts is not such a tree, and a caller that is told otherwise compares a fabrication against
-    the file it came from.
-
-    What is left here is the class the parser reads without repairing anything: an assignment
-    target the grammar refuses. A file that stops in the middle of a construct is answered
-    correctly and its law lives in `test.lib.scripts.js.test_parser_recovery`.
-    """
-
-    @unittest.expectedFailure
-    def test_an_arrow_function_is_not_an_update_target(self):
-        """
-        Node refuses `f = a => {}++` with `SyntaxError: Unexpected token '++'`. An update operator
-        needs an operand it can write back to, and a function made on the spot is not a reference.
-        """
-        self.assertEqual(well_formed('f = a => {}++'), False)
-
-    @unittest.expectedFailure
-    def test_a_function_expression_is_not_an_update_target(self):
-        """
-        Node refuses `f = function () {}++` with `SyntaxError: Invalid left-hand side expression in
-        postfix operation`, naming the same missing target the arrow form lacks.
-        """
-        self.assertEqual(well_formed('f = function () {}++'), False)
-
-
-class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
-    """
-    A buffer carved out of memory can stop in the middle of a literal, and the literal it stopped
-    inside is then spelled by no text at all. Refusing to print is the only answer that keeps that
-    visible, because an analyst holding a clean program has no way left to tell that the file they
-    handed over was cut.
-    """
-
-    @unittest.expectedFailure
-    def test_a_fold_that_reaches_a_literal_the_cut_left_open_is_refused(self):
-        """
-        Node refuses every carved file in
-        `test.lib.scripts.js.test_truncated_source.FOLDS_ANSWERED_WITH_A_PROGRAM` and accepts each
-        of them with its delimiter restored, so the missing quote is the whole of the difference
-        between a program and a buffer that is not one. In each of these the declaration the cut
-        left open is read by nothing before the cut, so it is dropped as dead code and the literal
-        no text spells never reaches the printer: what comes back is the head of the file, whole,
-        and it says nothing about what was lost.
-        """
-        carved = FOLDS_ANSWERED_WITH_A_PROGRAM
-        self.assertEqual(
-            {name: _refuses_to_print(fold.cut) for name, fold in carved.items()},
-            {name: True for name in carved},
-        )
-
-
-def _refuses_to_print(source: str) -> bool:
-    """
-    Whether `refinery.js` declines to write anything for *source*, which is the only answer that can
-    be given for a buffer holding a literal no text spells.
-    """
-    try:
-        folded(source)
-    except UnspellableNode:
-        return True
-    else:
-        return False
 
 
 def _a_module_reporting_it_loaded(module: str) -> str:
@@ -368,158 +293,6 @@ class TestAPrototypeHandedToAWriterIsStillWritten(TestBase):
         )
 
 
-def _spelled_with_an_escaped_identifier(source: str) -> str:
-    """
-    *source* with each placeholder replaced by the unicode escape spelling the characters it names.
-
-    The escapes are assembled from `chr(92)` rather than written out, because an escape written into
-    this file is one flattening away from being the characters it denotes, and an entry that no
-    longer holds the spelling it asks about asks nothing at all. A source that named a placeholder
-    and came back without a backslash is that flattening having happened, and it is refused here
-    rather than left to be discovered as an entry that quietly stopped asking anything.
-    """
-    result = source.replace('ESCAPED_IF', F'{chr(92)}u0069f')
-    result = result.replace('ESCAPED_AIT', F'{chr(92)}u0061it')
-    result = result.replace('ESCAPED_ET', F'{chr(92)}u0065t')
-    if result != source and chr(92) not in result:
-        raise AssertionError(F'the escape in {source!r} was flattened away')
-    return result
-
-
-#: Files the language refuses although nothing in them was fabricated by the parser, each mapped to
-#: whether it is a module. Every one of them parses cleanly: what refuses them is an early error,
-#: which is a rule about a tree rather than about the text a parser could not read.
-A_FILE_REFUSED_WITH_NOTHING_FABRICATED = {
-    _spelled_with_an_escaped_identifier(source): module
-    for source, module in (
-        ('function ESCAPED_IF(){ return 1; } console.log(2);', False),
-        ('let let = 1; console.log(2);', False),
-        ('var o = { __proto__: null, __proto__: {} }; console.log(2);', False),
-        ('var await = 1; console.log(2);', True),
-        ('var awESCAPED_AIT = 1; console.log(2);', True),
-    )
-}
-
-
-#: Binding positions written as an object pattern whose shorthand names a reserved word. The one
-#: node the parser builds there is the key and the binding at once, so the refusal that reaches
-#: every other binding position — a declarator, an array pattern, a parameter — does not reach this
-#: one, and `var { if: x } = o` is a program, which is why the refusal cannot simply move onto the
-#: key.
-A_BINDING_PATTERN_NAMING_A_RESERVED_WORD = tuple(
-    _spelled_with_an_escaped_identifier(source) for source in (
-        'var { ESCAPED_IF } = { if: 7 }; console.log(1);',
-        'var { ESCAPED_IF = 1 } = {}; console.log(1);',
-        'function f({ ESCAPED_IF }){ return 1; } console.log(f({}));',
-    )
-)
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAFileRefusedWithNothingFabricatedIsNotAnsweredWithAProgram(TestBase):
-    """
-    A file can parse with every token the source wrote and still be one no engine runs, because the
-    rule refusing it is stated over the tree rather than over the text: a name whose escapes spell a
-    reserved word, a `let` binding named `let`, two `__proto__` keys in one literal, and a module
-    binding `await` are all read without anything being repaired or invented.
-
-    `refinery.lib.scripts.is_well_formed` answers `True` for each, which is the honest answer to the
-    question it asks — nothing was fabricated — and the wrong answer to the one every caller wants,
-    which is whether the tree spells a program. What follows from that is a file the analyst is
-    handed as though it ran: each of these comes back reduced, with the one thing wrong with it
-    removed along with the code it stood in.
-
-    `test.lib.scripts.js.test_parser_recovery` states the other half, where the parser did supply
-    something and says so. Closing this one needs a refusal mechanism that does not exist yet, and
-    the escaped-name row shows the shape it must have: the parser answers with the span it read
-    wherever the model has a node kind for one, and a declared function's name is a slot that holds
-    an identifier and nothing else.
-    """
-
-    @unittest.expectedFailure
-    def test_a_file_the_language_refuses_is_refused(self):
-        """
-        Node refuses every program of `A_FILE_REFUSED_WITH_NOTHING_FABRICATED` with a `SyntaxError`
-        and prints nothing for it. Each deobfuscation prints `2`.
-        """
-        rows = A_FILE_REFUSED_WITH_NOTHING_FABRICATED
-        refused = ('', 'SyntaxError')
-        self.assertEqual(
-            {source: before_and_after(source, module=module) for source, module in rows.items()},
-            {source: (refused, refused) for source in rows},
-        )
-
-    @unittest.expectedFailure
-    def test_a_pattern_binding_a_reserved_word_is_no_program(self):
-        """
-        Node refuses every program of `A_BINDING_PATTERN_NAMING_A_RESERVED_WORD`, each of which
-        binds a name whose escapes spell `if` through an object pattern. What each comes back as is
-        refused too, so nothing runs that should not; what is wrong is that
-        `refinery.lib.scripts.is_well_formed` answers `True` for all three, and that answer is what
-        decides whether such a text may be spliced into a file that does run.
-        """
-        rows = A_BINDING_PATTERN_NAMING_A_RESERVED_WORD
-        self.assertEqual(
-            {source: well_formed(source) for source in rows},
-            {source: False for source in rows},
-        )
-
-
-#: Further shapes of the repair `A_FILE_THE_PARSER_REPAIRED` is about, one written with no escape at
-#: all so that the family is not read as being about escapes, and one spelling `let` where a
-#: declaration would begin.
-A_REPAIR_WITH_NOTHING_ESCAPED_ABOUT_IT = (
-    "console.log('alpha' 'beta');",
-    _spelled_with_an_escaped_identifier('lESCAPED_ET x = 1; console.log(x);'),
-)
-
-
-#: Every file whose parse needed a token the source did not write. Four of the tables come from
-#: `test.lib.scripts.js.deobfuscation.test_escaped_identifiers`, where the law they belong to is
-#: stated: a terminal word of the grammar is matched by the characters typed, so an escaped
-#: spelling of `get`, `set`, `static`, `async`, `instanceof` or `in` is a name standing where the
-#: grammar wanted a word, and the parser writes the separator that would have to be there.
-A_FILE_THE_PARSER_REPAIRED = (
-    *AN_ESCAPED_ACCESSOR_TERMINAL,
-    *AN_ESCAPED_STATIC_TERMINAL,
-    *AN_ESCAPED_ASYNC_TERMINAL,
-    *AN_ESCAPED_KEYWORD_OPERATOR,
-    *A_REPAIR_WITH_NOTHING_ESCAPED_ABOUT_IT,
-)
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAFileTheParserRepairedIsNotAnsweredWithAProgram(TestBase):
-    """
-    Standing where the grammar requires one token and finding another, the parser writes the token
-    it wanted and reads on. It records that it did — `refinery.lib.scripts.is_well_formed` answers
-    `False` for every file here — and nothing between that record and the printer reads it, so what
-    comes back is a program built out of text no engine agreed to read.
-
-    Two of these are the expensive shape. `[] instanceof Array` and `'a' in {a: 1}` written with an
-    escaped operator lose the operator and keep both operands, so the file comes back printing them;
-    and `class C { get x(){} }` written the same way comes back declaring a field beside a method,
-    which runs and prints a function where Node refuses the file outright.
-
-    `test_a_file_the_language_refuses_is_refused` states the same cost for the files where nothing
-    was repaired at all. That one needs a refusal mechanism to be built; this one needs only a
-    reader for the record the parser already keeps.
-    """
-
-    @unittest.expectedFailure
-    def test_a_file_the_parser_repaired_is_refused(self):
-        """
-        Node refuses every program of `A_FILE_THE_PARSER_REPAIRED` with a `SyntaxError` and prints
-        nothing for it. Each deobfuscation is a file that parses, and five of them print.
-        """
-        rows = A_FILE_THE_PARSER_REPAIRED
-        refused = ('', 'SyntaxError')
-        self.assertEqual(
-            {source: (well_formed(source), before_and_after(source)) for source in rows},
-            {source: (False, (refused, refused)) for source in rows},
-        )
-
-
 #: A program reaching `eval` through a name it bound to it and asking that name for a local of the
 #: caller, mapped to what Node prints for it. Only a call written as the name `eval` is a direct
 #: eval; every other way of reaching the same function runs the text in the global scope, where the
@@ -686,6 +459,123 @@ class TestAPromotedClosureIsStillOneObjectAcrossCalls(TestBase):
         `console.log(['a'] === ['a']);`, which print `1 1` and `false`.
         """
         rows = A_CLOSURE_THE_PROMOTED_ACCESSOR_STOPS_SHARING
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: A program binding one name that holds a zero-width joiner, mapped to what Node prints for it.
+#: U+200C is an identifier character, and obfuscators reach for it because nothing renders it. The
+#: name is assembled from `chr` so that no invisible character stands in this file.
+A_NAME_HOLDING_A_JOINER = {
+    F'function f(a{chr(0x200C)}b) {{ return a{chr(0x200C)}b + 1; }} console.log(f(6));': '7\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestANameHoldingAJoinerIsOneName(TestBase):
+    """
+    The defect is in no pass: handed the same text directly, the deobfuscation answers correctly.
+    The unit guesses the codec of its input bytes before parsing, and valid UTF-8 holding a joiner
+    is guessed as cp1252, so the unit reads and rewrites a different program than the file holds.
+    """
+
+    @unittest.expectedFailure
+    def test_a_name_holding_a_joiner_keeps_the_value_it_computes(self):
+        """
+        Node prints `7` for the program of `A_NAME_HOLDING_A_JOINER`, whose one function returns
+        its argument plus one. Through the unit it comes back as `console.log(6);`.
+        """
+        rows = A_NAME_HOLDING_A_JOINER
+        self.assertEqual(
+            {source: (behavior(source), behavior(folded(source))) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: A strict program declaring a function inside a plain block and calling its name beside it,
+#: mapped to what Node prints for it and whether it is read as a module. Strict code arrives both
+#: ways there is one: as a module, strict by its goal symbol alone, and as a script whose
+#: directive says so.
+A_FUNCTION_IN_A_BLOCK_OF_STRICT_CODE = {
+    'function outer() {\n'
+    '  { function W() { return 1; } }\n'
+    '  try { console.log(W()); } catch (e) { console.log("threw"); }\n'
+    '}\n'
+    'outer();\n'
+    'export {};\n': ('threw\n', True),
+    "'use strict';\n"
+    'function outer() {\n'
+    '  { function W() { return 1; } }\n'
+    '  try { console.log(W()); } catch (e) { console.log("threw"); }\n'
+    '}\n'
+    'outer();\n': ('threw\n', False),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAFunctionInABlockOfStrictCodeStaysInItsBlock(TestBase):
+    """
+    Sloppy code hoists a function declared inside a plain block out to the enclosing function, and
+    strict code does not: there the name lives in the block alone, and a call beside the block
+    reads no binding and throws. The scope model places every block function in the enclosing
+    variable scope whatever the mode - the strict-mode overlay that knows the difference exists and
+    is not consulted - so every consumer of the model reads a binding the program never has, and
+    the folds downstream answer the call with the function's value.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_beside_the_block_still_throws(self):
+        """
+        Node prints `threw` for both programs of `A_FUNCTION_IN_A_BLOCK_OF_STRICT_CODE`: the call
+        stands beside the block that scopes the function, and the `catch` reports the
+        `ReferenceError`. The deobfuscation folds the call to `1` and prints it.
+        """
+        rows = A_FUNCTION_IN_A_BLOCK_OF_STRICT_CODE
+        self.assertEqual(
+            {
+                source: before_and_after(source, module=module)
+                for source, (prints, module) in rows.items()
+            },
+            {
+                source: ((prints, None), (prints, None))
+                for source, (prints, module) in rows.items()
+            },
+        )
+
+
+#: A program whose parameter default reads a name the function body declares again, mapped to
+#: what Node prints for it.
+A_PARAMETER_DEFAULT_READING_PAST_THE_BODY = {
+    'function g() { return 1; }\n'
+    'function f(x = g()) { function g() { return 2; } return x; }\n'
+    'console.log(f());\n': '1\n',
+    'var v = 1;\n'
+    'function f(x = v) { var v = 2; return x; }\n'
+    'console.log(f());\n': '1\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAParameterDefaultReadsPastTheBody(TestBase):
+    """
+    A parameter default evaluates in a parameter scope of its own whose parent is the scope
+    enclosing the function, so it never reads what the body declares: the body's declarations do
+    not exist yet when a default runs. The scope model gives a function one scope for parameters
+    and body together, so a default's read resolves to the body's binding, and the folds
+    downstream substitute the body's value into the default or delete the very declaration the
+    default reads.
+    """
+
+    @unittest.expectedFailure
+    def test_a_default_reads_the_enclosing_scope(self):
+        """
+        Node prints `1` for both programs of `A_PARAMETER_DEFAULT_READING_PAST_THE_BODY`: each
+        default reads the outer declaration. The deobfuscation answers `2` for the first and a
+        program throwing `ReferenceError` for the second.
+        """
+        rows = A_PARAMETER_DEFAULT_READING_PAST_THE_BODY
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
