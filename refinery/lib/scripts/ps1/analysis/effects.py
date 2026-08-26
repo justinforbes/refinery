@@ -770,6 +770,27 @@ def _grant(verdict: bool, node, world: Ps1WorldReach) -> bool:
     return verdict and world.closed_at(node)
 
 
+#: The one variable whose read is not a read. `$input` names the enumerator over a function's
+#: pipeline input, and enumerating it advances it: measured on 5.1, `function f { $input; $input |
+#: ForEach-Object { $_ } }` fed `1, 2` writes `1` and `2` once, because the bare read drained what
+#: the pipeline below it would have enumerated. Only the enumerating spellings consume —
+#: `[Void]$input` and `$Null = $input` leave it whole, both measured — but the name is denied
+#: whole rather than per context, because a rule that reads the surrounding shape would have to
+#: be right about every spelling to stay sound and is only ever asked in the granting direction.
+_ENUMERATOR_VARIABLE = 'input'
+
+
+def _reads_the_pipeline_enumerator(node: Ps1Variable) -> bool:
+    """
+    Whether *node* is the unqualified `$input`, whose evaluation may advance the enumerator the rest
+    of the body reads — see `_ENUMERATOR_VARIABLE`.
+    """
+    return (
+        node.scope is Ps1ScopeModifier.NONE
+        and node.name.lower() == _ENUMERATOR_VARIABLE
+    )
+
+
 def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
     """
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
@@ -777,13 +798,17 @@ def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
     grant may be trusted and whether a command name still denotes what the metadata says, each at
     the position of the node it is asked about: a world opened, or a name rebound, only by
     statements no path places before the node still answers for it.
+
+    A variable read is one of the few things that is free of its own accord, and `$input` is the
+    exception the grant has to name: reading it advances an enumerator the statements below it read,
+    so a statement whose only content is that read still changes what the next one writes.
     """
     if isinstance(node, _LITERAL_EXPRESSIONS):
         return True
     if isinstance(node, Ps1TypeExpression):
         return True
     if isinstance(node, Ps1Variable):
-        return True
+        return not _reads_the_pipeline_enumerator(node)
     if isinstance(node, Ps1ParenExpression):
         return node.expression is None or is_side_effect_free(node.expression, world)
     if isinstance(node, Ps1CastExpression):
@@ -1851,11 +1876,19 @@ def expression_cannot_fault(
 
     **Two models answer that, and neither half alone is enough.**
     `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_may_be_in_force` reads what
-    the script itself arms, wherever it is written; `Ps1WorldReach.closed_at` says whether anything
-    the analysis cannot read may have run before *position*, and a payload it cannot read may arm
-    strict mode as easily as a spelled-out call does. A caller with no world therefore gets the
+    the script itself arms, wherever it is written;
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach.closed_at` says whether anything the
+    analysis cannot read may have run before *position*, and a payload it cannot read may arm strict
+    mode as easily as a spelled-out call does. A caller with no world therefore gets the
     context-free answer alone, which is the fail-closed direction: a grant refused keeps a
     statement, a grant made in error deletes one whose handler runs.
+
+    **The world half is a bound and not an answer.** What it reports is the type world's openers,
+    and a command that runs code no tree holds is not always one of them — `Set-PSDebug -Strict`
+    arms strict mode for the *global* scope, so any call this analysis cannot read through can arm
+    it without being a leak the world names. The bound it does give is the one that covers the
+    shapes an obfuscator writes, and everything it misses is stated with the entry-scope assumption
+    on `strict_mode_may_be_in_force` rather than left silent.
 
     It is one function rather than a clause repeated at each caller because two removal sites
     answering it differently is a contradiction and not a difference of opinion: the same `$x` in

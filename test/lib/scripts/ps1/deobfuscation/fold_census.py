@@ -1507,6 +1507,12 @@ FOLDS: dict[str, str] = {
         '$v = Get-Variable Error\nWrite-Host $v.Value.Count',
     "try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }":
         "try {\n  Write-Host 'quiet'\n} catch {\n  Write-Host 'caught'\n}",
+    'function f { $input; $input | ForEach-Object { Write-Host "seen:$_" } }; 1, 2 | f':
+        'function f {\n  $Input\n  $Input | ForEach-Object {\n'
+        '    Write-Host "seen:${_}"\n  }\n}\n1, 2 | f',
+    'function f { [void]$input; $input | ForEach-Object { Write-Host "seen:$_" } }; 1, 2 | f':
+        'function f {\n  [void]$Input\n  $Input | ForEach-Object {\n'
+        '    Write-Host "seen:${_}"\n  }\n}\n1, 2 | f',
     "try { item =5 } catch {}; Write-Host 'after'":
         "try {\n  Get-Item =5\n} catch {}\nWrite-Host 'after'",
     "trap { continue }; zzq0000=5; Write-Host 'after'":

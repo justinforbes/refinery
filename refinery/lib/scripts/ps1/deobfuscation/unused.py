@@ -8,12 +8,12 @@ from typing import NamedTuple
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
-from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     StatementEffect,
     body_is_inert,
     expression_cannot_fault,
+    fault_operand,
     is_side_effect_free,
     opens_a_redirection_target,
     output_path,
@@ -21,6 +21,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     statement_effect,
     unconsumed_statement,
 )
+from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.model import Binding, Ps1SemanticModel, Scope
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.ast import (
@@ -62,15 +63,14 @@ def _writes_only_what_cannot_fault(
     asks the fault question here.
 
     It is the same question `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` asks of a
-    `DISCARD`, and it goes through the same gate for that reason: a bare `$x` answered fault-free at
-    one of the two sites and not at the other would be deleted as a discard and kept as an output in
-    one script.
+    `DISCARD`, and it goes through the same gate *over the same operand* for that reason: a bare
+    `$x` answered fault-free at one of the two sites and not at the other would be deleted as a
+    discard and kept as an output in one script, and so would one the two sites disagreed about
+    which expression to weigh. `refinery.lib.scripts.ps1.analysis.effects.fault_operand` is that
+    one reading, and it answers `None` for a statement that is not one expression.
     """
-    return (
-        isinstance(stmt, Ps1ExpressionStatement)
-        and stmt.expression is not None
-        and expression_cannot_fault(stmt.expression, stmt, faults, world)
-    )
+    operand = fault_operand(stmt)
+    return operand is not None and expression_cannot_fault(operand, stmt, faults, world)
 
 
 class _MutationEdit(NamedTuple):

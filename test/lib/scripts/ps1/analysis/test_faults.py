@@ -617,10 +617,11 @@ class TestPs1AStrictModeArmingIsReadOverTheWholeScript(TestBase):
     that arms it anywhere is a script where deleting such a read is observable. Both halves are
     measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`.
 
-    Whether it is armed is asked of the whole script and never of a position, for the reason
-    `_stops_on_every_error` does not ask one either: the setting belongs to the session rather than
-    to a block. `Set-StrictMode -Off` is an arming here like every other spelling, and what that
-    costs is the recall of a script that turns strict mode off again.
+    Whether it is armed is asked of the whole script and never of a position, because which scopes
+    an arming covers is not decidable here: `Set-StrictMode` writes the scope it stands in and
+    `Set-PSDebug -Strict` writes the global one, so a call inside a function arms nothing outside it
+    in the first spelling and everything in the second. `Set-StrictMode -Off` is an arming here like
+    every other spelling, and what that costs is the recall of a script that turns it off again.
     """
 
     def _armings(self, scripts: list[str]) -> dict[str, bool]:
@@ -637,8 +638,25 @@ class TestPs1AStrictModeArmingIsReadOverTheWholeScript(TestBase):
             "& 'Set-StrictMode' -Version 1",
             "& 'global:Set-StrictMode' -Version 1",
             'Set-StrictMode -Off',
-            "function f { Set-StrictMode -Version 1 }",
-            "if ($a) { Set-StrictMode -Version 1 }",
+            'function f { Set-StrictMode -Version 1 }',
+            'if ($a) { Set-StrictMode -Version 1 }',
+        ]
+        self.assertEqual(self._armings(scripts), dict.fromkeys(scripts, True))
+
+    def test_the_second_command_that_arms_it_is_read_as_an_arming_too(self):
+        """
+        `Set-PSDebug -Strict` writes the same engine slot that `Set-StrictMode -Version 1` writes,
+        and writes it for the global scope rather than the current one. Measured on 5.1 in
+        `test.lib.scripts.ps1.corpus.BEHAVIOURS`: the guarded read below it raises and the `catch`
+        runs, exactly as it does under the spelling this scan was first written for.
+        """
+        scripts = [
+            'Set-PSDebug -Strict',
+            'set-psdebug -strict',
+            'Set-PSDebug -Trace 1 -Strict',
+            "& 'Set-PSDebug' -Strict",
+            "Invoke-Expression 'Set-PSDebug -Strict'",
+            'function f { Set-PSDebug -Strict }',
         ]
         self.assertEqual(self._armings(scripts), dict.fromkeys(scripts, True))
 

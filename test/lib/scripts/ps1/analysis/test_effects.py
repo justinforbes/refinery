@@ -954,6 +954,39 @@ class TestPs1FaultFreedomAndSideEffectFreedomAreIndependent(Ps1EffectsTest):
                 )
 
 
+class TestPs1ReadingThePipelineEnumeratorIsNotAPureRead(Ps1EffectsTest):
+    """
+    Every other variable read yields a value and changes nothing, which is why purity grants a bare
+    name unconditionally. `$input` is the enumerator over a function's pipeline input, and
+    enumerating it advances it, so a statement whose whole content is that read still decides what
+    the statement below it writes. Measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`:
+    `function f { $input; $input | ForEach-Object { Write-Host "seen:$_" } }` fed `1, 2` writes the
+    two values once and nothing after them.
+    """
+
+    def test_a_bare_read_of_the_enumerator_is_not_pure(self):
+        self.assertFalse(self._pure(self._expression('$input')))
+
+    def test_the_spelling_does_not_decide_it(self):
+        for source in ('$input', '${input}', '$INPUT'):
+            with self.subTest(source):
+                self.assertFalse(self._pure(self._expression(source)))
+
+    def test_every_other_bare_read_stays_pure(self):
+        for source in ('$x', '$inputs', '$myinput', '$args', '$_'):
+            with self.subTest(source):
+                self.assertTrue(self._pure(self._expression(source)))
+
+    def test_the_statement_acts_where_the_same_statement_over_any_other_name_only_writes(self):
+        self.assertEqual(
+            {
+                source: self._effect(self._statement(source))
+                for source in ('$input', '$x')
+            },
+            {'$input': StatementEffect.EFFECT, '$x': StatementEffect.OUTPUT},
+        )
+
+
 class TestPs1EffectInvariant(Ps1EffectsTest):
     """
     A regression list of shapes that were each, at some point, deleted along with real work: a

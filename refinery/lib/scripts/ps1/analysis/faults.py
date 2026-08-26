@@ -228,10 +228,15 @@ def _writes_stop_to_the_preference(node: Node) -> bool:
     return _selects_stop(node.value)
 
 
-#: The command that arms strict mode, in the spelling `resolve_command_name` answers with. One
-#: name rather than a set: `Set-StrictMode` carries no alias in the collected surface, and every
-#: other way of arming it arrives as a string this is matched inside.
-_STRICT_MODE_COMMAND = 'set-strictmode'
+#: The commands that arm strict mode, in the spelling `resolve_command_name` answers with. Two
+#: rather than one, because two commands write the same engine slot: `Set-StrictMode -Version`
+#: writes the scope it stands in and `Set-PSDebug -Strict` writes the global scope, and 5.1
+#: documents the second as the first at version 1. Neither carries an alias in the collected
+#: surface, and every other way of arming either arrives as a string these are matched inside.
+_STRICT_MODE_COMMANDS = frozenset({
+    'set-psdebug',
+    'set-strictmode',
+})
 
 
 def _arms_strict_mode(node: Node) -> bool:
@@ -240,21 +245,26 @@ def _arms_strict_mode(node: Node) -> bool:
 
     A command is the spelling that matters, resolved the deny-list way through
     `refinery.lib.scripts.ps1.ast.resolve_command_name`, so that a module- or scope-qualified
-    spelling of it arms strict mode as the bare word does.
+    spelling of one arms strict mode as the bare word does. The argument is not read: a
+    `Set-StrictMode -Off` and a `Set-PSDebug -Trace 1` are armings here like every other spelling,
+    and what that costs is the recall of a script that names either command for another purpose.
 
-    A string value need only *contain* the name, which is the asymmetry
+    A string value need only *contain* a name, which is the asymmetry
     `refinery.lib.scripts.ps1.analysis.worldflow._names_own_path` makes and that
     `a_stop_may_be_in_force` makes beside it. `Invoke-Expression 'Set-StrictMode -Version 1'`
-    arms it as surely as writing the command does, and a script that spells the name anywhere is
+    arms it as surely as writing the command does, and a script that spells either name anywhere is
     read as arming it — the direction that refuses a removal rather than granting one.
     """
     if (
         isinstance(node, Ps1CommandInvocation)
-        and resolve_command_name(node) == _STRICT_MODE_COMMAND
+        and resolve_command_name(node) in _STRICT_MODE_COMMANDS
     ):
         return True
     written = string_value(node)
-    return written is not None and _STRICT_MODE_COMMAND in written.lower()
+    if written is None:
+        return False
+    written = written.lower()
+    return any(command in written for command in _STRICT_MODE_COMMANDS)
 
 
 #: The automatic variables through which a `Stop` can be armed for commands that did not ask for
@@ -666,12 +676,24 @@ class Ps1FaultReach:
         default semantics `$unset | ForEach-Object { [void]$_ }` writes nothing and the script runs
         on, so removing it is invisible; under `Set-StrictMode -Version 1` the same line raises a
         statement-terminating error that a `catch` and a `trap` both take, so removing it is exactly
-        what `fault_is_observed` exists to refuse.
+        what `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` exists to refuse.
 
-        Position is not asked, for the reason `_stops_on_every_error` does not ask it: strict mode
-        is a setting of the session rather than of a block, and a call arms it for everything that
-        runs after it. `Set-StrictMode -Off` is not distinguished from an arming either, since
-        reading the argument buys back only the recall of a script that turns strict mode off again.
+        Position is not asked, and the reason is not the one `_stops_on_every_error` gives. Which
+        scopes an arming covers is not one rule: `Set-StrictMode` writes the scope it stands in and
+        `Set-PSDebug -Strict` writes the global one, so the first arms nothing outside the function
+        it is written in and the second arms everything that runs anywhere afterwards. Reading the
+        whole script is what covers both without deciding which was meant. `Set-StrictMode -Off` is
+        not distinguished from an arming either, since reading the argument buys back only the
+        recall of a script that turns strict mode off again.
+
+        **What this cannot see is an arming that is not in the script.** Strict mode is resolved by
+        walking the scope chain to the global scope, so a script dot-sourced from a session that
+        armed it — a profile, a stage-1 loader, an analyst's console — runs strict while spelling
+        nothing. Nothing readable says whether that happened, so the grant this feeds assumes the
+        entry scope runs the default semantics, the way
+        `refinery.lib.scripts.ps1.analysis.worldflow` assumes a leak does not re-run the statements
+        above it. A fragment carved out of a larger script is the case where the assumption is worth
+        doubting.
 
         **The empty pole is the opposite of the sibling's, and it is why this is not a copy of it.**
         `_stops_on_every_error` answers `False` where the graphs place no script, which is safe

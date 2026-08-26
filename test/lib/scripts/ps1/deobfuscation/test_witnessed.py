@@ -91,6 +91,8 @@ _RAISE_ABANDONS = _witness(
     test_removal_observability.TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
+_ENUMERATOR = _witness(
+    test_unused.TestPs1AReadThatConsumesWhatItReadsIsNotBareOutput)
 _STRICT_MODE = _witness(
     test_fault_observability.TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed)
 _STRICT_MODE_FACT = _witness(
@@ -572,8 +574,10 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
         self._assertWitnessed(
             [_KEPT_EITHER_WAY],
             patch.object(
-                unused, 'expression_cannot_fault',
-                lambda operand, position, faults, world: True),
+                unused,
+                'expression_cannot_fault',
+                lambda operand, position, faults, world: True,
+            ),
             notices='test_a_statement_that_can_raise_is_kept')
 
     def test_the_redirection_gate_on_a_deleted_write_is_witnessed(self):
@@ -667,14 +671,32 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
                 faults.Ps1FaultReach, 'strict_mode_may_be_in_force', lambda self: False),
             notices='test_the_discard_and_the_output_are_both_kept_where_strict_mode_is_armed')
 
+    def test_the_second_command_that_arms_strict_mode_is_witnessed(self):
+        # `Set-PSDebug -Strict` arms the same error engine-wide and resolves to a name of its own,
+        # so a table holding only the obvious command grants every removal below it.
+        self._assertWitnessed(
+            [_STRICT_MODE],
+            patch.object(faults, '_STRICT_MODE_COMMANDS', frozenset({'set-strictmode'})),
+            notices='test_the_discard_and_the_output_are_both_kept_where_the_other_command_arms_it')
+
+    def test_the_enumerator_being_denied_purity_is_witnessed(self):
+        # Reading `$input` advances what the statements below it read, so the one variable whose
+        # read is not free has to be denied where every other one is granted.
+        self._assertWitnessed(
+            [_ENUMERATOR],
+            patch.object(effects, '_reads_the_pipeline_enumerator', lambda node: False),
+            notices='test_a_bare_read_of_the_enumerator_is_kept')
+
     def test_the_empty_pole_of_that_fact_being_the_opposite_of_its_sibling_is_witnessed(self):
         # Mirroring `_stops_on_every_error` verbatim is the implementation a reader would write,
         # and no deobfuscation-string test reaches the model it answers for.
         self._assertWitnessed(
             [_STRICT_MODE_FACT],
             patch.object(
-                faults.Ps1FaultReach, 'strict_mode_may_be_in_force',
-                _strict_mode_with_the_siblings_empty_pole),
+                faults.Ps1FaultReach,
+                'strict_mode_may_be_in_force',
+                _strict_mode_with_the_siblings_empty_pole,
+            ),
             notices='test_a_model_the_graphs_hold_no_script_for_refuses_the_grant')
 
     def test_the_world_half_of_that_gate_is_witnessed(self):

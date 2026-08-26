@@ -607,6 +607,38 @@ class TestPs1BareOutputIsStrippedByDefault(TestPs1):
         self.assertIn('ANCHOR', result)
 
 
+class TestPs1AReadThatConsumesWhatItReadsIsNotBareOutput(TestPs1):
+    """
+    Stripping bare output gives away what the console would have seen, and nothing else. `$input`
+    reads the enumerator over a function's pipeline input and advances it, so deleting the read
+    changes what the statements *below* it write — output the switch was never offered.
+    Measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`: with the bare read present the
+    pipeline below it writes nothing, and with `[void]$input` in its place, which does not
+    enumerate, it writes both.
+    """
+
+    def _assertBareStatementSurvives(self, statement: str, survives: bool) -> None:
+        body = F"""
+            function Qzmr {{
+              {statement}
+              $Input | ForEach-Object {{ Write-Host "seen:$_" }}
+            }}
+            1, 2 | Qzmr
+        """
+        self._assertDeobfuscatesTo(body, body if survives else """
+            function Qzmr {
+              $Input | ForEach-Object { Write-Host "seen:$_" }
+            }
+            1, 2 | Qzmr
+        """)
+
+    def test_a_bare_read_of_the_enumerator_is_kept(self):
+        self._assertBareStatementSurvives('$Input', survives=True)
+
+    def test_a_bare_literal_beside_it_is_still_stripped(self):
+        self._assertBareStatementSurvives("'Xtjbnwqm'", survives=False)
+
+
 class TestPs1BareOutputIsKeptWhenAsked(TestPs1):
     """
     The same shapes with `preserve_bare_output` on, which is what a caller passes for a module, for

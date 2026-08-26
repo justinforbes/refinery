@@ -67,6 +67,11 @@ _UNSET_PIPELINE = '$zzqunset | ForEach-Object { [void]$_ }'
 #: What turns every read above into a raise, spelled as the command.
 _STRICT = 'Set-StrictMode -Version 1'
 
+#: The second command that arms it, which 5.1 documents as the first at version 1 and which writes
+#: the global scope rather than the current one. Measured on 5.1 in
+#: `test.lib.scripts.ps1.corpus.BEHAVIOURS`: the guarded read below it raises and the `catch` runs.
+_STRICT_PSDEBUG = 'Set-PSDebug -Strict'
+
 #: And spelled as a string handed to `Invoke-Expression`, which arms strict mode as surely.
 _STRICT_IN_A_STRING = "Invoke-Expression 'Set-StrictMode -Version 1'"
 
@@ -632,6 +637,37 @@ class TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed(TestPs1):
             }}
         """)
 
+    def test_the_discard_and_the_output_are_both_kept_where_the_other_command_arms_it(self):
+        self._assertKept(F"""
+            {_STRICT_PSDEBUG}
+            try {{
+              {_UNSET_READ}
+              {_UNSET_OUTPUT}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_the_pipeline_is_kept_where_the_other_command_arms_it(self):
+        self._assertKept(F"""
+            {_STRICT_PSDEBUG}
+            {_UNSET_PIPELINE}
+            try {{
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_the_discard_under_a_trap_is_kept_where_the_other_command_arms_it(self):
+        self._assertKept(F"""
+            trap {{ {_HANDLER} }}
+            {_STRICT_PSDEBUG}
+            {_UNSET_READ}
+            {_ANCHOR}
+        """)
+
     def test_the_arming_is_seen_where_it_is_written_as_a_string(self):
         self._assertDeobfuscatesTo(F"""
             {_STRICT_IN_A_STRING}
@@ -696,9 +732,10 @@ class TestPs1AnUnreadablePayloadMayArmStrictModeWithoutSpellingIt(TestPs1):
 
 class TestPs1OnlyABareNameIsGrantedTheStrictModeReading(TestPs1):
     """
-    The grant is a claim about reading a variable and nothing else. A member access runs a getter, an
-    index runs an indexer, and a qualified name reads a provider rather than the variable store —
-    each raises for reasons strict mode has nothing to do with, and each is kept.
+    The grant is a claim about reading a variable and nothing else. A member access runs a
+    getter, an index runs an indexer, and a qualified name reads a provider rather than the
+    variable store — each raises for reasons strict mode has nothing to do with, and each is
+    kept.
 
     They are not kept for one reason. A getter is impure, so the member read never reaches the fault
     question at all; the index and the qualified reads do reach it and are refused there. Both are
