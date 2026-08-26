@@ -8,11 +8,12 @@ from typing import NamedTuple
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
+from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     StatementEffect,
     body_is_inert,
-    is_fault_free,
+    expression_cannot_fault,
     is_side_effect_free,
     opens_a_redirection_target,
     output_path,
@@ -49,17 +50,26 @@ from refinery.lib.scripts.ps1.model import (
 )
 
 
-def _writes_only_what_cannot_fault(stmt: Node) -> bool:
+def _writes_only_what_cannot_fault(
+    stmt: Node,
+    faults: Ps1FaultReach,
+    world: Ps1WorldReach,
+) -> bool:
     """
     Whether a statement writes a value to the output stream and can do nothing else — not even
     raise. `refinery.lib.scripts.ps1.analysis.effects.StatementEffect.OUTPUT` says the first half
     and deliberately says nothing about the second, so a caller about to delete such a statement
     asks the fault question here.
+
+    It is the same question `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` asks of a
+    `DISCARD`, and it goes through the same gate for that reason: a bare `$x` answered fault-free at
+    one of the two sites and not at the other would be deleted as a discard and kept as an output in
+    one script.
     """
     return (
         isinstance(stmt, Ps1ExpressionStatement)
         and stmt.expression is not None
-        and is_fault_free(stmt.expression)
+        and expression_cannot_fault(stmt.expression, stmt, faults, world)
     )
 
 
@@ -128,7 +138,7 @@ class Ps1UnusedVariableRemoval(Transformer):
                 candidates[binding] = mutations
         if not candidates:
             return None
-        plans = Ps1RemovalPlans(cache.faults)
+        plans = Ps1RemovalPlans(cache.faults, world)
         planned: dict[int, _MutationEdit] = {}
         installed: set[int] = set()
         claimed: set[int] = set()
@@ -405,7 +415,7 @@ class Ps1JunkStatementRemoval(Transformer):
         cache = model_cache(self, node)
         flow = cache.output_flow
         called = cache.call_graph.reachable_names()
-        plans = Ps1RemovalPlans(cache.faults)
+        plans = Ps1RemovalPlans(cache.faults, cache.world_reach)
         for parent in node.walk():
             body = get_body(parent)
             if body is None:
@@ -414,7 +424,7 @@ class Ps1JunkStatementRemoval(Transformer):
             if path.sink is OutputSink.CAPTURED:
                 continue
             removable = self._removable_in_body(
-                parent, flow.resolved(path), called, cache.world_reach)
+                parent, flow.resolved(path), called, cache.world_reach, cache.faults)
             for statement in body:
                 if statement in removable:
                     plans.propose_in(parent, statement)
@@ -501,7 +511,7 @@ class Ps1JunkStatementRemoval(Transformer):
             survivors = self._survivors(get_body(node), removable_definitions)
             if pruning_erases_body(node, survivors):
                 return
-        plans = Ps1RemovalPlans(model_cache(self, node).faults)
+        plans = Ps1RemovalPlans(model_cache(self, node).faults, world)
         for group in groups.values():
             for statement in group:
                 plans.propose(statement)
@@ -546,7 +556,12 @@ class Ps1JunkStatementRemoval(Transformer):
         return statements
 
     def _removable_in_body(
-        self, parent: Node, sink: OutputSink, called: frozenset[str], world: Ps1WorldReach,
+        self,
+        parent: Node,
+        sink: OutputSink,
+        called: frozenset[str],
+        world: Ps1WorldReach,
+        faults: Ps1FaultReach,
     ) -> set[Node]:
         """
         What this pass would drop from the statement list `parent` owns, where `sink` is the
@@ -565,10 +580,10 @@ class Ps1JunkStatementRemoval(Transformer):
         - the value provably reaches the host and nothing else, which is `sink`. A body whose writes
           land anywhere else keeps every one of them — that is the whole of what the resolution
           across the call graph buys, and the reason this is not the positional answer;
-        - evaluating it cannot raise, which is `is_fault_free`. `[Int]'abc'` and `1/0` are `OUTPUT`
-          like `42` is, and both terminate the script where they stand, so deleting one resumes
-          execution that had stopped — and does it across a function boundary, where the `try` veto
-          in `Ps1RemovalPlan` cannot see.
+        - evaluating it cannot raise, which is `expression_cannot_fault`. `[Int]'abc'` and `1/0`
+          are `OUTPUT` like `42` is, and both terminate the script where they stand, so deleting one
+          resumes execution that had stopped — and does it across a function boundary, where the
+          `try` veto in `Ps1RemovalPlan` cannot see.
         """
         body = get_body(parent)
         removable: set[Node] = set()
@@ -590,7 +605,7 @@ class Ps1JunkStatementRemoval(Transformer):
             if effect is StatementEffect.DISCARD:
                 removable.add(stmt)
             elif effect is StatementEffect.OUTPUT and strip_bare_output:
-                if _writes_only_what_cannot_fault(stmt):
+                if _writes_only_what_cannot_fault(stmt, faults, world):
                     removable.add(stmt)
         if not removable:
             return set()
@@ -649,7 +664,7 @@ class Ps1DeadStoreElimination(Transformer):
         if not dead:
             self.generic_visit(node)
             return None
-        plan = Ps1RemovalPlan(node, faults=cache.faults)
+        plan = Ps1RemovalPlan(node, faults=cache.faults, world=world)
         for stmt in dead:
             if not isinstance(stmt, Ps1ExpressionStatement):
                 continue

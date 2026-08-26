@@ -91,6 +91,14 @@ _RAISE_ABANDONS = _witness(
     test_removal_observability.TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
+_STRICT_MODE = _witness(
+    test_fault_observability.TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed)
+_STRICT_MODE_FACT = _witness(
+    test_faults.TestPs1AStrictModeArmingIsReadOverTheWholeScript)
+_STRICT_MODE_PAYLOAD = _witness(
+    test_fault_observability.TestPs1AnUnreadablePayloadMayArmStrictModeWithoutSpellingIt)
+_STRICT_MODE_SHAPE = _witness(
+    test_fault_observability.TestPs1OnlyABareNameIsGrantedTheStrictModeReading)
 _SELECTION_COUNT = _witness(test_folding.TestPs1CountingAnArrayKeepsWhatBuildingItDid)
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
 _SWALLOWING_TRAP = _witness(
@@ -235,7 +243,11 @@ def _try_body_survivors_relaxing(*, fault_freedom: bool, abandonment: bool) -> C
     return mutated
 
 
-def _fault_observed_where_the_clause_is_written(stmt: Node, reach: faults.Ps1FaultReach) -> bool:
+def _fault_observed_where_the_clause_is_written(
+    stmt: Node,
+    reach: faults.Ps1FaultReach,
+    world=None,
+) -> bool:
     """
     The reading the routing walk superseded: a deletion is refused where the statement stands
     *directly* in the `try` block of a construct one of whose `catch` clauses has a body. One
@@ -252,7 +264,11 @@ def _fault_observed_where_the_clause_is_written(stmt: Node, reach: faults.Ps1Fau
     )
 
 
-def _fault_observed_wherever_an_error_would_go(stmt: Node, reach: faults.Ps1FaultReach) -> bool:
+def _fault_observed_wherever_an_error_would_go(
+    stmt: Node,
+    reach: faults.Ps1FaultReach,
+    world=None,
+) -> bool:
     """
     The guard with its first half dropped: every point inside *stmt* is asked where an error raised
     there would go, and no point is asked whether it can raise one, so every statement is judged as
@@ -288,6 +304,33 @@ def _observed_at_reading_only_what_acts(self: faults.Ps1FaultReach, node: Node) 
     if routing.handlers and not routing.leaves_the_body:
         return False
     return not isinstance(graph.owner, Ps1Script) and self._handled_elsewhere(graph)
+
+
+def _strict_mode_with_the_siblings_empty_pole(self: faults.Ps1FaultReach) -> bool:
+    """
+    The whole-script fact copied from `_stops_on_every_error` verbatim, pole and all. That one
+    answers `False` where the graphs place no script, which keeps a handler there; this one grants a
+    removal, so the same pole grants it against a script nothing was read of.
+    """
+    root = self._script
+    return root is not None and any(faults._arms_strict_mode(node) for node in root.walk())
+
+
+def _expression_cannot_fault_without_the_world(
+    operand: Node,
+    position: Node,
+    reach: faults.Ps1FaultReach,
+    world,
+) -> bool:
+    """
+    The gate with only the half the script spells out. What it stops asking is whether anything the
+    analysis cannot read may have run before *position* — and a payload it cannot read may arm
+    strict mode without the script naming it anywhere.
+    """
+    return effects.is_fault_free(operand) or (
+        effects._is_bare_variable_read(operand)
+        and not reach.strict_mode_may_be_in_force()
+    )
 
 
 def _removing_a_handler_asked_at_the_handler(self: faults.Ps1FaultReach, handler: Node) -> bool:
@@ -528,7 +571,9 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
         # terminates the script where it stands.
         self._assertWitnessed(
             [_KEPT_EITHER_WAY],
-            patch.object(unused, 'is_fault_free', lambda node: True),
+            patch.object(
+                unused, 'expression_cannot_fault',
+                lambda operand, position, faults, world: True),
             notices='test_a_statement_that_can_raise_is_kept')
 
     def test_the_redirection_gate_on_a_deleted_write_is_witnessed(self):
@@ -613,6 +658,45 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_NESTED_GUARD],
             patch.object(removal, 'fault_is_observed', _fault_observed_wherever_an_error_would_go),
             notices='test_a_quiet_cast_in_a_nested_if_body_is_removed')
+
+    def test_the_strict_mode_gate_on_a_deleted_variable_read_is_witnessed(self):
+        # The one fault a bare read can raise, and the reason the grant is not unconditional.
+        self._assertWitnessed(
+            [_STRICT_MODE],
+            patch.object(
+                faults.Ps1FaultReach, 'strict_mode_may_be_in_force', lambda self: False),
+            notices='test_the_discard_and_the_output_are_both_kept_where_strict_mode_is_armed')
+
+    def test_the_empty_pole_of_that_fact_being_the_opposite_of_its_sibling_is_witnessed(self):
+        # Mirroring `_stops_on_every_error` verbatim is the implementation a reader would write,
+        # and no deobfuscation-string test reaches the model it answers for.
+        self._assertWitnessed(
+            [_STRICT_MODE_FACT],
+            patch.object(
+                faults.Ps1FaultReach, 'strict_mode_may_be_in_force',
+                _strict_mode_with_the_siblings_empty_pole),
+            notices='test_a_model_the_graphs_hold_no_script_for_refuses_the_grant')
+
+    def test_the_world_half_of_that_gate_is_witnessed(self):
+        # Patched in both modules that read the name: `fault_is_observed` reads the one in `effects`
+        # and the output twin imported its own.
+        self._assertWitnessed(
+            [_STRICT_MODE_PAYLOAD],
+            patch.object(
+                effects, 'expression_cannot_fault', _expression_cannot_fault_without_the_world),
+            patch.object(
+                unused, 'expression_cannot_fault', _expression_cannot_fault_without_the_world),
+            notices='test_a_discarded_unset_read_below_an_unreadable_payload_is_kept')
+
+    def test_the_shape_the_grant_is_restricted_to_is_witnessed(self):
+        # An index runs an indexer and a qualified name runs a provider, neither of which strict
+        # mode decides; granting them reads those faults as absent. The member read in the same
+        # class is not a witness of this gate — a getter is impure, so it never reaches the fault
+        # question at all — which is why the probe names one that is.
+        self._assertWitnessed(
+            [_STRICT_MODE_SHAPE],
+            patch.object(effects, '_is_bare_variable_read', lambda node: True),
+            notices='test_a_discarded_index_read_is_kept')
 
     def test_asking_whether_a_handler_acts_at_all_is_witnessed(self):
         # Patched in the module that owns it, where both readings of the routing consult it. The

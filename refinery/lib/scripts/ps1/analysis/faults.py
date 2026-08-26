@@ -32,6 +32,7 @@ from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     binding_key,
     binds_parameter,
+    resolve_command_name,
     string_value,
 )
 from refinery.lib.scripts.ps1.data import COMMON_PARAMETERS
@@ -227,6 +228,35 @@ def _writes_stop_to_the_preference(node: Node) -> bool:
     return _selects_stop(node.value)
 
 
+#: The command that arms strict mode, in the spelling `resolve_command_name` answers with. One
+#: name rather than a set: `Set-StrictMode` carries no alias in the collected surface, and every
+#: other way of arming it arrives as a string this is matched inside.
+_STRICT_MODE_COMMAND = 'set-strictmode'
+
+
+def _arms_strict_mode(node: Node) -> bool:
+    """
+    Whether *node* may turn a read of a variable that was never set into an error.
+
+    A command is the spelling that matters, resolved the deny-list way through
+    `refinery.lib.scripts.ps1.ast.resolve_command_name`, so that a module- or scope-qualified
+    spelling of it arms strict mode as the bare word does.
+
+    A string value need only *contain* the name, which is the asymmetry
+    `refinery.lib.scripts.ps1.analysis.worldflow._names_own_path` makes and that
+    `a_stop_may_be_in_force` makes beside it. `Invoke-Expression 'Set-StrictMode -Version 1'`
+    arms it as surely as writing the command does, and a script that spells the name anywhere is
+    read as arming it — the direction that refuses a removal rather than granting one.
+    """
+    if (
+        isinstance(node, Ps1CommandInvocation)
+        and resolve_command_name(node) == _STRICT_MODE_COMMAND
+    ):
+        return True
+    written = string_value(node)
+    return written is not None and _STRICT_MODE_COMMAND in written.lower()
+
+
 #: The automatic variables through which a `Stop` can be armed for commands that did not ask for
 #: one: the preference itself, and the table that binds `-ErrorAction` into every command that takes
 #: it. Spelled as names rather than as assignment shapes because `a_stop_may_be_in_force` asks
@@ -356,6 +386,7 @@ class Ps1FaultReach:
         self._handled: set[int] | None = None
         self._ending: dict[int, bool] = {}
         self._stopping: bool | None = None
+        self._strict: bool | None = None
 
     def routing_at(self, node: Node) -> Ps1FaultRouting | None:
         """
@@ -624,6 +655,36 @@ class Ps1FaultReach:
                 _writes_stop_to_the_preference(node) for node in root.walk()
             )
         return self._stopping
+
+    def strict_mode_may_be_in_force(self) -> bool:
+        """
+        Whether this script may arm strict mode anywhere at all, which makes reading a variable that
+        was never set an error instead of a `$null`.
+
+        One consumer, `refinery.lib.scripts.ps1.analysis.effects.expression_cannot_fault`, which is
+        the single place deciding whether a bare variable read can raise. Measured on 5.1: under the
+        default semantics `$unset | ForEach-Object { [void]$_ }` writes nothing and the script runs
+        on, so removing it is invisible; under `Set-StrictMode -Version 1` the same line raises a
+        statement-terminating error that a `catch` and a `trap` both take, so removing it is exactly
+        what `fault_is_observed` exists to refuse.
+
+        Position is not asked, for the reason `_stops_on_every_error` does not ask it: strict mode
+        is a setting of the session rather than of a block, and a call arms it for everything that
+        runs after it. `Set-StrictMode -Off` is not distinguished from an arming either, since
+        reading the argument buys back only the recall of a script that turns strict mode off again.
+
+        **The empty pole is the opposite of the sibling's, and it is why this is not a copy of it.**
+        `_stops_on_every_error` answers `False` where the graphs place no script, which is safe
+        because a missed arming there only keeps a handler. This one grants a *removal*, so a script
+        the graphs hold nothing of has to refuse it rather than read as running under the lax
+        default.
+        """
+        if self._strict is None:
+            root = self._script
+            self._strict = root is None or any(
+                _arms_strict_mode(node) for node in root.walk()
+            )
+        return self._strict
 
     @staticmethod
     def _exceptional_closure(

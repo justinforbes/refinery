@@ -47,6 +47,33 @@ _CLEANUP = "Write-Host 'CLEANUP_RAN'"
 #: nothing about the statement that used to be in it.
 _OPAQUE = '$args'
 
+#: A read of a variable the script never sets. Under the default semantics it yields `$null` and
+#: raises nothing, so the statement around it runs to completion exactly like `_QUIET_CAST` does —
+#: but no reading of the operands alone can say so, because the same read raises under strict mode.
+#: Measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`.
+_UNSET_READ = '[void]$zzqunset'
+
+#: The same read written as a bare value on the output stream rather than as a discard, so that the
+#: removal site reached through `StatementEffect.OUTPUT` is measured beside the one reached through
+#: `DISCARD`. The two answer one question, and a script where they disagreed would delete the read
+#: in one spelling and keep it in the other.
+_UNSET_OUTPUT = '$zzqunset'
+
+#: The same read as the head of a discarded pipeline, which is the shape an obfuscator emits and the
+#: one no `_QUIET_` constant reaches: the graphs place the head in the block's own island, so the
+#: fault question for it used to be refused for want of a position rather than answered.
+_UNSET_PIPELINE = '$zzqunset | ForEach-Object { [void]$_ }'
+
+#: What turns every read above into a raise, spelled as the command.
+_STRICT = 'Set-StrictMode -Version 1'
+
+#: And spelled as a string handed to `Invoke-Expression`, which arms strict mode as surely.
+_STRICT_IN_A_STRING = "Invoke-Expression 'Set-StrictMode -Version 1'"
+
+#: A payload the analysis cannot read at all. It may arm strict mode without spelling the name
+#: anywhere, so what it governs is not what the script says but what may have run before a position.
+_UNREADABLE = 'Invoke-Expression $env:ZZQPAYLOAD'
+
 #: A call that is never a removal candidate, so a `try` written around it survives into the output
 #: as a handler the script demonstrably still contains.
 _REQUEST = 'Invoke-WebRequest $u'
@@ -531,3 +558,172 @@ class TestPs1ARaisingStatementIsObservedByTheStatementsItSkips(TestPs1):
             {_QUIET_CAST}
             {_ANCHOR}
         """, _QUIET_CAST)
+
+
+class TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed(TestPs1):
+    """
+    Reading a variable that was never set yields `$null`, so a statement whose only way to raise is
+    such a read runs to completion and deleting it is invisible. `Set-StrictMode` makes the same
+    read a statement-terminating error that the handler standing over it takes, so under one the
+    statement goes and under the other it stays. Both halves are measured on 5.1 in
+    `test.lib.scripts.ps1.corpus.BEHAVIOURS`.
+
+    One question asked at two removal sites and through three shapes: a discard, a bare value on
+    the output stream, and the head of a discarded pipeline.
+    """
+
+    def test_a_discarded_unset_read_in_a_guarded_try_block_is_removed(self):
+        self._assertRemoved(F"""
+            try {{
+              {_UNSET_READ}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _UNSET_READ)
+
+    def test_the_same_read_written_as_bare_output_is_removed_alike(self):
+        self._assertRemoved(F"""
+            try {{
+              {_UNSET_OUTPUT}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _UNSET_OUTPUT)
+
+    def test_a_discarded_unset_read_under_a_trap_that_acts_is_removed(self):
+        self._assertRemoved(F"""
+            trap {{ {_HANDLER} }}
+            {_UNSET_READ}
+            {_ANCHOR}
+        """, _UNSET_READ)
+
+    def test_a_discarded_pipeline_over_an_unset_read_is_removed(self):
+        self._assertRemoved(F"""
+            {_UNSET_PIPELINE}
+            try {{
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _UNSET_PIPELINE)
+
+    def test_the_discard_and_the_output_are_both_kept_where_strict_mode_is_armed(self):
+        self._assertKept(F"""
+            {_STRICT}
+            try {{
+              {_UNSET_READ}
+              {_UNSET_OUTPUT}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_the_pipeline_is_kept_where_strict_mode_is_armed(self):
+        self._assertKept(F"""
+            {_STRICT}
+            {_UNSET_PIPELINE}
+            try {{
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_the_arming_is_seen_where_it_is_written_as_a_string(self):
+        self._assertDeobfuscatesTo(F"""
+            {_STRICT_IN_A_STRING}
+            try {{
+              {_UNSET_READ}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, F"""
+            {_STRICT}
+            try {{
+              {_UNSET_READ}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+
+class TestPs1AnUnreadablePayloadMayArmStrictModeWithoutSpellingIt(TestPs1):
+    """
+    The other half of the same grant. A payload the analysis cannot read may arm strict mode, so a
+    read below one is refused however little the script itself says — and the same read above it is
+    granted, because nothing unreadable has run yet where it stands. That is what makes the question
+    positional rather than a second whole-script fact.
+    """
+
+    def test_a_discarded_unset_read_below_an_unreadable_payload_is_kept(self):
+        self._assertKept(F"""
+            {_UNREADABLE}
+            try {{
+              {_UNSET_READ}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_a_discarded_pipeline_below_an_unreadable_payload_is_kept(self):
+        self._assertKept(F"""
+            {_UNREADABLE}
+            {_UNSET_PIPELINE}
+            try {{
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_the_same_read_above_that_payload_is_removed(self):
+        self._assertRemoved(F"""
+            try {{
+              {_UNSET_READ}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+            {_UNREADABLE}
+        """, _UNSET_READ)
+
+
+class TestPs1OnlyABareNameIsGrantedTheStrictModeReading(TestPs1):
+    """
+    The grant is a claim about reading a variable and nothing else. A member access runs a getter, an
+    index runs an indexer, and a qualified name reads a provider rather than the variable store —
+    each raises for reasons strict mode has nothing to do with, and each is kept.
+
+    They are not kept for one reason. A getter is impure, so the member read never reaches the fault
+    question at all; the index and the qualified reads do reach it and are refused there. Both are
+    pinned, because a rule that stops covering the ones it decides would still look green here if
+    only the purity row were written.
+    """
+
+    def _assertKeptInAGuardedBlock(self, statement: str) -> None:
+        self._assertKept(F"""
+            try {{
+              {statement}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_a_discarded_member_read_is_kept(self):
+        self._assertKeptInAGuardedBlock('[void]$zzqunset.Foo')
+
+    def test_a_discarded_index_read_is_kept(self):
+        self._assertKeptInAGuardedBlock('[void]$zzqunset[0]')
+
+    def test_a_discarded_environment_read_is_kept(self):
+        self._assertKeptInAGuardedBlock('[void]$env:ZZQUNSET')
+
+    def test_a_discarded_scope_qualified_read_is_kept(self):
+        self._assertKeptInAGuardedBlock('[void]$global:zzqunset')

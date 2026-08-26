@@ -14,9 +14,12 @@ once over the whole script and held in a
 different thing, and no one of them may stand in for another:
 
 - whether it performs a side effect — `statement_effect`;
-- whether it may *throw* — `is_fault_free`, which grants what the value domain computes and what a
-  syntactic allow-list names, and answers `False` for everything else. Purity is not this question:
-  `is_side_effect_free` accepts `[Int]$x` and `$a / $b`, both of which raise;
+- whether it may *throw* — `expression_cannot_fault`, the one gate every removal site goes through.
+  Its context-free half is `is_fault_free`, which grants what the value domain computes and what a
+  syntactic allow-list names and answers `False` for everything else; the other half is the single
+  fault the script rather than the expression decides, a read of a variable that was never set.
+  Purity is not this question: `is_side_effect_free` accepts `[Int]$x` and `$a / $b`, both of which
+  raise;
 - where the value it writes to the output stream is read — `output_sink` positionally, and
   `Ps1OutputFlow` through the call graph, which is the only one that can see past a function
   boundary.
@@ -92,6 +95,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1RealLiteral,
     Ps1RedirectionStream,
     Ps1ReturnStatement,
+    Ps1ScopeModifier,
     Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
@@ -1046,6 +1050,13 @@ def is_fault_free(node) -> bool:
     Both read their operands through `Int32`, so `-'abc'` and `'a'..'z'` raise exactly what
     `[Int]'abc'` raises; neither may inherit the string-literal grant, and both go through
     `_is_numeric_constant` and `_range_is_fault_free` instead.
+
+    **A removal site asks `expression_cannot_fault` and not this**, because one fault is decided by
+    the script rather than by the operands. What still reads this directly asks a narrower question
+    on purpose: `may_be_dropped` and the range fold weigh work a rewrite would stop doing, where
+    the operand's own faults are the whole question, and
+    `refinery.lib.scripts.ps1.deobfuscation.deadcode._try_body_survivors` needs a second property
+    beside fault-freedom — that what it accepts is a constant it can carry out of the construct.
     """
     if not evaluate(node).may_throw:
         return True
@@ -1145,9 +1156,9 @@ class StatementEffect(enum.Enum):
     grow a branch to reach the verdict it already reaches. `Write-Host x` and `Get-Item x` are both
     `EFFECT`, and nothing here distinguishes them because nothing needs to.
 
-    Nor does any member say whether the statement can *throw*. That is `is_fault_free`, which a
-    caller about to remove an `OUTPUT` statement has to ask separately: `[Int]'abc'` and `1/0` are
-    both `OUTPUT`, and removing either resumes a script that had terminated.
+    Nor does any member say whether the statement can *throw*. That is `expression_cannot_fault`,
+    which a caller about to remove an `OUTPUT` statement has to ask separately: `[Int]'abc'` and
+    `1/0` are both `OUTPUT`, and removing either resumes a script that had terminated.
     """
     EFFECT = 'effect'
     OUTPUT = 'output'
@@ -1797,7 +1808,74 @@ def fault_operand(stmt: Node) -> Node | None:
     return expression
 
 
-def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
+def _is_bare_variable_read(node: Node) -> bool:
+    """
+    Whether *node* is an unqualified variable read and nothing else — the one expression shape whose
+    only way to raise is a setting of the script rather than a property of its operands.
+
+    Splatting is excluded because `@x` is not a read of the value at all, and every qualified
+    spelling is excluded because none of them shares the fact this rests on. `$global:x` and
+    `$script:x` read the same store and were measured not to raise, but `$using:x` is a different
+    construct outside the block that binds it; and a drive qualifier reads no store at all —
+    `${SomeDrive:path}` runs a provider, and what an arbitrary provider raises is not a question
+    this can answer for the drives it has never seen. One test covers them because the lexer spells
+    a drive as `Ps1ScopeModifier.DRIVE` like every other qualifier.
+
+    **Purity does not gain this gate and must not.** `is_side_effect_free` accepts a bare read
+    unconditionally, because reading a variable changes nothing whether or not the read raises. The
+    two questions are separate here, and a reader expecting them to be symmetric would be wrong.
+    """
+    return (
+        isinstance(node, Ps1Variable)
+        and not node.splatted
+        and node.scope is Ps1ScopeModifier.NONE
+    )
+
+
+def expression_cannot_fault(
+    operand: Node,
+    position: Node,
+    faults: Ps1FaultReach,
+    world: Ps1WorldReach | None,
+) -> bool:
+    """
+    Whether evaluating *operand* cannot raise **where *position* stands** — the question a removal
+    site asks before it deletes an expression whose fault would have been observed.
+
+    `is_fault_free` is the context-free half and stays exactly that: it grants only what cannot
+    raise under any semantics, so a bare `$x` is not fault-free there and must not become so. What
+    is added here is the one fault the *script* decides rather than the expression. Reading a
+    variable that was never set yields `$null` under the default semantics and raises only where
+    strict mode is armed, so a script that never arms it cannot fault on such a read — and the
+    padding an obfuscator writes as `$junk | ForEach-Object { [void]$_ }` goes.
+
+    **Two models answer that, and neither half alone is enough.**
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_may_be_in_force` reads what
+    the script itself arms, wherever it is written; `Ps1WorldReach.closed_at` says whether anything
+    the analysis cannot read may have run before *position*, and a payload it cannot read may arm
+    strict mode as easily as a spelled-out call does. A caller with no world therefore gets the
+    context-free answer alone, which is the fail-closed direction: a grant refused keeps a
+    statement, a grant made in error deletes one whose handler runs.
+
+    It is one function rather than a clause repeated at each caller because two removal sites
+    answering it differently is a contradiction and not a difference of opinion: the same `$x` in
+    the same script would be dropped as a discard and kept as a bare output.
+    """
+    if is_fault_free(operand):
+        return True
+    return (
+        _is_bare_variable_read(operand)
+        and world is not None
+        and world.closed_at(position)
+        and not faults.strict_mode_may_be_in_force()
+    )
+
+
+def fault_is_observed(
+    stmt: Node,
+    faults: Ps1FaultReach,
+    world: Ps1WorldReach | None = None,
+) -> bool:
     """
     Whether deleting *stmt* may change which handler runs.
 
@@ -1809,11 +1887,16 @@ def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
     and a gate that refuses only what a `catch` clause is written *beside* deletes the statement a
     handler one nesting level away was waiting for.
 
-    The first half is `is_fault_free` over `fault_operand`, and the second is
+    The first half is `expression_cannot_fault` over `fault_operand`, and the second is
     `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.observed_at`. Both are asked once per
     point the graphs evaluate inside *stmt*, because a construct is deleted whole and each of its
     parts raises where it stands; a construct the graphs place nothing for at all is refused, since
     a subtree nothing models is one nothing can clear.
+
+    *stmt* is the position every point is weighed at, rather than the point itself: *stmt* is what
+    the removal takes away, so what may have run before it is what decides whether the analysis can
+    see the semantics its parts run under. A point inside a script block has no position in the root
+    graph at all, and asking the world there refuses the shape this exists to clear.
 
     **This is not the question asked before a handler is deleted.** A `trap` cannot raise, so
     nothing about its own position decides anything: what a removal changes is where the errors of
@@ -1827,7 +1910,7 @@ def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
     for site in faults.points_in(stmt):
         judged = True
         operand = fault_operand(site)
-        if operand is not None and is_fault_free(operand):
+        if operand is not None and expression_cannot_fault(operand, stmt, faults, world):
             continue
         if faults.observed_at(site):
             return True

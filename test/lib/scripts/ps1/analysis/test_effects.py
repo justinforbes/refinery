@@ -5,10 +5,12 @@ from inspect import cleandoc
 from test import TestBase
 
 from refinery.lib.scripts import Statement, _remove_from_parent
+from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     StatementEffect,
     body_is_inert,
+    expression_cannot_fault,
     is_fault_free,
     is_side_effect_free,
     output_path,
@@ -17,8 +19,9 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     statement_effect,
     unconsumed_statement,
 )
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
-from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
+from refinery.lib.scripts.ps1.analysis.faults import build_fault_reach
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld, measure_world
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach, build_world_reach
 from refinery.lib.scripts.ps1.ast import get_body, get_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
@@ -1354,3 +1357,86 @@ class TestPs1OpenWorldNameTrust(Ps1EffectsTest):
         # The two questions the world answers must fail in the same direction, or a caller that
         # forgets the world gets a member grant refused and a name grant handed to it.
         self.assertFalse(is_side_effect_free(self._expression('Get-Date'), _NO_WORLD))
+
+
+class TestPs1WhetherAnExpressionCanFaultIsDecidedByTheScriptToo(Ps1EffectsTest):
+    """
+    `expression_cannot_fault` is the whole question a removal site asks, and `is_fault_free` is only
+    its context-free half. The half added on top is one fault the operands cannot decide: reading a
+    variable that was never set yields `$null` under the default semantics and raises only where
+    strict mode is armed. Measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`.
+
+    Two models answer it and both may refuse. The script may arm strict mode itself, and a payload
+    the analysis cannot read may arm it before the position — so a read below an opaque
+    `Invoke-Expression` is refused where the same read above it is granted.
+
+    A variable is not fault-free and stays that way, so the two predicates disagree about `$x` on
+    purpose: one says what holds under any semantics, the other what holds in this script here.
+    """
+
+    @staticmethod
+    def _cannot_fault(expression: str, above: str = '', below: str = '') -> bool:
+        tree = Ps1Parser(cleandoc(F'{above}{expression}{below}')).parse()
+        control_flow = build_control_flow_model(tree)
+        world = build_world_reach(measure_world(tree), lambda: control_flow)
+        statement = tree.body[above.count(chr(10))]
+        return expression_cannot_fault(
+            statement.expression, statement, build_fault_reach(control_flow), world)
+
+    def _verdicts(self, expressions: list[str], above: str = '') -> dict[str, bool]:
+        return {
+            expression: self._cannot_fault(expression, above)
+            for expression in expressions
+        }
+
+    #: Three spellings of the one shape the added half is about, so that no row below rests on how
+    #: the name happens to be written.
+    _BARE = ['$x', '${x}', '$Undefined']
+
+    def test_a_bare_variable_read_cannot_fault_where_nothing_arms_strict_mode(self):
+        self.assertEqual(self._verdicts(self._BARE), dict.fromkeys(self._BARE, True))
+
+    def test_the_same_reads_can_fault_where_the_script_arms_strict_mode(self):
+        self.assertEqual(
+            self._verdicts(self._BARE, 'Set-StrictMode -Version 1\n'),
+            dict.fromkeys(self._BARE, False),
+        )
+
+    def test_the_same_reads_can_fault_below_a_payload_the_analysis_cannot_read(self):
+        self.assertEqual(
+            self._verdicts(self._BARE, 'Invoke-Expression $env:ZZQ\n'),
+            dict.fromkeys(self._BARE, False),
+        )
+
+    def test_the_same_reads_cannot_fault_above_that_payload(self):
+        self.assertEqual(
+            {
+                expression: self._cannot_fault(
+                    expression, below='\nInvoke-Expression $env:ZZQ')
+                for expression in self._BARE
+            },
+            dict.fromkeys(self._BARE, True),
+        )
+
+    def test_no_read_that_is_more_than_a_bare_name_is_granted(self):
+        expressions = ['@x', '$env:x', '$global:x', '${zzqdrive:x}', '$x.Foo', '$x[0]', 'Get-Thing']
+        self.assertEqual(self._verdicts(expressions), dict.fromkeys(expressions, False))
+
+    def test_what_cannot_raise_under_any_semantics_is_granted_under_all_of_them(self):
+        expressions = ["'abc'", '42', '6 * 7', "[Int]'42'", '@(1, 2)']
+        for above in ('', 'Set-StrictMode -Version 1\n', 'Invoke-Expression $env:ZZQ\n'):
+            with self.subTest(above=above):
+                self.assertEqual(
+                    self._verdicts(expressions, above), dict.fromkeys(expressions, True))
+
+    def test_a_bare_variable_read_is_never_fault_free_on_its_own(self):
+        self.assertEqual(
+            {e: is_fault_free(self._expression(e)) for e in self._BARE},
+            dict.fromkeys(self._BARE, False),
+        )
+
+    def test_a_caller_with_no_world_gets_the_context_free_answer_alone(self):
+        tree = Ps1Parser('$x').parse()
+        statement = tree.body[0]
+        faults = build_fault_reach(build_control_flow_model(tree))
+        self.assertFalse(expression_cannot_fault(statement.expression, statement, faults, None))

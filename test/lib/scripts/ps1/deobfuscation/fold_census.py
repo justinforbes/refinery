@@ -47,6 +47,8 @@ FOLDS: dict[str, str] = {
         '',
     'echo a < b':
         'Write-Output a < b',
+    '$x > out.txt':
+        '>\nout.txt',
     '$x = 3..5':
         '$x = 3, 4, 5',
     '$x = 1e3.5':
@@ -1503,6 +1505,8 @@ FOLDS: dict[str, str] = {
         "Write-Host 'after'",
     'try { zzqfoo =5 } catch {}; $v = Get-Variable Error; Write-Host $v.Value.Count':
         '$v = Get-Variable Error\nWrite-Host $v.Value.Count',
+    "try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }":
+        "try {\n  Write-Host 'quiet'\n} catch {\n  Write-Host 'caught'\n}",
     "try { item =5 } catch {}; Write-Host 'after'":
         "try {\n  Get-Item =5\n} catch {}\nWrite-Host 'after'",
     "trap { continue }; zzq0000=5; Write-Host 'after'":

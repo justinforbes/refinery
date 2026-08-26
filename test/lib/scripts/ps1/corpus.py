@@ -241,6 +241,8 @@ BEHAVIOURS: tuple[str, ...] = (
     "function echo { 'from-function' }; echo 'from-alias'",
     "zzq 'early'; Set-Alias zzq Write-Output",
     'try { zzqfoo =5 } catch {}; $v = Get-Variable Error; Write-Host $v.Value.Count',
+    "try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }",
+    "Set-StrictMode -Version 1; try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }",
     "$s = { try { zzqfoo =5 } catch { 'caught' }; Set-Alias -Scope Script zzqfoo Write-Output }; & $s; & $s",
     "function f { Set-Alias zzq Write-Output }; f; zzq 'leaked'",
     "Set-Alias zzq Write-Output; zzq 'resolved'",
