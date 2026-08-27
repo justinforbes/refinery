@@ -8,9 +8,9 @@ import inspect
 import unittest
 
 
-#: What the null-assignment sample reduces to once the junk around its payload is gone. Two
-#: tests read it: the default model, which cannot reach it while the payload dispatcher stands,
-#: and the trusting one, which can.
+#: What the null-assignment sample reduces to once the junk around its payload is gone. Only the
+#: trusting model reaches it: everything the sample writes below its payload dispatcher is junk a
+#: payload that renames a type could tell apart, so the default model keeps all of it.
 _NULL_ASSIGNMENT_GOAL = inspect.cleandoc(
     r"""
         $Null = (Get-Command ???t?).Name
@@ -887,12 +887,6 @@ class TestPs1RealWorldLarge(TestUnitBase):
             """
         ).replace('[[C2]]', '62''.60''.178.24')
         self.assertEqual(test, goal)
-
-    @unittest.expectedFailure
-    def test_null_assignment_sample(self):
-        data = self.download_sample('34f5eab91e26c1c2073740ed76af289fdd0df985385d3d198f5be7165d79745f')
-        test = data | self.load() | str
-        self.assertEqual(test, _NULL_ASSIGNMENT_GOAL)
 
     def test_null_assignment_sample_with_a_trusted_eval(self):
         data = self.download_sample('34f5eab91e26c1c2073740ed76af289fdd0df985385d3d198f5be7165d79745f')
