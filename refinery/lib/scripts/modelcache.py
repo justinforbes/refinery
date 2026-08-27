@@ -34,18 +34,26 @@ class ModelCacheBase:
     model it was layered on. Because the base owns the whole mechanism, `invalidate` — the one
     method the `refinery.lib.scripts.AnalysisCache` protocol requires — is defined once, not per
     language.
+
+    The run's caller-supplied `options` are held here rather than per language, because a model
+    built differently under them is built once per cache and `for_transformer` is the one place a
+    cache is created without a caller naming them. Taking them off the transformer there is what
+    keeps the two from disagreeing: the pipeline sets the same object on both, and a cache that
+    defaulted its own would answer under a configuration the transformer beside it does not hold.
     """
 
     _SLOTS: tuple[str, ...] = ()
 
     root: Node
+    options: object | None
 
-    def __init__(self, root: Node):
+    def __init__(self, root: Node, options: object | None = None):
         # Normalized here and not only in `for_transformer`, because the version counter a mutation
         # advances is the one keyed on the tree: a cache holding a nested node as its root would
         # read a counter nothing ever bumps and never invalidate.
         root = tree_root(root)
         self.root = root
+        self.options = options
         self._version = tree_version(root)
         self.invalidate()
 
@@ -88,11 +96,16 @@ class ModelCacheBase:
         as one that visits the script. Skipping that leaves a whole-script model derived from a
         subtree: a leak sitting outside it becomes invisible and the world reads closed, which is
         the one direction that deletes code.
+
+        A fresh cache takes the options the transformer is holding, which is the run's own
+        configuration wherever the pipeline set it. Defaulting them here instead would let one
+        transform in a run read a model built under a configuration the run never asked for, and
+        stash that cache back for every transform after it.
         """
         root = tree_root(root)
         cache = transformer.models
         if isinstance(cache, cls) and cache.root is root:
             return cache
-        cache = cls(root)
+        cache = cls(root, transformer.options)
         transformer.models = cache
         return cache

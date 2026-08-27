@@ -317,7 +317,7 @@ def build_call_graph(
         elif isinstance(node, Ps1CommandInvocation):
             name = get_command_name(node)
             if name is None:
-                if is_opaque_dispatch(node) and not trusting:
+                if not trusting and is_opaque_dispatch(node):
                     readable = False
                 continue
             key = normalize_command_name(name)

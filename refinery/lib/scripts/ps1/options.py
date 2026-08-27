@@ -52,11 +52,22 @@ class Ps1DeobfuscationOptions:
       define `function Get-Date` in the calling scope. The switch is for triage, where reading the
       script matters more than being able to run the output.
 
-    What the trusting model does *not* excuse is a mutation the script performs in plain sight —
+    The trusting model assumes the same of what such code *reads*, which costs more than the type
+    system does. A `function` this script defines and no statement in it calls is deleted, so a
+    payload whose only job is to call one is left calling a name the output no longer defines; a
+    bare value inside a function nothing but the console reads goes the same way, so a payload that
+    captures the call gets nothing; and a fault the payload can arm — `Set-StrictMode` reaching a
+    bare read below it — stops being reachable, so a statement that terminated the input runs on.
+    None of the three is a change to the type system or the command table, and each is a way the
+    output can behave differently from a payload that changed neither.
+
+    What the trusting model does *not* excuse is a change the script performs in plain sight.
     `Add-Type`, `Update-TypeData`, `Add-Member`, `Import-Module`, `New-Module`, a `class` or `enum`
     definition, a type-accelerator remap and a PSObject member mutation still open the world under
-    both models. The assumption is about code that cannot be read, not about every way a script can
-    reach the world.
+    both models, and so does a statement that spells out both a command name it takes over and what
+    it binds that name to — `New-Alias Get-Date Stop-Process`, `Set-Item function:Get-Date { ... }`.
+    The assumption is about code that cannot be read, not about every way a script can reach the
+    world.
     """
     preserve_bare_output: bool = False
     trust_eval: bool = False

@@ -98,4 +98,4 @@ def deobfuscate(ast: JsScript, max_steps: int = 5000, *, module: bool = False) -
     `refinery.lib.scripts.js.deobfuscation.options.DeobfuscationOptions`.
     """
     options = DeobfuscationOptions(module=module)
-    return _pipeline.run(ast, max_steps=max_steps, models=ModelCache(ast), options=options)
+    return _pipeline.run(ast, max_steps=max_steps, models=ModelCache(ast, options), options=options)

@@ -895,11 +895,5 @@ class TestPs1RealWorldLarge(TestUnitBase):
         self.assertEqual(test, _NULL_ASSIGNMENT_GOAL)
 
     def test_null_assignment_sample_with_a_trusted_eval(self):
-        """
-        The same sample under `-e`, where the payload dispatcher is assumed to leave the type
-        system and the command table alone. Every statement the default keeps below it is junk
-        the option removes, so the two models differ by exactly that junk and by nothing above
-        the dispatcher.
-        """
         data = self.download_sample('34f5eab91e26c1c2073740ed76af289fdd0df985385d3d198f5be7165d79745f')
         self.assertEqual(data | self.load(trust_eval=True) | str, _NULL_ASSIGNMENT_GOAL)

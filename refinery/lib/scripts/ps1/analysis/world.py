@@ -55,6 +55,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1ClassDefinition,
     Ps1CommandArgument,
+    Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1EnumDefinition,
     Ps1FunctionDefinition,
@@ -230,17 +231,109 @@ class Ps1WorldMeasurement(NamedTuple):
     build_version: int
 
 
-#: The opening roles whose danger is that code this analysis cannot read will run — now, for
-#: `WorldRole.LEAK` and `WorldRole.UNKNOWN`, or under a name a later statement invokes, for
-#: `WorldRole.IDENTITY`. These are the ones
-#: `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` excuses.
-#: `WorldRole.MUTATION` is never among them: it is a change the script performs in plain sight, and
-#: excusing it would mean disbelieving a statement the walk can read.
-_ROLES_RUNNING_UNREADABLE_CODE = frozenset({
-    WorldRole.IDENTITY,
-    WorldRole.LEAK,
-    WorldRole.UNKNOWN,
+#: The commands that write the command table with a binding written down beside them. `Import-Alias`
+#: is the aliasing cmdlet that is not one: it takes its names from a file no analysis here sees, so
+#: what it does to the table is unreadable in exactly the sense an `Invoke-Expression` payload is. A
+#: command outside this set that merely mentions a provider path — `Get-ChildItem alias:`,
+#: `Test-Path 'function:more'` — is read as an identity opener by `touches_identity_provider`, which
+#: cannot tell a read from a write, and binds nothing at all.
+_NAME_BINDING_COMMANDS = (_ALIAS_CMDLETS - {'import-alias'}) | _ITEM_CMDLETS
+
+#: The parameter spellings that carry the binding such a command performs, each a prefix of `-Name`
+#: or `-Value` because PowerShell binds a parameter by any unambiguous prefix of its name. Every
+#: other named parameter — `-Force`, `-Scope`, `-Option`, `-Description` — steers the binding
+#: without saying what it is, and reading one as part of the binding would let a `-Force:$true` make
+#: a fully written-out rebinding look unreadable.
+_BINDING_PARAMETERS = frozenset({
+    'n',
+    'na',
+    'nam',
+    'name',
+    'v',
+    'va',
+    'val',
+    'valu',
+    'value',
 })
+
+
+def _runs_unreadable_code(node, role: WorldRole) -> bool:
+    """
+    Whether the danger `role` names at `node` is that code this analysis cannot read will run — now,
+    for `WorldRole.LEAK` and `WorldRole.UNKNOWN`, or under a name a later statement invokes, for
+    `WorldRole.IDENTITY`. These are the openers
+    `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` excuses.
+
+    `WorldRole.MUTATION` is never one: it is a change the script performs in plain sight, and
+    excusing it would mean disbelieving a statement the walk can read. Neither is a command that
+    writes the command table with the whole binding spelled out beside it — `New-Alias Get-Date
+    Stop-Process`, `Set-Item alias:Out-Null Write-Host`, `Set-Item function:Get-Date { ... }`. That
+    is the same plain-sight change wearing the command table's clothes, and it is the one opener
+    nothing else covers: `_identity_redefinitions` classifies a `function` statement and a
+    `function:`/`alias:` variable write, so a name an aliasing or item cmdlet takes over never
+    reaches the shadow set, and the verdict is all that stands between such a statement and a later
+    call to the name it rebound.
+
+    A binding with an unreadable half is excused, name or target either way, which is where the
+    trade the option buys actually sits: `Set-Alias Copy-Item $t` says which name it takes over but
+    not what that name will run, and refusing it would keep every script whose payload dispatcher is
+    reached through an alias. The residual is stated rather than left silent — such a name is
+    trusted afterwards, and closing that needs the shadow set to record what an aliasing cmdlet
+    binds, which is a reading no walk here performs.
+    """
+    if role is WorldRole.MUTATION or role is WorldRole.NONE:
+        return False
+    if role is not WorldRole.IDENTITY or not isinstance(node, Ps1CommandInvocation):
+        return True
+    if normalize_command_name(resolve_command_name(node) or '') not in _NAME_BINDING_COMMANDS:
+        return True
+    return _binds_what_the_walk_cannot_read(node)
+
+
+def _binds_what_the_walk_cannot_read(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether any argument of `cmd` that carries the binding hides what it holds.
+
+    A parameter and the value written after it reach the tree as two arguments — a switch naming the
+    parameter, then a positional holding the value — so the two are paired here. A value written
+    after `-Name` or `-Value`, and a positional that follows no parameter at all, carry the binding;
+    a value written after any other parameter steers it without saying what it is, and reading one
+    as part of the binding lets a `-Scope 1` make a fully written-out rebinding look unreadable.
+    """
+    pending: str | None = None
+    for argument in cmd.arguments:
+        if not isinstance(argument, Ps1CommandArgument):
+            if not _is_written_out(argument):
+                return True
+            continue
+        name = argument.name.lstrip('-').lower()
+        if argument.kind is Ps1CommandArgumentKind.SWITCH:
+            pending = name
+            continue
+        if argument.kind is Ps1CommandArgumentKind.NAMED:
+            carries = name in _BINDING_PARAMETERS
+        else:
+            carries = pending is None or pending in _BINDING_PARAMETERS
+        pending = None
+        if carries and not _is_written_out(argument.value):
+            return True
+    return False
+
+
+def _is_written_out(value) -> bool:
+    """
+    Whether `value` stands in the tree as something this walk reads whole: a static string, a
+    scriptblock whose body is written out, a list of such values, or the absent value of a switch.
+    Anything else — a variable, the result of a call — hides what the command holding it binds.
+    """
+    if value is None:
+        return True
+    value = unwrap_parens(value)
+    if isinstance(value, Ps1ScriptBlock):
+        return True
+    if isinstance(value, Ps1ArrayLiteral):
+        return all(_is_written_out(element) for element in value.elements)
+    return string_value(value) is not None
 
 
 def measure_world(root: Ps1Script, options: object | None = None) -> Ps1WorldMeasurement:
@@ -256,8 +349,8 @@ def measure_world(root: Ps1Script, options: object | None = None) -> Ps1WorldMea
     opens the world at no position — the engine compiles it before the first statement runs — and is
     recognized by `build_world_reach`, which must fail closed on it.
 
-    Under `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` an opener whose role
-    is in `_ROLES_RUNNING_UNREADABLE_CODE` is not recorded at all, so it neither opens the whole-run
+    Under `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` an opener
+    `_runs_unreadable_code` answers for is not recorded at all, so it neither opens the whole-run
     verdict nor floods a position. The shadow set is untouched by the option: every site in it is a
     redefinition this walk *did* read, so nothing about it rests on what unreadable code does.
     """
@@ -272,7 +365,7 @@ def measure_world(root: Ps1Script, options: object | None = None) -> Ps1WorldMea
         shadowed.update(record.name for record in redefined)
         shadow_sites.extend(Ps1ShadowSite(record.name, node) for record in redefined)
         role = _opens_world(node, redefined)
-        if role is None or (trusting and role in _ROLES_RUNNING_UNREADABLE_CODE):
+        if role is WorldRole.NONE or (trusting and _runs_unreadable_code(node, role)):
             continue
         openers.append(node)
         closed = False
@@ -505,10 +598,10 @@ def _assigned_identity_body(
     return _IdentityBody.OPAQUE_VALUE
 
 
-def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> WorldRole | None:
+def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> WorldRole:
     """
     The role by which `node` leaves the type system or the command table in a state the collected
-    metadata no longer describes, or `None` for a node that leaves both as it found them.
+    metadata no longer describes, or `WorldRole.NONE` for a node that leaves both as it found them.
     `redefined` is the identity classification of the same node, so an assignment into the identity
     namespaces is recognized once, not by two functions that can drift apart.
 
@@ -541,25 +634,31 @@ def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> WorldRol
             return WorldRole.LEAK
         if _is_type_accelerator_mutation(node) or _is_psobject_member_mutation(node):
             return WorldRole.MUTATION
-        return None
+        return WorldRole.NONE
     if isinstance(node, Ps1AssignmentExpression):
         if any(record.body is not _IdentityBody.VISIBLE_BLOCK for record in redefined):
             return WorldRole.IDENTITY
-        return None
-    return None
+        return WorldRole.NONE
+    return WorldRole.NONE
 
 
-def _command_opens_world(cmd: Ps1CommandInvocation) -> WorldRole | None:
+def _command_opens_world(cmd: Ps1CommandInvocation) -> WorldRole:
+    """
+    The deny-list is read before the opaque-file test, so that a command the tables name keeps the
+    role they give it however it is invoked. Both spellings open the world either way, but the role
+    is what decides whether `_runs_unreadable_code` may excuse the node, and a dot-invoked
+    `Add-Type` mutates the type system in plain sight rather than running a file nobody can read.
+    """
     if is_opaque_dispatch(cmd):
         return WorldRole.UNKNOWN
+    name = resolve_command_name(cmd)
+    if name is not None and (role := command_role(name)) is not WorldRole.NONE:
+        return role
     if runs_another_script_file(cmd):
         return WorldRole.LEAK
-    name = resolve_command_name(cmd)
     if name is None:
-        return None
-    if (role := command_role(name)) is not WorldRole.NONE:
-        return role
-    return WorldRole.IDENTITY if touches_identity_provider(cmd) else None
+        return WorldRole.NONE
+    return WorldRole.IDENTITY if touches_identity_provider(cmd) else WorldRole.NONE
 
 
 def runs_another_script_file(cmd: Ps1CommandInvocation) -> bool:

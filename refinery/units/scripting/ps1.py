@@ -34,8 +34,10 @@ class ps1(IterativeDeobfuscator):
     to a computed target runs code this analysis cannot read, and such code can rename a .NET type,
     re-point a property or define a function over a cmdlet's name. Everything written below one is
     therefore kept, which on a script that decodes its payload halfway through can be the bulk of
-    the output. The `-e` switch assumes such code changes none of that and removes the junk anyway;
-    it is unsound by construction and meant for reading a script rather than running the result.
+    the output. The `-e` switch assumes such code changes none of that, and also that it reads none
+    of it: a function nothing in the file calls is then deleted even where the payload is the only
+    thing that could have called it. It is unsound by construction and meant for reading a script
+    rather than running the result.
 
     **The assumption behind the default.** Stripping console output treats the input as a standalone
     script. A file cannot say whether it is a module: a `.psm1` exports its functions to callers no
@@ -54,10 +56,10 @@ class ps1(IterativeDeobfuscator):
             'the console.'))] = False,
         trust_eval: Param[bool, Arg.Switch('-e', help=(
             'Assume that code the analysis cannot read - an Invoke-Expression, a call through a '
-            'variable, a dot-sourced file, an alias bound to a computed target - leaves the .NET '
-            'type system and the command table alone, and remove the junk written below it. This '
-            'is unsound: such code can rename a type or shadow a cmdlet, so the output may behave '
-            'differently. Use it to read a script, not to run the result.'))] = False,
+            'variable, a dot-sourced file, an alias bound to a computed target - neither changes '
+            'nor reads anything the rest of the script does, and remove the junk written below it. '
+            'This is unsound: such code can rename a type or shadow a cmdlet, and a function only '
+            'it calls is deleted. Use it to read a script, not to run the result.'))] = False,
     ):
         super().__init__(timeout=timeout, keep_output=keep_output, trust_eval=trust_eval)
 

@@ -7,16 +7,15 @@ from inspect import cleandoc
 from refinery.lib.scripts.ps1.analysis.world import (
     Ps1TypeWorld,
     WorldRole,
-    _identity_redefinitions,
-    _opens_world,
     assigns_an_alias_name,
     build_closed_world,
     command_role,
     measure_world,
     touches_identity_provider,
 )
-from refinery.lib.scripts.ps1.options import Ps1DeobfuscationOptions
+from refinery.lib.scripts.ps1.ast import get_command_name
 from refinery.lib.scripts.ps1.model import Ps1CommandInvocation
+from refinery.lib.scripts.ps1.options import Ps1DeobfuscationOptions
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -627,8 +626,8 @@ class TestPs1TrustedEvalNarrowsTheOpenerListAndNothingElse(TestBase):
     `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` withholds exactly the
     openers whose danger is that code nobody can read will run, and leaves every other reading of
     the same walk alone. Both models are measured over one tree holding one construct of each kind,
-    so the two opener lists are comparable node by node and a role that stopped being recognized
-    shows up as a missing opener rather than as a row nobody wrote.
+    and each opener is named by the statement it was written as rather than by the classification
+    under test, so a construct that stopped being recognized shows up as a missing row.
     """
 
     _ONE_OF_EVERY_KIND = cleandoc("""
@@ -636,6 +635,7 @@ class TestPs1TrustedEvalNarrowsTheOpenerListAndNothingElse(TestBase):
         & $f
         . C:/stage2.ps1
         Set-Alias Copy-Item $t
+        Set-Item alias:Out-Null Write-Host
         Add-Type -TypeDefinition $src
         Update-TypeData -TypeName System.Int32 -MemberName X -Value 1
         class Zzq {
@@ -644,24 +644,43 @@ class TestPs1TrustedEvalNarrowsTheOpenerListAndNothingElse(TestBase):
         }
     """)
 
-    def setUp(self):
-        script = Ps1Parser(self._ONE_OF_EVERY_KIND).parse()
-        self.suspecting = measure_world(script, Ps1DeobfuscationOptions(trust_eval=False))
-        self.trusting = measure_world(script, Ps1DeobfuscationOptions(trust_eval=True))
+    @classmethod
+    def setUpClass(cls):
+        script = Ps1Parser(cls._ONE_OF_EVERY_KIND).parse()
+        cls.suspecting = measure_world(script, Ps1DeobfuscationOptions(trust_eval=False))
+        cls.trusting = measure_world(script, Ps1DeobfuscationOptions(trust_eval=True))
 
     @staticmethod
-    def _role(node) -> WorldRole | None:
-        return _opens_world(node, _identity_redefinitions(node))
+    def _written_as(node) -> str:
+        if isinstance(node, Ps1CommandInvocation):
+            return get_command_name(node) or '&'
+        return type(node).__name__
 
-    def test_the_trusting_model_keeps_exactly_the_openers_that_mutate(self):
+    def test_the_suspecting_model_records_every_construct(self):
         self.assertEqual(
-            [node for node in self.suspecting.openers if self._role(node) is WorldRole.MUTATION],
-            list(self.trusting.openers),
+            [self._written_as(node) for node in self.suspecting.openers],
+            [
+                'Ps1ClassDefinition',
+                'Update-TypeData',
+                'Add-Type',
+                'Set-Item',
+                'Set-Alias',
+                'C:/stage2.ps1',
+                '&',
+                'Invoke-Expression',
+            ],
         )
 
-    def test_the_suspecting_model_records_strictly_more_on_this_script(self):
-        self.assertLess(len(self.trusting.openers), len(self.suspecting.openers))
-        self.assertNotEqual(self.trusting.openers, ())
+    def test_the_trusting_model_withholds_only_the_ones_running_unreadable_code(self):
+        self.assertEqual(
+            [self._written_as(node) for node in self.trusting.openers],
+            [
+                'Ps1ClassDefinition',
+                'Update-TypeData',
+                'Add-Type',
+                'Set-Item',
+            ],
+        )
 
     def test_the_shadow_set_is_the_same_under_both_models(self):
         self.assertEqual(
@@ -673,5 +692,4 @@ class TestPs1TrustedEvalNarrowsTheOpenerListAndNothingElse(TestBase):
         for name in ('suspecting', 'trusting'):
             with self.subTest(name):
                 measured = getattr(self, name)
-                self.assertEqual(
-                    measured.world.closed_for_the_whole_run, not measured.openers)
+                self.assertEqual(measured.world.closed_for_the_whole_run, not measured.openers)
