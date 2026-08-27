@@ -132,6 +132,14 @@ produce **only** the following, with no preface, no commentary, and nothing afte
 3. Add a brief reminder to add targeted regression tests where applicable.
 
 Your output must match this exactly so that it can be easily copied and pasted.
+When the code review returns, each discovered defect must be handled in one of three ways:
+
+1. it is discarded; provide your reason
+2. it has a satisfying fix; either by the reviewer or by you
+3. there is an xfail test that tracks it
+
+Never throw around the vague terms "measured", "recorded", or "pinned" in this context.
+State only which bugs are discarded, fixed, and tracked with a test.
 
 # Test Coverage
 
