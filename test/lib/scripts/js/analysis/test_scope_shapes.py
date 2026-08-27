@@ -515,6 +515,165 @@ class TestTheDeclarationATopLevelThisReadsIsKept(TestBase):
         )
 
 
+#: A program declaring a function inside a block, mapped to the behavior an engine gives it. The
+#: block is where the name lives in strict code and the copy Annex B makes is what puts it outside
+#: one in sloppy code, so the shapes here differ in the mode the block is read under and in where
+#: the name is read from.
+A_FUNCTION_DECLARED_INSIDE_A_BLOCK = {
+    'a module': Program(
+        a_program("""
+            function outer() {
+              { function W() { return 1; } }
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+            }
+            outer();
+            export {};
+            """),
+        prints('threw'),
+        Reading.ES_MODULE,
+    ),
+    'a script saying so': Program(
+        a_program("""
+            'use strict';
+            function outer() {
+              { function W() { return 1; } }
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+            }
+            outer();
+            """),
+        prints('threw'),
+    ),
+    'a function body saying so': Program(
+        a_program("""
+            function outer() {
+              'use strict';
+              { function W() { return 1; } }
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+            }
+            outer();
+            """),
+        prints('threw'),
+    ),
+    'a sloppy call before the block': Program(
+        a_program("""
+            function outer() {
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+              { function W() { return 1; } }
+            }
+            outer();
+            """),
+        prints('threw'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAFunctionDeclaredInsideABlockIsDeclaredInsideIt(TestBase):
+    """
+    Retired from `test.lib.scripts.js.test_release_blockers` and kept as the regression it retired.
+
+    A function declared inside a plain block is a lexical binding of that block, and what reaches
+    the enclosing variable scope is decided by the mode. Strict code puts nothing there: a call
+    beside the block reads no binding and throws. Sloppy code creates a `var` of the name at the
+    entry of the enclosing function and copies the block's function into it where the declaration
+    runs, so a call before the block reads `undefined` and throws too, and only a call after it
+    answers the function.
+
+    `refinery.lib.scripts.js.analysis.model` used to place every block function in the enclosing
+    variable scope whatever the mode, initialized as if it were declared there, without consulting
+    the strict-mode overlay that knows the difference and without modelling the point in the block
+    at which the copy runs, so every consumer read a binding holding a function where the program
+    held none and the folds downstream answered the call with the function's value.
+    """
+
+    def test_a_block_function_is_read_from_where_the_language_binds_it(self):
+        rows = A_FUNCTION_DECLARED_INSIDE_A_BLOCK
+        self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
+
+
+#: A program whose block is one no branch of it takes, mapped to the behavior an engine gives it.
+#: What a dead block declares is declared all the same - a `var` and, in sloppy code, the `var` half
+#: of a function declaration are created at the entry of the enclosing scope, before any branch is
+#: decided - so a read of the name answers `undefined` rather than throwing.
+A_DECLARATION_A_DEAD_BLOCK_HOLDS = {
+    'a function no branch declares': Program(
+        a_program("""
+            if (0) { function W() { return 1; } }
+            console.log(W);
+            """),
+        prints('undefined'),
+    ),
+    'a var no branch declares': Program(
+        a_program("""
+            if (0) { var v = 1; }
+            console.log(v);
+            """),
+        prints('undefined'),
+    ),
+    'a function that is the whole of an if clause': Program(
+        a_program("""
+            function outer() {
+              if (0) function W() { return 1; }
+              console.log(W);
+            }
+            outer();
+            """),
+        prints('undefined'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestADeclarationADeadBlockHoldsIsStillDeclared(TestBase):
+    """
+    Retired from `test.lib.scripts.js.test_release_blockers` and kept as the regression it retired.
+
+    Removing a branch no condition takes removes the statements it ran, and a declaration is not
+    only a statement: a `var` and the `var` half of a sloppy function declaration name something
+    from the entry of the enclosing scope onwards, whether or not the branch holding them is ever
+    reached. `refinery.lib.scripts.js.deobfuscation.deadcode` used to drop the branch whole, so the
+    name the program answered `undefined` for was left bound to nothing and reading it threw.
+
+    The two halves are one defect and are kept as two rows because one rule reads both shapes, and
+    the same rule decides the other direction too: a *taken* branch is unwrapped into the list
+    around it, which may only happen where the block scopes nothing, so the block a strict function
+    is declared in is kept exactly as a block holding a `let` is.
+    """
+
+    def test_a_declaration_a_dead_block_holds_is_still_read(self):
+        rows = A_DECLARATION_A_DEAD_BLOCK_HOLDS
+        self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
+
+
+class TestTheDeclarationsADeadBlockHeldAreKept(TestBase):
+    """
+    The same law read from the text and from nothing else, so that it is not answered only where
+    Node.js is installed: what comes back is the read, with a `var` of the name left standing in
+    front of it and the statements the branch would have run gone.
+    """
+
+    def test_each_dead_block_leaves_the_names_it_declared(self):
+        self.assertEqual(
+            {
+                label: folded(row.text)
+                for label, row in A_DECLARATION_A_DEAD_BLOCK_HOLDS.items()
+            },
+            {
+                'a function no branch declares': 'var W;\nconsole.log(W);',
+                'a var no branch declares': 'var v;\nconsole.log(v);',
+                'a function that is the whole of an if clause': inspect.cleandoc(
+                    """
+                    function outer() {
+                      var W;
+                      console.log(W);
+                    }
+                    outer();
+                    """
+                ),
+            },
+        )
+
+
 #: A program whose block function writes a name declared outside the block, mapped to the behavior
 #: an engine gives it. The call is the only thing that writes the name, so a reader that cannot say
 #: which function a call reaches has to say that any of them may have written it.
@@ -592,26 +751,59 @@ class TestAReductionTheBlockFunctionRefusalGivesUpIsGivenUp(TestBase):
     What the block-function fix costs, written down before it is paid. A name Annex B copies into
     the enclosing scope holds the function only from the point the declaration runs, and the copy
     takes whatever the block's own name holds at that point, so nothing that reads the enclosing
-    name can be answered from the declaration alone. The three calls here are answered from it
-    today and are answered correctly; a model that stops guessing stops answering them.
+    name can be answered from the declaration alone. The three calls here were answered from it and
+    were answered correctly; the model stopped guessing and stopped answering them.
 
-    Read from the text and from nothing else, because that is what changes: the programs go on
+    Read from the text and from nothing else, because that is what changed: the programs go on
     printing `1` either way, so no engine can report the difference.
     """
 
-    def test_each_call_to_a_block_function_is_still_folded(self):
+    def test_no_call_to_a_block_function_is_folded(self):
         self.assertEqual(
             {
                 label: folded(program)
                 for label, program in A_REDUCTION_THE_BLOCK_FUNCTION_REFUSAL_GIVES_UP.items()
             },
             {
-                'a call after the block': (
-                    'function outer() {\n  {}\n  console.log(1);\n}\nouter();'),
-                'a call inside the block': (
-                    'function outer() {\n  {\n    console.log(1);\n  }\n}\nouter();'),
-                'a value taken out of the block': (
-                    'function outer() {\n  {}\n  console.log(1);\n}\nouter();'),
+                'a call after the block': inspect.cleandoc(
+                    """
+                    function outer() {
+                      {
+                        function W() {
+                          return 1;
+                        }
+                      }
+                      console.log(W());
+                    }
+                    outer();
+                    """
+                ),
+                'a call inside the block': inspect.cleandoc(
+                    """
+                    function outer() {
+                      {
+                        function W() {
+                          return 1;
+                        }
+                        console.log(W());
+                      }
+                    }
+                    outer();
+                    """
+                ),
+                'a value taken out of the block': inspect.cleandoc(
+                    """
+                    function outer() {
+                      {
+                        function W() {
+                          return 1;
+                        }
+                      }
+                      console.log(W());
+                    }
+                    outer();
+                    """
+                ),
             },
         )
 

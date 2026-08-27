@@ -243,6 +243,24 @@ def _is_const_qualified(declarator: JsVariableDeclarator) -> bool:
     return isinstance(parent, JsVariableDeclaration) and parent.kind is JsVarKind.CONST
 
 
+def _calls_a_function_of_this_file_by_an_unstated_name(scope: Node, effects: EffectModel) -> bool:
+    """
+    Whether *scope* holds a call naming its callee by an identifier this file binds while the model
+    declines to say which function that name holds.
+
+    Such a call may run any function written here, one that writes a candidate included, and
+    `_collect_call_sites` cannot report it: that answers with the functions a call may reach, and
+    this one reaches none it can name. Where it is true, a candidate survives only if no function of
+    this file writes it at all, which is what the substitution needs: it is the only guard standing
+    between a non-escaping mutator and a constant inlined past its write.
+    """
+    return any(
+        effects.a_name_this_file_binds_holds_the_callee(node)
+        for node in walk_scope(scope, include_root_body=True)
+        if isinstance(node, JsCallExpression)
+    )
+
+
 def _collect_call_sites(
     scope: Node,
     effects: EffectModel,
@@ -639,10 +657,12 @@ class JsConstantInlining(ScopeProcessingTransformer):
         owner = enclosing_function(scope)
 
         call_sites, called_funcs = _collect_call_sites(scope, effects)
+        a_callee_is_unstated = _calls_a_function_of_this_file_by_an_unstated_name(scope, effects)
 
         for name in [
             candidate for candidate, binding in cross_bindings.items()
-            if any(effects.function_can_mutate(func, binding) for func in called_funcs)
+            if (a_callee_is_unstated and effects.some_function_can_mutate(binding))
+            or any(effects.function_can_mutate(func, binding) for func in called_funcs)
         ]:
             del cross_candidates[name]
             del cross_bindings[name]

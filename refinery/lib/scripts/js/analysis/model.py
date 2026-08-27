@@ -33,7 +33,7 @@ import enum
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from refinery.lib.scripts import Node
+from refinery.lib.scripts import Node, Statement
 from refinery.lib.scripts.js.model import (
     FUNCTION_NODES,
     JsArrayExpression,
@@ -81,6 +81,7 @@ from refinery.lib.scripts.js.model import (
     JsSpreadElement,
     JsStaticBlock,
     JsStringLiteral,
+    JsSwitchCase,
     JsSwitchStatement,
     JsTaggedTemplateExpression,
     JsThisExpression,
@@ -773,6 +774,171 @@ def _walk_skipping_functions(stmts: list) -> Iterator[Node]:
         if isinstance(node, HOIST_BOUNDARY):
             continue
         stack.extend(reversed(node.children()))
+
+
+def statement_list_of(node: Node) -> list[Statement] | None:
+    """
+    The list of statements *node* holds, or `None` where it holds none. A script and a block hold
+    theirs directly, a function holds its body's, and a `switch` case holds the statements written
+    under it - the four places a declaration may stand in a list at all.
+
+    A `switch` holds every case's statements as one list, freshly built, because that is what its
+    one scope binds: a `let` written under one case is visible under all of them, so a reader asking
+    what a switch declares has to be given the cases together and not one at a time.
+    """
+    if isinstance(node, JsScript):
+        return node.body
+    if isinstance(node, JsSwitchStatement):
+        return [statement for case in node.cases for statement in case.body]
+    if isinstance(node, JsBlockStatement):
+        return node.body
+    if isinstance(node, JsStaticBlock):
+        return node.body
+    if isinstance(node, JsSwitchCase):
+        return node.body
+    if isinstance(node, FUNCTION_NODES):
+        body = node.body
+        return body.body if isinstance(body, JsBlockStatement) else None
+    return None
+
+
+def is_a_var_home(node: Node) -> bool:
+    """
+    Whether *node* is where a `var` and a function declaration written in it are bound: a function,
+    a class static block, or the script. The same set `HOIST_BOUNDARY` bounds a hoist walk by, asked
+    of one node rather than used to stop one.
+    """
+    return isinstance(node, (JsScript, JsStaticBlock)) or isinstance(node, FUNCTION_NODES)
+
+
+def statement_list_holding(node: Node) -> Node | None:
+    """
+    The nearest node holding *node* in a statement list, looking through the labels a statement may
+    be written under. A labelled declaration stands in the list its label stands in - Annex B reads
+    a label as transparent at every level, and so does the placement of a `var`.
+    """
+    cursor = node
+    parent = cursor.parent
+    while isinstance(parent, JsLabeledStatement) and parent.body is cursor:
+        cursor, parent = parent, parent.parent
+    if parent is None:
+        return None
+    return parent if statement_list_of(parent) is not None else None
+
+
+def _lexically_declares(statements: list[Statement], name: str) -> bool:
+    """
+    Whether *statements* holds a `let`, `const` or `class` declaration of *name* directly, through
+    the labels a declaration may be written under.
+    """
+    for statement in statements:
+        while isinstance(statement, JsLabeledStatement):
+            statement = statement.body
+        if isinstance(statement, JsVariableDeclaration) and statement.kind in (
+            JsVarKind.LET, JsVarKind.CONST,
+        ):
+            for declarator in statement.declarations:
+                if isinstance(declarator, JsVariableDeclarator) and any(
+                    ident.name == name for ident in pattern_identifiers(declarator.id)
+                ):
+                    return True
+        elif isinstance(statement, JsClassDeclaration) and statement.id is not None:
+            if statement.id.name == name:
+                return True
+    return False
+
+
+def annex_b_var_home(declaration: JsFunctionDeclaration) -> Node | None:
+    """
+    The function, script or static block whose `var` names the function *declaration* declares, or
+    `None` where nothing outside the block holding it ever does.
+
+    A declaration written directly in such a body names something there and is answered with that
+    body. A declaration written inside a block is a lexical binding of that block, and only Annex
+    B.3.3 puts the name outside it: the enclosing body gets a `var` of the name, which the copy the
+    declaration makes writes to when it runs. That happens in sloppy code only, and §B.3.3.1 names
+    three things that stop it:
+
+    - a `let`, `const` or `class` of the same name between the block and the body, the body's own
+      list included, which the `var` would conflict with;
+    - a parameter of the function, which already binds the name;
+    - the name `arguments`, whose binding the function already has.
+
+    A catch parameter is not one of them, and the mismatch is deliberate: a simple catch parameter
+    does not stop the copy, so the enclosing name still ends up holding the function, while a
+    destructuring one does, being a lexical declaration the `var` would conflict with. Both were
+    read from an engine rather than from the text of the specification.
+    """
+    home = statement_list_holding(declaration)
+    if home is not None and is_a_var_home(home):
+        return home
+    if strict_mode_at(declaration):
+        return None
+    name = declaration.id.name if declaration.id is not None else None
+    if name is None:
+        return None
+    cursor: Node | None = declaration.parent
+    while cursor is not None:
+        statements = statement_list_of(cursor)
+        if statements is not None and _lexically_declares(statements, name):
+            return None
+        if (
+            isinstance(cursor, JsCatchClause)
+            and cursor.param is not None
+            and not isinstance(cursor.param, JsIdentifier)
+            and any(ident.name == name for ident in pattern_identifiers(cursor.param))
+        ):
+            return None
+        if is_a_var_home(cursor):
+            if name == 'arguments' and not isinstance(cursor, JsArrowFunctionExpression):
+                return None
+            if any(
+                ident.name == name
+                for param in getattr(cursor, 'params', ())
+                for ident in pattern_identifiers(param)
+            ):
+                return None
+            return cursor
+        cursor = cursor.parent
+    return None
+
+
+def annex_b_copies_into(binding: Binding) -> bool:
+    """
+    Whether *binding* holds a function Annex B copies into its scope rather than declares there, so
+    that nothing about the declaration says what the name holds.
+
+    Three things are true of such a name and of no other function name, and each of them on its own
+    makes the declaration a poor answer for what it denotes. The copy runs where the declaration
+    stands rather than at the entry of the scope, so a read before it - or in a run where the block
+    never executes - finds whatever was there. The copy takes what the block's own name holds at
+    that point, which a write inside the block may have replaced. And nothing in the text writes to
+    the outer name at all, so a consumer counting writes finds none and reads the declaration as the
+    only thing that ever put a value there.
+
+    Spelled over the scope the binding is in rather than over its variable scope, because a block
+    function that is *not* copied is declared in the block it stands in, and that one is a plain
+    lexical binding: it is initialized before any statement of the block runs and the declaration is
+    exactly what it holds.
+    """
+    if binding.kind is not BindingKind.FUNCTION or len(binding.declarations) != 1:
+        return False
+    declaration = binding.declarations[0].parent
+    if not isinstance(declaration, JsFunctionDeclaration):
+        return False
+    return statement_list_holding(declaration) is not _statement_list_holder_of(binding.scope)
+
+
+def _statement_list_holder_of(scope: Scope) -> Node | None:
+    """
+    The node whose statement list *scope* binds the declarations of, which is the scope's own node
+    but for a function, whose statements are its body's.
+    """
+    node = scope.node
+    if isinstance(node, FUNCTION_NODES):
+        body = node.body
+        return body if isinstance(body, JsBlockStatement) else None
+    return node
 
 
 def enclosing_function(node: Node) -> Node | None:
@@ -1546,7 +1712,7 @@ class SemanticModel:
         """
         if binding is None or len(binding.declarations) != 1:
             return None
-        if binding.written_at_entry:
+        if binding.written_at_entry or annex_b_copies_into(binding):
             return None
         if self.binding_maybe_reassigned_dynamically(binding):
             return None
@@ -1597,7 +1763,7 @@ class SemanticModel:
         """
         if binding is None or len(binding.declarations) != 1:
             return None
-        if binding.has_indefinite_write:
+        if binding.has_indefinite_write or annex_b_copies_into(binding):
             return None
         if binding.writes:
             return list(binding.writes)
@@ -2213,7 +2379,8 @@ class _ScopeBuilder:
                         for ident in pattern_identifiers(decl.id):
                             self._declare(func_scope, ident.name, BindingKind.VAR, ident)
             elif isinstance(node, JsFunctionDeclaration) and node.id is not None:
-                self._declare(func_scope, node.id.name, BindingKind.FUNCTION, node.id)
+                if annex_b_var_home(node) is func_scope.node:
+                    self._declare(func_scope, node.id.name, BindingKind.FUNCTION, node.id)
 
     def _collect_imports(self, stmts: list, scope: Scope):
         for stmt in stmts:
@@ -2225,6 +2392,17 @@ class _ScopeBuilder:
                     self._declare(scope, local.name, BindingKind.IMPORT, local)
 
     def _collect_lexical(self, stmts: list, scope: Scope):
+        """
+        Declare in *scope* what the statements of *stmts* bind lexically: a `let`, a `const`, a
+        class, and a function no `var` outside the block is created for.
+
+        That last one is the whole of what a mode decides about a block-declared function. Strict
+        code binds it in the block and nowhere else, and so does sloppy code wherever §B.3.3.1 stops
+        the copy; where the copy runs, the name outside the block is what every reference reads and
+        `_hoist` has already declared it, so nothing is declared here and the block holds no binding
+        of its own - which is what makes a read inside the block and one after it read one name, as
+        they do.
+        """
         for stmt in stmts:
             if isinstance(stmt, JsVariableDeclaration) and stmt.kind in (
                 JsVarKind.LET, JsVarKind.CONST,
@@ -2236,6 +2414,9 @@ class _ScopeBuilder:
                             self._declare(scope, ident.name, kind, ident)
             elif isinstance(stmt, JsClassDeclaration) and stmt.id is not None:
                 self._declare(scope, stmt.id.name, BindingKind.CLASS, stmt.id)
+            elif isinstance(stmt, JsFunctionDeclaration) and stmt.id is not None:
+                if annex_b_var_home(stmt) is None:
+                    self._declare(scope, stmt.id.name, BindingKind.FUNCTION, stmt.id)
 
     def _visit(self, node: Node, scope: Scope):
         self.model._node_scope[id(node)] = scope

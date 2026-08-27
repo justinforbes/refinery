@@ -15,7 +15,12 @@ from refinery.lib.scripts.js.analysis.effects import (
     EffectModel,
     side_effect_free,
 )
-from refinery.lib.scripts.js.analysis.model import SemanticModel
+from refinery.lib.scripts.js.analysis.model import (
+    SemanticModel,
+    _walk_skipping_functions,
+    annex_b_var_home,
+    pattern_identifiers,
+)
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     BodyProcessingTransformer,
     is_truthy,
@@ -23,11 +28,58 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
 from refinery.lib.scripts.js.model import (
     JsBlockStatement,
     JsExpressionStatement,
+    JsFunctionDeclaration,
+    JsIdentifier,
     JsIfStatement,
     JsScript,
     JsVariableDeclaration,
+    JsVariableDeclarator,
     JsVarKind,
 )
+
+
+def _the_names_a_dropped_branch_still_declares(branch: Statement | None) -> list[Statement]:
+    """
+    A `var` statement declaring every name *branch* binds outside itself, or nothing where it binds
+    none.
+
+    Removing a branch removes the statements it would have run, and a declaration is more than a
+    statement it runs: a `var`, and in sloppy code a function declaration Annex B gives a `var` half
+    to, name something from the entry of the enclosing scope onwards, whether or not the branch is
+    ever reached. Reading such a name answers `undefined` in a program that keeps the branch and
+    throws in one that does not, so the names have to be left behind even where nothing else is.
+
+    What the branch binds lexically is not among them, and neither is a `var` inside a function it
+    holds: the first goes with the block it was scoped to, and the second belongs to that function.
+    """
+    if branch is None:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for node in _walk_skipping_functions([branch]):
+        if isinstance(node, JsVariableDeclaration) and node.kind is JsVarKind.VAR:
+            found = [
+                ident.name
+                for declarator in node.declarations
+                if isinstance(declarator, JsVariableDeclarator)
+                for ident in pattern_identifiers(declarator.id)
+            ]
+        elif isinstance(node, JsFunctionDeclaration) and node.id is not None:
+            found = [node.id.name] if annex_b_var_home(node) is not None else []
+        else:
+            continue
+        for name in found:
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+    if not names:
+        return []
+    return [JsVariableDeclaration(
+        kind=JsVarKind.VAR,
+        declarations=[
+            JsVariableDeclarator(id=JsIdentifier(name=name)) for name in names
+        ],
+    )]
 
 
 class JsDeadCodeElimination(BodyProcessingTransformer):
@@ -95,7 +147,9 @@ class JsDeadCodeElimination(BodyProcessingTransformer):
         if truthy is None:
             return None
         taken = stmt.consequent if truthy else stmt.alternate
+        dropped = stmt.alternate if truthy else stmt.consequent
         result = self._unwrap_branch(taken)
+        result[0:0] = _the_names_a_dropped_branch_still_declares(dropped)
         if not self._test_is_side_effect_free(stmt.test):
             result.insert(0, JsExpressionStatement(expression=stmt.test))
         return result
@@ -117,8 +171,13 @@ class JsDeadCodeElimination(BodyProcessingTransformer):
     def _unwrap_branch(branch: Statement | None) -> list[Statement]:
         """
         Extract the statements from a branch. If the branch is a block, return its body list
-        contents; if it is a bare statement, wrap it in a single-element list. Blocks containing
-        `let` or `const` declarations are kept as-is to preserve block scoping.
+        contents; if it is a bare statement, wrap it in a single-element list. A block is kept whole
+        wherever it declares something that is scoped to it, since lifting the statements out would
+        move that declaration into the scope around it.
+
+        A `let` and a `const` are always such a declaration. A function declaration is one wherever
+        no `var` outside the block is created for it - in strict code always, and in sloppy code
+        under each of the conditions §B.3.3.1 names - which `annex_b_var_home` answers.
         """
         if branch is None:
             return []
@@ -128,6 +187,8 @@ class JsDeadCodeElimination(BodyProcessingTransformer):
                     JsVarKind.LET,
                     JsVarKind.CONST,
                 ):
+                    return [branch]
+                if isinstance(stmt, JsFunctionDeclaration) and annex_b_var_home(stmt) is None:
                     return [branch]
             return list(branch.body)
         return [branch]

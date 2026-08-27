@@ -59,6 +59,8 @@ from test.lib.scripts.js.ledger import (
     printed,
     well_formed,
 )
+
+NL = chr(10)
 from test.lib.scripts.js.test_parameter_grammar import (
     A_BINDING_THE_KIND_OF_FUNCTION_RESERVES,
     A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES,
@@ -351,6 +353,43 @@ class TestLexicalDeclarationIsNotAStatement(TestBase):
         script = JsParser('if (0) let\nx = 1;').parse()
         self.assertEqual(len(script.body), 2)
         self.assertEqual(JsSynthesizer().convert(script.body[1]), 'x = 1;')
+
+
+#: A function declaration written as the whole of an `if` clause, in each of the modes. Annex B.3.4
+#: admits one in sloppy code, reading it as a block holding it; strict code has no such rule and the
+#: grammar refuses a declaration where it requires a statement.
+A_FUNCTION_DECLARATION_AS_AN_IF_CLAUSE = {
+    'sloppy': 'if (1) function W() { return 1; }' + NL + 'console.log(W());' + NL,
+    'strict': (
+        "'use strict';" + NL
+        + 'if (1) function W() { return 1; }' + NL
+        + 'console.log(W());' + NL
+    ),
+}
+
+
+class TestAFunctionDeclarationIsAClauseOnlyWhereAnnexBSaysSo(TestBase):
+    """
+    `if (x) function f() {}` is a program in sloppy code and no program in strict code: §B.3.4 gives
+    the sloppy grammar an extra production reading the declaration as the block that would hold it,
+    and strict code keeps the rule that a clause is a Statement, which a Declaration is not. Node
+    runs the first and refuses the second with a `SyntaxError`.
+
+    The parser reads both, so a file the engine would not load comes back as a deobfuscated program.
+    That is mishandling of invalid input and never what a release is held for, which is why this is
+    here and not in the other file; it is written down because the placement of a block-declared
+    function is decided by the same production and a reader of that code will look for it.
+    """
+
+    @unittest.expectedFailure
+    def test_a_clause_position_declaration_is_refused_in_strict_code(self):
+        self.assertEqual(
+            {
+                mode: well_formed(source)
+                for mode, source in A_FUNCTION_DECLARATION_AS_AN_IF_CLAUSE.items()
+            },
+            {'sloppy': True, 'strict': False},
+        )
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
