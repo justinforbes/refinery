@@ -5,6 +5,7 @@ import inspect
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.deobfuscation.argwrap import JsAssignmentsAsFunctionArgs
+from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
 
 
 class TestStackUnwrapper(TestJsDeobfuscator):
@@ -161,11 +162,11 @@ class TestRegressionBugs(TestJsDeobfuscator):
             ),
         )
 
-    def test_parenthesized_callee_expanded_only_once_the_parentheses_are_gone(self):
+    def test_parenthesized_callee_is_expanded_like_a_bare_one(self):
         """
-        The callee this pass expands is the identifier a call names, and a parenthesized one is not
-        that identifier. `JsSimplifications` strips the parentheses before this pass sees the call,
-        so the refusal is what a single pass answers and never what the pipeline does.
+        `(wr)(x = 1)` calls what `wr(x = 1)` calls: parentheses around a callee say nothing about
+        which binding the call reads, and
+        `refinery.lib.scripts.js.analysis.model.enclosing_operator` is what looks through them.
         """
         source = inspect.cleandoc(
             """
@@ -174,24 +175,14 @@ class TestRegressionBugs(TestJsDeobfuscator):
             g(x);
             """
         )
-        self.assertEqual(
-            self._run_transformer(source, JsAssignmentsAsFunctionArgs),
-            inspect.cleandoc(
-                """
-                function wr() {
-                  wr = function() {};
-                }
-                (wr)(x = 1);
-                g(x);
-                """
-            ),
-        )
-        self.assertEqual(self._deobfuscate_iterative(source), inspect.cleandoc(
+        goal = inspect.cleandoc(
             """
             x = 1;
             g(x);
             """
-        ))
+        )
+        self.assertEqual(self._run_transformer(source, JsAssignmentsAsFunctionArgs), goal)
+        self.assertEqual(self._deobfuscate_iterative(source), goal)
 
     def test_spread_argument_call_not_expanded(self):
         """
@@ -208,6 +199,122 @@ class TestRegressionBugs(TestJsDeobfuscator):
                 }
                 var y = wr(...arr);
                 g(y);
+                """
+            ),
+        )
+
+
+class TestOnlyAWrapperTheNameActuallyHoldsIsExpanded(TestJsDeobfuscator):
+
+    @staticmethod
+    def _wrapper_and_call() -> str:
+        return inspect.cleandoc(
+            """
+            function wr() { wr = function () {}; }
+            wr(a = 1);
+            """
+        )
+
+    def test_a_wrapper_a_parameter_default_cannot_see_is_left_standing(self):
+        """
+        A parameter default runs in a scope of its own, outside the body, so `W` there is not the
+        `W` the body declares and the call throws before the body ever runs. The model gives the
+        parameters and the body one scope, so the call is recorded against the body's binding.
+        """
+        source = inspect.cleandoc(
+            """
+            function f(x = W(console.log(1))) {
+              function W() { W = function () {}; }
+              return typeof x;
+            }
+            """
+        )
+        self.assertEqual(
+            self._run_transformer(source, JsAssignmentsAsFunctionArgs),
+            inspect.cleandoc(
+                """
+                function f(x = W(console.log(1))) {
+                  function W() {
+                    W = function() {};
+                  }
+                  return typeof x;
+                }
+                """
+            ),
+        )
+
+    def test_a_wrapper_nothing_calls_is_left_standing_beside_one_that_expands(self):
+        """
+        No call to `never` was expanded, so the answer about its declaration is one no call asked
+        for. Expanding a call to `used` says nothing about it.
+        """
+        source = inspect.cleandoc(
+            """
+            function never() { never = function () {}; }
+            function used() { used = function () {}; }
+            used(a = 1);
+            """
+        )
+        self.assertEqual(
+            self._run_transformer(source, JsAssignmentsAsFunctionArgs),
+            inspect.cleandoc(
+                """
+                function never() {
+                  never = function() {};
+                }
+                a = 1;
+                """
+            ),
+        )
+
+    def test_a_wrapper_the_analyst_named_as_a_host_entrypoint_is_left_standing(self):
+        """
+        A host that calls `wr` by name reads a declaration this file never calls, so removing it
+        deletes code reachable from outside. The other two removers of a function declaration —
+        `refinery.lib.scripts.js.deobfuscation.unused.JsUnusedCodeRemoval` and
+        `refinery.lib.scripts.js.deobfuscation.evaluator.JsFunctionEvaluator` — refuse it too.
+        """
+        source = self._wrapper_and_call()
+        self.assertEqual(
+            self._run_transformer(
+                source,
+                JsAssignmentsAsFunctionArgs,
+                DeobfuscationOptions(entrypoints=('wr',)),
+            ),
+            inspect.cleandoc(
+                """
+                function wr() {
+                  wr = function() {};
+                }
+                wr(a = 1);
+                """
+            ),
+        )
+
+    def test_a_wrapper_no_export_names_is_expanded_beside_an_export_of_that_name(self):
+        """
+        The exported `wr` is the top-level `var`; the wrapper is a different binding inside `outer`
+        that no export list can reach.
+        """
+        source = inspect.cleandoc(
+            """
+            var wr = 1;
+            export { wr };
+            function outer() {
+              function wr() { wr = function () {}; }
+              wr(a = 1);
+            }
+            """
+        )
+        self.assertEqual(
+            self._run_transformer(source, JsAssignmentsAsFunctionArgs),
+            inspect.cleandoc(
+                """
+                var wr = 1;
+                export { wr };
+                function outer() {
+                  a = 1;
+                }
                 """
             ),
         )

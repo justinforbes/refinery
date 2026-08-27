@@ -51,16 +51,28 @@ from test.lib.scripts.js.ledger import (
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.model import FUNCTION_NODES
 from refinery.lib.scripts.js.model import (
+    JsArrayPattern,
+    JsAssignmentExpression,
+    JsAssignmentPattern,
     JsCallExpression,
+    JsCatchClause,
+    JsClassDeclaration,
     JsFunctionDeclaration,
     JsFunctionExpression,
     JsFunctionNode,
     JsIdentifier,
+    JsImportDefaultSpecifier,
+    JsImportNamespaceSpecifier,
+    JsImportSpecifier,
     JsMemberExpression,
     JsMethodDefinition,
+    JsObjectPattern,
     JsProperty,
+    JsRestElement,
     JsScript,
     JsStringLiteral,
+    JsVarKind,
+    JsVariableDeclaration,
     JsVariableDeclarator,
     is_async_function,
     is_generator_function,
@@ -638,20 +650,49 @@ def _wraps_what_it_returns(node: Node | None) -> bool:
 
 def _the_keys_a_wrapping_function_is_held_under(root: Node) -> set[str]:
     """
-    The property and method names a wrapping function in *root* is reached through. A member access
-    names no binding, so this is all a reading of the text can say about `o.m()`.
+    The names a wrapping function in *root* is reached through where the reach is a member access.
+    Such an access names no binding, so the name it spells is all a reading of the text can say
+    about `o.m()`, and every name a wrapping function is held under anywhere counts.
     """
     names: set[str] = set()
     for node in root.walk():
         if not _wraps_what_it_returns(node):
             continue
+        own = getattr(node, 'id', None)
+        if isinstance(own, JsIdentifier):
+            names.add(own.name)
         owner = node.parent
+        if isinstance(owner, JsVariableDeclarator) and isinstance(owner.id, JsIdentifier):
+            names.add(owner.id.name)
         if isinstance(owner, (JsProperty, JsMethodDefinition)):
             key = getattr(owner, 'key', None)
             if isinstance(key, JsIdentifier):
                 names.add(key.name)
             elif isinstance(key, JsStringLiteral):
                 names.add(key.value)
+    return names
+
+
+def _the_names_a_pattern_binds(pattern: Node | None) -> set[str]:
+    """
+    The names a binding position introduces: the identifier itself, the target a default is written
+    onto, what a rest element gathers, and the value halves of an object or array pattern. A
+    property key that is not the pattern's own identifier names a property and binds nothing.
+    """
+    if isinstance(pattern, JsIdentifier):
+        return {pattern.name}
+    if isinstance(pattern, JsAssignmentPattern):
+        return _the_names_a_pattern_binds(pattern.left)
+    if isinstance(pattern, JsRestElement):
+        return _the_names_a_pattern_binds(pattern.argument)
+    names: set[str] = set()
+    if isinstance(pattern, JsArrayPattern):
+        for element in pattern.elements:
+            names |= _the_names_a_pattern_binds(element)
+    if isinstance(pattern, JsObjectPattern):
+        for entry in pattern.properties:
+            names |= _the_names_a_pattern_binds(
+                entry.value if isinstance(entry, JsProperty) else entry)
     return names
 
 
@@ -666,29 +707,97 @@ def _the_scopes_around(node: Node):
         owner = owner.parent
 
 
-def _what_a_scope_declares(scope: Node, name: str) -> list[Node | None]:
+def _where_a_lexical_declaration_is_visible(node: Node) -> Node | None:
     """
-    What *scope* itself declares under *name*, as the functions declared or a `None` for a name
-    holding something else. A function below it declares into its own scope and not into this one.
+    The statement list a declaration is visible in when it is visible in less than the whole scope —
+    a `let`, a `const`, a class, or a caught error — and `None` for one the whole scope holds.
     """
-    declared: list[Node | None] = []
-    own = getattr(scope, 'id', None)
-    if isinstance(scope, JsFunctionExpression) and isinstance(own, JsIdentifier):
-        if own.name == name:
-            declared.append(scope)
-    for param in getattr(scope, 'params', None) or ():
-        if isinstance(param, JsIdentifier) and param.name == name:
-            declared.append(None)
+    if isinstance(node, JsCatchClause):
+        return node.body
+    if isinstance(node, JsClassDeclaration):
+        return node.parent
+    if isinstance(node, JsVariableDeclarator):
+        declaration = node.parent
+        if isinstance(declaration, JsVariableDeclaration) and declaration.kind is not JsVarKind.VAR:
+            return declaration.parent
+    return None
+
+
+def _what_a_declaration_binds(node: Node) -> tuple[set[str], Node | None]:
+    """
+    The names *node* declares and what it binds them to, which is `None` for a declaration binding
+    something other than a function written where it stands.
+    """
+    if isinstance(node, JsFunctionDeclaration) and isinstance(node.id, JsIdentifier):
+        return {node.id.name}, node
+    if isinstance(node, JsClassDeclaration) and isinstance(node.id, JsIdentifier):
+        return {node.id.name}, None
+    if isinstance(node, JsVariableDeclarator):
+        return _the_names_a_pattern_binds(node.id), node.init
+    if isinstance(node, JsCatchClause):
+        return _the_names_a_pattern_binds(node.param), None
+    if isinstance(
+        node, (JsImportSpecifier, JsImportDefaultSpecifier, JsImportNamespaceSpecifier)
+    ):
+        return _the_names_a_pattern_binds(node.local), None
+    return set(), None
+
+
+def _how_deep_inside(scope: Node, block: Node | None) -> int:
+    """
+    How far *block* sits below *scope*, and zero for a declaration the whole scope holds. Where one
+    name is declared twice, the deeper of the two is the one a reference inside both reads.
+    """
+    depth = 0
+    node = block
+    while node is not None and node is not scope:
+        depth += 1
+        node = node.parent
+    return depth
+
+
+def _what_a_scope_declares(scope: Node, name: str, reference: JsIdentifier) -> list[Node | None]:
+    """
+    What *scope* itself declares under *name* where *reference* stands: a function expression's own
+    name, the parameters, and the declarations written in it, less the ones a block holds that the
+    reference stands outside of. A function below the scope declares into its own scope, not this
+    one.
+    """
+    seen: list[tuple[int, Node | None]] = []
+    if isinstance(scope, JsFunctionExpression) and isinstance(scope.id, JsIdentifier):
+        if scope.id.name == name:
+            seen.append((0, scope))
+    for parameter in getattr(scope, 'params', None) or ():
+        if name in _the_names_a_pattern_binds(parameter):
+            seen.append((0, None))
     for node in scope.walk():
         if node is scope or next(_the_scopes_around(node), None) is not scope:
             continue
-        if isinstance(node, JsFunctionDeclaration) and isinstance(node.id, JsIdentifier):
-            if node.id.name == name:
-                declared.append(node)
-        if isinstance(node, JsVariableDeclarator) and isinstance(node.id, JsIdentifier):
-            if node.id.name == name:
-                declared.append(node.init)
-    return declared
+        names, bound = _what_a_declaration_binds(node)
+        if name not in names:
+            continue
+        block = _where_a_lexical_declaration_is_visible(node)
+        if block is not None and not reference.is_descendant_of(block):
+            continue
+        seen.append((_how_deep_inside(scope, block), bound))
+    if not seen:
+        return []
+    innermost = max(depth for depth, _ in seen)
+    return [bound for depth, bound in seen if depth == innermost]
+
+
+def _what_a_scope_writes(scope: Node, name: str) -> list[Node | None]:
+    """
+    What an assignment written anywhere in *scope* puts into *name*. A declaration says what a name
+    is bound to and an assignment says what it holds later, and a call reads whichever of the two
+    ran last, so both count.
+    """
+    written: list[Node | None] = []
+    for node in scope.walk():
+        if isinstance(node, JsAssignmentExpression) and isinstance(node.left, JsIdentifier):
+            if node.left.name == name:
+                written.append(node.right)
+    return written
 
 
 def _the_name_reaches_a_wrapping_function(reference: JsIdentifier) -> bool:
@@ -702,9 +811,13 @@ def _the_name_reaches_a_wrapping_function(reference: JsIdentifier) -> bool:
     the plain call — which it may — reads as having answered the wrapping one.
     """
     for scope in _the_scopes_around(reference):
-        declared = _what_a_scope_declares(scope, reference.name)
-        if declared:
-            return any(_wraps_what_it_returns(node) for node in declared)
+        declared = _what_a_scope_declares(scope, reference.name, reference)
+        if not declared:
+            continue
+        return any(
+            _wraps_what_it_returns(node)
+            for node in (*declared, *_what_a_scope_writes(scope, reference.name))
+        )
     return False
 
 

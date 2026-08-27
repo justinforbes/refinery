@@ -12,7 +12,11 @@ program it is ever given is one an entry wrote out by hand.
 """
 from __future__ import annotations
 
-from test.lib.scripts.js.analysis.differential import behavior, deobfuscate_source
+from test.lib.scripts.js.analysis.differential import (
+    behavior,
+    deobfuscate_source,
+    host_behavior,
+)
 
 from refinery.lib.scripts import is_well_formed
 from refinery.lib.scripts.js.parser import JsParser
@@ -114,6 +118,23 @@ def before_and_after(
         behavior(source, module=module),
         behavior(deobfuscate_source(source, module=True), module=module),
     )
+
+
+def before_and_after_in_a_host(
+    source: str,
+) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
+    """
+    What a host running *source* as a classic global script makes of it, and what it makes of the
+    text `refinery.js` writes for it, reported together because the law is that the two agree.
+
+    `before_and_after` reads both under the module execution model, in which a top-level declaration
+    is scoped to the file and reaches no global object. A question about what a name reaches through
+    `this`, through `globalThis`, or from outside the file is one that model cannot be asked at all,
+    and this is the reading that answers it. The deobfuscation here is the one `refinery.js` writes
+    by default, the script model, so that the text read is the text an analyst deobfuscating a
+    classic script is handed.
+    """
+    return (host_behavior(source), host_behavior(folded(source)))
 
 
 def each_program_still_prints(

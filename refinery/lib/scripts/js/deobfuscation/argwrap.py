@@ -12,10 +12,25 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from refinery.lib.scripts import Expression, Node, _remove_from_parent, _replace_in_parent
-from refinery.lib.scripts.js.analysis.cache import model_cache
-from refinery.lib.scripts.js.analysis.model import SemanticModel
+from refinery.lib.scripts import (
+    Expression,
+    Node,
+    _remove_from_parent,
+    _replace_in_parent,
+    reattach,
+    set_child_list,
+)
+from refinery.lib.scripts.js.analysis.cache import ModelCache, model_cache
+from refinery.lib.scripts.js.analysis.model import (
+    Binding,
+    SemanticModel,
+    enclosing_operator,
+)
 from refinery.lib.scripts.js.deobfuscation.helpers import ScriptLevelTransformer
+from refinery.lib.scripts.js.deobfuscation.options import (
+    is_host_entrypoint,
+    module_execution,
+)
 from refinery.lib.scripts.js.model import (
     FUNCTION_NODES,
     JsAssignmentExpression,
@@ -32,11 +47,14 @@ from refinery.lib.scripts.js.model import (
     JsScript,
     JsSequenceExpression,
     JsSpreadElement,
+    JsStaticBlock,
     JsSwitchCase,
     JsUnaryExpression,
     JsVariableDeclarator,
+    strip_parens,
     wraps_return,
 )
+from refinery.lib.scripts.js.strict import is_prologue_host
 
 
 class _Wrapper(NamedTuple):
@@ -45,7 +63,8 @@ class _Wrapper(NamedTuple):
 
     The calls are the nodes themselves rather than a question asked again later, because the
     rewrite moves them: the declaration goes exactly when every one of them was expanded, and that
-    is a question about the calls this list named before anything moved.
+    is a question about the calls this list named before anything moved. The list is never empty, so
+    that answer is never one no call was asked for.
     """
     declaration: JsFunctionDeclaration
     calls: list[JsCallExpression]
@@ -92,23 +111,31 @@ def _is_expression_wrapper(node: JsFunctionDeclaration) -> bool:
     return True
 
 
-def _names_an_export_list_reads(root: Node) -> set[str]:
+def _bindings_an_export_list_reads(model: SemanticModel, root: Node) -> set[int]:
     """
-    The names the export lists of *root* read, less any list that names the file to read them from.
+    The bindings the export lists of *root* read, less any list that names the file to read them
+    from, as the identities of the binding objects.
 
     `export { W }` is a read of `W` that `refinery.lib.scripts.js.analysis.model.is_use_position`
     does not record, so the model reports the binding as one nothing outside its own declaration
-    names. Only a list carrying a source, `export { W } from './m.js'`, names something across the
+    names. Only a list carrying a source, `export { W } from 'm.js'`, names something across the
     module boundary and nothing local at all.
+
+    Which binding a list names is asked of the model rather than of the name it spells, for the
+    reason the module docstring gives: a file that exports one `W` says nothing about a second `W`
+    declared inside a function no export can reach.
     """
-    names: set[str] = set()
+    bindings: set[int] = set()
     for node in root.walk():
         if not isinstance(node, JsExportNamedDeclaration) or node.source is not None:
             continue
         for specifier in node.specifiers:
-            if isinstance(local := specifier.local, JsIdentifier):
-                names.add(local.name)
-    return names
+            if not isinstance(local := specifier.local, JsIdentifier):
+                continue
+            scope = model.scope_of(local) or model.scope_of(node)
+            if (binding := model.lookup(local.name, scope)) is not None:
+                bindings.add(id(binding))
+    return bindings
 
 
 def _stands_as_a_statement_of_a_function_or_the_script(node: JsFunctionDeclaration) -> bool:
@@ -119,16 +146,15 @@ def _stands_as_a_statement_of_a_function_or_the_script(node: JsFunctionDeclarati
     A block-scoped function declaration is one thing in strict code, where it is scoped to the
     block, and another in sloppy code, where the enclosing scope holds the name from the start and
     reaching the block is what puts the function in it; a labeled or exported declaration sits in a
-    slot `_remove_from_parent` cannot take it from. A block is a function body when the node holding
-    it is a function and that block is its body, which no static block or catch clause is.
+    slot `_remove_from_parent` cannot take it from.
+
+    The three placements a Directive Prologue can open are the same three, which is why
+    `refinery.lib.scripts.js.strict.is_prologue_host` answers this. A class static block is the one
+    of them left out: it is a scope of its own that nothing here has measured the model against, and
+    admitting it would buy a shape no obfuscator writes.
     """
     parent = node.parent
-    if isinstance(parent, JsScript):
-        return True
-    if not isinstance(parent, JsBlockStatement):
-        return False
-    owner = parent.parent
-    return isinstance(owner, FUNCTION_NODES) and owner.body is parent
+    return is_prologue_host(parent) and not isinstance(parent, JsStaticBlock)
 
 
 def _a_bare_var_declarator_outside_a_loop_head(declared: Node) -> bool:
@@ -149,6 +175,27 @@ def _a_bare_var_declarator_outside_a_loop_head(declared: Node) -> bool:
     return not isinstance(declaration.parent, (JsForInStatement, JsForOfStatement))
 
 
+def _the_parameters_the_declaration_is_hidden_from(
+    declaration: JsFunctionDeclaration,
+) -> list[Node]:
+    """
+    The parameters of the function whose body holds *declaration*, which the declaration is not
+    visible from.
+
+    A parameter default runs in a scope of its own, sitting between the function and the scope
+    around it, so a name spelled there never denotes what the body declares. The model gives a
+    function's parameters and its body one scope, so such a name is recorded as a reference to the
+    body's binding all the same, and a consumer that reads references has to refuse it here.
+    """
+    block = declaration.parent
+    if not isinstance(block, JsBlockStatement):
+        return []
+    owner = block.parent
+    if not isinstance(owner, FUNCTION_NODES) or owner.body is not block:
+        return []
+    return list(getattr(owner, 'params', None) or ())
+
+
 def _the_calls_that_reach(
     model: SemanticModel,
     declaration: JsFunctionDeclaration,
@@ -164,17 +211,31 @@ def _the_calls_that_reach(
     - it is declared once, here, but for a bare `var` of the same name, which stores nothing;
     - every write to it is the self-disabling assignment inside this declaration, so nothing else
       ever puts a value into the name;
-    - every reference to it, including one a `with` body resolves at run time, is the callee of a
-      call, so that no read of the name can tell the wrapper from what it left behind.
+    - every reference to it is the callee of a call, so that no read of the name can tell the
+      wrapper from what it left behind. The parentheses around a callee and around the call itself
+      are looked through, which is what `refinery.lib.scripts.js.analysis.model.enclosing_operator`
+      and `refinery.lib.scripts.js.model.strip_parens` are for;
+      `refinery.lib.scripts.js.analysis.model.is_invocation_target` answers a wider question than
+      this one, counting the tag of a tagged template, which no expansion here is written for.
 
     A reference that is not an identifier stands in for an access made through an object aliasing
     the binding, which is not a name this pass can follow.
+
+    `refinery.lib.scripts.js.analysis.effects.EffectModel.function_escapes` asks a question the
+    same shape as this one and answers `True` for every self-disabling wrapper there is: it refuses
+    a written binding, a dynamic reference and a second declaration outright, and those three are
+    exactly what the carve-outs above are about. It cannot stand in for this.
+
+    A reference a `with` body resolves at run time is counted as a call that reaches the wrapper,
+    which the object supplying the name instead would make wrong. That acceptance, and the reason
+    it is made rather than refused, is
+    `test.lib.scripts.js.test_unfixed_defects.TestAWithObjectMayCarryTheNameAWrapperAnswersTo`; the
+    opaque reflective surfaces are accepted for the reason
+    `test.lib.scripts.js.test_unfixed_defects.TestAnUnreadableEvalMayRebindAWrapper` states.
     """
     assert declaration.id is not None
     binding = model.binding_of(declaration.id)
     if binding is None:
-        return None
-    if sum(1 for name in binding.declarations if name is declaration.id) != 1:
         return None
     for name in binding.declarations:
         if name is not declaration.id and not _a_bare_var_declarator_outside_a_loop_head(name):
@@ -182,18 +243,36 @@ def _the_calls_that_reach(
     for write in (*binding.writes, *binding.indefinite_writes):
         if not isinstance(write, JsIdentifier) or not write.is_descendant_of(declaration):
             return None
+    hidden_from = _the_parameters_the_declaration_is_hidden_from(declaration)
     calls: list[JsCallExpression] = []
     for reference in (*binding.reads, *binding.dynamic_refs):
         if not isinstance(reference, JsIdentifier):
             return None
-        call = reference.parent
-        if not isinstance(call, JsCallExpression) or call.callee is not reference:
+        if any(reference.is_descendant_of(parameter) for parameter in hidden_from):
+            return None
+        call = enclosing_operator(reference)
+        if not isinstance(call, JsCallExpression) or strip_parens(call.callee) is not reference:
             return None
         calls.append(call)
     return calls
 
 
-def _admitted_wrappers(model: SemanticModel, root: JsScript) -> list[_Wrapper]:
+def _a_host_calls_the_binding(model: SemanticModel, binding: Binding, options: object) -> bool:
+    """
+    Whether *binding* names a function the analyst declared a host invokes, and is one a host could
+    reach — a top-level declaration under the script execution model.
+
+    `refinery.lib.scripts.js.deobfuscation.unused.JsUnusedCodeRemoval` and
+    `refinery.lib.scripts.js.deobfuscation.evaluator.JsFunctionEvaluator` ask this before deleting a
+    function declaration, and the three have to answer it the same way or they disagree about which
+    functions survive.
+    """
+    if not is_host_entrypoint(options, binding.name):
+        return False
+    return model.reaches_global_object(binding, module_scope=module_execution(options))
+
+
+def _admitted_wrappers(cache: ModelCache, root: JsScript, options: object) -> list[_Wrapper]:
     """
     The self-disabling wrappers of *root* the pass may expand, each with the calls that reach it.
 
@@ -201,25 +280,31 @@ def _admitted_wrappers(model: SemanticModel, root: JsScript) -> list[_Wrapper]:
     takes the body that disables the wrapper with it, so a call left standing beside an expanded one
     answers a promise where the input answered `undefined`. This is decided per declaration and no
     longer poisons a plain wrapper elsewhere that happens to answer to the same name.
+
+    The shape question is asked before the model is read, so a file carrying no wrapper at all never
+    pays for one being built.
     """
     shaped = [
         node for node in root.walk()
-        if isinstance(node, JsFunctionDeclaration) and _is_expression_wrapper(node)
+        if isinstance(node, JsFunctionDeclaration)
+        and not wraps_return(node)
+        and _stands_as_a_statement_of_a_function_or_the_script(node)
+        and _is_expression_wrapper(node)
     ]
     if not shaped:
         return []
-    exported = _names_an_export_list_reads(root)
+    model = cache.model
+    exported = _bindings_an_export_list_reads(model, root)
     wrappers: list[_Wrapper] = []
     for node in shaped:
         assert node.id is not None
-        if wraps_return(node):
+        binding = model.binding_of(node.id)
+        if binding is None or id(binding) in exported:
             continue
-        if not _stands_as_a_statement_of_a_function_or_the_script(node):
-            continue
-        if node.id.name in exported:
+        if _a_host_calls_the_binding(model, binding, options):
             continue
         calls = _the_calls_that_reach(model, node)
-        if calls is None:
+        if not calls:
             continue
         wrappers.append(_Wrapper(node, calls))
     return wrappers
@@ -253,7 +338,8 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
 
         A spread argument is neither a statement nor a sequence operand, and a statement its own
         list does not hold cannot be spliced into; either way the call stays, and the wrapper it
-        reaches stays with it.
+        reaches stays with it. A replacement that finds no slot is the same answer: the sequence it
+        built has adopted the arguments by then, so the call takes them back before the refusal.
         """
         if any(isinstance(arg, JsSpreadElement) for arg in call.arguments):
             return False
@@ -268,15 +354,15 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
             except ValueError:
                 return False
             statements = [JsExpressionStatement(expression=arg) for arg in call.arguments]
-            body[index:index + 1] = statements
-            for statement in statements:
-                statement.parent = block
+            set_child_list(block, 'body', [*body[:index], *statements, *body[index + 1:]])
             return True
-        _replace_in_parent(call, self._sequence_lowering(call.arguments))
-        return True
+        if _replace_in_parent(call, self._sequence_lowering(call.arguments)):
+            return True
+        reattach(call)
+        return False
 
     def _process_script(self, node: JsScript):
-        wrappers = _admitted_wrappers(model_cache(self, node).model, node)
+        wrappers = _admitted_wrappers(model_cache(self, node), node, self.options)
         if not wrappers:
             return
         reached = {id(call) for wrapper in wrappers for call in wrapper.calls}

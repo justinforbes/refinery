@@ -53,6 +53,7 @@ from test.lib.scripts.js.ledger import (
     a_walk_of,
     an_accessor_at,
     before_and_after,
+    before_and_after_in_a_host,
     each_program_still_prints,
     folded,
     printed,
@@ -2233,4 +2234,94 @@ class TestAnUnreadableEvalMayRebindAWrapper(TestBase):
         self.assertEqual(
             folded(source),
             'eval(String(Math.random() < 2 && "W = function (a) { console.log(7, a); }"));\n1;',
+        )
+
+
+#: A self-disabling wrapper called inside a `with` body whose scope object lacks the wrapper's name
+#: but watches it being looked for, mapped to what Node prints for it.
+A_WITH_OBJECT_WATCHING_FOR_A_WRAPPER_NAME = {
+    "var o = new Proxy({}, { has: function (t, k) { console.log('asked', k); return false; } });\n"
+    'function W() { W = function () {}; }\n'
+    'with (o) { W(console.log(1)); }\n'
+    'console.log(2);\n': 'asked W\nasked console\n1\n2\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWithObjectMayWatchForTheNameAWrapperAnswersTo(TestBase):
+    """
+    The other half of what a `with` body costs, and the half its scope object does not have to carry
+    the name to observe: a call inside the body asks the object for every name it spells, and an
+    object can answer that question with code. Expanding the call takes the question away, so a
+    program that watched for the wrapper's name stops being asked it.
+
+    This is the acceptance `TestAWithObjectMayCarryTheNameAWrapperAnswersTo` records, priced the
+    same way and closed the same way: refusing every call a `with` body makes forfeits the whole
+    recovery of one of the three real samples, and deciding that an object neither carries the name
+    nor watches for it takes interprocedural object facts the analysis does not have.
+    """
+
+    @unittest.expectedFailure
+    def test_the_question_the_expansion_takes_away_was_answered_by_code(self):
+        """
+        Node prints `asked W` and then `asked console` for the program of
+        `A_WITH_OBJECT_WATCHING_FOR_A_WRAPPER_NAME`: the body asks the scope object for both names.
+        The deobfuscation expands the call, and the output asks only for `console`.
+        """
+        rows = A_WITH_OBJECT_WATCHING_FOR_A_WRAPPER_NAME
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: A self-disabling wrapper rebound through the global object under a name no fold can read, mapped
+#: to what a host running the file as a classic script prints for it.
+A_WRAPPER_REBOUND_UNDER_AN_UNREADABLE_KEY = {
+    'function W() { W = function () {}; }\n'
+    "globalThis[['W'].join('')] = function (a) { console.log('real', a); };\n"
+    'W(1);\n': 'real 1\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnUnreadableKeyMayRebindAWrapperThroughTheGlobalObject(TestBase):
+    """
+    A write to the global object under a computed key names whatever the key evaluates to, and a key
+    no fold reads names anything at all — including a wrapper the file declares at its top level,
+    which under the script execution model is a property of that same object.
+
+    The wrapper expansion accepts this, for the reason `TestAnUnreadableEvalMayRebindAWrapper`
+    states: a reflective surface is what the real obfuscated files carry on the way in, and a pass
+    gated on one never runs and never clears the surface that was gating it. A key a fold can read
+    is not covered here — the write is then an ordinary one the model records against the binding,
+    and the expansion refuses.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_after_the_write_reaches_what_it_bound(self):
+        """
+        A host prints `real 1` for the program of `A_WRAPPER_REBOUND_UNDER_AN_UNREADABLE_KEY`: the
+        key spells the wrapper's own name. The deobfuscation lowers the call to its argument and
+        prints nothing.
+        """
+        rows = A_WRAPPER_REBOUND_UNDER_AN_UNREADABLE_KEY
+        self.assertEqual(
+            {source: before_and_after_in_a_host(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    def test_the_key_is_still_unread(self):
+        """
+        The entry above pins the acceptance only while nothing reads the key: a fold that learns to
+        answer `['W'].join('')` would flip it to an unexpected success by making the write visible,
+        not by closing the acceptance. This holds the key unread.
+        """
+        source, = A_WRAPPER_REBOUND_UNDER_AN_UNREADABLE_KEY
+        self.assertEqual(
+            folded(source),
+            "globalThis[['W'].join('')] = function(a) {\n"
+            "  console.log('real', a);\n"
+            '};\n'
+            '1;',
         )

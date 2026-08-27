@@ -24,6 +24,7 @@ from test import TestBase
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.ledger import (
     before_and_after,
+    before_and_after_in_a_host,
     each_program_still_prints,
     evaluated_in_a_body,
     folded,
@@ -538,5 +539,50 @@ class TestAParameterDefaultReadsPastTheBody(TestBase):
         rows = A_PARAMETER_DEFAULT_READING_PAST_THE_BODY
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: A classic script reading one of its own top-level declarations through the `this` its top level
+#: holds, mapped to what a host prints for it. Measured against the declaration being kept, which
+#: leaves both programs standing whole.
+A_DECLARATION_A_SCRIPT_READS_THROUGH_THIS = {
+    "var q = function (a) { console.log('q', a); };\n"
+    'this.q(1);\n': 'q 1\n',
+    'function W() { W = function () {}; }\n'
+    'W(console.log(1));\n'
+    'this.W(2);\n'
+    "console.log('end');\n": '1\nend\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestATopLevelThisNamesTheGlobalObject(TestBase):
+    """
+    At the top level of a classic script `this` is the global object, and a top-level `var` or
+    function declaration is a property of that object, so `this.q` is a read of `q` and nothing
+    else. `refinery.lib.scripts.js.analysis.model` recognizes an access through `globalThis`,
+    `global`, `window`, `self`, `top` and `frames` as reaching such a binding and records the member
+    access in its place; `this` is not among them, so a read written that way is recorded nowhere
+    and the binding reads as one nothing outside its declaration names.
+
+    Every pass that removes a declaration on that answer then removes it. Two of them are witnessed
+    here — the constant and unused-code removal for the `var`, and
+    `refinery.lib.scripts.js.deobfuscation.argwrap` for the wrapper — and the fix belongs to neither
+    of them but to the model: what makes `this` different from the six names is that it is the
+    global object only where it is written, and a function body may hold any receiver at all.
+    """
+
+    @unittest.expectedFailure
+    def test_a_declaration_a_script_reads_through_this_is_left_standing(self):
+        """
+        A host prints `q 1` for the first program of `A_DECLARATION_A_SCRIPT_READS_THROUGH_THIS` and
+        `1` then `end` for the second. The deobfuscation removes the declaration from both, so
+        `this.q` and `this.W` are `undefined` and each program throws `TypeError` where it called
+        them.
+        """
+        rows = A_DECLARATION_A_SCRIPT_READS_THROUGH_THIS
+        self.assertEqual(
+            {source: before_and_after_in_a_host(source) for source in rows},
             each_program_still_prints(rows),
         )
