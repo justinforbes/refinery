@@ -21,6 +21,7 @@ obfuscator fixture may be fed to this.
 """
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from test import TestBase
@@ -170,6 +171,231 @@ class TestABlockFunctionIsWhereItsModeAndItsPositionPutIt(TestBase):
     def test_a_block_function_the_program_answers_for_is_answered_the_same_way(self):
         rows = A_BLOCK_FUNCTION_THE_PROGRAM_STILL_ANSWERS_FOR
         self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
+
+
+#: A program whose parameter default reads a name its own body declares again, mapped to the
+#: behavior an engine gives it. Every kind of function a default may be written on is here, because
+#: the scope a default evaluates in is a property of having one at all and of nothing else.
+A_PARAMETER_DEFAULT_READING_PAST_THE_BODY = {
+    'a call in a default': Program(
+        a_program("""
+            function g() { return 1; }
+            function f(x = g()) { function g() { return 2; } return x; }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a read in a default': Program(
+        a_program("""
+            var v = 1;
+            function f(x = v) { var v = 2; return x; }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a wrapper a default names': Program(
+        a_program("""
+            function W() { W = function () {}; }
+            function f(x = W(console.log(1))) { var W; return typeof x; }
+            W(console.log(2));
+            f();
+            """),
+        prints('2', '1'),
+    ),
+    'an arrow default': Program(
+        a_program("""
+            var v = 1;
+            var f = (x = v) => { var v = 2; return x; };
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a class method default': Program(
+        a_program("""
+            var v = 1;
+            class C { m(x = v) { var v = 2; return x; } }
+            console.log(new C().m());
+            """),
+        prints('1'),
+    ),
+    'a shorthand method default': Program(
+        a_program("""
+            var v = 1;
+            var o = { m(x = v) { var v = 2; return x; } };
+            console.log(o.m());
+            """),
+        prints('1'),
+    ),
+    'a destructured default': Program(
+        a_program("""
+            var v = 1;
+            function f({ x = v } = {}) { var v = 2; return x; }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a generator default': Program(
+        a_program("""
+            var v = 1;
+            function* f(x = v) { var v = 2; yield x; }
+            console.log(f().next().value);
+            """),
+        prints('1'),
+    ),
+    'a closure a default holds': Program(
+        a_program("""
+            var v = 1;
+            function f(g = function () { return v; }) { var v = 2; return g(); }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a readable eval in a default': Program(
+        a_program("""
+            var v = 1;
+            function f(x = eval('v')) { var v = 2; return x; }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAParameterDefaultReadsPastTheBody(TestBase):
+    """
+    Retired from `test.lib.scripts.js.test_release_blockers` and kept as the regression it retired.
+
+    A function whose parameters carry an expression evaluates them in a parameter scope of its own
+    whose parent is the scope enclosing the function, so a default never reads what the body
+    declares: the body's declarations do not exist yet when a default runs. The scope model used to
+    give a function one scope for parameters and body together, so a default's read resolved to the
+    body's binding, and the folds downstream substituted the body's value into the default or
+    deleted the very declaration the default read.
+
+    The misattribution cost the outer binding as much as it cost the default: a reference the body's
+    binding was credited with was one the outer binding never recorded, so a pass counting what
+    reads the outer binding counted one too few. `a wrapper a default names` is that half, and
+    `A_WRAPPER_A_DEFAULT_AND_A_BODY_BOTH_NAME` beside it is the positive companion:
+    `refinery.lib.scripts.js.deobfuscation.argwrap` used to refuse a wrapper a default of its own
+    body named and had no way to see the other one at all, and now expands both.
+    """
+
+    def test_a_parameter_default_reads_the_scope_around_the_function(self):
+        rows = A_PARAMETER_DEFAULT_READING_PAST_THE_BODY
+        self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
+
+
+#: A program whose self-disabling wrapper is called from a parameter default, mapped to the behavior
+#: an engine gives it and to the text the deobfuscation answers with. Both are the positive
+#: companion of `A_PARAMETER_DEFAULT_READING_PAST_THE_BODY`: a call in a default is a call like any
+#: other once the default is in a scope of its own, so the expansion reaches it.
+A_WRAPPER_A_DEFAULT_AND_A_BODY_BOTH_NAME = {
+    'a call from a default and one from the body': (
+        Program(
+            a_program("""
+                function W() { W = function () {}; }
+                function f(x = W(console.log(1))) { W(console.log(3)); return typeof x; }
+                W(console.log(2));
+                f();
+                """),
+            prints('2', '1', '3'),
+        ),
+        inspect.cleandoc(
+            """
+            function f(x = (console.log(1), void 0)) {
+              console.log(3);
+              return typeof x;
+            }
+            console.log(2);
+            f();
+            """
+        ),
+    ),
+    'a call from a default alone': (
+        Program(
+            a_program("""
+                function W() { W = function () {}; }
+                function f(x = W(console.log(1))) { return typeof x; }
+                f();
+                """),
+            prints('1'),
+        ),
+        inspect.cleandoc(
+            """
+            function f(x = (console.log(1), void 0)) {
+              return typeof x;
+            }
+            f();
+            """
+        ),
+    ),
+}
+
+
+class TestAWrapperADefaultNamesIsStillExpanded(TestBase):
+    """
+    A call in a parameter default reaches the wrapper its name denotes, so the expansion is
+    equivalent for it exactly as it is for a call in a body. The pass used to refuse every wrapper
+    whose declaration stood in a body with parameters, because a reference in a default was recorded
+    against the body's binding and it had no way to tell that reference from a real one.
+    """
+
+    def test_each_call_a_default_makes_is_expanded(self):
+        self.assertEqual(
+            {
+                label: folded(row.text)
+                for label, (row, _) in A_WRAPPER_A_DEFAULT_AND_A_BODY_BOTH_NAME.items()
+            },
+            {
+                label: text
+                for label, (_, text) in A_WRAPPER_A_DEFAULT_AND_A_BODY_BOTH_NAME.items()
+            },
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_each_program_prints_what_it_printed(self):
+        rows = {
+            label: row for label, (row, _) in A_WRAPPER_A_DEFAULT_AND_A_BODY_BOTH_NAME.items()}
+        self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
+
+
+#: A program whose body declares a `var` of a parameter's name, mapped to the exact text the
+#: deobfuscation answers with. The read after the declarator is one the value reaches, and the
+#: parameter scope gives it up: the name is written twice, once by the call and once by the
+#: declarator, and the second write is the only one anything in the text says a value for.
+A_FOLD_THE_ENTRY_COPY_GIVES_UP = a_program("""
+    function f(x = 1) { console.log(x); var x = 5; console.log(x); }
+    f();
+    """)
+
+
+class TestAFoldTheEntryCopyGivesUpIsGivenUp(TestBase):
+    """
+    What the parameter scope costs, written down where it is paid. A body `var` of a parameter's
+    name is a binding the call writes before any statement runs, holding the argument, and the
+    declarator that follows is a second write. Two writes are not one value, so the name denotes
+    nothing the whole body over and the read after the declarator stops being answered - where the
+    one binding the two used to share was declined for counting two declarations, and the read
+    before the declarator was answered by ordering alone.
+
+    Read from the text and from nothing else: the program prints `1` and then `5` either way.
+    """
+
+    def test_the_read_after_the_declarator_is_no_longer_folded(self):
+        self.assertEqual(
+            folded(A_FOLD_THE_ENTRY_COPY_GIVES_UP),
+            inspect.cleandoc(
+                """
+                function f(x = 1) {
+                  console.log(x);
+                  var x = 5;
+                  console.log(x);
+                }
+                f();
+                """
+            ),
+        )
 
 
 #: A program whose block function writes a name declared outside the block, mapped to the behavior

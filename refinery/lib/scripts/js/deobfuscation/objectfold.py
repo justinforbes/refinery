@@ -163,7 +163,7 @@ class JsObjectFold(ScopeProcessingTransformer):
                 continue
             model = cache.model
             binding = model.binding_of(name)
-            if binding is None or binding.writes or len(binding.declarations) != 1:
+            if binding is None or binding.writes or model.singular_value(binding) is not init:
                 continue
             if self._has_freshly_allocating_value(prop_map):
                 continue

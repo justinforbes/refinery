@@ -636,113 +636,6 @@ class TestTheDeclarationsADeadBlockHeldAreGone(TestBase):
         )
 
 
-#: A program whose parameter default reads a name its own body declares again, mapped to the
-#: behavior an engine gives it. Every kind of function a default may be written on is here, because
-#: the scope a default evaluates in is a property of having one at all and of nothing else.
-A_PARAMETER_DEFAULT_READING_PAST_THE_BODY = {
-    'a call in a default': Program(
-        a_program("""
-            function g() { return 1; }
-            function f(x = g()) { function g() { return 2; } return x; }
-            console.log(f());
-            """),
-        prints('1'),
-    ),
-    'a read in a default': Program(
-        a_program("""
-            var v = 1;
-            function f(x = v) { var v = 2; return x; }
-            console.log(f());
-            """),
-        prints('1'),
-    ),
-    'a wrapper a default names': Program(
-        a_program("""
-            function W() { W = function () {}; }
-            function f(x = W(console.log(1))) { var W; return typeof x; }
-            W(console.log(2));
-            f();
-            """),
-        prints('2', '1'),
-    ),
-    'an arrow default': Program(
-        a_program("""
-            var v = 1;
-            var f = (x = v) => { var v = 2; return x; };
-            console.log(f());
-            """),
-        prints('1'),
-    ),
-    'a class method default': Program(
-        a_program("""
-            var v = 1;
-            class C { m(x = v) { var v = 2; return x; } }
-            console.log(new C().m());
-            """),
-        prints('1'),
-    ),
-    'a shorthand method default': Program(
-        a_program("""
-            var v = 1;
-            var o = { m(x = v) { var v = 2; return x; } };
-            console.log(o.m());
-            """),
-        prints('1'),
-    ),
-    'a destructured default': Program(
-        a_program("""
-            var v = 1;
-            function f({ x = v } = {}) { var v = 2; return x; }
-            console.log(f());
-            """),
-        prints('1'),
-    ),
-    'a generator default': Program(
-        a_program("""
-            var v = 1;
-            function* f(x = v) { var v = 2; yield x; }
-            console.log(f().next().value);
-            """),
-        prints('1'),
-    ),
-    'a closure a default holds': Program(
-        a_program("""
-            var v = 1;
-            function f(g = function () { return v; }) { var v = 2; return g(); }
-            console.log(f());
-            """),
-        prints('1'),
-    ),
-    'a readable eval in a default': Program(
-        a_program("""
-            var v = 1;
-            function f(x = eval('v')) { var v = 2; return x; }
-            console.log(f());
-            """),
-        prints('1'),
-    ),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-@_one_expected_failure_per_program(A_PARAMETER_DEFAULT_READING_PAST_THE_BODY)
-class TestAParameterDefaultReadsPastTheBody(TestBase):
-    """
-    A function whose parameters carry an expression evaluates them in a parameter scope of its own
-    whose parent is the scope enclosing the function, so a default never reads what the body
-    declares: the body's declarations do not exist yet when a default runs. The scope model gives a
-    function one scope for parameters and body together, so a default's read resolves to the body's
-    binding, and the folds downstream substitute the body's value into the default or delete the
-    very declaration the default reads.
-
-    The misattribution costs the outer binding as much as it costs the default: a reference the
-    body's binding is credited with is one the outer binding never records, so a pass counting what
-    reads the outer binding counts one too few. `a wrapper a default names` is that half -
-    `refinery.lib.scripts.js.deobfuscation.argwrap` refuses a wrapper a default of its own body
-    names, and has no way to see this one at all.
-    """
-
-
 #: A classic script reading one of its own top-level declarations through the `this` its top level
 #: holds, or writing a global property through it, mapped to the behavior a host gives it.
 A_TOP_LEVEL_THIS_REACHING_THE_GLOBAL_OBJECT = {
@@ -930,10 +823,18 @@ class TestTheTextOfAFunctionIsTheTextItWasWrittenWith(TestBase):
 #: A program whose parameter default runs a direct `eval` declaring a name the body reads, mapped
 #: to the behavior an engine gives it.
 A_DIRECT_EVAL_IN_A_DEFAULT_DECLARING_A_NAME = {
-    'a var the eval declares': Program(
+    'a var the eval declares, read by the body': Program(
         a_program("""
             var v = 1;
             function f(x = eval('var v = 2')) { return v; }
+            console.log(f());
+            """),
+        prints('2'),
+    ),
+    'a var the eval declares, read by a later default': Program(
+        a_program("""
+            var v = 1;
+            function f(a = eval('var v = 2'), b = v) { return b; }
             console.log(f());
             """),
         prints('2'),

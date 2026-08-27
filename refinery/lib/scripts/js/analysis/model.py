@@ -92,7 +92,11 @@ from refinery.lib.scripts.js.model import (
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import canonical_array_index, exact_integer
-from refinery.lib.scripts.js.strict import has_simple_parameters, strict_mode_at
+from refinery.lib.scripts.js.strict import (
+    has_parameter_expressions,
+    has_simple_parameters,
+    strict_mode_at,
+)
 
 # A class static block hoists its own `var`/function declarations, so it bounds the hoist walk like a
 # function body. It is deliberately absent from FUNCTION_NODES so the effect model stays transparent to
@@ -190,6 +194,8 @@ _PATTERN_CONTAINERS = (
 class ScopeKind(enum.Enum):
     SCRIPT   = 'script'    # noqa
     FUNCTION = 'function'  # noqa
+    NAME     = 'name'      # noqa  the own name of a named function expression
+    PARAMS   = 'params'    # noqa  a parameter list holding an expression
     BLOCK    = 'block'     # noqa
     CATCH    = 'catch'     # noqa
     CLASS    = 'class'     # noqa
@@ -256,6 +262,12 @@ class Binding:
     dynamic_refs: list[JsIdentifier] = field(default_factory=list)
     indefinite_writes: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
     captured: bool = False
+    #: Whether the call writes this binding before any statement of its scope runs. A `var` of a
+    #: parameter's name is the one shape that does: the body's name starts out holding the argument,
+    #: and only a declarator that runs later says anything about what it holds after that. There is
+    #: no node for that write - the call makes it, not anything in the text - so it can be neither a
+    #: `writes` nor an `indefinite_writes` entry, both of which every consumer orders by position.
+    written_at_entry: bool = False
 
     def note_reference_from(self, scope: Scope | None) -> None:
         """
@@ -269,7 +281,7 @@ class Binding:
         through a mapped `arguments`. They have to agree, and one of them being written differently
         from the others is not a difference anything downstream could act on.
         """
-        if scope is None or scope.var_scope is not self.scope.var_scope:
+        if scope is None or scope.closure_home is not self.scope.closure_home:
             self.captured = True
 
     @property
@@ -326,8 +338,11 @@ class Binding:
         entry is a definition, and a consumer reading one expects to find the value it stored. Recording
         this as a definition of every parameter would let a fold answer with a value only one of them
         can hold; recording it nowhere lets a fold carry a value across it that the write destroyed.
+
+        The write a call makes on entry is one of these too, and it is the one with no node at all,
+        so it is carried by `written_at_entry` and read here beside the rest.
         """
-        return bool(self.indefinite_writes)
+        return bool(self.indefinite_writes) or self.written_at_entry
 
     @property
     def has_global_member_write(self) -> bool:
@@ -376,6 +391,10 @@ class Scope:
     children: list[Scope] = field(default_factory=list)
     bindings: dict[str, Binding] = field(default_factory=dict)
     is_dynamic: bool = False
+    #: For one of the two scopes a function introduces around its body - the one holding its own
+    #: name and the one holding its parameters - the scope holding that body. It is what says the
+    #: three are one call rather than three, which `closure_home` reads and nothing else does.
+    function_body: Scope | None = None
 
     @property
     def is_var_scope(self) -> bool:
@@ -387,6 +406,7 @@ class Scope:
             self.kind is ScopeKind.FUNCTION
             or self.kind is ScopeKind.SCRIPT
             or self.kind is ScopeKind.STATIC_BLOCK
+            or self.kind is ScopeKind.PARAMS
         )
 
     @property
@@ -400,6 +420,25 @@ class Scope:
         while scope is not None and not scope.is_var_scope:
             scope = scope.parent
         return scope
+
+    @property
+    def closure_home(self) -> Scope | None:
+        """
+        The scope that decides whether a reference made from this one crosses a closure boundary: a
+        name read from a scope with a different one is read by a function other than the one that
+        declares it, and is a capture.
+
+        This is the variable scope for every scope but the two a function introduces around its
+        body. A parameter default and the body it belongs to are run by one call and share every
+        binding either of them makes, and so does the name a function expression answers to inside
+        itself, so no closure boundary runs between the three: all of them answer the body's scope.
+        """
+        if self.function_body is not None:
+            return self.function_body
+        home = self.var_scope
+        if home is not None and home.function_body is not None:
+            return home.function_body
+        return home
 
     def contains(self, other: Scope, *, strict: bool = False) -> bool:
         """
@@ -1424,6 +1463,8 @@ class SemanticModel:
         """
         if binding is None or len(binding.declarations) != 1:
             return None
+        if binding.written_at_entry:
+            return None
         if self.binding_maybe_reassigned_dynamically(binding):
             return None
         decl = binding.declarations[0]
@@ -2118,27 +2159,69 @@ class _ScopeBuilder:
                 self._visit(child, scope)
 
     def _visit_function(self, node: JsFunctionNode, enclosing: Scope):
-        fscope = self._new_scope(ScopeKind.FUNCTION, node, enclosing)
+        """
+        Build the scopes of *node*. A function whose parameter list holds no expression gets one
+        scope for its name, its parameters and its body together, which nothing in such a function
+        can tell from the three the specification gives it: no parameter runs, so none of them can
+        read a name, and no reference is made before the body's declarations exist.
+
+        A function whose parameter list does hold an expression gets all three, nested the way §10.2
+        nests them - the name outside the parameters, so a parameter spelling it wins, and the
+        parameters outside the body, so a default reads what encloses the function rather than what
+        the body declares. A `var` of a parameter's name is then a second binding, which is what the
+        entry copy is: the body's name starts out holding the argument, and only the declarator that
+        follows says anything about what it holds after that.
+        """
+        split = has_parameter_expressions(node)
+        outer = enclosing
+        if split and isinstance(node, JsFunctionExpression) and node.id is not None:
+            outer = self._new_scope(ScopeKind.NAME, node, outer)
+            self._declare(outer, node.id.name, BindingKind.FUNC_NAME, node.id)
+        pscope = self._new_scope(ScopeKind.PARAMS, node, outer) if split else None
+        fscope = self._new_scope(ScopeKind.FUNCTION, node, pscope or outer)
+        params = pscope or fscope
+        if pscope is not None:
+            pscope.function_body = fscope
+            if outer is not enclosing:
+                outer.function_body = fscope
         is_arrow = isinstance(node, JsArrowFunctionExpression)
-        if isinstance(node, JsFunctionExpression) and node.id is not None:
+        if not split and isinstance(node, JsFunctionExpression) and node.id is not None:
             self._declare(fscope, node.id.name, BindingKind.FUNC_NAME, node.id)
         for param in node.params:
             for ident in pattern_identifiers(param):
-                self._declare(fscope, ident.name, BindingKind.PARAM, ident)
+                self._declare(params, ident.name, BindingKind.PARAM, ident)
         if not is_arrow:
-            self._declare(fscope, 'arguments', BindingKind.ARGUMENTS, None)
+            self._declare(params, 'arguments', BindingKind.ARGUMENTS, None)
         body = node.body
         if isinstance(body, JsBlockStatement):
             self._hoist(body.body, fscope)
             self._collect_lexical(body.body, fscope)
+            self._note_entry_copies(fscope, params)
         for param in node.params:
-            self._visit(param, fscope)
+            self._visit(param, params)
         if isinstance(body, JsBlockStatement):
             self.model._node_scope[id(body)] = fscope
             for stmt in body.body:
                 self._visit(stmt, fscope)
         elif body is not None:
             self._visit(body, fscope)
+
+    @staticmethod
+    def _note_entry_copies(fscope: Scope, params: Scope):
+        """
+        Record, on every body binding repeating a parameter's name, that the call writes it before
+        any statement runs and says nothing about what it wrote.
+
+        The name starts the body holding the argument. A `var` declarator for it is a write that
+        happens later, so neither the value it installs nor its own position is what the name holds
+        throughout - and a `var` with no declarator at all installs nothing, leaving the argument
+        standing. Entering the declarators as writes that name no value is what says both.
+        """
+        if params is fscope:
+            return
+        for name, binding in fscope.bindings.items():
+            if binding.kind is BindingKind.VAR and name in params.bindings:
+                binding.written_at_entry = True
 
     def _visit_block(self, node: JsBlockStatement, enclosing: Scope):
         bscope = self._new_scope(ScopeKind.BLOCK, node, enclosing)

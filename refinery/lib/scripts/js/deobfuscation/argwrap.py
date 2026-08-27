@@ -32,7 +32,6 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     a_host_calls_the_binding,
 )
 from refinery.lib.scripts.js.model import (
-    FUNCTION_NODES,
     JsAssignmentExpression,
     JsBlockStatement,
     JsCallExpression,
@@ -173,27 +172,6 @@ def _a_bare_var_declarator_outside_a_loop_head(declared: Node) -> bool:
     return not isinstance(declaration.parent, (JsForInStatement, JsForOfStatement))
 
 
-def _the_parameters_the_declaration_is_hidden_from(
-    declaration: JsFunctionDeclaration,
-) -> list[Node]:
-    """
-    The parameters of the function whose body holds *declaration*, which the declaration is not
-    visible from.
-
-    A parameter default runs in a scope of its own, sitting between the function and the scope
-    around it, so a name spelled there never denotes what the body declares. The model gives a
-    function's parameters and its body one scope, so such a name is recorded as a reference to the
-    body's binding all the same, and a consumer that reads references has to refuse it here.
-    """
-    block = declaration.parent
-    if not isinstance(block, JsBlockStatement):
-        return []
-    owner = block.parent
-    if not isinstance(owner, FUNCTION_NODES) or owner.body is not block:
-        return []
-    return list(getattr(owner, 'params', None) or ())
-
-
 def _the_calls_that_reach(
     binding: Binding,
     declaration: JsFunctionDeclaration,
@@ -237,12 +215,9 @@ def _the_calls_that_reach(
     for write in (*binding.writes, *binding.indefinite_writes):
         if not isinstance(write, JsIdentifier) or not write.is_descendant_of(declaration):
             return None
-    hidden_from = _the_parameters_the_declaration_is_hidden_from(declaration)
     calls: list[JsCallExpression] = []
     for reference in (*binding.reads, *binding.dynamic_refs):
         if not isinstance(reference, JsIdentifier):
-            return None
-        if any(reference.is_descendant_of(parameter) for parameter in hidden_from):
             return None
         call = enclosing_operator(reference)
         if not isinstance(call, JsCallExpression) or strip_parens(call.callee) is not reference:

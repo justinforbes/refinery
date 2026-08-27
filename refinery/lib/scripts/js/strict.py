@@ -419,6 +419,43 @@ def has_simple_parameters(fn: JsFunctionNode) -> bool:
     return all(isinstance(param, JsIdentifier) for param in fn.params)
 
 
+def has_parameter_expressions(fn: JsFunctionNode) -> bool:
+    """
+    Whether *fn*'s parameter list holds an expression that runs when the function is called
+    (`ContainsExpression`, §8.6.2): a default anywhere in it, or a computed key of an object
+    pattern. A rest element is descended into, since a pattern inside one may hold either.
+
+    This is what decides whether a function has a parameter scope of its own. A parameter list with
+    no expression in it cannot observe the difference: nothing in it runs, so nothing in it can read
+    a name, and the body may as well hold the parameters. One with an expression can, and the
+    expression evaluates before the body's declarations exist.
+
+    The answer must be exact rather than merely safe in one direction. Answering `False` where an
+    expression stands leaves a default reading what the body declares; answering `True` where none
+    does splits one binding into two, which costs every consumer that reads a parameter and its
+    body together the reference the other half records.
+    """
+    return any(_contains_expression(param) for param in fn.params)
+
+
+def _contains_expression(node: Node | None) -> bool:
+    if node is None or isinstance(node, JsIdentifier):
+        return False
+    if isinstance(node, JsAssignmentPattern):
+        return True
+    if isinstance(node, JsRestElement):
+        return _contains_expression(node.argument)
+    if isinstance(node, JsArrayPattern):
+        return any(_contains_expression(element) for element in node.elements)
+    if isinstance(node, JsObjectPattern):
+        return any(
+            isinstance(prop, JsRestElement) and _contains_expression(prop.argument)
+            or isinstance(prop, JsProperty) and (prop.computed or _contains_expression(prop.value))
+            for prop in node.properties
+        )
+    return True
+
+
 class ParameterGrammar(enum.Enum):
     """
     The grammar a function's parameter list is read through, which decides how many parameters it may
