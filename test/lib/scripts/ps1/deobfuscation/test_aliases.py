@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -488,3 +490,39 @@ class TestPs1AliasDefiningCommandShadowing(TestPs1):
             foo 'hi'
         """))
         self.assertEqual(result, "Write-Output 'hi'")
+
+
+class TestPs1ARenameOfACommandTheEngineInvokesIsNotUnused(TestPs1):
+    """
+    A `Set-Alias` whose alias no statement names is deleted as a definition nothing uses. PowerShell
+    reaches command names the script never spells, so such a binding can still be the one that runs.
+    """
+
+    #: Each script renames a command that the statement below it reaches without naming it, measured
+    #: on Windows PowerShell 5.1: the `-?` common parameter runs `Get-Help`; the shipped functions
+    #: `cd..` and `more` call `Set-Location` and `Get-Content`; and displaying an error record runs
+    #: `Set-StrictMode`. Every one of them writes an error instead, so the rename is observable.
+    _REACHED_WITHOUT_BEING_NAMED = (
+        cleandoc("""
+            Set-Alias Get-Help Write-Error
+            Write-Output -?
+        """),
+        cleandoc("""
+            Set-Alias Set-Location Write-Error
+            cd..
+        """),
+        cleandoc("""
+            Set-Alias Get-Content Write-Error
+            more 'C:/Windows/win.ini'
+        """),
+        cleandoc("""
+            Set-Alias Set-StrictMode Write-Error
+            Get-Item 'C:/zzqnope/missing'
+        """),
+    )
+
+    @unittest.expectedFailure
+    def test_the_rename_survives(self):
+        for script in self._REACHED_WITHOUT_BEING_NAMED:
+            with self.subTest(script):
+                self._assertKept(script)
