@@ -91,14 +91,18 @@ def _collect_wrappers(root: Node) -> dict[str, _WrapperInfo]:
 
 class JsCallWrapperInliner(ScriptLevelTransformer):
     """
-    Detect trivial call wrapper functions and inline them at every call site.
+    Detect trivial call wrapper functions and inline them at every call site the wrapper's value has
+    reached. A function declared in the scope it names has that value before any statement runs, so
+    every call site qualifies; one Annex B copies into the scope around a block has it only from the
+    declaration onwards, and a call written before that reads `undefined` and throws.
     """
 
     def _process_script(self, node: JsScript):
         wrappers = _collect_wrappers(node)
         if not wrappers:
             return
-        effects = model_cache(self, node).effects
+        cache = model_cache(self, node)
+        effects = cache.effects
         by_node = {id(info.node): info for info in wrappers.values()}
         for dead in self._self_forwarding_wrappers(wrappers, by_node, effects):
             del by_node[dead]
@@ -111,6 +115,8 @@ class JsCallWrapperInliner(ScriptLevelTransformer):
                 continue
             info = by_node.get(id(target))
             if info is None:
+                continue
+            if not cache.dominance.established_before(target, ast_node):
                 continue
             if not arguments_substitutable(ast_node.arguments, info.param_names):
                 continue

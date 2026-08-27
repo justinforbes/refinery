@@ -718,93 +718,119 @@ class TestACallWhoseCalleeCannotBeValuedStillWrites(TestBase):
         self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
 
 
-#: A call to a block-declared function the deobfuscation folds today, mapped to the exact text it
-#: answers with. Every one of them is a correct answer, and every one of them is given up by a model
-#: that refuses to value a name Annex B assigns rather than declares.
-A_REDUCTION_THE_BLOCK_FUNCTION_REFUSAL_GIVES_UP = {
-    'a call after the block': a_program("""
-        function outer() {
-          { function W() { return 1; } }
-          console.log(W());
-        }
-        outer();
-        """),
-    'a call inside the block': a_program("""
-        function outer() {
-          { function W() { return 1; } console.log(W()); }
-        }
-        outer();
-        """),
-    'a value taken out of the block': a_program("""
-        function outer() {
-          { function W() { return 1; } }
-          var g = W;
-          console.log(g());
-        }
-        outer();
-        """),
+#: A call to a block-declared function, mapped to the exact text the deobfuscation answers with. A
+#: call the copy has run before is answered from the declaration; one written before the copy runs
+#: is not, since the name holds `undefined` there.
+A_CALL_TO_A_BLOCK_FUNCTION = {
+    'a call after the block': (
+        a_program("""
+            function outer() {
+              { function W() { return 1; } }
+              console.log(W());
+            }
+            outer();
+            """),
+        inspect.cleandoc(
+            """
+            function outer() {
+              {}
+              console.log(1);
+            }
+            outer();
+            """
+        ),
+    ),
+    'a call inside the block': (
+        a_program("""
+            function outer() {
+              { function W() { return 1; } console.log(W()); }
+            }
+            outer();
+            """),
+        inspect.cleandoc(
+            """
+            function outer() {
+              {
+                console.log(1);
+              }
+            }
+            outer();
+            """
+        ),
+    ),
+    'a value taken out of the block': (
+        a_program("""
+            function outer() {
+              { function W() { return 1; } }
+              var g = W;
+              console.log(g());
+            }
+            outer();
+            """),
+        inspect.cleandoc(
+            """
+            function outer() {
+              {}
+              console.log(1);
+            }
+            outer();
+            """
+        ),
+    ),
+    'a call before the block': (
+        a_program("""
+            function outer() {
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+              { function W() { return 1; } }
+            }
+            outer();
+            """),
+        inspect.cleandoc(
+            """
+            function outer() {
+              try {
+                console.log(W());
+              } catch (e) {
+                console.log('threw');
+              }
+              {
+                function W() {
+                  return 1;
+                }
+              }
+            }
+            outer();
+            """
+        ),
+    ),
 }
 
 
-class TestAReductionTheBlockFunctionRefusalGivesUpIsGivenUp(TestBase):
+class TestACallToABlockFunctionIsFoldedWhereTheCopyHasRun(TestBase):
     """
-    What the block-function fix costs, written down before it is paid. A name Annex B copies into
-    the enclosing scope holds the function only from the point the declaration runs, and the copy
-    takes whatever the block's own name holds at that point, so nothing that reads the enclosing
-    name can be answered from the declaration alone. The three calls here were answered from it and
-    were answered correctly; the model stopped guessing and stopped answering them.
+    What the block-function fix costs, which is nothing but the answers that were wrong. A name
+    Annex B copies into the enclosing scope holds the function from the point the declaration runs,
+    so a call written after it is answered from the declaration exactly as it was, and one written
+    before it is not answered at all - where it used to be answered with the function, which is the
+    entry this retired.
 
-    Read from the text and from nothing else, because that is what changed: the programs go on
-    printing `1` either way, so no engine can report the difference.
+    An earlier design refused to value such a name at all, which would have given up all four of
+    these. Ordering the value against the call keeps three of them, and it is the reduction of a
+    real sample rather than these rows that says so: refusing collapsed
+    `test.units.scripting.test_js.TestJsDeobfuscator.test_obfuscated_fizzbuzz_03` from one statement
+    to eleven kilobytes.
+
+    Read from the text and from nothing else: the first three programs print `1` either way, and
+    only the last one prints differently, which the entry it retired says.
     """
 
-    def test_no_call_to_a_block_function_is_folded(self):
+    def test_each_call_is_folded_where_the_copy_has_run(self):
         self.assertEqual(
             {
                 label: folded(program)
-                for label, program in A_REDUCTION_THE_BLOCK_FUNCTION_REFUSAL_GIVES_UP.items()
+                for label, (program, _) in A_CALL_TO_A_BLOCK_FUNCTION.items()
             },
-            {
-                'a call after the block': inspect.cleandoc(
-                    """
-                    function outer() {
-                      {
-                        function W() {
-                          return 1;
-                        }
-                      }
-                      console.log(W());
-                    }
-                    outer();
-                    """
-                ),
-                'a call inside the block': inspect.cleandoc(
-                    """
-                    function outer() {
-                      {
-                        function W() {
-                          return 1;
-                        }
-                        console.log(W());
-                      }
-                    }
-                    outer();
-                    """
-                ),
-                'a value taken out of the block': inspect.cleandoc(
-                    """
-                    function outer() {
-                      {
-                        function W() {
-                          return 1;
-                        }
-                      }
-                      console.log(W());
-                    }
-                    outer();
-                    """
-                ),
-            },
+            {label: text for label, (_, text) in A_CALL_TO_A_BLOCK_FUNCTION.items()},
         )
 
 

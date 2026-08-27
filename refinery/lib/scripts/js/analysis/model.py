@@ -905,16 +905,14 @@ def annex_b_var_home(declaration: JsFunctionDeclaration) -> Node | None:
 
 def annex_b_copies_into(binding: Binding) -> bool:
     """
-    Whether *binding* holds a function Annex B copies into its scope rather than declares there, so
-    that nothing about the declaration says what the name holds.
+    Whether *binding* holds a function Annex B copies into its scope rather than declares there.
 
-    Three things are true of such a name and of no other function name, and each of them on its own
-    makes the declaration a poor answer for what it denotes. The copy runs where the declaration
-    stands rather than at the entry of the scope, so a read before it - or in a run where the block
-    never executes - finds whatever was there. The copy takes what the block's own name holds at
-    that point, which a write inside the block may have replaced. And nothing in the text writes to
-    the outer name at all, so a consumer counting writes finds none and reads the declaration as the
-    only thing that ever put a value there.
+    The difference the copy makes is one of time. A function declared in the scope it names holds
+    its value before any statement of that scope runs, so nothing has to be ordered against it; one
+    Annex B copies holds it only from the point the declaration is reached, so a read before that
+    point - or in a run in which the block is never entered - finds whatever was there instead.
+    `binding_establishment_sites` is where that is answered, by naming the declaration as the node
+    the value waits on rather than by answering with the empty list a hoisted value gets.
 
     Spelled over the scope the binding is in rather than over its variable scope, because a block
     function that is *not* copied is declared in the block it stands in, and that one is a plain
@@ -1712,7 +1710,7 @@ class SemanticModel:
         """
         if binding is None or len(binding.declarations) != 1:
             return None
-        if binding.written_at_entry or annex_b_copies_into(binding):
+        if binding.written_at_entry:
             return None
         if self.binding_maybe_reassigned_dynamically(binding):
             return None
@@ -1763,14 +1761,14 @@ class SemanticModel:
         """
         if binding is None or len(binding.declarations) != 1:
             return None
-        if binding.has_indefinite_write or annex_b_copies_into(binding):
+        if binding.has_indefinite_write:
             return None
         if binding.writes:
             return list(binding.writes)
         declaration = binding.declarations[0]
         parent = declaration.parent
         if isinstance(parent, JsFunctionDeclaration):
-            return []
+            return [parent] if annex_b_copies_into(binding) else []
         if isinstance(parent, JsClassDeclaration):
             return [parent]
         if isinstance(parent, JsVariableDeclarator):
@@ -2372,6 +2370,14 @@ class _ScopeBuilder:
         return binding
 
     def _hoist(self, stmts: list, func_scope: Scope):
+        """
+        Declare in *func_scope* the names the statements of *stmts* bind with a `var` or with a
+        function declaration, which is what runs before any of them does.
+
+        A function declared inside a block and given a `var` outside it by Annex B is declared here
+        too. What is different about it is not where the name is but when it holds the function, and
+        that is `binding_establishment_sites`' answer rather than this one's.
+        """
         for node in _walk_skipping_functions(stmts):
             if isinstance(node, JsVariableDeclaration) and node.kind is JsVarKind.VAR:
                 for decl in node.declarations:

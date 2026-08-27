@@ -30,10 +30,11 @@ from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.js.analysis.cfg import CfgNode, ControlFlowGraph
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import EffectModel
-from refinery.lib.scripts.js.analysis.model import Binding
+from refinery.lib.scripts.js.analysis.model import Binding, annex_b_copies_into
 from refinery.lib.scripts.js.model import (
     JsAssignmentExpression,
     JsCallExpression,
+    JsFunctionDeclaration,
     JsIdentifier,
     JsVariableDeclarator,
     strip_parens,
@@ -184,15 +185,23 @@ class ReachingModel:
         has no dead zone, so a bare `var x;` establishes nothing and only an initialized declarator
         counts. A later definition kills an earlier one, so the query counts them all bar the
         one it tracks from.
+
+        A function declaration Annex B copies into the scope around its block is one too, and for
+        the same reason a lexical declaration is: the value arrives where the declaration runs, so a
+        read of the name before it answers something else and may not move across it. A function
+        declared in the scope it names is not, its value being there before any statement runs.
         """
         yield from binding.writes
         lexical = binding.is_lexical
+        copied = annex_b_copies_into(binding)
         for declaration in binding.declarations:
             if lexical:
                 yield declaration
                 continue
             parent = declaration.parent
             if isinstance(parent, JsVariableDeclarator) and parent.init is not None:
+                yield declaration
+            elif isinstance(parent, JsFunctionDeclaration) and copied:
                 yield declaration
 
     @staticmethod

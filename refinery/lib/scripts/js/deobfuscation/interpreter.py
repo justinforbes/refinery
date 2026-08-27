@@ -1185,6 +1185,26 @@ def names_runtime_builtin(node: JsIdentifier, model: SemanticModel) -> bool:
     return is_runtime_name(node.name) and name_is_unbound(node, model)
 
 
+def _declares_a_function_inside_a_block(
+    func: JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression,
+) -> bool:
+    """
+    Whether *func*'s body declares a function anywhere other than directly among its own statements
+    - inside a block, a `switch` case, or the clause of an `if` or a loop.
+
+    The walk is the boundary-respecting one, so a function written inside a *nested* function is
+    that function's business and not this one's.
+    """
+    body = func.body
+    if not isinstance(body, JsBlockStatement):
+        return False
+    written_here = {id(stmt) for stmt in body.body}
+    return any(
+        isinstance(node, JsFunctionDeclaration) and id(node) not in written_here
+        for node in walk_scope(body, include_root_body=True)
+    )
+
+
 class JsInterpreter:
     """
     Execute a JavaScript function body with concrete argument values. Returns a Python value or
@@ -1235,8 +1255,17 @@ class JsInterpreter:
         ends it and not `IrreducibleExpression`: the latter hands the caller the body's return
         expression to splice into the call site, which is the same wrong answer written a second
         way.
+
+        A body declaring a function anywhere but among its own statements ends it too. This
+        interpreter has one environment per call and none per block, so it holds such a function
+        from the entry of the body, where the language holds it in the block it is written in and,
+        in sloppy code, in the enclosing scope only from the point the declaration runs. A read
+        before that point is the difference, and it is one this answers with the function where a
+        program answers `undefined`.
         """
         if wraps_return(func):
+            raise InterpreterError
+        if _declares_a_function_inside_a_block(func):
             raise InterpreterError
         params = func.params
         param_names: list[str] = []
