@@ -109,13 +109,12 @@ class ReachingModel:
         The nodes of *graph* at which *binding*'s definition stops holding, or `None` where they
         cannot be listed and the caller must treat the value as reaching nowhere.
 
-        A call this file binds the name of but whose function the model will not state kills the
-        binding, wherever some function of this file writes it. Not knowing which function runs is
-        not knowing that it does not write, and the one that runs may be exactly the one that does:
-        a function a block declares is such a callee, since Annex B copies its value into the name
-        rather than declaring it there, so the model declines to say what the name holds. A callee
-        no name here binds is a different answer and is left alone, which is the condition every
-        reader of this was already written under.
+        A call whose callee `static_callee` does not name kills nothing here, and that is not a
+        claim that it writes nothing. It is answered before this loop is reached: a function that
+        may write *binding* and is reachable by anything other than a call naming it directly makes
+        `mutators_escape` true, and this returns `None` for the whole binding. So every call this
+        loop can be asked about names a function the file also calls by name, and the only reason
+        `static_callee` gives none is that the callee is not such a call at all.
         """
         if (
             binding.has_indefinite_write
@@ -136,12 +135,7 @@ class ReachingModel:
                 kills.add(id(def_node))
         for call, node in self._graph_calls(graph):
             target = self.effects.static_callee(call)
-            if target is None:
-                if not self.effects.a_name_this_file_binds_holds_the_callee(call):
-                    continue
-                if not self.effects.some_function_can_mutate(binding):
-                    continue
-            elif not self.effects.function_can_mutate(target, binding):
+            if target is None or not self.effects.function_can_mutate(target, binding):
                 continue
             if node is None:
                 return None

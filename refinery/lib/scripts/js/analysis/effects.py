@@ -837,7 +837,6 @@ class EffectModel:
         self._member_write_cache: dict[int, _WriteClass] = {}
         self._uses_arguments_cache: dict[int, bool] = {}
         self._mutators_escape_cache: dict[int, bool] = {}
-        self._some_mutator_cache: dict[int, bool] = {}
         self._functions: list[Node] = self._collect_functions()
         self._compute()
 
@@ -901,21 +900,6 @@ class EffectModel:
                 for func in self._functions
             )
             self._mutators_escape_cache[id(binding)] = cached
-        return cached
-
-    def some_function_can_mutate(self, binding: Binding) -> bool:
-        """
-        Whether any function this file writes may write *binding*, itself or through a transitive
-        callee. The answer a caller needs where a call runs a function it cannot name: not knowing
-        which one runs, it has to reckon with every one that could. Memoized per binding.
-        """
-        cached = self._some_mutator_cache.get(id(binding))
-        if cached is None:
-            cached = any(
-                func is not self.model.root and self.function_can_mutate(func, binding)
-                for func in self._functions
-            )
-            self._some_mutator_cache[id(binding)] = cached
         return cached
 
     def is_pure_call(self, call: JsCallExpression | JsNewExpression) -> bool:
@@ -1216,27 +1200,6 @@ class EffectModel:
         if not isinstance(callee, JsIdentifier):
             return None
         return self.function_of(self.model.resolve(callee))
-
-    def a_name_this_file_binds_holds_the_callee(self, call: JsCallExpression) -> bool:
-        """
-        Whether *call* names its callee with an identifier this file binds, while `static_callee`
-        declines to say which function that binding holds.
-
-        A caller reasoning about what a call may have done reads `static_callee` answering `None` in
-        two ways, and this tells them apart. Where the callee is a method, a host function, or a
-        name nothing here declares, `None` means the call runs something outside this file's
-        reckoning, which is a standing condition every such caller was written under. Where it is a
-        name this file binds, `None` means the model saw the binding and would not state its value
-        - one Annex B copies into a block's enclosing scope is such a function - and what it runs
-        may be any of the ones written here, one that writes the very binding being reasoned about
-        included.
-        """
-        callee = strip_parens(call.callee)
-        if not isinstance(callee, JsIdentifier):
-            return False
-        if self.model.resolve(callee) is None:
-            return False
-        return self.static_callee(call) is None
 
     def unambiguous_callee(
         self, call: JsCallExpression
