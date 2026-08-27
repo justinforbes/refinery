@@ -51,6 +51,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     utf16_code_units,
     value_to_node,
 )
+from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.deobfuscation.interpreter import (
     BUILTIN_REGISTRY,
     STATIC_OBJECTS,
@@ -175,7 +176,7 @@ class JsSimplifications(Transformer):
         (`globalThis.String`) is handled by `global_alias_member_name`; this covers only the local alias.
         """
         base = member.object
-        if not isinstance(base, JsIdentifier) or self.model.global_alias_member_name(member) is not None:
+        if not isinstance(base, JsIdentifier) or self._names_a_global(member) is not None:
             return False
         binding = self.model.resolve(base)
         if binding is None:
@@ -253,7 +254,35 @@ class JsSimplifications(Transformer):
         binding = self.model.lookup(name, self.model.scope_of(member))
         if binding is None:
             return name in GUARANTEED_GLOBALS
-        return any(self.dominance.runs_before(w, member) for w in binding.writes)
+        return any(
+            self._write_puts_the_name_on_the_global_object(w)
+            and self.dominance.runs_before(w, member)
+            for w in binding.writes
+        )
+
+    def _names_a_global(self, member: JsMemberExpression) -> str | None:
+        """
+        The global *member* names, read under the execution model this run was asked for. Every fold
+        this pass makes on the strength of an access naming a global asks it this way, since a
+        rewrite it drives is one an analyst runs the file under that model.
+        """
+        return self.model.global_alias_member_name(
+            member, module_scope=module_execution(self.options))
+
+    def _write_puts_the_name_on_the_global_object(self, write: Node) -> bool:
+        """
+        Whether *write*, one of the writes recorded against a global's binding, is one that creates
+        the property a later read through an alias would find.
+
+        A write spelled as a plain name does. One spelled as a member access does only where that
+        access names a global under the model this run was asked for: the model records a write
+        through the `this` of a top level under the script model, and under the module model that
+        same write puts a property on the file's exports, where no read through `globalThis` finds
+        it.
+        """
+        if not isinstance(write, JsMemberExpression):
+            return True
+        return self._names_a_global(write) is not None
 
     def _resolve_in(self, node: JsBinaryExpression, key: str) -> bool | None:
         """
@@ -699,7 +728,7 @@ class JsSimplifications(Transformer):
             not node.computed
             and isinstance(node.object, JsIdentifier)
             and isinstance(node.property, JsIdentifier)
-            and (self.model.global_alias_member_name(node) is not None or self._global_object_alias_base(node))
+            and (self._names_a_global(node) is not None or self._global_object_alias_base(node))
             and not self._resolves_to_local(node, node.property.name)
             and self._alias_property_defined(node, node.property.name)
         ):

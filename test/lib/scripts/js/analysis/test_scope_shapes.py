@@ -398,6 +398,123 @@ class TestAFoldTheEntryCopyGivesUpIsGivenUp(TestBase):
         )
 
 
+#: A classic script reading one of its own top-level declarations through the `this` its top level
+#: holds, or writing a global property through it, mapped to the behavior a host gives it.
+A_TOP_LEVEL_THIS_REACHING_THE_GLOBAL_OBJECT = {
+    'a var the top level declares': Program(
+        a_program("""
+            var q = function (a) { console.log('q', a); };
+            this.q(1);
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+    'a wrapper the top level declares': Program(
+        a_program("""
+            function W() { W = function () {}; }
+            W(console.log(1));
+            this.W(2);
+            console.log('end');
+            """),
+        prints('1', 'end'),
+        Reading.SCRIPT,
+    ),
+    'an arrow at the top level': Program(
+        a_program("""
+            var q = function (a) { console.log('q', a); };
+            (() => { this.q(1); })();
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+    'a global property written beside the read': Program(
+        a_program("""
+            globalThis.q = function (a) { console.log('q', a); };
+            this.q(1);
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+    'a computed write through the top-level this': Program(
+        a_program("""
+            var q = 1;
+            this['q'] = 2;
+            console.log(q);
+            """),
+        prints('2'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestATopLevelThisNamesTheGlobalObject(TestBase):
+    """
+    Retired from `test.lib.scripts.js.test_release_blockers` and kept as the regression it retired.
+
+    At the top level of a classic script `this` is the global object, and a top-level `var` or
+    function declaration is a property of that object, so `this.q` is a read of `q` and nothing
+    else. `refinery.lib.scripts.js.analysis.model` used to recognize an access through `globalThis`,
+    `global`, `window`, `self`, `top` and `frames` as reaching such a binding and record the member
+    access in its place, with `this` not among them, so a read written that way was recorded nowhere
+    and the binding read as one nothing outside its declaration named.
+
+    Every pass that removes a declaration on that answer then removed it, and the last row is the
+    same gap costing a value rather than a declaration: a computed write the model did not see was
+    one the folds behind it read past, so a program that printed what the write put there came back
+    printing what the declaration did. What makes `this` different from the six names is that it is
+    the global object only where it is written, and a function body may hold any receiver at all,
+    which is why it is read from the position it stands in rather than from a set of names.
+    """
+
+    def test_a_declaration_a_top_level_this_reads_is_still_read(self):
+        rows = A_TOP_LEVEL_THIS_REACHING_THE_GLOBAL_OBJECT
+        self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
+
+
+class TestTheDeclarationATopLevelThisReadsIsKept(TestBase):
+    """
+    The same law read from the text and from nothing else, so that it is not answered only where
+    Node.js is installed: what a `this` at the top level names is left standing, and the read
+    naming it is left standing beside it.
+    """
+
+    def test_each_declaration_a_this_reads_is_kept(self):
+        rows = A_TOP_LEVEL_THIS_REACHING_THE_GLOBAL_OBJECT
+        self.assertEqual(
+            {label: folded(rows[label].text) for label in [
+                'a var the top level declares',
+                'a global property written beside the read',
+                'a computed write through the top-level this',
+            ]},
+            {
+                'a var the top level declares': inspect.cleandoc(
+                    """
+                    var q = function(a) {
+                      console.log('q', a);
+                    };
+                    this.q(1);
+                    """
+                ),
+                'a global property written beside the read': inspect.cleandoc(
+                    """
+                    globalThis.q = function(a) {
+                      console.log('q', a);
+                    };
+                    this.q(1);
+                    """
+                ),
+                'a computed write through the top-level this': inspect.cleandoc(
+                    """
+                    var q = 1;
+                    this.q = 2;
+                    console.log(q);
+                    """
+                ),
+            },
+        )
+
+
 #: A program whose block function writes a name declared outside the block, mapped to the behavior
 #: an engine gives it. The call is the only thing that writes the name, so a reader that cannot say
 #: which function a call reaches has to say that any of them may have written it.
@@ -712,19 +829,26 @@ A_TOP_LEVEL_DECLARATION_NOTHING_IN_THE_FILE_NAMES = a_program("""
 
 class TestARemovalTheGlobalObjectFixGivesUp(TestBase):
     """
-    What the top-level `this` fix costs, written down before it is paid. Reading `this` as the
-    global object means reading a write through it as a write of a global property, and a write
-    under a computed key is a write of a property no reading of the text names, so every removal in
-    the file it stands in has to stop. The control beside it is the file with no such write, whose
-    removals must go on happening.
+    What the top-level `this` fix costs. Reading `this` as the global object means reading a write
+    through it as a write of a global property, and a write under a computed key is a write of a
+    property no reading of the text names, so every removal in the file it stands in stops - the
+    declaration of `z`, which nothing reads, and the fold of `k`, which the write reads. The control
+    beside it is the file with no such write, whose removals go on happening.
 
     Read from the text and from nothing else: both programs print what they printed either way.
     """
 
-    def test_a_removal_a_computed_write_stands_beside_still_happens(self):
+    def test_a_removal_a_computed_write_stands_beside_no_longer_happens(self):
         self.assertEqual(
             folded(A_REMOVAL_A_COMPUTED_WRITE_THROUGH_THIS_STANDS_BESIDE),
-            'this.q = 2;\nconsole.log(3);',
+            inspect.cleandoc(
+                """
+                var z = 1;
+                var k = 'q';
+                this[k] = 2;
+                console.log(3);
+                """
+            ),
         )
 
     def test_a_top_level_declaration_nothing_names_is_still_removed(self):

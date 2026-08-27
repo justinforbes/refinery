@@ -4970,31 +4970,19 @@ class TestValueNameClobberedThroughTheGlobalObject(TestBase):
             console.log(String(NaN));
         """))
 
-    @unittest.expectedFailure
     def test_an_assignment_to_nan_through_this_stops_the_fold(self):
-        """
-        JScript: `5`. The fold emits `'NaN'`.
-        """
         self._keeps_the_name(inspect.cleandoc("""
             this.NaN = 5;
             console.log(String(NaN));
         """))
 
-    @unittest.expectedFailure
     def test_an_assignment_to_infinity_through_this_stops_the_fold(self):
-        """
-        JScript: `5`. The fold emits `'Infinity'`.
-        """
         self._keeps_the_name(inspect.cleandoc("""
             this.Infinity = 5;
             console.log(String(Infinity));
         """))
 
-    @unittest.expectedFailure
     def test_an_assignment_to_undefined_through_this_stops_the_fold(self):
-        """
-        JScript: `number`. The fold emits `'undefined'`.
-        """
         self._keeps_the_name(inspect.cleandoc("""
             this.undefined = 5;
             console.log(typeof undefined);

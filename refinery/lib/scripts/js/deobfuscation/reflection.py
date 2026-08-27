@@ -737,7 +737,8 @@ class JsReflectionInlining(ScriptLevelTransformer):
             model = model_cache(self, root).model
             if model.scope_of(member) is None:
                 return None
-            return model.global_alias_member_name(member)
+            return model.global_alias_member_name(
+                member, module_scope=module_execution(self.options))
         return resolve
 
     def _free_global_name(self, root: JsScript) -> Callable[[Expression | None], str | None]:

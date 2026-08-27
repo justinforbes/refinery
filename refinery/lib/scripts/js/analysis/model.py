@@ -68,12 +68,14 @@ from refinery.lib.scripts.js.model import (
     JsImportSpecifier,
     JsLabeledStatement,
     JsMemberExpression,
+    JsMethodDefinition,
     JsNewExpression,
     JsNumericLiteral,
     JsObjectExpression,
     JsObjectPattern,
     JsParenthesizedExpression,
     JsProperty,
+    JsPropertyDefinition,
     JsRestElement,
     JsScript,
     JsSpreadElement,
@@ -81,6 +83,7 @@ from refinery.lib.scripts.js.model import (
     JsStringLiteral,
     JsSwitchStatement,
     JsTaggedTemplateExpression,
+    JsThisExpression,
     JsUnaryExpression,
     JsUpdateExpression,
     JsVariableDeclaration,
@@ -817,6 +820,53 @@ def walk_receiver_scope(root: Node) -> Iterator[Node]:
         stack.extend(node.children())
 
 
+def _shares_the_receiver_of(parent: Node, child: Node) -> bool:
+    """
+    Whether *child*, a child of *parent*, is evaluated with the receiver *parent* is - the one step
+    `walk_receiver_scope` takes, read from the child upwards rather than from the root down.
+
+    The two have to agree, because they are one boundary asked from two directions: the walk gives
+    every node under a receiver, and this gives the receiver of one node without a root to start
+    from. A node has no receiver of its own unless something above it made one, so answering from
+    below is what lets the question be asked of a node whose tree is being rewritten around it.
+    """
+    if isinstance(parent, (JsFunctionExpression, JsFunctionDeclaration, JsStaticBlock)):
+        return False
+    if isinstance(parent, (JsMethodDefinition, JsPropertyDefinition)):
+        return parent.computed and child is parent.key
+    if isinstance(parent, (JsClassDeclaration, JsClassExpression)):
+        return child is parent.super_class or child is parent.body
+    return True
+
+
+def is_the_this_of_a_script(node: Node) -> bool:
+    """
+    Whether *node* is a `this` denoting what the top level of a classic script does, which is the
+    global object: the position it stands in is reached from the top of the file without crossing
+    anything that makes a receiver of its own.
+
+    Written as a climb rather than as a walk from the root so that it answers for a node whose tree
+    is being rewritten: a climb that runs out of parents has reached a root and answers `True`, so a
+    node lifted out of the tree reads as the top level, which is the direction that keeps a
+    declaration rather than removing one.
+
+    An arrow crosses nothing - it has no `this` of its own - so a `this` inside any number of them
+    is still the top level's, and so is one in the `extends` clause or a computed key of a class,
+    which are evaluated where the class is written. A method, an accessor, a field initializer and a
+    static block each hold one of their own. A decorator is not answered for, because no engine this
+    is checked against parses one.
+    """
+    if not isinstance(node, JsThisExpression):
+        return False
+    child: Node = node
+    cursor = node.parent
+    while cursor is not None:
+        if not _shares_the_receiver_of(cursor, child):
+            return False
+        child, cursor = cursor, cursor.parent
+    return True
+
+
 def references_own_arguments(fn: Node) -> bool:
     """
     Whether *fn* reads its own `arguments` object, rather than one belonging to a function around it or
@@ -869,6 +919,10 @@ def is_global_object_base(node: Node | None) -> bool:
     refuses a fold, and one it misses removes code that runs.
     """
     base = strip_parens(node) if node is not None else None
+    if base is None:
+        return False
+    if isinstance(base, JsThisExpression):
+        return is_the_this_of_a_script(base)
     return isinstance(base, JsIdentifier) and base.name in GLOBAL_OBJECT_ALIASES
 
 
@@ -1095,6 +1149,16 @@ def _is_member_assignment_target(member: JsMemberExpression) -> bool:
     )
 
 
+def _is_a_named_global_object_base(node: Node | None) -> bool:
+    """
+    Whether *node* denotes the global object by one of the names written for it, which is
+    `is_global_object_base` without the positional reading of `this`. Only `_timer_callee_name`
+    reads it, and its docstring says why.
+    """
+    base = strip_parens(node) if node is not None else None
+    return isinstance(base, JsIdentifier) and base.name in GLOBAL_OBJECT_ALIASES
+
+
 def _is_reflective_member(member: JsMemberExpression) -> bool:
     """
     Whether a member access is a reflective surface — one through which code obtains the `eval`/`Function`
@@ -1139,11 +1203,17 @@ def _timer_callee_name(callee: Node | None) -> str | None:
     property of one specific object and is not the global timer. The base is not shadow-checked — a
     local `window` yielding a match only over-reports a reflection surface, the safe direction for the
     whole-program detector this feeds.
+
+    A `this` is not read as the global object here even where it stands for one, which is the one
+    place the two readings of a base part company. Over-reporting is safe for a surface and this
+    detector accepts it, but a `this` reaches every method of every object in the file, so reading
+    one as the global object would report a surface for `this.setTimeout(f)` on any receiver at all
+    - and a surface freezes every removal in the file it is found in.
     """
     callee = strip_parens(callee)
     if isinstance(callee, JsIdentifier):
         return callee.name if callee.name in STRING_EVAL_NAMES else None
-    if isinstance(callee, JsMemberExpression) and is_global_object_base(callee.object):
+    if isinstance(callee, JsMemberExpression) and _is_a_named_global_object_base(callee.object):
         name = _member_property_name(callee)
         return name if name in STRING_EVAL_NAMES else None
     return None
@@ -1885,7 +1955,9 @@ class SemanticModel:
             self.root_scope.bindings.setdefault(
                 node.name, Binding(node.name, BindingKind.IMPLICIT_GLOBAL, self.root_scope))
 
-    def global_alias_member_name(self, member: JsMemberExpression) -> str | None:
+    def global_alias_member_name(
+        self, member: JsMemberExpression, *, module_scope: bool = False,
+    ) -> str | None:
         """
         The name of the global that a member access on a global-object alias references
         (`globalThis.g`, `window['g']` → `g`), or `None` when *member* is not such an access. The alias
@@ -1893,9 +1965,19 @@ class SemanticModel:
         object, not the global) with a statically known property name, and the access must not cross a
         dynamic scope, where the alias could be rebound or the target could be a `with`-object property —
         in either case the model cannot claim the reference denotes a global.
+
+        *module_scope* is the one thing about the file this query cannot read off the access. A
+        `this` written where a classic script's top level holds one denotes the global object; the
+        same `this` in a module denotes nothing, and in a CommonJS file it denotes that file's
+        exports. So a caller rewriting a program for a host answers under the model it runs, and the
+        default is the script model, which is the model this class records under: recording a
+        reference the module model would not have is what keeps a declaration a reader may reach,
+        and refusing to record it is what removes one.
         """
         base = strip_parens(member.object)
         if not is_global_object_base(base):
+            return None
+        if module_scope and isinstance(base, JsThisExpression):
             return None
         name = _member_property_name(member)
         if name is None:
@@ -1914,6 +1996,14 @@ class SemanticModel:
         reference to it. Only a write creates a global property, so a read establishes nothing; the write
         itself is recorded against the binding by `_build_def_use` like any other reference, so this
         establishes existence only.
+
+        The binding minted here is one nothing reads a value out of: it carries no declaration, so
+        both value queries decline for it, and all it does is give a reference somewhere to resolve
+        to instead of standing free. That is why a write through the `this` of a top level mints one
+        too, although whether such a write creates a global at all is decided by the host - a
+        CommonJS file writes its own exports there. Under the model where it creates nothing, the
+        binding this mints answers no question differently; the one rewrite that reads such a write
+        as a property having been created asks for the execution model itself.
         """
         if not is_member_write_target(member):
             return

@@ -30,13 +30,14 @@ from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel, object_member_access_runs_accessor
 from refinery.lib.scripts.js.analysis.liveness import LivenessModel
 from refinery.lib.scripts.js.analysis.model import (
-    FUNCTION_NODES,
     Binding,
     BindingKind,
+    FUNCTION_NODES,
+    is_global_object_base,
+    is_simple_assignment_target,
     Scope,
     ScopeKind,
     SemanticModel,
-    is_simple_assignment_target,
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
@@ -89,17 +90,27 @@ def _const_global_alias_names(root: Node) -> frozenset[str]:
 
 
 def _global_alias_read_names(root: Node, aliases: frozenset[str]) -> frozenset[str]:
+    """
+    The global properties *root* reads through the global object, which are the ones a write of may
+    not be removed for want of a reader.
+
+    The base is read through `is_global_object_base`, so every spelling of the global object counts
+    here, including the `this` of a top level and the two names that denote another realm's global
+    object. That set is wider than the one the write side keys on, and deliberately: a name found
+    here keeps a write, and keeping one costs a reduction where missing one deletes a read.
+    """
     names: set[str] = set()
     for node in root.walk():
         if not isinstance(node, JsMemberExpression) or node.computed:
             continue
         if not isinstance(node.property, JsIdentifier):
             continue
-        if not isinstance(node.object, JsIdentifier):
-            continue
         if is_simple_assignment_target(node):
             continue
-        if node.object.name in SAME_REALM_GLOBAL_OBJECT_ALIASES or node.object.name in aliases:
+        base = node.object
+        if is_global_object_base(base) or (
+            isinstance(base, JsIdentifier) and base.name in aliases
+        ):
             names.add(node.property.name)
     return frozenset(names)
 
