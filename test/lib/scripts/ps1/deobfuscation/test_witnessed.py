@@ -91,6 +91,8 @@ _RAISE_ABANDONS = _witness(
     test_removal_observability.TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
+_ARMING_COST = _witness(
+    test_fault_observability.TestPs1TheStrictModeScanStaysLinearInTheSizeOfTheScript)
 _ENUMERATOR = _witness(
     test_unused.TestPs1AReadThatConsumesWhatItReadsIsNotBareOutput)
 _STRICT_MODE = _witness(
@@ -306,6 +308,16 @@ def _observed_at_reading_only_what_acts(self: faults.Ps1FaultReach, node: Node) 
     if routing.handlers and not routing.leaves_the_body:
         return False
     return not isinstance(graph.owner, Ps1Script) and self._handled_elsewhere(graph)
+
+
+def _strict_mode_read_without_the_memo(self: faults.Ps1FaultReach) -> bool:
+    """
+    The same answer with the `_strict` slot never consulted. Nothing about what the model says
+    changes, which is the point: the memo is a cost guard and not a correctness one, so the only
+    thing that may notice its removal is a test that counts.
+    """
+    root = self._script
+    return root is None or any(faults._arms_strict_mode(node) for node in root.walk())
 
 
 def _strict_mode_with_the_siblings_empty_pole(self: faults.Ps1FaultReach) -> bool:
@@ -678,6 +690,21 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_STRICT_MODE],
             patch.object(faults, '_STRICT_MODE_COMMANDS', frozenset({'set-strictmode'})),
             notices='test_the_discard_and_the_output_are_both_kept_where_the_other_command_arms_it')
+
+    def test_the_memo_that_keeps_the_arming_scan_affordable_is_witnessed(self):
+        # The scan is a walk over the whole tree and the removal path asks for it per candidate, so
+        # the slot is the only thing between one walk per batch and one per statement. Measured, the
+        # call order is *not* such a thing: asking the fact before the cheaper halves of the gate
+        # costs nothing, so a probe over the order would be satisfied by a mutation that changes no
+        # work at all.
+        self._assertWitnessed(
+            [_ARMING_COST],
+            patch.object(
+                faults.Ps1FaultReach,
+                'strict_mode_may_be_in_force',
+                _strict_mode_read_without_the_memo,
+            ),
+            notices='test_the_walk_is_taken_a_bounded_number_of_times')
 
     def test_the_enumerator_being_denied_purity_is_witnessed(self):
         # Reading `$input` advances what the statements below it read, so the one variable whose

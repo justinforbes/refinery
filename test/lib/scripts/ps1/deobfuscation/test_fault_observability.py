@@ -6,6 +6,10 @@ import unittest
 from unittest.mock import patch
 
 from refinery.lib.scripts.ps1.analysis import faults
+from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
+from refinery.lib.scripts.ps1.analysis.world import measure_world
+from refinery.lib.scripts.ps1.analysis.worldflow import build_world_reach
+from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
@@ -801,8 +805,9 @@ class TestPs1ACommandThatRunsUnreadableCodeIsNotAlwaysAWorldOpener(TestPs1):
     an opener for every reader of the world or giving the fault axis a flood of its own.
     """
 
-    def _assertReadSurvivesBelow(self, command: str) -> None:
-        self._assertKept(F"""
+    @staticmethod
+    def _source_below(command: str) -> str:
+        return inspect.cleandoc(F"""
             {command}
             try {{
               {_UNSET_READ}
@@ -811,6 +816,16 @@ class TestPs1ACommandThatRunsUnreadableCodeIsNotAlwaysAWorldOpener(TestPs1):
               {_HANDLER}
             }}
         """)
+
+    @classmethod
+    def _world_is_closed_below(cls, command: str) -> bool:
+        tree = Ps1Parser(cls._source_below(command)).parse()
+        control_flow = build_control_flow_model(tree)
+        world = build_world_reach(measure_world(tree), lambda: control_flow)
+        return world.closed_at(tree.body[1].try_block.body[0])
+
+    def _assertReadSurvivesBelow(self, command: str) -> None:
+        self._assertKept(self._source_below(command))
 
     @unittest.expectedFailure
     def test_a_module_loaded_by_the_using_statement_keeps_the_read(self):
@@ -840,6 +855,24 @@ class TestPs1ACommandThatRunsUnreadableCodeIsNotAlwaysAWorldOpener(TestPs1):
         for command in _OPENS_THE_WORLD:
             with self.subTest(command):
                 self._assertReadSurvivesBelow(command)
+
+    def test_the_world_is_what_answers_differently_for_the_two_groups(self):
+        """
+        The control the rows above need: each is an expected failure, and an expected failure says
+        only that something went wrong. This says *what* — the world calls the position below every
+        command in the first group closed, and below both in the second open — so a row that starts
+        failing for an unrelated reason stops agreeing with this and one of the two goes red.
+        """
+        self.assertEqual(
+            {
+                command: self._world_is_closed_below(command)
+                for command in (*_RUNS_UNREADABLE_CODE, *_OPENS_THE_WORLD)
+            },
+            {
+                **dict.fromkeys(_RUNS_UNREADABLE_CODE, True),
+                **dict.fromkeys(_OPENS_THE_WORLD, False),
+            },
+        )
 
 
 class TestPs1TheGrantAssumesTheEntryScopeRunsDefaultSemantics(TestPs1):
@@ -934,10 +967,14 @@ class TestPs1AFunctionBodyIsNotWeighedAtItsDefinitionsPosition(TestPs1):
 
 class TestPs1TheStrictModeScanStaysLinearInTheSizeOfTheScript(TestPs1):
     """
-    The fact is a walk over the whole tree, memoized per `Ps1FaultReach` — and the model cache
-    discards that model on every edit, so a pass that removes in batches pays one walk per batch
-    rather than one per statement. Asking it before the cheaper halves of the gate would turn that
-    into a walk per candidate, which is the shape this guards.
+    The fact is a walk over the whole tree, and what keeps that affordable is the memo alone: the
+    model cache discards the `Ps1FaultReach` on every edit, so a pass removing in batches pays one
+    walk per batch rather than one per candidate.
+
+    **The memo is the whole guard, and nothing else here is.** Measured: asking the fact before the
+    cheaper halves of the gate costs exactly nothing, because the first ask is the only one that
+    walks — so the call order is free to change. Dropping the memo is what turns this quadratic,
+    from 973 walked nodes to 311360 at the size below.
     """
 
     def _armings_asked(self, statements: int) -> int:
@@ -959,10 +996,9 @@ class TestPs1TheStrictModeScanStaysLinearInTheSizeOfTheScript(TestPs1):
         return asked
 
     def test_the_walk_is_taken_a_bounded_number_of_times(self):
-        # Measured: 133, 253, 493 and 973 at these four sizes, which is one walk per removal batch.
-        # A walk per candidate is the size of the tree times the number of candidates, so it reaches
-        # six figures at the last size; the bound sits far above the first shape and far below the
-        # second.
+        # Measured: 133, 253, 493 and 973 at n = 40, 80, 160 and 320, which is one walk per removal
+        # batch. Unmemoized the same sizes cost 5320 and 311360, so the bound sits far above the
+        # first shape and far below the second.
         self.assertLess(self._armings_asked(320), 5000)
 
     def test_doubling_the_script_does_not_square_the_walking(self):
