@@ -377,12 +377,20 @@ class LivenessModel:
         return True
 
     def _trackable(self, binding: Binding, owner_scope: Scope | None) -> bool:
+        """
+        Whether *binding* is a local of the function *owner_scope* is the body scope of, so that the
+        graph built for that function sees every store to it.
+
+        The parameters of a function whose parameter list holds an expression are bound in a scope
+        of their own standing outside the body's, so their variable scope is that one rather than
+        the body's; `Scope.closure_home` says the two belong to one call, and is what this asks.
+        """
         return (
             binding.kind in _CANDIDATE_KINDS
             and not binding.captured
             and owner_scope is not None
             and owner_scope.kind is ScopeKind.FUNCTION
-            and binding.scope.var_scope is owner_scope
+            and binding.scope.closure_home is owner_scope
         )
 
     def _analysable(

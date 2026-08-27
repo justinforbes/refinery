@@ -837,6 +837,7 @@ class EffectModel:
         self._member_write_cache: dict[int, _WriteClass] = {}
         self._uses_arguments_cache: dict[int, bool] = {}
         self._mutators_escape_cache: dict[int, bool] = {}
+        self._some_mutator_cache: dict[int, bool] = {}
         self._functions: list[Node] = self._collect_functions()
         self._compute()
 
@@ -900,6 +901,21 @@ class EffectModel:
                 for func in self._functions
             )
             self._mutators_escape_cache[id(binding)] = cached
+        return cached
+
+    def some_function_can_mutate(self, binding: Binding) -> bool:
+        """
+        Whether any function this file writes may write *binding*, itself or through a transitive
+        callee. The answer a caller needs where a call runs a function it cannot name: not knowing
+        which one runs, it has to reckon with every one that could. Memoized per binding.
+        """
+        cached = self._some_mutator_cache.get(id(binding))
+        if cached is None:
+            cached = any(
+                func is not self.model.root and self.function_can_mutate(func, binding)
+                for func in self._functions
+            )
+            self._some_mutator_cache[id(binding)] = cached
         return cached
 
     def is_pure_call(self, call: JsCallExpression | JsNewExpression) -> bool:
@@ -1172,7 +1188,7 @@ class EffectModel:
     def _compute_callee_uses_arguments(self, func: Node) -> bool:
         if isinstance(func, JsArrowFunctionExpression):
             return False
-        func_scope = self.model.function_scope(func)
+        func_scope = self.model.parameter_scope(func)
         if func_scope is None:
             return False
         binding = func_scope.bindings.get('arguments')
@@ -1200,6 +1216,27 @@ class EffectModel:
         if not isinstance(callee, JsIdentifier):
             return None
         return self.function_of(self.model.resolve(callee))
+
+    def a_name_this_file_binds_holds_the_callee(self, call: JsCallExpression) -> bool:
+        """
+        Whether *call* names its callee with an identifier this file binds, while `static_callee`
+        declines to say which function that binding holds.
+
+        A caller reasoning about what a call may have done reads `static_callee` answering `None` in
+        two ways, and this tells them apart. Where the callee is a method, a host function, or a
+        name nothing here declares, `None` means the call runs something outside this file's
+        reckoning, which is a standing condition every such caller was written under. Where it is a
+        name this file binds, `None` means the model saw the binding and would not state its value
+        - one Annex B copies into a block's enclosing scope is such a function - and what it runs
+        may be any of the ones written here, one that writes the very binding being reasoned about
+        included.
+        """
+        callee = strip_parens(call.callee)
+        if not isinstance(callee, JsIdentifier):
+            return False
+        if self.model.resolve(callee) is None:
+            return False
+        return self.static_callee(call) is None
 
     def unambiguous_callee(
         self, call: JsCallExpression
@@ -1390,11 +1427,18 @@ class EffectModel:
         global object — the exact ownership test `_account_write` applies to a plain-identifier write, so a
         mutation of an owned local and a mutation of its name agree on observability. A binding *func* owns
         has all its references inside *func*'s subtree, so the summary scan sees every one of its escapes.
+
+        A function whose parameter list holds an expression introduces its parameters and its own
+        name in scopes standing *outside* its body's, so containment alone would read a write to its
+        own parameter as a write reaching in from elsewhere. `Scope.closure_home` says those scopes
+        are the same call as the body, and answers for all three shapes a function is built in.
         """
         if binding.kind is BindingKind.IMPLICIT_GLOBAL or binding.scope is self.model.root_scope:
             return False
         func_scope = self.model.function_scope(func)
-        return func_scope is not None and func_scope.contains(binding.scope)
+        if func_scope is None:
+            return False
+        return func_scope.contains(binding.scope) or binding.scope.closure_home is func_scope
 
     def _fresh_container_origin(self, binding: Binding, func: Node) -> bool:
         """
@@ -2587,7 +2631,7 @@ def _callee_is_write_free(
     """
     if func is None or depth > _CALLEE_DEPTH_LIMIT:
         return False
-    scope = model.function_scope(func)
+    scope = model.parameter_scope(func)
     if scope is None:
         return False
     if not isinstance(func, JsArrowFunctionExpression):

@@ -23,6 +23,7 @@ from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     OBJECT_PROTOTYPE_MEMBERS,
     RELATIONAL_OPS,
+    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     UNARY_OPS,
     MemberRead,
     access_key,
@@ -51,12 +52,12 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     utf16_code_units,
     value_to_node,
 )
-from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.deobfuscation.interpreter import (
     BUILTIN_REGISTRY,
     STATIC_OBJECTS,
     to_string,
 )
+from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
@@ -262,10 +263,19 @@ class JsSimplifications(Transformer):
 
     def _names_a_global(self, member: JsMemberExpression) -> str | None:
         """
-        The global *member* names, read under the execution model this run was asked for. Every fold
-        this pass makes on the strength of an access naming a global asks it this way, since a
-        rewrite it drives is one an analyst runs the file under that model.
+        The global *member* names, read under the execution model this run was asked for and only
+        where the base names this realm's global object. Every fold this pass makes on the strength
+        of an access naming a global asks it this way, since a rewrite it drives is one an analyst
+        runs the file under that model.
+
+        `top` and `frames` name another document's global object, so a property on one is not the
+        property a bare name in this file reads and a fold that treats the two as one turns an
+        `undefined` into a `ReferenceError`. They are read as global-object bases all the same
+        wherever the answer only keeps code; a rewrite is the case where it does not.
         """
+        base = strip_parens(member.object)
+        if isinstance(base, JsIdentifier) and base.name not in SAME_REALM_GLOBAL_OBJECT_ALIASES:
+            return None
         return self.model.global_alias_member_name(
             member, module_scope=module_execution(self.options))
 

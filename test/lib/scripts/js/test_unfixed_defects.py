@@ -50,6 +50,7 @@ from test.lib.scripts.js.deobfuscation.test_stringarray import (
     A_PRESET_BESIDE_AN_ACCESSOR_CALL_NOTHING_CAN_ANSWER,
 )
 from test.lib.scripts.js.ledger import (
+    a_program,
     a_walk_of,
     an_accessor_at,
     before_and_after,
@@ -59,8 +60,6 @@ from test.lib.scripts.js.ledger import (
     printed,
     well_formed,
 )
-
-NL = chr(10)
 from test.lib.scripts.js.test_parameter_grammar import (
     A_BINDING_THE_KIND_OF_FUNCTION_RESERVES,
     A_FUNCTION_EXPRESSION_NAME_ONLY_THE_ENCLOSING_KIND_RESERVES,
@@ -359,12 +358,15 @@ class TestLexicalDeclarationIsNotAStatement(TestBase):
 #: admits one in sloppy code, reading it as a block holding it; strict code has no such rule and the
 #: grammar refuses a declaration where it requires a statement.
 A_FUNCTION_DECLARATION_AS_AN_IF_CLAUSE = {
-    'sloppy': 'if (1) function W() { return 1; }' + NL + 'console.log(W());' + NL,
-    'strict': (
-        "'use strict';" + NL
-        + 'if (1) function W() { return 1; }' + NL
-        + 'console.log(W());' + NL
-    ),
+    'sloppy': a_program("""
+        if (1) function W() { return 1; }
+        console.log(W());
+        """),
+    'strict': a_program("""
+        'use strict';
+        if (1) function W() { return 1; }
+        console.log(W());
+        """),
 }
 
 

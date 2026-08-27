@@ -15,7 +15,7 @@ from refinery.lib.scripts import (
     _remove_from_parent,
     _replace_in_parent,
 )
-from refinery.lib.scripts.js.analysis.cache import model_cache
+from refinery.lib.scripts.js.analysis.cache import ModelCache, model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
@@ -101,8 +101,30 @@ class JsCallWrapperInliner(ScriptLevelTransformer):
         wrappers = _collect_wrappers(node)
         if not wrappers:
             return
-        cache = model_cache(self, node)
+        with model_cache(self, node).pinned() as cache:
+            inlined = self._inline_the_calls_the_wrappers_reach(node, wrappers, cache)
+        if not inlined:
+            return
+        kept = self._wrappers_to_keep(node, wrappers)
+        for name, info in wrappers.items():
+            if name not in kept:
+                _remove_from_parent(info.node)
+        self.mark_changed()
+
+    def _inline_the_calls_the_wrappers_reach(
+        self, node: JsScript, wrappers: dict[str, _WrapperInfo], cache: ModelCache,
+    ) -> bool:
+        """
+        Replace every call the wrappers of *wrappers* reach with the expression it forwards to, and
+        report whether any was replaced.
+
+        The models are read from a cache the caller holds pinned, because each replacement advances
+        the tree's mutation counter and an unpinned read would rebuild all of them per call site.
+        Nothing this loop does makes a model it reads more permissive: a replaced call is gone, and
+        no declaration moves, so a call site it has not reached yet is ordered exactly as it was.
+        """
         effects = cache.effects
+        dominance = cache.dominance
         by_node = {id(info.node): info for info in wrappers.values()}
         for dead in self._self_forwarding_wrappers(wrappers, by_node, effects):
             del by_node[dead]
@@ -116,7 +138,7 @@ class JsCallWrapperInliner(ScriptLevelTransformer):
             info = by_node.get(id(target))
             if info is None:
                 continue
-            if not cache.dominance.established_before(target, ast_node):
+            if not dominance.established_before(target, ast_node):
                 continue
             if not arguments_substitutable(ast_node.arguments, info.param_names):
                 continue
@@ -130,13 +152,7 @@ class JsCallWrapperInliner(ScriptLevelTransformer):
             )
             _replace_in_parent(ast_node, replacement)
             inlined = True
-        if not inlined:
-            return
-        kept = self._wrappers_to_keep(node, wrappers)
-        for name, info in wrappers.items():
-            if name not in kept:
-                _remove_from_parent(info.node)
-        self.mark_changed()
+        return inlined
 
     @staticmethod
     def _self_forwarding_wrappers(

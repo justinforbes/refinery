@@ -30,14 +30,14 @@ from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel, object_member_access_runs_accessor
 from refinery.lib.scripts.js.analysis.liveness import LivenessModel
 from refinery.lib.scripts.js.analysis.model import (
+    FUNCTION_NODES,
     Binding,
     BindingKind,
-    FUNCTION_NODES,
-    is_global_object_base,
-    is_simple_assignment_target,
     Scope,
     ScopeKind,
     SemanticModel,
+    is_global_object_base,
+    is_simple_assignment_target,
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.js.analysis.effects import object_sets_prototype
-from refinery.lib.scripts.js.analysis.model import SemanticModel
+from refinery.lib.scripts.js.analysis.model import SemanticModel, statement_list_holding
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     GLOBAL_VALUE_NAMES,
     JS_NULL,
@@ -1192,16 +1192,17 @@ def _declares_a_function_inside_a_block(
     Whether *func*'s body declares a function anywhere other than directly among its own statements
     - inside a block, a `switch` case, or the clause of an `if` or a loop.
 
-    The walk is the boundary-respecting one, so a function written inside a *nested* function is
-    that function's business and not this one's.
+    Which list a declaration stands in is `statement_list_holding`'s answer, so a labelled one is
+    read as standing where its label stands, exactly as the scope model reads it. The walk is the
+    boundary-respecting one, so a function written inside a *nested* function is that function's
+    business and not this one's.
     """
     body = func.body
     if not isinstance(body, JsBlockStatement):
         return False
-    written_here = {id(stmt) for stmt in body.body}
     return any(
-        isinstance(node, JsFunctionDeclaration) and id(node) not in written_here
-        for node in walk_scope(body, include_root_body=True)
+        isinstance(node, JsFunctionDeclaration) and statement_list_holding(node) is not body
+        for node in walk_scope(body)
     )
 
 

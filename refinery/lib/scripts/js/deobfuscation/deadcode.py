@@ -27,15 +27,36 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
 )
 from refinery.lib.scripts.js.model import (
     JsBlockStatement,
+    JsClassDeclaration,
     JsExpressionStatement,
     JsFunctionDeclaration,
     JsIdentifier,
     JsIfStatement,
+    JsLabeledStatement,
     JsScript,
     JsVariableDeclaration,
     JsVariableDeclarator,
     JsVarKind,
 )
+
+
+def _is_scoped_to_the_block_holding_it(stmt: Statement | None) -> bool:
+    """
+    Whether *stmt*, standing directly in a block, binds a name that block is the scope of, so that
+    lifting it into the list around the block would give the name a different scope or a different
+    moment to start holding its value. Read through the labels a declaration may be written under.
+
+    A `let`, a `const` and a class are scoped to the block. So is a function declaration, whichever
+    way its mode reads it: strict code and each of the conditions §B.3.3.1 names bind it in the
+    block alone, and where Annex B does create a `var` outside the block, the name holds the
+    function only from the point the declaration runs, while one written in the list around the
+    block holds it from the entry of the scope.
+    """
+    while isinstance(stmt, JsLabeledStatement):
+        stmt = stmt.body
+    if isinstance(stmt, JsVariableDeclaration):
+        return stmt.kind in (JsVarKind.LET, JsVarKind.CONST)
+    return isinstance(stmt, (JsClassDeclaration, JsFunctionDeclaration))
 
 
 def _the_names_a_dropped_branch_still_declares(branch: Statement | None) -> list[Statement]:
@@ -173,22 +194,20 @@ class JsDeadCodeElimination(BodyProcessingTransformer):
         Extract the statements from a branch. If the branch is a block, return its body list
         contents; if it is a bare statement, wrap it in a single-element list. A block is kept whole
         wherever it declares something that is scoped to it, since lifting the statements out would
-        move that declaration into the scope around it.
+        move that declaration into the scope around it or give it a different moment to start
+        holding its value, which `_is_scoped_to_the_block_holding_it` answers.
 
-        A `let` and a `const` are always such a declaration. A function declaration is one wherever
-        no `var` outside the block is created for it - in strict code always, and in sloppy code
-        under each of the conditions §B.3.3.1 names - which `annex_b_var_home` answers.
+        A bare function declaration is the same branch written without the block §B.3.4 reads it as,
+        so it is given one rather than being lifted: a declaration standing in the list around the
+        `if` holds its function from the entry of the scope, where the clause holds it from the
+        point the clause runs.
         """
         if branch is None:
             return []
         if isinstance(branch, JsBlockStatement):
-            for stmt in branch.body:
-                if isinstance(stmt, JsVariableDeclaration) and stmt.kind in (
-                    JsVarKind.LET,
-                    JsVarKind.CONST,
-                ):
-                    return [branch]
-                if isinstance(stmt, JsFunctionDeclaration) and annex_b_var_home(stmt) is None:
-                    return [branch]
+            if any(_is_scoped_to_the_block_holding_it(stmt) for stmt in branch.body):
+                return [branch]
             return list(branch.body)
+        if _is_scoped_to_the_block_holding_it(branch):
+            return [JsBlockStatement(body=[branch])]
         return [branch]

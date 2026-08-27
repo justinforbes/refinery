@@ -51,6 +51,8 @@ from refinery.lib.scripts.js.model import (
     JsContinueStatement,
     JsDoWhileStatement,
     JsExportAllDeclaration,
+    JsExportDefaultDeclaration,
+    JsExportNamedDeclaration,
     JsExportSpecifier,
     JsExpressionStatement,
     JsForInStatement,
@@ -808,47 +810,107 @@ def is_a_var_home(node: Node) -> bool:
     a class static block, or the script. The same set `HOIST_BOUNDARY` bounds a hoist walk by, asked
     of one node rather than used to stop one.
     """
-    return isinstance(node, (JsScript, JsStaticBlock)) or isinstance(node, FUNCTION_NODES)
+    return isinstance(node, (JsScript, HOIST_BOUNDARY))
+
+
+def declaration_under_export(statement: Statement | None) -> Statement | None:
+    """
+    The declaration *statement* is an `export` of, or *statement* itself where it is not one. An
+    export names what the declaration written under it declares and declares nothing of its own, so
+    a reader asking what a statement list binds reads through it.
+    """
+    while isinstance(statement, (JsExportNamedDeclaration, JsExportDefaultDeclaration)):
+        inner = statement.declaration
+        if not isinstance(inner, Statement):
+            break
+        statement = inner
+    return statement
+
+
+def _writes_the_statement_of(parent: Node, child: Node) -> bool:
+    """
+    Whether *parent* is a wrapper *child* is the statement of rather than a list holding it: the
+    label a statement may be written under, or the `export` a declaration may be written under.
+    """
+    if isinstance(parent, JsLabeledStatement):
+        return parent.body is child
+    if isinstance(parent, (JsExportNamedDeclaration, JsExportDefaultDeclaration)):
+        return parent.declaration is child
+    return False
 
 
 def statement_list_holding(node: Node) -> Node | None:
     """
-    The nearest node holding *node* in a statement list, looking through the labels a statement may
-    be written under. A labelled declaration stands in the list its label stands in - Annex B reads
-    a label as transparent at every level, and so does the placement of a `var`.
+    The nearest node holding *node* in a statement list, looking through the labels and the `export`
+    a statement may be written under, and through the `switch` case a statement stands in. A
+    labelled declaration stands in the list its label stands in - Annex B reads a label as
+    transparent at every level, and so does the placement of a `var` - an exported one stands where
+    the export stands, and every case of a `switch` stands in the one list its scope binds.
     """
-    cursor = node
-    parent = cursor.parent
-    while isinstance(parent, JsLabeledStatement) and parent.body is cursor:
+    cursor: Node = node
+    parent: Node | None = cursor.parent
+    while parent is not None and _writes_the_statement_of(parent, cursor):
+        cursor, parent = parent, parent.parent
+    if isinstance(parent, JsSwitchCase):
         cursor, parent = parent, parent.parent
     if parent is None:
         return None
     return parent if statement_list_of(parent) is not None else None
 
 
-def _lexically_declares(statements: list[Statement], name: str) -> bool:
+def lexically_declared_names(statements: list[Statement]) -> frozenset[str]:
     """
-    Whether *statements* holds a `let`, `const` or `class` declaration of *name* directly, through
-    the labels a declaration may be written under.
+    The names *statements* declares with a `let`, a `const` or a class directly, read through the
+    labels and the `export` a declaration may be written under.
     """
+    names: set[str] = set()
     for statement in statements:
+        statement = declaration_under_export(statement)
         while isinstance(statement, JsLabeledStatement):
-            statement = statement.body
+            statement = declaration_under_export(statement.body)
         if isinstance(statement, JsVariableDeclaration) and statement.kind in (
             JsVarKind.LET, JsVarKind.CONST,
         ):
             for declarator in statement.declarations:
-                if isinstance(declarator, JsVariableDeclarator) and any(
-                    ident.name == name for ident in pattern_identifiers(declarator.id)
-                ):
-                    return True
+                if isinstance(declarator, JsVariableDeclarator):
+                    names.update(ident.name for ident in pattern_identifiers(declarator.id))
         elif isinstance(statement, JsClassDeclaration) and statement.id is not None:
-            if statement.id.name == name:
-                return True
-    return False
+            names.add(statement.id.name)
+    return frozenset(names)
 
 
-def annex_b_var_home(declaration: JsFunctionDeclaration) -> Node | None:
+class LexicalNameCache:
+    """
+    The lexically declared names of each statement list a walk passes, held for as long as the tree
+    is not being rewritten.
+
+    `annex_b_var_home` climbs from a declaration to the body that gives it a `var`, asking every
+    list on the way whether it declares the name lexically. A body holding many function
+    declarations is asked the same question about the same list once per declaration, and the scope
+    builder asks it twice over, so the answer is quadratic in the size of the body without this.
+    A cache is only ever right where nothing moves, which is why it is passed in rather than kept:
+    the caller is the one that knows its rewrites have not started.
+    """
+
+    def __init__(self):
+        self._names: dict[int, frozenset[str]] = {}
+
+    def declares(self, holder: Node, name: str) -> bool:
+        """
+        Whether the statement list *holder* holds declares *name* lexically, false where it holds
+        none.
+        """
+        names = self._names.get(id(holder))
+        if names is None:
+            statements = statement_list_of(holder)
+            names = frozenset() if statements is None else lexically_declared_names(statements)
+            self._names[id(holder)] = names
+        return name in names
+
+
+def annex_b_var_home(
+    declaration: JsFunctionDeclaration, cache: LexicalNameCache | None = None,
+) -> Node | None:
     """
     The function, script or static block whose `var` names the function *declaration* declares, or
     `None` where nothing outside the block holding it ever does.
@@ -862,13 +924,18 @@ def annex_b_var_home(declaration: JsFunctionDeclaration) -> Node | None:
     - a `let`, `const` or `class` of the same name between the block and the body, the body's own
       list included, which the `var` would conflict with;
     - a parameter of the function, which already binds the name;
-    - the name `arguments`, whose binding the function already has.
+    - the name `arguments`, whose binding the function already has, which is a condition about a
+      function and not about a script or a static block, neither of which has one.
 
     A catch parameter is not one of them, and the mismatch is deliberate: a simple catch parameter
     does not stop the copy, so the enclosing name still ends up holding the function, while a
     destructuring one does, being a lexical declaration the `var` would conflict with. Both were
     read from an engine rather than from the text of the specification.
+
+    *cache* holds the lexical names of the lists the climb passes, for a caller asking this of many
+    declarations over a tree it is not rewriting.
     """
+    cache = cache if cache is not None else LexicalNameCache()
     home = statement_list_holding(declaration)
     if home is not None and is_a_var_home(home):
         return home
@@ -879,8 +946,7 @@ def annex_b_var_home(declaration: JsFunctionDeclaration) -> Node | None:
         return None
     cursor: Node | None = declaration.parent
     while cursor is not None:
-        statements = statement_list_of(cursor)
-        if statements is not None and _lexically_declares(statements, name):
+        if cache.declares(cursor, name):
             return None
         if (
             isinstance(cursor, JsCatchClause)
@@ -890,7 +956,11 @@ def annex_b_var_home(declaration: JsFunctionDeclaration) -> Node | None:
         ):
             return None
         if is_a_var_home(cursor):
-            if name == 'arguments' and not isinstance(cursor, JsArrowFunctionExpression):
+            if (
+                name == 'arguments'
+                and isinstance(cursor, FUNCTION_NODES)
+                and not isinstance(cursor, JsArrowFunctionExpression)
+            ):
                 return None
             if any(
                 ident.name == name
@@ -1317,10 +1387,11 @@ def _is_a_named_global_object_base(node: Node | None) -> bool:
     """
     Whether *node* denotes the global object by one of the names written for it, which is
     `is_global_object_base` without the positional reading of `this`. Only `_timer_callee_name`
-    reads it, and its docstring says why.
+    reads it, and its docstring says why. Asked of the one reading rather than spelled a second
+    time, so that what counts as a named base is decided in one place.
     """
     base = strip_parens(node) if node is not None else None
-    return isinstance(base, JsIdentifier) and base.name in GLOBAL_OBJECT_ALIASES
+    return not isinstance(base, JsThisExpression) and is_global_object_base(base)
 
 
 def _is_reflective_member(member: JsMemberExpression) -> bool:
@@ -1432,6 +1503,23 @@ class SemanticModel:
         if body is None:
             return None
         return self.scope_of(body)
+
+    def parameter_scope(self, func: Node) -> Scope | None:
+        """
+        The scope holding *func*'s parameters and the `arguments` object a call gives it, which is
+        its body's scope but for a function whose parameter list holds an expression: that one binds
+        them in a scope of its own standing between the body and what encloses the function.
+
+        A consumer reading a parameter binding out of a scope's own `bindings` asks for this one.
+        `function_scope` answers the body's, which for such a function holds neither.
+        """
+        scope = self.function_scope(func)
+        if scope is None:
+            return None
+        parent = scope.parent
+        if parent is not None and parent.kind is ScopeKind.PARAMS and parent.node is scope.node:
+            return parent
+        return scope
 
     def binding_of(self, decl_id: JsIdentifier) -> Binding | None:
         """
@@ -2341,6 +2429,7 @@ class _ScopeBuilder:
 
     def __init__(self, model: SemanticModel):
         self.model = model
+        self._lexical_names = LexicalNameCache()
 
     def build(self, root: JsScript) -> Scope:
         scope = Scope(kind=ScopeKind.SCRIPT, node=root)
@@ -2385,7 +2474,7 @@ class _ScopeBuilder:
                         for ident in pattern_identifiers(decl.id):
                             self._declare(func_scope, ident.name, BindingKind.VAR, ident)
             elif isinstance(node, JsFunctionDeclaration) and node.id is not None:
-                if annex_b_var_home(node) is func_scope.node:
+                if annex_b_var_home(node, self._lexical_names) is func_scope.node:
                     self._declare(func_scope, node.id.name, BindingKind.FUNCTION, node.id)
 
     def _collect_imports(self, stmts: list, scope: Scope):
@@ -2408,8 +2497,12 @@ class _ScopeBuilder:
         `_hoist` has already declared it, so nothing is declared here and the block holds no binding
         of its own - which is what makes a read inside the block and one after it read one name, as
         they do.
+
+        A declaration written under an `export` is read through it: the export names what the
+        declaration binds and binds nothing of its own.
         """
         for stmt in stmts:
+            stmt = declaration_under_export(stmt)
             if isinstance(stmt, JsVariableDeclaration) and stmt.kind in (
                 JsVarKind.LET, JsVarKind.CONST,
             ):
@@ -2421,7 +2514,7 @@ class _ScopeBuilder:
             elif isinstance(stmt, JsClassDeclaration) and stmt.id is not None:
                 self._declare(scope, stmt.id.name, BindingKind.CLASS, stmt.id)
             elif isinstance(stmt, JsFunctionDeclaration) and stmt.id is not None:
-                if annex_b_var_home(stmt) is None:
+                if annex_b_var_home(stmt, self._lexical_names) is None:
                     self._declare(scope, stmt.id.name, BindingKind.FUNCTION, stmt.id)
 
     def _visit(self, node: Node, scope: Scope):

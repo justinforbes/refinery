@@ -31,6 +31,7 @@ from test.lib.scripts.js.ledger import (
     Reading,
     a_program,
     folded,
+    printed,
     prints,
 )
 
@@ -1073,4 +1074,289 @@ class TestARemovalTheGlobalObjectFixGivesUp(TestBase):
         self.assertEqual(
             folded(A_TOP_LEVEL_DECLARATION_NOTHING_IN_THE_FILE_NAMES),
             'console.log(1);',
+        )
+
+
+#: A program whose taken branch holds a declaration the block it stands in is the scope of, mapped
+#: to the behavior an engine gives it. What the block scopes is not only a `let`: a class is scoped
+#: to it, and so is a function declaration, whose name outside the block holds it from the point the
+#: declaration runs rather than from the entry of the scope.
+A_DECLARATION_A_TAKEN_BRANCH_HOLDS = {
+    'a block function': Program(
+        a_program("""
+            function outer() {
+              console.log(typeof W);
+              if (1) { function W() { return 1; } }
+              console.log(typeof W);
+            }
+            outer();
+            """),
+        prints('undefined', 'function'),
+    ),
+    'a function that is the whole of the clause': Program(
+        a_program("""
+            function outer() {
+              console.log(typeof W);
+              if (1) function W() { return 1; }
+              console.log(typeof W);
+            }
+            outer();
+            """),
+        prints('undefined', 'function'),
+    ),
+    'a class': Program(
+        a_program("""
+            if (1) { class C {} }
+            console.log(typeof C);
+            """),
+        prints('undefined'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestATakenBranchKeepsWhatItsBlockScopes(TestBase):
+    """
+    The other direction of `TestADeclarationADeadBlockHoldsIsStillDeclared`. A taken branch is
+    unwrapped into the list around it, which may only happen where the block scopes nothing:
+    `refinery.lib.scripts.js.deobfuscation.deadcode` kept the block for a `let`, a `const` and a
+    strictly bound function, and lifted a class out of the scope it belonged to and a sloppily
+    declared function to the entry of the enclosing one, where the program held `undefined` until
+    the declaration ran.
+
+    The clause form is the same defect written without a block, which §B.3.4 reads as the block it
+    would have had, so it is answered with one.
+    """
+
+    def test_a_taken_branch_answers_what_it_answered(self):
+        rows = A_DECLARATION_A_TAKEN_BRANCH_HOLDS
+        self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
+
+
+class TestTheBlockATakenBranchScopesIsKept(TestBase):
+    """
+    The same law read from the text and from nothing else: the `if` is gone and the block the
+    declaration was scoped to is still standing around it.
+    """
+
+    def test_each_taken_branch_keeps_its_block(self):
+        self.assertEqual(
+            {
+                label: folded(row.text)
+                for label, row in A_DECLARATION_A_TAKEN_BRANCH_HOLDS.items()
+            },
+            {
+                'a block function': inspect.cleandoc(
+                    """
+                    function outer() {
+                      console.log(typeof W);
+                      {
+                        function W() {
+                          return 1;
+                        }
+                      }
+                      console.log(typeof W);
+                    }
+                    outer();
+                    """
+                ),
+                'a function that is the whole of the clause': inspect.cleandoc(
+                    """
+                    function outer() {
+                      console.log(typeof W);
+                      {
+                        function W() {
+                          return 1;
+                        }
+                      }
+                      console.log(typeof W);
+                    }
+                    outer();
+                    """
+                ),
+                'a class': inspect.cleandoc(
+                    """
+                    {
+                      class C {}
+                    }
+                    console.log(typeof C);
+                    """
+                ),
+            },
+        )
+
+
+#: A program calling a function through a body `var` repeating a parameter's name, mapped to the
+#: behavior an engine gives it. The call writes that name before any statement runs, so nothing in
+#: the text says what it holds - and a reader that cannot say which function such a call reaches has
+#: to say that any function of the file may have written what the call wrote.
+A_CALL_TO_A_NAME_THE_CALL_WROTE_AT_ENTRY = {
+    'a read after the call': Program(
+        a_program("""
+            function outer(a = 0) {
+              var x = 1;
+              var a = function () { x = 2; };
+              a();
+              console.log(x);
+            }
+            outer();
+            """),
+        prints('2'),
+    ),
+    'a read from another function': Program(
+        a_program("""
+            function outer(a = 0) {
+              var x = 1;
+              var a = function () { x = 2; };
+              a();
+              function reader() { console.log(x); }
+              reader();
+            }
+            outer();
+            """),
+        prints('2'),
+    ),
+    'a mapped arguments a default stands beside': Program(
+        a_program("""
+            var c = { k: 1 };
+            function g(o, z = 1) { arguments[0].k = 99; }
+            g(c);
+            console.log(c.k);
+            """),
+        prints('99'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAParameterScopeDoesNotHideWhatACallDoes(TestBase):
+    """
+    What the parameter scope must not cost. The first two rows are the entry copy read as a callee:
+    the name is written by the call and by the declarator both, so no value is stated for it, while
+    every invocation of the function still goes through that one name - so a reader asking whether
+    the function escapes answers no and a reader asking which function a call reaches answers
+    nothing, and a caller conjoining the two concluded that the call wrote nothing.
+
+    The third row is the same split read from the other side: a function whose parameter list holds
+    an expression binds its `arguments` object in the parameter scope, and a reader taking it out of
+    the body's scope alone found none, so a container the function writes through `arguments` was
+    read as one nothing writes.
+    """
+
+    def test_a_call_the_parameter_scope_splits_still_writes(self):
+        rows = A_CALL_TO_A_NAME_THE_CALL_WROTE_AT_ENTRY
+        self.assertEqual(_still_answered(rows), _as_it_answers_them(rows))
+
+
+class TestNothingIsFoldedPastACallTheParameterScopeSplits(TestBase):
+    """
+    The same law read from the text and from nothing else: every one of these programs comes back
+    as it was written, since the value each of them reads is one no reading of the text states.
+    """
+
+    def test_each_program_comes_back_as_it_was_written(self):
+        rows = A_CALL_TO_A_NAME_THE_CALL_WROTE_AT_ENTRY
+        self.assertEqual(
+            {label: folded(row.text) for label, row in rows.items()},
+            {label: printed(row.text) for label, row in rows.items()},
+        )
+
+
+#: A module exporting a declaration the file also names, mapped to the behavior an engine gives it.
+#: An `export` names what the declaration under it declares and declares nothing of its own.
+AN_EXPORTED_DECLARATION_THE_FILE_ALSO_NAMES = Program(
+    a_program("""
+        export function atob(s) { return 'mine:' + s; }
+        console.log(atob('AAAA'));
+        """),
+    prints('mine:AAAA'),
+    Reading.ES_MODULE,
+)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnExportedDeclarationIsStillADeclaration(TestBase):
+    """
+    A declaration written under an `export` binds its name exactly as one written without it. The
+    scope model reads a statement list one statement at a time and an export is a statement holding
+    a declaration rather than being one, so a reader not looking through it finds no binding at all
+    - and a name nothing in the file binds is a free name, which for `atob` is the host's.
+    """
+
+    def test_an_exported_declaration_answers_the_call_the_file_makes(self):
+        self.assertEqual(
+            AN_EXPORTED_DECLARATION_THE_FILE_ALSO_NAMES.read(),
+            AN_EXPORTED_DECLARATION_THE_FILE_ALSO_NAMES.required(),
+        )
+
+
+class TestTheCallAnExportedDeclarationAnswersIsFoldedFromIt(TestBase):
+    """
+    The same law read from the text and from nothing else: the call is answered with what the
+    exported function returns and not with what the host's function of that name returns.
+    """
+
+    def test_the_call_is_folded_from_the_exported_function(self):
+        self.assertEqual(
+            folded(AN_EXPORTED_DECLARATION_THE_FILE_ALSO_NAMES.text),
+            inspect.cleandoc(
+                """
+                export function atob(s) {
+                  return 'mine:' + s;
+                }
+                console.log('mine:AAAA');
+                """
+            ),
+        )
+
+
+#: An access on a spelling of the global object, mapped to the exact text the deobfuscation answers
+#: with. `top` and `frames` name the global object of another document, so a property one of them
+#: carries is not a property of this file's realm and a read of the bare name does not find it.
+A_GLOBAL_PROPERTY_NAMED_THROUGH_A_REALM = {
+    'a write in another realm and a read in this one': (
+        a_program("""
+            top.foo = 1;
+            console.log(globalThis.foo);
+            """),
+        "top.foo = 1;\nconsole.log(globalThis.foo);",
+    ),
+    'a write in this realm and a read in another': (
+        a_program("""
+            globalThis.qux = 1;
+            console.log(top.qux);
+            """),
+        "globalThis.qux = 1;\nconsole.log(top.qux);",
+    ),
+    'a write and a read in this realm': (
+        a_program("""
+            globalThis.bar = 1;
+            console.log(globalThis.bar);
+            """),
+        "globalThis.bar = 1;\nconsole.log(bar);",
+    ),
+}
+
+
+class TestARealmDecidesWhetherAnAliasCollapses(TestBase):
+    """
+    `refinery.lib.scripts.js.deobfuscation.helpers.SAME_REALM_GLOBAL_OBJECT_ALIASES` is the set a
+    rewrite keys on and the wider one in `refinery.lib.scripts.js.analysis.model` is what a reading
+    of code's reach keys on. `refinery.lib.scripts.js.deobfuscation.simplify` read the wider one, so
+    a property written on another document's global object was collapsed to a bare name of this one
+    and the `undefined` a read answered became a `ReferenceError`.
+
+    The third row is the control: within one realm the collapse is what the pass is for.
+    """
+
+    def test_only_a_same_realm_alias_collapses(self):
+        self.assertEqual(
+            {
+                label: folded(source)
+                for label, (source, _) in A_GLOBAL_PROPERTY_NAMED_THROUGH_A_REALM.items()
+            },
+            {
+                label: text
+                for label, (_, text) in A_GLOBAL_PROPERTY_NAMED_THROUGH_A_REALM.items()
+            },
         )
