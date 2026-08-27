@@ -257,6 +257,21 @@ class Binding:
     indefinite_writes: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
     captured: bool = False
 
+    def note_reference_from(self, scope: Scope | None) -> None:
+        """
+        Mark this binding captured where *scope* is on the far side of a closure boundary from the
+        scope declaring it, which is what a reference made from a scope with a different variable
+        scope is. A reference whose own scope is not known is counted as a capture, since nothing
+        about it says that it is not one.
+
+        Three walks record a reference and each of them asks this: the identifier walk, the one
+        reading a binding through an alias of the global object, and the one reading a parameter
+        through a mapped `arguments`. They have to agree, and one of them being written differently
+        from the others is not a difference anything downstream could act on.
+        """
+        if scope is None or scope.var_scope is not self.scope.var_scope:
+            self.captured = True
+
     @property
     def is_read(self) -> bool:
         """
@@ -1771,8 +1786,7 @@ class SemanticModel:
                 binding.reads.append(node)
             if role is not Role.READ:
                 binding.writes.append(node)
-            if ref_scope is None or ref_scope.var_scope is not binding.scope.var_scope:
-                binding.captured = True
+            binding.note_reference_from(ref_scope)
 
     def _attribute_dynamic_reference(self, node: JsIdentifier, scope: Scope | None):
         """
@@ -1883,9 +1897,7 @@ class SemanticModel:
             binding.reads.append(member)
         if role is not Role.READ:
             binding.writes.append(member)
-        scope = self._node_scope.get(id(member))
-        if scope is None or scope.var_scope is not binding.scope.var_scope:
-            binding.captured = True
+        binding.note_reference_from(self._node_scope.get(id(member)))
 
     def _record_arguments_alias_references(self):
         """
@@ -2007,9 +2019,7 @@ class SemanticModel:
             binding.reads.append(node)
         if role is not Role.READ:
             binding.indefinite_writes.append(node)
-        scope = self._node_scope.get(id(node))
-        if scope is None or scope.var_scope is not binding.scope.var_scope:
-            binding.captured = True
+        binding.note_reference_from(self._node_scope.get(id(node)))
 
 
 class _ScopeBuilder:
