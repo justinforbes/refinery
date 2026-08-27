@@ -36,7 +36,6 @@ from refinery.lib.scripts.ps1.deobfuscation.constants import (
     _find_removable_statement,
 )
 from refinery.lib.scripts.ps1.deobfuscation.helpers import store_dropped_to_value
-from refinery.lib.scripts.ps1.deobfuscation.options import bare_output_is_preserved
 from refinery.lib.scripts.ps1.deobfuscation.removal import Ps1RemovalPlan, Ps1RemovalPlans
 from refinery.lib.scripts.ps1.model import (
     Expression,
@@ -49,6 +48,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1UnaryExpression,
     Ps1Variable,
 )
+from refinery.lib.scripts.ps1.options import bare_output_is_preserved
 
 
 def _writes_only_what_cannot_fault(

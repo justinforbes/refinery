@@ -75,6 +75,17 @@ class Ps1ModelCache(ModelCacheBase):
     _variable_flow: Ps1VariableFlow | None
     _commands: Ps1CommandModel | None
 
+    def __init__(self, root: Ps1Script, options: object | None = None):
+        """
+        *options* is the run's `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions`, held here
+        because two of the models below are built differently under it and a model is built once per
+        cache. A cache made without it — a transform running standalone, or
+        `refinery.lib.scripts.modelcache.ModelCacheBase.for_transformer` finding none attached —
+        takes the defaults, which are the sound answers.
+        """
+        super().__init__(root)
+        self.options = options
+
     @property
     def model(self) -> Ps1SemanticModel:
         return self._lazy('_model', lambda: build_semantic_model(self.root))
@@ -87,7 +98,8 @@ class Ps1ModelCache(ModelCacheBase):
         sits. `closed_world` projects the verdict from it and `world_reach` floods from its openers,
         so the whole-run answer and the positional one are never two different readings of the tree.
         """
-        return self._lazy('_world_measurement', lambda: measure_world(self.root))
+        return self._lazy(
+            '_world_measurement', lambda: measure_world(self.root, self.options))
 
     @property
     def closed_world(self) -> Ps1TypeWorld:
@@ -122,7 +134,10 @@ class Ps1ModelCache(ModelCacheBase):
         supplies is one of the reasons the graph declares itself unreadable, and a graph that
         answered that differently per caller would be two graphs.
         """
-        return self._lazy('_call_graph', lambda: build_call_graph(self.root, self.closed_world))
+        return self._lazy(
+            '_call_graph',
+            lambda: build_call_graph(self.root, self.closed_world, self.options),
+        )
 
     @property
     def output_flow(self) -> Ps1OutputFlow:

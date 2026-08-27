@@ -2,14 +2,20 @@ from __future__ import annotations
 
 from test import TestBase
 
+from inspect import cleandoc
+
 from refinery.lib.scripts.ps1.analysis.world import (
     Ps1TypeWorld,
     WorldRole,
+    _identity_redefinitions,
+    _opens_world,
     assigns_an_alias_name,
     build_closed_world,
     command_role,
+    measure_world,
     touches_identity_provider,
 )
+from refinery.lib.scripts.ps1.options import Ps1DeobfuscationOptions
 from refinery.lib.scripts.ps1.model import Ps1CommandInvocation
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
@@ -614,3 +620,58 @@ class TestPs1CommandRole(TestBase):
             'Import-Module',
         )
         self.assertEqual({command_role(name) for name in spellings}, {WorldRole.MUTATION})
+
+
+class TestPs1TrustedEvalNarrowsTheOpenerListAndNothingElse(TestBase):
+    """
+    `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` withholds exactly the
+    openers whose danger is that code nobody can read will run, and leaves every other reading of
+    the same walk alone. Both models are measured over one tree holding one construct of each kind,
+    so the two opener lists are comparable node by node and a role that stopped being recognized
+    shows up as a missing opener rather than as a row nobody wrote.
+    """
+
+    _ONE_OF_EVERY_KIND = cleandoc("""
+        Invoke-Expression $c
+        & $f
+        . C:/stage2.ps1
+        Set-Alias Copy-Item $t
+        Add-Type -TypeDefinition $src
+        Update-TypeData -TypeName System.Int32 -MemberName X -Value 1
+        class Zzq {
+        }
+        function Get-Date {
+        }
+    """)
+
+    def setUp(self):
+        script = Ps1Parser(self._ONE_OF_EVERY_KIND).parse()
+        self.suspecting = measure_world(script, Ps1DeobfuscationOptions(trust_eval=False))
+        self.trusting = measure_world(script, Ps1DeobfuscationOptions(trust_eval=True))
+
+    @staticmethod
+    def _role(node) -> WorldRole | None:
+        return _opens_world(node, _identity_redefinitions(node))
+
+    def test_the_trusting_model_keeps_exactly_the_openers_that_mutate(self):
+        self.assertEqual(
+            [node for node in self.suspecting.openers if self._role(node) is WorldRole.MUTATION],
+            list(self.trusting.openers),
+        )
+
+    def test_the_suspecting_model_records_strictly_more_on_this_script(self):
+        self.assertLess(len(self.trusting.openers), len(self.suspecting.openers))
+        self.assertNotEqual(self.trusting.openers, ())
+
+    def test_the_shadow_set_is_the_same_under_both_models(self):
+        self.assertEqual(
+            self.suspecting.world.shadowed_names,
+            self.trusting.world.shadowed_names,
+        )
+
+    def test_the_verdict_and_the_opener_list_stay_one_fact(self):
+        for name in ('suspecting', 'trusting'):
+            with self.subTest(name):
+                measured = getattr(self, name)
+                self.assertEqual(
+                    measured.world.closed_for_the_whole_run, not measured.openers)

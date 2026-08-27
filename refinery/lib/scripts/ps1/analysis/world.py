@@ -67,6 +67,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1TypeExpression,
     Ps1Variable,
 )
+from refinery.lib.scripts.ps1.options import eval_is_trusted
 
 
 class WorldRole(enum.Enum):
@@ -229,7 +230,20 @@ class Ps1WorldMeasurement(NamedTuple):
     build_version: int
 
 
-def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
+#: The opening roles whose danger is that code this analysis cannot read will run — now, for
+#: `WorldRole.LEAK` and `WorldRole.UNKNOWN`, or under a name a later statement invokes, for
+#: `WorldRole.IDENTITY`. These are the ones
+#: `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` excuses.
+#: `WorldRole.MUTATION` is never among them: it is a change the script performs in plain sight, and
+#: excusing it would mean disbelieving a statement the walk can read.
+_ROLES_RUNNING_UNREADABLE_CODE = frozenset({
+    WorldRole.IDENTITY,
+    WorldRole.LEAK,
+    WorldRole.UNKNOWN,
+})
+
+
+def measure_world(root: Ps1Script, options: object | None = None) -> Ps1WorldMeasurement:
     """
     Walk the whole tree once, computing the command-table verdict and every position together:
     whether any node opens the world (a single opener anywhere is global and retroactive, so it
@@ -241,7 +255,13 @@ def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
     An opener is yielded as the node itself, not its role. The class or enum definition among them
     opens the world at no position — the engine compiles it before the first statement runs — and is
     recognized by `build_world_reach`, which must fail closed on it.
+
+    Under `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` an opener whose role
+    is in `_ROLES_RUNNING_UNREADABLE_CODE` is not recorded at all, so it neither opens the whole-run
+    verdict nor floods a position. The shadow set is untouched by the option: every site in it is a
+    redefinition this walk *did* read, so nothing about it rests on what unreadable code does.
     """
+    trusting = eval_is_trusted(options)
     closed = True
     closed_but_for_alias_bindings = True
     shadowed: set[str] = set()
@@ -251,7 +271,8 @@ def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
         redefined = _identity_redefinitions(node)
         shadowed.update(record.name for record in redefined)
         shadow_sites.extend(Ps1ShadowSite(record.name, node) for record in redefined)
-        if not _opens_world(node, redefined):
+        role = _opens_world(node, redefined)
+        if role is None or (trusting and role in _ROLES_RUNNING_UNREADABLE_CODE):
             continue
         openers.append(node)
         closed = False
@@ -484,11 +505,16 @@ def _assigned_identity_body(
     return _IdentityBody.OPAQUE_VALUE
 
 
-def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> bool:
+def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> WorldRole | None:
     """
-    Whether `node` leaves the type system or the command table in a state the collected metadata no
-    longer describes. `redefined` is the identity classification of the same node, so an assignment
-    into the identity namespaces is recognized once, not by two functions that can drift apart.
+    The role by which `node` leaves the type system or the command table in a state the collected
+    metadata no longer describes, or `None` for a node that leaves both as it found them.
+    `redefined` is the identity classification of the same node, so an assignment into the identity
+    namespaces is recognized once, not by two functions that can drift apart.
+
+    The role rather than a boolean, because `measure_world` has a caller that acts differently on
+    each: `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` excuses an opener
+    that runs code nobody can read and never one that mutates the world in plain sight.
 
     A redefinition binding a visible scriptblock does *not* open the world. Its body stands in the
     tree, so a mutation inside it is caught by presence like any other statement, and the same
@@ -503,33 +529,37 @@ def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> bool:
     rather than on the presence of a body.
     """
     if isinstance(node, (Ps1ClassDefinition, Ps1EnumDefinition)):
-        return True
+        return WorldRole.MUTATION
     if isinstance(node, Ps1CommandInvocation):
         return _command_opens_world(node)
     if isinstance(node, Ps1InvokeMember):
-        return (
+        if (
             is_scriptblock_create(node)
             or is_scriptblock_invoke(node)
             or is_execution_context_invoke(node)
-            or _is_type_accelerator_mutation(node)
-            or _is_psobject_member_mutation(node)
-        )
+        ):
+            return WorldRole.LEAK
+        if _is_type_accelerator_mutation(node) or _is_psobject_member_mutation(node):
+            return WorldRole.MUTATION
+        return None
     if isinstance(node, Ps1AssignmentExpression):
-        return any(record.body is not _IdentityBody.VISIBLE_BLOCK for record in redefined)
-    return False
+        if any(record.body is not _IdentityBody.VISIBLE_BLOCK for record in redefined):
+            return WorldRole.IDENTITY
+        return None
+    return None
 
 
-def _command_opens_world(cmd: Ps1CommandInvocation) -> bool:
+def _command_opens_world(cmd: Ps1CommandInvocation) -> WorldRole | None:
     if is_opaque_dispatch(cmd):
-        return True
+        return WorldRole.UNKNOWN
     if runs_another_script_file(cmd):
-        return True
+        return WorldRole.LEAK
     name = resolve_command_name(cmd)
     if name is None:
-        return False
-    if command_role(name) is not WorldRole.NONE:
-        return True
-    return touches_identity_provider(cmd)
+        return None
+    if (role := command_role(name)) is not WorldRole.NONE:
+        return role
+    return WorldRole.IDENTITY if touches_identity_provider(cmd) else None
 
 
 def runs_another_script_file(cmd: Ps1CommandInvocation) -> bool:

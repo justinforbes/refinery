@@ -17,9 +17,15 @@ class TestPs1(TestBase):
         source: str,
         remove_junk: bool = True,
         preserve_bare_output: bool = False,
+        trust_eval: bool = False,
     ) -> str:
         ast = Ps1Parser(source).parse()
-        deobfuscate(ast, remove_junk=remove_junk, preserve_bare_output=preserve_bare_output)
+        deobfuscate(
+            ast,
+            remove_junk=remove_junk,
+            preserve_bare_output=preserve_bare_output,
+            trust_eval=trust_eval,
+        )
         return Ps1Synthesizer().convert(ast)
 
     def _deobfuscate_iterative(
@@ -28,37 +34,41 @@ class TestPs1(TestBase):
         iterations: int = 100,
         remove_junk: bool = True,
         preserve_bare_output: bool = False,
+        trust_eval: bool = False,
     ) -> str:
         ast = Ps1Parser(source).parse()
         for _ in range(iterations):
             if not deobfuscate(
-                ast, remove_junk=remove_junk, preserve_bare_output=preserve_bare_output
+                ast,
+                remove_junk=remove_junk,
+                preserve_bare_output=preserve_bare_output,
+                trust_eval=trust_eval,
             ):
                 break
         return Ps1Synthesizer().convert(ast)
 
-    def _assertDeobfuscatesTo(self, source: str, expected: str) -> None:
+    def _assertDeobfuscatesTo(self, source: str, expected: str, trust_eval: bool = False) -> None:
         """
         Both arguments are written as ordinary indented PowerShell, and `expected` is rendered
         through the synthesizer before the comparison, so that brace layout cannot be mistaken for a
         statement having been removed.
         """
         self.assertEqual(
-            self._deobfuscate(inspect.cleandoc(source)),
+            self._deobfuscate(inspect.cleandoc(source), trust_eval=trust_eval),
             self._apply(inspect.cleandoc(expected)),
         )
 
-    def _assertKept(self, source: str) -> None:
-        self._assertDeobfuscatesTo(source, source)
+    def _assertKept(self, source: str, trust_eval: bool = False) -> None:
+        self._assertDeobfuscatesTo(source, source, trust_eval=trust_eval)
 
-    def _assertRemoved(self, source: str, statement: str) -> None:
+    def _assertRemoved(self, source: str, statement: str, trust_eval: bool = False) -> None:
         """
         The expected output is `source` with `statement` gone and nothing else touched, so the pair
         of arguments spells out one removal rather than a whole rewritten script. Naming a statement
         that `source` does not contain would leave the expectation saying nothing, so it is refused.
         """
         self.assertIn(statement, source)
-        self._assertDeobfuscatesTo(source, source.replace(statement, ''))
+        self._assertDeobfuscatesTo(source, source.replace(statement, ''), trust_eval=trust_eval)
 
     def _transform(self, source: str, *transforms) -> Ps1Script:
         ast = Ps1Parser(source).parse()
