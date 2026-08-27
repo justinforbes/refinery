@@ -15,7 +15,7 @@ from refinery.lib.fast.scramble import decrypt_round as _decrypt_round
 from refinery.lib.scripts import Node, _remove_from_parent, _replace_in_parent
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.deobfuscation.helpers import (
-    GLOBAL_OBJECT_ALIASES,
+    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     ScriptLevelTransformer,
     access_key,
     make_string_literal,
@@ -372,7 +372,7 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
     ) -> str | None:
         if not isinstance(member.object, JsIdentifier):
             return None
-        if member.object.name not in GLOBAL_OBJECT_ALIASES:
+        if member.object.name not in SAME_REALM_GLOBAL_OBJECT_ALIASES:
             return None
         key = access_key(member)
         if key is not None:

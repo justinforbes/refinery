@@ -40,7 +40,7 @@ from refinery.lib.scripts.js.analysis.model import (
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
-    GLOBAL_OBJECT_ALIASES,
+    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     BodyProcessingTransformer,
     a_host_calls_the_binding,
     collect_identifier_names,
@@ -82,7 +82,7 @@ def _const_global_alias_names(root: Node) -> frozenset[str]:
                 isinstance(decl, JsVariableDeclarator)
                 and isinstance(decl.id, JsIdentifier)
                 and isinstance(decl.init, JsIdentifier)
-                and decl.init.name in GLOBAL_OBJECT_ALIASES
+                and decl.init.name in SAME_REALM_GLOBAL_OBJECT_ALIASES
             ):
                 names.add(decl.id.name)
     return frozenset(names)
@@ -99,7 +99,7 @@ def _global_alias_read_names(root: Node, aliases: frozenset[str]) -> frozenset[s
             continue
         if is_simple_assignment_target(node):
             continue
-        if node.object.name in GLOBAL_OBJECT_ALIASES or node.object.name in aliases:
+        if node.object.name in SAME_REALM_GLOBAL_OBJECT_ALIASES or node.object.name in aliases:
             names.add(node.property.name)
     return frozenset(names)
 
@@ -804,7 +804,7 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
                 and not lhs.computed
                 and isinstance(lhs.object, JsIdentifier)
                 and isinstance(lhs.property, JsIdentifier)
-                and lhs.object.name in GLOBAL_OBJECT_ALIASES
+                and lhs.object.name in SAME_REALM_GLOBAL_OBJECT_ALIASES
             ):
                 write_stmts.setdefault(lhs.property.name, []).append(node)
         if not write_stmts:

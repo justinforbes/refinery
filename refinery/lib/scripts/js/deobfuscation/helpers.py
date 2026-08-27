@@ -119,7 +119,19 @@ SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_$][a-zA-Z_$0-9]*$')
 
 JS_RESERVED = frozenset(set(KEYWORDS) | FUTURE_RESERVED | {'undefined'})
 
-GLOBAL_OBJECT_ALIASES: frozenset[str] = frozenset({'globalThis', 'global', 'window', 'self'})
+#: The spellings of the global object that name *this* realm's, which is the one a file's own
+#: top-level declarations are properties of. `refinery.lib.scripts.js.analysis.model` knows two
+#: more, `top` and `frames`, deliberately absent here: each names the global object of another
+#: document, so a property written on one is not a property of this realm's global object at all,
+#: and removing such a write because nothing in this file reads the name deletes a write another
+#: document makes its own reads of. A removal keys on this set; a reading of what code may reach
+#: keys on the wider one.
+SAME_REALM_GLOBAL_OBJECT_ALIASES: frozenset[str] = frozenset({
+    'globalThis',
+    'global',
+    'window',
+    'self',
+})
 VOID_LITERAL_OPERANDS = (JsNumericLiteral, JsStringLiteral, JsBooleanLiteral, JsNullLiteral)
 
 OBJECT_PROTOTYPE_MEMBERS = frozenset({

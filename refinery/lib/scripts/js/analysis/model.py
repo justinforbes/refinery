@@ -851,12 +851,25 @@ def has_mapped_arguments(fn: Node, *, strict: bool) -> bool:
     return references_own_arguments(fn)
 
 
-def _is_global_base(node: Node | None) -> bool:
+def is_global_object_base(node: Node | None) -> bool:
     """
-    Whether *node* denotes the global object by a well-known alias, so that a dynamic property access
-    on it could read or write any global by name.
+    Whether *node*, written as the base of a member access, denotes the global object - so that a
+    property named on it is a global, and a property named on it at run time could be any global.
+
+    Only the spelling is read. Parentheses around the base are looked through, because they change
+    what a base is written as and nothing about what it denotes: `(window).eval` obtains the same
+    intrinsic `window.eval` does, and a reader that saw the two differently would refuse a fold for
+    one of them and not the other.
+
+    Whether the name is bound to something else is a separate question, and the two callers want
+    opposite answers to it, which is why it is not asked here.
+    `SemanticModel.global_alias_member_name` asks it, because a reference it records has to be a
+    reference to the global it names, and a local `window` names an ordinary object.
+    `_is_reflective_member` deliberately does not: a surface it reports where there is none only
+    refuses a fold, and one it misses removes code that runs.
     """
-    return isinstance(node, JsIdentifier) and node.name in GLOBAL_OBJECT_ALIASES
+    base = strip_parens(node) if node is not None else None
+    return isinstance(base, JsIdentifier) and base.name in GLOBAL_OBJECT_ALIASES
 
 
 def _member_property_name(member: JsMemberExpression) -> str | None:
@@ -955,7 +968,7 @@ def _is_global_alias_access(node: Node) -> bool:
     reaches a binding no lexical name of its own is written for. An access on a mapped `arguments`
     object is the other, and reaches a parameter of the one function that holds it.
     """
-    return isinstance(node, JsMemberExpression) and _is_global_base(strip_parens(node.object))
+    return isinstance(node, JsMemberExpression) and is_global_object_base(node.object)
 
 
 def _enclosing_member_access(node: Node) -> JsMemberExpression | None:
@@ -1096,7 +1109,7 @@ def _is_reflective_member(member: JsMemberExpression) -> bool:
     if member.computed:
         if isinstance(prop, JsStringLiteral):
             return prop.value in REFLECTIVE_INTRINSICS
-        return _is_global_base(member.object)
+        return is_global_object_base(member.object)
     return isinstance(prop, JsIdentifier) and prop.name in REFLECTIVE_INTRINSICS
 
 
@@ -1130,7 +1143,7 @@ def _timer_callee_name(callee: Node | None) -> str | None:
     callee = strip_parens(callee)
     if isinstance(callee, JsIdentifier):
         return callee.name if callee.name in STRING_EVAL_NAMES else None
-    if isinstance(callee, JsMemberExpression) and _is_global_base(callee.object):
+    if isinstance(callee, JsMemberExpression) and is_global_object_base(callee.object):
         name = _member_property_name(callee)
         return name if name in STRING_EVAL_NAMES else None
     return None
@@ -1881,14 +1894,16 @@ class SemanticModel:
         dynamic scope, where the alias could be rebound or the target could be a `with`-object property —
         in either case the model cannot claim the reference denotes a global.
         """
-        base = member.object
-        if not isinstance(base, JsIdentifier) or base.name not in GLOBAL_OBJECT_ALIASES:
+        base = strip_parens(member.object)
+        if not is_global_object_base(base):
             return None
         name = _member_property_name(member)
         if name is None:
             return None
         scope = self._node_scope.get(id(member))
-        if self.lookup(base.name, scope) is not None or crosses_dynamic_scope(scope):
+        if crosses_dynamic_scope(scope):
+            return None
+        if isinstance(base, JsIdentifier) and self.lookup(base.name, scope) is not None:
             return None
         return name
 
