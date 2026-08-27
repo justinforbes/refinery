@@ -12,6 +12,11 @@ program it is ever given is one an entry wrote out by hand.
 """
 from __future__ import annotations
 
+import inspect
+
+from enum import Enum, auto
+from typing import NamedTuple
+
 from test.lib.scripts.js.analysis.differential import (
     behavior,
     deobfuscate_source,
@@ -22,6 +27,16 @@ from refinery.lib.scripts import is_well_formed
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 from refinery.units.scripting.js import js
+
+NL = chr(10)
+
+
+def a_program(text: str) -> str:
+    """
+    A program as a file holds it: *text* with the indentation it is written with in the entry that
+    holds it stripped, and its last line ending in the break every line of a file ends in.
+    """
+    return inspect.cleandoc(text) + NL
 
 
 def well_formed(source: str) -> bool:
@@ -148,3 +163,63 @@ def each_program_still_prints(
         source: ((prints, None), (prints, None))
         for source, prints in programs.items()
     }
+
+
+#: What an engine made of a program: everything it wrote to standard output, and the type of the
+#: error that ended it where one did.
+Behavior = tuple[str, str | None]
+
+
+class Reading(Enum):
+    """
+    The execution model a program is read under, which is also the model the deobfuscation it is
+    compared against is written for.
+
+    The three disagree about one thing, and every entry naming one names it for that reason: what
+    a top-level declaration is. Under `MODULE` and `ES_MODULE` it is scoped to the file and reaches
+    no global object, so a question about what a name reaches through `this`, through `globalThis`,
+    or from outside the file cannot be asked at all. `SCRIPT` is the classic global script, where it
+    can. `ES_MODULE` differs from `MODULE` in being strict code with no directive saying so, and in
+    being the only one of the three an `import` or `export` declaration may appear in.
+    """
+    MODULE = auto()
+    ES_MODULE = auto()
+    SCRIPT = auto()
+
+    def read(self, source: str) -> tuple[Behavior, Behavior]:
+        """
+        What an engine makes of *source* under this model and what it makes of the text
+        `refinery.js` deobfuscates it to, reported together because the law is that the two agree.
+        """
+        if self is Reading.SCRIPT:
+            return before_and_after_in_a_host(source)
+        return before_and_after(source, module=self is Reading.ES_MODULE)
+
+
+class Program(NamedTuple):
+    """
+    One program a ledger entry pins, the behavior an engine gives it, and the model that reading is
+    taken under.
+
+    The behavior is the whole of what the entry has to be told, because the law every entry asserts
+    is the same one: the deobfuscation of a program behaves the way the program does. Writing it
+    here rather than in the prose of the test that asserts it is what keeps the two from drifting
+    apart, since only this one is executed.
+    """
+    text: str
+    prints: Behavior
+    reading: Reading = Reading.MODULE
+
+    def read(self) -> tuple[Behavior, Behavior]:
+        return self.reading.read(self.text)
+
+    def required(self) -> tuple[Behavior, Behavior]:
+        return (self.prints, self.prints)
+
+
+def prints(*lines: str) -> Behavior:
+    """
+    The behavior of a program that writes *lines* and ends without an error, each line ending in the
+    break `console.log` adds.
+    """
+    return (''.join(line + NL for line in lines), None)

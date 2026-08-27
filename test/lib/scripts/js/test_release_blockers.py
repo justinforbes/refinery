@@ -5,8 +5,8 @@ Same form as `test.lib.scripts.js.test_unfixed_defects`, which these entries wer
 and the same rules: every test states what a correct implementation would do, never what the code
 does today, and is marked `unittest.expectedFailure`, so an entry that starts passing is reported as
 an unexpected success and leaves this file only by being fixed. Where the question is one about
-JavaScript rather than about this project, the answer was established with Node.js and is quoted in
-the docstring of the test that pins it.
+JavaScript rather than about this project, the answer was established with Node.js and is written
+into the row the entry holds, so that the only statement of it is the one that is executed.
 
 What sets these apart is what they cost rather than what they are. Each one takes a program an
 engine runs and hands back one that behaves differently: nothing throws, nothing is left
@@ -15,23 +15,55 @@ language gives. An entry that merely refuses to reduce something, or reduces it 
 uglier, belongs in the other file, and so does everything about a file no engine runs, however
 clean the answer for one looks: mishandling invalid input is never what a release is held for.
 This file emptying is the release gate.
+
+An entry whose programs are spellings of one root is pinned by one test over all of them. An entry
+whose programs have roots a fix may reach separately is pinned by one test per program instead,
+installed by `_one_expected_failure_per_program` and named for the shape that program holds: a fix
+that reaches some of the shapes and not the others is then reported as a fix rather than as nothing
+at all, which one test over the whole family cannot do.
 """
 from __future__ import annotations
 
 import inspect
 import unittest
 
+from typing import Callable, Mapping
+
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.ledger import (
+    Program,
+    Reading,
+    a_program,
     before_and_after,
     before_and_after_in_a_host,
     each_program_still_prints,
     evaluated_in_a_body,
     folded,
     printed,
+    prints,
     well_formed,
 )
+
+
+def _one_expected_failure_per_program(
+    rows: Mapping[str, Program],
+) -> Callable[[type], type]:
+    """
+    Install on the class one expected-failure test per program of *rows*, each named for the shape
+    its key labels and each asserting the one law every entry here asserts: the deobfuscation of a
+    program behaves the way the program does.
+    """
+    def install(entry: type) -> type:
+        for label, row in rows.items():
+            def test(self, row=row):
+                self.assertEqual(row.read(), row.required())
+            test.__name__ = F'test_{label.replace(" ", "_").replace("-", "_")}_still_behaves_so'
+            if hasattr(entry, test.__name__):
+                raise AssertionError(F'{entry.__name__} already holds {test.__name__}')
+            setattr(entry, test.__name__, unittest.expectedFailure(test))
+        return entry
+    return install
 
 
 def _a_module_reporting_it_loaded(module: str) -> str:
@@ -456,118 +488,312 @@ class TestANameHoldingAJoinerIsOneName(TestBase):
         )
 
 
-#: A strict program declaring a function inside a plain block and calling its name beside it,
-#: mapped to what Node prints for it and whether it is read as a module. Strict code arrives both
-#: ways there is one: as a module, strict by its goal symbol alone, and as a script whose
-#: directive says so.
-A_FUNCTION_IN_A_BLOCK_OF_STRICT_CODE = {
-    'function outer() {\n'
-    '  { function W() { return 1; } }\n'
-    '  try { console.log(W()); } catch (e) { console.log("threw"); }\n'
-    '}\n'
-    'outer();\n'
-    'export {};\n': ('threw\n', True),
-    "'use strict';\n"
-    'function outer() {\n'
-    '  { function W() { return 1; } }\n'
-    '  try { console.log(W()); } catch (e) { console.log("threw"); }\n'
-    '}\n'
-    'outer();\n': ('threw\n', False),
+#: A program declaring a function inside a block, mapped to the behavior an engine gives it. The
+#: block is where the name lives in strict code and the copy Annex B makes is what puts it outside
+#: one in sloppy code, so the shapes here differ in the mode the block is read under and in where
+#: the name is read from.
+A_FUNCTION_DECLARED_INSIDE_A_BLOCK = {
+    'a module': Program(
+        a_program("""
+            function outer() {
+              { function W() { return 1; } }
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+            }
+            outer();
+            export {};
+            """),
+        prints('threw'),
+        Reading.ES_MODULE,
+    ),
+    'a script saying so': Program(
+        a_program("""
+            'use strict';
+            function outer() {
+              { function W() { return 1; } }
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+            }
+            outer();
+            """),
+        prints('threw'),
+    ),
+    'a function body saying so': Program(
+        a_program("""
+            function outer() {
+              'use strict';
+              { function W() { return 1; } }
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+            }
+            outer();
+            """),
+        prints('threw'),
+    ),
+    'a sloppy call before the block': Program(
+        a_program("""
+            function outer() {
+              try { console.log(W()); } catch (e) { console.log('threw'); }
+              { function W() { return 1; } }
+            }
+            outer();
+            """),
+        prints('threw'),
+    ),
 }
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAFunctionInABlockOfStrictCodeStaysInItsBlock(TestBase):
+@_one_expected_failure_per_program(A_FUNCTION_DECLARED_INSIDE_A_BLOCK)
+class TestAFunctionDeclaredInsideABlockIsDeclaredInsideIt(TestBase):
     """
-    Sloppy code hoists a function declared inside a plain block out to the enclosing function, and
-    strict code does not: there the name lives in the block alone, and a call beside the block
-    reads no binding and throws. The scope model places every block function in the enclosing
-    variable scope whatever the mode - the strict-mode overlay that knows the difference exists and
-    is not consulted - so every consumer of the model reads a binding the program never has, and
-    the folds downstream answer the call with the function's value.
+    A function declared inside a plain block is a lexical binding of that block, and what reaches
+    the enclosing variable scope is decided by the mode. Strict code puts nothing there: a call
+    beside the block reads no binding and throws. Sloppy code creates a `var` of the name at the
+    entry of the enclosing function and copies the block's function into it where the declaration
+    runs, so a call before the block reads `undefined` and throws too, and only a call after it
+    answers the function.
+
+    `refinery.lib.scripts.js.analysis.model` places every block function in the enclosing variable
+    scope whatever the mode, initialized as if it were declared there. The strict-mode overlay that
+    knows the difference exists and is not consulted, and the point in the block at which the copy
+    runs is not modeled at all, so every consumer reads a binding holding a function where the
+    program holds none, and the folds downstream answer the call with the function's value.
     """
 
-    @unittest.expectedFailure
-    def test_a_call_beside_the_block_still_throws(self):
-        """
-        Node prints `threw` for both programs of `A_FUNCTION_IN_A_BLOCK_OF_STRICT_CODE`: the call
-        stands beside the block that scopes the function, and the `catch` reports the
-        `ReferenceError`. The deobfuscation folds the call to `1` and prints it.
-        """
-        rows = A_FUNCTION_IN_A_BLOCK_OF_STRICT_CODE
+
+#: A program whose block is one no branch of it takes, mapped to the behavior an engine gives it.
+#: What a dead block declares is declared all the same - a `var` and, in sloppy code, the `var` half
+#: of a function declaration are created at the entry of the enclosing scope, before any branch is
+#: decided - so a read of the name answers `undefined` rather than throwing.
+A_DECLARATION_A_DEAD_BLOCK_HOLDS = {
+    'a function no branch declares': Program(
+        a_program("""
+            if (0) { function W() { return 1; } }
+            console.log(W);
+            """),
+        prints('undefined'),
+    ),
+    'a var no branch declares': Program(
+        a_program("""
+            if (0) { var v = 1; }
+            console.log(v);
+            """),
+        prints('undefined'),
+    ),
+    'a function that is the whole of an if clause': Program(
+        a_program("""
+            function outer() {
+              if (0) function W() { return 1; }
+              console.log(W);
+            }
+            outer();
+            """),
+        prints('undefined'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@_one_expected_failure_per_program(A_DECLARATION_A_DEAD_BLOCK_HOLDS)
+class TestADeclarationADeadBlockHoldsIsStillDeclared(TestBase):
+    """
+    Removing a branch no condition takes removes the statements it ran, and a declaration is not
+    only a statement: a `var` and the `var` half of a sloppy function declaration name something
+    from the entry of the enclosing scope onwards, whether or not the branch holding them is ever
+    reached. `refinery.lib.scripts.js.deobfuscation.deadcode` drops the branch whole, so the name
+    the program answered `undefined` for is left bound to nothing and reading it throws.
+
+    The two halves are one defect and are pinned as two rows because they are removed by one rule
+    reading two shapes: `JsDeadCodeElimination._unwrap_branch` already keeps a `let` or `const` the
+    branch declares, which is the mechanism the `var` half needs and does not use.
+    """
+
+
+class TestTheDeclarationsADeadBlockHeldAreGone(TestBase):
+    """
+    The control for `TestADeclarationADeadBlockHoldsIsStillDeclared`, read from the text and from
+    nothing else, so that the entry cannot go quiet on a machine with no Node.js and cannot be
+    answered by a program that fails for some other reason. It names the removal the entry is about:
+    what comes back is the read alone, with nothing left declaring the name it reads.
+    """
+
+    def test_each_dead_block_is_removed_and_the_read_left_behind(self):
         self.assertEqual(
             {
-                source: before_and_after(source, module=module)
-                for source, (prints, module) in rows.items()
+                label: folded(row.text)
+                for label, row in A_DECLARATION_A_DEAD_BLOCK_HOLDS.items()
             },
             {
-                source: ((prints, None), (prints, None))
-                for source, (prints, module) in rows.items()
+                'a function no branch declares': 'console.log(W);',
+                'a var no branch declares': 'console.log(v);',
+                'a function that is the whole of an if clause': inspect.cleandoc(
+                    """
+                    function outer() {
+                      console.log(W);
+                    }
+                    outer();
+                    """
+                ),
             },
         )
 
 
-#: A program whose parameter default reads a name the function body declares again, mapped to
-#: what Node prints for it.
+#: A program whose parameter default reads a name its own body declares again, mapped to the
+#: behavior an engine gives it. Every kind of function a default may be written on is here, because
+#: the scope a default evaluates in is a property of having one at all and of nothing else.
 A_PARAMETER_DEFAULT_READING_PAST_THE_BODY = {
-    'function g() { return 1; }\n'
-    'function f(x = g()) { function g() { return 2; } return x; }\n'
-    'console.log(f());\n': '1\n',
-    'var v = 1;\n'
-    'function f(x = v) { var v = 2; return x; }\n'
-    'console.log(f());\n': '1\n',
-    'function W() { W = function () {}; }\n'
-    'function f(x = W(console.log(1))) { var W; return typeof x; }\n'
-    'W(console.log(2));\n'
-    'f();\n': '2\n1\n',
+    'a call in a default': Program(
+        a_program("""
+            function g() { return 1; }
+            function f(x = g()) { function g() { return 2; } return x; }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a read in a default': Program(
+        a_program("""
+            var v = 1;
+            function f(x = v) { var v = 2; return x; }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a wrapper a default names': Program(
+        a_program("""
+            function W() { W = function () {}; }
+            function f(x = W(console.log(1))) { var W; return typeof x; }
+            W(console.log(2));
+            f();
+            """),
+        prints('2', '1'),
+    ),
+    'an arrow default': Program(
+        a_program("""
+            var v = 1;
+            var f = (x = v) => { var v = 2; return x; };
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a class method default': Program(
+        a_program("""
+            var v = 1;
+            class C { m(x = v) { var v = 2; return x; } }
+            console.log(new C().m());
+            """),
+        prints('1'),
+    ),
+    'a shorthand method default': Program(
+        a_program("""
+            var v = 1;
+            var o = { m(x = v) { var v = 2; return x; } };
+            console.log(o.m());
+            """),
+        prints('1'),
+    ),
+    'a destructured default': Program(
+        a_program("""
+            var v = 1;
+            function f({ x = v } = {}) { var v = 2; return x; }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a generator default': Program(
+        a_program("""
+            var v = 1;
+            function* f(x = v) { var v = 2; yield x; }
+            console.log(f().next().value);
+            """),
+        prints('1'),
+    ),
+    'a closure a default holds': Program(
+        a_program("""
+            var v = 1;
+            function f(g = function () { return v; }) { var v = 2; return g(); }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
+    'a readable eval in a default': Program(
+        a_program("""
+            var v = 1;
+            function f(x = eval('v')) { var v = 2; return x; }
+            console.log(f());
+            """),
+        prints('1'),
+    ),
 }
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
+@_one_expected_failure_per_program(A_PARAMETER_DEFAULT_READING_PAST_THE_BODY)
 class TestAParameterDefaultReadsPastTheBody(TestBase):
     """
-    A parameter default evaluates in a parameter scope of its own whose parent is the scope
-    enclosing the function, so it never reads what the body declares: the body's declarations do
-    not exist yet when a default runs. The scope model gives a function one scope for parameters
-    and body together, so a default's read resolves to the body's binding, and the folds
-    downstream substitute the body's value into the default or delete the very declaration the
-    default reads.
+    A function whose parameters carry an expression evaluates them in a parameter scope of its own
+    whose parent is the scope enclosing the function, so a default never reads what the body
+    declares: the body's declarations do not exist yet when a default runs. The scope model gives a
+    function one scope for parameters and body together, so a default's read resolves to the body's
+    binding, and the folds downstream substitute the body's value into the default or delete the
+    very declaration the default reads.
 
     The misattribution costs the outer binding as much as it costs the default: a reference the
     body's binding is credited with is one the outer binding never records, so a pass counting what
-    reads the outer binding counts one too few. The third program is that half —
+    reads the outer binding counts one too few. `a wrapper a default names` is that half -
     `refinery.lib.scripts.js.deobfuscation.argwrap` refuses a wrapper a default of its own body
     names, and has no way to see this one at all.
     """
 
-    @unittest.expectedFailure
-    def test_a_default_reads_the_enclosing_scope(self):
-        """
-        Node prints `1` for the first two programs of `A_PARAMETER_DEFAULT_READING_PAST_THE_BODY`
-        and `2` then `1` for the third: each default reads the outer declaration. The deobfuscation
-        answers `2` for the first and a program throwing `ReferenceError` for each of the others.
-        """
-        rows = A_PARAMETER_DEFAULT_READING_PAST_THE_BODY
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
 
 #: A classic script reading one of its own top-level declarations through the `this` its top level
-#: holds, mapped to what a host prints for it. Measured against the declaration being kept, which
-#: leaves both programs standing whole.
-A_DECLARATION_A_SCRIPT_READS_THROUGH_THIS = {
-    "var q = function (a) { console.log('q', a); };\n"
-    'this.q(1);\n': 'q 1\n',
-    'function W() { W = function () {}; }\n'
-    'W(console.log(1));\n'
-    'this.W(2);\n'
-    "console.log('end');\n": '1\nend\n',
+#: holds, or writing a global property through it, mapped to the behavior a host gives it.
+A_TOP_LEVEL_THIS_REACHING_THE_GLOBAL_OBJECT = {
+    'a var the top level declares': Program(
+        a_program("""
+            var q = function (a) { console.log('q', a); };
+            this.q(1);
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+    'a wrapper the top level declares': Program(
+        a_program("""
+            function W() { W = function () {}; }
+            W(console.log(1));
+            this.W(2);
+            console.log('end');
+            """),
+        prints('1', 'end'),
+        Reading.SCRIPT,
+    ),
+    'an arrow at the top level': Program(
+        a_program("""
+            var q = function (a) { console.log('q', a); };
+            (() => { this.q(1); })();
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+    'a global property written beside the read': Program(
+        a_program("""
+            globalThis.q = function (a) { console.log('q', a); };
+            this.q(1);
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+    'a computed write through the top-level this': Program(
+        a_program("""
+            var q = 1;
+            this['q'] = 2;
+            console.log(q);
+            """),
+        prints('2'),
+        Reading.SCRIPT,
+    ),
 }
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
+@_one_expected_failure_per_program(A_TOP_LEVEL_THIS_REACHING_THE_GLOBAL_OBJECT)
 class TestATopLevelThisNamesTheGlobalObject(TestBase):
     """
     At the top level of a classic script `this` is the global object, and a top-level `var` or
@@ -577,26 +803,13 @@ class TestATopLevelThisNamesTheGlobalObject(TestBase):
     access in its place; `this` is not among them, so a read written that way is recorded nowhere
     and the binding reads as one nothing outside its declaration names.
 
-    Every pass that removes a declaration on that answer then removes it. Two of them are witnessed
-    here — the constant and unused-code removal for the `var`, and the wrapper expansion of
-    `refinery.lib.scripts.js.deobfuscation.argwrap` — and the fix belongs to neither of them but to
-    the model: what makes `this` different from the six names is that it is the global object only
-    where it is written, and a function body may hold any receiver at all.
+    Every pass that removes a declaration on that answer then removes it, and the last row shows the
+    same gap costing a value rather than a declaration: a computed write the model does not see is
+    one the folds behind it read past, so a program that printed what the write put there comes back
+    printing what the declaration did. The fix belongs to none of those passes but to the model:
+    what makes `this` different from the six names is that it is the global object only where it is
+    written, and a function body may hold any receiver at all.
     """
-
-    @unittest.expectedFailure
-    def test_a_declaration_a_script_reads_through_this_is_left_standing(self):
-        """
-        A host prints `q 1` for the first program of `A_DECLARATION_A_SCRIPT_READS_THROUGH_THIS` and
-        `1` then `end` for the second. The deobfuscation removes the declaration from both, so
-        `this.q` and `this.W` are `undefined` and each program throws `TypeError` where it called
-        them.
-        """
-        rows = A_DECLARATION_A_SCRIPT_READS_THROUGH_THIS
-        self.assertEqual(
-            {source: before_and_after_in_a_host(source) for source in rows},
-            each_program_still_prints(rows),
-        )
 
 
 class TestTheDeclarationATopLevelThisReadsIsGone(TestBase):
@@ -607,17 +820,212 @@ class TestTheDeclarationATopLevelThisReadsIsGone(TestBase):
     """
 
     def test_each_declaration_is_removed_and_the_read_left_behind(self):
-        first, second = A_DECLARATION_A_SCRIPT_READS_THROUGH_THIS
+        rows = A_TOP_LEVEL_THIS_REACHING_THE_GLOBAL_OBJECT
         self.assertEqual(
-            {first: folded(first), second: folded(second)},
+            {label: folded(rows[label].text) for label in [
+                'a var the top level declares',
+                'a wrapper the top level declares',
+                'a global property written beside the read',
+            ]},
             {
-                first: 'this.q(1);',
-                second: inspect.cleandoc(
+                'a var the top level declares': 'this.q(1);',
+                'a wrapper the top level declares': inspect.cleandoc(
                     """
                     console.log(1);
                     this.W(2);
                     console.log('end');
                     """
                 ),
+                'a global property written beside the read': 'this.q(1);',
             },
         )
+
+
+#: A classic script whose function is called with no receiver, mapped to the behavior a host gives
+#: it. Sloppy code gives such a call the global object as its `this`, so the body reaches the
+#: script's own top-level declarations through it.
+A_SLOPPY_CALL_READING_THE_GLOBAL_OBJECT = {
+    'a bare call': Program(
+        a_program("""
+            var q = function (a) { console.log('q', a); };
+            function f() { this.q(1); }
+            f();
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@_one_expected_failure_per_program(A_SLOPPY_CALL_READING_THE_GLOBAL_OBJECT)
+class TestASloppyCallGivesItsBodyTheGlobalObject(TestBase):
+    """
+    A call written with no receiver passes `undefined` as the `this` of the call, and sloppy code
+    replaces that with the global object before the body runs. So a sloppy function nothing calls as
+    a method reads the global object through `this` just as its script's top level does, and a
+    top-level declaration is reachable through it.
+
+    This is the same gap as `TestATopLevelThisNamesTheGlobalObject` at one remove, and it is not the
+    same fix: what a `this` in a function body holds is decided by every call reaching that body,
+    where the `this` of a top level is decided by the position alone. The declaration is removed and
+    the call left standing, so the program comes back throwing where it printed.
+    """
+
+
+#: A program reading the text of a function value, mapped to the behavior an engine gives it. The
+#: read is written inside a function body, which is where the tool answers it at all: the same read
+#: at the top of a file is left standing.
+THE_TEXT_A_FUNCTION_WAS_WRITTEN_WITH = {
+    'a declaration handed to String': Program(
+        a_program("""
+            function W(a) { return a + 1; }
+            function f() { return String(W); }
+            console.log(f());
+            """),
+        prints('function W(a) { return a + 1; }'),
+    ),
+    'the length of the text of a declaration': Program(
+        a_program("""
+            function W(a) { return a + 1; }
+            function f() { return String(W).length; }
+            console.log(f());
+            """),
+        prints('31'),
+    ),
+    'a local function value concatenated': Program(
+        a_program("""
+            function f() { var W = function (a) { return a + 1; }; return '' + W; }
+            console.log(f());
+            """),
+        prints('function (a) { return a + 1; }'),
+    ),
+    'a local function value joined': Program(
+        a_program("""
+            function f() { var W = function (a) { return a + 1; }; return [W].join(''); }
+            console.log(f());
+            """),
+        prints('function (a) { return a + 1; }'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@_one_expected_failure_per_program(THE_TEXT_A_FUNCTION_WAS_WRITTEN_WITH)
+class TestTheTextOfAFunctionIsTheTextItWasWrittenWith(TestBase):
+    """
+    Converting a function to a string answers the source text it was written with, character for
+    character, and every conversion reaches it: `String`, a concatenation, a template, and the join
+    an array performs on its elements. The interpreter has no value for that text and converts a
+    function the way it converts a plain object, so each of these answers `[object Object]` and the
+    length of one answers `15`.
+
+    An obfuscator reads this text on purpose - a self-check comparing a function's own source
+    against a stored length or hash is a common anti-tamper device - so answering it wrongly hands
+    the analyst a program that takes the branch the original never took. The numeric row is the one
+    that shows it: a length is a plain number, and nothing about `15` says it was not computed.
+    """
+
+
+#: A program whose parameter default runs a direct `eval` declaring a name the body reads, mapped
+#: to the behavior an engine gives it.
+A_DIRECT_EVAL_IN_A_DEFAULT_DECLARING_A_NAME = {
+    'a var the eval declares': Program(
+        a_program("""
+            var v = 1;
+            function f(x = eval('var v = 2')) { return v; }
+            console.log(f());
+            """),
+        prints('2'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@_one_expected_failure_per_program(A_DIRECT_EVAL_IN_A_DEFAULT_DECLARING_A_NAME)
+class TestADirectEvalInADefaultDeclaresWhereItRuns(TestBase):
+    """
+    A direct `eval` in sloppy code declares a `var` in the variable scope it runs in, and the
+    parameter list of a function carrying an expression is such a scope. The name it declares is
+    therefore one the body reads instead of the outer one it would otherwise have read, and the
+    program prints what the `eval` put there.
+
+    The analysis resolves the body's read to the outer declaration and folds it, so the value the
+    `eval` wrote is dropped. The root is not the parameter scope but the reach of a direct `eval`:
+    `TestAParameterDefaultReadsPastTheBody` is about which scope a default reads from, and this one
+    is about a scope whose contents no reading of the text gives.
+    """
+
+
+#: A classic script reading one of its own top-level declarations through a local name a guard put
+#: the global object into, mapped to the behavior a host gives it. `window` is installed first,
+#: because Node has no such name and the guard would otherwise answer the empty object.
+A_DECLARATION_READ_THROUGH_A_LOCAL_ALIAS = {
+    'an alias a guard built': Program(
+        a_program("""
+            globalThis.window = globalThis;
+            var q = function (a) { console.log('q', a); };
+            var w = window || {};
+            w.q(1);
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@_one_expected_failure_per_program(A_DECLARATION_READ_THROUGH_A_LOCAL_ALIAS)
+class TestADeclarationReadThroughALocalAliasIsStillRead(TestBase):
+    """
+    `var w = window || {}` is how a script written to run in a browser and in something else names
+    the global object once, and every read through the local name afterwards is a read of a global
+    property. The model recognizes an access whose base is one of six spellings and nothing else, so
+    a read through the local name is recorded nowhere and the declaration it reaches is removed.
+
+    Two notions of a local alias already exist and disagree - `refinery.lib.scripts.js.deobfuscation
+    .simplify` holds one and `refinery.lib.scripts.js.deobfuscation.unused` holds another - which is
+    why this belongs to the model rather than to either of them.
+    """
+
+
+#: A classic script handing the global object to a function that writes a property of it, mapped to
+#: the behavior a host gives it. The object is spelled both ways a top level may spell it.
+THE_GLOBAL_OBJECT_HANDED_TO_A_CALL = {
+    'the top-level this': Program(
+        a_program("""
+            var q = 1;
+            function a(g, k) { g[k] = 2; }
+            a(this, 'q');
+            console.log(q);
+            """),
+        prints('2'),
+        Reading.SCRIPT,
+    ),
+    'globalThis': Program(
+        a_program("""
+            var q = 1;
+            function a(g, k) { g[k] = 2; }
+            a(globalThis, 'q');
+            console.log(q);
+            """),
+        prints('2'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@_one_expected_failure_per_program(THE_GLOBAL_OBJECT_HANDED_TO_A_CALL)
+class TestTheGlobalObjectHandedToACallMayBeWrittenThrough(TestBase):
+    """
+    A call that is handed the global object may write any property of it, and a top-level
+    declaration of a classic script is such a property. The model reads a write of a global property
+    off the spelling of the base at the write, so a write whose base is a parameter holding the
+    object is one it never sees, and the declaration keeps the value its initializer gave it.
+
+    Nothing throws and nothing is left half-rewritten: the read is folded to the value the
+    declaration held, and the program comes back printing a different number. The two rows are one
+    defect asked of the two spellings a top level has for the object, so that a fix reading only the
+    name is reported as reaching one of them.
+    """
