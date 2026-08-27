@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -637,6 +639,40 @@ class TestPs1AReadThatConsumesWhatItReadsIsNotBareOutput(TestPs1):
 
     def test_a_bare_literal_beside_it_is_still_stripped(self):
         self._assertBareStatementSurvives("'Xtjbnwqm'", survives=False)
+
+
+class TestPs1StrippingBareOutputDoesNotAlsoStripWhatProducedIt(TestPs1):
+    """
+    Stripping bare output is a claim about the console and nothing else: the value is not the
+    artifact, but the command that produced it is what an analyst opened the listing to read. While
+    a bare `$x` was kept, the store above it had a reader and survived; now the read goes and the
+    store dies with it, so a pure command whose value is only ever echoed leaves no trace at all.
+
+    An impure producer still survives as a discard — `$c = (New-Object Net.WebClient).Download...`
+    becomes `$Null = ...` — which is the shape this asks for, and the reason the loss is a gap in
+    one rule rather than the intent of the switch.
+    """
+
+    @unittest.expectedFailure
+    def test_a_pure_command_whose_value_is_only_echoed_survives_as_a_discard(self):
+        self._assertDeobfuscatesTo(F"""
+            $q = Get-Content zzq.txt
+            $q
+            {_ANCHOR}
+        """, F"""
+            $Null = Get-Content zzq.txt
+            {_ANCHOR}
+        """)
+
+    def test_an_impure_command_in_the_same_shape_already_does(self):
+        self._assertDeobfuscatesTo(F"""
+            $q = (New-Object Net.WebClient).DownloadString('http://zzq/a')
+            $q
+            {_ANCHOR}
+        """, F"""
+            $Null = (New-Object Net.WebClient).DownloadString('http://zzq/a')
+            {_ANCHOR}
+        """)
 
 
 class TestPs1BareOutputIsKeptWhenAsked(TestPs1):

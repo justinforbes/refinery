@@ -3,6 +3,10 @@ from __future__ import annotations
 import inspect
 import unittest
 
+from unittest.mock import patch
+
+from refinery.lib.scripts.ps1.analysis import faults
+
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
 #: A discarded conversion that Windows PowerShell 5.1 answers with a terminating error: `[Int]'abc'`
@@ -764,3 +768,203 @@ class TestPs1OnlyABareNameIsGrantedTheStrictModeReading(TestPs1):
 
     def test_a_discarded_scope_qualified_read_is_kept(self):
         self._assertKeptInAGuardedBlock('[void]$global:zzqunset')
+
+
+#: Commands that run code no tree here holds, and that `measure_world` does not count as openers.
+#: Each can reach a `Set-PSDebug -Strict`, which arms strict mode for the *global* scope — measured
+#: on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`, a function that calls it arms its caller
+#: while the same function calling `Set-StrictMode` does not.
+_RUNS_UNREADABLE_CODE = (
+    'using module Zzqfoo',
+    'Invoke-History',
+    'Add-PSSnapin Zzqfoo',
+    'Import-PSSession $s',
+    'Register-EngineEvent -SourceIdentifier z -Action $sb',
+    'Zzqunknowncommand',
+)
+
+#: The two spellings that *are* openers, so the class below measures the gap and not the gate.
+_OPENS_THE_WORLD = ('Import-Module Zzqfoo', 'Invoke-Expression $env:ZZQPAYLOAD')
+
+
+class TestPs1ACommandThatRunsUnreadableCodeIsNotAlwaysAWorldOpener(TestPs1):
+    """
+    The world half of the grant asks `Ps1WorldReach.closed_at`, which reports where a *type-world*
+    opener may have run. That is a proxy for "code this analysis cannot read may have run", and the
+    two are not the same set: a command that loads or replays code arms strict mode as effectively
+    as `Invoke-Expression` does, because `Set-PSDebug -Strict` writes the global scope and so
+    reaches its caller.
+
+    Every row here is a wrong answer today — the guarded read is deleted and the handler that would
+    have run in a session where the loaded code armed strict mode no longer does. They are held as
+    expected failures rather than fixed, because closing them means either widening what counts as
+    an opener for every reader of the world or giving the fault axis a flood of its own.
+    """
+
+    def _assertReadSurvivesBelow(self, command: str) -> None:
+        self._assertKept(F"""
+            {command}
+            try {{
+              {_UNSET_READ}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    @unittest.expectedFailure
+    def test_a_module_loaded_by_the_using_statement_keeps_the_read(self):
+        self._assertReadSurvivesBelow(_RUNS_UNREADABLE_CODE[0])
+
+    @unittest.expectedFailure
+    def test_a_replayed_history_entry_keeps_the_read(self):
+        self._assertReadSurvivesBelow(_RUNS_UNREADABLE_CODE[1])
+
+    @unittest.expectedFailure
+    def test_a_loaded_snapin_keeps_the_read(self):
+        self._assertReadSurvivesBelow(_RUNS_UNREADABLE_CODE[2])
+
+    @unittest.expectedFailure
+    def test_an_imported_session_keeps_the_read(self):
+        self._assertReadSurvivesBelow(_RUNS_UNREADABLE_CODE[3])
+
+    @unittest.expectedFailure
+    def test_an_event_action_keeps_the_read(self):
+        self._assertReadSurvivesBelow(_RUNS_UNREADABLE_CODE[4])
+
+    @unittest.expectedFailure
+    def test_a_command_this_analysis_cannot_resolve_keeps_the_read(self):
+        self._assertReadSurvivesBelow(_RUNS_UNREADABLE_CODE[5])
+
+    def test_the_two_spellings_the_world_does_count_keep_it_today(self):
+        for command in _OPENS_THE_WORLD:
+            with self.subTest(command):
+                self._assertReadSurvivesBelow(command)
+
+
+class TestPs1TheGrantAssumesTheEntryScopeRunsDefaultSemantics(TestPs1):
+    """
+    Strict mode resolves by walking the scope chain to the global scope, so a fragment dot-sourced
+    from a session that armed it runs strict while spelling nothing. Nothing readable says whether
+    that happened, and `preserve_bare_output` is the switch a caller passes for exactly that case —
+    a module, or a fragment carved out of a larger script.
+
+    It withdraws the bare-output half of the grant, because it withdraws bare-output stripping
+    altogether. It does not withdraw the discard half, which is the wrong answer here: the caller
+    has said this is a fragment and the grant still assumes the entry scope is not strict.
+    """
+
+    @unittest.expectedFailure
+    def test_the_discarded_read_survives_when_the_caller_says_this_is_a_fragment(self):
+        source = inspect.cleandoc(F"""
+            try {{
+              {_UNSET_READ}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+        self.assertEqual(
+            self._deobfuscate(source, preserve_bare_output=True),
+            self._apply(source),
+        )
+
+    def test_the_bare_output_read_survives_there_today(self):
+        source = inspect.cleandoc(F"""
+            try {{
+              {_UNSET_OUTPUT}
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+        self.assertEqual(
+            self._deobfuscate(source, preserve_bare_output=True),
+            self._apply(source),
+        )
+
+
+class TestPs1AFunctionBodyIsNotWeighedAtItsDefinitionsPosition(TestPs1):
+    """
+    The world is asked at the position of the statement being removed. For a statement inside a
+    function body that is the statement itself, which the graphs place in the body's own island and
+    `_position_in_root` therefore refuses — so a body read below an unreadable payload is kept for
+    want of a position rather than by an argument about where the body runs.
+
+    That refusal is what makes the definition's own position harmless today. A change that supplied
+    the world at the *definition* instead would grant this, and the body runs at the call below the
+    payload, so this is the row that would flip.
+    """
+
+    def test_a_body_read_is_kept_where_the_call_below_a_payload_is_guarded(self):
+        self._assertKept(F"""
+            function Zzqf {{
+              {_UNSET_READ}
+            }}
+            {_UNREADABLE}
+            try {{
+              Zzqf
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+    def test_the_same_body_read_goes_where_nothing_unreadable_runs_at_all(self):
+        self._assertDeobfuscatesTo(F"""
+            function Zzqf {{
+              {_UNSET_READ}
+            }}
+            try {{
+              Zzqf
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, F"""
+            function Zzqf {{}}
+            try {{
+              Zzqf
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """)
+
+
+class TestPs1TheStrictModeScanStaysLinearInTheSizeOfTheScript(TestPs1):
+    """
+    The fact is a walk over the whole tree, memoized per `Ps1FaultReach` — and the model cache
+    discards that model on every edit, so a pass that removes in batches pays one walk per batch
+    rather than one per statement. Asking it before the cheaper halves of the gate would turn that
+    into a walk per candidate, which is the shape this guards.
+    """
+
+    def _armings_asked(self, statements: int) -> int:
+        source = '\n'.join([
+            F"trap {{ {_HANDLER} }}",
+            *(F'[void]$zzq{index}' for index in range(statements)),
+            _ANCHOR,
+        ])
+        asked = 0
+        real = faults._arms_strict_mode
+
+        def counted(node):
+            nonlocal asked
+            asked += 1
+            return real(node)
+
+        with patch.object(faults, '_arms_strict_mode', counted):
+            self._deobfuscate(source)
+        return asked
+
+    def test_the_walk_is_taken_a_bounded_number_of_times(self):
+        # Measured: 133, 253, 493 and 973 at these four sizes, which is one walk per removal batch.
+        # A walk per candidate is the size of the tree times the number of candidates, so it reaches
+        # six figures at the last size; the bound sits far above the first shape and far below the
+        # second.
+        self.assertLess(self._armings_asked(320), 5000)
+
+    def test_doubling_the_script_does_not_square_the_walking(self):
+        counts = {size: self._armings_asked(size) for size in (40, 320)}
+        self.assertLess(counts[320], 12 * counts[40])

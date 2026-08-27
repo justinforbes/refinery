@@ -244,6 +244,8 @@ BEHAVIOURS: tuple[str, ...] = (
     "try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }",
     "Set-StrictMode -Version 1; try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }",
     "Set-PSDebug -Strict; try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }",
+    "function f { Set-PSDebug -Strict }; f; try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }",
+    "function f { Set-StrictMode -Version 1 }; f; try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }",
     'function f { $input; $input | ForEach-Object { Write-Host "seen:$_" } }; 1, 2 | f',
     'function f { [void]$input; $input | ForEach-Object { Write-Host "seen:$_" } }; 1, 2 | f',
     "$s = { try { zzqfoo =5 } catch { 'caught' }; Set-Alias -Scope Script zzqfoo Write-Output }; & $s; & $s",
