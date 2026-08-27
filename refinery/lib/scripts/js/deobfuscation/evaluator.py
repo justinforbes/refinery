@@ -22,6 +22,7 @@ from refinery.lib.scripts.js.analysis.model import (
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     GLOBAL_VALUE_NAMES,
     ScriptLevelTransformer,
+    a_host_calls_the_binding,
     access_key,
     binding_has_references,
     extract_literal_value,
@@ -40,10 +41,6 @@ from refinery.lib.scripts.js.deobfuscation.interpreter import (
     _ThrowSignal,
     is_runtime_name,
     names_runtime_builtin,
-)
-from refinery.lib.scripts.js.deobfuscation.options import (
-    is_host_entrypoint,
-    module_execution,
 )
 from refinery.lib.scripts.js.model import (
     JsArrowFunctionExpression,
@@ -726,13 +723,9 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
     def _is_host_entrypoint(self, model: SemanticModel, binding: Binding) -> bool:
         """
         Whether *binding* names a function the caller declared a host invokes, and is one a host could
-        actually reach — a top-level declaration under the script execution model. The reachability test
-        is what keeps a pattern from protecting a nested function that happens to share the name.
+        actually reach — a top-level declaration under the script execution model.
         """
-        if not is_host_entrypoint(self.options, binding.name):
-            return False
-        return model.reaches_global_object(
-            binding, module_scope=module_execution(self.options))
+        return a_host_calls_the_binding(model, binding, self.options)
 
     def _remove_resolved_definitions(self, script: JsScript) -> None:
         removed: set[int] = set()

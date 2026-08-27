@@ -71,6 +71,7 @@ from refinery.lib.scripts.js.model import (
     JsRestElement,
     JsScript,
     JsStringLiteral,
+    JsSwitchCase,
     JsVarKind,
     JsVariableDeclaration,
     JsVariableDeclarator,
@@ -650,9 +651,9 @@ def _wraps_what_it_returns(node: Node | None) -> bool:
 
 def _the_keys_a_wrapping_function_is_held_under(root: Node) -> set[str]:
     """
-    The names a wrapping function in *root* is reached through where the reach is a member access.
-    Such an access names no binding, so the name it spells is all a reading of the text can say
-    about `o.m()`, and every name a wrapping function is held under anywhere counts.
+    Every name a wrapping function in *root* is held under: its own, the one a declarator binds it
+    to, and the property or method key it is written at. A member access names no binding, so a name
+    a wrapping function carries anywhere is all a reading of the text can say about `o.m()`.
     """
     names: set[str] = set()
     for node in root.walk():
@@ -707,19 +708,28 @@ def _the_scopes_around(node: Node):
         owner = owner.parent
 
 
+def _the_region_a_holder_scopes(holder: Node | None) -> Node | None:
+    """
+    The node a block-scoped declaration written directly in *holder* is visible throughout. Every
+    case of a `switch` shares the one scope the switch block opens, so a `let` written in one case
+    is visible in all of them and in the discriminant of none.
+    """
+    return holder.parent if isinstance(holder, JsSwitchCase) else holder
+
+
 def _where_a_lexical_declaration_is_visible(node: Node) -> Node | None:
     """
-    The statement list a declaration is visible in when it is visible in less than the whole scope —
-    a `let`, a `const`, a class, or a caught error — and `None` for one the whole scope holds.
+    The region a declaration is visible in when it is visible in less than the whole scope — a
+    `let`, a `const`, a class, or a caught error — and `None` for one the whole scope holds.
     """
     if isinstance(node, JsCatchClause):
         return node.body
     if isinstance(node, JsClassDeclaration):
-        return node.parent
+        return _the_region_a_holder_scopes(node.parent)
     if isinstance(node, JsVariableDeclarator):
         declaration = node.parent
         if isinstance(declaration, JsVariableDeclaration) and declaration.kind is not JsVarKind.VAR:
-            return declaration.parent
+            return _the_region_a_holder_scopes(declaration.parent)
     return None
 
 
@@ -788,16 +798,35 @@ def _what_a_scope_declares(scope: Node, name: str, reference: JsIdentifier) -> l
 
 def _what_a_scope_writes(scope: Node, name: str) -> list[Node | None]:
     """
-    What an assignment written anywhere in *scope* puts into *name*. A declaration says what a name
-    is bound to and an assignment says what it holds later, and a call reads whichever of the two
-    ran last, so both count.
+    What an assignment written anywhere in *scope* puts into the binding *scope* declares under
+    *name*. A declaration says what a name is bound to and an assignment says what it holds later,
+    and a call reads whichever of the two ran last, so both count.
+
+    An assignment a nested scope declaring the same name owns puts nothing into this binding, so the
+    target is resolved the same way a read is: the innermost scope around it that declares the name
+    at all has to be this one.
     """
     written: list[Node | None] = []
     for node in scope.walk():
-        if isinstance(node, JsAssignmentExpression) and isinstance(node.left, JsIdentifier):
-            if node.left.name == name:
-                written.append(node.right)
+        if not isinstance(node, JsAssignmentExpression) or not isinstance(node.left, JsIdentifier):
+            continue
+        if node.left.name != name:
+            continue
+        if _the_scope_the_name_reaches(node.left) is not scope:
+            continue
+        written.append(node.right)
     return written
+
+
+def _the_scope_the_name_reaches(reference: JsIdentifier) -> Node | None:
+    """
+    The innermost scope around *reference* that declares its name at all, which is the one a read or
+    a write of it touches, and `None` for a name declared nowhere.
+    """
+    for scope in _the_scopes_around(reference):
+        if _what_a_scope_declares(scope, reference.name, reference):
+            return scope
+    return None
 
 
 def _the_name_reaches_a_wrapping_function(reference: JsIdentifier) -> bool:
@@ -810,15 +839,16 @@ def _the_name_reaches_a_wrapping_function(reference: JsIdentifier) -> bool:
     to a plain function elsewhere in the file as a call to the wrapping one, so a pass that answers
     the plain call — which it may — reads as having answered the wrapping one.
     """
-    for scope in _the_scopes_around(reference):
-        declared = _what_a_scope_declares(scope, reference.name, reference)
-        if not declared:
-            continue
-        return any(
-            _wraps_what_it_returns(node)
-            for node in (*declared, *_what_a_scope_writes(scope, reference.name))
+    scope = _the_scope_the_name_reaches(reference)
+    if scope is None:
+        return False
+    return any(
+        _wraps_what_it_returns(node)
+        for node in (
+            *_what_a_scope_declares(scope, reference.name, reference),
+            *_what_a_scope_writes(scope, reference.name),
         )
-    return False
+    )
 
 
 def _calls_a_wrapping_function(callee: Node | None, keys: set[str]) -> bool:

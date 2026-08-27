@@ -18,6 +18,7 @@ This file emptying is the release gate.
 """
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from test import TestBase
@@ -515,6 +516,10 @@ A_PARAMETER_DEFAULT_READING_PAST_THE_BODY = {
     'var v = 1;\n'
     'function f(x = v) { var v = 2; return x; }\n'
     'console.log(f());\n': '1\n',
+    'function W() { W = function () {}; }\n'
+    'function f(x = W(console.log(1))) { var W; return typeof x; }\n'
+    'W(console.log(2));\n'
+    'f();\n': '2\n1\n',
 }
 
 
@@ -527,14 +532,20 @@ class TestAParameterDefaultReadsPastTheBody(TestBase):
     and body together, so a default's read resolves to the body's binding, and the folds
     downstream substitute the body's value into the default or delete the very declaration the
     default reads.
+
+    The misattribution costs the outer binding as much as it costs the default: a reference the
+    body's binding is credited with is one the outer binding never records, so a pass counting what
+    reads the outer binding counts one too few. The third program is that half —
+    `refinery.lib.scripts.js.deobfuscation.argwrap` refuses a wrapper a default of its own body
+    names, and has no way to see this one at all.
     """
 
     @unittest.expectedFailure
     def test_a_default_reads_the_enclosing_scope(self):
         """
-        Node prints `1` for both programs of `A_PARAMETER_DEFAULT_READING_PAST_THE_BODY`: each
-        default reads the outer declaration. The deobfuscation answers `2` for the first and a
-        program throwing `ReferenceError` for the second.
+        Node prints `1` for the first two programs of `A_PARAMETER_DEFAULT_READING_PAST_THE_BODY`
+        and `2` then `1` for the third: each default reads the outer declaration. The deobfuscation
+        answers `2` for the first and a program throwing `ReferenceError` for each of the others.
         """
         rows = A_PARAMETER_DEFAULT_READING_PAST_THE_BODY
         self.assertEqual(
@@ -567,10 +578,10 @@ class TestATopLevelThisNamesTheGlobalObject(TestBase):
     and the binding reads as one nothing outside its declaration names.
 
     Every pass that removes a declaration on that answer then removes it. Two of them are witnessed
-    here — the constant and unused-code removal for the `var`, and
-    `refinery.lib.scripts.js.deobfuscation.argwrap` for the wrapper — and the fix belongs to neither
-    of them but to the model: what makes `this` different from the six names is that it is the
-    global object only where it is written, and a function body may hold any receiver at all.
+    here — the constant and unused-code removal for the `var`, and the wrapper expansion of
+    `refinery.lib.scripts.js.deobfuscation.argwrap` — and the fix belongs to neither of them but to
+    the model: what makes `this` different from the six names is that it is the global object only
+    where it is written, and a function body may hold any receiver at all.
     """
 
     @unittest.expectedFailure
@@ -585,4 +596,28 @@ class TestATopLevelThisNamesTheGlobalObject(TestBase):
         self.assertEqual(
             {source: before_and_after_in_a_host(source) for source in rows},
             each_program_still_prints(rows),
+        )
+
+
+class TestTheDeclarationATopLevelThisReadsIsGone(TestBase):
+    """
+    The control for `TestATopLevelThisNamesTheGlobalObject`, read from the text and from nothing
+    else: it names the removal that entry is about, so the entry cannot go quiet on a machine with
+    no Node.js and cannot be answered by a program that fails for some other reason.
+    """
+
+    def test_each_declaration_is_removed_and_the_read_left_behind(self):
+        first, second = A_DECLARATION_A_SCRIPT_READS_THROUGH_THIS
+        self.assertEqual(
+            {first: folded(first), second: folded(second)},
+            {
+                first: 'this.q(1);',
+                second: inspect.cleandoc(
+                    """
+                    console.log(1);
+                    this.W(2);
+                    console.log('end');
+                    """
+                ),
+            },
         )

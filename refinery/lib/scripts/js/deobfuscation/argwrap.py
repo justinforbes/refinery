@@ -17,6 +17,7 @@ from refinery.lib.scripts import (
     Node,
     _remove_from_parent,
     _replace_in_parent,
+    owning_list,
     reattach,
     set_child_list,
 )
@@ -26,10 +27,9 @@ from refinery.lib.scripts.js.analysis.model import (
     SemanticModel,
     enclosing_operator,
 )
-from refinery.lib.scripts.js.deobfuscation.helpers import ScriptLevelTransformer
-from refinery.lib.scripts.js.deobfuscation.options import (
-    is_host_entrypoint,
-    module_execution,
+from refinery.lib.scripts.js.deobfuscation.helpers import (
+    ScriptLevelTransformer,
+    a_host_calls_the_binding,
 )
 from refinery.lib.scripts.js.model import (
     FUNCTION_NODES,
@@ -48,7 +48,6 @@ from refinery.lib.scripts.js.model import (
     JsSequenceExpression,
     JsSpreadElement,
     JsStaticBlock,
-    JsSwitchCase,
     JsUnaryExpression,
     JsVariableDeclarator,
     strip_parens,
@@ -132,8 +131,7 @@ def _bindings_an_export_list_reads(model: SemanticModel, root: Node) -> set[int]
         for specifier in node.specifiers:
             if not isinstance(local := specifier.local, JsIdentifier):
                 continue
-            scope = model.scope_of(local) or model.scope_of(node)
-            if (binding := model.lookup(local.name, scope)) is not None:
+            if (binding := model.lookup(local.name, model.scope_of(local))) is not None:
                 bindings.add(id(binding))
     return bindings
 
@@ -197,12 +195,12 @@ def _the_parameters_the_declaration_is_hidden_from(
 
 
 def _the_calls_that_reach(
-    model: SemanticModel,
+    binding: Binding,
     declaration: JsFunctionDeclaration,
 ) -> list[JsCallExpression] | None:
     """
     Every call that reaches the wrapper *declaration* declares, or `None` where the expansion is not
-    equivalent for the binding it declares at all.
+    equivalent for *binding*, the binding it declares, at all.
 
     Expanding a call to the statements its arguments carry is equivalent only where the name holds
     this wrapper when the call runs and nothing observes that the call then disabled it. That is
@@ -233,10 +231,6 @@ def _the_calls_that_reach(
     opaque reflective surfaces are accepted for the reason
     `test.lib.scripts.js.test_unfixed_defects.TestAnUnreadableEvalMayRebindAWrapper` states.
     """
-    assert declaration.id is not None
-    binding = model.binding_of(declaration.id)
-    if binding is None:
-        return None
     for name in binding.declarations:
         if name is not declaration.id and not _a_bare_var_declarator_outside_a_loop_head(name):
             return None
@@ -255,21 +249,6 @@ def _the_calls_that_reach(
             return None
         calls.append(call)
     return calls
-
-
-def _a_host_calls_the_binding(model: SemanticModel, binding: Binding, options: object) -> bool:
-    """
-    Whether *binding* names a function the analyst declared a host invokes, and is one a host could
-    reach — a top-level declaration under the script execution model.
-
-    `refinery.lib.scripts.js.deobfuscation.unused.JsUnusedCodeRemoval` and
-    `refinery.lib.scripts.js.deobfuscation.evaluator.JsFunctionEvaluator` ask this before deleting a
-    function declaration, and the three have to answer it the same way or they disagree about which
-    functions survive.
-    """
-    if not is_host_entrypoint(options, binding.name):
-        return False
-    return model.reaches_global_object(binding, module_scope=module_execution(options))
 
 
 def _admitted_wrappers(cache: ModelCache, root: JsScript, options: object) -> list[_Wrapper]:
@@ -301,9 +280,9 @@ def _admitted_wrappers(cache: ModelCache, root: JsScript, options: object) -> li
         binding = model.binding_of(node.id)
         if binding is None or id(binding) in exported:
             continue
-        if _a_host_calls_the_binding(model, binding, options):
+        if a_host_calls_the_binding(model, binding, options):
             continue
-        calls = _the_calls_that_reach(model, node)
+        calls = _the_calls_that_reach(binding, node)
         if not calls:
             continue
         wrappers.append(_Wrapper(node, calls))
@@ -338,23 +317,21 @@ class JsAssignmentsAsFunctionArgs(ScriptLevelTransformer):
 
         A spread argument is neither a statement nor a sequence operand, and a statement its own
         list does not hold cannot be spliced into; either way the call stays, and the wrapper it
-        reaches stays with it. A replacement that finds no slot is the same answer: the sequence it
-        built has adopted the arguments by then, so the call takes them back before the refusal.
+        reaches stays with it. Which list holds it is `refinery.lib.scripts.owning_list`'s answer,
+        the same one `refinery.lib.scripts._remove_from_parent` would reach, so a statement position
+        this pass can splice is exactly one a removal could take the statement from. A replacement
+        that finds no slot is the same answer: the sequence it built has adopted the arguments by
+        then, so the call takes them back before the refusal.
         """
         if any(isinstance(arg, JsSpreadElement) for arg in call.arguments):
             return False
         parent = call.parent
-        if (
-            isinstance(parent, JsExpressionStatement)
-            and isinstance(block := parent.parent, (JsBlockStatement, JsScript, JsSwitchCase))
-        ):
-            body = block.body
-            try:
-                index = body.index(parent)
-            except ValueError:
-                return False
+        if isinstance(parent, JsExpressionStatement) and (held := owning_list(parent)) is not None:
+            block, attribute = held
+            body = getattr(block, attribute)
+            index = next(i for i, item in enumerate(body) if item is parent)
             statements = [JsExpressionStatement(expression=arg) for arg in call.arguments]
-            set_child_list(block, 'body', [*body[:index], *statements, *body[index + 1:]])
+            set_child_list(block, attribute, [*body[:index], *statements, *body[index + 1:]])
             return True
         if _replace_in_parent(call, self._sequence_lowering(call.arguments)):
             return True

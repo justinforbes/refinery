@@ -56,6 +56,10 @@ from refinery.lib.scripts.js.analysis.model import (
     reference_role,
     walk_receiver_scope,
 )
+from refinery.lib.scripts.js.deobfuscation.options import (
+    is_host_entrypoint,
+    module_execution,
+)
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
@@ -1855,6 +1859,22 @@ def binding_has_references(
             continue
         return True
     return False
+
+
+def a_host_calls_the_binding(model: SemanticModel, binding: Binding, options: object) -> bool:
+    """
+    Whether *binding* names a function the analyst declared a host invokes, and is one a host could
+    reach — a top-level declaration under the script execution model. A pattern alone does not
+    decide it: `refinery.lib.scripts.js.analysis.model.SemanticModel.reaches_global_object` is what
+    keeps a pattern from protecting a nested binding, a `let`, or anything at all under the module
+    model, where a top-level declaration never becomes a property of the global object.
+
+    Every pass that deletes a function declaration asks here, so that none of them can answer it its
+    own way and disagree with the rest about which functions survive.
+    """
+    if not is_host_entrypoint(options, binding.name):
+        return False
+    return model.reaches_global_object(binding, module_scope=module_execution(options))
 
 
 def nothing_still_names(model: SemanticModel, removed: Sequence[Node]) -> bool:

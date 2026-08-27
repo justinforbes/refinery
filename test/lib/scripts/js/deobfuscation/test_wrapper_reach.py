@@ -57,9 +57,10 @@ def _a_program(text: str) -> str:
 
 def _prints(*lines: str) -> tuple[str, None]:
     """
-    What a program prints: the lines it writes, each ending in the break `console.log` adds.
+    What a program prints: the lines it writes, each ending in the break `console.log` adds, and the
+    empty text for a program that writes none.
     """
-    return (NL.join(lines) + NL, None)
+    return (''.join(line + NL for line in lines), None)
 
 
 def _throws(error: str) -> tuple[str, str]:

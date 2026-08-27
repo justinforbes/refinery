@@ -42,15 +42,12 @@ from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     GLOBAL_OBJECT_ALIASES,
     BodyProcessingTransformer,
+    a_host_calls_the_binding,
     collect_identifier_names,
     insert_after_prologue,
     is_binding_site,
     remove_declarator,
     walk_scope,
-)
-from refinery.lib.scripts.js.deobfuscation.options import (
-    is_host_entrypoint,
-    module_execution,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -515,16 +512,8 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         Whether *binding* is one the caller declared a host invokes by name. This answers the same
         question reflection does — could code outside the recorded references reach this binding — for the
         case the model cannot see at all, a caller living outside the file.
-
-        A pattern alone does not decide it: the binding must also be one a host could reach, which
-        `reaches_global_object` answers over the active execution model. That is what keeps a pattern from
-        protecting a nested binding, a `let`, or anything at all under the module model, where a top-level
-        declaration never becomes a property of the global object.
         """
-        if not is_host_entrypoint(self.options, binding.name):
-            return False
-        return self.model.reaches_global_object(
-            binding, module_scope=module_execution(self.options))
+        return a_host_calls_the_binding(self.model, binding, self.options)
 
     def _at_script_scope(self, parent: Node) -> bool:
         """
