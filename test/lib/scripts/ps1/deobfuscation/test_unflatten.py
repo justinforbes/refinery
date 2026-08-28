@@ -282,7 +282,6 @@ class TestPs1ControlFlowDeflattening(TestPs1):
             self._apply(code, Ps1ControlFlowDeflattening),
             self._apply(code))
 
-    @unittest.expectedFailure
     def test_a_loop_whose_exit_condition_is_unevaluable_is_left_flattened(self):
         """
         Which state ends this loop depends on what `Get-Random` returns, so no state can be shown to

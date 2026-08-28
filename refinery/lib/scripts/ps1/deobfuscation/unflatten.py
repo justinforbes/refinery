@@ -167,6 +167,11 @@ def _make_exit_check(
     Return a predicate that checks whether assigning a given state value to the state variable
     would make the while condition falsy (the loop would exit). Uses the emulator to evaluate the
     condition with the state variable bound.
+
+    A condition the emulator cannot evaluate is read as one that does not exit, which is sound only
+    because `_exit_condition_is_total` refuses the whole recovery unless the condition resolves at
+    every state value the predicate is consulted on. Without that gate a loop whose exit depends on
+    an unevaluable value — `while ($s -ne (Get-Random))` — would recover as one that never exits.
     """
     def is_exit(state_value: _StateKey) -> bool:
         bindings = {var_name: state_value}
@@ -175,6 +180,26 @@ def _make_exit_check(
             return False
         return not result
     return is_exit
+
+
+def _exit_condition_is_total(
+    condition: Expression,
+    var_name: str,
+    states: dict[_StateKey, _StateBlock],
+) -> bool:
+    """
+    Whether the loop condition resolves to a definite truth value at every state the machine can
+    hold — each case label and each transition target, which together are exactly the values
+    `_make_exit_check`'s predicate is asked about. A machine undecidable at one of them cannot be
+    shown to exit there, so recovering it would run a body the host may never run.
+    """
+    values: set[_StateKey] = set(states)
+    for block in states.values():
+        values.update(block.transition.successors)
+    return all(
+        evaluate_truthy(condition, {var_name: value}) is not None
+        for value in values
+    )
 
 
 def _is_state_assignment(
@@ -1251,6 +1276,9 @@ class Ps1ControlFlowDeflattening(Transformer):
                 i += 1
                 continue
             if entry_state not in machine:
+                i += 1
+                continue
+            if not _exit_condition_is_total(match.condition, match.state_var_name, machine):
                 i += 1
                 continue
             recovered = _recover_structure(machine, entry_state, is_exit)
