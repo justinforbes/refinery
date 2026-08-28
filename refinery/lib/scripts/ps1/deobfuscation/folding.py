@@ -14,6 +14,7 @@ from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import is_fault_free, may_be_dropped
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.analysis.values import (
+    NULL,
     Ps1Constant,
     Ps1Fact,
     apply,
@@ -685,7 +686,11 @@ class Ps1ConstantFolding(Transformer):
             count = 1 if name == 'rank' else len(array.elements)
             return self._selected(node, _Selection(_integer(count), list(array.elements)))
         fact = read(obj)
-        if name == 'rank' or not isinstance(fact, Ps1Constant) or isinstance(fact.payload, tuple):
+        if name == 'rank':
+            return None
+        if fact is NULL:
+            return _integer(0)
+        if not isinstance(fact, Ps1Constant) or isinstance(fact.payload, tuple):
             return None
         text = text_of(fact)
         return _integer(len(text) if name == 'length' and text is not None else 1)

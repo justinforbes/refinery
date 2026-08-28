@@ -372,7 +372,7 @@ FOLDS: dict[str, str] = {
     '$t = (5).Zqnope; Write-Output (,$t)':
         'Write-Output (,$Null)',
     '$t = $null.Count; Write-Output (,$t); Write-Output $t':
-        '$t = $Null.Count\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,0)\nWrite-Output 0',
     '$t = @(); Write-Output (,$t); Write-Output $t.Count':
         'Write-Output (,@())\nWrite-Output @().Count',
     '$t = , 1; Write-Output (,$t); Write-Output $t.Count':

@@ -164,9 +164,11 @@ class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
             '$x = 10, 30, 10',
         )
 
-    @unittest.expectedFailure
     def test_the_count_of_null_is_zero(self):
         self.assertEqual(self._deobfuscate('$x = $null.Count'), '$x = 0')
+
+    def test_the_length_of_null_is_zero(self):
+        self.assertEqual(self._deobfuscate('$x = $null.Length'), '$x = 0')
 
     @unittest.expectedFailure
     def test_the_count_of_an_empty_array_is_zero(self):
