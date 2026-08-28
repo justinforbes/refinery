@@ -552,7 +552,8 @@ def _identity_redefinitions(node) -> tuple[_IdentityRedefinition, ...]:
     with what it binds, or an empty tuple. A `function`/`filter` definition names one command
     directly; an assignment into the `function:`/`alias:` variable namespace names one per slot it
     writes, so the multi-assignment `${function:Get-Date}, $y = { ... }, 2` records `get-date` where
-    matching one target shape against one variable would miss it.
+    matching one target shape against one variable would miss it; an item cmdlet writing a
+    `function:`/`alias:` provider path names the item that path addresses.
 
     Normalizing is what makes the name usable: `function global:Get-Date` defines exactly what a
     later unqualified `Get-Date` runs, and a shadow set holding the qualified spelling answers `False`
@@ -566,6 +567,8 @@ def _identity_redefinitions(node) -> tuple[_IdentityRedefinition, ...]:
     if isinstance(node, Ps1FunctionDefinition):
         return (_IdentityRedefinition(
             normalize_command_name(node.name), _IdentityBody.VISIBLE_BLOCK),)
+    if isinstance(node, Ps1CommandInvocation):
+        return _provider_path_redefinitions(node)
     if not isinstance(node, Ps1AssignmentExpression):
         return ()
     targets = assignment_target_variables(node.target)
@@ -596,6 +599,53 @@ def _assigned_identity_body(
     if isinstance(unwrap_parens(node.value), Ps1ScriptBlock):
         return _IdentityBody.VISIBLE_BLOCK
     return _IdentityBody.OPAQUE_VALUE
+
+
+def _provider_path_redefinitions(cmd: Ps1CommandInvocation) -> tuple[_IdentityRedefinition, ...]:
+    """
+    The command names an item cmdlet takes over by writing a `function:`/`alias:` provider path —
+    `Set-Item function:ForEach-Object { ... }` rebinds `ForEach-Object` exactly as
+    `function ForEach-Object { ... }` does, but through a path this reads out of the argument rather
+    than off the statement keyword. Only the item cmdlets are read this way: `Get-ChildItem alias:`
+    and `Test-Path 'function:x'` name the same provider and bind nothing, so a command outside
+    `_ITEM_CMDLETS` yields no name however it spells a provider.
+
+    The bound body is `OPAQUE_VALUE`: what a path write installs is not a scriptblock standing where
+    the name is declared, and the world opens on the command through `_command_opens_world` as it
+    always has. A computed path (`Set-Item $p { ... }`) names nothing here and remains the whole-run
+    verdict's charge — the residual `_binds_what_the_walk_cannot_read` documents.
+    """
+    if normalize_command_name(resolve_command_name(cmd) or '') not in _ITEM_CMDLETS:
+        return ()
+    redefinitions: list[_IdentityRedefinition] = []
+    for argument in cmd.arguments:
+        value = argument.value if isinstance(argument, Ps1CommandArgument) else argument
+        text = string_value(value)
+        if text is None:
+            continue
+        item = _identity_provider_item_name(text)
+        if item is not None:
+            redefinitions.append(_IdentityRedefinition(
+                normalize_command_name(item), _IdentityBody.OPAQUE_VALUE))
+    return tuple(redefinitions)
+
+
+def _identity_provider_item_name(path: str) -> str | None:
+    """
+    The command name a `function:`/`alias:` provider path addresses — `ForEach-Object` for
+    `function:ForEach-Object`, `x` for `Alias:\\x`, `Get-Date` for
+    `Microsoft.PowerShell.Core\\Function::Get-Date` — or `None` for a path naming no identity
+    provider or no item under one. The drive is read in both spellings `touches_identity_provider`
+    reads it, and the item is what follows the provider's colon, cleared of the `:` a qualified path
+    doubles and the `\\` a drive-rooted one leads with.
+    """
+    for spelling in (path, path.rpartition('\\')[2]):
+        drive, separator, item = spelling.partition(':')
+        if separator and drive.lower() in _IDENTITY_PROVIDERS:
+            item = item.lstrip('\\:')
+            if item:
+                return item
+    return None
 
 
 def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> WorldRole:

@@ -150,6 +150,35 @@ class TestPs1ShadowedCommands(Ps1TypeWorldTest):
                 self.assertTrue(world.command_shadowed(name))
         self.assertFalse(world.command_shadowed('get-childitem'))
 
+    def test_an_item_cmdlet_writing_a_provider_path_shadows_the_name_it_binds(self):
+        # `Set-Item function:Get-Date { 1 }` rebinds `Get-Date` the way `function Get-Date { 1 }`
+        # does, measured on 5.1, but through a path read out of the argument, not off the statement
+        # keyword; the alias drive is the same rebinding one provider over.
+        for source in (
+            'Set-Item function:Get-Date { 1 }',
+            'Set-Item function:Get-Date -Value { 1 }',
+            'New-Item function:Get-Date -Value { 1 }',
+            "Set-Item 'Microsoft.PowerShell.Core\\Function::Get-Date' -Value { 1 }",
+            'Set-Item Function:\\Get-Date -Value { 1 }',
+            'Set-Item alias:Get-Date Stop-Process',
+        ):
+            with self.subTest(source):
+                self.assertTrue(
+                    build_closed_world(Ps1Parser(source).parse()).command_shadowed('get-date'))
+
+    def test_a_provider_path_that_is_read_or_ordinary_shadows_nothing(self):
+        # A read the same path spells binds nothing, a command outside the item cmdlets is not a
+        # provider write however it mentions one, and an ordinary path is no provider at all, so
+        # none may distrust a name the script never redefined.
+        for source in (
+            'Get-Item function:Get-Date',
+            'Write-Output function:Get-Date',
+            'Set-Item C:\\tmp\\Get-Date.txt -Value 1',
+        ):
+            with self.subTest(source):
+                self.assertFalse(
+                    build_closed_world(Ps1Parser(source).parse()).command_shadowed('get-date'))
+
     def test_a_defined_function_does_not_open_the_world(self):
         self.assertTrue(self._closed('function Get-Date { 1 }\n$x = 2'))
 
