@@ -1812,3 +1812,22 @@ class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
         dashes, recurse = self._arguments('f -- -Recurse')
         self._assertEndsTheParameters(dashes)
         self._assertIsTheWord(recurse, '-Recurse')
+
+
+class TestPs1AFunctionNamedForAnAliasCharacterDoesNotSwallowTheScript(TestBase):
+    """
+    `function % { … }` defines the name `%`, and the statement written after it belongs to the
+    script. The name is read as empty and everything that follows is taken into the body, so a
+    script Windows PowerShell 5.1 runs comes back as one definition it refuses with `Missing name
+    after function keyword`. No deobfuscation pass is involved; parsing and printing alone do it.
+    """
+
+    @unittest.expectedFailure
+    def test_a_statement_after_a_percent_function_stays_in_the_script(self):
+        script = Ps1Parser(inspect.cleandoc(
+            """
+            function % { 'b' }
+            Write-Host 'AFTER'
+            """
+        )).parse()
+        self.assertEqual(len(script.body), 2)

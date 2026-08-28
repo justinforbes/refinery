@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import unittest
+
+from inspect import cleandoc
+
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
 from refinery.lib.scripts.ps1.deobfuscation import Ps1ConstantInlining
@@ -923,3 +927,25 @@ class TestPs1ALaunchDependentDefaultIsNotInvented(TestPs1):
         self.assertEqual(
             self._apply('Write-Host "$PSHome"', Ps1ConstantInlining),
             'Write-Host "C:\\Windows\\System32\\WindowsPowerShell\\v1.0"')
+
+
+class TestPs1AnUnsetReadIsNotNullWhereStrictModeIsArmed(TestPs1):
+    """
+    `Set-StrictMode` turns a read of a never-assigned variable into a statement-terminating error, so
+    the name is not worth `$null` and giving it that value decides a branch the script never takes.
+    Windows PowerShell 5.1 raises for the script below and runs neither body, printing nothing.
+    """
+
+    @unittest.expectedFailure
+    def test_a_branch_on_an_unset_name_is_not_resolved_where_strict_mode_is_armed(self):
+        result = self._deobfuscate_iterative(cleandoc(
+            """
+            Set-StrictMode -Version 1
+            if ($zzqundefined) {
+              Write-Host 'dead'
+            } else {
+              Write-Host 'live'
+            }
+            """
+        ))
+        self.assertIn('$zzqundefined', result)

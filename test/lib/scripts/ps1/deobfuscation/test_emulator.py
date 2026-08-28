@@ -1594,3 +1594,42 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
             $x = f
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 20')
+
+
+class TestPs1AFunctionBodyReadsWhatTheScriptScopeHolds(TestPs1):
+    """
+    A function body that names a variable the script assigned reads that variable when the call
+    runs. Windows PowerShell 5.1 prints `v=6` for the script below; the emulator evaluates the body
+    with the name unset, folds the call to `1`, and the assignment that fed it is then deleted as
+    unused.
+    """
+
+    @unittest.expectedFailure
+    def test_a_call_is_not_folded_as_if_the_script_variable_were_unset(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            $g = Get-Random -Minimum 5 -Maximum 6
+            function zzqf { $g + 1 }
+            Write-Host ('v=' + (zzqf))
+            """
+        ))
+        self.assertIn('Get-Random', result)
+
+
+class TestPs1AFoldedCallKeepsItsPipelinePosition(TestPs1):
+    """
+    Only the first element of a pipeline may be an expression, so substituting a function's constant
+    result into any later element writes a script 5.1 refuses with `ExpressionsMustBeFirstInPipeline`.
+    Measured, the input prints `r=H` and the output runs nothing at all.
+    """
+
+    @unittest.expectedFailure
+    def test_a_function_in_a_later_pipeline_element_is_not_replaced_by_its_value(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function zzqf { 'H' }
+            $r = 'x' | zzqf
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertNotIn("| 'H'", result)

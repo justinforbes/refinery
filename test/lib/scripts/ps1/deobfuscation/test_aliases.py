@@ -546,3 +546,23 @@ class TestPs1AnAliasTheScriptRebindsIsNotSpelledAsItsDefaultTarget(TestPs1):
             """
         ))
         self.assertNotIn('ForEach-Object', result)
+
+
+class TestPs1AScriptThatRedefinesForEachObjectDoesNotRunTheCmdlet(TestPs1):
+    """
+    `function ForEach-Object { … }` takes the name over, so the pipeline below it runs the script's
+    own function and Windows PowerShell 5.1 prints `r=HIJACK`. The fold that rewrites a
+    `ForEach-Object` pipeline matches the written name against a fixed set of spellings and never
+    asks the shadow set, which already records `foreach-object` for this script.
+    """
+
+    @unittest.expectedFailure
+    def test_a_pipeline_over_a_redefined_iterator_is_not_folded(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function ForEach-Object { 'HIJACK' }
+            $r = 1, 2 | ForEach-Object { $_ * 2 }
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertIn('ForEach-Object', result)
