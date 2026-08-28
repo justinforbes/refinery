@@ -1816,13 +1816,13 @@ class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
 
 class TestPs1AFunctionNamedForAnAliasCharacterDoesNotSwallowTheScript(TestBase):
     """
-    `function % { … }` defines the name `%`, and the statement written after it belongs to the
-    script. The name is read as empty and everything that follows is taken into the body, so a
-    script Windows PowerShell 5.1 runs comes back as one definition it refuses with `Missing name
-    after function keyword`. No deobfuscation pass is involved; parsing and printing alone do it.
+    `function % { … }` defines the name `%`, so the statement written after it belongs to the
+    script and the two are two statements, not one definition that swallows the rest. PowerShell
+    5.1 takes any token that could begin a command name as the function name, refusing only its
+    punctuators and unary operators; a bare `%` is not among those. No deobfuscation pass is
+    involved; parsing alone does it.
     """
 
-    @unittest.expectedFailure
     def test_a_statement_after_a_percent_function_stays_in_the_script(self):
         script = Ps1Parser(inspect.cleandoc(
             """
