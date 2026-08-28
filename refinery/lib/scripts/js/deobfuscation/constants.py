@@ -837,11 +837,11 @@ class JsConstantInlining(ScopeProcessingTransformer):
         Remove declarators for variables where all references have been inlined. For `const`
         qualified candidates, check the full subtree since cross-function inlining may have
         replaced references inside nested functions. An exported binding keeps its declarator even
-        with every local read inlined, because an importer still reads it across the module boundary;
-        removing it would leave an `export` naming a binding the module no longer declares.
+        with every local read inlined, because an importer still reads it across the module
+        boundary; removing it would leave an `export` naming a binding the module no longer declares.
         """
         assert self._root is not None
-        model = model_cache(self, self._root).effects.model
+        model = model_cache(self, self._root).model
         decl_ids = _candidate_decl_ids(candidates)
         ref_counts = _count_scope_references(
             scope, set(inlined), decl_ids, walk_full=True,

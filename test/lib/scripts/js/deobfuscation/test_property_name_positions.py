@@ -46,7 +46,7 @@ from test.lib.scripts.js.ledger import (
     printed,
 )
 
-from refinery.lib.scripts.js.analysis.model import is_use_position
+from refinery.lib.scripts.js.analysis.model import build_semantic_model, is_use_position
 from refinery.lib.scripts.js.deobfuscation.namespaces import JsNamespaceFlattening
 from refinery.lib.scripts.js.model import JsIdentifier
 from refinery.lib.scripts.js.parser import JsParser
@@ -1081,7 +1081,8 @@ class TestOnlyTheLocalHalfOfAnExportListReads(TestBase):
 #: it and the specifier read that keeps the list form alive has nothing to attach to; the fact has
 #: to be the binding's own. Every keyword is here, a function and a class and a default one, the
 #: binding relocation would move into the one function writing it, the write nothing in the module
-#: reads back, and the const whose one reader is folded away.
+#: reads back, the const whose one reader is folded away, and the exported arrow whose one call
+#: folds to its result while its declarator has to stay.
 A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION = {
     _a_module_reporting_it_loaded('export let b = 5;'): 'loaded\n',
     _a_module_reporting_it_loaded(
@@ -1114,11 +1115,20 @@ A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION = {
         console.log(c);
         """
     ): '7\n',
+    inspect.cleandoc(
+        """
+        export const f = () => 4;
+        console.log(f());
+        """
+    ): '4\n',
 }
 
-#: The one row of `A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION` whose correct deobfuscation is not
-#: the module itself: the const's reader is folded to the value, while the export declaration stays,
-#: because an importer reads the binding it names.
+#: The rows of `A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION` whose correct deobfuscation is not
+#: the module itself: the const's reader is folded to the value and the exported function's one
+#: call is folded to its result, while the export declaration stays in both, because an importer
+#: reads the binding it names. The function row is the one an evaluator that folds the call and then
+#: deletes the now-referenceless declarator would leave as `export const ;`, a module no engine
+#: parses.
 A_DECLARATION_EXPORT_INLINES_ITS_READERS = {
     inspect.cleandoc(
         """
@@ -1129,6 +1139,17 @@ A_DECLARATION_EXPORT_INLINES_ITS_READERS = {
         """
         export const c = 7;
         console.log(7);
+        """
+    ),
+    inspect.cleandoc(
+        """
+        export const f = () => 4;
+        console.log(f());
+        """
+    ): inspect.cleandoc(
+        """
+        export const f = () => 4;
+        console.log(4);
         """
     ),
 }
@@ -1164,9 +1185,11 @@ class TestAnExportDeclarationKeepsTheBindingItExports(TestBase):
     initializer, a function, a class, a default-exported function, and the write to a `var` the
     module never reads back, which a dead-store sweep would drop although an importer reads it. The
     `var` whose every reference sits in one function would be relocated into that function, leaving
-    an `export` naming a binding the module no longer declares, and stays put here. The `const` is
-    the one row that changes: its reader is folded to the value like any other, while the export
-    declaration is kept, since removing it would strand the export.
+    an `export` naming a binding the module no longer declares, and stays put here. Two rows change:
+    the `const` reader is folded to its value and the exported arrow's one call to its result, while
+    each export declaration is kept, since removing it would strand the export. The arrow is the row
+    an evaluator that folds the call and then deletes the now-referenceless declarator would
+    leave as `export const ;`, a module no engine parses.
     """
 
     def test_a_module_that_only_exports_comes_back_as_it_was(self):
@@ -1227,6 +1250,72 @@ class TestAnExportDeclarationKeepsTheBindingItExports(TestBase):
                 ),
             ),
             (agreed, agreed),
+        )
+
+
+#: A module written in every `export` form, mapped to the set of local binding names the export
+#: ties to the outside. A declaration exports the names it declares, descending through
+#: destructuring; a sourceless list exports each specifier's local half; an anonymous or expression
+#: `export default`, a re-export, and `export *` name no local binding and tie nothing. The set is
+#: the fact `_record_exports` must compute from the binding itself, since a declaration export has
+#: no specifier read for the fact to ride on.
+WHICH_LOCAL_BINDINGS_AN_EXPORT_TIES_TO_THE_OUTSIDE = {
+    'export var a;': {'a'},
+    'export let b = 5;': {'b'},
+    'export const c = 7;': {'c'},
+    'export var a, b;': {'a', 'b'},
+    'export function g() {}': {'g'},
+    'export class K {}': {'K'},
+    'export const { a, b } = o;': {'a', 'b'},
+    'export const [x, , y] = o;': {'x', 'y'},
+    'export const { p: { q }, ...r } = o;': {'q', 'r'},
+    'export const [a = 1] = o;': {'a'},
+    'export default function h() {}': {'h'},
+    'export default class D {}': {'D'},
+    'export default function () {}': set(),
+    'export default class {}': set(),
+    'var foo = 1;\nexport default foo;': set(),
+    'export default 1 + 2;': set(),
+    'var q = 1;\nexport { q };': {'q'},
+    'var q = 1;\nexport { q as w };': {'q'},
+    'var q = 1;\nexport { q as default };': {'q'},
+    "export { a } from 'm';": set(),
+    "export { a as b } from 'm';": set(),
+    "export * from 'm';": set(),
+    "export * as ns from 'm';": set(),
+}
+
+
+def exported_bindings(source: str) -> set[str]:
+    """
+    The names of the bindings `SemanticModel._record_exports` flags as exported in *source*,
+    gathered across every scope so a mark placed anywhere but module scope would show here too.
+    """
+    model = build_semantic_model(JsParser(source).parse())
+    names: set[str] = set()
+    stack = [model.root_scope]
+    while stack:
+        scope = stack.pop()
+        names |= {name for name, binding in scope.bindings.items() if binding.exported}
+        stack.extend(scope.children)
+    return names
+
+
+class TestRecordExportsMarksTheBindingEachExportFormTies(TestBase):
+    """
+    `_record_exports` marks exactly the local bindings an export ties to the outside, in every
+    grammar form: a declaration under an export marks the names it declares, descending through
+    destructuring; a sourceless list marks each specifier's local half; a named `export default`
+    marks its name. An anonymous or expression default, a re-export, and `export *` mark nothing
+    local, so a pass that finds no static read of such a name is free to act on it. This is the
+    declaration half of the export-list rule, stated as a fact of the binding.
+    """
+
+    def test_each_export_form_ties_exactly_its_local_bindings(self):
+        rows = WHICH_LOCAL_BINDINGS_AN_EXPORT_TIES_TO_THE_OUTSIDE
+        self.assertEqual(
+            rows,
+            {source: exported_bindings(source) for source in rows},
         )
 
 

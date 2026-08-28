@@ -708,11 +708,18 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
         A function the caller declared to be a host entrypoint is likewise never removable: a host calls
         it by name from outside the file, so no reference here can prove it dead. Both transforms consult
         the same declaration, or they would disagree about which functions survive.
+
+        An exported binding is never removable for the same reason the other removal sweeps keep it:
+        an importer reads its value across the module boundary once the module has run, so no
+        reference here can prove it dead, and deleting the declarator would leave an `export` naming
+        a binding the module no longer declares.
         """
         binding = model.naming_binding(func)
         if binding is None:
             return False
         if self._is_host_entrypoint(model, binding):
+            return False
+        if binding.exported:
             return False
         exclude = self._function_exclude_node(func)
         return (
@@ -818,6 +825,8 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
                 if decl.id.name not in closure_names:
                     continue
                 binding = model.binding_of(decl.id)
+                if binding is not None and binding.exported:
+                    continue
                 if not binding_has_references(model, binding, exclude=decl):
                     remove_declarator(decl)
                     self.mark_changed()
