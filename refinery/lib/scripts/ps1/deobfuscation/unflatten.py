@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Callable, Generator, NamedTuple
 
 from refinery.lib.scripts import Block, Node, Statement, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.values import integer_of, read
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS
 from refinery.lib.scripts.ps1.deobfuscation.emulator import evaluate_truthy
@@ -55,13 +56,24 @@ def _is_bool_literal(node: Node) -> bool | None:
     return None
 
 
+def _integer_state_key(node: Ps1IntegerLiteral) -> int | None:
+    """
+    The integer PowerShell gives an integer literal, or `None` for a numeral too wide to type. This
+    is not `node.value`, which is the numeral's magnitude: a hexadecimal literal is typed by its
+    width and carries that width's sign, so `0xFFFFFFFF` is the Int32 -1 rather than four billion,
+    and a state machine that matches the magnitude routes itself into a case the host never enters.
+    The value the host assigns is what `read` types and `integer_of` reads back.
+    """
+    return integer_of(read(node))
+
+
 def _unwrap_constant(node) -> _StateKey | None:
     """
     Extract a constant value (int, float, or string) from an AST node.
     """
     node = unwrap_parens(node) if isinstance(node, Expression) else node
     if isinstance(node, Ps1IntegerLiteral):
-        return node.value
+        return _integer_state_key(node)
     if isinstance(node, Ps1RealLiteral):
         return node.value
     if isinstance(node, Ps1StringLiteral):
@@ -69,7 +81,8 @@ def _unwrap_constant(node) -> _StateKey | None:
     if isinstance(node, Ps1UnaryExpression) and node.operator == '-':
         inner = unwrap_parens(node.operand) if isinstance(node.operand, Expression) else node.operand
         if isinstance(inner, Ps1IntegerLiteral):
-            return -inner.value
+            magnitude = _integer_state_key(inner)
+            return None if magnitude is None else -magnitude
         if isinstance(inner, Ps1RealLiteral):
             return -inner.value
     if is_builtin_variable(node, frozenset({'null'})):

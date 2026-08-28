@@ -243,7 +243,6 @@ class TestPs1ControlFlowDeflattening(TestPs1):
         s_idx = next(i for i, ln in enumerate(lines) if '$script:second' in ln)
         self.assertLess(f_idx, s_idx)
 
-    @unittest.expectedFailure
     def test_a_hexadecimal_state_constant_is_the_value_powershell_gives_it(self):
         """
         Measured on 5.1: `0xFFFFFFFF` is the Int32 -1, not the magnitude 4294967295. So state 0 ends
