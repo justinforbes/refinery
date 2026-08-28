@@ -165,6 +165,13 @@ _ITEM_CMDLETS = frozenset({
     'set-item',
 })
 
+#: The keywords that define a command under a name given as an argument rather than as a definition
+#: node. `workflow NAME { ... }` and `configuration NAME { ... }` each introduce a command named NAME
+#: that shadows a same-named cmdlet under 5.1's Function-over-Cmdlet precedence, but the parser emits
+#: both as a plain invocation whose name is the keyword, so the name they take over is read off the
+#: arguments the way an item cmdlet's provider path is.
+_COMMAND_DEFINITION_KEYWORDS = frozenset({'workflow', 'configuration'})
+
 
 def command_role(name: str) -> WorldRole:
     """
@@ -553,7 +560,8 @@ def _identity_redefinitions(node) -> tuple[_IdentityRedefinition, ...]:
     directly; an assignment into the `function:`/`alias:` variable namespace names one per slot it
     writes, so the multi-assignment `${function:Get-Date}, $y = { ... }, 2` records `get-date` where
     matching one target shape against one variable would miss it; an item cmdlet writing a
-    `function:`/`alias:` provider path names the item that path addresses.
+    `function:`/`alias:` provider path names the item that path addresses; a `workflow`/`configuration`
+    statement names the command its first argument spells.
 
     Normalizing is what makes the name usable: `function global:Get-Date` defines exactly what a
     later unqualified `Get-Date` runs, and a shadow set holding the qualified spelling answers `False`
@@ -568,7 +576,8 @@ def _identity_redefinitions(node) -> tuple[_IdentityRedefinition, ...]:
         return (_IdentityRedefinition(
             normalize_command_name(node.name), _IdentityBody.VISIBLE_BLOCK),)
     if isinstance(node, Ps1CommandInvocation):
-        return _provider_path_redefinitions(node)
+        keyword = _command_definition_keyword_redefinition(node)
+        return (keyword,) if keyword is not None else _provider_path_redefinitions(node)
     if not isinstance(node, Ps1AssignmentExpression):
         return ()
     targets = assignment_target_variables(node.target)
@@ -653,6 +662,33 @@ def _identity_provider_item_name(path: str) -> str | None:
             if item:
                 return item
     return None
+
+
+def _command_definition_keyword_redefinition(
+    cmd: Ps1CommandInvocation,
+) -> _IdentityRedefinition | None:
+    """
+    The command a `workflow`/`configuration` statement defines, or `None` when `cmd` is not one. The
+    defined name is the statement's first positional argument and its body is a scriptblock standing
+    among the arguments; a form carrying no scriptblock defines nothing and is left alone, and one
+    whose name is not a static literal names no command this can add to the shadow set. The body is a
+    `VISIBLE_BLOCK` for the same reason `function NAME { ... }` is — it stands in the tree, so a
+    mutation inside it is caught by presence and the redefinition leaves the world closed.
+    """
+    if resolve_command_name(cmd) not in _COMMAND_DEFINITION_KEYWORDS:
+        return None
+    positionals = [
+        argument.value
+        for argument in cmd.arguments
+        if isinstance(argument, Ps1CommandArgument)
+        and argument.kind is Ps1CommandArgumentKind.POSITIONAL
+    ]
+    if not any(isinstance(value, Ps1ScriptBlock) for value in positionals):
+        return None
+    name = string_value(positionals[0]) if positionals else None
+    if name is None:
+        return None
+    return _IdentityRedefinition(normalize_command_name(name), _IdentityBody.VISIBLE_BLOCK)
 
 
 def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> WorldRole:
