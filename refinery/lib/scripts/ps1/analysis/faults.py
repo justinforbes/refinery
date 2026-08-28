@@ -378,6 +378,31 @@ def handler_acts(handler: Ps1CatchClause | Ps1TrapStatement) -> bool:
     return False
 
 
+def _handled_in_the_body(routing: Ps1FaultRouting) -> bool:
+    """
+    Whether a handler of the body the error was raised in disposes of it in a way a run can see: a
+    `catch` or `trap` that acts, or a `trap` set the error may get past, which 5.1 answers by ending
+    the body rather than by reporting the error and stepping over it.
+
+    A `catch` that misses does not end the body — the sharp asymmetry between the two keywords — so
+    the escalation reading is keyed to the `trap` and not to the escape.
+    """
+    if any(handler_acts(handler) for handler in routing.handlers):
+        return True
+    return routing.leaves_the_body and any(
+        isinstance(handler, Ps1TrapStatement) for handler in routing.handlers
+    )
+
+
+def _escapes(routing: Ps1FaultRouting) -> bool:
+    """
+    Whether an error routed like *routing* gets past every handler of the body it was raised in. A
+    handler set it cannot leave settles it there; an empty set settles nothing, which the graphs
+    spell as no handlers and no exceptional edge out of the body.
+    """
+    return not routing.handlers or routing.leaves_the_body
+
+
 class Ps1FaultReach:
     """
     The fault routing of one script, read off its control-flow graphs.
@@ -427,6 +452,22 @@ class Ps1FaultReach:
             if self._control_flow.node_of(inner) is not None:
                 yield inner
 
+    def escapes_the_body(self, node: Node) -> bool:
+        """
+        Whether an error raised at *node* gets past every handler written in the body *node* stands
+        in, so that where it goes next is decided by whatever ran that body and not by anything the
+        body itself says.
+
+        A position the graphs place nowhere settles nothing and escapes nothing; `False` is the
+        answer that leaves such a node to the position question, which reads an unplaced node as
+        observed.
+        """
+        located = self._control_flow.locate(node)
+        if located is None:
+            return False
+        routing = self._routing(*located)
+        return not _handled_in_the_body(routing) and _escapes(routing)
+
     def observed_at(self, node: Node) -> bool:
         """
         Whether an error raised at *node* changes which code runs: some handler it reaches acts, a
@@ -436,11 +477,8 @@ class Ps1FaultReach:
         it answers the same for a statement that cannot raise at all, which is what a caller
         weighing whether a guarded body may be emptied wants to know.
 
-        A `trap` beside `leaves_the_body` is escalation: the set was offered the error and may have
-        declined it, and 5.1 then ends the body rather than reporting the error and stepping over
-        it, so everything written after the raise stops running. A `catch` that misses does not do
-        that — the sharp asymmetry between the two keywords — so the reading is keyed to the `trap`
-        and not to the escape.
+        What the body itself decides is `_handled_in_the_body`; what is left over once the error
+        gets past it is this.
 
         **An error that gets past a function's own handlers is the caller's**, and no graph here
         holds both ends of a call. Measured: the same function whose error is reported and stepped
@@ -462,13 +500,9 @@ class Ps1FaultReach:
         a routing there is, so that the position question, the arrival question `_observed_from`
         asks of a fallback, and anything later that reads a routing cannot answer it three ways.
         """
-        if any(handler_acts(handler) for handler in routing.handlers):
+        if _handled_in_the_body(routing):
             return True
-        if routing.leaves_the_body and any(
-            isinstance(handler, Ps1TrapStatement) for handler in routing.handlers
-        ):
-            return True
-        if routing.handlers and not routing.leaves_the_body:
+        if not _escapes(routing):
             return False
         return not isinstance(graph.owner, Ps1Script) and self._handled_elsewhere(graph)
 

@@ -700,7 +700,6 @@ class TestPs1RealWorldLarge(TestUnitBase):
         )
         self.assertIn(goal, test)
 
-    @unittest.expectedFailure
     def test_junk_statement_downloader(self):
         data = inspect.cleandoc(
             """

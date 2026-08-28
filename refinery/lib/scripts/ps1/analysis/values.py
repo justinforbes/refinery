@@ -31,8 +31,8 @@ remembers anything, and remembering does not make `evaluate` answer differently;
 The type side has two views over one engine. `resolve_expression_type` is the single-type core: one
 expression, one `refinery.lib.scripts.ps1.dotnet.Ps1TypeName` or `None`. `candidate_types` is the
 set-valued view the effect layer reasons over, and it is a strict superset — it additionally
-resolves a static method call and a cmdlet whose declared output is closed, either of which can name
-several types. The set is the primitive and the single type the derived view, because a caller
+resolves a static method call, a cmdlet whose declared output is closed, and the `$_` such a cmdlet
+binds downstream of it, any of which can name several types. The set is the primitive and the single type the derived view, because a caller
 reasoning about a value must have its conclusion hold for every type the value could carry.
 """
 from __future__ import annotations
@@ -56,6 +56,7 @@ from refinery.lib.scripts.ps1.ast import (
     is_builtin_variable,
     unwrap_parens,
 )
+from refinery.lib.scripts.ps1.analysis.blocks import binds_the_pipeline_variable
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.data import (
     OBJ_COMMANDS,
@@ -90,7 +91,11 @@ from refinery.lib.scripts.ps1.model import (
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1ParenExpression,
+    Ps1Pipeline,
+    Ps1PipelineElement,
     Ps1RealLiteral,
+    Ps1ScopeModifier,
+    Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1TypeExpression,
@@ -326,7 +331,71 @@ def resolve_expression_type(
 #: belong here; a read on any other command's result stays unresolved, and therefore kept.
 _CLOSED_OUTPUT_CMDLETS = frozenset({
     'get-date',
+    'measure-object',
 })
+
+
+#: The names the pipeline binds the current object to. `$PSItem` is the same variable spelled out,
+#: and a script that uses one spelling to defeat a rule written over the other is the reason both
+#: are listed here rather than only the short one.
+_PIPELINE_VARIABLES = frozenset({'_', 'psitem'})
+
+
+def _is_pipeline_variable(node) -> bool:
+    """
+    Whether *node* reads the current pipeline object. A splatted or scope-qualified spelling is not
+    one: neither reads the automatic variable the pipeline binds.
+    """
+    return (
+        isinstance(node, Ps1Variable)
+        and not node.splatted
+        and node.scope is Ps1ScopeModifier.NONE
+        and node.name.lower() in _PIPELINE_VARIABLES
+    )
+
+
+def _pipeline_variable_candidates(
+    node: Ps1Variable,
+    world: Ps1WorldReach,
+    type_of_variable: Ps1VariableTyping | None,
+) -> frozenset[Ps1TypeName]:
+    """
+    The types the current pipeline object may carry where *node* reads it: the output types of the
+    command feeding the element whose body *node* stands in.
+
+    **Only a command upstream answers.** A cmdlet's declared output describes what it writes to the
+    pipeline *per object*, which is already the type `$_` is bound to. Every other expression is a
+    value the pipeline enumerates, and its type is the type of the whole — `@(1, 2) | ForEach-Object
+    { $_ }` binds an `Int32` where the array is an `Int32[]` — so an upstream that is not a command
+    contributes nothing rather than the collection's type.
+
+    The block has to be one the command runs once per input object, which is what binds the variable
+    at all; `refinery.lib.scripts.ps1.analysis.blocks.binds_the_pipeline_variable` decides it. A read
+    in a `-Begin` body, or in a block written where the enclosing scope's `$_` is what is read, is
+    refused there and answers nothing here.
+    """
+    block = node.parent
+    while block is not None and not isinstance(block, Ps1ScriptBlock):
+        block = block.parent
+    if block is None:
+        return frozenset()
+    command = binds_the_pipeline_variable(block)
+    if command is None:
+        return frozenset()
+    element = command.parent
+    if not isinstance(element, Ps1PipelineElement):
+        return frozenset()
+    pipeline = element.parent
+    if not isinstance(pipeline, Ps1Pipeline):
+        return frozenset()
+    upstream = None
+    for candidate in pipeline.elements:
+        if candidate is element:
+            break
+        upstream = candidate
+    if upstream is None or not isinstance(upstream.expression, Ps1CommandInvocation):
+        return frozenset()
+    return _command_candidates(upstream.expression, world, type_of_variable)
 
 
 def candidate_types(
@@ -337,10 +406,11 @@ def candidate_types(
     """
     The set of canonical .NET type names the expression's value could have, or the empty set when
     the type cannot be determined. A static method call contributes the return its overloads agree
-    on, and a cmdlet call the output types it declares; either can be several, so a caller reasoning
-    about the value must have its conclusion hold for every candidate. The single-type forms —
-    literals, variables, casts, `New-Object`, WMI, and property chains — are delegated to
-    `resolve_expression_type` rather than re-derived here.
+    on, a cmdlet call the output types it declares, and `$_` the output types of whatever feeds the
+    pipeline element it is bound in; each can be several, so a caller reasoning about the value must
+    have its conclusion hold for every candidate. The single-type forms — literals, variables,
+    casts, `New-Object`, WMI, and property chains — are delegated to `resolve_expression_type`
+    rather than re-derived here.
 
     `world` is what decides whether a command name still denotes what the metadata says, so a cmdlet
     whose name the script has taken over contributes nothing. It is asked at the position of the
@@ -355,6 +425,8 @@ def candidate_types(
         return _static_method_candidates(expr)
     if isinstance(expr, Ps1CommandInvocation):
         return _command_candidates(expr, world, type_of_variable)
+    if _is_pipeline_variable(expr):
+        return _pipeline_variable_candidates(expr, world, type_of_variable)
     single = resolve_expression_type(expr, type_of_variable)
     return frozenset() if single is None else frozenset({single})
 

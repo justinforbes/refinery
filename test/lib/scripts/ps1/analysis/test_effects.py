@@ -9,6 +9,7 @@ from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     StatementEffect,
+    _reflection_read_is_pure,
     body_is_inert,
     expression_cannot_fault,
     is_fault_free,
@@ -23,6 +24,7 @@ from refinery.lib.scripts.ps1.analysis.faults import build_fault_reach
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld, measure_world
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach, build_world_reach
 from refinery.lib.scripts.ps1.ast import get_body, get_command_name
+from refinery.lib.scripts.ps1.data import resolve_type
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1CommandInvocation,
@@ -1473,3 +1475,56 @@ class TestPs1WhetherAnExpressionCanFaultIsDecidedByTheScriptToo(Ps1EffectsTest):
         statement = tree.body[0]
         faults = build_fault_reach(build_control_flow_model(tree))
         self.assertFalse(expression_cannot_fault(statement.expression, statement, faults, None))
+
+
+class TestPs1AnAdapterMemberIsReadOffTheAdapterAndNotOffTheType(Ps1EffectsTest):
+    """
+    The object adapter answers `Count`, `PSTypeNames` and `PSObject` for any value that carries no
+    member of that name, so reading one runs no getter the type declares. What could still make it
+    run one is the runtime value being a subtype with a real member of that name — which a sealed
+    type rules out, and an unsealed one does not.
+
+    Measured on 5.1: `(@('one', 'two', 'three') | Measure-Object).GetType().FullName` is the sealed
+    `Microsoft.PowerShell.Commands.TextMeasureInfo`'s sibling `GenericMeasureInfo`, and the whole
+    family carries no `Count` of its own on the text variant, where the adapter supplies it.
+    """
+
+    def test_the_adapter_count_on_a_sealed_type_that_does_not_carry_one_is_pure(self):
+        self.assertTrue(_reflection_read_is_pure(
+            resolve_type('Microsoft.PowerShell.Commands.TextMeasureInfo'), 'Count'))
+
+    def test_the_adapter_count_on_an_unsealed_type_is_not(self):
+        self.assertTrue(_reflection_read_is_pure(
+            resolve_type('System.Diagnostics.Process'), 'ProcessName'))
+        self.assertFalse(_reflection_read_is_pure(
+            resolve_type('System.Diagnostics.Process'), 'PSTypeNames'))
+
+    def test_a_member_the_type_really_carries_is_not_read_off_the_adapter(self):
+        """
+        `System.Array` declares its own `Length`, and the collected record wins over the adapter, so
+        the sealedness of the type says nothing about it.
+        """
+        self.assertFalse(_reflection_read_is_pure(resolve_type('System.Array'), 'Length'))
+
+    def test_a_member_no_collected_type_carries_stays_refused_on_a_sealed_reference_type(self):
+        self.assertFalse(_reflection_read_is_pure(
+            resolve_type('Microsoft.PowerShell.Commands.TextMeasureInfo'), 'Nonesuch'))
+
+
+class TestPs1ADiscardedMeasurementReadsItsCountWithoutRunningCode(Ps1EffectsTest):
+    """
+    `@('a', 'b') | Measure-Object | ForEach-Object { $_.Count }` writes `2` on 5.1 and does nothing
+    else, so a script that throws the value away has said nothing. Every type `Measure-Object`
+    declares has to answer for the read, since which one a call yields depends on its switches.
+    """
+
+    def test_the_whole_pipeline_is_side_effect_free(self):
+        self.assertTrue(self._pure(
+            self._expression("@('a', 'b') | Measure-Object | ForEach-Object { $_.Count }")))
+
+    def test_a_member_the_measurement_does_not_carry_is_still_refused(self):
+        self.assertFalse(self._pure(
+            self._expression("@('a', 'b') | Measure-Object | ForEach-Object { $_.Length }")))
+
+    def test_a_member_read_on_an_untyped_current_object_is_refused(self):
+        self.assertFalse(self._pure(self._expression("1, 2 | ForEach-Object { $_.Count }")))

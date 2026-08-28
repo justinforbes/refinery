@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import unittest
 
+from inspect import cleandoc
+
 from test import TestBase
 
 from refinery.lib.scripts import set_body
 from refinery.lib.scripts.ps1.analysis.cache import Ps1ModelCache
 from refinery.lib.scripts.ps1.analysis.world import build_closed_world
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
-from refinery.lib.scripts.ps1.model import Ps1Script
+from refinery.lib.scripts.ps1.ast import resolve_command_name
+from refinery.lib.scripts.ps1.model import Ps1CommandInvocation, Ps1Script
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -202,3 +205,84 @@ class TestPs1TheStatementAResumptionLandsOnIsTheOneControlEnters(TestBase):
         script, reach = self._reach(self._guarded('try { } catch { $Null = [Math]::Sqrt(144) }'))
         read = script.body[2].catch_clauses[0].body.body[0]
         self.assertFalse(reach.closed_at(read))
+
+
+class TestPs1AReadInsideABlockTheStatementRunsHasTheStatementsPosition(TestBase):
+    """
+    A `ForEach-Object` body runs while the statement holding it runs and at no other time, so a
+    command named inside it is as trustworthy as the same command named beside it. A body something
+    keeps runs whenever that something says, which is a time no per-body graph orders.
+    """
+
+    @staticmethod
+    def _named(source: str, name: str):
+        script = Ps1Parser(cleandoc(source)).parse()
+        found = next(
+            node for node in script.walk()
+            if isinstance(node, Ps1CommandInvocation) and resolve_command_name(node) == name
+        )
+        return script, found
+
+    def test_a_command_inside_an_iterated_body_above_a_leak_is_trusted(self):
+        script, inner = self._named(
+            """
+            $Null = 1, 2 | ForEach-Object { Get-Random }
+            Invoke-Expression $env:PAYLOAD
+            """,
+            'get-random',
+        )
+        reach = Ps1ModelCache(script).world_reach
+        self.assertFalse(reach.closed_for_the_whole_run)
+        self.assertTrue(reach.may_trust_command_name_at('get-random', inner))
+        self.assertTrue(reach.closed_at(inner))
+
+    def test_the_same_command_below_the_leak_is_refused(self):
+        script, inner = self._named(
+            """
+            Invoke-Expression $env:PAYLOAD
+            $Null = 1, 2 | ForEach-Object { Get-Random }
+            """,
+            'get-random',
+        )
+        reach = Ps1ModelCache(script).world_reach
+        self.assertFalse(reach.may_trust_command_name_at('get-random', inner))
+        self.assertFalse(reach.closed_at(inner))
+
+    def test_a_command_inside_a_stored_block_is_refused_wherever_it_stands(self):
+        script, inner = self._named(
+            """
+            $b = { Get-Random }
+            Invoke-Expression $env:PAYLOAD
+            """,
+            'get-random',
+        )
+        reach = Ps1ModelCache(script).world_reach
+        self.assertFalse(reach.may_trust_command_name_at('get-random', inner))
+        self.assertFalse(reach.closed_at(inner))
+
+    def test_a_redefined_iterator_refuses_the_climb_out_of_its_body(self):
+        """
+        The name is what makes the climb true: a script that takes `ForEach-Object` over may hand
+        the block to something that keeps it, so the body is no longer run where it is written.
+        """
+        script, inner = self._named(
+            """
+            function ForEach-Object { param($b) $global:kept = $b }
+            $Null = 1, 2 | ForEach-Object { Get-Random }
+            Invoke-Expression $env:PAYLOAD
+            """,
+            'get-random',
+        )
+        reach = Ps1ModelCache(script).world_reach
+        self.assertFalse(reach.may_trust_command_name_at('get-random', inner))
+
+    def test_an_ampersand_block_needs_no_name_to_be_trusted(self):
+        script, inner = self._named(
+            """
+            $Null = & { Get-Random }
+            Invoke-Expression $env:PAYLOAD
+            """,
+            'get-random',
+        )
+        reach = Ps1ModelCache(script).world_reach
+        self.assertTrue(reach.may_trust_command_name_at('get-random', inner))

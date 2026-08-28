@@ -583,6 +583,14 @@ class TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed(TestPs1):
 
     One question asked at two removal sites and through three shapes: a discard, a bare value on
     the output stream, and the head of a discarded pipeline.
+
+    **The pipeline shape shows only the removal, and the arming does not change it.** Measured on
+    5.1, `Set-StrictMode -Version 1` above `$zzqunset | ForEach-Object { [void]$_ }` reports the
+    read and steps over it, so the statements below run whether or not the pipeline stands, and a
+    `try` written under it is not a handler standing over it. What the arming does change is the
+    error record, which nothing in these scripts reads. A handler that does stand over the pipeline
+    keeps it either way, because what the removal weighs there is the pipeline as a whole and no
+    reading of that calls it fault-free — so the arming has no shape here to make a difference in.
     """
 
     def test_a_discarded_unset_read_in_a_guarded_try_block_is_removed(self):
@@ -622,6 +630,23 @@ class TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed(TestPs1):
             }}
         """, _UNSET_PIPELINE)
 
+    def test_the_pipeline_is_removed_beside_a_handler_that_does_not_stand_over_it(self):
+        """
+        Measured on 5.1 under `Set-StrictMode -Version 1`: the unset read is reported and stepped
+        over, so `ANCHOR_SURVIVES` is written whether or not the pipeline stands. A handler written
+        below it is not a handler standing over it, and what deleting the statement takes away is an
+        error record nothing here reads.
+        """
+        self._assertRemoved(F"""
+            {_STRICT}
+            {_UNSET_PIPELINE}
+            try {{
+              {_ANCHOR}
+            }} catch {{
+              {_HANDLER}
+            }}
+        """, _UNSET_PIPELINE)
+
     def test_the_discard_and_the_output_are_both_kept_where_strict_mode_is_armed(self):
         self._assertKept(F"""
             {_STRICT}
@@ -634,16 +659,6 @@ class TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed(TestPs1):
             }}
         """)
 
-    def test_the_pipeline_is_kept_where_strict_mode_is_armed(self):
-        self._assertKept(F"""
-            {_STRICT}
-            {_UNSET_PIPELINE}
-            try {{
-              {_ANCHOR}
-            }} catch {{
-              {_HANDLER}
-            }}
-        """)
 
     def test_the_discard_and_the_output_are_both_kept_where_the_other_command_arms_it(self):
         self._assertKept(F"""
@@ -657,8 +672,8 @@ class TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed(TestPs1):
             }}
         """)
 
-    def test_the_pipeline_is_kept_where_the_other_command_arms_it(self):
-        self._assertKept(F"""
+    def test_the_pipeline_is_removed_where_the_other_command_arms_it(self):
+        self._assertRemoved(F"""
             {_STRICT_PSDEBUG}
             {_UNSET_PIPELINE}
             try {{
@@ -666,7 +681,7 @@ class TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed(TestPs1):
             }} catch {{
               {_HANDLER}
             }}
-        """)
+        """, _UNSET_PIPELINE)
 
     def test_the_discard_under_a_trap_is_kept_where_the_other_command_arms_it(self):
         self._assertKept(F"""

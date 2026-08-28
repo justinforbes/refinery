@@ -9,7 +9,12 @@ from unittest.mock import patch
 
 from test import TestBase
 from test.lib.scripts.ps1 import test_deobfuscation
-from test.lib.scripts.ps1.analysis import test_callgraph, test_faults
+from test.lib.scripts.ps1.analysis import (
+    test_blocks,
+    test_callgraph,
+    test_faults,
+    test_worldflow,
+)
 from test.lib.scripts.ps1.deobfuscation import (
     test_deadcode,
     test_emulator,
@@ -25,6 +30,7 @@ from test.lib.scripts.ps1.deobfuscation import (
 
 from refinery.lib.scripts import Node, owning_list
 from refinery.lib.scripts.ps1.analysis import (
+    blocks,
     callgraph,
     commands,
     effects,
@@ -105,6 +111,12 @@ _STRICT_MODE_SHAPE = _witness(
     test_fault_observability.TestPs1OnlyABareNameIsGrantedTheStrictModeReading)
 _SELECTION_COUNT = _witness(test_folding.TestPs1CountingAnArrayKeepsWhatBuildingItDid)
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
+_SCRIPTBLOCK_SLOT = _witness(
+    test_blocks.TestPs1AnIteratingCommandRunsOnlyTheBlocksItIsHandedToRun)
+_SITE_POSITION = _witness(
+    test_worldflow.TestPs1AReadInsideABlockTheStatementRunsHasTheStatementsPosition)
+_STATEMENT_RUNS_THE_BODY = _witness(
+    test_unused.TestPs1AHandlerElsewhereDoesNotGuardABodyTheStatementItselfRuns)
 _SWALLOWING_TRAP = _witness(
     test_fault_escalation.TestPs1ATrapThatTakesTheErrorAndSwallowsLeavesTheRaiseRemovable)
 _TREE = _witness(test_unused.TestPs1RemovalLeavesTheTreeConsistent)
@@ -788,3 +800,29 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_PROTECTED_BODY],
             patch.object(removal, 'emptying_unhooks_a_handler', lambda block: False),
             notices='test_junk_removal_keeps_a_protected_try_body')
+
+    def test_the_scriptblock_slot_a_block_fills_is_witnessed(self):
+        # A block a command takes as data is one it may hand on rather than run, so reading every
+        # argument of an iterating command as a body it runs invents a site for it.
+        self._assertWitnessed(
+            [_SCRIPTBLOCK_SLOT],
+            patch.object(blocks, '_fills_a_scriptblock_slot', lambda cmd, block, command: True),
+            notices='test_a_block_handed_to_a_data_slot_has_no_site')
+
+    def test_the_name_the_climb_out_of_a_body_rests_on_is_witnessed(self):
+        # The lift is worth what the command name is worth: a script that takes `ForEach-Object`
+        # over may hand the block to something that keeps it.
+        self._assertWitnessed(
+            [_SITE_POSITION],
+            patch.object(
+                worldflow.Ps1WorldReach, '_climb_is_trusted',
+                lambda self, climbed, position: True),
+            notices='test_a_redefined_iterator_refuses_the_climb_out_of_its_body')
+
+    def test_that_a_statement_answers_for_the_bodies_it_runs_is_witnessed(self):
+        # Without it the fallback for a body something may call answers for every block written
+        # inside a discarded pipeline, and one `try` anywhere in the file keeps all of them.
+        self._assertWitnessed(
+            [_STATEMENT_RUNS_THE_BODY],
+            patch.object(effects, '_leaves_a_block_of', lambda site, stmt, faults: False),
+            notices='test_a_discarded_pipeline_is_removed_beside_an_unrelated_handler')

@@ -56,7 +56,13 @@ from refinery.lib.scripts.ps1.analysis.naming import (
     named_references,
 )
 from refinery.lib.scripts.ps1.analysis.opaque import writes_nobody_can_attribute
-from refinery.lib.scripts.ps1.ast import binding_key, resolve_command_name
+from refinery.lib.scripts.ps1.ast import (
+    binding_key,
+    bound_argument_value,
+    free_positional_values,
+    resolve_command_name,
+)
+from refinery.lib.scripts.ps1.data import scriptblock_parameters
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
     Ps1CommandInvocation,
@@ -184,6 +190,62 @@ def _named_writes(cmd: Ps1CommandInvocation) -> Iterator[Occurrence]:
         yield Occurrence(node=cmd, role=NAME_ROLES[reference.role], key=reference.key)
 
 
+#: The scriptblock parameters of `_ITERATING_COMMANDS` that run their body once per input object,
+#: which is what binds `$_`. `-Begin` and `-End` run once beside them and leave `$_` at whatever the
+#: scope around the pipeline holds, so a block in either binds nothing.
+_PER_OBJECT_PARAMETERS = frozenset({
+    'filterscript',
+    'process',
+})
+
+
+def binds_the_pipeline_variable(block: Ps1ScriptBlock) -> Ps1CommandInvocation | None:
+    """
+    The invocation whose input `$_` ranges over inside *block*, or `None` where *block* is not a
+    body run once per input object.
+
+    The slot is read by name where it is written by name, and otherwise from position: a lone free
+    positional block is the per-object body, where three of them are `begin`, `process` and `end` in
+    that order — so a positional block beside another is refused rather than guessed at.
+    """
+    command = _handed_to_command(block)
+    if command is None:
+        return None
+    name = resolve_command_name(command)
+    if name not in _ITERATING_COMMANDS:
+        return None
+    for parameter in scriptblock_parameters(name) & _PER_OBJECT_PARAMETERS:
+        if bound_argument_value(command, parameter) is block:
+            return command
+    positional = free_positional_values(command, name)
+    if len(positional) == 1 and positional[0] is block:
+        return command
+    return None
+
+
+def _fills_a_scriptblock_slot(
+    cmd: Ps1CommandInvocation,
+    block: Ps1ScriptBlock,
+    command: str,
+) -> bool:
+    """
+    Whether *block* sits in a slot of *cmd* that the command runs, rather than one it takes as data.
+    `ForEach-Object -Process { }` runs the block, `ForEach-Object -InputObject { }` hands it on
+    untouched, and a `site` is a claim about the first only.
+
+    A named slot is decided by the declared parameter type. A positional one is granted to the
+    *first* free positional argument alone, because that is the only position at which a block binds
+    a scriptblock parameter on either of these commands: `ForEach-Object ToString { }` binds
+    `-MemberName` and passes the block to the method as an argument, so a later positional is data
+    however it is written.
+    """
+    for parameter in scriptblock_parameters(command):
+        if bound_argument_value(cmd, parameter) is block:
+            return True
+    positional = free_positional_values(cmd, command)
+    return bool(positional) and positional[0] is block
+
+
 def classify_block(block: Ps1ScriptBlock) -> Ps1BlockFacts:
     """
     The facts readable from where *block* sits.
@@ -209,14 +271,15 @@ def classify_block(block: Ps1ScriptBlock) -> Ps1BlockFacts:
             site=invocation,
         )
     command = _handed_to_command(block)
-    if command is not None and resolve_command_name(command) in _ITERATING_COMMANDS:
-        return Ps1BlockFacts(
-            reach=Ps1BlockReach.IMMEDIATE,
-            scope=Ps1BlockScope.CALLER,
-            iteration=Ps1BlockIteration.REPEATED,
-            site=command,
-        )
     if command is not None:
+        name = resolve_command_name(command)
+        if name in _ITERATING_COMMANDS and _fills_a_scriptblock_slot(command, block, name):
+            return Ps1BlockFacts(
+                reach=Ps1BlockReach.IMMEDIATE,
+                scope=Ps1BlockScope.CALLER,
+                iteration=Ps1BlockIteration.REPEATED,
+                site=command,
+            )
         return _UNPLACED
     return Ps1BlockFacts(
         reach=Ps1BlockReach.STORED,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from test import TestBase
 
 from refinery.lib.scripts.analysis.cycles import CycleModel
@@ -7,6 +9,7 @@ from refinery.lib.scripts.ps1.analysis.blocks import (
     Ps1BlockIteration,
     Ps1BlockReach,
     Ps1BlockScope,
+    binds_the_pipeline_variable,
     build_block_model,
 )
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
@@ -248,3 +251,65 @@ class TestPs1BlockFactsReachCycleModel(TestBase):
 
     def test_a_block_written_inside_a_loop_repeats_with_the_loop_around_it(self):
         self.assertTrue(self._repeats("while ($c) { & { $x = 'b' } }"))
+
+
+class TestPs1AnIteratingCommandRunsOnlyTheBlocksItIsHandedToRun(TestBase):
+    """
+    Measured on Windows PowerShell 5.1. `ForEach-Object -InputObject { 'RAN' }` never runs the
+    block: it reports `ScriptBlockArgumentNoInput` and the block's text is never evaluated.
+    `1, 2 | ForEach-Object { 'B' } { 'P' } { 'E' }` writes `B P P E`, so three positional blocks are
+    `begin`, `process` and `end`, and only the middle one sees each object.
+    `1, 2 | ForEach-Object -Begin { "[$_]" } -Process { "[$_]" }` writes `[]`, `[1]`, `[2]`.
+    """
+
+    @staticmethod
+    def _blocks(source: str):
+        tree = Ps1Parser(source).parse()
+        found = [node for node in tree.walk() if isinstance(node, Ps1ScriptBlock)]
+        return build_block_model(tree), sorted(found, key=lambda node: node.offset)
+
+    def test_a_block_handed_to_a_data_slot_has_no_site(self):
+        blocks, found = self._blocks("ForEach-Object -InputObject { 'x' }")
+        self.assertIs(blocks.facts(found[0]).reach, Ps1BlockReach.UNKNOWN)
+        self.assertIsNone(blocks.facts(found[0]).site)
+
+    def test_a_named_process_block_has_the_command_as_its_site(self):
+        blocks, found = self._blocks("1, 2 | ForEach-Object -Process { $_ }")
+        facts = blocks.facts(found[0])
+        self.assertIs(facts.reach, Ps1BlockReach.IMMEDIATE)
+        self.assertIsNotNone(facts.site)
+
+    def test_only_the_first_of_three_positional_blocks_is_placed(self):
+        blocks, found = self._blocks("1, 2 | ForEach-Object { 'B' } { 'P' } { 'E' }")
+        placed = [blocks.facts(block).reach is Ps1BlockReach.IMMEDIATE for block in found]
+        self.assertEqual(placed, [True, False, False])
+
+    def test_a_lone_positional_block_binds_the_current_object(self):
+        blocks, found = self._blocks("1, 2 | ForEach-Object { $_ }")
+        self.assertIsNotNone(binds_the_pipeline_variable(found[0]))
+
+    def test_a_begin_block_binds_no_current_object_beside_a_process_block_that_does(self):
+        blocks, found = self._blocks(
+            '1, 2 | ForEach-Object -Begin { "[$_]" } -Process { "[$_]" }')
+        self.assertIsNone(binds_the_pipeline_variable(found[0]))
+        self.assertIsNotNone(binds_the_pipeline_variable(found[1]))
+
+    def test_a_where_object_filter_binds_the_current_object(self):
+        blocks, found = self._blocks("1, 2 | Where-Object { $_ -gt 1 }")
+        self.assertIsNotNone(binds_the_pipeline_variable(found[0]))
+
+    def test_a_block_beside_another_positional_block_binds_nothing(self):
+        blocks, found = self._blocks("1, 2 | ForEach-Object { 'B' } { 'P' } { 'E' }")
+        self.assertEqual([binds_the_pipeline_variable(block) for block in found], [None] * 3)
+
+    @unittest.expectedFailure
+    def test_a_member_name_makes_the_positional_block_an_argument_rather_than_a_body(self):
+        """
+        Measured on 5.1: `1, 2 | ForEach-Object -MemberName ToString { Write-Host 'BLOCK_RAN' }`
+        writes the block's own text twice — it is handed to `ToString` as an argument and never run.
+        Telling that from `ForEach-Object -InputObject 5 { Write-Host "P:$_" }`, which does run the
+        block and writes `P:5`, needs the parameter *set* each written name selects, which nothing
+        here reads yet.
+        """
+        blocks, found = self._blocks("1, 2 | ForEach-Object -MemberName ToString { 'x' }")
+        self.assertIs(blocks.facts(found[0]).reach, Ps1BlockReach.UNKNOWN)

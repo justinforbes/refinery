@@ -40,9 +40,17 @@ so every uncertainty fails toward *open*:
 An opener written inside a scriptblock or function body is *lifted* to the root-graph statement that
 runs that body — the value where the block is written, the `function` statement that defines it —
 and floods from there, because a stored block cannot execute before the statement that creates it
-and a function cannot be called before its definition runs. A read inside such a body, by contrast,
-is refused wholesale: a body may be entered again by a later call, so a read written after a leak in
-source can run before it at runtime, which the intraprocedural graph does not order.
+and a function cannot be called before its definition runs.
+
+A read inside such a body is lifted only where the body provably runs *where it is written*, which
+`refinery.lib.scripts.ps1.analysis.blocks` decides: `& { }`, `. { }` and the block a
+`ForEach-Object` or `Where-Object` runs are evaluated by one statement of the enclosing body and by
+nothing else, so a read inside them observes exactly what that statement observes. Everything else
+is refused, because a body may be entered again by a later call, and a read written after a leak in
+source can then run before it at runtime — an edge the intraprocedural graph does not carry. The
+lift through a *command* is worth only as much as the command name: a script that redefines
+`ForEach-Object` may hand the block to something that stores it, so every name climbed through has
+to be trustworthy at the statement the climb lands on, or the whole climb is refused.
 
 The gate rests on one assumption the graph cannot enforce: that the code a leak runs does not
 re-execute this script's own earlier statements. A script that dot-sources or invokes its own file
@@ -68,19 +76,22 @@ from refinery.lib.scripts.analysis.cfg import (
     ControlFlowModel,
     reachable_forward_from_any,
 )
+from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockReach, classify_block
 from refinery.lib.scripts.ps1.analysis.world import (
     Ps1ShadowSite,
     Ps1TypeWorld,
     Ps1WorldMeasurement,
 )
-from refinery.lib.scripts.ps1.ast import normalize_command_name
+from refinery.lib.scripts.ps1.ast import normalize_command_name, resolve_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1ClassDefinition,
+    Ps1CommandInvocation,
     Ps1EnumDefinition,
     Ps1HereString,
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1Script,
+    Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1Variable,
 )
@@ -174,8 +185,24 @@ class Ps1WorldReach:
         if self._world.may_trust_command_name(name):
             return True
         position = self._position_in_root(node)
-        if position is None:
-            return False
+        return position is not None and self._trusted_at(name, position)
+
+    def _climb_is_trusted(self, climbed: list[str], position: CfgNode) -> bool:
+        """
+        Whether every command name `_position_in_root` climbed through still denotes what the
+        metadata says at *position*. A name the script may have taken over is a name that may hand
+        the block to something that keeps it, and then the body no longer runs where it is written.
+        """
+        return all(self._trusted_at(name, position) for name in climbed)
+
+    def _trusted_at(self, name: str, position: CfgNode) -> bool:
+        """
+        `may_trust_command_name_at` once the position is known, which is also the question
+        `_position_in_root` asks of every command name it climbs through. Kept apart from the query
+        so that the climb does not have to re-enter the query it is answering.
+        """
+        if self._world.may_trust_command_name(name):
+            return True
         if id(position) in self._poisoned:
             return False
         if not self._world.command_shadowed(name):
@@ -207,18 +234,55 @@ class Ps1WorldReach:
         """
         The root-graph control-flow node that evaluates `node`, or `None` when no positional answer
         may be given: the wrapper was built refused or without a graph, or the graphs cannot place
-        the node in the root body. A node inside a scriptblock or function body locates into that
-        body's own graph and is refused with the rest, because a later call can run it again after
-        a statement the intraprocedural graphs do not order it against. Each `None` is the
-        fail-closed direction both positional queries share: a wrong grant deletes an effect, a
-        refusal keeps a statement.
+        the node in the root body. Each `None` is the fail-closed direction both positional queries
+        share: a wrong grant deletes an effect, a refusal keeps a statement.
+
+        A node inside a scriptblock locates into that block's own graph, and the climb out of it is
+        sound exactly where the block runs where it is written — `_runs_in_place`. Anything else is
+        refused, because a later call can run the body again after a statement the intraprocedural
+        graphs do not order it against.
+
+        A block reaches an iterating command under a *name*, and the name is what makes the climb
+        true: `function ForEach-Object { $args }` hands the block to something that may store it
+        rather than run it. Every name climbed through is therefore checked at the landing, and one
+        the landing cannot trust refuses the whole climb. Checking at the landing rather than at the
+        site is the same answer, since the site is nested inside the statement the landing stands
+        for, and it keeps this off the query it is part of answering.
         """
         if self._refuse or self._control_flow is None or self._root is None:
             return None
-        located = self._control_flow.locate(node)
-        if located is None or located[0].owner is not self._root:
-            return None
-        return located[1]
+        climbed: list[str] = []
+        while True:
+            located = self._control_flow.locate(node)
+            if located is None:
+                return None
+            graph, position = located
+            if graph.owner is self._root:
+                return position if self._climb_is_trusted(climbed, position) else None
+            site = _runs_in_place(graph.owner)
+            if site is None:
+                return None
+            if site.name is not graph.owner:
+                name = resolve_command_name(site)
+                if name is None:
+                    return None
+                climbed.append(name)
+            node = site
+
+
+def _runs_in_place(owner: Node) -> Ps1CommandInvocation | None:
+    """
+    The invocation whose evaluation runs *owner*, when *owner* is a script block that runs where it
+    is written and nowhere else, else `None`. A function body, a stored block and a block handed to
+    a command that may keep it all answer `None`: when they run is not a question the enclosing
+    body's control-flow graph orders.
+    """
+    if not isinstance(owner, Ps1ScriptBlock):
+        return None
+    facts = classify_block(owner)
+    if facts.reach is not Ps1BlockReach.IMMEDIATE:
+        return None
+    return facts.site if isinstance(facts.site, Ps1CommandInvocation) else None
 
 
 def build_world_reach(

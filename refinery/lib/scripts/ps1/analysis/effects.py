@@ -291,6 +291,8 @@ _PURE_READS = _canonical_read_set({
     ('environment', 'username'),
     ('math', 'e'),
     ('math', 'pi'),
+    ('microsoft.powershell.commands.genericmeasureinfo', 'count'),
+    ('microsoft.powershell.commands.genericobjectmeasureinfo', 'count'),
     ('threading.tasks.task', 'status'),
     ('threading.thread', 'currentthread'),
     ('threading.thread', 'managedthreadid'),
@@ -720,9 +722,12 @@ def _reflection_read_is_pure(type_key: Ps1TypeName, member: str) -> bool:
     read its runtime subtype does carry.
 
     A member the object adapter supplies (`source == 'engine'`) is read off the adapter rather than
-    off the type, so no getter of the type's own runs. It is granted on the same condition as an
-    absent member and for the same reason: the grant is about this value carrying exactly the
-    surface the metadata describes, which only a sealed type settles.
+    off the type, so no getter of the type's own runs. What could still make it run one is the
+    runtime value being a *subtype* that carries a real member of that name, which the collected
+    record for the static type would then not be describing — so a sealed type settles it and is the
+    condition. An absent member needs more than that, and keeps the narrower
+    `_PURE_READ_TYPES` gate: reading one yields `$null` only while nothing has *added* the member,
+    and a module's `types.ps1xml` can add one to a sealed reference type.
     """
     record = data.member_record(type_key, member)
     surface = type_key.generic_definition
@@ -731,7 +736,7 @@ def _reflection_read_is_pure(type_key: Ps1TypeName, member: str) -> bool:
     if record is data.MemberLookup.ABSENT:
         return surface in _PURE_READ_TYPES
     if record['source'] == 'engine':
-        return surface in _PURE_READ_TYPES
+        return surface in _PURE_READ_TYPES or data.type_is_sealed(type_key)
     if record['source'] in ('ets', 'wmi'):
         return False
     if record['kind'] == 'field' and record.get('static') is False:
@@ -1904,6 +1909,44 @@ def expression_cannot_fault(
     )
 
 
+def _lies_in_a_block_within(site: Node, stmt: Node) -> bool:
+    """
+    Whether *site* stands inside a script block that is itself written inside *stmt*. A script block
+    is the boundary asked about because it is what the graph builder gives a body of its own; a
+    `catch` or `trap` body written in *stmt* stays in the same graph and is judged there.
+    """
+    cursor = site.parent
+    crossed = False
+    while cursor is not None and cursor is not stmt:
+        crossed = crossed or isinstance(cursor, Ps1ScriptBlock)
+        cursor = cursor.parent
+    return crossed and cursor is stmt
+
+
+def _leaves_a_block_of(site: Node, stmt: Node, faults: Ps1FaultReach) -> bool:
+    """
+    Whether an error raised at *site* has no destination that deleting *stmt* could change: *site*
+    stands inside a script block written within *stmt*, and no handler of that block settles the
+    error.
+
+    Such an error arrives at one of two places, and neither is this gate's business. Where the block
+    runs where it is written, the error leaves it and arrives exactly where an error raised by
+    *stmt* itself arrives — which is *stmt*'s own point, weighed beside this one in the same loop.
+    Where the block is kept rather than run, the value holding it is built by evaluating *stmt*, so
+    a script without *stmt* never builds the block and never reaches the point at all.
+
+    Without this, the fallback `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.observed_at`
+    takes for a body something may call — whether a handler that acts is written anywhere else in
+    this script — answers for every block an obfuscator writes inside a discarded pipeline, and a
+    single `try` written elsewhere in the file keeps all of them.
+    """
+    return (
+        site is not stmt
+        and _lies_in_a_block_within(site, stmt)
+        and faults.escapes_the_body(site)
+    )
+
+
 def fault_is_observed(
     stmt: Node,
     faults: Ps1FaultReach,
@@ -1944,6 +1987,8 @@ def fault_is_observed(
         judged = True
         operand = fault_operand(site)
         if operand is not None and expression_cannot_fault(operand, stmt, faults, world):
+            continue
+        if _leaves_a_block_of(site, stmt, faults):
             continue
         if faults.observed_at(site):
             return True

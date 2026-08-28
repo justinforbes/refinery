@@ -16,9 +16,10 @@ from refinery.lib.scripts.ps1.analysis.faults import (
     ends_the_script,
     handler_acts,
 )
-from refinery.lib.scripts.ps1.ast import get_body
+from refinery.lib.scripts.ps1.ast import get_body, resolve_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
+    Ps1CommandInvocation,
     Ps1Script,
     Ps1SubExpression,
     Ps1TrapStatement,
@@ -697,3 +698,49 @@ class TestPs1AStrictModeArmingIsReadOverTheWholeScript(TestBase):
         read of is not a script that was read and found to arm nothing.
         """
         self.assertTrue(Ps1FaultReach(ControlFlowModel({})).strict_mode_may_be_in_force())
+
+
+class TestPs1WhetherAnErrorLeavesTheBodyItWasRaisedIn(TestBase):
+    """
+    The half of the position question that says nothing about where the error goes next, only that
+    the body it was raised in does not decide it. A caller that knows what runs the body reads this
+    and answers the rest for itself.
+    """
+
+    def _escapes(self, source: str) -> bool:
+        tree, faults = _model(source)
+        point = next(
+            node for node in tree.walk()
+            if isinstance(node, Ps1CommandInvocation)
+            and resolve_command_name(node) == 'get-random'
+        )
+        return faults.escapes_the_body(point)
+
+    def test_a_body_with_no_handler_settles_nothing(self):
+        self.assertTrue(self._escapes("1, 2 | ForEach-Object { Get-Random }"))
+
+    def test_a_catch_that_acts_settles_it(self):
+        self.assertFalse(self._escapes(
+            "1, 2 | ForEach-Object { try { Get-Random } catch { Write-Host 'h' } }"))
+
+    def test_an_empty_catch_settles_it_too(self):
+        """
+        Nothing observable happens, but the error stops there all the same, so where the body runs
+        cannot change where it went.
+        """
+        self.assertFalse(self._escapes("1, 2 | ForEach-Object { try { Get-Random } catch { } }"))
+
+    def test_a_trap_that_may_decline_the_error_ends_the_body_and_settles_it(self):
+        self.assertFalse(self._escapes(
+            "1, 2 | ForEach-Object { trap [System.IO.IOException] { } Get-Random }"))
+
+    def test_a_position_the_graphs_place_nowhere_escapes_nothing(self):
+        tree = _parse("function f ($p = $(Get-Random)) { }")
+        faults = build_fault_reach(build_control_flow_model(tree))
+        point = next(
+            node for node in tree.walk()
+            if isinstance(node, Ps1CommandInvocation)
+            and resolve_command_name(node) == 'get-random'
+        )
+        self.assertFalse(faults.escapes_the_body(point))
+        self.assertTrue(faults.observed_at(point))

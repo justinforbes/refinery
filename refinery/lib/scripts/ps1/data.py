@@ -366,6 +366,7 @@ def _derive_out_variable_parameters(common: dict[str, tuple[str, ...]]) -> froze
 OUT_VARIABLE_PARAMETERS = _derive_out_variable_parameters(COMMON_PARAMETERS)
 
 _VALUE_PARAMETERS: dict[str, frozenset[str]] = {}
+_SCRIPTBLOCK_PARAMETERS: dict[str, frozenset[str]] = {}
 
 _COMMAND_RECORDS: dict[str, dict] = {
     _name.lower(): _record for _name, _record in _COMMAND_TABLE.items()
@@ -395,6 +396,34 @@ def value_parameters(command: str) -> frozenset[str]:
             names.add(_parameter.lower())
             names.update(_alias.lower() for _alias in _info['aliases'])
         found = _VALUE_PARAMETERS[command] = frozenset(names)
+    return found
+
+
+def scriptblock_parameters(command: str) -> frozenset[str]:
+    """
+    The lowercased parameter names and aliases of *command* that are declared to take a script
+    block, as opposed to the ones that take a value of any other kind. Empty for a command the
+    collected surface does not carry.
+
+    A caller asking where a block written as an argument ends up needs this to tell
+    `ForEach-Object -Process { ... }`, which the command runs, from `ForEach-Object -InputObject
+    { ... }`, which hands the block on as data and never runs it.
+
+    An array element type counts: `-Process` is declared `ScriptBlock[]` and `-Begin` is declared
+    `ScriptBlock`, and both are run.
+
+    Looked up and memoized per command for the reason `value_parameters` gives.
+    """
+    command = command.lower()
+    found = _SCRIPTBLOCK_PARAMETERS.get(command)
+    if found is None:
+        names: set[str] = set()
+        for _parameter, _info in _COMMAND_RECORDS.get(command, {}).get('parameters', {}).items():
+            if _info['type'].rstrip('[]') != 'System.Management.Automation.ScriptBlock':
+                continue
+            names.add(_parameter.lower())
+            names.update(_alias.lower() for _alias in _info['aliases'])
+        found = _SCRIPTBLOCK_PARAMETERS[command] = frozenset(names)
     return found
 
 
