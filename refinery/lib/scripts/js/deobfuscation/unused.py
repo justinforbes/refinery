@@ -36,7 +36,7 @@ from refinery.lib.scripts.js.analysis.model import (
     Scope,
     ScopeKind,
     SemanticModel,
-    is_global_object_base,
+    may_be_global_object_base,
     is_simple_assignment_target,
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
@@ -94,10 +94,11 @@ def _global_alias_read_names(root: Node, aliases: frozenset[str]) -> frozenset[s
     The global properties *root* reads through the global object, which are the ones a write of may
     not be removed for want of a reader.
 
-    The base is read through `is_global_object_base`, so every spelling of the global object counts
-    here, including the `this` of a top level and the two names that denote another realm's global
-    object. That set is wider than the one the write side keys on, and deliberately: a name found
-    here keeps a write, and keeping one costs a reduction where missing one deletes a read.
+    The base is read through `may_be_global_object_base`, so every spelling of the global object
+    counts here, including a `this` a call may supply the global object for and the two names that
+    denote another realm's global object. That set is wider than the one the write side keys on, and
+    deliberately: a name found here keeps a write, and keeping one costs a reduction where missing
+    one deletes a read.
     """
     names: set[str] = set()
     for node in root.walk():
@@ -108,7 +109,7 @@ def _global_alias_read_names(root: Node, aliases: frozenset[str]) -> frozenset[s
         if is_simple_assignment_target(node):
             continue
         base = node.object
-        if is_global_object_base(base) or (
+        if may_be_global_object_base(base) or (
             isinstance(base, JsIdentifier) and base.name in aliases
         ):
             names.add(node.property.name)

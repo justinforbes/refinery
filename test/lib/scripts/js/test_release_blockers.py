@@ -523,38 +523,6 @@ class TestALexicalBindingThatStopsABlockFunctionEscapingIsKept(TestBase):
     """
 
 
-#: A classic script whose function is called with no receiver, mapped to the behavior a host gives
-#: it. Sloppy code gives such a call the global object as its `this`, so the body reaches the
-#: script's own top-level declarations through it.
-A_SLOPPY_CALL_READING_THE_GLOBAL_OBJECT = {
-    'a bare call': Program(
-        a_program("""
-            var q = function (a) { console.log('q', a); };
-            function f() { this.q(1); }
-            f();
-            """),
-        prints('q 1'),
-        Reading.SCRIPT,
-    ),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-@_one_expected_failure_per_program(A_SLOPPY_CALL_READING_THE_GLOBAL_OBJECT)
-class TestASloppyCallGivesItsBodyTheGlobalObject(TestBase):
-    """
-    A call written with no receiver passes `undefined` as the `this` of the call, and sloppy code
-    replaces that with the global object before the body runs. So a sloppy function nothing calls as
-    a method reads the global object through `this` just as its script's top level does, and a
-    top-level declaration is reachable through it.
-
-    This is the same gap as `TestATopLevelThisNamesTheGlobalObject` at one remove, and it is not the
-    same fix: what a `this` in a function body holds is decided by every call reaching that body,
-    where the `this` of a top level is decided by the position alone. The declaration is removed and
-    the call left standing, so the program comes back throwing where it printed.
-    """
-
-
 #: A program reading the text of a function value, mapped to the behavior an engine gives it. The
 #: read is written inside a function body, which is where the tool answers it at all: the same read
 #: at the top of a file is left standing.

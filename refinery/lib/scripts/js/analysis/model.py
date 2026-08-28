@@ -31,7 +31,7 @@ from __future__ import annotations
 import enum
 
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import Callable, Iterator
 
 from refinery.lib.scripts import Node, Statement
 from refinery.lib.scripts.js.model import (
@@ -1160,6 +1160,28 @@ def is_global_object_base(node: Node | None) -> bool:
     return isinstance(base, JsIdentifier) and base.name in GLOBAL_OBJECT_ALIASES
 
 
+def may_be_global_object_base(node: Node | None) -> bool:
+    """
+    Whether *node*, written as the base of a member access, may denote the global object once the
+    program runs. `is_global_object_base` widened by the receiver a call supplies: a function called
+    with no receiver is given `undefined`, and sloppy code replaces that with the global object
+    before the body runs, so a `this` in such a body reads the same properties the top level does.
+
+    Which calls reach a body is not decided here, and every `this` is admitted rather than only the
+    ones a bare call can reach. The two directions cost different things: admitting a receiver that
+    is some other object keeps a declaration a reader may never reach, while missing one removes a
+    declaration the program still reads.
+
+    The readers that decide a *rewrite* keep the narrow question. `_is_reflective_member` does
+    because a `this` reaches every method of every object in a file, and reporting a surface for one
+    freezes every removal in it; `_timer_callee_name` because it names a callee it will act on.
+    """
+    base = strip_parens(node) if node is not None else None
+    if isinstance(base, JsThisExpression):
+        return True
+    return is_global_object_base(base)
+
+
 def _member_property_name(member: JsMemberExpression) -> str | None:
     """
     The statically known property name a member access designates: the property identifier of a dot
@@ -1256,7 +1278,7 @@ def _is_global_alias_access(node: Node) -> bool:
     reaches a binding no lexical name of its own is written for. An access on a mapped `arguments`
     object is the other, and reaches a parameter of the one function that holds it.
     """
-    return isinstance(node, JsMemberExpression) and is_global_object_base(node.object)
+    return isinstance(node, JsMemberExpression) and may_be_global_object_base(node.object)
 
 
 def _enclosing_member_access(node: Node) -> JsMemberExpression | None:
@@ -2226,8 +2248,36 @@ class SemanticModel:
         reference the module model would not have is what keeps a declaration a reader may reach,
         and refusing to record it is what removes one.
         """
+        return self._global_member_name(member, is_global_object_base, module_scope=module_scope)
+
+    def may_name_a_global(self, member: JsMemberExpression) -> str | None:
+        """
+        The name of the global that a member access *may* reference once the program runs, read
+        through `may_be_global_object_base` rather than through the spelling alone, or `None`.
+
+        The reading half of `global_alias_member_name`, and separate from it because the two answers
+        are spent on opposite things. This one is recorded as a reference, where admitting an access
+        whose receiver turns out to be another object keeps a declaration nothing reaches. That one
+        drives a rewrite, where the same admission renames a method's own property to a global:
+        `refinery.lib.scripts.js.deobfuscation.reflection` resolves a member callee through it, and
+        a `this.eval(...)` answered as the global `eval` rewrites a call to an ordinary method.
+
+        No binding is minted from this answer. `_ensure_implicit_global_from_alias_write` keeps the
+        spelling question, because a minted global is a name every intrinsic-trust and reflection
+        reader then sees, and one minted from a receiver that was some other object withdraws trust
+        the file never gave up.
+        """
+        return self._global_member_name(member, may_be_global_object_base)
+
+    def _global_member_name(
+        self,
+        member: JsMemberExpression,
+        base_denotes_the_global_object: Callable[[Node | None], bool],
+        *,
+        module_scope: bool = False,
+    ) -> str | None:
         base = strip_parens(member.object)
-        if not is_global_object_base(base):
+        if not base_denotes_the_global_object(base):
             return None
         if module_scope and isinstance(base, JsThisExpression):
             return None
@@ -2270,8 +2320,12 @@ class SemanticModel:
         The existing global binding a member access on a global-object alias references, or `None`.
         Unlike `_ensure_implicit_global_from_alias_write` this never creates a binding: a read of an
         otherwise-undeclared global has none to attribute and leaves the name free.
+
+        Read through `may_name_a_global`, so a receiver a call may supply the global object for is
+        recorded too. Nothing is created from that answer, so the widest it can be wrong is to keep
+        a declaration a reader never reaches.
         """
-        name = self.global_alias_member_name(member)
+        name = self.may_name_a_global(member)
         if name is None:
             return None
         return self.root_scope.bindings.get(name)
