@@ -28,6 +28,7 @@ reported as a fix rather than as nothing at all, which one test over the whole f
 """
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from test import TestBase
@@ -35,6 +36,7 @@ from test.lib.scripts.js.analysis.differential import (
     behavior,
     deobfuscate_source,
     host_behavior,
+    module_graph_behavior,
     node_executable,
 )
 from test.lib.scripts.js.ledger import (
@@ -46,6 +48,75 @@ from test.lib.scripts.js.ledger import (
     one_expected_failure_per_program,
     prints,
 )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAnExportDeclarationExportsTheBindingItDeclares(TestBase):
+    """
+    `export var a;` ties the binding to the outside in the declaration itself: no list names it, so
+    the specifier read that keeps `export { a };` alive has nothing to attach to, and nothing in
+    the model records that the binding is exported. Two passes act on the silence. The dead-store
+    sweep deletes a write the module never reads back, although every importer reads it, so the
+    importer of the first program reads `undefined` where the input gave it `1`. And pseudo-global
+    localization relocates the second program's declarator into the one function writing it,
+    leaving `export var ;` standing — a module no engine parses.
+
+    The shape is ordinary transpiler output: TypeScript and Babel both lower a module to a
+    declaration exported first and assigned later, so bundled loaders hold it wherever they hold
+    transpiled code at all. The list half of the same rule is stated in
+    `test.lib.scripts.js.deobfuscation.test_property_name_positions`; this entry is the declaration
+    half, and a fix closes it by making exported-ness a fact of the binding rather than of a read
+    some list happens to spell.
+    """
+
+    @unittest.expectedFailure
+    def test_a_write_the_module_never_reads_is_kept_for_the_importer(self):
+        """
+        Node prints `1` from the module and `1` again from an importer reading `a` out of it, and
+        the same importer must read the same `1` out of the deobfuscation.
+        """
+        module = inspect.cleandoc(
+            """
+            export var a;
+            a = 1;
+            console.log(1);
+            """
+        )
+        importer = inspect.cleandoc(
+            """
+            import { a } from './lib.mjs';
+            console.log(a);
+            """
+        )
+        agreed = ('1\n1\n', None)
+        self.assertEqual(
+            (
+                module_graph_behavior({'main.mjs': importer, 'lib.mjs': module}, 'main.mjs'),
+                module_graph_behavior(
+                    {
+                        'main.mjs': importer,
+                        'lib.mjs': deobfuscate_source(module, module=True),
+                    },
+                    'main.mjs',
+                ),
+            ),
+            (agreed, agreed),
+        )
+
+    @unittest.expectedFailure
+    def test_an_exported_declarator_stays_where_the_export_stands(self):
+        """
+        Node prints `2` for the module, and so must the deobfuscation, which instead relocates the
+        declarator into the writing function and leaves `export var ;` behind.
+        """
+        source = inspect.cleandoc(
+            """
+            export var a;
+            function f() { a = 2; return a; }
+            console.log(f());
+            """
+        )
+        self.assertEqual(before_and_after(source, module=True), (prints('2'), prints('2')))
 
 
 #: A program reaching `eval` through a name it bound to it and asking that name for a local of the

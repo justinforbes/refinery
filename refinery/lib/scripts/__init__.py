@@ -530,9 +530,30 @@ def _replace_in_parent(old: Node, new: Node) -> bool:
     `new.parent` is set only once a slot has been found, so that a failed replacement leaves `new`
     naming no holder rather than naming one that does not hold it — a caller that abandons the
     replacement then has nothing to undo.
+
+    A node two fields of its parent hold at once — the one identifier a parser builds for both
+    halves of a shorthand property or of an export specifier — is refused outright: writing one
+    slot would leave the other holding a node the tree no longer owns, and which slot was meant is
+    knowledge only a caller has. The callers with that knowledge take those shapes apart before
+    reaching here, so the refusal loses nothing.
     """
     parent = old.parent
     if parent is None:
+        return False
+    held = 0
+    for attr_name in vars(parent):
+        if attr_name in _SKIP_FIELDS:
+            continue
+        value = getattr(parent, attr_name)
+        if value is old:
+            held += 1
+        elif isinstance(value, list):
+            for item in value:
+                if item is old:
+                    held += 1
+                elif isinstance(item, tuple):
+                    held += sum(1 for elem in item if elem is old)
+    if held > 1:
         return False
     for attr_name in vars(parent):
         if attr_name in _SKIP_FIELDS:

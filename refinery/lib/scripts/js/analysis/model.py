@@ -486,15 +486,17 @@ def crosses_dynamic_scope(scope: Scope | None) -> bool:
 
 def is_use_position(node: JsIdentifier) -> bool:
     """
-    Whether an identifier occupies a position where it reads or writes a value, as opposed to naming a
-    property, a key, a label, or an import/export specifier. `names_a_property` answers for the four
-    positions that name a property; what is added here is the positions that name something else the
-    program cannot refer to — the name a module is re-exported under, a label, either side of an
-    import specifier, and every half of an export specifier but one. The local half of an export list
-    without a `from` clause reads the binding it names, which is why an engine refuses to link
-    `export { a };` where nothing declares `a`; with the clause the same half names a binding of the
-    module the clause spells and nothing local at all. Binding sites are not excluded here;
-    `SemanticModel.is_reference` is the binding-aware predicate that also excludes them.
+    Whether an identifier occupies a position where it reads or writes a value, as opposed to naming
+    a property, a key, a label, or something across a module boundary. `names_a_property` answers
+    for the four positions that name a property; what is added here is the positions that name
+    something else the program cannot refer to — the name a module is re-exported under, a label,
+    either side of an import specifier, and an export specifier that names nothing local. The local
+    half of an export list without a `from` clause reads the binding it names, which is why an
+    engine refuses to link `export { a };` where nothing declares `a`; with the clause the same half
+    names a binding of the module the clause spells and nothing local at all. Where nothing renames,
+    one node fills both halves of the specifier, and that node is the local half and reads. Binding
+    sites are not excluded here; `SemanticModel.is_reference` is the binding-aware predicate that
+    also excludes them.
     """
     p = node.parent
     if p is None:
@@ -2212,12 +2214,21 @@ class SemanticModel:
         self._record_global_object_alias_references()
 
     def _record_def_use_references(self):
+        """
+        One record per reference node: the walk reaches a node once per slot holding it, and the
+        one identifier of `{ a }` or of `export { a };` fills two, so without the dedup a read's
+        multiplicity would follow its spelling rather than the program.
+        """
+        seen: set[int] = set()
         for node in self.root.walk():
             if isinstance(node, JsMemberExpression):
                 self._record_global_alias_member_reference(node)
                 continue
             if not isinstance(node, JsIdentifier):
                 continue
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
             if not self.is_reference(node):
                 continue
             ref_scope = self._node_scope.get(id(node))

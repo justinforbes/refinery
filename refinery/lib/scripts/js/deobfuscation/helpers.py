@@ -1197,10 +1197,11 @@ def is_reference(node: JsIdentifier) -> bool:
     this is the syntactic approximation of `SemanticModel.is_reference` and not a second opinion
     about what a name is.
 
-    Every position naming a property, a label or a module specifier is excluded exactly as the
-    model excludes it. The approximation is in the declarations, and it is a *permissive* one: a
-    name bound by a destructuring pattern is written like a read and `is_binding_site` sees only a
-    declarator id and a function declaration name, so `var { a } = o` is answered `True` here and
+    Every position naming a property, a label or something across a module boundary is excluded
+    exactly as the model excludes it, and the local half of a sourceless export list reads exactly
+    as the model reads it. The approximation is in the declarations, and it is a *permissive* one:
+    a name bound by a destructuring pattern is written like a read and `is_binding_site` sees only
+    a declarator id and a function declaration name, so `var { a } = o` is answered `True` here and
     `False` by the model. A caller that acts on a `True` answer — one that substitutes or renames
     rather than one that grows a conservative set — needs the model.
     """

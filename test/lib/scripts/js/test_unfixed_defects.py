@@ -26,6 +26,7 @@ day the marker comes off.
 """
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from collections import Counter
@@ -34,6 +35,7 @@ from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
     behavior,
     deobfuscate_source,
+    module_graph_behavior,
     node_executable,
 )
 from test.lib.scripts.js.deobfuscation.test_array_length_reads import (
@@ -968,6 +970,51 @@ class TestAWriteOnlyStrictCodeRefusesIsNotADeadStore(TestBase):
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             {source: (answer, answer) for source, answer in rows.items()},
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAConstAModuleExportsIsDeadUntilTheModuleRuns(TestBase):
+    """
+    A function declaration crosses a module boundary at link time: an importer in a cycle with its
+    exporter can call the function before the exporter's body has run, and a `const` the function
+    reads is then still in its dead zone, so the input throws `ReferenceError`. The model takes the
+    export read to stand at the list's statement position, so the fold that puts the constant into
+    the function proves its ordering over a walk the cycle never takes, and the deobfuscation
+    returns the value where the input threw.
+
+    Kept off the release gate for likelihood: the shape needs an import cycle whose second module
+    calls back into the first at its own top level, which a single-file payload — the
+    overwhelming shape of obfuscated malware — cannot spell at all. The fix is a link-time
+    invocation point in `refinery.lib.scripts.js.analysis.dominance`, priced against every module
+    fold there is.
+    """
+
+    @unittest.expectedFailure
+    def test_the_cycle_still_throws_after_the_fold(self):
+        exporter = inspect.cleandoc(
+            """
+            import { g } from './b.mjs';
+            const x = 1;
+            export { f };
+            function f() { return x; }
+            g();
+            """
+        )
+        caller = inspect.cleandoc(
+            """
+            export function g() {}
+            import { f } from './main.mjs';
+            console.log(f());
+            """
+        )
+        rewritten = deobfuscate_source(exporter, module=True)
+        self.assertEqual(
+            (
+                module_graph_behavior({'b.mjs': caller, 'main.mjs': exporter}, 'main.mjs'),
+                module_graph_behavior({'b.mjs': caller, 'main.mjs': rewritten}, 'main.mjs'),
+            ),
+            (('', 'ReferenceError'), ('', 'ReferenceError')),
         )
 
 

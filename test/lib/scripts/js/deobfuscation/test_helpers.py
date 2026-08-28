@@ -25,6 +25,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
 from refinery.lib.scripts.js.lexer import decode_js_string_body
 from refinery.lib.scripts.js.model import (
     JsBlockStatement,
+    JsExportSpecifier,
     JsExpressionStatement,
     JsFunctionDeclaration,
     JsIdentifier,
@@ -443,7 +444,10 @@ class TestHoistingBehindADirectivePrologue(TestJsDeobfuscator):
 #: every such position the language has: the member after a dot, a key of an object literal, the
 #: name of a class method and of a class field, the key of an import attribute, a label and the two
 #: jumps to one, the name a module is re-exported under, both halves of an import specifier, the
-#: local of a default and of a namespace import, and both halves of an export specifier.
+#: local of a default and of a namespace import, the name a binding is exported under, and the
+#: local of an export list carrying a `from` clause. The local of a sourceless list is the one
+#: specifier position missing here: it reads, and
+#: `AN_EXPORT_LIST_READ_BUT_NEVER_TAKING_THE_VALUE` holds it.
 A_NAME_NO_VALUE_MAY_BE_PUT_IN_THE_PLACE_OF = (
     'console.log(q.zz);',
     'console.log({ zz: 1 });',
@@ -487,6 +491,15 @@ THE_KINDS_OF_POSITION_THAT_CORPUS_REACHES = [
 A_SHORTHAND_READ_BUT_NOT_WRITTEN_OUT = (
     'var __proto__ = 1; console.log({ __proto__ });',
     'console.log({ [zz] });',
+)
+
+#: A module whose export list is the only reader of the name `zz`. The local half of a sourceless
+#: list stands where `is_use_position` says a value is read, and there is still no program that a
+#: value put there could mean: a list exports bindings and never values, and `export { 5 };` is a
+#: module no engine links.
+AN_EXPORT_LIST_READ_BUT_NEVER_TAKING_THE_VALUE = (
+    'var zz = 1; export { zz };',
+    'var zz = 1; export { zz as q };',
 )
 
 #: A program naming something a value may stand in the place of, mapped to the program that stands
@@ -604,6 +617,33 @@ class TestTheOneGateEverySubstitutionGoesThrough(TestJsDeobfuscator):
         rows = A_SHORTHAND_READ_BUT_NOT_WRITTEN_OUT
         self.assertEqual(
             {source: self._substituted_shorthand(source) for source in rows},
+            {source: (True, False, printed(source)) for source in rows},
+        )
+
+    def _substituted_export_local(self, source: str) -> tuple[bool, bool, str]:
+        """
+        Whether the local half of the one export specifier of *source* reads a value, what the gate
+        answers for it, and the program that stands afterwards.
+        """
+        tree = JsParser(source).parse()
+        specifier = [
+            node for node in tree.walk()
+            if isinstance(node, JsExportSpecifier)
+        ][0]
+        node = specifier.local
+        assert isinstance(node, JsIdentifier)
+        answer = substitute_use_position(node, make_numeric_literal(5))
+        return is_use_position(node), answer, JsSynthesizer().convert(tree)
+
+    def test_an_export_list_is_refused_although_it_is_read(self):
+        """
+        The export lists of `AN_EXPORT_LIST_READ_BUT_NEVER_TAKING_THE_VALUE` stand where
+        `is_use_position` says a value is read, and the gate declines both, leaving each program as
+        it found it.
+        """
+        rows = AN_EXPORT_LIST_READ_BUT_NEVER_TAKING_THE_VALUE
+        self.assertEqual(
+            {source: self._substituted_export_local(source) for source in rows},
             {source: (True, False, printed(source)) for source in rows},
         )
 

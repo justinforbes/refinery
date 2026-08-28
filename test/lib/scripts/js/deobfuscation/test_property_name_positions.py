@@ -818,38 +818,109 @@ class TestAShorthandKeepsTheDeclarationItReads(TestBase):
 
 def _a_module_reporting_it_loaded(module: str) -> str:
     """
-    *module* with a statement printing `loaded` appended. A module that only declares and exports
-    does nothing an engine reports, and the print is what makes the difference between a module that
-    loads and one that does not an answer rather than a silence on both sides.
+    `inspect.cleandoc` of *module* with a statement printing `loaded` appended. A module that only
+    declares and exports does nothing an engine reports, and the print is what makes the difference
+    between a module that loads and one that does not an answer rather than a silence on both
+    sides.
     """
-    return F"{module}\nconsole.log('loaded');\n"
+    return F"{inspect.cleandoc(module)}\nconsole.log('loaded');\n"
+
+
+def rewritten_as_modules(programs: Iterable[str]) -> dict[str, str]:
+    """
+    What `refinery.js` writes for each program under the module execution model, keyed by the
+    program it was given.
+    """
+    return {program: folded(program, module=True) for program in programs}
 
 
 #: The one module of `A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES` that also reads what it exports.
 #: The read beside the list is a substitution target and the list is not, so this is the module
 #: whose deobfuscation is not the module itself.
-A_MODULE_READING_WHAT_IT_EXPORTS = 'var a = 1;\nexport { a };\nconsole.log(a);\n'
+A_MODULE_READING_WHAT_IT_EXPORTS = inspect.cleandoc(
+    """
+    var a = 1;
+    export { a };
+    console.log(a);
+    """
+)
 
 #: A module that exports a binding it declares, mapped to what Node prints for it. Every one of them
 #: is a module an engine loads, which is the whole of what an export list has to be checked against:
 #: a list compiles only where the module declares what it names.
 A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES = {
-    _a_module_reporting_it_loaded('var a = 1;\nexport { a };'): 'loaded\n',
-    _a_module_reporting_it_loaded('let a = 1;\nexport { a };'): 'loaded\n',
-    _a_module_reporting_it_loaded('const a = 1;\nexport { a };'): 'loaded\n',
-    _a_module_reporting_it_loaded('const a = () => 1;\nexport { a };'): 'loaded\n',
-    _a_module_reporting_it_loaded('let a;\nexport { a };'): 'loaded\n',
-    _a_module_reporting_it_loaded('var a = 1;\nexport { a as b };'): 'loaded\n',
-    _a_module_reporting_it_loaded('var a = 1, b = 2;\nexport { a, b };'): 'loaded\n',
-    _a_module_reporting_it_loaded('var a = 1;\nexport { a as default };'): 'loaded\n',
-    A_MODULE_READING_WHAT_IT_EXPORTS: '1\n',
-    _a_module_reporting_it_loaded('function a() { return 1; }\nexport { a };'): 'loaded\n',
-    _a_module_reporting_it_loaded('class a {}\nexport { a };'): 'loaded\n',
     _a_module_reporting_it_loaded(
-        "import { format } from 'node:util';\nexport { format };"
+        """
+        var a = 1;
+        export { a };
+        """
     ): 'loaded\n',
     _a_module_reporting_it_loaded(
-        "var format = 1;\nexport { format } from 'node:util';"
+        """
+        let a = 1;
+        export { a };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        const a = 1;
+        export { a };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        const a = () => 1;
+        export { a };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        let a;
+        export { a };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        var a = 1;
+        export { a as b };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        var a = 1, b = 2;
+        export { a, b };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        var a = 1;
+        export { a as default };
+        """
+    ): 'loaded\n',
+    A_MODULE_READING_WHAT_IT_EXPORTS: '1\n',
+    _a_module_reporting_it_loaded(
+        """
+        function a() { return 1; }
+        export { a };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        class a {}
+        export { a };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        import { format } from 'node:util';
+        export { format };
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        var format = 1;
+        export { format } from 'node:util';
+        """
     ): 'loaded\n',
     _a_module_reporting_it_loaded('export var a = 1;'): 'loaded\n',
 }
@@ -860,10 +931,24 @@ A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES = {
 #: list spells its name, because that list names the far side of the module boundary, so a rule
 #: reading every list as a local read would be caught keeping it.
 A_MODULE_AN_EXPORT_LIST_DOES_NOT_KEEP_AS_IT_WAS = {
-    A_MODULE_READING_WHAT_IT_EXPORTS: 'var a = 1;\nexport { a };\nconsole.log(1);\n',
+    A_MODULE_READING_WHAT_IT_EXPORTS: inspect.cleandoc(
+        """
+        var a = 1;
+        export { a };
+        console.log(1);
+        """
+    ),
     _a_module_reporting_it_loaded(
-        "var format = 1;\nexport { format } from 'node:util';"
-    ): "export { format } from 'node:util';\nconsole.log('loaded');\n",
+        """
+        var format = 1;
+        export { format } from 'node:util';
+        """
+    ): inspect.cleandoc(
+        """
+        export { format } from 'node:util';
+        console.log('loaded');
+        """
+    ),
 }
 
 
@@ -879,13 +964,13 @@ class TestAnExportListReadsTheBindingItNames(TestBase):
 
     The rows put a declaration under an export list in every spelling: each keyword, with an
     initializer and without, renamed, exported as `default`, two names at once, and read elsewhere
-    besides. The last five are the controls of the opposite kind. Three of them export a name the
-    module declares no local for — a list carrying a `from` clause names a binding on the far
-    side of the module boundary, a list re-exporting an import names what the import statement
-    bound, and an `export var` is one statement and not two — so reading every name in every
-    list as a local read is not this rule either: a constant substituted into the `from` row's
-    list writes `export { 1 } from 'node:util'`. The other two are the function and class
-    declarations.
+    besides. The `from` row is the control of the opposite kind: its list names a binding on the
+    far side of the module boundary and nothing local, so reading every name in every list as a
+    local read is not this rule either — a constant substituted into that list writes
+    `export { 1 } from 'node:util'`, and the local its name happens to match is unread and free to
+    go. The remaining controls each hold the rule somewhere else: a list re-exporting an import
+    reads the binding the import statement bound, an `export var` is one statement and not two,
+    and the function and class declarations are kept on their own terms.
     """
 
     def test_a_module_the_list_alone_reads_comes_back_as_it_was(self):
@@ -899,12 +984,34 @@ class TestAnExportListReadsTheBindingItNames(TestBase):
         rows = A_MODULE_AN_EXPORT_LIST_DOES_NOT_KEEP_AS_IT_WAS
         self.assertEqual(spelled_as_expected(rows), rewritten(rows))
 
+    def test_every_rewritten_row_is_a_row_of_the_table(self):
+        self.assertLessEqual(
+            set(A_MODULE_AN_EXPORT_LIST_DOES_NOT_KEEP_AS_IT_WAS),
+            set(A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES),
+        )
+
+    def test_the_module_model_hands_back_the_same_modules(self):
+        rows = A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES
+        rewrites = A_MODULE_AN_EXPORT_LIST_DOES_NOT_KEEP_AS_IT_WAS
+        self.assertEqual(
+            {source: printed(rewrites.get(source, source)) for source in rows},
+            rewritten_as_modules(rows),
+        )
+
     @unittest.skipIf(node_executable() is None, 'node.js is not available')
     def test_each_module_still_prints_what_it_printed(self):
         rows = A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES
         self.assertEqual(
             {source: before_and_after(source, module=True) for source in rows},
             each_program_still_prints(rows),
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_each_expected_module_runs_the_way_the_module_it_replaces_does(self):
+        rows = A_MODULE_AN_EXPORT_LIST_DOES_NOT_KEEP_AS_IT_WAS
+        self.assertEqual(
+            {source: behavior(source, module=True) for source in rows},
+            {source: behavior(expected, module=True) for source, expected in rows.items()},
         )
 
 
@@ -914,11 +1021,36 @@ class TestAnExportListReadsTheBindingItNames(TestBase):
 #: half of a specifier that reads, the name a binding is exported under is not a read, and a list
 #: carrying a `from` clause reads nothing at all, and neither does the name a re-export invents.
 WHAT_A_NAME_IN_AN_EXPORT_LIST_COUNTS_FOR = {
-    'var a = 1;\nexport { a };\n': (2, 2),
-    'var a = 1;\nexport { a as b };\n': (2, 2),
-    'var a = 1, x = 2;\nexport { x as a };\n': (2, 1),
-    "var a = 1;\nexport { a } from 'node:util';\n": (2, 1),
-    "export * as a from 'node:util';\nvar a = 1;\n": (2, 1),
+    inspect.cleandoc(
+        """
+        var a = 1;
+        export { a };
+        """
+    ): (2, 2),
+    inspect.cleandoc(
+        """
+        var a = 1;
+        export { a as b };
+        """
+    ): (2, 2),
+    inspect.cleandoc(
+        """
+        var a = 1, x = 2;
+        export { x as a };
+        """
+    ): (2, 1),
+    inspect.cleandoc(
+        """
+        var a = 1;
+        export { a } from 'node:util';
+        """
+    ): (2, 1),
+    inspect.cleandoc(
+        """
+        export * as a from 'node:util';
+        var a = 1;
+        """
+    ): (2, 1),
 }
 
 

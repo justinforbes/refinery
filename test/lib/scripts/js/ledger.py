@@ -53,8 +53,8 @@ def printed(source: str) -> str:
     return JsSynthesizer().convert(JsParser(source).parse())
 
 
-def folded(source: str) -> str:
-    return source.encode('utf8') | js() | str
+def folded(source: str, *, module: bool = False) -> str:
+    return source.encode('utf8') | js(module=module) | str
 
 
 def evaluated_in_a_body(receiver: str, read: str, installs: str = '') -> str:
