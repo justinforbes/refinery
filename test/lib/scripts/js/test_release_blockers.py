@@ -615,11 +615,21 @@ class TestADirectEvalInADefaultDeclaresWhereItRuns(TestBase):
     """
 
 
-#: A classic script reading one of its own top-level declarations through a local name a guard put
-#: the global object into, mapped to the behavior a host gives it. `window` is installed first,
-#: because Node has no such name and the guard would otherwise answer the empty object.
-A_DECLARATION_READ_THROUGH_A_LOCAL_ALIAS = {
-    'an alias a guard built': Program(
+#: A classic script reading one of its own top-level declarations through a name the file itself
+#: installs on the global object, mapped to the behavior a host gives it. The installing statement is
+#: what every row has in common: Node has no `window`, so a file meaning to read one has to put it
+#: there, and a browser file that never installs one is already read correctly.
+A_NAME_THE_FILE_INSTALLS_ON_THE_GLOBAL_OBJECT = {
+    'read through the installed name': Program(
+        a_program("""
+            globalThis.window = globalThis;
+            var q = 1;
+            console.log(window.q);
+            """),
+        prints('1'),
+        Reading.SCRIPT,
+    ),
+    'a guard reads the installed name': Program(
         a_program("""
             globalThis.window = globalThis;
             var q = function (a) { console.log('q', a); };
@@ -633,17 +643,25 @@ A_DECLARATION_READ_THROUGH_A_LOCAL_ALIAS = {
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
-@_one_expected_failure_per_program(A_DECLARATION_READ_THROUGH_A_LOCAL_ALIAS)
-class TestADeclarationReadThroughALocalAliasIsStillRead(TestBase):
+@_one_expected_failure_per_program(A_NAME_THE_FILE_INSTALLS_ON_THE_GLOBAL_OBJECT)
+class TestANameTheFileInstallsOnTheGlobalObjectHoldsIt(TestBase):
     """
-    `var w = window || {}` is how a script written to run in a browser and in something else names
-    the global object once, and every read through the local name afterwards is a read of a global
-    property. The model recognizes an access whose base is one of six spellings and nothing else, so
-    a read through the local name is recorded nowhere and the declaration it reaches is removed.
+    A name given the global object holds it, and a read through the name is a read of a global —
+    the law `test.lib.scripts.js.deobfuscation.test_a_name_holding_the_global_object` states. It is
+    answered from the value the name is declared with, and a name the file only ever assigns is
+    declared with none: the binding minted for `globalThis.window = globalThis` carries no
+    declaration, so both value queries decline for it, the name is taken for one bound to something
+    other than the object, and every global read through it is recorded nowhere.
 
-    Two notions of a local alias already exist and disagree - `refinery.lib.scripts.js.deobfuscation
-    .simplify` holds one and `refinery.lib.scripts.js.deobfuscation.unused` holds another - which is
-    why this belongs to the model rather than to either of them.
+    Declining is deliberate and its reason is an ordering one. The value would have to come from the
+    write, and the writes made through the global object are recorded by the same walk that would ask
+    — so what a read is admitted on would be how far that walk had got, which is not a fact about
+    the program. Answering needs the writes established before any read is admitted, which is a
+    change to how the model is built rather than to what it knows.
+
+    The second row is the shape that made this worth having: `var w = window || {}` is how a file
+    meant for a browser and for something else names the object once. It is read correctly wherever
+    `window` is the host's own name, and wrongly only where the file installs that name itself.
     """
 
 

@@ -73,23 +73,7 @@ from refinery.lib.scripts.js.model import (
 from refinery.lib.scripts.js.strict import is_use_strict_directive
 
 
-def _const_global_alias_names(root: Node) -> frozenset[str]:
-    names: set[str] = set()
-    for node in root.walk():
-        if not isinstance(node, JsVariableDeclaration) or node.kind is not JsVarKind.CONST:
-            continue
-        for decl in node.declarations:
-            if (
-                isinstance(decl, JsVariableDeclarator)
-                and isinstance(decl.id, JsIdentifier)
-                and isinstance(decl.init, JsIdentifier)
-                and decl.init.name in SAME_REALM_GLOBAL_OBJECT_ALIASES
-            ):
-                names.add(decl.id.name)
-    return frozenset(names)
-
-
-def _global_alias_read_names(root: Node, aliases: frozenset[str]) -> frozenset[str]:
+def _global_alias_read_names(model: SemanticModel, root: Node) -> frozenset[str]:
     """
     The global properties *root* reads through the global object, which are the ones a write of may
     not be removed for want of a reader.
@@ -99,6 +83,12 @@ def _global_alias_read_names(root: Node, aliases: frozenset[str]) -> frozenset[s
     denote another realm's global object. That set is wider than the one the write side keys on, and
     deliberately: a name found here keeps a write, and keeping one costs a reduction where missing
     one deletes a read.
+
+    A name the file gives the object to counts as well, and the model is asked which those are —
+    `refinery.lib.scripts.js.analysis.model.SemanticModel.names_the_global_object`. This pass used to
+    hold its own answer, admitting a `const` initialized with one same-realm spelling and nothing
+    else, which found neither a `var` nor the `A || B` guard a file meant for two hosts is written
+    with.
     """
     names: set[str] = set()
     for node in root.walk():
@@ -109,9 +99,7 @@ def _global_alias_read_names(root: Node, aliases: frozenset[str]) -> frozenset[s
         if is_simple_assignment_target(node):
             continue
         base = node.object
-        if may_be_global_object_base(base) or (
-            isinstance(base, JsIdentifier) and base.name in aliases
-        ):
+        if may_be_global_object_base(base) or model.names_the_global_object(base):
             names.add(node.property.name)
     return frozenset(names)
 
@@ -828,8 +816,7 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
                 write_stmts.setdefault(lhs.property.name, []).append(node)
         if not write_stmts:
             return set()
-        aliases = _const_global_alias_names(parent)
-        alias_reads = _global_alias_read_names(parent, aliases)
+        alias_reads = _global_alias_read_names(self.model, parent)
         bare_refs: set[str] = set()
         for node in parent.walk():
             if not isinstance(node, JsIdentifier) or node.name not in write_stmts:

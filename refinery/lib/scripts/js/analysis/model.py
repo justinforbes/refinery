@@ -69,6 +69,7 @@ from refinery.lib.scripts.js.model import (
     JsImportNamespaceSpecifier,
     JsImportSpecifier,
     JsLabeledStatement,
+    JsLogicalExpression,
     JsMemberExpression,
     JsMethodDefinition,
     JsNewExpression,
@@ -1320,6 +1321,15 @@ def _is_call_argument(node: Node) -> bool:
     return any(strip_parens(argument) is node for argument in governor.arguments)
 
 
+_GLOBAL_ALIAS_CHAIN_LIMIT = 4
+"""
+How far `SemanticModel.names_the_global_object` follows one name to the next before it
+gives up. A program names the global object once and reads through that name; a chain of four
+is already past anything a file writes, and the bound is what keeps `var a = b, b = a` from
+recurring forever.
+"""
+
+
 _IDENTITY_OPERATORS = frozenset({'typeof', 'void', '!'})
 """
 The unary operators that take their operand to a type name or a truth value without entering the
@@ -2275,7 +2285,8 @@ class SemanticModel:
         reference the module model would not have is what keeps a declaration a reader may reach,
         and refusing to record it is what removes one.
         """
-        return self._global_member_name(member, is_global_object_base, module_scope=module_scope)
+        return self._global_member_name(
+            member, self._base_is_the_global_object, module_scope=module_scope)
 
     def may_name_a_global(self, member: JsMemberExpression) -> str | None:
         """
@@ -2294,29 +2305,97 @@ class SemanticModel:
         reader then sees, and one minted from a receiver that was some other object withdraws trust
         the file never gave up.
         """
-        return self._global_member_name(member, may_be_global_object_base)
+        return self._global_member_name(member, self._base_may_be_the_global_object)
 
     def _global_member_name(
         self,
         member: JsMemberExpression,
-        base_denotes_the_global_object: Callable[[Node | None], bool],
+        base_is_the_global_object: Callable[[Node | None], bool],
         *,
         module_scope: bool = False,
     ) -> str | None:
         base = strip_parens(member.object)
-        if not base_denotes_the_global_object(base):
+        if not base_is_the_global_object(base):
             return None
         if module_scope and isinstance(base, JsThisExpression):
             return None
         name = _member_property_name(member)
         if name is None:
             return None
-        scope = self._node_scope.get(id(member))
-        if crosses_dynamic_scope(scope):
-            return None
-        if isinstance(base, JsIdentifier) and self.lookup(base.name, scope) is not None:
+        if crosses_dynamic_scope(self._node_scope.get(id(member))):
             return None
         return name
+
+    def _base_is_the_global_object(self, base: Node | None) -> bool:
+        """
+        Whether *base* is the global object under the narrow reading: the spelling says so, and the
+        name it is spelled with is not bound to anything else. A local `window` names an ordinary
+        object, so the two questions are one answer here, and every reader that drives a rewrite
+        gets that answer.
+        """
+        return is_global_object_base(base) and not self._is_bound_here(base)
+
+    def _holds_the_global_object(self, node: Node | None) -> bool:
+        """
+        Whether *node* is the global object: spelled as one, or a name the file gives it to. A
+        program meant to run in a browser and in something else names it once — `var w = window ||
+        {}` — and every read through that name afterwards reads a global property, which
+        `_base_is_the_global_object` cannot see, because the name it is asked about is `w`.
+        """
+        return self._base_is_the_global_object(node) or self.names_the_global_object(node)
+
+    def _base_may_be_the_global_object(self, base: Node | None) -> bool:
+        """
+        Whether *base* may be the global object once the program runs: `_holds_the_global_object`
+        widened by the receiver a call supplies, which `may_be_global_object_base` states. Only a
+        reader recording a reference asks this, and the argument for admitting a receiver that turns
+        out to be another object is written there.
+        """
+        return (
+            may_be_global_object_base(base) and not self._is_bound_here(base)
+        ) or self.names_the_global_object(base)
+
+    def _is_bound_here(self, node: Node | None) -> bool:
+        return (
+            isinstance(node, JsIdentifier)
+            and self.lookup(node.name, self._node_scope.get(id(node))) is not None
+        )
+
+    def names_the_global_object(self, node: Node | None, *, depth: int = 0) -> bool:
+        """
+        Whether *node* is a name whose one value is the global object, so a property read on it is a
+        read of a global. The value comes from `singular_value`, so a name written more than once,
+        redeclared, or reachable by a dynamic rebinding has none and is refused.
+
+        A name the file only ever assigns has none either: `_ensure_implicit_global_from_alias_write`
+        mints its binding without a declaration and both value queries decline for it. That is what
+        keeps this answer out of the walk which is still recording those very writes — a read
+        admitted or refused by how far that walk had got would depend on nothing the program says.
+
+        The value holds wherever the name is not in its temporal dead zone, and nothing here orders
+        the establishing definition before the read. A caller driving a rewrite has to; the callers
+        here record a reference, where one admission too many keeps a declaration and one refusal
+        too many deletes one.
+        """
+        if depth >= _GLOBAL_ALIAS_CHAIN_LIMIT or not isinstance(node, JsIdentifier):
+            return False
+        return self._value_is_the_global_object(
+            self.singular_value(self.resolve(node)), depth + 1)
+
+    def _value_is_the_global_object(self, value: Node | None, depth: int) -> bool:
+        """
+        Whether *value*, the one value a name holds, is the global object. `A || B` is it whenever
+        `A` is: every spelling of the object is truthy, so the guard a program writes to survive a
+        host lacking the name it prefers evaluates to the object wherever that name exists.
+        """
+        value = strip_parens(value)
+        if value is None:
+            return False
+        if self._base_is_the_global_object(value):
+            return True
+        if isinstance(value, JsLogicalExpression) and value.operator == '||':
+            return self._value_is_the_global_object(value.left, depth)
+        return self.names_the_global_object(value, depth=depth)
 
     def _ensure_implicit_global_from_alias_write(self, member: JsMemberExpression):
         """
@@ -2513,25 +2592,11 @@ class SemanticModel:
         for node in self.root.walk():
             if not isinstance(node, (JsIdentifier, JsThisExpression)):
                 continue
-            if not self._denotes_the_global_object(node) or not _is_call_argument(node):
+            if not self._holds_the_global_object(node) or not _is_call_argument(node):
                 continue
             for binding in bindings:
                 binding.reachable_through_a_handed_object = True
                 self._record_alias_reference(binding, node, Role.READWRITE)
-
-    def _denotes_the_global_object(self, node: Node) -> bool:
-        """
-        Whether *node*, standing where a value is taken rather than where a member access is made,
-        denotes the global object. `is_global_object_base` answers the spelling; whether the name is
-        bound to something else is asked here, for the reason `global_alias_member_name` asks it — a
-        local `window` names an ordinary object, and taking one for the global object would credit
-        every top-level name in the file with a write the program never makes.
-        """
-        if not is_global_object_base(node):
-            return False
-        if isinstance(node, JsIdentifier):
-            return self.lookup(node.name, self._node_scope.get(id(node))) is None
-        return True
 
     def _record_alias_reference(
         self,
