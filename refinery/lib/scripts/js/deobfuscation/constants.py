@@ -23,6 +23,7 @@ from refinery.lib.scripts.js.analysis.model import (
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
+    a_host_reaches_the_binding,
     collect_identifier_names,
     is_literal,
     remove_declarator,
@@ -321,8 +322,8 @@ class JsConstantInlining(ScopeProcessingTransformer):
                 continue
             return
 
-    @staticmethod
     def _collect_candidates(
+        self,
         scope: Node,
         effects: EffectModel,
     ) -> tuple[dict[str, list[_CandidateEntry]], set[str]]:
@@ -336,9 +337,12 @@ class JsConstantInlining(ScopeProcessingTransformer):
         definition. A candidate a dynamic scope could rewrite with no static write site is rejected
         the same way, through `binding_maybe_reassigned_dynamically`: a `with`-body write the model
         attributes to it, or a direct `eval` in its owning function that could rebind it through a
-        string; a write through a global-object alias is rejected alongside. The points past which a
-        surviving candidate's value no longer holds are not enumerated here; the reaching query
-        derives them from the effect model at each use.
+        string; a write through a global-object alias is rejected alongside. A candidate the analyst
+        declared a host reaches by name is rejected outright — the host reads it once the file has
+        run, and may have rewritten it before any read the substitution would fold, so neither its
+        declarator nor any read of it may be replaced. The points past which a surviving candidate's
+        value no longer holds are not enumerated here; the reaching query derives them from the
+        effect model at each use.
         """
         candidates: dict[str, list[_CandidateEntry]] = {}
         rejected: set[str] = set()
@@ -439,7 +443,11 @@ class JsConstantInlining(ScopeProcessingTransformer):
         functions = [node for node in scope.walk() if isinstance(node, FUNCTION_NODES)]
 
         for cand_name, binding in list(candidate_bindings.items()):
-            if binding.has_global_member_write or model.binding_maybe_reassigned_dynamically(binding):
+            if (
+                binding.has_global_member_write
+                or model.binding_maybe_reassigned_dynamically(binding)
+                or a_host_reaches_the_binding(model, binding, self.options)
+            ):
                 _reject(cand_name)
 
         for func in functions:

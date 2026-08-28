@@ -3971,6 +3971,51 @@ class TestClassMemberNamesArePropertyKeys(TestBase):
             '9 R\n')
 
 
+class TestANamedEntrypointIsKeptInTheEmittedText(TestBase):
+    """
+    The `entrypoints` option is a promise about the output: a host reaches each named binding once
+    the file has loaded, so under the script execution model the binding, everything it reaches, and
+    every read of it survive in the emitted text. A host that can reach a name can also have
+    rewritten it, so a folded copy of its value is a value the host never gets to replace. Each case
+    drives the file with an outer call so the library rule that keeps a file of only declarations
+    does not apply, and pairs the kept output against the control that removes or folds the same
+    binding when no entrypoint names it, so the entrypoint is shown to be what keeps it.
+
+    The data global is the shape the release was held for: `refinery.lib.scripts.js.deobfuscation`
+    folded `var VERSION = 3` into its readers and dropped the declaration, so a host reading
+    `globalThis.VERSION` after load got `undefined` where the source gave it `3`. The module model
+    protects nothing here, which the sibling class below pins.
+    """
+
+    def test_a_declared_function_named_as_an_entrypoint_is_kept(self):
+        source = 'function handler() { return 5; } run();'
+        self.assertEqual(deobfuscate_source(source), 'run();')
+        self.assertEqual(
+            deobfuscate_source(source, entrypoints=('handler',)),
+            'function handler() {\n  return 5;\n}\nrun();',
+        )
+
+    def test_a_helper_an_entrypoint_reaches_is_kept(self):
+        source = (
+            'function help() { console.log("hi!"); return 7; }'
+            ' function handler() { return help(); } run();'
+        )
+        self.assertEqual(deobfuscate_source(source), 'run();')
+        self.assertEqual(
+            deobfuscate_source(source, entrypoints=('handler',)),
+            'function help() {\n  console.log("hi!");\n  return 7;\n}\n'
+            'function handler() {\n  return help();\n}\nrun();',
+        )
+
+    def test_a_data_global_named_as_an_entrypoint_survives_unfolded(self):
+        source = 'var VERSION = 3; console.log(VERSION);'
+        self.assertEqual(deobfuscate_source(source), 'console.log(3);')
+        self.assertEqual(
+            deobfuscate_source(source, entrypoints=('VERSION',)),
+            'var VERSION = 3;\nconsole.log(VERSION);',
+        )
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestUndeclaredHostObservableGlobals(TestBase):
     def assertSameBehavior(self, source: str, *, calls: tuple[str, ...], entrypoints: tuple[str, ...] = ()):

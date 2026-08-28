@@ -28,7 +28,7 @@ from refinery.lib.scripts.js.analysis.model import (
 )
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
-    a_host_calls_the_binding,
+    a_host_reaches_the_binding,
 )
 from refinery.lib.scripts.js.model import (
     JsAssignmentExpression,
@@ -229,7 +229,7 @@ def _admitted_wrappers(cache: ModelCache, root: JsScript, options: object) -> li
         binding = model.binding_of(node.id)
         if binding is None:
             continue
-        if a_host_calls_the_binding(model, binding, options):
+        if a_host_reaches_the_binding(model, binding, options):
             continue
         calls = _the_calls_that_reach(binding, node)
         if not calls:

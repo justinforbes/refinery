@@ -22,7 +22,7 @@ from refinery.lib.scripts.js.analysis.model import (
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     GLOBAL_VALUE_NAMES,
     ScriptLevelTransformer,
-    a_host_calls_the_binding,
+    a_host_reaches_the_binding,
     access_key,
     binding_has_references,
     extract_literal_value,
@@ -732,7 +732,7 @@ class JsFunctionEvaluator(ScriptLevelTransformer):
         Whether *binding* names a function the caller declared a host invokes, and is one a host could
         actually reach — a top-level declaration under the script execution model.
         """
-        return a_host_calls_the_binding(model, binding, self.options)
+        return a_host_reaches_the_binding(model, binding, self.options)
 
     def _remove_resolved_definitions(self, script: JsScript) -> None:
         removed: set[int] = set()

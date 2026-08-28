@@ -43,7 +43,7 @@ from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     SAME_REALM_GLOBAL_OBJECT_ALIASES,
     BodyProcessingTransformer,
-    a_host_calls_the_binding,
+    a_host_reaches_the_binding,
     collect_identifier_names,
     insert_after_prologue,
     is_binding_site,
@@ -411,10 +411,18 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         Targets are gathered from the pass-start liveness before any mutation. Relocating one binding
         removes no reference to another, and a localization candidate is never a dead-store candidate
         (one is script-scope, the other strictly function-local), so the batch stays mutually consistent.
+
+        Relocation takes the name out of the global scope, so a binding the analyst declared a host
+        reaches by name is left where it stands. The localizer's own eligibility rule keeps a
+        realistic entrypoint out of reach already — a host-observed global holds a value across load
+        and is not overwritten before every read of it — so this is the invariant made structural
+        rather than a case that fires today.
         """
         relocations: dict[int, tuple[JsBlockStatement, list[str]]] = {}
         declarators: list[JsVariableDeclarator] = []
         for binding, function in self.liveness.localizable_bindings():
+            if self._named_host_entrypoint(binding):
+                continue
             body = getattr(function, 'body', None)
             if not isinstance(body, JsBlockStatement):
                 continue
@@ -517,11 +525,11 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
 
     def _named_host_entrypoint(self, binding: Binding) -> bool:
         """
-        Whether *binding* is one the caller declared a host invokes by name. This answers the same
+        Whether *binding* is one the caller declared a host reaches by name. This answers the same
         question reflection does — could code outside the recorded references reach this binding — for the
         case the model cannot see at all, a caller living outside the file.
         """
-        return a_host_calls_the_binding(self.model, binding, self.options)
+        return a_host_reaches_the_binding(self.model, binding, self.options)
 
     def _at_script_scope(self, parent: Node) -> bool:
         """

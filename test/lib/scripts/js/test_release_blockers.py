@@ -33,8 +33,6 @@ import unittest
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
     behavior,
-    deobfuscate_source,
-    host_behavior,
     node_executable,
 )
 from test.lib.scripts.js.ledger import (
@@ -281,59 +279,4 @@ class TestAPropertyWriteThroughAShadowedGlobalAliasSurvives(TestBase):
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
-        )
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestANamedEntrypointIsKeptForTheHost(TestBase):
-    """
-    `refinery.units.scripting.js` takes entrypoint names on its command line, and a name given
-    there is a promise about the output: the host calls the name once the file has loaded, so what
-    it holds must survive, behave as it did, and keep reading its globals rather than folded copies
-    of them, since a host that can reach a name can also have rewritten it. The promise is kept for
-    a function held in a `var` and broken for the two commoner shapes: a function declaration named
-    as an entrypoint is deleted, and a data global named as one is folded into its readers and
-    removed.
-
-    What admits this here is that the contract broken is the unit's own rather than the
-    language's: the input can be any file at all, and the option is one the unit ships. The
-    kept shapes and the module model's half of the contract are stated where these three rows
-    came from, `test.lib.scripts.js.analysis.test_differential`.
-    """
-
-    def assertSameBehavior(
-        self,
-        source: str,
-        *,
-        calls: tuple[str, ...],
-        entrypoints: tuple[str, ...] = (),
-    ):
-        deobfuscated = deobfuscate_source(source, entrypoints=entrypoints)
-        self.assertEqual(
-            host_behavior(source, calls=calls),
-            host_behavior(deobfuscated, calls=calls),
-            F'deobfuscation changed what a host observes; result was:\n{deobfuscated}',
-        )
-
-    @unittest.expectedFailure
-    def test_a_declared_function_named_as_an_entrypoint_is_kept(self):
-        source = 'function handler() { return 5; }'
-        self.assertEqual(deobfuscate_source(source), '')
-        self.assertSameBehavior(source, calls=('handler',), entrypoints=('handler',))
-
-    @unittest.expectedFailure
-    def test_a_helper_an_entrypoint_reaches_is_kept(self):
-        source = (
-            'function help() { console.log("hi!"); return 7; }'
-            ' function handler() { return help(); }'
-        )
-        self.assertEqual(deobfuscate_source(source), '')
-        self.assertSameBehavior(source, calls=('help',), entrypoints=('handler',))
-
-    @unittest.expectedFailure
-    def test_a_data_global_named_as_an_entrypoint_survives_unfolded(self):
-        source = 'var VERSION = 3; console.log(VERSION);'
-        self.assertEqual(
-            deobfuscate_source(source, entrypoints=('VERSION',)),
-            'var VERSION = 3;\nconsole.log(VERSION);',
         )
