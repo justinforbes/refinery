@@ -846,6 +846,51 @@ class TestPs1MembersTheObjectAdapterAddsToEveryValue(TestPs1):
         self.assertEqual(self._deobfuscate(source), source)
 
 
+class TestPs1TheAdapterCountAndLengthThrowUnderStrictModeVersionTwo(TestPs1):
+    """
+    The `Count` and `Length` the object adapter fakes onto a scalar or `$null` are not real members,
+    so `Set-StrictMode -Version 2` turns reading one into a statement-terminating error where the
+    default semantics and `-Version 1` hand back the adapter's value. Measured on 5.1: under
+    `-Version 2` every `Count` and the `Length` of a non-String — `$null.Count`, `$null.Length`,
+    `'AB'.Count`, `(5).Length`, `([char]65).Length` — raises `PropertyNotFoundStrict`, while a real
+    member reads on, a `String`'s own `Length` and an array's own `Count` among them. Folding the
+    fake member to its value therefore hands `-Version 2` a number for a line that never produces
+    one and lets it decide a branch the script never reaches.
+
+    The two `expectedFailure` rows are the gap: the fold has no strict-mode gate. Closing it needs a
+    model of whether `-Version 2` may be armed — the existing
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_may_be_in_force` fires at
+    `-Version 1` too, where the fold is correct — and it must spare the real-member arms, which the
+    three passing rows pin.
+    """
+
+    @unittest.expectedFailure
+    def test_the_count_of_null_is_not_folded_under_strict_mode_v2(self):
+        self._assertKept('Set-StrictMode -Version 2\nWrite-Output $null.Count')
+
+    @unittest.expectedFailure
+    def test_the_count_of_a_scalar_is_not_folded_under_strict_mode_v2(self):
+        self._assertKept("Set-StrictMode -Version 2\nWrite-Output 'AB'.Count")
+
+    def test_the_count_of_null_is_still_folded_under_strict_mode_v1(self):
+        self._assertDeobfuscatesTo(
+            'Set-StrictMode -Version 1\nWrite-Output $null.Count',
+            'Set-StrictMode -Version 1\nWrite-Output 0',
+        )
+
+    def test_the_count_of_a_scalar_is_still_folded_under_strict_mode_v1(self):
+        self._assertDeobfuscatesTo(
+            "Set-StrictMode -Version 1\nWrite-Output 'AB'.Count",
+            'Set-StrictMode -Version 1\nWrite-Output 1',
+        )
+
+    def test_the_real_length_of_a_string_is_still_folded_under_strict_mode_v2(self):
+        self._assertDeobfuscatesTo(
+            "Set-StrictMode -Version 2\nWrite-Output 'AB'.Length",
+            'Set-StrictMode -Version 2\nWrite-Output 2',
+        )
+
+
 class TestPs1ACharacterOfAStringIsACharAndNotAString(TestPs1):
     """
     Measured, `'ABC'[0]` is a `System.Char`: it answers `-is [char]` with True, and reading several
