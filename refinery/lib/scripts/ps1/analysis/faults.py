@@ -705,12 +705,17 @@ class Ps1FaultReach:
         Whether this script may arm strict mode anywhere at all, which makes reading a variable that
         was never set an error instead of a `$null`.
 
-        One consumer, `refinery.lib.scripts.ps1.analysis.effects.expression_cannot_fault`, which is
-        the single place deciding whether a bare variable read can raise. Measured on 5.1: under the
-        default semantics `$unset | ForEach-Object { [void]$_ }` writes nothing and the script runs
-        on, so removing it is invisible; under `Set-StrictMode -Version 1` the same line raises a
-        statement-terminating error that a `catch` and a `trap` both take, so removing it is exactly
-        what `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` exists to refuse.
+        Two consumers, both reading it as the one model of whether the script arms strict mode.
+        `refinery.lib.scripts.ps1.analysis.effects.expression_cannot_fault` is the single place
+        deciding whether a bare variable read can raise before a removal site deletes it;
+        `refinery.lib.scripts.ps1.deobfuscation.constants.Ps1NullVariableInlining` stands its whole
+        pass down where this holds, because a never-assigned read it would rewrite to `$null` is a
+        terminating error under strict mode and the value would decide a branch the script never
+        reaches. Measured on 5.1: under the default semantics `$unset | ForEach-Object { [void]$_ }`
+        writes nothing and the script runs on, so removing it is invisible; under
+        `Set-StrictMode -Version 1` the same line raises a statement-terminating error that a
+        `catch` and a `trap` both take, so removing it is exactly what
+        `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` exists to refuse.
 
         Position is not asked, and the reason is not the one `_stops_on_every_error` gives. Which
         scopes an arming covers is not one rule: `Set-StrictMode` writes the scope it stands in and

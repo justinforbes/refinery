@@ -958,6 +958,12 @@ class Ps1NullVariableInlining(Transformer):
     Replace references to never-assigned variables with `$Null`. Only operates on variables that
     appear in expression contexts where null coercion enables further simplification (arithmetic,
     comparison, cast, assignment value).
+
+    A never-assigned read is `$null` only under the default semantics; under strict mode it is a
+    statement-terminating error instead, so giving it `$null` decides a branch the script never
+    reaches. `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_may_be_in_force`
+    is the one model of whether the script arms it, shared with the removal veto, and the whole
+    pass stands down where it may be in force rather than every substitution deciding it again.
     """
 
     @staticmethod
@@ -985,6 +991,8 @@ class Ps1NullVariableInlining(Transformer):
         return False
 
     def visit(self, node: Node):
+        if model_cache(self, node).faults.strict_mode_may_be_in_force():
+            return
         mutated = _collect_mutated_variables(node)
         for ref in list(node.walk()):
             if not isinstance(ref, Ps1Variable):

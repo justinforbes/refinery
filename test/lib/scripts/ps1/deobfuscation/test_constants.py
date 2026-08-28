@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import unittest
-
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -936,7 +934,6 @@ class TestPs1AnUnsetReadIsNotNullWhereStrictModeIsArmed(TestPs1):
     Windows PowerShell 5.1 raises for the script below and runs neither body, printing nothing.
     """
 
-    @unittest.expectedFailure
     def test_a_branch_on_an_unset_name_is_not_resolved_where_strict_mode_is_armed(self):
         result = self._deobfuscate_iterative(cleandoc(
             """
