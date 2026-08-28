@@ -409,13 +409,20 @@ class Ps1IexInlining(Transformer):
     - `[scriptblock]::Create('CODE')`
     """
 
-    _shadowed: frozenset[str] = frozenset()
-
     def visit(self, node):
-        self._shadowed = model_cache(self, node).closed_world.shadowed_names
         self._inline_statements(node)
         self._inline_expressions(node)
         return None
+
+    def _shadowed_at(self, node) -> frozenset[str]:
+        """
+        The whole-run set of command names the script has taken over, read fresh at *node* rather
+        than snapshotted once for the pass. An `Invoke-Expression` this pass has already inlined can
+        install a `function ForEach-Object`, and a decode pipeline folded later in the same pass
+        must see it or it inlines what 5.1 never runs — the folding and emulator recognizers read
+        the set at the fold point for this reason too. See `extract_foreach_scriptblock`.
+        """
+        return model_cache(self, node).closed_world.shadowed_names
 
     def _inline_statements(self, node):
         for container in list(node.walk()):
@@ -468,11 +475,12 @@ class Ps1IexInlining(Transformer):
         return len(parsed)
 
     def _try_resolve_inline(self, stmt) -> list | None:
-        code = self._try_extract_iex_string(stmt, self._shadowed)
+        shadowed = self._shadowed_at(stmt)
+        code = self._try_extract_iex_string(stmt, shadowed)
         if code is None:
-            code = self._try_extract_piped_iex_string(stmt, self._shadowed)
+            code = self._try_extract_piped_iex_string(stmt, shadowed)
         if code is None:
-            code = self._try_extract_scriptblock_create_string(stmt, self._shadowed)
+            code = self._try_extract_scriptblock_create_string(stmt, shadowed)
         if code is not None:
             return self._try_parse(code)
         return self._try_extract_invoke_command(stmt)
@@ -498,7 +506,7 @@ class Ps1IexInlining(Transformer):
     def _try_inline_expression(self, node: Ps1CommandInvocation) -> Expression | None:
         sb_arg = _try_extract_scriptblock_create_from_statement(node)
         if sb_arg is not None:
-            code = _resolve_to_string(sb_arg, self._shadowed)
+            code = _resolve_to_string(sb_arg, self._shadowed_at(node))
         else:
             if not isinstance(node.name, Ps1StringLiteral):
                 return None
@@ -507,7 +515,7 @@ class Ps1IexInlining(Transformer):
             val = _extract_iex_value(node)
             if val is None:
                 return None
-            code = _resolve_to_string(val, self._shadowed)
+            code = _resolve_to_string(val, self._shadowed_at(node))
         if code is None:
             return None
         parsed = self._try_parse(code)
@@ -538,7 +546,7 @@ class Ps1IexInlining(Transformer):
             return None
         if sb_arg is None:
             return None
-        code = _resolve_to_string(sb_arg, self._shadowed)
+        code = _resolve_to_string(sb_arg, self._shadowed_at(node))
         if code is None:
             return None
         parsed = self._try_parse(code)

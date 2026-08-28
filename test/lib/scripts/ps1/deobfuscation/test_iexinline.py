@@ -298,6 +298,17 @@ class TestPs1AShadowedForeachStageIsNotDecoded(TestPs1):
         self.assertNotIn('Write-Host', result)
         self.assertIn('ReadToEnd', result)
 
+    def test_a_redefinition_an_earlier_inline_installs_is_seen_by_the_later_decode(self):
+        """
+        The `function ForEach-Object` is not written in the source: the same pass inlines the
+        `Invoke-Expression` that installs it before it reaches the decode pipeline, which must still
+        refuse. A shadow set snapshotted once at the start of the pass misses it and decodes anyway.
+        """
+        source = "Invoke-Expression 'function ForEach-Object { \"HIJACK\" }'\n" + self._PIPELINE
+        result = self._deobfuscate(source)
+        self.assertNotIn('Write-Host', result)
+        self.assertIn('ReadToEnd', result)
+
 
 class TestPs1IexInliningOfAnEmptyBlock(TestPs1):
 

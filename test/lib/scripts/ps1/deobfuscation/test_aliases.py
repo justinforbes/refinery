@@ -587,9 +587,9 @@ class TestPs1AScriptThatRedefinesForEachObjectDoesNotRunTheCmdlet(TestPs1):
     def test_a_pipeline_over_a_set_item_function_drive_is_not_folded(self):
         """
         `Set-Item function:ForEach-Object { … }` rebinds through the provider drive and 5.1 runs
-        that body — the script prints `r=H`. The rebinding opens the world rather than entering the
-        shadow set, so the fold gate does not see it. Closing this needs `measure_world` to read the
-        name a provider-path item command binds.
+        that body — the script prints `r=H`. The rebinding opens the world rather than entering
+        the shadow set, so the fold gate does not see it. Closing this needs `measure_world` to
+        read the name a provider-path item command binds.
         """
         result = self._deobfuscate(cleandoc(
             """

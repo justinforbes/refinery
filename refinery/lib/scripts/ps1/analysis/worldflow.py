@@ -166,10 +166,14 @@ class Ps1WorldReach:
         """
         The whole-run set of command names the script takes over, off the leaf model — the fact
         `refinery.lib.scripts.ps1.analysis.values.candidate_types` reads to decide whether a
-        `ForEach-Object` still binds `$_` in the body handed to it. Read unguarded by staleness, as
-        `command_shadowed` already is a line below: a name in the set only makes a caller refuse a
-        fold, which is the safe direction, and a redefinition is a fact about the tree the leaf was
-        measured over whether or not an edit has since moved on.
+        `ForEach-Object` still binds `$_` in the body handed to it.
+
+        The leaf set is returned as measured, without the `_stale` guard the positional queries
+        apply, because a *smaller* set is the unsound direction here: it lets a redefined iterator
+        read as intact, so a wrapper that has fallen behind an edit must never be the one asked.
+        The sole reader takes this off `Ps1ModelCache.world_reach`, which the cache rebuilds on the
+        same version bump, so it is fresh by construction and no stale wrapper reaches this
+        property; a pass must not capture one and read it across its own edits.
         """
         return self._world.shadowed_names
 
