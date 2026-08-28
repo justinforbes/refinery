@@ -367,6 +367,8 @@ OUT_VARIABLE_PARAMETERS = _derive_out_variable_parameters(COMMON_PARAMETERS)
 
 _VALUE_PARAMETERS: dict[str, frozenset[str]] = {}
 _SCRIPTBLOCK_PARAMETERS: dict[str, frozenset[str]] = {}
+_PARAMETER_SETS: dict[str, dict[str, frozenset[str]]] = {}
+_POSITIONAL_SCRIPTBLOCK_SETS: dict[str, frozenset[str]] = {}
 
 _COMMAND_RECORDS: dict[str, dict] = {
     _name.lower(): _record for _name, _record in _COMMAND_TABLE.items()
@@ -424,6 +426,54 @@ def scriptblock_parameters(command: str) -> frozenset[str]:
             names.add(_parameter.lower())
             names.update(_alias.lower() for _alias in _info['aliases'])
         found = _SCRIPTBLOCK_PARAMETERS[command] = frozenset(names)
+    return found
+
+
+#: The set name the engine records for a parameter that belongs to every parameter set of its
+#: command, rather than to any one of them. Every common parameter carries it.
+EVERY_PARAMETER_SET = '__AllParameterSets'
+
+
+def parameter_sets(command: str) -> dict[str, frozenset[str]]:
+    """
+    The parameter sets each parameter of *command* belongs to, keyed by lowercased parameter name
+    and by each of its aliases. Empty for a command the collected surface does not carry.
+
+    5.1 chooses one set from the arguments a call writes, and the same position can mean a different
+    thing in each: `ForEach-Object` has a script block at position 0 of its `ScriptBlockSet` and a
+    member name at position 0 of its `PropertyAndMethodSet`. A caller reading what a positional
+    argument binds needs this to know which set the call is in.
+
+    Looked up and memoized per command for the reason `value_parameters` gives.
+    """
+    command = command.lower()
+    found = _PARAMETER_SETS.get(command)
+    if found is None:
+        table: dict[str, frozenset[str]] = {}
+        for _parameter, _info in _COMMAND_RECORDS.get(command, {}).get('parameters', {}).items():
+            names = frozenset(_set['set'] for _set in _info['sets'])
+            table[_parameter.lower()] = names
+            for _alias in _info['aliases']:
+                table[_alias.lower()] = names
+        found = _PARAMETER_SETS[command] = table
+    return found
+
+
+def positional_scriptblock_sets(command: str) -> frozenset[str]:
+    """
+    The parameter sets of *command* in which the first positional argument binds a parameter
+    declared to take a script block. Empty where the command has no such parameter at all, and a
+    positional block then binds nothing this can name.
+    """
+    command = command.lower()
+    found = _POSITIONAL_SCRIPTBLOCK_SETS.get(command)
+    if found is None:
+        names: set[str] = set()
+        for _parameter, _info in _COMMAND_RECORDS.get(command, {}).get('parameters', {}).items():
+            if _info['type'].rstrip('[]') != 'System.Management.Automation.ScriptBlock':
+                continue
+            names.update(_set['set'] for _set in _info['sets'] if _set['position'] == 0)
+        found = _POSITIONAL_SCRIPTBLOCK_SETS[command] = frozenset(names)
     return found
 
 

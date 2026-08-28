@@ -826,3 +826,11 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_STATEMENT_RUNS_THE_BODY],
             patch.object(effects, '_leaves_a_block_of', lambda site, stmt, faults: False),
             notices='test_a_discarded_pipeline_is_removed_beside_an_unrelated_handler')
+
+    def test_the_parameter_set_a_positional_block_lands_in_is_witnessed(self):
+        # A command picks one parameter set from its arguments, and the first positional argument is
+        # a body in one of them and a method's argument list in another.
+        self._assertWitnessed(
+            [_SCRIPTBLOCK_SLOT],
+            patch.object(blocks, '_selects_a_scriptblock_set', lambda cmd, command: True),
+            notices='test_a_member_name_makes_the_positional_block_an_argument_rather_than_a_body')

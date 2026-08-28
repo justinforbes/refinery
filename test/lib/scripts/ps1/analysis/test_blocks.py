@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import unittest
-
 from test import TestBase
 
 from refinery.lib.scripts.analysis.cycles import CycleModel
@@ -302,14 +300,12 @@ class TestPs1AnIteratingCommandRunsOnlyTheBlocksItIsHandedToRun(TestBase):
         blocks, found = self._blocks("1, 2 | ForEach-Object { 'B' } { 'P' } { 'E' }")
         self.assertEqual([binds_the_pipeline_variable(block) for block in found], [None] * 3)
 
-    @unittest.expectedFailure
     def test_a_member_name_makes_the_positional_block_an_argument_rather_than_a_body(self):
         """
         Measured on 5.1: `1, 2 | ForEach-Object -MemberName ToString { Write-Host 'BLOCK_RAN' }`
         writes the block's own text twice — it is handed to `ToString` as an argument and never run.
-        Telling that from `ForEach-Object -InputObject 5 { Write-Host "P:$_" }`, which does run the
-        block and writes `P:5`, needs the parameter *set* each written name selects, which nothing
-        here reads yet.
+        `ForEach-Object -InputObject 5 { Write-Host "P:$_" }` does run the block and writes `P:5`,
+        so what tells the two apart is the parameter *set* each written name selects.
         """
         blocks, found = self._blocks("1, 2 | ForEach-Object -MemberName ToString { 'x' }")
         self.assertIs(blocks.facts(found[0]).reach, Ps1BlockReach.UNKNOWN)

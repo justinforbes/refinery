@@ -58,13 +58,20 @@ from refinery.lib.scripts.ps1.analysis.naming import (
 from refinery.lib.scripts.ps1.analysis.opaque import writes_nobody_can_attribute
 from refinery.lib.scripts.ps1.ast import (
     binding_key,
+    binds_parameter,
     bound_argument_value,
     free_positional_values,
     resolve_command_name,
 )
-from refinery.lib.scripts.ps1.data import scriptblock_parameters
+from refinery.lib.scripts.ps1.data import (
+    EVERY_PARAMETER_SET,
+    parameter_sets,
+    positional_scriptblock_sets,
+    scriptblock_parameters,
+)
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
+    Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1FunctionDefinition,
     Ps1ScopeModifier,
@@ -199,6 +206,44 @@ _PER_OBJECT_PARAMETERS = frozenset({
 })
 
 
+def _selects_a_scriptblock_set(cmd: Ps1CommandInvocation, command: str) -> bool:
+    """
+    Whether every parameter *cmd* names leaves the call in a parameter set whose first positional
+    argument is a script block the command runs.
+
+    5.1 picks one set from the arguments a call writes, and the same position means a different
+    thing in each. Measured: `1, 2 | ForEach-Object -MemberName ToString { Write-Host 'X' }` writes
+    the block's own text twice, because `-MemberName` selects the set in which the argument after it
+    is the method's argument list rather than a body. `ForEach-Object -InputObject 5 { Write-Host
+    "P:$_" }` writes `P:5`, because `-InputObject` belongs to the scriptblock set as well.
+
+    A parameter that belongs to every set decides nothing, which is what every common parameter is.
+    A name the collected surface does not carry, and a prefix reaching any parameter that excludes
+    the set, both refuse: a wrong grant here calls a value the command passes on a body it runs.
+    """
+    wanted = positional_scriptblock_sets(command)
+    if not wanted:
+        return False
+    table = parameter_sets(command)
+    for argument in cmd.arguments:
+        if not isinstance(argument, Ps1CommandArgument):
+            continue
+        if argument.kind is Ps1CommandArgumentKind.POSITIONAL:
+            continue
+        reached = [
+            sets for parameter, sets in table.items()
+            if binds_parameter(argument.name, parameter)
+        ]
+        if not reached:
+            return False
+        if any(
+            EVERY_PARAMETER_SET not in sets and sets.isdisjoint(wanted)
+            for sets in reached
+        ):
+            return False
+    return True
+
+
 def binds_the_pipeline_variable(block: Ps1ScriptBlock) -> Ps1CommandInvocation | None:
     """
     The invocation whose input `$_` ranges over inside *block*, or `None` where *block* is not a
@@ -218,7 +263,7 @@ def binds_the_pipeline_variable(block: Ps1ScriptBlock) -> Ps1CommandInvocation |
         if bound_argument_value(command, parameter) is block:
             return command
     positional = free_positional_values(command, name)
-    if len(positional) == 1 and positional[0] is block:
+    if len(positional) == 1 and positional[0] is block and _selects_a_scriptblock_set(command, name):
         return command
     return None
 
@@ -234,16 +279,20 @@ def _fills_a_scriptblock_slot(
     untouched, and a `site` is a claim about the first only.
 
     A named slot is decided by the declared parameter type. A positional one is granted to the
-    *first* free positional argument alone, because that is the only position at which a block binds
-    a scriptblock parameter on either of these commands: `ForEach-Object ToString { }` binds
-    `-MemberName` and passes the block to the method as an argument, so a later positional is data
-    however it is written.
+    *first* free positional argument alone, and only where the parameters the call names leave it
+    in a set whose first positional argument is a body — `_selects_a_scriptblock_set`. Three
+    positional blocks are `begin`, `process` and `end`, so a later one is not the first slot; and
+    a call that writes `-MemberName` is in the set where the first slot is a method name.
     """
     for parameter in scriptblock_parameters(command):
         if bound_argument_value(cmd, parameter) is block:
             return True
     positional = free_positional_values(cmd, command)
-    return bool(positional) and positional[0] is block
+    return (
+        bool(positional)
+        and positional[0] is block
+        and _selects_a_scriptblock_set(cmd, command)
+    )
 
 
 def classify_block(block: Ps1ScriptBlock) -> Ps1BlockFacts:
