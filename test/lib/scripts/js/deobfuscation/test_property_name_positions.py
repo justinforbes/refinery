@@ -8,10 +8,14 @@ programs at all while `o.zz` and `{ 'zz': 1 }` are programs about a different pr
 identifier position reads a binding, writes one, or declares one, and a computed key is the ordinary
 read it looks like.
 
-Two positions are both at once, and they are what this module presses on. A shorthand property is
+Three positions are both at once, and they are what this module presses on. A shorthand property is
 one identifier standing for two things — `{ a }` means `{ a: a }` — so a value reaching it has to be
 written out beside the name it may not replace, and a question about which names a program reads has
-to count it. And `__proto__` is the one name for which that expansion is not available:
+to count it. The local half of an export list is the second: `export { a };` reads the binding it
+names — an engine refuses to link the list where nothing declares `a` — while no value may take
+the read's place, because a list exports bindings and never values, so the read is one every
+substitution declines. And `__proto__` is the one name for which the shorthand expansion is not
+available:
 `{ __proto__ }` gives the object an own property of that name, while `{ __proto__: v }` hands the
 value to the object's prototype slot and gives it no such property, so the two spellings are
 different programs, and Node says which is which for a value that is an object and for one that is
@@ -809,6 +813,129 @@ class TestAShorthandKeepsTheDeclarationItReads(TestBase):
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
+        )
+
+
+def _a_module_reporting_it_loaded(module: str) -> str:
+    """
+    *module* with a statement printing `loaded` appended. A module that only declares and exports
+    does nothing an engine reports, and the print is what makes the difference between a module that
+    loads and one that does not an answer rather than a silence on both sides.
+    """
+    return F"{module}\nconsole.log('loaded');\n"
+
+
+#: The one module of `A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES` that also reads what it exports.
+#: The read beside the list is a substitution target and the list is not, so this is the module
+#: whose deobfuscation is not the module itself.
+A_MODULE_READING_WHAT_IT_EXPORTS = 'var a = 1;\nexport { a };\nconsole.log(a);\n'
+
+#: A module that exports a binding it declares, mapped to what Node prints for it. Every one of them
+#: is a module an engine loads, which is the whole of what an export list has to be checked against:
+#: a list compiles only where the module declares what it names.
+A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES = {
+    _a_module_reporting_it_loaded('var a = 1;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('let a = 1;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('const a = 1;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('const a = () => 1;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('let a;\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('var a = 1;\nexport { a as b };'): 'loaded\n',
+    _a_module_reporting_it_loaded('var a = 1, b = 2;\nexport { a, b };'): 'loaded\n',
+    _a_module_reporting_it_loaded('var a = 1;\nexport { a as default };'): 'loaded\n',
+    A_MODULE_READING_WHAT_IT_EXPORTS: '1\n',
+    _a_module_reporting_it_loaded('function a() { return 1; }\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded('class a {}\nexport { a };'): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        "import { format } from 'node:util';\nexport { format };"
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        "var format = 1;\nexport { format } from 'node:util';"
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded('export var a = 1;'): 'loaded\n',
+}
+
+#: The rows of `A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES` whose correct deobfuscation is not the
+#: module itself, mapped to the module a correct tool writes. The read beside the list is
+#: substituted while the declaration stays; and a local nothing reads goes even though a `from`
+#: list spells its name, because that list names the far side of the module boundary, so a rule
+#: reading every list as a local read would be caught keeping it.
+A_MODULE_AN_EXPORT_LIST_DOES_NOT_KEEP_AS_IT_WAS = {
+    A_MODULE_READING_WHAT_IT_EXPORTS: 'var a = 1;\nexport { a };\nconsole.log(1);\n',
+    _a_module_reporting_it_loaded(
+        "var format = 1;\nexport { format } from 'node:util';"
+    ): "export { format } from 'node:util';\nconsole.log('loaded');\n",
+}
+
+
+class TestAnExportListReadsTheBindingItNames(TestBase):
+    """
+    The local half of `export { a };` reads the module's own binding: an engine refuses to link
+    the list where nothing declares `a`, and the refusal is the linker's rather than the parser's,
+    so whoever imports the module gets it as much as whoever runs it. A declaration whose only
+    reader is such a list is therefore live, and substituting a constant into its every other read
+    does not free it either, because no value can stand where the list names it — a list exports
+    bindings and never values, and `export { 1 };` is refused as readily as the export of a name
+    nothing declares.
+
+    The rows put a declaration under an export list in every spelling: each keyword, with an
+    initializer and without, renamed, exported as `default`, two names at once, and read elsewhere
+    besides. The last five are the controls of the opposite kind. Three of them export a name the
+    module declares no local for — a list carrying a `from` clause names a binding on the far
+    side of the module boundary, a list re-exporting an import names what the import statement
+    bound, and an `export var` is one statement and not two — so reading every name in every
+    list as a local read is not this rule either: a constant substituted into the `from` row's
+    list writes `export { 1 } from 'node:util'`. The other two are the function and class
+    declarations.
+    """
+
+    def test_a_module_the_list_alone_reads_comes_back_as_it_was(self):
+        rows = [
+            source for source in A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES
+            if source not in A_MODULE_AN_EXPORT_LIST_DOES_NOT_KEEP_AS_IT_WAS
+        ]
+        self.assertEqual(spelled(rows), rewritten(rows))
+
+    def test_a_substituted_read_and_a_far_side_name_leave_their_own_marks(self):
+        rows = A_MODULE_AN_EXPORT_LIST_DOES_NOT_KEEP_AS_IT_WAS
+        self.assertEqual(spelled_as_expected(rows), rewritten(rows))
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_each_module_still_prints_what_it_printed(self):
+        rows = A_MODULE_THAT_EXPORTS_A_BINDING_IT_DECLARES
+        self.assertEqual(
+            {source: before_and_after(source, module=True) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: A program mentioning the name `a`, mapped to how many times it is written as an identifier and
+#: how many of those occurrences read or write a binding. The declarator is one occurrence that
+#: writes in every row; what varies is the list: the local half of a sourceless list is the one
+#: half of a specifier that reads, the name a binding is exported under is not a read, and a list
+#: carrying a `from` clause reads nothing at all, and neither does the name a re-export invents.
+WHAT_A_NAME_IN_AN_EXPORT_LIST_COUNTS_FOR = {
+    'var a = 1;\nexport { a };\n': (2, 2),
+    'var a = 1;\nexport { a as b };\n': (2, 2),
+    'var a = 1, x = 2;\nexport { x as a };\n': (2, 1),
+    "var a = 1;\nexport { a } from 'node:util';\n": (2, 1),
+    "export * as a from 'node:util';\nvar a = 1;\n": (2, 1),
+}
+
+
+class TestOnlyTheLocalHalfOfAnExportListReads(TestBase):
+    """
+    A specifier has two halves and, where nothing renames, one node: `export { a };` is a single
+    identifier filling both slots, exactly as a shorthand property is, and only the local half is
+    a read. The table counts what a pass asking which names a program reads would be handed, so it
+    says the answer follows the position: the exported name is not a read however it is spelled,
+    and a `from` clause turns the local half into a name on the far side of the module boundary.
+    """
+
+    def test_the_halves_of_a_specifier_are_counted_by_position(self):
+        rows = WHAT_A_NAME_IN_AN_EXPORT_LIST_COUNTS_FOR
+        self.assertEqual(
+            rows,
+            {source: occurrences_of('a', source) for source in rows},
         )
 
 

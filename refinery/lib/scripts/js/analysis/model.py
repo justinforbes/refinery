@@ -488,10 +488,13 @@ def is_use_position(node: JsIdentifier) -> bool:
     """
     Whether an identifier occupies a position where it reads or writes a value, as opposed to naming a
     property, a key, a label, or an import/export specifier. `names_a_property` answers for the four
-    positions that name a property; what is added here is the three that name something else the
-    program cannot refer to — the name a module is re-exported under, a label, and either side of an
-    import or export specifier. Binding sites are not excluded here; `SemanticModel.is_reference` is
-    the binding-aware predicate that also excludes them.
+    positions that name a property; what is added here is the positions that name something else the
+    program cannot refer to — the name a module is re-exported under, a label, either side of an
+    import specifier, and every half of an export specifier but one. The local half of an export list
+    without a `from` clause reads the binding it names, which is why an engine refuses to link
+    `export { a };` where nothing declares `a`; with the clause the same half names a binding of the
+    module the clause spells and nothing local at all. Binding sites are not excluded here;
+    `SemanticModel.is_reference` is the binding-aware predicate that also excludes them.
     """
     p = node.parent
     if p is None:
@@ -506,9 +509,15 @@ def is_use_position(node: JsIdentifier) -> bool:
         JsImportSpecifier,
         JsImportDefaultSpecifier,
         JsImportNamespaceSpecifier,
-        JsExportSpecifier,
     )):
         return False
+    if isinstance(p, JsExportSpecifier):
+        declaration = p.parent
+        return (
+            p.local is node
+            and isinstance(declaration, JsExportNamedDeclaration)
+            and declaration.source is None
+        )
     return True
 
 

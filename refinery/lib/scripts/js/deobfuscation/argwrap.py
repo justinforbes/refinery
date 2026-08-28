@@ -24,7 +24,6 @@ from refinery.lib.scripts import (
 from refinery.lib.scripts.js.analysis.cache import ModelCache, model_cache
 from refinery.lib.scripts.js.analysis.model import (
     Binding,
-    SemanticModel,
     enclosing_operator,
 )
 from refinery.lib.scripts.js.deobfuscation.helpers import (
@@ -35,7 +34,6 @@ from refinery.lib.scripts.js.model import (
     JsAssignmentExpression,
     JsBlockStatement,
     JsCallExpression,
-    JsExportNamedDeclaration,
     JsExpressionStatement,
     JsForInStatement,
     JsForOfStatement,
@@ -109,32 +107,6 @@ def _is_expression_wrapper(node: JsFunctionDeclaration) -> bool:
     return True
 
 
-def _bindings_an_export_list_reads(model: SemanticModel, root: Node) -> set[int]:
-    """
-    The bindings the export lists of *root* read, less any list that names the file to read them
-    from, as the identities of the binding objects.
-
-    `export { W }` is a read of `W` that `refinery.lib.scripts.js.analysis.model.is_use_position`
-    does not record, so the model reports the binding as one nothing outside its own declaration
-    names. Only a list carrying a source, `export { W } from 'm.js'`, names something across the
-    module boundary and nothing local at all.
-
-    Which binding a list names is asked of the model rather than of the name it spells, for the
-    reason the module docstring gives: a file that exports one `W` says nothing about a second `W`
-    declared inside a function no export can reach.
-    """
-    bindings: set[int] = set()
-    for node in root.walk():
-        if not isinstance(node, JsExportNamedDeclaration) or node.source is not None:
-            continue
-        for specifier in node.specifiers:
-            if not isinstance(local := specifier.local, JsIdentifier):
-                continue
-            if (binding := model.lookup(local.name, model.scope_of(local))) is not None:
-                bindings.add(id(binding))
-    return bindings
-
-
 def _stands_as_a_statement_of_a_function_or_the_script(node: JsFunctionDeclaration) -> bool:
     """
     Whether *node* is a statement of the script or of a function body, which is the only placement
@@ -192,7 +164,10 @@ def _the_calls_that_reach(
       are looked through, which is what `refinery.lib.scripts.js.analysis.model.enclosing_operator`
       and `refinery.lib.scripts.js.model.strip_parens` are for;
       `refinery.lib.scripts.js.analysis.model.is_invocation_target` answers a wider question than
-      this one, counting the tag of a tagged template, which no expansion here is written for.
+      this one, counting the tag of a tagged template, which no expansion here is written for. An
+      export list naming the wrapper is such a reference — the local half of a sourceless list
+      reads the binding — and is never the callee of a call, so an exported wrapper is refused
+      here without being looked for separately.
 
     A reference that is not an identifier stands in for an access made through an object aliasing
     the binding, which is not a name this pass can follow.
@@ -248,12 +223,11 @@ def _admitted_wrappers(cache: ModelCache, root: JsScript, options: object) -> li
     if not shaped:
         return []
     model = cache.model
-    exported = _bindings_an_export_list_reads(model, root)
     wrappers: list[_Wrapper] = []
     for node in shaped:
         assert node.id is not None
         binding = model.binding_of(node.id)
-        if binding is None or id(binding) in exported:
+        if binding is None:
             continue
         if a_host_calls_the_binding(model, binding, options):
             continue

@@ -71,6 +71,7 @@ from refinery.lib.scripts.js.model import (
     JsClassDeclaration,
     JsClassExpression,
     JsConditionalExpression,
+    JsExportSpecifier,
     JsForInStatement,
     JsForOfStatement,
     JsFunctionDeclaration,
@@ -1635,10 +1636,16 @@ def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
     `is_reference` only approximates it, in the permissive direction.
 
     A name the program cannot refer to is not such a read and is left alone. `is_use_position` says
-    which positions those are — the four that spell a property, and the label, the re-export name
-    and the specifier halves besides — and substituting into one of them is not a rename but a
-    different program: a replacement with no identifier spelling leaves text no engine parses
-    (`o.5`, `{ -2: 1 }`), and a numeral put where a label stood leaves `5: while (0) break 5;`.
+    which positions those are — the four that spell a property, and the label, the import specifier
+    halves, the re-export name and the name an export list exports under besides — and substituting
+    into one of them is not a rename but a different program: a replacement with no identifier
+    spelling leaves text no engine parses (`o.5`, `{ -2: 1 }`), and a numeral put where a label
+    stood leaves `5: while (0) break 5;`.
+
+    The local half of an export list without a `from` clause is a read that predicate does record,
+    and still no slot a replacement can stand in, because a list exports bindings and never values:
+    `export { 1 };` is a module no engine links. It is declined here instead, which is what keeps
+    the declaration the list reads alive under an inliner that substitutes every read it can.
 
     A shorthand property is the one position that is both at once. `{ a }` means `{ a: a }`, so the
     read is the value half and the key must keep the name it wrote; the property is written out in
@@ -1661,6 +1668,8 @@ def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
     """
     parent = node.parent
     if not is_use_position(node):
+        return False
+    if isinstance(parent, JsExportSpecifier):
         return False
     if isinstance(parent, JsProperty) and parent.shorthand:
         if parent.computed or parent.value is not node:
