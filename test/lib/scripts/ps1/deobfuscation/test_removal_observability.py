@@ -13,11 +13,10 @@ class TestPs1TheSuccessVariableObservesACallThatRan(TestPs1):
     """
     Every command that runs writes `$?`, so a call whose own output nobody reads is still observable
     to a later read of that variable. `Ps1CommandModel.reads_command_success` answers whether the
-    script holds one, and the pass that removes an inert function together with its calls does not
-    ask it.
+    script holds one, and the pass that removes an inert function together with its calls keeps the
+    group whole where it does.
     """
 
-    @unittest.expectedFailure
     def test_a_call_removed_between_a_failure_and_a_read_of_the_success_variable_is_kept(self):
         self._assertKept(F"""
             function K {{ }}
@@ -106,11 +105,11 @@ class TestPs1ACallAboveItsDefinitionNamesNoCommand(TestPs1):
     """
     A `function` statement binds its name when it runs, so a call written above it resolves against
     whatever stood there before — nothing, in a script that defines the name once. 5.1 answers such
-    a call with a terminating `CommandNotFoundException`, which ends the script, so the statements
-    below it never run. Removing the pair lets them run.
+    a call with a `CommandNotFoundException`, which fails without ending the script and leaves `$?`
+    at false, so a later read of `$?` observes the failure. Removing the call lets that read report
+    the success that stood before it.
     """
 
-    @unittest.expectedFailure
     def test_a_call_written_above_the_only_definition_of_its_name_is_kept(self):
         self._assertKept(F"""
             K

@@ -1460,7 +1460,7 @@ FOLDS: dict[str, str] = {
     "function K { param([int] $x = '42') }; K; Write-Host 'A'":
         "Write-Host 'A'",
     "function K { $Null = 1 }; Write-Error 'e'; K; Write-Host $?":
-        "Write-Error 'e'\nWrite-Host $?",
+        "function K {}\nWrite-Error 'e'\nK\nWrite-Host $?",
     'function K { $Null = 1 }; K; Write-Host ($function:K -ne $Null)':
         'Write-Host ($function:K -NE $Null)',
     "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'":
@@ -1468,7 +1468,7 @@ FOLDS: dict[str, str] = {
     "function vnMTH { $Null = 1 }; vnMTH; $Null = (Get-Command *vnMT*).Name; Write-Host 'A'":
         "$Null = (Get-Command *vnMT*).Name\nWrite-Host 'A'",
     'K; function K { $Null = 1 }; Write-Host $?':
-        'Write-Host $?',
+        'K\nfunction K {}\nWrite-Host $?',
     'function K { $Null = 1 }; K; $b = { K }; Write-Host $b':
         '$b = {}\nWrite-Host $b',
     'function Measure-Object { $Null = 1 }; Measure-Object; 1, 2, 3 | measure':

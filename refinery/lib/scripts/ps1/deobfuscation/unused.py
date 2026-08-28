@@ -488,9 +488,16 @@ class Ps1JunkStatementRemoval(Transformer):
         another group's withdrawal is caught too; it terminates because the batch only shrinks.
         `pruning_erases_body` is asked *before* any of this, against the full set, because it is
         permissive in the survivors and a withdrawal is a veto by another name.
+
+        A call site that runs sets `$?`, so removing one is observable to a later read of that
+        variable even where the call's own output is not — the exposure
+        `Ps1CommandModel.reads_command_success` already answers for the alias drive. A group
+        carrying call statements is therefore kept whole where the script reads `$?`; a definition
+        alone is transparent to the flag and drops regardless.
         """
         if not graph.is_readable:
             return
+        reads_success = model_cache(self, node).commands.reads_command_success()
         groups: dict[str, list[Node]] = {}
         removable_definitions: set[Node] = set()
         for key in graph.defined_names:
@@ -504,6 +511,8 @@ class Ps1JunkStatementRemoval(Transformer):
                 continue
             call_statements = self._inert_call_statements(graph, key)
             if call_statements is None:
+                continue
+            if call_statements and reads_success:
                 continue
             groups[key] = [*call_statements, *removable_here]
             removable_definitions.update(removable_here)

@@ -317,10 +317,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'runs the conversion its type constraint names and `abc` has none, so every call raises '
         'before the body would run. The fault is the binder\'s, and an inert body says nothing '
         'about it.',
-    "function K { $Null = 1 }; Write-Error 'e'; K; Write-Host $?":
-        'The call is removed, and with it the write to `$?` that a command performs by running. '
-        'The snippet reports `True` because `K` succeeded after the failure; the output reports '
-        '`False` because the failure is now the last thing that ran.',
     'function K { $Null = 1 }; K; Write-Host ($function:K -ne $Null)':
         'The definition is removed although the script reads it back out of the function table. '
         '`Ps1CommandModel.introspected_names` collects the `alias:` namespace only, so the '
@@ -331,10 +327,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'matches nothing writes a `CommandNotFoundException` to the error stream whatever is done '
         'with the result, so the output writes an error record the snippet does not. A pattern '
         'that matches nothing writes none, which is the neighbouring `*vnMT*` row.',
-    'K; function K { $Null = 1 }; Write-Host $?':
-        'The pair is removed although the call stands above the only definition of its name, so '
-        'nothing is bound when it runs. 5.1 answers it with a terminating `CommandNotFoundException` '
-        'and the script stops; the output runs to completion and reports `True`.',
     'function K { $Null = 1 }; K; $b = { K }; Write-Host $b':
         'The call inside the stored block is removed along with the definition, but a `ScriptBlock` '
         'renders as its own source text, so the block the snippet writes out is no longer the block '
