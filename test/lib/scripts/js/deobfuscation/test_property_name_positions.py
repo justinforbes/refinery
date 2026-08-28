@@ -32,7 +32,12 @@ import unittest
 from typing import Iterable
 
 from test import TestBase
-from test.lib.scripts.js.analysis.differential import behavior, node_executable
+from test.lib.scripts.js.analysis.differential import (
+    behavior,
+    deobfuscate_source,
+    module_graph_behavior,
+    node_executable,
+)
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 from test.lib.scripts.js.ledger import (
     before_and_after,
@@ -1068,6 +1073,160 @@ class TestOnlyTheLocalHalfOfAnExportListReads(TestBase):
         self.assertEqual(
             rows,
             {source: occurrences_of('a', source) for source in rows},
+        )
+
+
+#: A module exporting a binding through the declaration itself rather than a list, mapped to what
+#: Node prints for it. `export var a` ties `a` to the outside in the declaration, so no list names
+#: it and the specifier read that keeps the list form alive has nothing to attach to; the fact has
+#: to be the binding's own. Every keyword is here, a function and a class and a default one, the
+#: binding relocation would move into the one function writing it, the write nothing in the module
+#: reads back, and the const whose one reader is folded away.
+A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION = {
+    _a_module_reporting_it_loaded('export let b = 5;'): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        export function g() { return 3; }
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded('export class K {}'): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        export default function h() { return 4; }
+        """
+    ): 'loaded\n',
+    _a_module_reporting_it_loaded(
+        """
+        export var a;
+        a = 1;
+        """
+    ): 'loaded\n',
+    inspect.cleandoc(
+        """
+        export var a;
+        function f() { a = 2; return a; }
+        console.log(f());
+        """
+    ): '2\n',
+    inspect.cleandoc(
+        """
+        export const c = 7;
+        console.log(c);
+        """
+    ): '7\n',
+}
+
+#: The one row of `A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION` whose correct deobfuscation is not
+#: the module itself: the const's reader is folded to the value, while the export declaration stays,
+#: because an importer reads the binding it names.
+A_DECLARATION_EXPORT_INLINES_ITS_READERS = {
+    inspect.cleandoc(
+        """
+        export const c = 7;
+        console.log(c);
+        """
+    ): inspect.cleandoc(
+        """
+        export const c = 7;
+        console.log(7);
+        """
+    ),
+}
+
+#: A module whose exported binding is written and never read again within it, and the importer that
+#: reads that binding out of it. The module prints `1` and the importer prints the `1` the write
+#: stored; a tool that drops the write as dead leaves the importer reading `undefined`, which no
+#: single-file oracle can see, because the module itself reads `a` nowhere.
+A_MODULE_WHOSE_EXPORTED_WRITE_AN_IMPORTER_READS = inspect.cleandoc(
+    """
+    export var a;
+    a = 1;
+    console.log(1);
+    """
+)
+AN_IMPORTER_READING_THE_EXPORTED_WRITE = inspect.cleandoc(
+    """
+    import { a } from './lib.mjs';
+    console.log(a);
+    """
+)
+
+
+class TestAnExportDeclarationKeepsTheBindingItExports(TestBase):
+    """
+    A declaration written under an export ties the binding it declares to the outside: an importer
+    reads its value once the module has run, so the declaration must stay where it stands, keep the
+    writes that decide that value, and never be relocated out of module scope. This is the export
+    list's rule stated for the declaration half, where there is no specifier and so no read for the
+    fact to ride on — it is a fact of the binding itself.
+
+    The rows put the rule in every declaration shape. Most come back untouched: a `let` with an
+    initializer, a function, a class, a default-exported function, and the write to a `var` the
+    module never reads back, which a dead-store sweep would drop although an importer reads it. The
+    `var` whose every reference sits in one function would be relocated into that function, leaving
+    an `export` naming a binding the module no longer declares, and stays put here. The `const` is
+    the one row that changes: its reader is folded to the value like any other, while the export
+    declaration is kept, since removing it would strand the export.
+    """
+
+    def test_a_module_that_only_exports_comes_back_as_it_was(self):
+        rows = [
+            source for source in A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION
+            if source not in A_DECLARATION_EXPORT_INLINES_ITS_READERS
+        ]
+        self.assertEqual(spelled(rows), rewritten(rows))
+
+    def test_an_inlined_reader_leaves_the_export_declaration_standing(self):
+        rows = A_DECLARATION_EXPORT_INLINES_ITS_READERS
+        self.assertEqual(spelled_as_expected(rows), rewritten(rows))
+
+    def test_every_rewritten_row_is_a_row_of_the_table(self):
+        self.assertLessEqual(
+            set(A_DECLARATION_EXPORT_INLINES_ITS_READERS),
+            set(A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION),
+        )
+
+    def test_the_module_model_hands_back_the_same_modules(self):
+        rows = A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION
+        rewrites = A_DECLARATION_EXPORT_INLINES_ITS_READERS
+        self.assertEqual(
+            {source: printed(rewrites.get(source, source)) for source in rows},
+            rewritten_as_modules(rows),
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_each_module_still_prints_what_it_printed(self):
+        rows = A_MODULE_THAT_EXPORTS_THROUGH_ITS_DECLARATION
+        self.assertEqual(
+            {source: before_and_after(source, module=True) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_each_expected_module_runs_the_way_the_module_it_replaces_does(self):
+        rows = A_DECLARATION_EXPORT_INLINES_ITS_READERS
+        self.assertEqual(
+            {source: behavior(source, module=True) for source in rows},
+            {source: behavior(expected, module=True) for source, expected in rows.items()},
+        )
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_the_exported_write_is_read_by_an_importer_after_the_fold(self):
+        module = A_MODULE_WHOSE_EXPORTED_WRITE_AN_IMPORTER_READS
+        importer = AN_IMPORTER_READING_THE_EXPORTED_WRITE
+        agreed = ('1\n1\n', None)
+        self.assertEqual(
+            (
+                module_graph_behavior({'main.mjs': importer, 'lib.mjs': module}, 'main.mjs'),
+                module_graph_behavior(
+                    {
+                        'main.mjs': importer,
+                        'lib.mjs': deobfuscate_source(module, module=True),
+                    },
+                    'main.mjs',
+                ),
+            ),
+            (agreed, agreed),
         )
 
 

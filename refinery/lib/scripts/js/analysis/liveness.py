@@ -164,14 +164,15 @@ class LivenessModel:
         any read (so a value carried across calls or from load is never observed), it has no initializer
         whose load-time effect the move would strand, no reference reaches it through a global-object
         alias member (`globalThis.x`, which would no longer find it once it leaves the global object),
-        and the program keeps no reflection surface that could read it by name. Relocating it tightens a
-        pseudo-global into the local it behaves as.
+        it is not exported (an importer reads its value where the module leaves it, which a body local
+        cannot answer), and the program keeps no reflection surface that could read it by name.
+        Relocating it tightens a pseudo-global into the local it behaves as.
         """
         if self.model.has_reflection_surface():
             return None
         if binding.kind is not BindingKind.VAR or binding.scope is not self.model.root_scope:
             return None
-        if binding.has_member_reference:
+        if binding.exported or binding.has_member_reference:
             return None
         if self._has_initializer(binding):
             return None

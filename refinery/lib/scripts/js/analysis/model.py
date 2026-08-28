@@ -287,6 +287,13 @@ class Binding:
     #: and this says the one thing they cannot: that a walk which finds a name only where the text
     #: spells it is looking at less than the whole program. Only a global is ever carried this way.
     reachable_through_a_handed_object: bool = False
+    #: Whether the binding is exported, so an importer observes its value across the module boundary
+    #: after the module runs. Like the two flags above, it names an observer no reading of the text
+    #: reaches: its declaration must be kept and never relocated out of module scope, and a write to
+    #: it is never a dead store, because the final value is read from outside. `export var a`,
+    #: `export function`/`class`, and the local half of a sourceless `export { a }` all set it; a
+    #: `from`-clause list and a re-export name a binding of another module and set nothing here.
+    exported: bool = False
 
     def note_reference_from(self, scope: Scope | None) -> None:
         """
@@ -331,13 +338,14 @@ class Binding:
     @property
     def is_dead(self) -> bool:
         """
-        Whether no use observes the binding's value: it is read through no resolved reference and named
-        inside no dynamic scope. Definitions of a dead binding can be removed if they carry no other
-        side effect (which the caller decides). A name a `with` body could read is not dead even though
-        `reads` is empty — the dynamic reference may observe it at runtime — so removers need not rely on
-        a separate reflection gate to keep such a binding.
+        Whether no use observes the binding's value: it is read through no resolved reference, named
+        inside no dynamic scope, and not exported. Definitions of a dead binding can be removed if they
+        carry no other side effect (which the caller decides). A name a `with` body could read is not
+        dead even though `reads` is empty — the dynamic reference may observe it at runtime — nor is an
+        exported one, whose value an importer reads across the module boundary, so removers need not
+        rely on a separate reflection gate to keep such a binding.
         """
-        return not self.reads and not self.dynamic_refs
+        return not self.reads and not self.dynamic_refs and not self.exported
 
     @property
     def has_indefinite_write(self) -> bool:
@@ -2212,6 +2220,48 @@ class SemanticModel:
         self._record_def_use_references()
         self._record_arguments_alias_references()
         self._record_global_object_alias_references()
+        self._record_exports()
+
+    def _record_exports(self):
+        """
+        Flag every binding an `export` ties to the outside as `Binding.exported`. A declaration
+        written under an export (`export var a`, `export function`/`class`, and `export default` of a
+        named function or class) exports the binding it declares; a sourceless list (`export { a }`,
+        `export { a as q }`) exports the binding each specifier's local half names. A list carrying a
+        `from` clause and a re-export name a binding of the module the clause spells, nothing local,
+        and are passed over here.
+        """
+        for node in self.root.walk():
+            if isinstance(node, JsExportNamedDeclaration):
+                if node.declaration is not None:
+                    self._mark_declaration_exported(node.declaration)
+                elif node.source is None:
+                    for specifier in node.specifiers:
+                        if isinstance(specifier.local, JsIdentifier):
+                            self._mark_binding_exported(self.resolve(specifier.local))
+            elif isinstance(node, JsExportDefaultDeclaration):
+                self._mark_declaration_exported(node.declaration)
+
+    def _mark_declaration_exported(self, declaration: Node | None):
+        """
+        Flag the bindings a declaration written under an export declares. A `var`/`let`/`const`
+        exports every name its declarators bind, descending through destructuring; a function or
+        class declaration exports its own name. An expression under `export default` declares no
+        binding and is read like any other value.
+        """
+        if isinstance(declaration, JsVariableDeclaration):
+            for declarator in declaration.declarations:
+                if isinstance(declarator, JsVariableDeclarator):
+                    for ident in pattern_identifiers(declarator.id):
+                        self._mark_binding_exported(self.binding_of(ident))
+        elif isinstance(declaration, (JsFunctionDeclaration, JsClassDeclaration)):
+            if isinstance(declaration.id, JsIdentifier):
+                self._mark_binding_exported(self.binding_of(declaration.id))
+
+    @staticmethod
+    def _mark_binding_exported(binding: Binding | None):
+        if binding is not None:
+            binding.exported = True
 
     def _record_def_use_references(self):
         """
