@@ -647,43 +647,47 @@ class TestADeclarationReadThroughALocalAliasIsStillRead(TestBase):
     """
 
 
-#: A classic script handing the global object to a function that writes a property of it, mapped to
-#: the behavior a host gives it. The object is spelled both ways a top level may spell it.
-THE_GLOBAL_OBJECT_HANDED_TO_A_CALL = {
-    'the top-level this': Program(
+#: A classic script handing the global object to a call from inside a function body, mapped to the
+#: behavior a host gives it. Every row spells the object as the `this` of a function nothing calls as
+#: a method, which §10.2.1.2 makes the global object for the duration of the call.
+THE_GLOBAL_OBJECT_A_CALL_SUPPLIES_HANDED_ON = {
+    'a write through it': Program(
         a_program("""
             var q = 1;
             function a(g, k) { g[k] = 2; }
-            a(this, 'q');
+            function f() { a(this, 'q'); }
+            f();
             console.log(q);
             """),
         prints('2'),
         Reading.SCRIPT,
     ),
-    'globalThis': Program(
+    'a read through it': Program(
         a_program("""
             var q = 1;
-            function a(g, k) { g[k] = 2; }
-            a(globalThis, 'q');
-            console.log(q);
+            function a(g, k) { console.log(g[k]); }
+            function f() { a(this, 'q'); }
+            f();
             """),
-        prints('2'),
+        prints('1'),
         Reading.SCRIPT,
     ),
 }
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
-@_one_expected_failure_per_program(THE_GLOBAL_OBJECT_HANDED_TO_A_CALL)
-class TestTheGlobalObjectHandedToACallMayBeWrittenThrough(TestBase):
+@_one_expected_failure_per_program(THE_GLOBAL_OBJECT_A_CALL_SUPPLIES_HANDED_ON)
+class TestAReceiverACallSuppliesMayBeHandedOn(TestBase):
     """
-    A call that is handed the global object may write any property of it, and a top-level
-    declaration of a classic script is such a property. The model reads a write of a global property
-    off the spelling of the base at the write, so a write whose base is a parameter holding the
-    object is one it never sees, and the declaration keeps the value its initializer gave it.
+    A function called with no receiver is given the global object as its `this`, and passing that on
+    hands a second call every global the file declares. The references such a hand-over makes are
+    recorded — `test.lib.scripts.js.deobfuscation.test_global_handed_to_a_call` states that law — but
+    only for the spellings the text settles: an unshadowed alias, and the `this` a script's top level
+    holds. Which receiver reaches a body is not decided anywhere, so a `this` written inside a
+    function is not admitted, and a hand-over spelled with one is recorded nowhere.
 
-    Nothing throws and nothing is left half-rewritten: the read is folded to the value the
-    declaration held, and the program comes back printing a different number. The two rows are one
-    defect asked of the two spellings a top level has for the object, so that a fix reading only the
-    name is reported as reaching one of them.
+    Admitting every `this` is measured, not assumed, and it is what this entry costs: obfuscator.io's
+    self-defending wrapper passes its own `this` to a call, and a run that took that for the global
+    object leaves `test_obfuscated_fizzbuzz_01` at twenty times its deobfuscated size. Closing this
+    needs the receiver a call supplies, which nothing answers today.
     """

@@ -507,14 +507,21 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
 
     def _reflection_reachable(self, binding: Binding | None) -> bool:
         """
-        Whether reflection could read *binding* by name without a reference the model records, so its
-        declaration and assignments must be kept even when no static reference remains. A function-local
-        is at risk only from a `with` or direct `eval` inside its own function; a global, from any
-        surface. The model decides; a `None` binding (a synthesized node the model never saw) is treated
-        as not reachable, matching the surrounding removal logic.
+        Whether code this pass cannot read could name *binding*, so its declaration and assignments
+        must be kept even when no static reference remains. A function-local is at risk only from a
+        `with` or direct `eval` inside its own function; a global, from any surface, from a caller
+        outside the file, and from a body the file hands the global object to.
+
+        The last of those has references the model does record, and they keep everything reached
+        through a name the text spells. What they cannot reach is the reachability walk over function
+        declarations, which finds a function only where a statement names it, so the fact is read
+        here as well. The model decides all three; a `None` binding (a synthesized node the model
+        never saw) is treated as not reachable, matching the surrounding removal logic.
         """
         if binding is None:
             return False
+        if binding.reachable_through_a_handed_object:
+            return True
         if self._named_host_entrypoint(binding):
             return True
         return self.model.reflection_can_reach(binding)

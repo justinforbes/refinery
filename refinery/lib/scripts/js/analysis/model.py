@@ -243,6 +243,13 @@ class ContainerRole(enum.Enum):
     ESCAPE       = 'escape'        # noqa  any other use, through which the container could be aliased
 
 
+#: What a binding's reference lists hold. A reference is ordinarily the identifier naming the
+#: binding; where an object aliases it there is no such identifier, and the node the program reached
+#: the object through stands in — a member access for `globalThis.g` and for `arguments[0]`, and the
+#: `this` of a script's top level where the object itself is handed to a call.
+ReferenceNode = JsIdentifier | JsMemberExpression | JsThisExpression
+
+
 @dataclass(eq=False)
 class Binding:
     """
@@ -263,10 +270,10 @@ class Binding:
     kind: BindingKind
     scope: Scope
     declarations: list[JsIdentifier] = field(default_factory=list)
-    reads: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
-    writes: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
+    reads: list[ReferenceNode] = field(default_factory=list)
+    writes: list[ReferenceNode] = field(default_factory=list)
     dynamic_refs: list[JsIdentifier] = field(default_factory=list)
-    indefinite_writes: list[JsIdentifier | JsMemberExpression] = field(default_factory=list)
+    indefinite_writes: list[ReferenceNode] = field(default_factory=list)
     captured: bool = False
     #: Whether the call writes this binding before any statement of its scope runs. A `var` of a
     #: parameter's name is the one shape that does: the body's name starts out holding the argument,
@@ -274,6 +281,11 @@ class Binding:
     #: no node for that write - the call makes it, not anything in the text - so it can be neither a
     #: `writes` nor an `indefinite_writes` entry, both of which every consumer orders by position.
     written_at_entry: bool = False
+    #: Whether the program hands a call the object that carries this binding, so a body no reading of
+    #: the text follows can name it. The references such a call may make are recorded like any other,
+    #: and this says the one thing they cannot: that a walk which finds a name only where the text
+    #: spells it is looking at less than the whole program. Only a global is ever carried this way.
+    reachable_through_a_handed_object: bool = False
 
     def note_reference_from(self, scope: Scope | None) -> None:
         """
@@ -535,7 +547,7 @@ def pattern_identifiers(target: Node | None) -> Iterator[JsIdentifier]:
         yield from pattern_identifiers(target.argument)
 
 
-def reference_role(node: JsIdentifier | JsMemberExpression) -> Role:
+def reference_role(node: ReferenceNode) -> Role:
     """
     Classify how a reference touches its binding: a plain read, a write-only target (the left of a
     simple `=`, including inside a destructuring pattern or a destructuring default, or a
@@ -543,9 +555,10 @@ def reference_role(node: JsIdentifier | JsMemberExpression) -> Role:
     of which keeps the name live as a read rather than overwriting it outright). The shared
     `_governing_target` climb looks through destructuring containers, default patterns, and
     parentheses, so a target nested in a pattern or a grouping (`[x = 9] = xs`, `(x)++`, `(o) = v`) is
-    still recognized as a write. The reference is usually an identifier, but the same rules classify a
-    member access on a global-object alias (`globalThis.g`, `globalThis.g = ...`) against the global it
-    denotes, so the def-use pass records such an access as the read or write it is.
+    still recognized as a write. The reference is usually an identifier, but the same rules classify
+    the node an object aliasing the binding was reached through — a member access on a global-object
+    alias (`globalThis.g`, `globalThis.g = ...`), and the global object itself where a call is handed
+    it — so the def-use pass records each as the read or write it is.
     """
     governor, target = _governing_target(node)
     if isinstance(governor, JsAssignmentExpression) and strip_parens(governor.left) is target:
@@ -649,7 +662,7 @@ def tolerates_unresolvable(node: Node) -> bool:
     return _is_unary_operand(enclosing_operator(node), node, _UNRESOLVABLE_TOLERANT_OPERATORS)
 
 
-def container_reference_role(node: JsIdentifier | JsMemberExpression) -> ContainerRole:
+def container_reference_role(node: ReferenceNode) -> ContainerRole:
     """
     Classify how the reference *node* touches the container value (object or array) its binding holds.
     A member access based on *node* is a `MEMBER_READ` unless the outermost member of the chain it
@@ -1294,6 +1307,19 @@ def _enclosing_member_access(node: Node) -> JsMemberExpression | None:
     return None
 
 
+def _is_call_argument(node: Node) -> bool:
+    """
+    Whether *node* is written as an argument of a call or a `new`, so that evaluating the call hands
+    what it denotes to a body this walk does not read. The callee position is not one: a call on the
+    global object reaches the object as a receiver, which is the question
+    `may_be_global_object_base` answers, and a call *of* it throws.
+    """
+    governor = enclosing_operator(node)
+    if not isinstance(governor, (JsCallExpression, JsNewExpression)):
+        return False
+    return any(strip_parens(argument) is node for argument in governor.arguments)
+
+
 _IDENTITY_OPERATORS = frozenset({'typeof', 'void', '!'})
 """
 The unary operators that take their operand to a type name or a truth value without entering the
@@ -1592,11 +1618,11 @@ class SemanticModel:
 
     def references(
         self, binding: Binding, *, exclude: Node | None = None,
-    ) -> list[JsIdentifier | JsMemberExpression]:
+    ) -> list[ReferenceNode]:
         """
         Every reference (read or write) bound to *binding*, optionally omitting those that lie within
-        the subtree of *exclude*. Each is a referencing identifier except the member-expression write
-        site of a global written through an alias (see `Binding`).
+        the subtree of *exclude*. Each is a referencing identifier except where an object aliasing the
+        binding stands in for one (see `Binding`).
         """
         nodes = binding.reads + binding.writes
         if exclude is None:
@@ -2164,6 +2190,7 @@ class SemanticModel:
         self._create_implicit_globals()
         self._record_def_use_references()
         self._record_arguments_alias_references()
+        self._record_global_object_alias_references()
 
     def _record_def_use_references(self):
         for node in self.root.walk():
@@ -2452,18 +2479,73 @@ class SemanticModel:
                     if may_write:
                         self._record_alias_reference(binding, site, Role.WRITE)
 
+    def _record_global_object_alias_references(self):
+        """
+        Record, against every binding a classic script's global object carries, the references a
+        call may make through the object once it is handed one. `a(globalThis, 'q')` and `a(this,
+        'q')` both give `a` an object whose properties are the script's top-level declarations, and
+        a body that writes one of them writes the declaration — which no identifier in the text
+        names, so the identifier walk sees nothing.
+
+        This is `_record_arguments_alias_references` for the other object that aliases bindings, and
+        the two record the same way: a read of every binding, so a declaration whose only use is
+        through the object is not removed, and an indefinite write of every one, so a fold does not
+        carry a value across a write the callee made. Which properties the callee touches is not
+        decided here and every binding is admitted, for the reason the argument list is admitted
+        whole — a value only some of them can hold is not a definition of any of them.
+
+        The object is recognized by `_denotes_the_global_object`, so only the `this` a script's top
+        level holds is one. A `this` inside a function is the receiver its call supplied, and
+        admitting it costs every fold in a file that hands one to anything: obfuscator.io's
+        self-defending wrapper passes its own `this` to a call, and a run that took it for the
+        global object leaves that sample twenty times its deobfuscated size. `may_be_global_object_base`
+        admits every `this` for the opposite reason — there the wrong answer only keeps a
+        declaration alive, and here it freezes the file.
+
+        Only an argument is read. A `return` of the object hands it to a caller the text still
+        shows, and taking that for an escape refuses `refinery.lib.scripts.js.deobfuscation
+        .globalfinder` the very function whose removal makes the object nameable, leaving the two
+        obfuscated samples that use a finder at their original size.
+        """
+        bindings = list(self.root_scope.bindings.values())
+        if not bindings:
+            return
+        for node in self.root.walk():
+            if not isinstance(node, (JsIdentifier, JsThisExpression)):
+                continue
+            if not self._denotes_the_global_object(node) or not _is_call_argument(node):
+                continue
+            for binding in bindings:
+                binding.reachable_through_a_handed_object = True
+                self._record_alias_reference(binding, node, Role.READWRITE)
+
+    def _denotes_the_global_object(self, node: Node) -> bool:
+        """
+        Whether *node*, standing where a value is taken rather than where a member access is made,
+        denotes the global object. `is_global_object_base` answers the spelling; whether the name is
+        bound to something else is asked here, for the reason `global_alias_member_name` asks it — a
+        local `window` names an ordinary object, and taking one for the global object would credit
+        every top-level name in the file with a write the program never makes.
+        """
+        if not is_global_object_base(node):
+            return False
+        if isinstance(node, JsIdentifier):
+            return self.lookup(node.name, self._node_scope.get(id(node))) is None
+        return True
+
     def _record_alias_reference(
         self,
         binding: Binding | None,
-        node: JsIdentifier | JsMemberExpression,
+        node: ReferenceNode,
         role: Role,
     ) -> None:
         """
-        Record against a parameter binding one reference made through the `arguments` object that
-        aliases it. The read half is a definite read — the access observes whatever the parameter
-        holds — while the write half never is: whether an element is mapped onto its parameter at
-        all is decided by the call, which a walk over the text does not see, so it lands in
-        `indefinite_writes` as a kill that names no value rather than in `writes` as a definition.
+        Record against a binding one reference made through an object that aliases it — a mapped
+        `arguments` reaching a parameter, or the global object reaching a global. The read half is a
+        definite read — the access observes whatever the binding holds — while the write half never
+        is: what an object handed to a call writes through is decided by code the walk does not
+        read, so it lands in `indefinite_writes` as a kill that names no value rather than in
+        `writes` as a definition.
         """
         if binding is None:
             return
