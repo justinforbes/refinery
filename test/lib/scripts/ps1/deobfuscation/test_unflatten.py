@@ -262,6 +262,26 @@ class TestPs1ControlFlowDeflattening(TestPs1):
         result = self._apply(code, Ps1ControlFlowDeflattening)
         self.assertEqual(result, 'Write-Host $script:reached')
 
+    def test_a_state_id_too_wide_for_an_integer_is_left_flattened(self):
+        """
+        A decimal literal past Int64 is a Decimal, not an integer, so the machine reader names no
+        value for it rather than reading its magnitude as an int it is not. Recovering the machine
+        would key it on a value the host never assigns, so the dispatcher is left in place instead.
+        """
+        code = cleandoc("""
+            $s = 0
+            while ($s -ne -1) {
+              switch ($s) {
+                0 { Write-Host $script:reached; $s = 99999999999999999999 }
+                99999999999999999999 { Write-Host $script:x; $s = -1 }
+                default { break }
+              }
+            }
+        """)
+        self.assertEqual(
+            self._apply(code, Ps1ControlFlowDeflattening),
+            self._apply(code))
+
     @unittest.expectedFailure
     def test_a_loop_whose_exit_condition_is_unevaluable_is_left_flattened(self):
         """
