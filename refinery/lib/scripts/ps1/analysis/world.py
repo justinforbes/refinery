@@ -612,8 +612,15 @@ def _provider_path_redefinitions(cmd: Ps1CommandInvocation) -> tuple[_IdentityRe
 
     The bound body is `OPAQUE_VALUE`: what a path write installs is not a scriptblock standing where
     the name is declared, and the world opens on the command through `_command_opens_world` as it
-    always has. A computed path (`Set-Item $p { ... }`) names nothing here and remains the whole-run
-    verdict's charge — the residual `_binds_what_the_walk_cannot_read` documents.
+    always has. A computed path (`Set-Item $p { ... }`) spells no name here; it leaves the world
+    closed, since `touches_identity_provider` cannot read `$p` either, and catching that shape is
+    the `may_touch_identity_provider` residual the command model carries, not this walk.
+
+    A name an item cmdlet binds outside a provider-path string is not read: a `-Name`/`-NewName`
+    operand, a positional new-name (`Rename-Item function:t X`), an array element
+    (`Set-Item a,b { ... }`), or a path behind a `/` this does not canonicalize. A pipeline over
+    such a rebound iterator still folds. Measured on 5.1 and pinned in `test_aliases.py`; closing
+    it is the extraction-completeness increment.
     """
     if normalize_command_name(resolve_command_name(cmd) or '') not in _ITEM_CMDLETS:
         return ()

@@ -598,3 +598,42 @@ class TestPs1AScriptThatRedefinesForEachObjectDoesNotRunTheCmdlet(TestPs1):
             """
         ))
         self.assertIn('$_ * 2', result)
+
+    _REBOUND_ITERATOR_FORMS_5_1_RUNS = (
+        "New-Item -Path function: -Name ForEach-Object -Value { 'HIJACK' }",
+        "function tmp { 'HIJACK' }\nRename-Item function:tmp ForEach-Object",
+        "Set-Item function:ForEach-Object,function:Where-Object { 'HIJACK' }",
+        "Set-Item function:/ForEach-Object { 'HIJACK' }",
+    )
+
+    @unittest.expectedFailure
+    def test_a_rebinding_the_path_extractor_cannot_read_is_still_folded(self):
+        """
+        Each line below rebinds `ForEach-Object` on Windows PowerShell 5.1 (`5.1.26100.9168`):
+        `$r = 1, 2 | % { $_ * 2 }` prints `r=HIJACK`, not `r=2 4`. `_provider_path_redefinitions`
+        reads a name only from a `provider:name` token, so a name written as a `-Name`/`-NewName`
+        operand, a positional new-name, an array element, or behind a `/` separator it does not
+        canonicalize never enters the shadow set, so the pipeline folds. One increment closes them.
+        """
+        for rebinding in self._REBOUND_ITERATOR_FORMS_5_1_RUNS:
+            with self.subTest(rebinding):
+                result = self._deobfuscate(
+                    rebinding + "\n$r = 1, 2 | % { $_ * 2 }\nWrite-Host ('r=' + $r)")
+                self.assertIn('$_ * 2', result)
+
+    @unittest.expectedFailure
+    def test_a_content_cmdlet_writing_the_function_provider_is_still_folded(self):
+        """
+        `Set-Content function:ForEach-Object -Value { ... }` rebinds the function on 5.1, so the
+        pipeline prints `r=HIJACK`. But `Set-Content` is outside `_ITEM_CMDLETS`, so it opens the
+        world without entering the shadow set and the pipeline folds. Widening the cmdlet set is
+        part of the extraction-completeness increment.
+        """
+        result = self._deobfuscate(cleandoc(
+            """
+            Set-Content function:ForEach-Object -Value { 'HIJACK' }
+            $r = 1, 2 | % { $_ * 2 }
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertIn('$_ * 2', result)
