@@ -151,13 +151,12 @@ class TestPs1AStoredBlockRendersTheStatementsInIt(TestPs1):
 
 class TestPs1AWorkflowBindsTheNameAFunctionBinds(TestPs1):
     """
-    `workflow K { }` writes the same table `function K { }` writes, so a script holding both binds
-    the name twice and a call reaches the later binding. Nothing in the analysis reads a `workflow`
-    as a definition, so the inert `function` reads as the only one and the call reads as reaching
-    it.
+    `workflow K { }` and `configuration K { }` write the same table `function K { }` writes, so a
+    script holding both binds the name twice and a call reaches the later binding. The call graph
+    reads the keyword definition beside the `function`, so the acting keyword body keeps the call
+    the inert `function` alone would have dropped.
     """
 
-    @unittest.expectedFailure
     def test_a_call_a_workflow_of_the_same_name_claims_is_kept(self):
         self._assertKept(F"""
             function K {{ }}

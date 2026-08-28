@@ -18,7 +18,10 @@ from __future__ import annotations
 from typing import Mapping, NamedTuple, Sequence
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.world import (
+    Ps1TypeWorld,
+    command_definition_keyword_binding,
+)
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_command_name,
@@ -34,6 +37,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1MethodMember,
     Ps1ScopeModifier,
     Ps1Script,
+    Ps1ScriptBlock,
 )
 from refinery.lib.scripts.ps1.options import eval_is_trusted
 
@@ -133,11 +137,13 @@ class Ps1CallGraph:
     def __init__(
         self,
         definitions: Mapping[str, Sequence[Ps1FunctionDefinition]],
+        keyword_definitions: Mapping[str, Sequence[Ps1ScriptBlock]],
         call_sites: Mapping[str, Sequence[Ps1CallSite]],
         readable: bool,
         exports: bool,
     ):
         self._definitions = dict(definitions)
+        self._keyword_definitions = dict(keyword_definitions)
         self._call_sites = dict(call_sites)
         self._readable = readable
         self._exports = exports
@@ -192,6 +198,16 @@ class Ps1CallGraph:
         Every function definition a call to `name` could reach, in source order.
         """
         return self._definitions.get(normalize_command_name(name), ())
+
+    def keyword_definitions(self, name: str) -> Sequence[Ps1ScriptBlock]:
+        """
+        The scriptblock bodies a `workflow`/`configuration` statement binds to `name`, in source
+        order. These define the same command name a `function` does but are not themselves a
+        `refinery.lib.scripts.ps1.model.Ps1FunctionDefinition`, so a caller weighing whether a name
+        is inert reads them beside `definitions`: the empty `function` a call names may be shadowed
+        by a `workflow` whose body acts.
+        """
+        return self._keyword_definitions.get(normalize_command_name(name), ())
 
     def call_sites(self, name: str) -> Sequence[Ps1CallSite]:
         """
@@ -305,6 +321,7 @@ def build_call_graph(
     """
     trusting = eval_is_trusted(options)
     definitions: dict[str, list[Ps1FunctionDefinition]] = {}
+    keyword_definitions: dict[str, list[Ps1ScriptBlock]] = {}
     call_sites: dict[str, list[Ps1CallSite]] = {}
     qualified: list[str] = []
     retried: dict[str, list[str]] = {}
@@ -315,6 +332,10 @@ def build_call_graph(
             if not _is_class_method(node):
                 definitions.setdefault(normalize_command_name(node.name), []).append(node)
         elif isinstance(node, Ps1CommandInvocation):
+            binding = command_definition_keyword_binding(node)
+            if binding is not None:
+                keyword_name, keyword_body = binding
+                keyword_definitions.setdefault(keyword_name, []).append(keyword_body)
             name = get_command_name(node)
             if name is None:
                 if not trusting and is_opaque_dispatch(node):
@@ -338,4 +359,4 @@ def build_call_graph(
             qualified.extend(names)
     if _collides_with_a_definition(qualified, definitions):
         readable = False
-    return Ps1CallGraph(definitions, call_sites, readable, exports)
+    return Ps1CallGraph(definitions, keyword_definitions, call_sites, readable, exports)

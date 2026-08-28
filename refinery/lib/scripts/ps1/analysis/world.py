@@ -664,16 +664,17 @@ def _identity_provider_item_name(path: str) -> str | None:
     return None
 
 
-def _command_definition_keyword_redefinition(
+def command_definition_keyword_binding(
     cmd: Ps1CommandInvocation,
-) -> _IdentityRedefinition | None:
+) -> tuple[str, Ps1ScriptBlock] | None:
     """
-    The command a `workflow`/`configuration` statement defines, or `None` when `cmd` is not one. The
-    defined name is the statement's first positional argument and its body is a scriptblock standing
-    among the arguments; a form carrying no scriptblock defines nothing and is left alone, and one
-    whose name is not a static literal names no command this can add to the shadow set. The body is a
-    `VISIBLE_BLOCK` for the same reason `function NAME { ... }` is — it stands in the tree, so a
-    mutation inside it is caught by presence and the redefinition leaves the world closed.
+    The command a `workflow`/`configuration` statement defines and the scriptblock body it binds to
+    that name, or `None` when `cmd` is not one. The defined name is the statement's first positional
+    argument and the body is a scriptblock standing among the arguments; a form carrying no
+    scriptblock defines nothing and is left alone, and one whose name is not a static literal names no
+    command this can read. It is the one recognizer of these keywords, shared with
+    `refinery.lib.scripts.ps1.analysis.callgraph` so that the shadow set and the call graph cannot
+    disagree on what a `workflow` defines.
     """
     if resolve_command_name(cmd) not in _COMMAND_DEFINITION_KEYWORDS:
         return None
@@ -683,12 +684,29 @@ def _command_definition_keyword_redefinition(
         if isinstance(argument, Ps1CommandArgument)
         and argument.kind is Ps1CommandArgumentKind.POSITIONAL
     ]
-    if not any(isinstance(value, Ps1ScriptBlock) for value in positionals):
+    body = next((value for value in positionals if isinstance(value, Ps1ScriptBlock)), None)
+    if body is None:
         return None
     name = string_value(positionals[0]) if positionals else None
     if name is None:
         return None
-    return _IdentityRedefinition(normalize_command_name(name), _IdentityBody.VISIBLE_BLOCK)
+    return normalize_command_name(name), body
+
+
+def _command_definition_keyword_redefinition(
+    cmd: Ps1CommandInvocation,
+) -> _IdentityRedefinition | None:
+    """
+    The identity redefinition a `workflow`/`configuration` statement performs, or `None` when `cmd`
+    is not one. The body is a `VISIBLE_BLOCK` for the same reason `function NAME { ... }` is — it
+    stands in the tree, so a mutation inside it is caught by presence and the redefinition leaves the
+    world closed.
+    """
+    binding = command_definition_keyword_binding(cmd)
+    if binding is None:
+        return None
+    name, _ = binding
+    return _IdentityRedefinition(name, _IdentityBody.VISIBLE_BLOCK)
 
 
 def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> WorldRole:

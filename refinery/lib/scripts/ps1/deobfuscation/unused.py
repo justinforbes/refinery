@@ -497,6 +497,8 @@ class Ps1JunkStatementRemoval(Transformer):
             definitions = graph.definitions(key)
             if not all(body_is_inert(d.body, world) for d in definitions):
                 continue
+            if not all(body_is_inert(body, world) for body in graph.keyword_definitions(key)):
+                continue
             removable_here = [d for d in definitions if d.parent is node]
             if not removable_here:
                 continue
