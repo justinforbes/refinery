@@ -526,3 +526,23 @@ class TestPs1ARenameOfACommandTheEngineInvokesIsNotUnused(TestPs1):
         for script in self._REACHED_WITHOUT_BEING_NAMED:
             with self.subTest(script):
                 self._assertKept(script)
+
+
+class TestPs1AnAliasTheScriptRebindsIsNotSpelledAsItsDefaultTarget(TestPs1):
+    """
+    `Set-Alias % Keep` takes the shorthand over, so `%` no longer names `ForEach-Object` anywhere
+    below it. Rewriting the call to `ForEach-Object` runs the cmdlet where Windows PowerShell 5.1
+    runs `Keep`.
+    """
+
+    @unittest.expectedFailure
+    def test_a_rebound_shorthand_keeps_its_own_spelling(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function Keep { param($s) $script:store = $s }
+            Set-Alias -Force -Option AllScope % Keep
+            1..2 | % { Write-Output 'x' }
+            & $script:store
+            """
+        ))
+        self.assertNotIn('ForEach-Object', result)

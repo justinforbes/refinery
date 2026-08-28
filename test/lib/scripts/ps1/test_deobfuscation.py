@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unittest
 
 from inspect import cleandoc
 
@@ -803,3 +804,28 @@ class TestPs1NegatedStringTruth(TestPs1):
                 } until (0)
             """),
         )
+
+
+class TestPs1ABlockAShadowedIteratorReceivesRunsWhereThatIteratorRunsIt(TestPs1):
+    """
+    A script-local `function ForEach-Object` receives the block as a value rather than running it in
+    place, so the body runs whenever that function chooses to run it. Windows PowerShell 5.1 prints
+    `b` for the script below, because the stored block runs after the second assignment.
+
+    The deobfuscator orders the body against the pipeline it is written in, folds `'a'` into the
+    read, and deletes the second assignment as dead, so the output prints `a`.
+    """
+
+    @unittest.expectedFailure
+    def test_a_write_after_the_pipeline_reaches_a_read_inside_the_block(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function ForEach-Object { param($s) $script:store = $s }
+            $x = 'a'
+            1..2 | ForEach-Object { Write-Output $x }
+            $x = 'b'
+            & $script:store
+            """
+        ))
+        self.assertIn('Write-Output $x', result)
+        self.assertIn("$x = 'b'", result)
