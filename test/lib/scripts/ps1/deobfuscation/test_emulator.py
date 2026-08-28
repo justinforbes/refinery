@@ -1623,7 +1623,6 @@ class TestPs1AFoldedCallKeepsItsPipelinePosition(TestPs1):
     Measured, the input prints `r=H` and the output runs nothing at all.
     """
 
-    @unittest.expectedFailure
     def test_a_function_in_a_later_pipeline_element_is_not_replaced_by_its_value(self):
         result = self._deobfuscate(cleandoc(
             """

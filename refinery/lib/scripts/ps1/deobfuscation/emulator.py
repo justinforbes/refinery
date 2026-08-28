@@ -57,6 +57,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
+    stands_where_only_a_command_may,
     ps_divide,
     ps_modulo,
     ps_shift_left,
@@ -1504,6 +1505,8 @@ class Ps1FunctionEvaluator(Transformer):
 
     def visit_Ps1CommandInvocation(self, node: Ps1CommandInvocation):
         self.generic_visit(node)
+        if stands_where_only_a_command_may(node):
+            return None
         name_str = get_command_name(node)
         if name_str is None:
             return None
