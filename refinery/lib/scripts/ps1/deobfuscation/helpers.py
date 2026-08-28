@@ -15,7 +15,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     integer_of,
     make_string_literal,
 )
-from refinery.lib.scripts.ps1.ast import get_member_name, string_value
+from refinery.lib.scripts.ps1.ast import get_member_name, resolve_command_name, string_value
 from refinery.lib.scripts.ps1.data import FOREACH_ALIASES, FORMAT_PATTERN, is_type
 from refinery.lib.scripts.ps1.deobfuscation.substitution import substitute_field
 from refinery.lib.scripts.ps1.model import (
@@ -146,12 +146,30 @@ def detect_encoding_chain(node: Ps1InvokeMember) -> str | None:
     return enc_name
 
 
-def extract_foreach_scriptblock(expr: Expression) -> Ps1ScriptBlock | None:
+def extract_foreach_scriptblock(
+    expr: Expression,
+    shadowed: frozenset[str] = frozenset(),
+) -> Ps1ScriptBlock | None:
+    """
+    The script block a `ForEach-Object` invocation runs once per input object, or `None` when
+    *expr* is not one of `%`, `foreach` or `ForEach-Object` carrying a single positional block.
+
+    *shadowed* is the whole-run set of command names the script has taken over
+    (`refinery.lib.scripts.ps1.analysis.world.Ps1TypeWorld.shadowed_names`). The three spellings
+    all resolve to `foreach-object`, and a script that redefines that name runs its own body where
+    the block would otherwise run: measured on 5.1, `function ForEach-Object { 'H' }` makes
+    `1, 2 | % { $_ * 2 }` write `H`, not `2 4`, so a caller that folds the block as the cmdlet's
+    must pass the set and this refuses where the name is in it. The default is empty: a caller with
+    no world reads the name at face value, which is what every reader did before the set was
+    threaded.
+    """
     if not isinstance(expr, Ps1CommandInvocation):
         return None
     if not isinstance(expr.name, Ps1StringLiteral):
         return None
     if expr.name.value.lower() not in FOREACH_ALIASES:
+        return None
+    if resolve_command_name(expr) in shadowed:
         return None
     if len(expr.arguments) != 1:
         return None

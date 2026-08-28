@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
 from refinery.lib.scripts.ps1.deobfuscation import Ps1IexInlining
@@ -265,6 +267,36 @@ class TestPs1IexRedirections(TestPs1):
         self.assertEqual(
             self._apply("Invoke-Expression 'Write-Host hello'", Ps1IexInlining),
             'Write-Host hello')
+
+
+class TestPs1AShadowedForeachStageIsNotDecoded(TestPs1):
+    """
+    The decode pipeline `expr | %{ body } | %{ body }` runs its stages through `ForEach-Object`.
+    A script that redefines `ForEach-Object` runs its own body for each stage instead, so on Windows
+    PowerShell 5.1 (`5.1.26100.9168`) the deflated payload is never reached — the run raises
+    `HIJACK : The term 'HIJACK' is not recognized`. Decoding it anyway inlines code the script never
+    produces.
+    """
+
+    _PIPELINE = (
+        "(New-Object IO.Compression.DeflateStream("
+        "[IO.MemoryStream][Convert]::FromBase64String('Cy/KLEnV9cgvLlHISM3JyQcA'),"
+        " [IO.Compression.CompressionMode]::Decompress)"
+        " | %{ New-Object System.IO.StreamReader($_, [Text.Encoding]::ASCII) }"
+        " | %{ $_.ReadToEnd() })"
+        " | Invoke-Expression"
+    )
+
+    def test_an_unshadowed_decode_pipeline_is_still_inlined(self):
+        result = self._deobfuscate(self._PIPELINE)
+        self.assertIn('Write-Host', result)
+        self.assertNotIn('FromBase64String', result)
+
+    def test_a_redefined_foreach_object_leaves_the_decode_pipeline_alone(self):
+        result = self._deobfuscate(inspect.cleandoc(
+            F"function ForEach-Object {{ 'HIJACK' }}\n{self._PIPELINE}"))
+        self.assertNotIn('Write-Host', result)
+        self.assertIn('ReadToEnd', result)
 
 
 class TestPs1IexInliningOfAnEmptyBlock(TestPs1):

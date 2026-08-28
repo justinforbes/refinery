@@ -113,6 +113,8 @@ _SELECTION_COUNT = _witness(test_folding.TestPs1CountingAnArrayKeepsWhatBuilding
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
 _SCRIPTBLOCK_SLOT = _witness(
     test_blocks.TestPs1AnIteratingCommandRunsOnlyTheBlocksItIsHandedToRun)
+_SHADOWED_ITERATOR = _witness(
+    test_blocks.TestPs1AShadowedIteratingCommandRunsItsOwnBodyNotTheBlock)
 _SITE_POSITION = _witness(
     test_worldflow.TestPs1AReadInsideABlockTheStatementRunsHasTheStatementsPosition)
 _STATEMENT_RUNS_THE_BODY = _witness(
@@ -219,6 +221,12 @@ def _leaves_anything_counting_its_own_residue(original: Callable) -> staticmetho
     def mutated(plans, node, installed):
         return original(plans, node, set())
     return staticmethod(mutated)
+
+
+def _iterating_command_ignoring_the_shadow_set(original: Callable) -> Callable:
+    def mutated(cmd, shadowed=frozenset()):
+        return original(cmd, frozenset())
+    return mutated
 
 
 def _try_body_survivors_relaxing(*, fault_freedom: bool, abandonment: bool) -> Callable:
@@ -497,6 +505,15 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
                 _dead_bindings_over_every_candidate(
                     unused.Ps1UnusedVariableRemoval._dead_bindings)),
             notices='test_a_kept_value_keeps_the_variable_it_reads')
+
+    def test_reading_the_shadow_set_before_placing_an_iterating_body_is_witnessed(self):
+        self._assertWitnessed(
+            [_SHADOWED_ITERATOR],
+            patch.object(
+                blocks, 'names_an_intact_iterating_command',
+                _iterating_command_ignoring_the_shadow_set(
+                    blocks.names_an_intact_iterating_command)),
+            notices='test_a_function_redefinition_makes_the_body_unplaced')
 
     def test_the_target_slot_gate_on_a_dissolving_value_is_witnessed(self):
         self._assertWitnessed(

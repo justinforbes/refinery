@@ -379,7 +379,7 @@ def _pipeline_variable_candidates(
         block = block.parent
     if block is None:
         return frozenset()
-    command = binds_the_pipeline_variable(block)
+    command = binds_the_pipeline_variable(block, world.shadowed_names)
     if command is None:
         return frozenset()
     element = command.parent

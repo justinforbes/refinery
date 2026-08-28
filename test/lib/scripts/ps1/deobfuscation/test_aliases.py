@@ -556,7 +556,6 @@ class TestPs1AScriptThatRedefinesForEachObjectDoesNotRunTheCmdlet(TestPs1):
     asks the shadow set, which already records `foreach-object` for this script.
     """
 
-    @unittest.expectedFailure
     def test_a_pipeline_over_a_redefined_iterator_is_not_folded(self):
         result = self._deobfuscate(cleandoc(
             """
@@ -566,3 +565,20 @@ class TestPs1AScriptThatRedefinesForEachObjectDoesNotRunTheCmdlet(TestPs1):
             """
         ))
         self.assertIn('ForEach-Object', result)
+        self.assertIn('$_ * 2', result)
+        self.assertNotIn('2, 4', result)
+
+    def test_a_pipeline_over_a_function_drive_rebinding_is_not_folded(self):
+        """
+        `${function:ForEach-Object} = { … }` rebinds the same name through the provider drive, and
+        5.1 runs that body — the script below prints `r=H`, not `r=2 4`.
+        """
+        result = self._deobfuscate(cleandoc(
+            """
+            ${function:ForEach-Object} = { 'HIJACK' }
+            $r = 1, 2 | ForEach-Object { $_ * 2 }
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertIn('$_ * 2', result)
+        self.assertNotIn('2, 4', result)

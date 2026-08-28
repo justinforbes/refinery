@@ -1851,7 +1851,8 @@ class Ps1ForEachPipeline(Transformer):
             return None
         if cmd_elem.expression is None:
             return None
-        script_block = extract_foreach_scriptblock(cmd_elem.expression)
+        shadowed = model_cache(self, node).closed_world.shadowed_names
+        script_block = extract_foreach_scriptblock(cmd_elem.expression, shadowed)
         if script_block is None:
             return None
         if self._has_free_variables(script_block):

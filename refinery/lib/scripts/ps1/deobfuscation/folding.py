@@ -630,7 +630,10 @@ class Ps1ConstantFolding(Transformer):
         member = get_member_name(first.member)
         if member is None:
             return None
-        sb = extract_foreach_scriptblock(second_expr) if second_expr else None
+        if second_expr is None:
+            return None
+        shadowed = model_cache(self, node).closed_world.shadowed_names
+        sb = extract_foreach_scriptblock(second_expr, shadowed)
         if sb is None or not _foreach_extracts_value(sb):
             return None
         return self._fold_regex_call_result(first, member.lower())

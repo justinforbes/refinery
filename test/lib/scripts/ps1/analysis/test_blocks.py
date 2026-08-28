@@ -11,7 +11,8 @@ from refinery.lib.scripts.ps1.analysis.blocks import (
     build_block_model,
 )
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
-from refinery.lib.scripts.ps1.model import Ps1ScriptBlock
+from refinery.lib.scripts.ps1.analysis.world import measure_world
+from refinery.lib.scripts.ps1.model import Ps1FunctionDefinition, Ps1ScriptBlock
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -309,3 +310,49 @@ class TestPs1AnIteratingCommandRunsOnlyTheBlocksItIsHandedToRun(TestBase):
         """
         blocks, found = self._blocks("1, 2 | ForEach-Object -MemberName ToString { 'x' }")
         self.assertIs(blocks.facts(found[0]).reach, Ps1BlockReach.UNKNOWN)
+
+
+class TestPs1AShadowedIteratingCommandRunsItsOwnBodyNotTheBlock(TestBase):
+    """
+    Measured on Windows PowerShell 5.1 (`5.1.26100.9168`). A script that redefines `ForEach-Object`
+    with a `function` runs that body where the block would otherwise run, and `%` follows the same
+    redefinition because it resolves to `ForEach-Object`:
+
+        function ForEach-Object { 'HIJACK' }
+        1, 2 | % { $_ * 2 }        # writes HIJACK, not 2 4
+
+    A `function foreach` binds the separate `foreach` name that the built-in keyword outranks, so it
+    does not take over `ForEach-Object` — `1, 2 | ForEach-Object { $_ * 2 }` still writes `2 4`.
+    """
+
+    def _pipeline_block(self, source: str):
+        tree = Ps1Parser(source).parse()
+        shadowed = measure_world(tree).world.shadowed_names
+        blocks = build_block_model(tree, shadowed)
+        pipeline_block = next(
+            node for node in tree.walk()
+            if isinstance(node, Ps1ScriptBlock)
+            and not isinstance(node.parent, Ps1FunctionDefinition))
+        return blocks, pipeline_block, shadowed
+
+    def test_a_function_redefinition_makes_the_body_unplaced(self):
+        blocks, block, _ = self._pipeline_block(
+            "function ForEach-Object { 'HIJACK' }\n1, 2 | ForEach-Object { $_ * 2 }")
+        self.assertIs(blocks.facts(block).reach, Ps1BlockReach.UNKNOWN)
+
+    def test_the_percent_alias_follows_the_redefinition_of_foreach_object(self):
+        blocks, block, shadowed = self._pipeline_block(
+            "function ForEach-Object { 'HIJACK' }\n1, 2 | % { $_ * 2 }")
+        self.assertIs(blocks.facts(block).reach, Ps1BlockReach.UNKNOWN)
+        self.assertIsNone(binds_the_pipeline_variable(block, shadowed))
+
+    def test_a_body_of_an_unshadowed_command_is_still_placed(self):
+        blocks, block, shadowed = self._pipeline_block("1, 2 | % { $_ * 2 }")
+        self.assertIs(blocks.facts(block).reach, Ps1BlockReach.IMMEDIATE)
+        self.assertIsNotNone(binds_the_pipeline_variable(block, shadowed))
+
+    def test_a_redefinition_of_the_foreach_keyword_does_not_take_over_foreach_object(self):
+        blocks, block, shadowed = self._pipeline_block(
+            "function foreach { 'HIJACK' }\n1, 2 | ForEach-Object { $_ * 2 }")
+        self.assertIs(blocks.facts(block).reach, Ps1BlockReach.IMMEDIATE)
+        self.assertIsNotNone(binds_the_pipeline_variable(block, shadowed))

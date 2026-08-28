@@ -104,13 +104,14 @@ class Ps1WorldReach:
     `closed_at`, which asks whether the type world is closed at one read rather than anywhere, and
     `may_trust_command_name_at`, which asks the same of a command name's identity. Held in a
     `refinery.lib.scripts.ps1.analysis.cache.Ps1ModelCache` slot and threaded through
-    `refinery.lib.scripts.ps1.analysis.effects` in place of the leaf world. It answers only the
-    three questions the passes ask of it — the two positional ones and `closed_for_the_whole_run`;
-    the remaining leaf facts are read straight off `Ps1ModelCache.closed_world`, which no staleness
-    can touch because the cache rebuilds it, so mirroring them here would be answers with no reader.
-    The whole-run `Ps1TypeWorld.may_trust_command_name` is one of those, and no pass reads it: it
-    is the verdict `may_trust_command_name_at` short-circuits on, which is a fact about the leaf
-    model and stays with it.
+    `refinery.lib.scripts.ps1.analysis.effects` in place of the leaf world. It answers the two
+    positional questions, `closed_for_the_whole_run`, and `shadowed_names` — the whole-run shadow
+    set, mirrored here because the values layer that reads it holds this wrapper and not the leaf.
+    Every other leaf fact is read straight off `Ps1ModelCache.closed_world`, which no staleness can
+    touch because the cache rebuilds it, so mirroring one with no reader would be an answer nobody
+    asks for. The whole-run `Ps1TypeWorld.may_trust_command_name` is one of those, and no pass reads
+    it: it is the verdict `may_trust_command_name_at` short-circuits on, which is a fact about the
+    leaf model and stays with it.
 
     Built without flow context — `Ps1WorldReach(world)` — it answers each positional query with
     the whole-run verdict at every position, which is what a caller that did not build the graphs,
@@ -159,6 +160,18 @@ class Ps1WorldReach:
     @property
     def closed_for_the_whole_run(self) -> bool:
         return not self._stale and self._world.closed_for_the_whole_run
+
+    @property
+    def shadowed_names(self) -> frozenset[str]:
+        """
+        The whole-run set of command names the script takes over, off the leaf model — the fact
+        `refinery.lib.scripts.ps1.analysis.values.candidate_types` reads to decide whether a
+        `ForEach-Object` still binds `$_` in the body handed to it. Read unguarded by staleness, as
+        `command_shadowed` already is a line below: a name in the set only makes a caller refuse a
+        fold, which is the safe direction, and a redefinition is a fact about the tree the leaf was
+        measured over whether or not an edit has since moved on.
+        """
+        return self._world.shadowed_names
 
     def may_trust_command_name_at(self, name: str, node) -> bool:
         """

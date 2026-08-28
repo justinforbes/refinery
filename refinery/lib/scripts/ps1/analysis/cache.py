@@ -179,10 +179,13 @@ class Ps1ModelCache(ModelCacheBase):
     def blocks(self) -> Ps1BlockModel:
         """
         Where each script block of this root runs — at what point, in whose scope, how many times.
-        Purely syntactic like `control_flow`, and the answer three other layers used to guess from
-        the code a block is *written* in.
+        Reads the whole-run shadow set from `closed_world` so a body handed to a `ForEach-Object` or
+        `Where-Object` the script has redefined is placed as data, and is otherwise syntactic like
+        `control_flow` — the answer three other layers used to guess from the code a block is
+        *written* in.
         """
-        return self._lazy('_blocks', lambda: build_block_model(self.root))
+        return self._lazy('_blocks', lambda: build_block_model(
+            self.root, self.closed_world.shadowed_names))
 
     @property
     def cycles(self) -> CycleModel:

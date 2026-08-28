@@ -812,20 +812,27 @@ class TestPs1ABlockAShadowedIteratorReceivesRunsWhereThatIteratorRunsIt(TestPs1)
     place, so the body runs whenever that function chooses to run it. Windows PowerShell 5.1 prints
     `b` for the script below, because the stored block runs after the second assignment.
 
-    The deobfuscator orders the body against the pipeline it is written in, folds `'a'` into the
-    read, and deletes the second assignment as dead, so the output prints `a`.
+    The block is no longer placed at the pipeline it is written in, so the read inside it is not
+    folded to `'a'`. What remains wrong is a separate defect: the second assignment `$x = 'b'` is
+    deleted as dead, because the liveness walk does not see the read that runs when
+    `& $script:store` invokes the stored block. That read reaches `$x` through the shadowing
+    function, which no pass connects the invocation to, so the output still prints `a`.
     """
 
-    @unittest.expectedFailure
-    def test_a_write_after_the_pipeline_reaches_a_read_inside_the_block(self):
-        result = self._deobfuscate(cleandoc(
-            """
-            function ForEach-Object { param($s) $script:store = $s }
-            $x = 'a'
-            1..2 | ForEach-Object { Write-Output $x }
-            $x = 'b'
-            & $script:store
-            """
-        ))
+    _SCRIPT = """
+        function ForEach-Object { param($s) $script:store = $s }
+        $x = 'a'
+        1..2 | ForEach-Object { Write-Output $x }
+        $x = 'b'
+        & $script:store
+        """
+
+    def test_the_read_inside_the_stored_block_is_not_folded(self):
+        result = self._deobfuscate(cleandoc(self._SCRIPT))
         self.assertIn('Write-Output $x', result)
+        self.assertNotIn("Write-Output 'a'", result)
+
+    @unittest.expectedFailure
+    def test_the_write_after_the_pipeline_is_kept_alive_by_the_stored_read(self):
+        result = self._deobfuscate(cleandoc(self._SCRIPT))
         self.assertIn("$x = 'b'", result)
