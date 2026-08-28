@@ -3991,29 +3991,10 @@ class TestUndeclaredHostObservableGlobals(TestBase):
         self.assertEqual(deobfuscate_source(source), '')
         self.assertSameBehavior(source, calls=('handler',), entrypoints=('handler',))
 
-    @unittest.expectedFailure
-    def test_function_declaration(self):
-        source = 'function handler() { return 5; }'
-        self.assertEqual(deobfuscate_source(source), '')
-        self.assertSameBehavior(source, calls=('handler',), entrypoints=('handler',))
-
-    @unittest.expectedFailure
-    def test_function_and_helper(self):
-        source = 'function help() { console.log("hi!"); return 7; } function handler() { return help(); }'
-        self.assertEqual(deobfuscate_source(source), '')
-        self.assertSameBehavior(source, calls=('help',), entrypoints=('handler',))
-
     def test_unexported_global_folds(self):
         self.assertEqual(
             deobfuscate_source('var VERSION = 3; console.log(VERSION);'),
             'console.log(3);')
-
-    @unittest.expectedFailure
-    def test_exported_global_survives_and_is_not_folded(self):
-        source = 'var VERSION = 3; console.log(VERSION);'
-        self.assertEqual(
-            deobfuscate_source(source, entrypoints=('VERSION',)),
-            'var VERSION = 3;\nconsole.log(VERSION);')
 
     def test_module_scoped_var_is_removed_even_when_exported(self):
         """

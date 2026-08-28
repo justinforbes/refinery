@@ -13,9 +13,10 @@ program it is ever given is one an entry wrote out by hand.
 from __future__ import annotations
 
 import inspect
+import unittest
 
 from enum import Enum, auto
-from typing import NamedTuple
+from typing import Callable, Mapping, NamedTuple
 
 from test.lib.scripts.js.analysis.differential import (
     behavior,
@@ -223,3 +224,23 @@ def prints(*lines: str) -> Behavior:
     break `console.log` adds.
     """
     return (''.join(line + NL for line in lines), None)
+
+
+def one_expected_failure_per_program(
+    rows: Mapping[str, Program],
+) -> Callable[[type], type]:
+    """
+    Install on the class one expected-failure test per program of *rows*, each named for the shape
+    its key labels and each asserting the one law every ledger entry asserts: the deobfuscation of
+    a program behaves the way the program does.
+    """
+    def install(entry: type) -> type:
+        for label, row in rows.items():
+            def test(self, row=row):
+                self.assertEqual(row.read(), row.required())
+            test.__name__ = F'test_{label.replace(" ", "_").replace("-", "_")}_still_behaves_so'
+            if hasattr(entry, test.__name__):
+                raise AssertionError(F'{entry.__name__} already holds {test.__name__}')
+            setattr(entry, test.__name__, unittest.expectedFailure(test))
+        return entry
+    return install

@@ -4,8 +4,10 @@ A ledger of JavaScript defects that are known, understood, and not yet fixed.
 The ones a release is held for are not here: `test.lib.scripts.js.test_release_blockers` holds
 those, under the same rules, so that the question of whether the tool is fit to ship has one file
 for an answer. An entry belongs there rather than here when a program an engine runs comes back
-behaving differently; one that refuses to reduce something, reduces it to something uglier, or
-mishandles a file no engine runs, belongs here. Which
+behaving differently over a shape real input plausibly holds. A behavior change only a shape
+constructed for the defect reaches stays here whatever it costs, with the judgment of its
+unlikelihood written on the entry that carries it; so does one that refuses to reduce
+something, reduces it to something uglier, or mishandles a file no engine runs. Which
 file an entry sits in says what it costs and never how well it is understood, so an entry moves
 across when that is reassessed.
 
@@ -50,14 +52,19 @@ from test.lib.scripts.js.deobfuscation.test_stringarray import (
     A_PRESET_BESIDE_AN_ACCESSOR_CALL_NOTHING_CAN_ANSWER,
 )
 from test.lib.scripts.js.ledger import (
+    Program,
+    Reading,
     a_program,
     a_walk_of,
     an_accessor_at,
     before_and_after,
     before_and_after_in_a_host,
     each_program_still_prints,
+    evaluated_in_a_body,
     folded,
+    one_expected_failure_per_program,
     printed,
+    prints,
     well_formed,
 )
 from test.lib.scripts.js.test_parameter_grammar import (
@@ -1371,65 +1378,6 @@ class TestASequenceOperandThatThrowsIsNotDropped(TestBase):
         )
 
 
-def _a_property_written_on_a_local_object(name: str) -> str:
-    """
-    A program that declares *name* as a local object, writes a property on it, and prints the object
-    as JSON, so that a write that went missing is a line of output and not an error.
-    """
-    return (
-        F'var {name} = {{}};\n'
-        F'{name}.x = 1;\n'
-        F'console.log(JSON.stringify({name}));\n'
-    )
-
-
-#: A program whose object is named by a local declaration, mapped to what Node prints for it. The
-#: name is spelled seven ways: the six the model calls aliases of the global object, and one that
-#: is no spelling of it at all, which is the control.
-A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS = {
-    _a_property_written_on_a_local_object(name): '{"x":1}\n'
-    for name in ['globalThis', 'global', 'window', 'self', 'top', 'frames', 'obj']
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAPropertyWriteThroughAShadowedGlobalAliasSurvives(TestBase):
-    """
-    `window` names the global object only where nothing else binds it. A declaration of that name
-    binds it, and from then on `window.x = 1` is a property write on whatever the declaration put
-    there — a plain object here — which the program goes on to read back.
-
-    The sweep that deletes a write of a global property never asks that question.
-    `JsUnusedCodeRemoval._remove_dead_global_properties` takes a statement to be a global-property
-    write when the base is an identifier whose *name* is one of
-    `refinery.lib.scripts.js.deobfuscation.helpers.GLOBAL_OBJECT_ALIASES`, and decides from the
-    spelling alone; `EffectModel._base_is_global_object` asks the model whether the name is bound
-    before answering the same question, which is the answer this sweep needs.
-
-    Two of the six spellings are wrong in the other direction and pass today, which is why they are
-    rows and not omissions: the alias set the sweep reads holds four names, and the model's
-    `refinery.lib.scripts.js.analysis.model.GLOBAL_OBJECT_ALIASES` holds six, so `top` and `frames`
-    are outside the sweep's reach for a reason that has nothing to do with shadowing. The last row
-    is the control: `obj` is a spelling of nothing, and its write is kept, so an entry that started
-    passing by keeping every property write would be reported as an unexpected success.
-    """
-
-    @unittest.expectedFailure
-    def test_a_write_on_an_object_a_local_name_holds_is_kept(self):
-        """
-        Node prints `{"x":1}` for every program of
-        `A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS`, the property having been written on
-        the object the declaration made. The four deobfuscations whose name is one the sweep
-        reads — `globalThis`, `global`, `window` and `self` — come back with the assignment
-        deleted and print `{}`.
-        """
-        rows = A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
 class TestAStringNamedSpecifierTheGrammarBansIsRefused(TestBase):
     """
     An import or export list may name what it reads or writes across the module boundary with a
@@ -1809,6 +1757,109 @@ class TestAReadAWrittenChainDoesNotReachIsStillAnswered(TestBase):
         )
 
 
+#: Programs that reach `Object.prototype` through a name the file bound the receiver to, rather than
+#: through the literal itself, mapped to what Node prints for each. Reading `__proto__` off a
+#: binding, and handing that binding to a `getPrototypeOf` the file also bound, are the same gadget
+#: written one indirection further out: what the spelling reaches is decided by the value the
+#: binding holds, which the syntax at the write does not show.
+A_PROTOTYPE_REACHED_THROUGH_A_BINDING = {
+    'var a = {}; a.__proto__.z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+    'var a = {}; var g = Object.getPrototypeOf; g(a).z = 9; var o = {}; console.log(o.z);':
+        '9\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPrototypeReachedThroughABindingIsStillWritten(TestBase):
+    """
+    `refinery.lib.scripts.js.deobfuscation.protospelling` writes each spelling that reaches an
+    intrinsic prototype out as the name it reaches, which is what puts the write in front of every
+    check already looking for one. It reads the receiver from the syntax, so a receiver held in a
+    binding is one it declines: `test_a_receiver_the_syntax_does_not_decide_is_left_alone` pins that
+    refusal, and these are what the refusal costs.
+
+    Closing it needs the value the binding holds rather than new machinery — the model already
+    answers what a binding is assigned, and the pass would consult it where the receiver is a name.
+    The same is true of the callee: `g` is `Object.getPrototypeOf` and the file said so.
+
+    Off the release gate deliberately: the one prototype write real obfuscation spells is the
+    literal `X.prototype.m = f`, which is read; a write that reaches the prototype through
+    a binding has so far had to be constructed to be seen.
+    """
+
+    @unittest.expectedFailure
+    def test_a_prototype_reached_through_a_binding_answers_the_read(self):
+        """
+        Node prints `9` for both programs of `A_PROTOTYPE_REACHED_THROUGH_A_BINDING`, each of which
+        reaches `Object.prototype` through a name rather than through a literal. Each deobfuscation
+        prints `undefined`, and comes back having replaced the read with a variable nothing writes.
+        """
+        rows = A_PROTOTYPE_REACHED_THROUGH_A_BINDING
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: Programs that reach `Object.prototype` by handing it to something that writes it, rather than by
+#: writing through a member chain, mapped to what Node prints for each. The prototype is an ordinary
+#: argument in each: to `Object.assign`, to `Reflect.set`, to `Reflect.deleteProperty`, and to a
+#: function the file declares itself. The last row hands over `Object` rather than its prototype,
+#: which reaches the same chain through one more member access and is a route of its own: the write
+#: is spelled inside the callee, so nothing at the call site names the property it replaces.
+A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT = {
+    'Object.assign(Object.prototype, {z: 9}); var o = {}; console.log(o.z);':
+        '9\n',
+    'Reflect.set(Object.prototype, "z", 9); var o = {}; console.log(o.z);':
+        '9\n',
+    'Reflect.deleteProperty(Object.prototype, "toString");\n'
+    + evaluated_in_a_body('{a: 1}', "'toString' in v"):
+        'false\n',
+    'function patch(p) { p.z = 9; } patch(Object.prototype); var o = {}; console.log(o.z);':
+        '9\n',
+    'function patch(o) { o.prototype.zz = 9; }\npatch(Object);\n'
+    + evaluated_in_a_body('{a: 1}', 'v.zz'):
+        '9\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPrototypeHandedToAWriterIsStillWritten(TestBase):
+    """
+    A value that escapes into a call may be written by that call. `refinery.lib.scripts.js.analysis
+    .effects` records that escape against the *keys* of every name it watches, `Object` among them,
+    which is why `EffectModel.global_key_written` refuses each of these — and against the name
+    itself only for the roots whose methods a fold is trusted to run, which `Object` is not. So
+    `EffectModel.read_chain_intact` reports the chain intact, and every question about it is
+    answered from the tables.
+
+    A correct implementation records the escape once, against the name as much as against its keys,
+    so that the two questions asked about one escape cannot disagree. Doing that and nothing else
+    withdraws every chain answer from a file that hands `Object` to a call it cannot resolve, which
+    the real samples do: `test.units.scripting.test_js` measures two of them coming back unreduced.
+    So the escape has to be *followed* rather than assumed, which is the interprocedural precision
+    this is deferred to — a callee whose writes are enumerable is a callee whose escape is not one.
+
+    Off the release gate deliberately, with the entry above: prototype pollution through a
+    writer is exploit vocabulary rather than dropper vocabulary, and no sample family
+    observed so far hands its prototype to a call and reads the pollution back.
+    """
+
+    @unittest.expectedFailure
+    def test_a_prototype_handed_to_a_writer_answers_the_read(self):
+        """
+        Node prints `9`, `9`, `false`, `9` and `9` for the five programs of
+        `A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT`. Each deobfuscation answers as if the call
+        it was handed to had not written it.
+        """
+        rows = A_PROTOTYPE_HANDED_TO_SOMETHING_THAT_WRITES_IT
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
 #: Programs that disable one of the mechanisms a prototype spelling goes through by writing it
 #: through another such spelling, mapped to what Node prints for each. The first replaces the
 #: `constructor` every plain object inherits, and the second replaces the `__proto__` accessor with
@@ -1844,7 +1895,7 @@ class TestAMechanismWrittenThroughASpellingIsStillWritten(TestBase):
     `refinery.lib.scripts.js.analysis.effects` that a member chain rooted in a literal receiver is
     rooted at the name `_PROTOTYPE_OWNERS` gives that receiver's prototype, so that one model build
     sees both spellings. The same step answers `var a = {}; a.__proto__.z = 9`, which
-    `test.lib.scripts.js.test_release_blockers` records the pass as unable to read.
+    `TestAPrototypeReachedThroughABindingIsStillWritten` records the pass as unable to read.
     """
 
     @unittest.expectedFailure
@@ -2366,3 +2417,327 @@ class TestAnUnreadableKeyMayRebindAWrapperThroughTheGlobalObject(TestBase):
             '};\n'
             '1;',
         )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestScriptCodeHasTwoMoreCommentOpeners(TestBase):
+    """
+    Script code reads two comment delimiters beyond `//` and `/*`, held over from the years a
+    script was written inside an HTML comment so that a browser which did not know the tag printed
+    nothing instead of the source. Each runs to the end of its line the way `//` does, and only one
+    of them is free to stand anywhere.
+
+    `<!--` opens a comment wherever a comment may open, the middle of an expression included, so
+    `var y = x <!-- note` declares `y` and holds what `x` holds. `-->` opens one only where nothing
+    but whitespace and comments precedes it on its line, the head of the file counting as such a
+    line; anywhere else those three characters are the decrement operator and `>`, which is what
+    makes `a-->b` the program `a-- > b`. Node reads a script holding either delimiter and refuses
+    the same file read as a module with `SyntaxError: HTML comments are not allowed in modules`,
+    the two being script grammar and nothing else; it refuses `console.log(1); --> note` and
+    `var a = 1; /* c */ --> note` with `SyntaxError: Unexpected token '>'`, a statement in front of
+    the delimiter on its line being what the positional restriction is about.
+
+    Neither delimiter is read here, `<!--` being taken for `<` against `!` and `-->` for a
+    decrement against `>`, and what that costs runs in both directions at once. Ten of the files
+    below are refused, `refinery.lib.scripts.is_well_formed` answering `False` for programs a host
+    runs; the eleventh, `var y = x <!-- note`, is called a program and comes back as
+    `var y = x < !--note;`, which reads the word behind the delimiter and throws over it. What the
+    printer writes for the rest is text resegmented into statements the file never held: a `-->`
+    comment becomes a statement of its own with the comment text standing behind it as a second, so
+    a file that printed `1` and `2` comes back printing `1` and then throwing.
+
+    Off the release gate deliberately: both delimiters stand in the input in plain sight, so
+    an analyst who meets one recognizes the HTML wrapper and cuts it — a work-around,
+    where the gate is for the wrong answers an analyst cannot see.
+    """
+
+    @unittest.expectedFailure
+    def test_a_file_a_host_reads_is_a_well_formed_program(self):
+        """
+        The delimiters in every position that decides one: at the head of a file, behind a
+        statement, at the end of one, inside a function body, and behind whitespace, a comment and
+        a comment that spans lines. The three files that hold neither delimiter and the two the
+        host refuses are answered here already, and they stand in the same answer so that a fix
+        reading `-->` wherever it is written turns `a-->b` red.
+        """
+        rows = {
+            '<!-- note\nconsole.log(1);': True,
+            'console.log(1); <!-- note': True,
+            'console.log(1);\n<!--': True,
+            'var x = 1;\nvar y = x <!-- note\nconsole.log(y);': True,
+            '--> note\nconsole.log(1);': True,
+            'console.log(1);\n--> note\nconsole.log(2);': True,
+            'console.log(1);\n   --> note\nconsole.log(2);': True,
+            'console.log(1);\n/* c */ --> note\nconsole.log(2);': True,
+            'console.log(1); /* c\n */ --> note\nconsole.log(2);': True,
+            'function f() {\n--> note\nreturn 1;\n}\nconsole.log(f());': True,
+            'var a = 2, b = 0;\nconsole.log(a-->b);': True,
+            "console.log('-->');": True,
+            'console.log(`x\n--> y`);': True,
+            'console.log(1); --> note': False,
+            'var a = 1; /* c */ --> note': False,
+        }
+        self.assertEqual({source: well_formed(source) for source in rows}, rows)
+
+    @unittest.expectedFailure
+    def test_the_text_printed_for_one_prints_what_the_file_prints(self):
+        """
+        What each of these files prints is what the host prints for it, and the text the printer
+        hands back has to print the same. `<!--` read as two operators leaves text the host refuses
+        outright; `-->` read as a decrement leaves a program that prints the output ahead of the
+        delimiter and then throws a `ReferenceError` over the word behind it, which is a file's
+        second half going missing behind an answer that reads as one.
+        """
+        programs = {
+            '<!-- note\nconsole.log(1);': '1\n',
+            'console.log(1); <!-- note': '1\n',
+            'console.log(1);\n<!--': '1\n',
+            'var x = 1;\nvar y = x <!-- note\nconsole.log(y);': '1\n',
+            '--> note\nconsole.log(1);': '1\n',
+            'console.log(1);\n--> note\nconsole.log(2);': '1\n2\n',
+            'console.log(1);\n   --> note\nconsole.log(2);': '1\n2\n',
+            'console.log(1);\n/* c */ --> note\nconsole.log(2);': '1\n2\n',
+            'console.log(1); /* c\n */ --> note\nconsole.log(2);': '1\n2\n',
+            'function f() {\n--> note\nreturn 1;\n}\nconsole.log(f());': '1\n',
+            'var a = 2, b = 0;\nconsole.log(a-->b);': 'true\n',
+            "console.log('-->');": '-->\n',
+            'console.log(`x\n--> y`);': 'x\n--> y\n',
+        }
+        self.assertEqual(
+            {source: behavior(printed(source)) for source in programs},
+            {source: (prints, None) for source, prints in programs.items()},
+        )
+
+
+#: An accessor an IIFE answers, over a closure the answered function writes through a member of or
+#: reads the identity of, mapped to what Node prints for it. Measured against
+#: `refinery.lib.scripts.js.deobfuscation.iifeaccessor._is_safe_to_promote` answering False, which
+#: leaves both programs standing whole.
+A_CLOSURE_THE_PROMOTED_ACCESSOR_STOPS_SHARING = {
+    'var acc = (function () {\n'
+    '  var t = [0];\n'
+    '  return function (i) { t[0] = t[0] + i; return t[0]; };\n'
+    '})();\n'
+    'console.log(acc(1), acc(1));\n': '1 2\n',
+    'var acc = (function () {\n'
+    "  var t = ['a'];\n"
+    '  return function () { return t; };\n'
+    '})();\n'
+    'console.log(acc() === acc());\n': 'true\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPromotedClosureIsStillOneObjectAcrossCalls(TestBase):
+    """
+    An IIFE answering a function is inlined by moving what the IIFE declared into the answered
+    function's body, which builds those declarations afresh on every call. That is equivalent only
+    where nothing carries a value or an identity from one call to the next, and `_is_safe_to_promote`
+    asks it of a closure name written through a bare identifier and of nothing else: a closure
+    written through a member keeps no count, and one whose identity is compared is a different object
+    each time it is answered.
+
+    Off the release gate deliberately: the accessor closures real obfuscators emit are
+    memo-caches, whose rebuilt state recomputes the same values, so a promotion changes
+    their speed and nothing an engine reports; state a program can watch accumulating
+    across calls has had to be constructed.
+    """
+
+    @unittest.expectedFailure
+    def test_a_closure_the_accessor_keeps_writing_or_comparing_is_not_promoted(self):
+        """
+        Node prints `1 2` for the first program of `A_CLOSURE_THE_PROMOTED_ACCESSOR_STOPS_SHARING`
+        and `true` for the second. The deobfuscation folds them to `console.log(1, 1);` and
+        `console.log(['a'] === ['a']);`, which print `1 1` and `false`.
+        """
+        rows = A_CLOSURE_THE_PROMOTED_ACCESSOR_STOPS_SHARING
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
+#: A program whose block-declared function is kept out of the enclosing scope by a lexical binding
+#: of the same name, mapped to the behavior an engine gives it. The `let` is what stops the copy, so
+#: it is read by the placement whether or not anything else in the program names it.
+A_LEXICAL_BINDING_THAT_STOPS_A_BLOCK_FUNCTION_ESCAPING = {
+    'a let nothing else reads': Program(
+        a_program("""
+            function outer() {
+              { let f = 1; { function f() { return 2; } } }
+              console.log(typeof f);
+            }
+            outer();
+            """),
+        prints('undefined'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_LEXICAL_BINDING_THAT_STOPS_A_BLOCK_FUNCTION_ESCAPING)
+class TestALexicalBindingThatStopsABlockFunctionEscapingIsKept(TestBase):
+    """
+    A `let` between a block-declared function and the variable scope stops Annex B giving that
+    function a `var` outside its block (§B.3.3.1), so the name means nothing after the block and
+    `typeof` answers `undefined`. Reading the `let` is the whole of what it is for: no other
+    statement of the program has to name it for it to decide that.
+
+    `refinery.lib.scripts.js.deobfuscation.unused` removes a declarator nothing references, and a
+    declarator whose only consumer is the placement of another declaration is one it counts as
+    unreferenced. With the `let` gone the copy runs, the name reaches the enclosing scope, and the
+    program comes back printing `function`.
+
+    The removal is what is wrong here rather than the placement, which is why this is its own entry:
+    `refinery.lib.scripts.js.analysis.model.annex_b_var_home` reads the `let` correctly, and answers
+    a different question once a pass has deleted it.
+
+    Off the release gate deliberately: no real file writes a `let` whose one consumer is the
+    placement of a block function two blocks in, probed by a `typeof` after both.
+    """
+
+
+#: A program whose parameter default runs a direct `eval` declaring a name the body reads, mapped
+#: to the behavior an engine gives it.
+A_DIRECT_EVAL_IN_A_DEFAULT_DECLARING_A_NAME = {
+    'a var the eval declares, read by the body': Program(
+        a_program("""
+            var v = 1;
+            function f(x = eval('var v = 2')) { return v; }
+            console.log(f());
+            """),
+        prints('2'),
+    ),
+    'a var the eval declares, read by a later default': Program(
+        a_program("""
+            var v = 1;
+            function f(a = eval('var v = 2'), b = v) { return b; }
+            console.log(f());
+            """),
+        prints('2'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_DIRECT_EVAL_IN_A_DEFAULT_DECLARING_A_NAME)
+class TestADirectEvalInADefaultDeclaresWhereItRuns(TestBase):
+    """
+    A direct `eval` in sloppy code declares a `var` in the variable scope it runs in, and the
+    parameter list of a function carrying an expression is such a scope. The name it declares is
+    therefore one the body reads instead of the outer one it would otherwise have read, and the
+    program prints what the `eval` put there.
+
+    The analysis resolves the body's read to the outer declaration and folds it, so the value the
+    `eval` wrote is dropped. The root is not the parameter scope but the reach of a direct `eval`:
+    `TestAParameterDefaultReadsPastTheBody` is about which scope a default reads from, and this one
+    is about a scope whose contents no reading of the text gives.
+
+    Off the release gate deliberately: no real file runs an `eval` in a parameter default to
+    mint a binding, so the shape is this entry's own.
+    """
+
+
+#: A classic script reading one of its own top-level declarations through a name the file itself
+#: installs on the global object, mapped to the behavior a host gives it. The installing statement is
+#: what every row has in common: Node has no `window`, so a file meaning to read one has to put it
+#: there, and a browser file that never installs one is already read correctly.
+A_NAME_THE_FILE_INSTALLS_ON_THE_GLOBAL_OBJECT = {
+    'read through the installed name': Program(
+        a_program("""
+            globalThis.window = globalThis;
+            var q = 1;
+            console.log(window.q);
+            """),
+        prints('1'),
+        Reading.SCRIPT,
+    ),
+    'a guard reads the installed name': Program(
+        a_program("""
+            globalThis.window = globalThis;
+            var q = function (a) { console.log('q', a); };
+            var w = window || {};
+            w.q(1);
+            """),
+        prints('q 1'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_NAME_THE_FILE_INSTALLS_ON_THE_GLOBAL_OBJECT)
+class TestANameTheFileInstallsOnTheGlobalObjectHoldsIt(TestBase):
+    """
+    A name given the global object holds it, and a read through the name is a read of a global —
+    the law `test.lib.scripts.js.deobfuscation.test_a_name_holding_the_global_object` states. It is
+    answered from the value the name is declared with, and a name the file only ever assigns is
+    declared with none: the binding minted for `globalThis.window = globalThis` carries no
+    declaration, so both value queries decline for it, the name is taken for one bound to something
+    other than the object, and every global read through it is recorded nowhere.
+
+    Declining is deliberate and its reason is an ordering one. The value would have to come from the
+    write, and the writes made through the global object are recorded by the same walk that would ask
+    — so what a read is admitted on would be how far that walk had got, which is not a fact about
+    the program. Answering needs the writes established before any read is admitted, which is a
+    change to how the model is built rather than to what it knows.
+
+    The second row is the shape that made this worth having: `var w = window || {}` is how a file
+    meant for a browser and for something else names the object once. It is read correctly wherever
+    `window` is the host's own name, and wrongly only where the file installs that name itself.
+
+    Off the release gate deliberately: a browser file relies on the host's own `window`,
+    which is read correctly, and installing the alias oneself is a shape only cross-host
+    shims come near.
+    """
+
+
+#: A classic script handing the global object to a call from inside a function body, mapped to the
+#: behavior a host gives it. Every row spells the object as the `this` of a function nothing calls as
+#: a method, which §10.2.1.2 makes the global object for the duration of the call.
+THE_GLOBAL_OBJECT_A_CALL_SUPPLIES_HANDED_ON = {
+    'a write through it': Program(
+        a_program("""
+            var q = 1;
+            function a(g, k) { g[k] = 2; }
+            function f() { a(this, 'q'); }
+            f();
+            console.log(q);
+            """),
+        prints('2'),
+        Reading.SCRIPT,
+    ),
+    'a read through it': Program(
+        a_program("""
+            var q = 1;
+            function a(g, k) { console.log(g[k]); }
+            function f() { a(this, 'q'); }
+            f();
+            """),
+        prints('1'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(THE_GLOBAL_OBJECT_A_CALL_SUPPLIES_HANDED_ON)
+class TestAReceiverACallSuppliesMayBeHandedOn(TestBase):
+    """
+    A function called with no receiver is given the global object as its `this`, and passing that on
+    hands a second call every global the file declares. The references such a hand-over makes are
+    recorded — `test.lib.scripts.js.deobfuscation.test_global_handed_to_a_call` states that law — but
+    only for the spellings the text settles: an unshadowed alias, and the `this` a script's top level
+    holds. Which receiver reaches a body is not decided anywhere, so a `this` written inside a
+    function is not admitted, and a hand-over spelled with one is recorded nowhere.
+
+    Admitting every `this` is measured, not assumed, and it is what this entry costs: obfuscator.io's
+    self-defending wrapper passes its own `this` to a call, and a run that took that for the global
+    object leaves `test_obfuscated_fizzbuzz_01` at twenty times its deobfuscated size. Closing this
+    needs the receiver a call supplies, which nothing answers today.
+
+    Off the release gate deliberately: the spellings real files hand the object on with — a
+    UMD factory's top-level `this`, `(function (g) {...})(this)`, a `.call(this)`
+    wrapper — are all top-level and admitted already, and a bare-called function
+    forwarding its own `this` has so far had to be constructed.
+    """

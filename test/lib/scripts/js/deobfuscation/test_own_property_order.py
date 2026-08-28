@@ -286,8 +286,9 @@ class TestAWalkIsAnsweredTheSameWhetherOrNotItFolds(TestBase):
 #: A question about a position a `delete` emptied, mapped to what Node answers it with. A removed
 #: position is no longer one of the array's own keys, so the walk passes over it, the membership
 #: test reports it absent, and a search does not find `undefined` there. The same four questions
-#: over a position an array grew past are answered wrongly and are pinned in
-#: `test.lib.scripts.js.test_release_blockers`; these rows are the half that is already right, and
+#: over a position an array grew past were answered wrongly once, and are law in
+#: `test.lib.scripts.js.deobfuscation.test_inherited_reads` now; these rows are the half that
+#: was always right, and
 #: they are what says the two ways of emptying a position are told apart at all.
 _A_POSITION_A_DELETE_EMPTIED: dict[str, str] = {
     "var v = [1, 2, 3]; delete v[1]; var r = ''; for (var k in v) r += k; return r;" : '02',
