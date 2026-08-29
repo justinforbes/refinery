@@ -100,7 +100,7 @@ class _Coverage(NamedTuple):
 #: being compared cannot hide behind another type's growth — and a row that turns from an answer
 #: into a refusal moves a number here rather than quietly leaving the comparison below.
 COVERAGE: dict[str, _Coverage] = {
-    ''               : _Coverage(3, 1),
+    ''               : _Coverage(3, 0),
     'System.Boolean' : _Coverage(173, 99),
     'System.Byte'    : _Coverage(5, 5),
     'System.Char'    : _Coverage(8, 6),
@@ -230,10 +230,9 @@ DIVERGENCES: dict[str, _Divergence] = {
     "'ſ' -match 's'"                     : _Divergence(False, True),
 
     # A conversion answers inside the width of its target or not at all: a hexadecimal string
-    # reaches Int32 as a bit pattern, `-as` hands back `$null` where a cast would throw, and a shift
-    # keeps the type it shifted rather than widening past it.
+    # reaches Int32 as a bit pattern, and a shift keeps the type it shifted rather than widening
+    # past it.
     "[int]'0xFFFFFFFF'"                  : _Divergence(-1, 4294967295),
-    '300 -as [byte]'                     : _Divergence(None, 44),
     '[byte]1 -shl -1'                    : _Divergence(0, -2147483648),
 
     # `$null` on the left leaves the type to the right operand, so nothing plus a Boolean is that
@@ -250,14 +249,9 @@ DIVERGENCES: dict[str, _Divergence] = {
 #: Where 5.1 threw and the interpreter answered anyway, with the value it answered. Each entry is an
 #: expression that stops the script being folded into a constant that lets it run on.
 ANSWERED_THROWS: dict[str, _Value] = {
-    # A conversion whose source does not fit its target throws. The interpreter truncates to the
-    # width instead, so the value it folds is one the script could never have held.
-    '[byte]-1'                      : 255,
-    '[byte]300'                     : 44,
-    '[byte]400'                     : 144,
-    '[byte](200 * 2)'               : 144,
-    "[byte]'-1'"                    : 255,
-    "[byte]'0x100'"                 : 0,
+    # A conversion whose source does not fit its target throws. The interpreter answers the
+    # oversized number for an integer width and the code point Python allows for a Char, each a
+    # value the script could never have held.
     '[int]2147483648'               : 2147483648,
     '[char]65536'                   : chr(65536),
 

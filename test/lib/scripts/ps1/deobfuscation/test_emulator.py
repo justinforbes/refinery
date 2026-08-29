@@ -1529,7 +1529,6 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'AB'")
 
-    @unittest.expectedFailure
     def test_a_byte_cast_the_value_does_not_fit_is_a_throw_and_not_a_masked_number(self):
         for cast in ['[byte]400', '[byte](200 * 2)']:
             source = cleandoc(F"""

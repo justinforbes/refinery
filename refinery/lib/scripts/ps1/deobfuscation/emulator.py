@@ -1188,7 +1188,10 @@ class _Ps1Interpreter:
                 return list(val)
             raise _Ps1InterpreterError
         if tn == 'byte':
-            return self._to_int(val) & 0xFF
+            result = self._to_int(val)
+            if not 0 <= result <= 0xFF:
+                raise _Ps1InterpreterError
+            return result
         raise _Ps1InterpreterError
 
     def _add(self, left: _Value, right: _Value) -> _Value:
