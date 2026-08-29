@@ -2329,6 +2329,9 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         # it can be read as arithmetic.
         return None
     if operator in _COMPARISON_SPELLINGS:
+        elements = _elements(left)
+        if elements is not None:
+            return _filtered(operator, elements, right)
         return _compared(operator, left, right)
     operands = _numeric_pair(left, right)
     if operands is None:
@@ -2880,6 +2883,33 @@ def _compared(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool | None:
         return None
     operands = _numeric_pair(left, right)
     return None if operands is None else numeric(*operands)
+
+
+def _filtered(
+    operator: str,
+    elements: tuple[Ps1Fact, ...],
+    right: Ps1Fact,
+) -> tuple[Ps1Fact, ...] | None:
+    """
+    The elements a comparison keeps when its left operand is a collection, or `None` where any one
+    of them cannot be decided. 5.1 reads `10, 20, 30 -eq 20` as the elements the scalar comparison
+    holds for — `@(20)` — and `10, 20, 30, 20, 10 -ne 20` as `10, 30, 10`, so the same predicate
+    that answers the scalar case answers each element here.
+
+    An element the scalar comparison declines withholds the whole result rather than being dropped
+    from it: a collection missing the members it could not read is a different collection from the
+    one 5.1 builds. Which operators reach here is `apply`'s throw gate to decide and not this — an
+    ordering whose cell records a throw never does, so an element that would raise a comparison is
+    refused before this filters anything.
+    """
+    kept: list[Ps1Fact] = []
+    for element in elements:
+        decided = _compared(operator, element, right)
+        if decided is None:
+            return None
+        if decided:
+            kept.append(element)
+    return tuple(kept)
 
 
 def _compared_to_absent(comparison: _Comparison, left: Ps1Fact, right: Ps1Fact) -> bool | None:

@@ -506,9 +506,9 @@ FOLDS: dict[str, str] = {
     '$t = -2147483648; Write-Output (,$t); Write-Output $t':
         'Write-Output (,-2147483648)\nWrite-Output (-2147483648)',
     '$t = 10, 20, 30, 20, 10 -ne 20; Write-Output (,$t); Write-Output $t':
-        '$t = 10, 20, 30, 20, 10 -NE 20\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,(10, 30, 10))\nWrite-Output (10, 30, 10)',
     '$t = 10, 20, 30 -eq 20; Write-Output (,$t); Write-Output $t':
-        '$t = 10, 20, 30 -Eq 20\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,(,20))\nWrite-Output (,20)',
     '$t = 10 -ne 20; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
     "$t = [string]('a', 'b'); Write-Output (,$t); Write-Output $t":
@@ -1314,7 +1314,7 @@ FOLDS: dict[str, str] = {
     '$t = $null -le -5; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = @(1, 2) -eq $null; Write-Output (,$t); Write-Output $t':
-        '$t = @(1, 2) -Eq $Null\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,@())\nWrite-Output @()',
     "$t = '2' -lt '10'; Write-Output (,$t); Write-Output $t":
         "$t = '2' -LT '10'\nWrite-Output (,$t)\nWrite-Output $t",
     "$t = '10' -le '9'; Write-Output (,$t); Write-Output $t":

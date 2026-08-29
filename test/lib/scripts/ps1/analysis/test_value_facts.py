@@ -923,9 +923,8 @@ DECIDED_COMPARISON_ROWS: tuple[str, ...] = tuple(
 )
 
 #: The measured comparisons the domain settles no value for. Refusing is allowed — ordering two
-#: texts is a culture's question, ordering a number against a text may abort, a case-marked
-#: spelling over two numbers is a question about text asked of values that have none, and a
-#: comparison against a collection answers with the elements that match rather than with a truth.
+#: texts is a culture's question, ordering a number against a text may abort, and a case-marked
+#: spelling over two numbers is a question about text asked of values that have none.
 #: Answering one of them differently from a host is not allowed. An entry leaving this tuple is an
 #: answer gained and one joining it an answer lost, so neither can happen without this being
 #: rewritten.
@@ -943,14 +942,23 @@ UNDECIDED_COMPARISONS: tuple[str, ...] = (
     "1 -lt '5'",
     "1 -eq 'abc'",
     "1 -ne 'abc'",
-    '10, 20, 30 -eq 20',
-    '10, 20, 30, 20, 10 -ne 20',
     "'10' -gt 9",
     "'10' -le '9'",
     "'2' -lt '10'",
-    '@(1, 2) -eq $null',
     "'ss' -eq [char]0x00DF",
     "[char]0x00DF -eq 'ss'",
+)
+
+#: The measured comparisons against a collection on the left, which 5.1 answers with the elements
+#: that match the right operand rather than with a truth: `10, 20, 30 -eq 20` is the one-element
+#: collection `20` and `@(1, 2) -eq $null` is the empty one. The domain settles the same collection,
+#: so these are decided rather than refused, but the host printed the members and not a fact this
+#: module reconstructs — so the type is pinned here and the value beside the fold, in
+#: `test.lib.scripts.ps1.deobfuscation.test_value_domain`.
+FILTERED_COMPARISONS: tuple[str, ...] = (
+    '10, 20, 30 -eq 20',
+    '10, 20, 30, 20, 10 -ne 20',
+    '@(1, 2) -eq $null',
 )
 
 #: The measured Decimal literals at the extremes of the type. A `System.Decimal` is a 96 bit
@@ -2849,6 +2857,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
             len(OPERATION_ROWS), 293, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
+        self.assertEqual(sorted(set(FILTERED_COMPARISONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
             sorted(THROWN_OPERATIONS),
             [
@@ -2896,7 +2905,13 @@ class TestPs1MeasuredOperators(unittest.TestCase):
         ]
         self.assertEqual(
             sorted(rewritten),
-            sorted(PINNED_OPERATIONS + ABBREVIATED_OPERATIONS + tuple(MISFOLDED_OPERATIONS)))
+            sorted(
+                PINNED_OPERATIONS
+                + ABBREVIATED_OPERATIONS
+                + FILTERED_COMPARISONS
+                + tuple(MISFOLDED_OPERATIONS)
+            ),
+        )
 
     def test_every_operation_recorded_as_folded_wrongly_still_is(self):
         """
@@ -3523,6 +3538,7 @@ class TestPs1AComparisonIsDecidedByItsLeftOperand(unittest.TestCase):
             sorted(
                 DECIDED_COMPARISON_ROWS
                 + UNDECIDED_COMPARISONS
+                + FILTERED_COMPARISONS
                 + tuple(row for row in COMPARISON_ROWS if row in THROWN_OPERATIONS)
             ),
         )
@@ -3559,11 +3575,15 @@ class TestPs1AComparisonIsDecidedByItsLeftOperand(unittest.TestCase):
         `is_truthy` is what an `if` over a comparison asks, and it composes two steps that each may
         refuse — so it is asked here as well as `apply`, over every measured comparison including
         the two a host aborted on.
+
+        A comparison against a collection is left out: it produces the members that match and not a
+        Boolean, so the host printed no truth for it to be held against. Its `if` reads the truth of
+        that collection, which is what `is_truthy` over a collection is measured against elsewhere.
         """
         counted = {
             expression: is_truthy(_slot(expression))
             for expression in COMPARISON_ROWS
-            if is_truthy(_slot(expression)) is not None
+            if expression not in FILTERED_COMPARISONS and is_truthy(_slot(expression)) is not None
         }
         self.assertEqual(
             counted,
@@ -4140,7 +4160,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 192)
+        self.assertEqual(len(composed), 195)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -4381,7 +4401,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 2344)
+        self.assertEqual(len(compared), 2341)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 

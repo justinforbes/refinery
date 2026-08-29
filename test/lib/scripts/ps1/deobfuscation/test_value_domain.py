@@ -153,11 +153,9 @@ class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
     def test_a_string_plus_a_double_is_the_text_the_double_is_written_as(self):
         self.assertEqual(self._deobfuscate("$x = 'a' + 1.5"), "$x = 'a1.5'")
 
-    @unittest.expectedFailure
     def test_an_equality_against_a_collection_filters_it(self):
-        self.assertEqual(self._deobfuscate('$x = 10, 20, 30 -eq 20'), '$x = @(20)')
+        self.assertEqual(self._deobfuscate('$x = 10, 20, 30 -eq 20'), '$x = ,20')
 
-    @unittest.expectedFailure
     def test_an_inequality_against_a_collection_filters_it(self):
         self.assertEqual(
             self._deobfuscate('$x = 10, 20, 30, 20, 10 -ne 20'),
