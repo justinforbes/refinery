@@ -32,6 +32,7 @@ from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
 from refinery.lib.scripts.ps1.analysis.variable_types import constraint_converts
 from refinery.lib.scripts.ps1.analysis.values import (
     UNKNOWN,
+    folded_binary,
     integer_of,
     make_string_literal,
     read,
@@ -66,6 +67,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1HereString,
     Ps1IfStatement,
     Ps1IndexExpression,
+    Ps1IntegerLiteral,
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1ParenExpression,
@@ -459,6 +461,42 @@ def _ancestor_past_parens(node: Node) -> Node | None:
     return parent
 
 
+def _accumulation_terms(node: Node) -> tuple[str, Expression] | None:
+    """
+    The binary operator and right-hand operand that an accumulating write of `node` reads its
+    previous value against, or `None` when the write is not one — `('+', e)` for `$x += e`, and
+    `('+', 1)` for `$x++`, whose long spelling `$x = $x + 1` folds already.
+
+    A plain `=` is excluded: it replaces the value without reading it, and its constant is the
+    ordinary `by_write` entry. An accumulating one reads the value as well, so its constant is the
+    fold of the previous value against the operand rather than a value written down anywhere.
+
+    Only a write that is itself a statement counts. Its previous value is asked of the flow model,
+    which tracks control flow between statements but not within an expression: a `$i++` inside
+    `$false -and ($i++)` never runs, yet the model reports it as the definite last write to `$i`, so
+    folding it in would compute a value the script never reaches. Held to a statement, whether the
+    write runs at all is the flow model's own question to answer, and this only supplies the value
+    once it does.
+    """
+    if not isinstance(node, Ps1Variable):
+        return None
+    assignment = assignment_of(node)
+    if assignment is not None:
+        if assignment.operator == '=' or not isinstance(assignment.parent, Ps1ExpressionStatement):
+            return None
+        value = assignment.value
+        return (assignment.operator[:-1], value) if isinstance(value, Expression) else None
+    parent = node.parent
+    if isinstance(parent, Ps1UnaryExpression) and parent.operand is node:
+        if not isinstance(parent.parent, Ps1ExpressionStatement):
+            return None
+        if parent.operator == '++':
+            return '+', Ps1IntegerLiteral(raw='1')
+        if parent.operator == '--':
+            return '-', Ps1IntegerLiteral(raw='1')
+    return None
+
+
 def _constant_value_key(node: Node) -> tuple | None:
     """
     A hashable key for the constant value of a node, or `None` where the node names no value. Two
@@ -709,13 +747,20 @@ class _Inlining:
         write = self.flow.reaching_definition(var)
         if write is None:
             return None
-        if not isinstance(write, Ps1Variable) or not is_mutated_in_place(write):
+        accumulation = _accumulation_terms(write)
+        through = isinstance(write, Ps1Variable) and is_mutated_in_place(write)
+        if not through and accumulation is None:
             value = self.table.by_write.get(id(write))
             return None if value is None or constraint_converts(binding, value) else value
         if id(write) in chased:
             return None
         previous = self._value_at(write, key, chased | {id(write)})
-        return None if previous is None else value_after(write, previous)
+        if previous is None:
+            return None
+        if accumulation is not None:
+            operator, right = accumulation
+            return folded_binary(previous, operator, right)
+        return value_after(write, previous)
 
     def binding_of(self, var: Ps1Variable) -> Binding | None:
         return self.flow.semantic.binding_of(var)

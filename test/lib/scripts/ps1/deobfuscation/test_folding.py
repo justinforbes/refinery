@@ -1824,22 +1824,18 @@ class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output 'abc'")
 
-    @unittest.expectedFailure
     def test_an_added_number_is_the_sum(self):
         self.assertEqual(
             self._deobfuscate('$n = 1; $n += 2; Write-Output $n'), 'Write-Output 3')
 
-    @unittest.expectedFailure
     def test_a_subtracted_number_is_the_difference(self):
         self.assertEqual(
             self._deobfuscate('$n = 5; $n -= 2; Write-Output $n'), 'Write-Output 3')
 
-    @unittest.expectedFailure
     def test_an_incremented_number_is_the_next_one(self):
         self.assertEqual(
             self._deobfuscate('$n = 1; $n++; Write-Output $n'), 'Write-Output 2')
 
-    @unittest.expectedFailure
     def test_appended_text_is_the_text_of_every_append(self):
         source = inspect.cleandoc("""
             $s = 'a'
@@ -1849,7 +1845,6 @@ class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output 'abc'")
 
-    @unittest.expectedFailure
     def test_a_command_accumulated_by_appending_is_run_where_it_was_built(self):
         source = inspect.cleandoc("""
             $c = 'Write-Out'
@@ -2350,8 +2345,9 @@ class TestPs1AValueNoStoreCanReachFoldsBesideAnObjectAStoreDoes(TestPs1):
     A String, an Int32 and a Char have no identity a store reaches: nothing a script does to an
     object it holds elsewhere changes what one of them is. So the constants standing beside an array
     the script turns around, or writes an element of, still fold into the positions that store them
-    — an accumulation, a key of a hashtable literal, a slot of a multi-assignment — and the array
-    keeps its name where the call that writes through it stands.
+    — a key of a hashtable literal and a slot of a multi-assignment keep the container they fold
+    into, while an accumulation folds on through to the value it leaves — and the array keeps its
+    name where the call that writes through it stands.
     """
 
     def test_a_string_folds_into_an_accumulation_beside_an_array_that_is_reversed(self):
@@ -2366,9 +2362,7 @@ class TestPs1AValueNoStoreCanReachFoldsBesideAnObjectAStoreDoes(TestPs1):
         expected = inspect.cleandoc("""
             $b = 1, 2, 3
             [Array]::Reverse($b)
-            $t = ''
-            $t += 'abc'
-            Write-Output $t
+            Write-Output 'abc'
         """)
         self.assertEqual(self._deobfuscate(source), expected)
 

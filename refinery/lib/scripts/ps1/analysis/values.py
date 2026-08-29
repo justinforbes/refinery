@@ -48,7 +48,7 @@ import typing
 from typing import Callable, TypeAlias, TypeVar
 from weakref import WeakKeyDictionary
 
-from refinery.lib.scripts import Node, mutation_epoch
+from refinery.lib.scripts import Node, _clone_node, mutation_epoch
 from refinery.lib.scripts.ps1.ast import (
     extract_first_positional_string,
     get_command_name,
@@ -3088,6 +3088,27 @@ def render(fact: Ps1Fact) -> Expression | None:
     if target is None:
         return None
     return Ps1CastExpression(type_name=target, operand=Ps1IntegerLiteral(raw=str(payload)))
+
+
+def folded_binary(left: Expression, operator: str, right: Expression) -> Expression | None:
+    """
+    The expression `left operator right` folds to, or `None` where the pair is not constant or the
+    operation may throw.
+
+    The operands are read exactly as `evaluate` reads the two sides of any binary expression, so a
+    fold here agrees with folding the same operator written out longhand: the value a compound
+    assignment `$x op= e` leaves is `$x op e`, and this is what lets the short spelling reach the
+    same constant the long one does. Each operand is copied before it is read, because the throwaway
+    node built to hold them adopts the children it is handed, and a fold must leave the tree it read
+    from untouched whether or not a caller installs the result.
+    """
+    combined = Ps1BinaryExpression(
+        left=_clone_node(left),
+        operator=operator,
+        right=_clone_node(right),
+    )
+    outcome = evaluate(combined)
+    return None if outcome.may_throw else render(outcome.value)
 
 
 def _rendered_character(payload) -> Expression | None:

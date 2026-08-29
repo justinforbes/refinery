@@ -31,9 +31,9 @@ class TestPs1ConstantInlining(TestPs1):
         self.assertIn('XZ', result)
         self.assertNotIn('$a', result)
 
-    def test_compound_assignment_disqualifies(self):
+    def test_compound_assignment_folds(self):
         result = self._deobfuscate("$x = 'a'; $x += 'b'; Write-Output $x")
-        self.assertIn('$x', result)
+        self.assertEqual(result, "Write-Output 'ab'")
 
     def test_same_value_multiple_assignments_inlined(self):
         result = self._deobfuscate(
@@ -102,10 +102,9 @@ class TestPs1ConstantInlining(TestPs1):
         result = self._deobfuscate("$script:x = 'val'; Write-Output $script:x")
         self.assertIn('$script:x', result)
 
-    def test_increment_not_inlined(self):
+    def test_increment_folds(self):
         result = self._deobfuscate("$i = 0; $i++; Write-Output $i")
-        self.assertIn('$i', result)
-        self.assertNotIn('0++', result)
+        self.assertEqual(result, 'Write-Output 1')
 
     def test_nonconst_value_not_inlined(self):
         result = self._deobfuscate("$x = Get-Date; Write-Output $x")
@@ -466,11 +465,11 @@ class TestPs1ReassignedVariableInlining(TestPs1):
         self.assertIn('done', result)
         self.assertNotIn('$x', result)
 
-    def test_augmented_assignment_rejects(self):
+    def test_augmented_assignment_folds(self):
         result = self._deobfuscate(
             "$x = 'hello'\n$x += ' world'\nWrite-Host $x"
         )
-        self.assertIn('$x', result)
+        self.assertEqual(result, "Write-Host 'hello world'")
 
     def test_same_stmt_assign_does_not_dominate_earlier_ref(self):
         """

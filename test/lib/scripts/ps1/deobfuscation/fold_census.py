@@ -1519,4 +1519,14 @@ FOLDS: dict[str, str] = {
         "zzq0000=5\nWrite-Host 'after'",
     "function f { try { 'tail' } catch {} }; Write-Host (f)":
         "Write-Host 'tail'",
+    '$n = 1; $n += 2; Write-Output $n':
+        'Write-Output 3',
+    '$n = 5; $n -= 2; Write-Output $n':
+        'Write-Output 3',
+    '$n = 1; $n++; Write-Output $n':
+        'Write-Output 2',
+    "$s = 'a'; $s += 'b'; $s += 'c'; Write-Output $s":
+        "Write-Output 'abc'",
+    "$c = 'Write-Out'; $c += 'put 5'; Invoke-Expression $c":
+        'Write-Output 5',
 }
