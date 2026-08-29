@@ -189,10 +189,10 @@ class TestIDLib(TestBase):
     def test_text_holding_format_characters_reads_back_as_what_it_holds(self):
         """
         A soft hyphen, a zero width non-joiner and a right-to-left mark are written into text on
-        purpose, and each is two bytes in UTF-8 that every legacy single byte codec reads as two
-        letters. A guess that counts them as evidence against UTF-8 therefore answers a codec
-        under which the document is mojibake, and every reader of the guess then works on a
-        different text than the file holds.
+        purpose; the soft hyphen is two bytes in UTF-8 and the other two are three, and a legacy
+        single byte codec reads each of those bytes as its own character. A guess that counts them
+        as evidence against UTF-8 therefore answers a codec under which the document is mojibake,
+        and every reader of the guess then works on a different text than the file holds.
         """
         text = (
             F'A soft{chr(0x00AD)}hyphen may break a long word, a joiner of zero'
@@ -204,14 +204,35 @@ class TestIDLib(TestBase):
         assert enc is not None
         self.assertEqual(text, codecs.decode(data[enc.bom:], enc.codec))
 
+    def test_dropping_format_characters_does_not_admit_a_byte_dense_blob_as_text(self):
+        """
+        A legacy codec maps almost every byte to a letter, so the evidence that a byte dense blob
+        is not text is the handful of control and format characters a few of its bytes decode to.
+        Dropping the format characters, so that a document holding them reads back as itself, must
+        not cost that evidence: an authentic document reads as text, and the same document with
+        every byte complemented is a control sparse blob no reader may take for a single byte
+        encoding merely because a legacy codec spells its bytes out as letters.
+        """
+        document = (
+            'The analyst opened the captured sample in a sandbox, read the strings it carried, '
+            'and wrote a short note about the network addresses it would have contacted at run time.'
+        ).encode('ascii')
+        assert len(document) % 2 == 1  # route the complement through the per-codec scoring loop
+        plain = idlib.guess_text_encoding(document)
+        assert plain is not None
+        self.assertEqual(plain.codec, 'utf8')
+        self.assertIsNone(idlib.guess_text_encoding(bytes(b ^ 0xFF for b in document)))
+
     @unittest.expectedFailure
     def test_utf16_without_a_mark_is_found_by_the_text_it_decodes_to(self):
         """
         Without a byte order mark, UTF-16 is looked for in the bytes rather than in the text they
-        decode to: every second byte is required to be one no printable ASCII letter holds, which
-        is true of Latin script and false of everything else. A document holding typographic
-        quotation marks or one CJK word is therefore not recognized at all, and every reader of
-        the guess then works on the bytes as though they were a single byte encoding.
+        decode to: the high byte of every unit must fall outside printable ASCII, the range 0x20
+        to 0x7E that holds space, the digits and the punctuation as well as the letters. That is
+        true of Latin script, whose high byte is zero, and false of any character from U+2000 up,
+        whose high byte lands inside that range. A document holding typographic quotation marks or
+        one CJK word is therefore not recognized at all, and every reader of the guess then works
+        on the bytes as though they were a single byte encoding.
         """
         texts = {
             'typographic punctuation': (

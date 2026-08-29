@@ -704,24 +704,35 @@ def get_reg_export_type(data: buf):
         return Fmt.REG_TEXT
 
 
-#: The Unicode categories of the characters that a document does not hold, so that reading
-#: one out of a decoding is evidence that the decoding is the wrong one. The format category
-#: `Cf` is not among them: a zero width joiner inside a word, a bidirectional mark and a soft
-#: hyphen are all written into text on purpose, and counting them against a decoding makes a
-#: valid document read as one in whatever legacy encoding maps its bytes to letters instead.
+#: The Unicode categories of the characters that a document does not hold, so that reading one out
+#: of a decoding is evidence that the decoding is the wrong one.
 _NONTEXT_CATEGORIES = frozenset({'Cc', 'Cn', 'Co', 'Cs'})
 
+#: The format category is added to the above for every codec but the Unicode transformation formats
+#: below. A zero width joiner inside a word, a bidirectional mark and a soft hyphen are written into
+#: text on purpose, and a transformation format spends several bytes to encode one: counting such a
+#: character against `utf8` makes a valid document read as mojibake in whatever legacy codec reads
+#: its bytes as letters. A legacy codec maps a single byte to a format character instead, and not
+#: counting that lets a byte dense blob read as text in whatever legacy codec spells it out.
+_LEGACY_NONTEXT_CATEGORIES = _NONTEXT_CATEGORIES | {'Cf'}
 
-def _get_nontext_chars():
-    if not _NONTEXT_CHARS:
+#: The codecs under which a format character is a deliberate part of the text rather than a byte
+#: that a legacy codec had no better home for.
+_TEXT_FORMAT_CODECS = frozenset({'utf8', 'utf7', 'utf-16le', 'utf-16be', 'utf-32le', 'utf-32be'})
+
+_NONTEXT_CHARS: dict[frozenset[str], set[int]] = {}
+
+
+def _get_nontext_chars(categories: frozenset[str]):
+    chars = _NONTEXT_CHARS.get(categories)
+    if chars is None:
         from unicodedata import category as uc
-        _NONTEXT_CHARS.update(
-            cp for cp in range(0x10000) if uc(chr(cp)) in _NONTEXT_CATEGORIES)
-        _NONTEXT_CHARS.difference_update(B'\040\n\r\t')
-    return _NONTEXT_CHARS
+        chars = {cp for cp in range(0x10000) if uc(chr(cp)) in categories}
+        chars.difference_update(B'\040\n\r\t')
+        _NONTEXT_CHARS[categories] = chars
+    return chars
 
 
-_NONTEXT_CHARS = set()
 _INVALID_BYTES = bytes(sorted(set(range(256)) - set(range(0x20, 0x80)) - {9, 10, 13}))
 
 
@@ -808,13 +819,15 @@ def guess_text_encoding(
         assert enc is not None
         return TextEncoding(enc, bom, lsb, step)
 
-    nontext = _get_nontext_chars()
-
     for encoding in (enc and [enc] or ENCODINGS):
         try:
             decoded = codecs.decode(data, encoding)
         except UnicodeDecodeError:
             continue
+        categories = _LEGACY_NONTEXT_CATEGORIES
+        if encoding in _TEXT_FORMAT_CODECS:
+            categories = _NONTEXT_CATEGORIES
+        nontext = _get_nontext_chars(categories)
         threshold = int(maxbad * len(decoded))
         bad = 0
         for c in decoded:
