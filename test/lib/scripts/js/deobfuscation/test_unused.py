@@ -1794,3 +1794,68 @@ class TestNodePrintsTheSameOnceTheDeadStoreIsGone(TestJsDeobfuscator):
             {source: behavior(self._deobfuscate(source)) for source in rows},
             {source: behavior(source) for source in rows},
         )
+
+
+def _a_property_written_on_a_local_object(name: str) -> str:
+    """
+    A program that declares *name* as a local object, writes a property on it, and prints the object
+    as JSON, so that a write that went missing is a line of output and not an error.
+    """
+    return (
+        F'var {name} = {{}};\n'
+        F'{name}.x = 1;\n'
+        F'console.log(JSON.stringify({name}));'
+    )
+
+
+#: A program whose object is named by a local declaration, mapped to the text the deobfuscation
+#: writes for it — the program itself. A declaration of a global-object alias name binds it, so the
+#: write puts a property on an ordinary object the `JSON.stringify` read prints whole, never on the
+#: global object, and the write is kept however dead its property name looks. The name is spelled
+#: seven ways: the four the removal's same-realm set holds, the two alias spellings outside it, and
+#: one that is no spelling of the global object at all.
+A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS: dict[str, str] = {
+    source: source
+    for source in map(_a_property_written_on_a_local_object, [
+        'globalThis',
+        'global',
+        'window',
+        'self',
+        'top',
+        'frames',
+        'obj',
+    ])
+}
+
+#: The same write through an alias no declaration binds, beside a program that never reads the
+#: name, mapped to the text the deobfuscation writes for it. This is the control: here the write
+#: really puts a property on the global object and nothing reads it, so the sweep removes it, and a
+#: fix that kept every write spelled through an alias would fail this row.
+A_GLOBAL_PROPERTY_WRITE_NOTHING_READS: dict[str, str] = {
+    'globalThis.q = 1;\nconsole.log(3);': 'console.log(3);',
+}
+
+
+class TestAPropertyWriteThroughAShadowedGlobalAliasSurvives(TestJsDeobfuscator):
+
+    def test_the_write_is_kept_where_a_declaration_binds_the_alias_name(self):
+        rows = A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_the_write_is_removed_where_no_declaration_binds_the_alias(self):
+        rows = A_GLOBAL_PROPERTY_WRITE_NOTHING_READS
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNodePrintsTheSameAboutTheObjectALocalAliasNameHolds(TestJsDeobfuscator):
+
+    def test_each_program_prints_what_it_printed_before(self):
+        rows = {
+            **A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS,
+            **A_GLOBAL_PROPERTY_WRITE_NOTHING_READS,
+        }
+        self.assertEqual(
+            {source: behavior(self._deobfuscate(source)) for source in rows},
+            {source: behavior(source) for source in rows},
+        )

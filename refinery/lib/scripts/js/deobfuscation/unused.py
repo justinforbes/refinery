@@ -806,6 +806,14 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         """
         Remove global-property write statements (`global.x = value`) where property name `x` is
         never referenced anywhere in the script (not by any identifier or member expression).
+
+        The base has to denote the global object where the write stands, which is the model's
+        question rather than the spelling's: a declaration of the alias name binds it, and from then
+        on `window.x = 1` writes a property of an ordinary object the program may read back whole,
+        through `JSON.stringify` or any second name for it, without ever spelling `x`. The spelling
+        test stays as the sweep's own policy on top of the model's answer, because a removal keys on
+        the same-realm names only, and the model's alias set is wider by the two names that denote
+        another document's global object.
         """
         write_stmts: dict[str, list[JsExpressionStatement]] = {}
         for node in walk_scope(parent):
@@ -821,6 +829,7 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
                 and isinstance(lhs.object, JsIdentifier)
                 and isinstance(lhs.property, JsIdentifier)
                 and lhs.object.name in SAME_REALM_GLOBAL_OBJECT_ALIASES
+                and self.model.global_alias_member_name(lhs) is not None
             ):
                 write_stmts.setdefault(lhs.property.name, []).append(node)
         if not write_stmts:
