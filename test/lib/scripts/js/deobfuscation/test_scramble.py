@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
 from test.lib.scripts.js.analysis.differential import deobfuscate_within
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
@@ -239,3 +240,89 @@ class TestScrambleStringDecoder(TestJsDeobfuscator):
             """
         )
         self.assertEqual(self._run_transformer(source, JsScrambleStringDecoder), expected)
+
+
+class TestTheInstallationOfADecoderIsKeptWhereACallStillReachesIt(TestJsDeobfuscator):
+    """
+    The pass deletes the cipher machinery once nothing outside it names any of the machinery, and a
+    call whose argument it could not read is exactly what leaves something naming it. Both rows put
+    such a call beside a statement installing the decoder under a second name, so the installation
+    is what the surviving call reaches the decoder through.
+    """
+
+    _MACHINERY = inspect.cleandoc(
+        """
+        class Scramble {
+          constructor(pw, salt) {
+            this.masterKey = pb(pw, salt, 200000, 32, 'sha256');
+            this.rounds = 3;
+          }
+          decode(input) { return decrypt(input, this.masterKey, this.rounds); }
+        }
+        var key = '2aaa9053353088d4d49b5bf32f403f2d85b3df97c9a9beedfcdbb1ecc27ba9c6';
+        var salt = 'fec5863b88643968ecff0c2c8afecbaf';
+        var instance = new Scramble(key, salt);
+        function decode(x) { return instance.decode(x); }
+        """
+    )
+
+    def _decode(self, tail: str) -> str:
+        return self._run_transformer(
+            F'{self._MACHINERY}\n{inspect.cleandoc(tail)}', JsScrambleStringDecoder)
+
+    def test_an_installation_on_an_object_a_declaration_holds_is_not_a_global_installation(self):
+        """
+        `self` is declared here, so `self.d = decode` writes a property of an ordinary object rather
+        than installing a global, and `self.d(payload)` reads that property back. The machinery
+        stays whole because that call still names it; the call the pass could read is answered all
+        the same.
+        """
+        tail = """
+            var self = {};
+            self.d = decode;
+            var url = decode('hJQxp9Pvj3X2QId3C4RuMOe1C4EpuSg2b/8JyqzSWjrQm+VgNNg=');
+            var other = self.d(payload);
+            """
+        expected = inspect.cleandoc(
+            """
+            class Scramble {
+              constructor(pw, salt) {
+                this.masterKey = pb(pw, salt, 200000, 32, 'sha256');
+                this.rounds = 3;
+              }
+              decode(input) {
+                return decrypt(input, this.masterKey, this.rounds);
+              }
+            }
+            var key = '2aaa9053353088d4d49b5bf32f403f2d85b3df97c9a9beedfcdbb1ecc27ba9c6';
+            var salt = 'fec5863b88643968ecff0c2c8afecbaf';
+            var instance = new Scramble(key, salt);
+            function decode(x) {
+              return instance.decode(x);
+            }
+            var self = {};
+            self.d = decode;
+            var url = 'https://api.github.com';
+            var other = self.d(payload);
+            """
+        )
+        self.assertEqual(self._decode(tail), expected)
+
+    @unittest.expectedFailure
+    def test_an_installation_on_the_global_object_is_kept_where_a_call_reads_the_name(self):
+        """
+        `window.d = decode` really does install the decoder as the global `d`, which `d(payload)`
+        goes on to call, so the installation and the machinery behind it have to stay: the output
+        the pass writes today throws `ReferenceError` where the input decoded.
+
+        `nothing_still_names` asks the model about every identifier the removal would take away,
+        and the model records this installation against the global it mints as the member
+        expression rather than as an identifier, so the read through the installed name is a
+        reference that question never reaches.
+        """
+        tail = """
+            window.d = decode;
+            var url = decode('hJQxp9Pvj3X2QId3C4RuMOe1C4EpuSg2b/8JyqzSWjrQm+VgNNg=');
+            var other = d(payload);
+            """
+        self.assertIn('function decode(x)', self._decode(tail))

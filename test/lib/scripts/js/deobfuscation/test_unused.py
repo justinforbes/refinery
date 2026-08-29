@@ -1750,6 +1750,26 @@ class TestHostEntrypoints(TestJsDeobfuscator):
             self._remove_unused(source),
         )
 
+    def test_a_dead_write_standing_as_an_unbraced_branch_body_is_kept_and_the_pass_ends(self):
+        """
+        `_remove_from_parent` cannot take a statement out of a single-node field, so a removal the
+        tree refuses must not report the pass as changed: each of these programs used to spin the
+        fixpoint forever, one per removal arm — global property, dead variable, destructuring.
+        """
+        rows = {
+            'if (Math.random() > 2) window.x = 1;\nconsole.log(3);':
+                'if (Math.random() > 2) {\n  window.x = 1;\n}\nconsole.log(3);',
+            'var y;\nif (Math.random() > 2) y = 1;\nconsole.log(3);':
+                'var y;\nif (Math.random() > 2) {\n  y = 1;\n}\nconsole.log(3);',
+            'var a, b;\nif (Math.random() > 2) [a, b] = [1, 2];\nconsole.log(3);':
+                'var a, b;\nif (Math.random() > 2) {\n  [a, b] = [1, 2];\n}\nconsole.log(3);',
+        }
+        self.assertEqual({source: self._remove_unused(source) for source in rows}, rows)
+
+    def test_a_write_read_back_through_a_bracket_spelling_is_kept(self):
+        source = "globalThis.x = 1;\nconsole.log(globalThis['x']);"
+        self.assertEqual(source, self._remove_unused(source))
+
 
 #: An assignment to a name no declaration binds, standing where nothing makes the region strict,
 #: mapped to the text the deobfuscation writes for it. Sloppy code answers such a write by creating
@@ -1801,10 +1821,12 @@ def _a_property_written_on_a_local_object(name: str) -> str:
     A program that declares *name* as a local object, writes a property on it, and prints the object
     as JSON, so that a write that went missing is a line of output and not an error.
     """
-    return (
-        F'var {name} = {{}};\n'
-        F'{name}.x = 1;\n'
-        F'console.log(JSON.stringify({name}));'
+    return inspect.cleandoc(
+        F"""
+        var {name} = {{}};
+        {name}.x = 1;
+        console.log(JSON.stringify({name}));
+        """
     )
 
 
@@ -1830,9 +1852,12 @@ A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS: dict[str, str] = {
 #: The same write through an alias no declaration binds, beside a program that never reads the
 #: name, mapped to the text the deobfuscation writes for it. This is the control: here the write
 #: really puts a property on the global object and nothing reads it, so the sweep removes it, and a
-#: fix that kept every write spelled through an alias would fail this row.
+#: fix that kept every write spelled through an alias would fail this row. The second row stands a
+#: spelling in a `typeof` guard, which observes no property, so it does not veto the sweep either.
 A_GLOBAL_PROPERTY_WRITE_NOTHING_READS: dict[str, str] = {
     'globalThis.q = 1;\nconsole.log(3);': 'console.log(3);',
+    "globalThis.x = 1;\nif (typeof window !== 'undefined') {\n  console.log(3);\n}":
+        "if (typeof window !== 'undefined') {\n  console.log(3);\n}",
 }
 
 
@@ -1850,10 +1875,103 @@ class TestAPropertyWriteThroughAShadowedGlobalAliasSurvives(TestJsDeobfuscator):
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestNodePrintsTheSameAboutTheObjectALocalAliasNameHolds(TestJsDeobfuscator):
 
+    def test_each_object_program_prints_the_property_to_begin_with(self):
+        rows = A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS
+        self.assertEqual(
+            {source: behavior(source) for source in rows},
+            {source: ('{"x":1}\n', None) for source in rows},
+        )
+
     def test_each_program_prints_what_it_printed_before(self):
         rows = {
             **A_PROPERTY_WRITTEN_ON_AN_OBJECT_A_LOCAL_NAME_HOLDS,
             **A_GLOBAL_PROPERTY_WRITE_NOTHING_READS,
+        }
+        self.assertEqual(
+            {source: behavior(self._deobfuscate(source)) for source in rows},
+            {source: behavior(source) for source in rows},
+        )
+
+
+#: The same dead-looking write beside a position that hands the global object itself onward — a
+#: call argument, a `for-in` subject, the `this` of the top level — mapped to the program itself.
+#: From such a position every property is readable without its name being spelled, so nothing may
+#: be removed: `Object.keys` would hold one name fewer and the `w` parameter would print
+#: `undefined` if the write went.
+A_GLOBAL_PROPERTY_WRITE_AN_UNSPELLED_READ_OBSERVES: dict[str, str] = {
+    source: source
+    for source in [
+        inspect.cleandoc(
+            """
+            globalThis.x = 1;
+            console.log(Object.keys(globalThis).includes('x'));
+            """
+        ),
+        inspect.cleandoc(
+            """
+            globalThis.x = 1;
+            for (var k in globalThis) {
+              console.log(k);
+            }
+            """
+        ),
+        inspect.cleandoc(
+            """
+            window.cfg = 1;
+            (function(w) {
+              console.log(w.cfg);
+            })(window);
+            """
+        ),
+        'globalThis.x = 1;\ndump(this);',
+    ]
+}
+
+#: A dead write under each same-realm spelling the sweep may act on, mapped to the text the
+#: deobfuscation writes for it. The removal trusts an alias spelling to denote this realm's global
+#: object, which is a host assumption rather than a language one — under Node a bare `window` read
+#: throws — so these rows pin the text only and stay out of the Node twin, whose host lacks the
+#: names.
+A_DEAD_GLOBAL_PROPERTY_WRITE_UNDER_EACH_SAME_REALM_SPELLING: dict[str, str] = {
+    'window.q = 1;\nconsole.log(3);': 'console.log(3);',
+    'self.q = 1;\nconsole.log(3);': 'console.log(3);',
+    'global.q = 1;\nconsole.log(3);': 'console.log(3);',
+}
+
+#: The same dead write through the two spellings the removal set leaves out, mapped to the program
+#: itself: `top` and `frames` are not trusted to denote this document's global object, so their
+#: writes are not this sweep's to remove.
+A_DEAD_PROPERTY_WRITE_ON_ANOTHER_REALMS_GLOBAL: dict[str, str] = {
+    source: source
+    for source in [
+        'top.q = 1;\nconsole.log(3);',
+        'frames.q = 1;\nconsole.log(3);',
+    ]
+}
+
+
+class TestAGlobalPropertyWriteSurvivesWhereTheGlobalObjectEscapes(TestJsDeobfuscator):
+
+    def test_the_write_is_kept_where_a_position_reads_the_object_whole(self):
+        rows = A_GLOBAL_PROPERTY_WRITE_AN_UNSPELLED_READ_OBSERVES
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_the_write_is_removed_under_each_same_realm_spelling(self):
+        rows = A_DEAD_GLOBAL_PROPERTY_WRITE_UNDER_EACH_SAME_REALM_SPELLING
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_the_write_is_kept_under_a_spelling_of_another_realms_global(self):
+        rows = A_DEAD_PROPERTY_WRITE_ON_ANOTHER_REALMS_GLOBAL
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNodePrintsTheSameWhereTheGlobalObjectEscapes(TestJsDeobfuscator):
+
+    def test_each_program_prints_what_it_printed_before(self):
+        rows = {
+            **A_GLOBAL_PROPERTY_WRITE_AN_UNSPELLED_READ_OBSERVES,
+            **A_DEAD_PROPERTY_WRITE_ON_ANOTHER_REALMS_GLOBAL,
         }
         self.assertEqual(
             {source: behavior(self._deobfuscate(source)) for source in rows},

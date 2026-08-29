@@ -216,5 +216,3 @@ class TestTheTextOfAFunctionIsTheTextItWasWrittenWith(TestBase):
     the analyst a program that takes the branch the original never took. The numeric row is the one
     that shows it: a length is a plain number, and nothing about `15` says it was not computed.
     """
-
-

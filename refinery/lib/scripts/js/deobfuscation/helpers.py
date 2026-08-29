@@ -122,11 +122,11 @@ JS_RESERVED = frozenset(set(KEYWORDS) | FUTURE_RESERVED | {'undefined'})
 
 #: The spellings of the global object that name *this* realm's, which is the one a file's own
 #: top-level declarations are properties of. `refinery.lib.scripts.js.analysis.model` knows two
-#: more, `top` and `frames`, deliberately absent here: each names the global object of another
-#: document, so a property written on one is not a property of this realm's global object at all,
-#: and removing such a write because nothing in this file reads the name deletes a write another
-#: document makes its own reads of. A removal keys on this set; a reading of what code may reach
-#: keys on the wider one.
+#: more, `top` and `frames`, deliberately absent here: which document's global object each names
+#: depends on where the file runs — `top` is another document's in a framed one, and both are read
+#: by the document a frame is embedded in — so a removal must not trust either to be this realm's,
+#: since deleting a write for want of a reader in this file deletes one another document reads. A
+#: removal keys on this set; a reading of what code may reach keys on the wider one.
 SAME_REALM_GLOBAL_OBJECT_ALIASES: frozenset[str] = frozenset({
     'globalThis',
     'global',
@@ -899,6 +899,31 @@ def access_key(node: JsMemberExpression) -> str | None:
     if isinstance(node.property, JsIdentifier):
         return node.property.name
     return None
+
+
+def names_this_realms_global_object(model: SemanticModel, node: Node | None) -> bool:
+    """
+    Whether *node* denotes this realm's global object: it is spelled with one of
+    `SAME_REALM_GLOBAL_OBJECT_ALIASES` and nothing binds that name where it stands. Both halves are
+    needed by every pass that acts on a property written through such a spelling, because a
+    declaration of the name binds it and the access then reads an ordinary object the program may
+    read back through any second name for it.
+
+    The two questions are one predicate because a pass asking only the first is the shape of a
+    defect rather than of a policy: `refinery.lib.scripts.js.deobfuscation.unused` deleted a write
+    on the object a `var self = {}` held, and
+    `refinery.lib.scripts.js.deobfuscation.scramble.JsScrambleStringDecoder` deleted the
+    installation of a decoder a later call still reached through the same object.
+
+    A pass that needs the name the access designates asks
+    `refinery.lib.scripts.js.analysis.model.SemanticModel.global_alias_member_name` instead, which
+    answers both questions at once for a statically spelled key. This one is for a caller that reads
+    its key some other way.
+    """
+    base = strip_parens(node)
+    if not isinstance(base, JsIdentifier) or base.name not in SAME_REALM_GLOBAL_OBJECT_ALIASES:
+        return False
+    return model.lookup(base.name, model.scope_of(base)) is None
 
 
 def make_string_literal(value: str) -> JsStringLiteral:

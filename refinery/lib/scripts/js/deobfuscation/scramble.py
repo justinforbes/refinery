@@ -14,11 +14,12 @@ from typing import NamedTuple, Sequence
 from refinery.lib.fast.scramble import decrypt_round as _decrypt_round
 from refinery.lib.scripts import Node, _remove_from_parent, _replace_in_parent
 from refinery.lib.scripts.js.analysis.cache import model_cache
+from refinery.lib.scripts.js.analysis.model import SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
-    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     ScriptLevelTransformer,
     access_key,
     make_string_literal,
+    names_this_realms_global_object,
     nothing_still_names,
     remove_declarator,
 )
@@ -244,7 +245,8 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
         instance = self._find_instance(body, class_node.id.name, class_node)
         if instance is None:
             return
-        decode_names = self._find_decode_functions(body, instance.name)
+        model = model_cache(self, node).model
+        decode_names = self._find_decode_functions(model, body, instance.name)
         if not decode_names:
             return
         cipher = ScrambleCipher(
@@ -307,7 +309,9 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
                 )
         return None
 
-    def _find_decode_functions(self, body: Sequence[Node], instance_name: str) -> set[str]:
+    def _find_decode_functions(
+        self, model: SemanticModel, body: Sequence[Node], instance_name: str,
+    ) -> set[str]:
         names: set[str] = set()
         for stmt in body:
             if isinstance(stmt, JsFunctionDeclaration):
@@ -323,7 +327,7 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
                         continue
                     if self._is_decode_wrapper(decl.init, instance_name):
                         names.add(decl.id.name)
-        aliases = self._find_aliases(body, names)
+        aliases = self._find_aliases(model, body, names)
         names.update(aliases)
         return names
 
@@ -348,7 +352,9 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
             and access_key(callee) == 'decode'
         )
 
-    def _find_aliases(self, body: Sequence[Node], known: set[str]) -> set[str]:
+    def _find_aliases(
+        self, model: SemanticModel, body: Sequence[Node], known: set[str],
+    ) -> set[str]:
         aliases: set[str] = set()
         for stmt in body:
             if not isinstance(stmt, JsExpressionStatement):
@@ -361,18 +367,23 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
             if isinstance(expr.left, JsIdentifier):
                 aliases.add(expr.left.name)
             elif isinstance(expr.left, JsMemberExpression):
-                name = self._resolve_global_property_name(expr.left, body)
+                name = self._resolve_global_property_name(model, expr.left, body)
                 if name is not None:
                     aliases.add(name)
         return aliases
 
     @staticmethod
     def _resolve_global_property_name(
-        member: JsMemberExpression, body: Sequence[Node],
+        model: SemanticModel, member: JsMemberExpression, body: Sequence[Node],
     ) -> str | None:
-        if not isinstance(member.object, JsIdentifier):
-            return None
-        if member.object.name not in SAME_REALM_GLOBAL_OBJECT_ALIASES:
+        """
+        The global name *member* installs the decoder under, or `None` where it installs nothing:
+        the base has to denote this realm's global object where it stands, which a declaration of
+        the alias name takes away. A `self.d = decode` beneath a `var self = {}` puts the decoder on
+        an ordinary object a later `self.d(...)` reads back, and taking it for a global installation
+        deletes machinery that call still needs.
+        """
+        if not names_this_realms_global_object(model, member.object):
             return None
         key = access_key(member)
         if key is not None:
@@ -419,6 +430,7 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
         argument the pass could not read is left standing, and deleting the function that call names
         would hand back a program throwing where it ran.
         """
+        model = model_cache(self, root).model
         removals: list[Node] = [class_node]
         declarator_removals: list[JsVariableDeclarator] = []
         global_name_vars: set[str] = set()
@@ -432,7 +444,7 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
                 continue
             if not isinstance(expr.right, JsIdentifier) or expr.right.name not in decode_names:
                 continue
-            name = self._resolve_global_property_name(expr.left, body)
+            name = self._resolve_global_property_name(model, expr.left, body)
             if name is not None and name in decode_names:
                 removals.append(stmt)
                 if isinstance(expr.left.property, JsIdentifier) and expr.left.computed:
@@ -460,7 +472,6 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
                     and expr.left.name in decode_names
                 ):
                     removals.append(stmt)
-        model = model_cache(self, root).model
         if not nothing_still_names(model, [*removals, *declarator_removals]):
             return
         for decl in declarator_removals:

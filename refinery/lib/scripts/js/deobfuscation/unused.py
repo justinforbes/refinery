@@ -31,19 +31,22 @@ from refinery.lib.scripts.js.analysis.effects import EffectModel, object_member_
 from refinery.lib.scripts.js.analysis.liveness import LivenessModel
 from refinery.lib.scripts.js.analysis.model import (
     FUNCTION_NODES,
+    GLOBAL_OBJECT_ALIASES,
     Binding,
     BindingKind,
     Scope,
     ScopeKind,
     SemanticModel,
-    may_be_global_object_base,
     is_simple_assignment_target,
+    is_the_this_of_a_script,
+    may_be_global_object_base,
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     SAME_REALM_GLOBAL_OBJECT_ALIASES,
     BodyProcessingTransformer,
     a_host_reaches_the_binding,
+    access_key,
     collect_identifier_names,
     insert_after_prologue,
     is_binding_site,
@@ -54,21 +57,31 @@ from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrayPattern,
     JsAssignmentExpression,
+    JsBinaryExpression,
     JsBlockStatement,
     JsCallExpression,
+    JsConditionalExpression,
+    JsDoWhileStatement,
     JsExpressionStatement,
+    JsForStatement,
     JsFunctionDeclaration,
     JsIdentifier,
+    JsIfStatement,
     JsMemberExpression,
     JsNewExpression,
     JsObjectExpression,
     JsObjectPattern,
+    JsParenthesizedExpression,
     JsProperty,
     JsScript,
+    JsThisExpression,
+    JsUnaryExpression,
     JsVariableDeclaration,
     JsVariableDeclarator,
     JsVarKind,
+    JsWhileStatement,
     Statement,
+    strip_parens,
 )
 from refinery.lib.scripts.js.strict import is_use_strict_directive
 
@@ -89,19 +102,96 @@ def _global_alias_read_names(model: SemanticModel, root: Node) -> frozenset[str]
     hold its own answer, admitting a `const` initialized with one same-realm spelling and nothing
     else, which found neither a `var` nor the `A || B` guard a file meant for two hosts is written
     with.
+
+    A computed access with a statically known string key (`globalThis['g']`) reads the same name its
+    dot spelling reads, so it counts here through `access_key`; one whose key the text does not state
+    is not a read of any one name but of potentially all of them, which is
+    `_the_global_object_escapes`'s question rather than this scan's.
     """
     names: set[str] = set()
     for node in root.walk():
-        if not isinstance(node, JsMemberExpression) or node.computed:
+        if not isinstance(node, JsMemberExpression):
             continue
-        if not isinstance(node.property, JsIdentifier):
+        name = access_key(node)
+        if name is None:
             continue
         if is_simple_assignment_target(node):
             continue
         base = node.object
         if may_be_global_object_base(base) or model.names_the_global_object(base):
-            names.add(node.property.name)
+            names.add(name)
     return frozenset(names)
+
+
+_IDENTITY_OBSERVING_UNARY = frozenset({'typeof', 'void', '!'})
+
+_IDENTITY_COMPARISONS = frozenset({'===', '!=='})
+
+
+def _observes_no_global_property(node: Node) -> bool:
+    """
+    Whether the position *node* stands in cannot read a property of the global object it denotes:
+    the base of a member access whose key `access_key` states, a plain overwrite of the name, a
+    `typeof`/`void`/`!` operand, an operand of a strict comparison, the test of a branch or a loop,
+    or an expression statement whose value nothing takes. Every other position — a call or `new`
+    argument, a `for-in` subject, an initializer, a return value, a computed access with no static
+    key — hands the object itself onward, where its properties are readable without being spelled.
+    """
+    parent = node.parent
+    while isinstance(parent, JsParenthesizedExpression):
+        parent = parent.parent
+    if isinstance(parent, JsMemberExpression) and strip_parens(parent.object) is node:
+        return access_key(parent) is not None
+    if isinstance(parent, JsUnaryExpression):
+        return (
+            parent.operator in _IDENTITY_OBSERVING_UNARY
+            and strip_parens(parent.operand) is node
+        )
+    if isinstance(parent, JsBinaryExpression):
+        return parent.operator in _IDENTITY_COMPARISONS
+    if isinstance(parent, (
+        JsConditionalExpression,
+        JsDoWhileStatement,
+        JsIfStatement,
+        JsWhileStatement,
+    )):
+        return strip_parens(parent.test) is node
+    if isinstance(parent, JsForStatement):
+        return parent.test is not None and strip_parens(parent.test) is node
+    if isinstance(parent, JsExpressionStatement):
+        return strip_parens(parent.expression) is node
+    return is_simple_assignment_target(node)
+
+
+def _the_global_object_escapes(model: SemanticModel, root: Node) -> bool:
+    """
+    Whether the global object itself reaches a position the per-name scans cannot read through: a
+    spelling of it that nothing else binds, the `this` of the top level, or a name the model says
+    holds it, standing anywhere `_observes_no_global_property` does not accept. From such a position
+    every global is readable without its name being spelled — `Object.keys(globalThis)` holds them
+    all, a `for-in` walks them, and `(function (w) { ... })(window)` reads them through `w` — so
+    while one exists no global-property write can be proven unread.
+
+    The `this` question is the narrow one every rewrite-driving reader of the model asks. A method's
+    `this` is its receiver, and taking every escaping method `this` for the global object would turn
+    the sweep off for ordinary object code, the same trade `_is_reflective_member` writes down.
+    """
+    for node in root.walk():
+        if isinstance(node, JsThisExpression):
+            if is_the_this_of_a_script(node) and not _observes_no_global_property(node):
+                return True
+            continue
+        if not isinstance(node, JsIdentifier) or not model.is_reference(node):
+            continue
+        if _observes_no_global_property(node):
+            continue
+        if node.name in GLOBAL_OBJECT_ALIASES:
+            binding = model.resolve(node)
+            if binding is None or binding.kind is BindingKind.IMPLICIT_GLOBAL:
+                return True
+        if model.names_the_global_object(node):
+            return True
+    return False
 
 
 def _reachable_functions(
@@ -642,6 +732,11 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         whole-program model, so a binding read across a function boundary or captured by a closure stays
         live. A side-effect-free right-hand side is dropped with the statement; an effectful one is kept
         as a bare expression. Returns the dead target names and the statements kept for their side effects.
+
+        A statement the tree refuses to give up — one standing as the unbraced body of a branch or a
+        loop, which `_remove_from_parent` cannot take out of a single-node field — keeps its binding
+        out of the returned names: the write survives, so the declaration must survive with it, and a
+        pass that changed nothing must say so or the fixpoint driver never stops rebuilding the model.
         """
         if not self._is_var_scope_root(parent):
             return set(), set()
@@ -669,19 +764,26 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         dead_names = {binding.name for binding in dead}
         all_defunct = defunct | dead_names
         preserved: set[JsExpressionStatement] = set()
+        eliminated: set[str] = set()
         for binding in dead:
+            fully = True
             for stmt in stores[binding]:
                 expr = stmt.expression
                 assert isinstance(expr, JsAssignmentExpression)
                 if expr.right is None or self._is_removable(expr.right, all_defunct):
-                    _remove_from_parent(stmt)
+                    if _remove_from_parent(stmt):
+                        self.mark_changed()
+                    else:
+                        fully = False
                 else:
                     stmt.expression = expr.right
                     expr.right.parent = stmt
                     preserved.add(stmt)
-        self._remove_empty_declarators(parent, body, dead_names)
-        self.mark_changed()
-        return dead_names, preserved
+                    self.mark_changed()
+            if fully:
+                eliminated.add(binding.name)
+        self._remove_empty_declarators(parent, body, eliminated)
+        return eliminated, preserved
 
     def _dead_store_bindings(
         self, stores: dict[Binding, list[JsExpressionStatement]],
@@ -783,7 +885,8 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         for stmt, targets in candidates:
             if any(t in read_names for t in targets):
                 continue
-            _remove_from_parent(stmt)
+            if not _remove_from_parent(stmt):
+                continue
             removed.update(targets)
         if not removed:
             return set()
@@ -812,8 +915,14 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         on `window.x = 1` writes a property of an ordinary object the program may read back whole,
         through `JSON.stringify` or any second name for it, without ever spelling `x`. The spelling
         test stays as the sweep's own policy on top of the model's answer, because a removal keys on
-        the same-realm names only, and the model's alias set is wider by the two names that denote
-        another document's global object.
+        the same-realm names only, and the model's alias set is wider by two names, `top` and
+        `frames`, that a removal must not trust to denote this document's global object.
+
+        The same whole-object read exists for the global object itself, and needs no declaration:
+        `Object.keys(globalThis)` holds every dead-looking name, a `for-in` walks them, and
+        `(function (w) { ... })(window)` hands the object to a body that reads them through `w`.
+        While `_the_global_object_escapes` finds any such position, nothing is removed, because no
+        property can be proven unread.
         """
         write_stmts: dict[str, list[JsExpressionStatement]] = {}
         for node in walk_scope(parent):
@@ -824,15 +933,18 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
                 continue
             lhs = expr.left
             if (
-                isinstance(lhs, JsMemberExpression)
-                and not lhs.computed
-                and isinstance(lhs.object, JsIdentifier)
-                and isinstance(lhs.property, JsIdentifier)
-                and lhs.object.name in SAME_REALM_GLOBAL_OBJECT_ALIASES
-                and self.model.global_alias_member_name(lhs) is not None
+                not isinstance(lhs, JsMemberExpression)
+                or lhs.computed
+                or not isinstance(lhs.object, JsIdentifier)
+                or lhs.object.name not in SAME_REALM_GLOBAL_OBJECT_ALIASES
             ):
-                write_stmts.setdefault(lhs.property.name, []).append(node)
+                continue
+            name = self.model.global_alias_member_name(lhs)
+            if name is not None:
+                write_stmts.setdefault(name, []).append(node)
         if not write_stmts:
+            return set()
+        if _the_global_object_escapes(self.model, parent):
             return set()
         alias_reads = _global_alias_read_names(self.model, parent)
         bare_refs: set[str] = set()
@@ -852,15 +964,17 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
             dead.add(name)
             for stmt in stmts:
                 expr = stmt.expression
-                if not isinstance(expr, JsAssignmentExpression) or expr.right is None:
-                    _remove_from_parent(stmt)
-                elif self._is_removable(expr.right, defunct | dead):
-                    _remove_from_parent(stmt)
+                if (
+                    not isinstance(expr, JsAssignmentExpression)
+                    or expr.right is None
+                    or self._is_removable(expr.right, defunct | dead)
+                ):
+                    if _remove_from_parent(stmt):
+                        self.mark_changed()
                 else:
                     stmt.expression = expr.right
                     expr.right.parent = stmt
-        if dead:
-            self.mark_changed()
+                    self.mark_changed()
         return dead
 
     def _remove_dead_expressions(
