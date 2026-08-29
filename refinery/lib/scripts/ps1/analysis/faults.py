@@ -32,6 +32,7 @@ from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     binding_key,
     binds_parameter,
+    bound_argument_value,
     resolve_command_name,
     string_value,
 )
@@ -267,6 +268,38 @@ def _arms_strict_mode(node: Node) -> bool:
     return any(command in written for command in _STRICT_MODE_COMMANDS)
 
 
+def _arms_strict_mode_v2(node: Node) -> bool:
+    """
+    Whether *node* may arm strict mode at version 2 or above, under which the object adapter's
+    faked `Count` and `Length` on a scalar or `$null` become terminating errors rather than a
+    value. This is narrower than `_arms_strict_mode`: `Set-PSDebug -Strict` is documented as
+    `Set-StrictMode -Version 1`, where those fakes still read, so only `Set-StrictMode` can arm the
+    version this asks about.
+
+    The argument *is* read here, unlike in `_arms_strict_mode`, because version 1 and version 2 are
+    the two poles of the question. Only a `-Version` that is provably the integer `1` is read as
+    not arming version 2; every other spelling — a higher or non-constant version, `Latest`, `-Off`,
+    or no readable value — is read as arming it, the direction that refuses a fold rather than
+    granting one. A string value need only *contain* the command name, the way
+    `_arms_strict_mode` reads one, since the version inside it cannot be told apart.
+    """
+    if isinstance(node, Ps1CommandInvocation):
+        if resolve_command_name(node) != 'set-strictmode':
+            return False
+        version = bound_argument_value(node, 'version')
+        return not (isinstance(version, Ps1IntegerLiteral) and version.value == 1)
+    written = string_value(node)
+    if written is None or 'set-strictmode' not in written.lower():
+        return False
+    parent = node.parent
+    if isinstance(parent, Ps1CommandInvocation) and parent.name is node:
+        # A bareword command name parses as a string literal too, so a genuine `Set-StrictMode`
+        # invocation reaches this the way a concealed one does. Its version is read on the
+        # invocation above; reading the version-less name here would refuse every `-Version 1`.
+        return False
+    return True
+
+
 #: The automatic variables through which a `Stop` can be armed for commands that did not ask for
 #: one: the preference itself, and the table that binds `-ErrorAction` into every command that takes
 #: it. Spelled as names rather than as assignment shapes because `a_stop_may_be_in_force` asks
@@ -422,6 +455,7 @@ class Ps1FaultReach:
         self._ending: dict[int, bool] = {}
         self._stopping: bool | None = None
         self._strict: bool | None = None
+        self._strict_v2: bool | None = None
 
     def routing_at(self, node: Node) -> Ps1FaultRouting | None:
         """
@@ -746,6 +780,29 @@ class Ps1FaultReach:
                 _arms_strict_mode(node) for node in root.walk()
             )
         return self._strict
+
+    def strict_mode_v2_may_be_in_force(self) -> bool:
+        """
+        Whether this script may arm strict mode at version 2 or above, under which the `Count` and
+        `Length` the object adapter fakes onto a scalar or `$null` raise `PropertyNotFoundStrict`
+        rather than answering. Folding one of those to its value would stand a number where the
+        script terminated and decide a branch it never reaches, so the fold in
+        `refinery.lib.scripts.ps1.deobfuscation.folding` stands down where this holds and keeps the
+        real members — a `String`'s own `Length`, an array's own `Count` — that read on regardless.
+
+        This is the version-sensitive sibling of `strict_mode_may_be_in_force`: that one refuses a
+        removal wherever any strict mode is armed, because reading an unset variable raises under
+        version 1 too, and so treats `Set-PSDebug -Strict` and every `-Version` alike. The fake
+        adapter members survive version 1, so this asks the narrower question, and everything the
+        two share — position not asked, an arming outside the script not seen, an empty script
+        refusing — is shared for the reasons written there.
+        """
+        if self._strict_v2 is None:
+            root = self._script
+            self._strict_v2 = root is None or any(
+                _arms_strict_mode_v2(node) for node in root.walk()
+            )
+        return self._strict_v2
 
     @staticmethod
     def _exceptional_closure(

@@ -696,13 +696,26 @@ class Ps1ConstantFolding(Transformer):
         if name == 'rank':
             return None
         if fact is NULL:
-            return _integer(0)
+            return None if self._strict_v2_may_be_in_force(node) else _integer(0)
         if not isinstance(fact, Ps1Constant):
             return None
         if isinstance(fact.payload, tuple):
             return self._selected(node, _Selection(_integer(len(fact.payload)), [obj]))
         text = text_of(fact)
-        return _integer(len(text) if name == 'length' and text is not None else 1)
+        if name == 'length' and text is not None:
+            return _integer(len(text))
+        if self._strict_v2_may_be_in_force(node):
+            return None
+        return _integer(1)
+
+    def _strict_v2_may_be_in_force(self, node: Node) -> bool:
+        """
+        Whether `Set-StrictMode -Version 2` may be armed at *node*, under which the `Count` and
+        `Length` the object adapter fakes onto a scalar or `$null` raise rather than answer. Only
+        those fakes ask this; a real member — a `String`'s `Length`, an array's `Count` — reads on
+        under strict mode and is folded without it.
+        """
+        return model_cache(self, node).faults.strict_mode_v2_may_be_in_force()
 
     def _try_fold_regex_member_access(
         self, node: Ps1MemberAccess, member: str,

@@ -854,18 +854,19 @@ class TestPs1TheAdapterCountAndLengthThrowUnderStrictModeVersionTwo(TestPs1):
     fake member to its value therefore hands `-Version 2` a number for a line that never produces
     one and lets it decide a branch the script never reaches.
 
-    The two `expectedFailure` rows are the gap: the fold has no strict-mode gate. Closing it needs a
-    model of whether `-Version 2` may be armed — the existing
-    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_may_be_in_force` fires at
-    `-Version 1` too, where the fold is correct — and it must spare the real-member arms, which the
-    three passing rows pin.
+    The fold stands down where
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_v2_may_be_in_force` holds —
+    a version-sensitive sibling of `strict_mode_may_be_in_force`, which fires at `-Version 1` too
+    where the fold is correct. It gates only the faked members, so the real-member arms the three
+    passing rows pin are folded regardless.
     """
 
-    @unittest.expectedFailure
     def test_the_count_of_null_is_not_folded_under_strict_mode_v2(self):
-        self._assertKept('Set-StrictMode -Version 2\nWrite-Output $null.Count')
+        self._assertDeobfuscatesTo(
+            'Set-StrictMode -Version 2\nWrite-Output $null.Count',
+            'Set-StrictMode -Version 2\nWrite-Output $Null.Count',
+        )
 
-    @unittest.expectedFailure
     def test_the_count_of_a_scalar_is_not_folded_under_strict_mode_v2(self):
         self._assertKept("Set-StrictMode -Version 2\nWrite-Output 'AB'.Count")
 
@@ -885,6 +886,28 @@ class TestPs1TheAdapterCountAndLengthThrowUnderStrictModeVersionTwo(TestPs1):
         self._assertDeobfuscatesTo(
             "Set-StrictMode -Version 2\nWrite-Output 'AB'.Length",
             'Set-StrictMode -Version 2\nWrite-Output 2',
+        )
+
+    def test_the_real_count_of_an_array_is_still_folded_under_strict_mode_v2(self):
+        self._assertDeobfuscatesTo(
+            'Set-StrictMode -Version 2\nWrite-Output (1, 2).Count',
+            'Set-StrictMode -Version 2\nWrite-Output 2',
+        )
+
+    def test_a_scalar_count_still_folds_under_set_psdebug_strict(self):
+        # `Set-PSDebug -Strict` is documented as `Set-StrictMode -Version 1`, under which the
+        # adapter's faked member reads on, so it does not gate the fold the way version 2 does.
+        self._assertDeobfuscatesTo(
+            "Set-PSDebug -Strict\nWrite-Output 'AB'.Count",
+            'Set-PSDebug -Strict\nWrite-Output 1',
+        )
+
+    def test_a_scalar_count_is_not_folded_when_version_two_is_armed_through_iex(self):
+        # The payload string is unwrapped into a real `Set-StrictMode -Version 2`, and the fold
+        # stays refused beneath it rather than being decided before the arming is seen.
+        self._assertDeobfuscatesTo(
+            "Invoke-Expression 'Set-StrictMode -Version 2'\nWrite-Output 'AB'.Count",
+            "Set-StrictMode -Version 2\nWrite-Output 'AB'.Count",
         )
 
 
