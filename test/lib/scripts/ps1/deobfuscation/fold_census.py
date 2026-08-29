@@ -147,6 +147,8 @@ FOLDS: dict[str, str] = {
         '$x = 7, 8, 9\n[Array]::Reverse($x)\nWrite-Output (9, 8, 7)',
     '$x = 1, 2, 3; $r = [Array]::Reverse($x); Write-Output $x':
         '$x = 1, 2, 3\n$Null = [Array]::Reverse($x)\nWrite-Output (3, 2, 1)',
+    '$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x':
+        '$x = 1, 2, 3\n[Array]::Clear($x, 0, 1)\nWrite-Output ($Null, 2, 3)',
     '$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y':
         '$y = 0, 0, 0\n[Array]::Copy((1, 2, 3), $y, 3)\nWrite-Output $y',
     '$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x':

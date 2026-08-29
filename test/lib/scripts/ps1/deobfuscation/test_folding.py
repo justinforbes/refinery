@@ -1654,9 +1654,10 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
     leaves behind is determined and the reads below it can be answered. Measured on 5.1, the three
     scripts here print `2` and `1`, then `a`, then an empty line and `2` and `3`.
 
-    None of the three is answered today, and each is a refusal rather than a wrong answer: the
-    emitted script is the input. The entries are marked so that a rule taking one of these folds
-    reports an unexpected success, and so that none of them can quietly stop being true meanwhile.
+    The clear is answered; the reversal reached through an element and the sort of a shared type are
+    each still a refusal rather than a wrong answer: the emitted script is the input. Their entries
+    are marked so that a rule taking one of those folds reports an unexpected success, and so that
+    neither can quietly stop being true meanwhile.
     """
 
     @unittest.expectedFailure
@@ -1691,7 +1692,6 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
         """)
         self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
 
-    @unittest.expectedFailure
     def test_a_clear_over_a_range_that_fits_empties_the_elements_it_covers(self):
         source = inspect.cleandoc("""
             $x = 1, 2, 3

@@ -567,6 +567,14 @@ UNKNOWN: Ps1Fact = _Ps1Unknown()
 NULL: Ps1Fact = _Ps1Null()
 
 
+def null_expression() -> Ps1Variable:
+    """
+    The expression that spells `$null`. This is `render(NULL)`, given its own name and a precise
+    return type so a caller building a node out of it does not carry render's `Expression | None`.
+    """
+    return Ps1Variable(name='Null')
+
+
 @dataclasses.dataclass(frozen=True)
 class Ps1Typed(Ps1Fact):
     """
@@ -3063,7 +3071,7 @@ def render(fact: Ps1Fact) -> Expression | None:
     `refinery.lib.scripts.ps1.synth`, because only the slot knows what stands beside it.
     """
     if fact is NULL:
-        return Ps1Variable(name='Null')
+        return null_expression()
     if not isinstance(fact, Ps1Constant):
         return None
     payload = fact.payload

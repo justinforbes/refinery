@@ -554,6 +554,7 @@ CONTRIBUTION: dict[str, Contribution] = {
             '$x = 1, 2, 3; $y = if ($True) { $x }; $x[0] = 9; Write-Output $y[0]',
             '$x = 1, 2, 3; Write-Output $x[0]; $x[0] = 9; Write-Output $x[0]',
             '$x = 1, 2, 3; Write-Output $x[0]; [Array]::Reverse($x); Write-Output $x[0]',
+            '$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x',
             '$x = 1, 2, 3; [Array]::Reverse($script:x); Write-Output $x',
             '$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x',
             '$x = 1, 2, 3; [Array]::Reverse(($x)); Write-Output $x',

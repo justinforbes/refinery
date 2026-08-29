@@ -9,11 +9,11 @@ Nothing here computes a value. `[Array]::Reverse` reverses a collection, and wha
 and how one is spelled is `refinery.lib.scripts.ps1.analysis.values`' to say, so this reads the
 value in and writes the value out through that module and holds only the rule between them.
 
-**A rule is added only where the call is total over the values it accepts.** `[Array]::Sort` throws
-on an array of mixed types, `[Array]::Clear` throws when the range runs off the end, and a rule that
-answered for those would replace an error record with a value — worse than not answering, because a
-refusal costs a fold and this would print something the script never printed. `Reverse` over a range
-it fits in throws for no input, which is why it is the one rule here.
+**A rule answers only over the values the call is total on.** `[Array]::Reverse` and `[Array]::Clear`
+throw when the range runs off the end, so each is answered only for a range that fits and refuses the
+rest rather than clamping it: a value where 5.1 raised is worse than no answer, because a refusal
+costs a fold and this would print something the script never printed. `[Array]::Sort` throws on an
+array whose elements do not compare, a sub-domain the values here do not settle, so it has no rule.
 """
 from __future__ import annotations
 
@@ -23,7 +23,12 @@ from refinery.lib.scripts import Expression, _clone_node
 from refinery.lib.scripts.ps1 import data
 from refinery.lib.scripts.ps1.analysis.arguments import RECEIVER
 from refinery.lib.scripts.ps1.analysis.model import written_call_slot
-from refinery.lib.scripts.ps1.analysis.values import integer_of, read, unwrap_to_array_literal
+from refinery.lib.scripts.ps1.analysis.values import (
+    integer_of,
+    null_expression,
+    read,
+    unwrap_to_array_literal,
+)
 from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
     Ps1ArrayLiteral,
@@ -31,9 +36,10 @@ from refinery.lib.scripts.ps1.model import (
     Ps1Variable,
 )
 
-#: The one member whose effect on its slot is written down here, as a canonical type key and a
+#: The members whose effect on their slot is written down here, each a canonical type key and a
 #: lowercased member name.
 _REVERSE = (data.required_type_key('array'), 'reverse')
+_CLEAR = (data.required_type_key('array'), 'clear')
 
 
 def value_after(occurrence: Ps1Variable, previous: Expression) -> Expression | None:
@@ -74,9 +80,15 @@ def value_after(occurrence: Ps1Variable, previous: Expression) -> Expression | N
     if not isinstance(named, Ps1TypeExpression):
         return None
     resolved = data.resolve_type(named.name)
-    if resolved is None or (resolved.generic_definition, call.member.lower()) != _REVERSE:
+    if resolved is None:
         return None
-    return _reversed(previous, call.arguments[found.slot + 1:])
+    member = (resolved.generic_definition, call.member.lower())
+    bounds = call.arguments[found.slot + 1:]
+    if member == _REVERSE:
+        return _reversed(previous, bounds)
+    if member == _CLEAR:
+        return _cleared(previous, bounds)
+    return None
 
 
 def _reversed(previous: Expression, bounds: Sequence[Expression]) -> Expression | None:
@@ -119,3 +131,36 @@ def _reversed(previous: Expression, bounds: Sequence[Expression]) -> Expression 
     elements = [_clone_node(element) for element in array.elements]
     return Ps1ArrayLiteral(
         elements=[*elements[:start], *elements[start:stop][::-1], *elements[stop:]])
+
+
+def _cleared(previous: Expression, bounds: Sequence[Expression]) -> Expression | None:
+    """
+    The collection `previous` names with a run of it set to `$null`, or `None` where this names none.
+
+    `[Array]::Clear` takes an index and a length and has no whole-collection form, so a call that
+    does not pass exactly those two is refused. A range that runs off the end is refused rather than
+    clamped, for the reason `_reversed` refuses one: 5.1 raises there, and a value would stand where
+    the script did not.
+
+    Only a bare array literal is answered for, and every one of those is an `Object[]` whose element
+    default is `$null` — a typed array clears to that type's default instead, and a cast standing
+    between the literal and the call is one `unwrap_to_array_literal` does not read through, so the
+    element the answer writes is always `$null`.
+
+    The surviving elements are copied before the answer is built, for the reason `_reversed` copies
+    them: a node adopts the children it is handed, and a value read out of the tree has to be free
+    of it.
+    """
+    array = unwrap_to_array_literal(previous)
+    if array is None or len(bounds) != 2:
+        return None
+    start = integer_of(read(bounds[0]))
+    length = integer_of(read(bounds[1]))
+    if start is None or length is None:
+        return None
+    if start < 0 or length < 0 or start + length > len(array.elements):
+        return None
+    stop = start + length
+    elements = [_clone_node(element) for element in array.elements]
+    cleared = [null_expression() for _ in range(start, stop)]
+    return Ps1ArrayLiteral(elements=[*elements[:start], *cleared, *elements[stop:]])
