@@ -388,6 +388,19 @@ class TestJsDeobfuscator(TestUnitBase):
             test,
         )
 
+    def test_a_name_holding_a_zero_width_joiner_keeps_the_value_it_computes(self):
+        """
+        A zero width non-joiner is an identifier character, and an obfuscator reaches for one
+        because nothing renders it. Node prints `7` for this script, whose one function returns its
+        argument plus one; the name is assembled from `chr` so that no invisible character stands
+        in this file.
+        """
+        joiner = chr(0x200C)
+        data = (
+            F'function f(a{joiner}b) {{ return a{joiner}b + 1; }} console.log(f(6));'
+        ).encode('utf8')
+        self.assertEqual('console.log(7);', data | self.load() | str)
+
     def test_host_entrypoint_survives_removal(self):
         """
         A JXA script exposes `run` for the host to invoke and never calls it itself, so reachability over

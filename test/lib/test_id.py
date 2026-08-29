@@ -1,4 +1,5 @@
 import base64
+import codecs
 import itertools
 import lzma
 
@@ -183,6 +184,27 @@ class TestIDLib(TestBase):
         self.assertEqual(enc.codec, 'utf8')
         self.assertEqual(enc.bom, 3)
         self.assertEqual(enc.step, 1)
+
+    def test_text_holding_format_characters_reads_back_as_what_it_holds(self):
+        """
+        A soft hyphen, a zero width non-joiner and a right-to-left mark are written into text on
+        purpose, and each is two bytes in UTF-8 that every legacy single byte codec reads as two
+        letters. A guess that counts them as evidence against UTF-8 therefore answers a codec
+        under which the document is mojibake, and every reader of the guess then works on a
+        different text than the file holds.
+        """
+        text = (
+            F'A soft{chr(0x00AD)}hyphen may break a long word, a joiner of zero'
+            F'{chr(0x200C)}width may stand between two letters, and a mark'
+            F'{chr(0x200F)}may turn the writing direction around.'
+        )
+        data = text.encode('utf8')
+        enc = idlib.guess_text_encoding(data)
+        assert enc is not None
+        self.assertEqual(text, codecs.decode(data[enc.bom:], enc.codec))
+
+    def test_binary_data_is_not_text(self):
+        self.assertIsNone(idlib.guess_text_encoding(bytes(range(0x100)) * 8))
 
     def test_structured_data_html_tag(self):
         data = b'<html><head><title>Test</title></head><body>Hello</body></html>'

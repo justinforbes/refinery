@@ -704,16 +704,24 @@ def get_reg_export_type(data: buf):
         return Fmt.REG_TEXT
 
 
-def _get_control_chars():
-    if not _CONTROL_CHARS:
+#: The Unicode categories of the characters that a document does not hold, so that reading
+#: one out of a decoding is evidence that the decoding is the wrong one. The format category
+#: `Cf` is not among them: a zero width joiner inside a word, a bidirectional mark and a soft
+#: hyphen are all written into text on purpose, and counting them against a decoding makes a
+#: valid document read as one in whatever legacy encoding maps its bytes to letters instead.
+_NONTEXT_CATEGORIES = frozenset({'Cc', 'Cn', 'Co', 'Cs'})
+
+
+def _get_nontext_chars():
+    if not _NONTEXT_CHARS:
         from unicodedata import category as uc
-        _CONTROL_CHARS.update(
-            cp for cp in range(0x10000) if uc(chr(cp)).startswith('C'))
-        _CONTROL_CHARS.difference_update(B'\040\n\r\t')
-    return _CONTROL_CHARS
+        _NONTEXT_CHARS.update(
+            cp for cp in range(0x10000) if uc(chr(cp)) in _NONTEXT_CATEGORIES)
+        _NONTEXT_CHARS.difference_update(B'\040\n\r\t')
+    return _NONTEXT_CHARS
 
 
-_CONTROL_CHARS = set()
+_NONTEXT_CHARS = set()
 _INVALID_BYTES = bytes(sorted(set(range(256)) - set(range(0x20, 0x80)) - {9, 10, 13}))
 
 
@@ -800,7 +808,7 @@ def guess_text_encoding(
         assert enc is not None
         return TextEncoding(enc, bom, lsb, step)
 
-    cc = _get_control_chars()
+    nontext = _get_nontext_chars()
 
     for encoding in (enc and [enc] or ENCODINGS):
         try:
@@ -810,7 +818,7 @@ def guess_text_encoding(
         threshold = int(maxbad * len(decoded))
         bad = 0
         for c in decoded:
-            if ord(c) not in cc:
+            if ord(c) not in nontext:
                 continue
             if (bad := bad + 1) > threshold:
                 break

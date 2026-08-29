@@ -31,47 +31,13 @@ from __future__ import annotations
 import unittest
 
 from test import TestBase
-from test.lib.scripts.js.analysis.differential import (
-    behavior,
-    node_executable,
-)
+from test.lib.scripts.js.analysis.differential import node_executable
 from test.lib.scripts.js.ledger import (
     Program,
     a_program,
-    each_program_still_prints,
-    folded,
     one_expected_failure_per_program,
     prints,
 )
-
-
-#: A program binding one name that holds a zero-width joiner, mapped to what Node prints for it.
-#: U+200C is an identifier character, and obfuscators reach for it because nothing renders it. The
-#: name is assembled from `chr` so that no invisible character stands in this file.
-A_NAME_HOLDING_A_JOINER = {
-    F'function f(a{chr(0x200C)}b) {{ return a{chr(0x200C)}b + 1; }} console.log(f(6));': '7\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestANameHoldingAJoinerIsOneName(TestBase):
-    """
-    The defect is in no pass: handed the same text directly, the deobfuscation answers correctly.
-    The unit guesses the codec of its input bytes before parsing, and valid UTF-8 holding a joiner
-    is guessed as cp1252, so the unit reads and rewrites a different program than the file holds.
-    """
-
-    @unittest.expectedFailure
-    def test_a_name_holding_a_joiner_keeps_the_value_it_computes(self):
-        """
-        Node prints `7` for the program of `A_NAME_HOLDING_A_JOINER`, whose one function returns
-        its argument plus one. Through the unit it comes back as `console.log(6);`.
-        """
-        rows = A_NAME_HOLDING_A_JOINER
-        self.assertEqual(
-            {source: (behavior(source), behavior(folded(source))) for source in rows},
-            each_program_still_prints(rows),
-        )
 
 
 #: A program reading the text of a function value, mapped to the behavior an engine gives it. The
