@@ -1892,9 +1892,11 @@ def a_host_reaches_the_binding(model: SemanticModel, binding: Binding, options: 
     pattern from protecting a nested binding, a `let`, or anything at all under the module model,
     where a top-level declaration never becomes a property of the global object.
 
-    Every pass that deletes such a declaration, folds a read of one into its value, or relocates one
-    out of the global scope asks here, so that none of them can answer the question its own way and
-    disagree with the rest about what a host still finds.
+    A pass that could delete such a declaration, fold a read of one into its value, or relocate one
+    out of the global scope asks here before doing so, so that the answer is one predicate's rather
+    than each pass's own. A pass whose removals only ever fall on obfuscation machinery — a string
+    table, a control-flow state, an anti-debug guard, none of which an analyst names an entrypoint —
+    never reaches a binding this protects, and does not consult it.
     """
     if not is_host_entrypoint(options, binding.name):
         return False

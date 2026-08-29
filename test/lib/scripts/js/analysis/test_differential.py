@@ -3985,6 +3985,10 @@ class TestANamedEntrypointIsKeptInTheEmittedText(TestBase):
     folded `var VERSION = 3` into its readers and dropped the declaration, so a host reading
     `globalThis.VERSION` after load got `undefined` where the source gave it `3`. The module model
     protects nothing here, which the sibling class below pins.
+
+    A constant object and a built-up namespace object are the same data global in the two other
+    shapes: the object folder inlines `CFG.v` and the namespace flattener splits `NS` into loose
+    globals, and each drops the `var` a host reaches by name unless the same predicate stops it.
     """
 
     def test_a_declared_function_named_as_an_entrypoint_is_kept(self):
@@ -4013,6 +4017,22 @@ class TestANamedEntrypointIsKeptInTheEmittedText(TestBase):
         self.assertEqual(
             deobfuscate_source(source, entrypoints=('VERSION',)),
             'var VERSION = 3;\nconsole.log(VERSION);',
+        )
+
+    def test_an_object_global_named_as_an_entrypoint_survives_unfolded(self):
+        source = 'var CFG = { v: 3 }; console.log(CFG.v);'
+        self.assertEqual(deobfuscate_source(source), 'console.log(3);')
+        self.assertEqual(
+            deobfuscate_source(source, entrypoints=('CFG',)),
+            'var CFG = { v: 3 };\nconsole.log(CFG.v);',
+        )
+
+    def test_a_namespace_object_named_as_an_entrypoint_survives_unflattened(self):
+        source = 'var NS = {}; NS.greet = function () { return 7; }; console.log(NS.greet());'
+        self.assertEqual(deobfuscate_source(source), 'console.log(7);')
+        self.assertEqual(
+            deobfuscate_source(source, entrypoints=('NS',)),
+            'var NS = {};\nNS.greet = function() {\n  return 7;\n};\nconsole.log(NS.greet());',
         )
 
 

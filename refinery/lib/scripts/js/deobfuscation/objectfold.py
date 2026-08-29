@@ -23,6 +23,7 @@ from refinery.lib.scripts.js.analysis.effects import EffectModel, object_sets_pr
 from refinery.lib.scripts.js.analysis.model import Binding, Scope, SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
+    a_host_reaches_the_binding,
     access_key,
     make_undefined_expression,
     property_key,
@@ -164,6 +165,8 @@ class JsObjectFold(ScopeProcessingTransformer):
             model = cache.model
             binding = model.binding_of(name)
             if binding is None or binding.writes or model.singular_value(binding) is not init:
+                continue
+            if a_host_reaches_the_binding(model, binding, self.options):
                 continue
             if self._has_freshly_allocating_value(prop_map):
                 continue

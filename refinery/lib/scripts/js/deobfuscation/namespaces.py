@@ -12,6 +12,7 @@ from refinery.lib.scripts.js.analysis.effects import EffectModel
 from refinery.lib.scripts.js.analysis.model import FUNCTION_NODES, Scope, SemanticModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
+    a_host_reaches_the_binding,
     access_key,
     function_binds_name,
     insert_after_prologue,
@@ -69,6 +70,11 @@ class JsNamespaceFlattening(ScopeProcessingTransformer):
                 continue
             cache = model_cache(self, self._root)
             model = cache.model
+            namespace_id = declarator.id
+            if isinstance(namespace_id, JsIdentifier):
+                binding = model.binding_of(namespace_id)
+                if binding is not None and a_host_reaches_the_binding(model, binding, self.options):
+                    continue
             scope_obj = model.scope_of(scope)
             if scope_obj is None:
                 continue
