@@ -217,6 +217,18 @@ class TestObjectFold(TestJsDeobfuscator):
             self._objectfold('var o = { *m() { return 1; } }; var p = o.m();'),
         )
 
+    def test_method_forwarding_eval_into_a_callee_stays_indirect(self):
+        self.assertEqual(
+            "(0, eval)('code');",
+            self._objectfold("var o = { m: function (x) { return x; } }; o.m(eval)('code');"),
+        )
+
+    def test_method_forwarding_eval_into_a_read_stays_bare(self):
+        self.assertEqual(
+            'typeof eval;',
+            self._objectfold('var o = { m: function (x) { return x; } }; typeof o.m(eval);'),
+        )
+
     def test_regex_valued_property_not_folded(self):
         source = inspect.cleandoc(
             """

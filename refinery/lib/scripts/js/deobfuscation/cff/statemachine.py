@@ -2304,7 +2304,10 @@ def _qualify_bare_walk(node: Node, homes: dict[str, tuple[str, ...]], exempt: se
                 if getattr(parent, 'label', None) is child:
                     continue
             substitute_use_position(
-                child, _make_namespace_node([*homes[child.name], child.name]))
+                child,
+                _make_namespace_node([*homes[child.name], child.name]),
+                as_spelled=True,
+            )
             continue
         _qualify_bare_walk(child, homes, exempt)
 

@@ -1656,7 +1656,30 @@ def _introduces_nested_scope(node: Node) -> bool:
     )
 
 
-def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
+def spelled_for_the_callee_position(position: Node, replacement: Node) -> Node:
+    """
+    The expression to write where *position* stands so that *replacement* reaches its value there
+    without changing the call it lands in. Where *position* is a call's callee (or a tagged
+    template's tag) and *replacement*'s own spelling as a callee would mean something a neutral
+    spelling does not — a member access binds `this` to its object, a bare `eval` runs its text in
+    the caller's own scope — the value is reached behind `(0, ...)`, which invokes it with no
+    receiver and no direct-eval effect, exactly as the name that stood there did. Anywhere else, and
+    for any other value, *replacement* is written as it is.
+
+    Every pass that drops a value into a slot another node occupied shares this, so a member or a
+    bare `eval` cannot become a receiver-bound or direct call at one substitution site while being
+    neutralized at another.
+    """
+    if is_invocation_target(position) and callee_form_sensitive(replacement):
+        assert isinstance(replacement, Expression)
+        return JsSequenceExpression(expressions=[
+            JsNumericLiteral(value=0, raw='0'),
+            replacement,
+        ])
+    return replacement
+
+
+def substitute_use_position(node: JsIdentifier, replacement: Node, *, as_spelled: bool = False) -> bool:
     """
     Put *replacement* where *node* reads a binding, and report whether it did. That *node* reads one
     is the caller's to establish, and it takes a model: a name bound by a destructuring pattern is
@@ -1690,11 +1713,13 @@ def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
     Writing that one out is a different program, so it is left as it stands.
 
     A replacement standing where a callee stands is written behind `(0, ...)` where its own spelling
-    as a callee would change the call. The name that stood there invoked its value with no receiver
-    and no direct-eval effect, whatever the value was; a member access written in its place binds
-    `this` to its object, and a bare `eval` runs its text in the caller's scope instead of the
-    global scope the name sent it to. The sequence spells exactly the call the name made, which is
-    what `callee_form_sensitive` decides.
+    as a callee would change the call, which `spelled_for_the_callee_position` decides and every
+    substituting pass shares: the name that stood there invoked its value with no receiver and no
+    direct-eval effect, whatever the value was, and the sequence spells exactly that call. That is
+    the reading for a value put where a read stood. A caller that instead re-spells the reference
+    itself — the flattening recovery qualifying a name to the namespaced home it was recovered
+    from, whose member form is the very call being restored — passes `as_spelled=True` and takes
+    the form it wrote.
 
     The answer is what a caller announcing a change has to read. A pass that reports one for a
     substitution this declined is a pass that reports one every round, and the fixpoint it sits in
@@ -1717,12 +1742,8 @@ def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
         set_child(parent, 'value', replacement)
         set_value(parent, 'shorthand', False)
         return True
-    if is_invocation_target(node) and callee_form_sensitive(replacement):
-        assert isinstance(replacement, Expression)
-        replacement = JsSequenceExpression(expressions=[
-            JsNumericLiteral(value=0, raw='0'),
-            replacement,
-        ])
+    if not as_spelled:
+        replacement = spelled_for_the_callee_position(node, replacement)
     return _replace_in_parent(node, replacement)
 
 

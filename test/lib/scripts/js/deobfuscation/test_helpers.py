@@ -675,3 +675,38 @@ class TestTheOneGateEverySubstitutionGoesThrough(TestJsDeobfuscator):
         ][0]
         substituted = substitute_params(literal, function.params, [make_numeric_literal(5)])
         self.assertEqual(JsSynthesizer().convert(substituted), '{ a: 5 }')
+
+
+class TestASubstitutedCalleeKeepsTheCallTheNameMade(TestJsDeobfuscator):
+    """
+    A name standing as a callee invoked its value with no receiver and no direct-eval effect, so a
+    value put in its place whose own spelling as a callee means more — a member access binds
+    `this` to its object, a bare `eval` runs its text in the caller's scope — is called behind
+    `(0, ...)` instead. A caller that re-spells the reference itself asks for the form it wrote with
+    `as_spelled=True`: the flattening recovery qualifies a name to the namespaced home it was
+    recovered from, and the member call is the call the input made there.
+    """
+
+    @staticmethod
+    def _substituting_the_callee_of(source: str, replacement: str, **kwargs) -> str:
+        ast = JsParser(source).parse()
+        callee = next(n for n in ast.walk() if isinstance(n, JsIdentifier) and n.name == 'f')
+        statement = JsParser(F'{replacement};').parse().body[0]
+        assert isinstance(statement, JsExpressionStatement) and statement.expression is not None
+        substitute_use_position(callee, statement.expression, **kwargs)
+        return JsSynthesizer().convert(ast)
+
+    def test_a_member_written_for_a_callee_is_called_behind_a_sequence(self):
+        self.assertEqual("(0, ns.f)('x');", self._substituting_the_callee_of("f('x');", 'ns.f'))
+
+    def test_the_name_eval_written_for_a_callee_is_called_behind_a_sequence(self):
+        self.assertEqual("(0, eval)('x');", self._substituting_the_callee_of("f('x');", 'eval'))
+
+    def test_a_member_written_as_the_spelling_of_the_reference_keeps_its_receiver(self):
+        self.assertEqual(
+            "ns.f('x');",
+            self._substituting_the_callee_of("f('x');", 'ns.f', as_spelled=True),
+        )
+
+    def test_a_member_written_for_a_read_stands_bare(self):
+        self.assertEqual('typeof ns.f;', self._substituting_the_callee_of('typeof f;', 'ns.f'))

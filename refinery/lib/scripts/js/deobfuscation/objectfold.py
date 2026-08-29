@@ -30,6 +30,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     property_provably_absent,
     references_receiver_this,
     remove_declarator,
+    spelled_for_the_callee_position,
     try_inline_trivial_function,
     walk_scope,
 )
@@ -420,7 +421,8 @@ class JsObjectFold(ScopeProcessingTransformer):
                     transformer=transformer,
                 )
                 if replacement is not None:
-                    _replace_in_parent(call, replacement)
+                    _replace_in_parent(
+                        call, spelled_for_the_callee_position(call, replacement))
                     changed = True
                     continue
             if isinstance(value, (JsFunctionExpression, JsArrowFunctionExpression)) and call is None:
