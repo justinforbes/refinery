@@ -100,6 +100,7 @@ _PS1_DEFAULT_VARIABLES: dict[str, str] = {
         'InformationPreference'      : r'SilentlyContinue',
         'ProgressPreference'         : r'Continue',
         'PSCulture'                  : r'en-US',
+        'PSEdition'                  : r'Desktop',
         'PSEmailServer'              : r'',
         'PSHome'                     : r'C:\Windows\System32\WindowsPowerShell\v1.0',
         'PSSessionApplicationName'   : r'wsman',

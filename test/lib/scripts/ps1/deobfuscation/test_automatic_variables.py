@@ -162,17 +162,17 @@ class TestPs1AnEngineStringTheToolHasNoValueFor(_Ps1AutomaticVariables):
     empty, so a guard reading one is a guard the script passes, whether it tests the name for truth
     or compares it against the value the engine supplies.
 
-    The deobfuscator knows neither name and reads both as `$null`. The truth test then decides for
-    the `else` branch and the comparison decides for the wrong side, so in each case the branch 5.1
-    runs is the one deleted. Where the guard carries no `else`, the whole script comes back empty.
+    The tool now supplies `$PSEdition` as `Desktop`, so those two guards decide the way 5.1 does. It
+    still has no value for `$ErrorView` and reads it as `$null`: the truth test then decides for the
+    `else` branch and the comparison decides for the wrong side, so in each case the branch 5.1 runs
+    is the one deleted, and where the guard carries no `else` the whole script comes back empty. Its
+    three entries stay marked until the engine supplies that name too.
     """
 
-    @unittest.expectedFailure
     def test_the_edition_name_takes_the_then_branch(self):
         self._assertRunsTheSameStatements(
             F'if ($PSEdition) {{ {_PAYLOAD} }} else {{ {_OTHER} }}', _PAYLOAD)
 
-    @unittest.expectedFailure
     def test_the_edition_name_compared_to_desktop_takes_the_then_branch(self):
         self._assertRunsTheSameStatements(
             F"if ($PSEdition -eq 'Desktop') {{ {_PAYLOAD} }} else {{ {_OTHER} }}", _PAYLOAD)
