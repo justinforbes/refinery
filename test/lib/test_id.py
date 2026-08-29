@@ -2,6 +2,7 @@ import base64
 import codecs
 import itertools
 import lzma
+import unittest
 
 from refinery.lib import id as idlib
 
@@ -202,6 +203,31 @@ class TestIDLib(TestBase):
         enc = idlib.guess_text_encoding(data)
         assert enc is not None
         self.assertEqual(text, codecs.decode(data[enc.bom:], enc.codec))
+
+    @unittest.expectedFailure
+    def test_utf16_without_a_mark_is_found_by_the_text_it_decodes_to(self):
+        """
+        Without a byte order mark, UTF-16 is looked for in the bytes rather than in the text they
+        decode to: every second byte is required to be one no printable ASCII letter holds, which
+        is true of Latin script and false of everything else. A document holding typographic
+        quotation marks or one CJK word is therefore not recognized at all, and every reader of
+        the guess then works on the bytes as though they were a single byte encoding.
+        """
+        texts = {
+            'typographic punctuation': (
+                F'var greeting = {chr(0x201C)}hello there{chr(0x201D)}, said the '
+                F'{chr(0x2018)}man{chr(0x2019)} standing under the awning {chr(0x2014)} and left.'
+            ),
+            'a CJK string literal': (
+                F'var s = "{chr(0x4F60) * 6}"; console.log(s + " and some plain ASCII besides");'
+            ),
+        }
+        for name, text in texts.items():
+            with self.subTest(name):
+                data = text.encode('utf-16le')
+                enc = idlib.guess_text_encoding(data)
+                assert enc is not None
+                self.assertEqual(text, codecs.decode(data, enc.codec))
 
     def test_binary_data_is_not_text(self):
         self.assertIsNone(idlib.guess_text_encoding(bytes(range(0x100)) * 8))
