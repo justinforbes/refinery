@@ -819,7 +819,7 @@ class _Ps1Interpreter:
         lst = self._lookup(key)
         if not isinstance(lst, list):
             raise _Ps1InterpreterError
-        idx = self._to_int(self._eval(target.index))
+        idx = self._to_index(self._eval(target.index))
         value = self._eval(node.value)
         try:
             lst[idx] = value
@@ -1154,13 +1154,9 @@ class _Ps1Interpreter:
 
     def _eval_index(self, node: Ps1IndexExpression) -> _Value:
         obj = self._eval(node.object)
-        idx = self._eval(node.index)
-        if not isinstance(idx, int):
-            raise _Ps1InterpreterError
+        idx = self._to_index(self._eval(node.index))
         try:
-            if isinstance(obj, str):
-                return obj[idx]
-            if isinstance(obj, list):
+            if isinstance(obj, (str, list)):
                 return obj[idx]
         except IndexError:
             raise _Ps1InterpreterError
@@ -1400,6 +1396,15 @@ class _Ps1Interpreter:
         if value is None:
             return 0
         raise _Ps1InterpreterError
+
+    def _to_index(self, value: _Value) -> int:
+        """
+        A subscript is converted to Int32 the way any value is, except that `$null` is no index:
+        5.1 raises NullArrayIndex where a plain Int32 conversion of `$null` would answer zero.
+        """
+        if value is None:
+            raise _Ps1InterpreterError
+        return self._to_int(value)
 
     def _to_float(self, value: _Value) -> float:
         if isinstance(value, (int, float)):

@@ -1480,7 +1480,8 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
     `IgnoreCase` that a case insensitive `-match` means is .NET's culture `ToLower`, under which
     U+017F is no `s`, where Python's own folding makes it one. A sum too long for the interpreter's
     stack has to leave the unit with an answer and not with a `RecursionError`. An index written as
-    a String is an index like any other, and 5.1 answers the element it numbers.
+    a String is an index like any other and 5.1 answers the element it numbers, but `$null` is no
+    index at all and 5.1 stops there rather than reading the element a zero would name.
     """
 
     @staticmethod
@@ -1573,7 +1574,6 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         except RecursionError:
             self.fail('a RecursionError escaped the unit, which has to decline a fold instead')
 
-    @unittest.expectedFailure
     def test_an_index_written_as_a_string_is_the_element_that_number_names(self):
         source = cleandoc("""
             function f {
@@ -1583,6 +1583,15 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
             $x = f
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 20')
+
+    def test_a_null_index_is_a_throw_and_not_the_element_a_zero_would_name(self):
+        self._assertUnchanged(cleandoc("""
+            function f {
+              $a = 10, 20, 30
+              $a[$null]
+            }
+            $x = f
+        """), Ps1FunctionEvaluator)
 
     def test_an_index_written_as_a_number_is_the_element_that_number_names(self):
         source = cleandoc("""
