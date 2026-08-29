@@ -826,14 +826,12 @@ class TestPs1MembersTheObjectAdapterAddsToEveryValue(TestPs1):
     def test_a_member_that_does_not_exist_is_null(self):
         self.assertEqual(self._deobfuscate("$x = 'AB'.Zqnope"), '$x = $Null')
 
-    @unittest.expectedFailure
     def test_the_pstypenames_of_a_number_are_its_type_and_its_bases(self):
         self.assertEqual(
             self._deobfuscate('$x = (5).PSTypeNames'),
             "$x = 'System.Int32', 'System.ValueType', 'System.Object'",
         )
 
-    @unittest.expectedFailure
     def test_the_pstypenames_of_a_string_are_its_type_and_its_base(self):
         self.assertEqual(
             self._deobfuscate("$x = ('AB').PSTypeNames"),

@@ -859,6 +859,30 @@ def engine_member(member: str) -> dict | None:
     return _ENGINE_MEMBERS.get(member.lower())
 
 
+def type_names(name: str | Ps1TypeName) -> list[str] | None:
+    """
+    The value a type's `PSTypeNames` enumerates: its own reflection `FullName` followed by the
+    `FullName` of every type it derives from, ending at `System.Object`. Measured on a 5.1 host; see
+    `TYPE_TRANSCRIPTS` in `test.lib.scripts.ps1.test_oracle`.
+
+    Returns `None` when the type does not resolve, is an array — whose chain is `System.Array` and
+    not that of its element type — or reaches a base that was not collected, so a caller folds a
+    chain that is known whole and never a truncated one.
+    """
+    resolved = resolve_type(name)
+    if resolved is None or resolved.is_array:
+        return None
+    names: list[str] = []
+    current: str | None = resolved.definition
+    while current is not None:
+        record = _type_record(current)
+        if record is None:
+            return None
+        names.append(current)
+        current = record.get('base')
+    return names
+
+
 def member_record(name: str | Ps1TypeName, member: str) -> dict | MemberLookup:
     """
     The collected record for a single member of a type, or a `MemberLookup` sentinel explaining why

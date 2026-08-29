@@ -58,7 +58,7 @@ from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     substitute_list,
     substituted,
 )
-from refinery.lib.scripts.ps1.data import MemberLookup, member_record
+from refinery.lib.scripts.ps1.data import MemberLookup, member_record, type_names
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ArrayExpression,
@@ -651,6 +651,10 @@ class Ps1ConstantFolding(Transformer):
         if shaped is not None:
             return shaped
         owner = type_of(read(obj))
+        if owner is not None and member.lower() == 'pstypenames':
+            names = type_names(owner)
+            if names is not None:
+                return Ps1ArrayLiteral(elements=[make_string_literal(name) for name in names])
         if owner is not None and member_record(owner, member) is MemberLookup.ABSENT:
             return Ps1Variable(name='Null')
         result = self._try_fold_regex_member_access(node, member)

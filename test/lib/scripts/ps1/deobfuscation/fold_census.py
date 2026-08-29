@@ -365,8 +365,10 @@ FOLDS: dict[str, str] = {
         'Write-Output (,3)\nWrite-Output 3',
     "$t = 'AB'.Length; Write-Output (,$t); Write-Output $t":
         'Write-Output (,2)\nWrite-Output 2',
+    'Write-Output ((5).PSTypeNames)':
+        "Write-Output ('System.Int32', 'System.ValueType', 'System.Object')",
     "Write-Output (('AB').PSTypeNames)":
-        "Write-Output ('AB'.PSTypeNames)",
+        "Write-Output ('System.String', 'System.Object')",
     '$t = (5).Rank; Write-Output (,$t)':
         'Write-Output (,$Null)',
     "$t = 'AB'.Zqnope; Write-Output (,$t)":
