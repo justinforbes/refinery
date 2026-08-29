@@ -83,6 +83,7 @@ from refinery.lib.scripts.js.model import (
     JsSpreadElement,
     JsStringLiteral,
     JsUnaryExpression,
+    callee_form_sensitive,
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import exact_integer
@@ -103,20 +104,6 @@ _FUNCTION_PROPERTIES = _OBJECT_PROTO_PROPERTIES | frozenset({
 })
 
 _EMPTY_OBJECT_PROPERTIES = _OBJECT_PROTO_PROPERTIES
-
-
-def _callee_form_sensitive(node: Node) -> bool:
-    """
-    Whether invoking *node* directly as a call callee, rather than behind the comma sequence that
-    currently wraps it, would change the call's meaning. A member access binds `this` to its object and
-    a bare `eval` performs a *direct* eval evaluated in the caller's own scope; any other callee — a
-    plain identifier or value — invokes with no receiver and no direct-eval effect, exactly as the
-    wrapping indirect sequence does, so collapsing the sequence down to it preserves the call.
-    """
-    inner = strip_parens(node)
-    if isinstance(inner, JsMemberExpression):
-        return True
-    return isinstance(inner, JsIdentifier) and inner.name == 'eval'
 
 
 _UNCONVERTIBLE = object()
@@ -665,7 +652,7 @@ class JsSimplifications(Transformer):
         """
         if kept is None:
             return None
-        receiver_sensitive = is_invocation_target(node) and _callee_form_sensitive(kept)
+        receiver_sensitive = is_invocation_target(node) and callee_form_sensitive(kept)
         if not receiver_sensitive and self.effects.is_side_effect_free(test, discarded=True):
             return kept
         return JsSequenceExpression(expressions=[test, kept])
@@ -692,7 +679,7 @@ class JsSimplifications(Transformer):
         if len(filtered) == len(node.expressions):
             return None
         if len(filtered) == 1:
-            if is_invocation_target(node) and _callee_form_sensitive(filtered[0]):
+            if is_invocation_target(node) and callee_form_sensitive(filtered[0]):
                 return None
             return filtered[0]
         node.expressions = filtered

@@ -675,6 +675,21 @@ def strip_parens(node: Node | None) -> Node | None:
     return node
 
 
+def callee_form_sensitive(node: Node | None) -> bool:
+    """
+    Whether a call invoking *node* directly as its callee means something a call reaching the same
+    value through a neutral spelling does not. The language has two such forms: a member access
+    binds `this` to its object, and a bare `eval` performs a *direct* eval evaluated in the
+    caller's own scope. Any other callee — a plain identifier or a value — invokes with no
+    receiver and no direct-eval effect, exactly as the same value called behind `(0, ...)` does,
+    so only these two forms constrain what may stand in a callee position.
+    """
+    inner = strip_parens(node)
+    if isinstance(inner, JsMemberExpression):
+        return True
+    return isinstance(inner, JsIdentifier) and inner.name == 'eval'
+
+
 def names_a_property(node: Node) -> bool:
     """
     Whether *node* spells the name of a property and reads nothing. A member written with a dot, a

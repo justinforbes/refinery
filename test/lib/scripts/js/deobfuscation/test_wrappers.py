@@ -172,3 +172,34 @@ class TestCallWrapperInliner(TestJsDeobfuscator):
             """
         )
         self.assertEqual(source, self._run_transformer(source, JsCallWrapperInliner))
+
+
+class TestAnArgumentBoundToEvalStaysAnIndirectCall(TestJsDeobfuscator):
+
+    def test_an_argument_bound_to_eval_is_inlined_as_an_indirect_call(self):
+        """
+        `cb(s)` inside the wrapper reaches `eval` without spelling it, so it runs its text in the
+        global scope, and Node prints `ReferenceError` for this program. Substituting the argument
+        into the callee position as the bare name would make the eval direct, and the program would
+        print `7` — the local the payload must not see.
+        `refinery.lib.scripts.js.deobfuscation.helpers.substitute_use_position` writes `(0, eval)`
+        there instead.
+        """
+        self.assertEqual(
+            'function f() {\n'
+            '  var loc = 7;\n'
+            '  try {\n'
+            "    return (0, eval)('loc');\n"
+            '  } catch (e) {\n'
+            '    return e.constructor.name;\n'
+            '  }\n'
+            '}\n'
+            'console.log(f());',
+            self._run_transformer(
+                'function w(cb, s) { return cb(s); }'
+                ' function f(){ var loc = 7;'
+                " try { return w(eval, 'loc'); } catch (e) { return e.constructor.name; } }"
+                ' console.log(f());',
+                JsCallWrapperInliner,
+            ),
+        )

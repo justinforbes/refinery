@@ -52,6 +52,7 @@ from refinery.lib.scripts.js.analysis.model import (
     Role,
     SemanticModel,
     build_semantic_model,
+    is_invocation_target,
     is_use_position,
     reference_role,
     walk_receiver_scope,
@@ -97,6 +98,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsVarKind,
     JsWhileStatement,
+    callee_form_sensitive,
     strip_parens,
     wraps_return,
 )
@@ -1687,6 +1689,13 @@ def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
     `Object.keys({ __proto__ })` answers one name and `Object.keys({ __proto__: v })` answers none.
     Writing that one out is a different program, so it is left as it stands.
 
+    A replacement standing where a callee stands is written behind `(0, ...)` where its own spelling
+    as a callee would change the call. The name that stood there invoked its value with no receiver
+    and no direct-eval effect, whatever the value was; a member access written in its place binds
+    `this` to its object, and a bare `eval` runs its text in the caller's scope instead of the
+    global scope the name sent it to. The sequence spells exactly the call the name made, which is
+    what `callee_form_sensitive` decides.
+
     The answer is what a caller announcing a change has to read. A pass that reports one for a
     substitution this declined is a pass that reports one every round, and the fixpoint it sits in
     never reaches one. Nothing is written until the slot the replacement goes into is known, so a
@@ -1708,6 +1717,12 @@ def substitute_use_position(node: JsIdentifier, replacement: Node) -> bool:
         set_child(parent, 'value', replacement)
         set_value(parent, 'shorthand', False)
         return True
+    if is_invocation_target(node) and callee_form_sensitive(replacement):
+        assert isinstance(replacement, Expression)
+        replacement = JsSequenceExpression(expressions=[
+            JsNumericLiteral(value=0, raw='0'),
+            replacement,
+        ])
     return _replace_in_parent(node, replacement)
 
 

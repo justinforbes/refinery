@@ -2788,3 +2788,63 @@ class TestAReceiverACallSuppliesMayBeHandedOn(TestBase):
     wrapper — are all top-level and admitted already, and a bare-called function
     forwarding its own `this` has so far had to be constructed.
     """
+
+
+#: A program whose deobfuscation writes a global's name into a block where a `let` of the same name
+#: shadows it, mapped to the behavior an engine gives it. Two passes write such a name: the
+#: constant inliner substitutes an initializer for a use of the name it was bound to, and the
+#: wrapper inliner grafts a wrapper's return expression at its call site. Neither asks whether the
+#: names the written text carries still resolve, where it lands, to what they resolved to where it
+#: was read.
+A_SUBSTITUTED_NAME_A_BLOCK_SHADOWS_AT_ITS_USE = {
+    'an initializer inlined into a shadowing block': Program(
+        a_program("""
+            function f() {
+              var g = parseInt;
+              {
+                let parseInt = function (s) { return 99; };
+                console.log(g('7'));
+              }
+            }
+            f();
+            """),
+        prints('7'),
+    ),
+    'a wrapper body grafted into a shadowing block': Program(
+        a_program("""
+            function w(x) { return parseInt(x); }
+            function f() {
+              {
+                let parseInt = function (s) { return 99; };
+                console.log(w('7'));
+              }
+            }
+            f();
+            """),
+        prints('7'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_SUBSTITUTED_NAME_A_BLOCK_SHADOWS_AT_ITS_USE)
+class TestASubstitutedNameStillResolvesWhereItIsWritten(TestBase):
+    """
+    Substituting text for a name moves every name that text carries to a new position, and a name
+    means what it resolves to where it stands. Both programs bind `parseInt` inside a block with
+    `let` and call the global one from that block through something bound outside it — a plain
+    alias in the first, a one-return wrapper in the second — so each call answers `7`. The
+    deobfuscation writes `parseInt` into the block, where the shadow answers it, and each program
+    comes back printing `99`.
+
+    `refinery.lib.scripts.js.deobfuscation.constants` checks what the initializer's names held at
+    the use (`_free_variables_preserved`) but not what its spelling resolves to there, a question
+    its own cross-function inliner does ask before emitting an intrinsic alias's name;
+    `refinery.lib.scripts.js.deobfuscation.wrappers` grafts a return expression whose free names
+    are never re-resolved at the call site. One rule closes both: text may land only where every
+    name it carries resolves to what it resolved to where the text was read.
+
+    Off the release gate deliberately: the shape needs a block-scoped `let` spelling the same name
+    as a global that an alias or wrapper bound outside the block still reaches, and that is not
+    what an obfuscator does to names — it renames them apart, never toward a collision.
+    """

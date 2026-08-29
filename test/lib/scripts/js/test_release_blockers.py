@@ -46,49 +46,6 @@ from test.lib.scripts.js.ledger import (
 )
 
 
-#: A program reaching `eval` through a name it bound to it and asking that name for a local of the
-#: caller, mapped to what Node prints for it. Only a call written as the name `eval` is a direct
-#: eval; every other way of reaching the same function runs the text in the global scope, where the
-#: local is not, so what the program prints is the name of the error that raises.
-AN_EVAL_REACHED_THROUGH_A_NAME_BOUND_TO_IT = {
-    'function f(){ var loc = 7; var g = eval;'
-    " try { return g('loc'); } catch (e) { return e.constructor.name; } }"
-    ' console.log(f());': 'ReferenceError\n',
-    'function f(){ var loc = 7; var g = eval;'
-    " return typeof g('typeof loc'); }"
-    ' console.log(f());': 'string\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestANameBoundToEvalIsNotADirectEval(TestBase):
-    """
-    `eval` is the one function the language treats differently depending on how the call was
-    written. A call whose callee is the name `eval` runs its text in the calling scope; a call
-    reaching the same function any other way runs it in the global scope, where the caller's locals
-    are not. Substituting a name bound to `eval` for its value therefore turns one into the other,
-    and the payload starts seeing bindings it could not have seen.
-
-    `test.lib.scripts.js.deobfuscation.test_simplify` refuses this for two of the three ways of
-    reaching it, `window.eval(code)` and `(0, eval)(code)`. A plain `var g = eval` is the third and
-    is not refused, which is the same rule missing its own case rather than a new rule.
-    """
-
-    @unittest.expectedFailure
-    def test_a_call_through_a_name_bound_to_eval_sees_no_local_of_its_caller(self):
-        """
-        Node prints `ReferenceError` for the first program of
-        `AN_EVAL_REACHED_THROUGH_A_NAME_BOUND_TO_IT`, whose payload reads a local of the calling
-        function, and `string` for the second, where a `typeof` guard makes the same read safe. The
-        deobfuscation rewrites the call to a direct one and prints `7` for the first.
-        """
-        rows = AN_EVAL_REACHED_THROUGH_A_NAME_BOUND_TO_IT
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
 #: An argument to a method the object fold answers, whose evaluation the answer has to keep. The
 #: first is used by nothing the body returns, so folding the call away takes the call to `g` with it
 #: and the write to `SIDE` never happens; the second pair is used in the other order than it is

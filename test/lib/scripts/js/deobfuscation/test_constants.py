@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
 from test import TestBase
+from test.lib.scripts.js.analysis.differential import (
+    deobfuscate_source,
+    node_executable,
+)
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
-from test.lib.scripts.js.ledger import folded
+from test.lib.scripts.js.ledger import (
+    before_and_after,
+    each_program_still_prints,
+    folded,
+)
 
 
 class TestConstantInlining(TestJsDeobfuscator):
@@ -1524,3 +1533,132 @@ class TestAConstantSubstitutedIntoAShorthandPropertyKeepsItsName(TestBase):
         """
         rows = A_CONSTANT_REACHING_A_SHORTHAND_PROPERTY
         self.assertEqual({source: folded(source) for source in rows}, rows)
+
+
+AN_ALIAS_CALL_READING_A_LOCAL_OF_ITS_CALLER = (
+    'function f(){ var loc = 7; var g = eval;'
+    " try { return g('loc'); } catch (e) { return e.constructor.name; } }"
+    ' console.log(f());'
+)
+
+AN_ALIAS_CALL_UNDER_A_TYPEOF_GUARD = (
+    'function f(){ var loc = 7; var g = eval;'
+    " return typeof g('typeof loc'); }"
+    ' console.log(f());'
+)
+
+AN_ALIAS_OF_EVAL_READ_WITHOUT_A_CALL = (
+    'function f(){ var g = eval; return typeof g; } console.log(f());'
+)
+
+AN_ALIAS_OF_ANOTHER_GLOBAL_CALLED = (
+    "function f(){ var g = parseInt; return g('7'); } console.log(f());"
+)
+
+
+#: A program binding a name to `eval` and calling through it, mapped to the text a correct
+#: deobfuscation writes for it under the module reading `before_and_after` takes. Only a call
+#: written as the name `eval` is a direct eval, so the one thing substituting the alias's value may
+#: not write for such a call is that name in the callee position. The last two rows are the
+#: controls: a use no call applies takes the bare name, and a name bound to any other global calls
+#: bare as well.
+A_CALL_THROUGH_A_NAME_BOUND_TO_EVAL = {
+    AN_ALIAS_CALL_READING_A_LOCAL_OF_ITS_CALLER: (
+        'function f() {\n'
+        '  try {\n'
+        "    return (0, eval)('loc');\n"
+        '  } catch (e) {\n'
+        '    return e.constructor.name;\n'
+        '  }\n'
+        '}\n'
+        'console.log(f());'
+    ),
+    AN_ALIAS_CALL_UNDER_A_TYPEOF_GUARD: (
+        'function f() {\n'
+        "  return typeof (0, eval)('typeof loc');\n"
+        '}\n'
+        'console.log(f());'
+    ),
+    AN_ALIAS_OF_EVAL_READ_WITHOUT_A_CALL: (
+        'function f() {\n'
+        '  return typeof eval;\n'
+        '}\n'
+        'console.log(f());'
+    ),
+    AN_ALIAS_OF_ANOTHER_GLOBAL_CALLED: (
+        'console.log(7);'
+    ),
+}
+
+#: What Node prints for each program of `A_CALL_THROUGH_A_NAME_BOUND_TO_EVAL` — and for the text
+#: it is mapped to, which is the agreement the entry exists for.
+WHAT_A_CALL_THROUGH_A_NAME_BOUND_TO_EVAL_PRINTS = {
+    AN_ALIAS_CALL_READING_A_LOCAL_OF_ITS_CALLER: 'ReferenceError\n',
+    AN_ALIAS_CALL_UNDER_A_TYPEOF_GUARD: 'string\n',
+    AN_ALIAS_OF_EVAL_READ_WITHOUT_A_CALL: 'function\n',
+    AN_ALIAS_OF_ANOTHER_GLOBAL_CALLED: '7\n',
+}
+
+
+class TestACallThroughANameBoundToEvalStaysIndirect(TestJsDeobfuscator):
+    """
+    `eval` is the one function the language treats differently depending on how the call was
+    written. A call whose callee is the name `eval` runs its text in the calling scope; a call
+    reaching the same function any other way runs it in the global scope, where the caller's
+    locals are not. `var g = eval; g(s)` is the second kind, so substituting the value of `g` may
+    bind the call to any spelling but that name, and
+    `refinery.lib.scripts.js.deobfuscation.helpers.substitute_use_position` writes `(0, eval)`
+    into a callee position instead — the spelling for the call the alias made, and one
+    `test.lib.scripts.js.deobfuscation.test_simplify` pins as a sequence no collapse takes apart.
+
+    The texts are the module reading. The script reading hands the same programs to
+    `refinery.lib.scripts.js.deobfuscation.reflection`, which resolves the indirect eval against
+    the global scope itself, and the text it writes witnesses that pass instead of this rule.
+    """
+
+    def test_the_name_eval_is_never_written_into_a_callee_position(self):
+        rows = A_CALL_THROUGH_A_NAME_BOUND_TO_EVAL
+        self.assertEqual({source: deobfuscate_source(source) for source in rows}, rows)
+
+    def test_the_constant_inliner_alone_writes_the_indirect_spelling(self):
+        self.assertEqual(
+            'function f() {\n'
+            '  var loc = 7;\n'
+            '  try {\n'
+            "    return (0, eval)('loc');\n"
+            '  } catch (e) {\n'
+            '    return e.constructor.name;\n'
+            '  }\n'
+            '}\n'
+            'console.log(f());',
+            self._inline(AN_ALIAS_CALL_READING_A_LOCAL_OF_ITS_CALLER),
+        )
+
+    def test_the_constant_inliner_alone_takes_the_bare_name_where_nothing_calls_it(self):
+        self.assertEqual(
+            'function f() {\n  return typeof eval;\n}\nconsole.log(f());',
+            self._inline(AN_ALIAS_OF_EVAL_READ_WITHOUT_A_CALL),
+        )
+
+    def test_the_constant_inliner_alone_calls_another_global_bare(self):
+        self.assertEqual(
+            "function f() {\n  return parseInt('7');\n}\nconsole.log(f());",
+            self._inline(AN_ALIAS_OF_ANOTHER_GLOBAL_CALLED),
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNodePrintsTheSameAboutACallThroughANameBoundToEval(TestBase):
+
+    def test_the_rewritten_call_sees_no_local_of_its_caller(self):
+        """
+        Node prints `ReferenceError` for the first program of
+        `A_CALL_THROUGH_A_NAME_BOUND_TO_EVAL`, whose payload reads a local of the calling
+        function, and `string` for the second, where a `typeof` guard makes the same read safe. A
+        rewrite binding the call to the name `eval` prints `7` for the first instead.
+        """
+        rows = WHAT_A_CALL_THROUGH_A_NAME_BOUND_TO_EVAL_PRINTS
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
