@@ -3149,6 +3149,28 @@ def folded_binary(left: Expression, operator: str, right: Expression) -> Express
     return None if outcome.may_throw else render(outcome.value)
 
 
+def folded_increment(previous: Expression, delta: int) -> Expression | None:
+    """
+    The value `$x++` or `$x--` leaves in `$x`, given its previous value `previous` and a `delta` of
+    `+1` or `-1`, or `None` where that value is not constant or the increment throws.
+
+    `++` and `--` are not the binary `$x + 1` and `$x - 1`: they require a number and add the delta
+    to it, where `+` and `-` would concatenate a String, coerce one, or read a Boolean as an integer
+    — none of which the increment does. 5.1 answers the delta itself for `$null` and throws
+    `OperatorRequiresNumber` for a String, a Char, a Boolean or a collection, so this folds only over
+    `$null` and the numeric types and refuses the rest, standing no value where 5.1 raised. Over a
+    number the increment *is* the binary sum, which is why `folded_binary` computes it once the
+    operand is one — and `$null`, which `_is_domain_integer` reads as the zero the sum needs.
+    """
+    fact = read(previous)
+    numeric = _is_domain_integer(fact) or (
+        isinstance(fact, Ps1Constant) and fact.type in (_DECIMAL, _DOUBLE)
+    )
+    if not numeric:
+        return None
+    return folded_binary(previous, '+' if delta > 0 else '-', Ps1IntegerLiteral(raw='1'))
+
+
 def _rendered_character(payload) -> Expression | None:
     """
     A `Char`, written as the cast of its code point. The one-character String that carries the same

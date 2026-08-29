@@ -1854,6 +1854,40 @@ class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
         self.assertEqual(self._deobfuscate(source), 'Write-Output 5')
 
 
+class TestPs1AnIncrementNeedsANumberAndIsNotTheBinarySum(TestPs1):
+    """
+    `$x++` and `$x--` are not the binary `$x + 1` and `$x - 1` their long spelling would be: 5.1 adds
+    the delta to `$null` and to any numeric value, but throws `OperatorRequiresNumber` for a String,
+    a Char, a Boolean or a collection — where the binary `+` concatenates a String and reads a
+    Boolean as an integer instead. So the increment folds only where the operand is a number, and
+    stands no value where 5.1 raised rather than computing a sum the operator never reaches.
+    """
+
+    def test_incrementing_a_number_is_the_next_one(self):
+        self.assertEqual(self._deobfuscate('$x = 5; $x++; Write-Output $x'), 'Write-Output 6')
+
+    def test_decrementing_a_number_is_the_previous_one(self):
+        self.assertEqual(self._deobfuscate('$x = 5; $x--; Write-Output $x'), 'Write-Output 4')
+
+    def test_incrementing_null_is_one(self):
+        self.assertEqual(self._deobfuscate('$x = $null; $x++; Write-Output $x'), 'Write-Output 1')
+
+    def test_incrementing_a_string_is_not_folded_to_a_concatenation(self):
+        self.assertEqual(
+            self._deobfuscate('$x = "5"; $x++; Write-Output $x'),
+            '$x = "5"\n$x++\nWrite-Output $x')
+
+    def test_incrementing_a_char_is_not_folded(self):
+        self.assertEqual(
+            self._deobfuscate('$x = [char]65; $x++; Write-Output $x'),
+            '$x = [char]65\n$x++\nWrite-Output $x')
+
+    def test_incrementing_a_boolean_is_not_folded_to_the_sum_of_its_integer(self):
+        self.assertEqual(
+            self._deobfuscate('$x = $true; $x++; Write-Output $x'),
+            '$x = $True\n$x++\nWrite-Output $x')
+
+
 class TestPs1ASharedArrayIsOneOnlyBetweenTheAliasAndTheNextRebinding(TestPs1):
     """
     `$y = $x` gives one array a second name rather than a copy, so `[Array]::Reverse($x)` is a write
