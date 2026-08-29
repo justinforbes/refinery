@@ -28,16 +28,23 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: `-gt` or `-ge` is not the numerals its operands spell — measured, `'10' -lt '9'` is `$True` and
 #: `'2' -lt '10'` is `$False`, both of which reading them as numbers answers the other way. This row
 #: comes back down by a collation and not by an arithmetic.
+#:
+#: All nine rows were then raised together, by 408 in total, and what was added was a fold rather
+#: than a wrong answer: `-and` and `-or` short circuit, so the interpreter now answers them from the
+#: left operand alone and never evaluates the operand it skips. The domain's `apply` still reads both
+#: operands, so every pair whose skipped operand is one the interpreter cannot fold is new gap. These
+#: rows come back down by teaching `apply` to short circuit as well, not by computing the operand
+#: neither engine needs.
 GAP: dict[str, int] = {
-    'System.String': 1633,
-    'System.Object[]': 1463,
-    'System.Char': 1096,
-    'System.Int64': 1000,
-    'System.Int32': 670,
-    'System.Double': 590,
-    'System.Byte': 402,
-    'System.Boolean': 236,
-    'System.Void': 150,
+    'System.String': 1713,
+    'System.Object[]': 1603,
+    'System.Char': 1156,
+    'System.Int64': 1080,
+    'System.Int32': 685,
+    'System.Double': 605,
+    'System.Byte': 411,
+    'System.Boolean': 242,
+    'System.Void': 153,
 }
 
 #: The witness spellings the reader cannot make a fact of, so the census is quantified over the

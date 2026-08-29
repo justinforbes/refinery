@@ -835,6 +835,10 @@ class _Ps1Interpreter:
             left = self._eval(node.left)
             return self._apply_type_cast(node.right.name, left)
         left = self._eval(node.left)
+        if op == '-and':
+            return self._truthy(left) and self._truthy(self._eval(node.right))
+        if op == '-or':
+            return self._truthy(left) or self._truthy(self._eval(node.right))
         right = self._eval(node.right)
         if isinstance(left, bool) and op in _NO_OPERATOR_METHOD_ON_BOOLEAN:
             raise _Ps1InterpreterError
@@ -858,14 +862,8 @@ class _Ps1Interpreter:
             return self._int_op(left, right, ps_shift_left)
         if op == '-shr':
             return self._int_op(left, right, ps_shift_right)
-        if op in ('-and', '-or', '-xor'):
-            lb = self._truthy(left)
-            rb = self._truthy(right)
-            if op == '-and':
-                return lb and rb
-            if op == '-or':
-                return lb or rb
-            return lb != rb
+        if op == '-xor':
+            return self._truthy(left) != self._truthy(right)
         cmp_fn = COMPARISON_OPS.get(op)
         if cmp_fn is not None:
             return self._compare(left, right, cmp_fn)

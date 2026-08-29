@@ -1377,7 +1377,6 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
     read no digit group separator and answer InvalidCastFromStringToInteger instead.
     """
 
-    @unittest.expectedFailure
     def test_an_increment_the_short_circuit_skips_never_happens(self):
         for condition in ['$false -and ($i++)', '$true -or ($i++)']:
             source = cleandoc(F"""
