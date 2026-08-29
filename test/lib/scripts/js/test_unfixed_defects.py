@@ -1317,6 +1317,49 @@ class TestAReadOfANameNothingBindsInsideATryIsCaught(TestBase):
 #: A program that calls a function whose body reads a name nothing binds and prints the result,
 #: mapped to the behavior Node gives it. The read stands in a store no later statement reads, which
 #: is what lets the body be emptied down to the value it returns. The last two rows are the
+#: A program handing a name nothing binds to a wrapper whose body reads the parameter under
+#: `typeof`, mapped to what Node prints for it. At the call site the argument is read as a value
+#: and throws; substituted into the `typeof` operand, the same spelling stands in the one position
+#: a `ReferenceError` does not reach, so the inlined program prints `undefined` where the original
+#: is caught. The second row is the control: a declared name prints the same under both.
+A_THROWING_READ_TYPEOF_WOULD_MUTE = {
+    'try {'
+    ' console.log(function (a) { return typeof a; }(u));'
+    " } catch (e) { console.log('caught'); }": 'caught\n',
+    'var u = 1;'
+    ' try {'
+    ' console.log(function (a) { return typeof a; }(u));'
+    " } catch (e) { console.log('caught'); }": 'number\n',
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReadMovedUnderTypeofKeepsItsThrow(TestBase):
+    """
+    `typeof` is the one operand position where reading a name nothing binds does not throw, so
+    substituting a call-site argument into it erases the `ReferenceError` the call site raised.
+    The admission — `refinery.lib.scripts.js.deobfuscation.helpers.is_safe_iife_inline` — counts
+    a bare identifier argument as side-effect-free wherever the body uses it, because the effect
+    gate `TestAReadOfANameNothingBindsThrowsWhereverItStands` pins answers that such a read does
+    nothing. Even under the widening documented there, an argument moved into a `typeof` operand
+    mutes the throw the widened gate would order, so the admission additionally has to refuse the
+    position, not only classify the read.
+    """
+
+    @unittest.expectedFailure
+    def test_an_argument_read_under_typeof_still_throws(self):
+        """
+        Node prints `caught` for the first program of `A_THROWING_READ_TYPEOF_WOULD_MUTE` and
+        `number` for its control. The deobfuscation substitutes the argument into the operand and
+        the first program comes back printing `undefined`.
+        """
+        rows = A_THROWING_READ_TYPEOF_WOULD_MUTE
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            each_program_still_prints(rows),
+        )
+
+
 #: controls: the same read written where no store holds it, and the returned value itself.
 A_CALL_WHOSE_BODY_READS_A_NAME_NOTHING_BINDS = {
     'function f() {\n  var x = missing;\n  return 7;\n}\nconsole.log(f());\n':
@@ -2791,11 +2834,9 @@ class TestAReceiverACallSuppliesMayBeHandedOn(TestBase):
 
 
 #: A program whose deobfuscation writes a global's name into a block where a `let` of the same name
-#: shadows it, mapped to the behavior an engine gives it. Two passes write such a name: the
-#: constant inliner substitutes an initializer for a use of the name it was bound to, and the
-#: wrapper inliner grafts a wrapper's return expression at its call site. Neither asks whether the
-#: names the written text carries still resolve, where it lands, to what they resolved to where it
-#: was read.
+#: shadows it, mapped to the behavior an engine gives it. The constant inliner substitutes an
+#: initializer for a use of the name it was bound to, without asking whether the names the
+#: initializer carries still resolve, where it lands, to what they resolved to where it was read.
 A_SUBSTITUTED_NAME_A_BLOCK_SHADOWS_AT_ITS_USE = {
     'an initializer inlined into a shadowing block': Program(
         a_program("""
@@ -2810,19 +2851,6 @@ A_SUBSTITUTED_NAME_A_BLOCK_SHADOWS_AT_ITS_USE = {
             """),
         prints('7'),
     ),
-    'a wrapper body grafted into a shadowing block': Program(
-        a_program("""
-            function w(x) { return parseInt(x); }
-            function f() {
-              {
-                let parseInt = function (s) { return 99; };
-                console.log(w('7'));
-              }
-            }
-            f();
-            """),
-        prints('7'),
-    ),
 }
 
 
@@ -2831,20 +2859,21 @@ A_SUBSTITUTED_NAME_A_BLOCK_SHADOWS_AT_ITS_USE = {
 class TestASubstitutedNameStillResolvesWhereItIsWritten(TestBase):
     """
     Substituting text for a name moves every name that text carries to a new position, and a name
-    means what it resolves to where it stands. Both programs bind `parseInt` inside a block with
-    `let` and call the global one from that block through something bound outside it — a plain
-    alias in the first, a one-return wrapper in the second — so each call answers `7`. The
-    deobfuscation writes `parseInt` into the block, where the shadow answers it, and each program
-    comes back printing `99`.
+    means what it resolves to where it stands. The program binds `parseInt` inside a block with
+    `let` and calls the global one from that block through an alias bound outside it, so the call
+    answers `7`. The deobfuscation writes `parseInt` into the block, where the shadow answers it,
+    and the program comes back printing `99`.
 
     `refinery.lib.scripts.js.deobfuscation.constants` checks what the initializer's names held at
     the use (`_free_variables_preserved`) but not what its spelling resolves to there, a question
-    its own cross-function inliner does ask before emitting an intrinsic alias's name;
-    `refinery.lib.scripts.js.deobfuscation.wrappers` grafts a return expression whose free names
-    are never re-resolved at the call site. One rule closes both: text may land only where every
-    name it carries resolves to what it resolved to where the text was read.
+    its own cross-function inliner does ask before emitting an intrinsic alias's name. The rule that
+    closes it: text may land only where every name it carries resolves to what it resolved to where
+    the text was read. The wrapper inliner's twin of this defect is closed —
+    `refinery.lib.scripts.js.deobfuscation.wrappers.JsCallWrapperInliner._forwarded_callee_reaches`
+    refuses to graft a return expression whose forwarded callee a local at the call site would
+    capture.
 
     Off the release gate deliberately: the shape needs a block-scoped `let` spelling the same name
-    as a global that an alias or wrapper bound outside the block still reaches, and that is not
-    what an obfuscator does to names — it renames them apart, never toward a collision.
+    as a global that an alias bound outside the block still reaches, and that is not what an
+    obfuscator does to names — it renames them apart, never toward a collision.
     """

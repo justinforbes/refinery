@@ -20,7 +20,13 @@ from refinery.lib.scripts import (
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import EffectModel, object_sets_prototype
-from refinery.lib.scripts.js.analysis.model import Binding, Scope, SemanticModel
+from refinery.lib.scripts.js.analysis.model import (
+    Binding,
+    Scope,
+    SemanticModel,
+    is_use_position,
+    walk_receiver_scope,
+)
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScopeProcessingTransformer,
     a_host_reaches_the_binding,
@@ -85,6 +91,36 @@ def _object_binds_this(prop_map: dict[str, Node]) -> bool:
     folding the object away (detaching the value from its receiver) would change its meaning.
     """
     return any(references_receiver_this(value) for value in prop_map.values())
+
+
+def _function_observes_its_identity(func: JsFunctionExpression) -> bool:
+    """
+    Whether a call to *func* can tell one copy of the function from another: the body reads the
+    function expression's own name, or reaches `arguments.callee` — through its own `arguments`
+    binding, which an arrow inside the body shares and a nested regular function does not. Cloning
+    such a function into each call site answers a different object at each, so `o.m() === o.m()`
+    flips where the original compared one function against itself. A computed `arguments[k]` whose
+    key is not statically known counts, since `k` may name `callee` at runtime.
+    """
+    name = func.id.name if func.id is not None else None
+    if name is not None and any(
+        isinstance(node, JsIdentifier)
+        and node.name == name
+        and node is not func.id
+        and is_use_position(node)
+        for node in func.walk()
+    ):
+        return True
+    for node in walk_receiver_scope(func):
+        if not isinstance(node, JsMemberExpression) or node.object is None:
+            continue
+        base = strip_parens(node.object)
+        if not isinstance(base, JsIdentifier) or base.name != 'arguments':
+            continue
+        key = access_key(node)
+        if key is None or key == 'callee':
+            return True
+    return False
 
 
 def _binding_inside(binding: Binding, value: Node) -> bool:
@@ -421,6 +457,9 @@ class JsObjectFold(ScopeProcessingTransformer):
                     _replace_in_parent(
                         call, spelled_for_the_callee_position(call, replacement))
                     changed = True
+                    continue
+                if _function_observes_its_identity(value):
+                    can_remove = False
                     continue
             if isinstance(value, (JsFunctionExpression, JsArrowFunctionExpression)) and call is None:
                 can_remove = False

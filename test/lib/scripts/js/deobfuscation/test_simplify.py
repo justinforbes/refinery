@@ -450,6 +450,23 @@ class TestExtendedOperatorFolding(TestJsDeobfuscator):
         source = 'var r = (function(a) { return a; })(7);'
         self.assertEqual('var r = 7;', self._simplify(source))
 
+    def test_iife_inline_member_arg_landing_as_callee_is_neutralized(self):
+        source = (
+            'var o = { f: function () { return this === o; } };'
+            ' console.log(function (a) { return a; }(o.f)());'
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var o = { f: function() {
+                  return this === o;
+                } };
+                console.log((0, o.f)());
+                """
+            ),
+            self._simplify(source),
+        )
+
     def test_iife_object_shorthand_substitutes_value_not_property_name(self):
         source = 'var r = (function(a) { return {a}; })(7);'
         self.assertEqual('var r = { a: 7 };', self._simplify(source))

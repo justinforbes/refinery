@@ -1003,14 +1003,24 @@ class TestRegressionBugs(TestJsDeobfuscator):
             self._objectfold(source),
         )
 
+
 #: An argument to a method the object fold answers, whose evaluation the answer has to keep. The
 #: first is used by nothing the body returns; the second pair is used in the other order than it is
-#: written; the third pair is used with one argument behind a ternary arm. Substituting any of them
-#: into the body would drop, reorder, or conditionalize a side effect, so each of the three is
-#: answered by putting the function value itself where the method stood, immediately called, and
-#: its arguments still standing where they were written. The last two are the admitted side of the
-#: rule: an effectful argument used exactly once, unconditionally, and in declaration order is
-#: substituted. Each program is mapped to what Node prints for it.
+#: written; the third pair is used with one argument behind a ternary arm. The next five turn the
+#: screw: a duplicate parameter name reads only the last argument, an identifier is read after the
+#: other argument writes it, an identifier is read on both sides of that write, an optional chain
+#: short-circuits past the argument's position, and the body calls one argument before evaluating
+#: the other. Substituting any of them into the body would drop, duplicate, reorder, or
+#: conditionalize an effect or a read, so each is answered by putting the function value itself
+#: where the method stood, immediately called, and its arguments still standing where they were
+#: written. The last two are the admitted side of the rule: an effectful argument used exactly
+#: once, unconditionally, in declaration order, and before the body's own operations is
+#: substituted. The final rows widen the screw once more: a logical assignment evaluates its right
+#: side conditionally, and a parameter read inside a nested arrow is evaluated on each later run of
+#: that arrow rather than at the call — an effectful or live-reading argument substituted into
+#: either is wrong, so both are answered by the standing function value. The last row is the
+#: oracle's own admitted side: two calls the analysis proves pure are reordered into the body
+#: without changing what the program prints. Each program is mapped to what Node prints for it.
 AN_ARGUMENT_WHOSE_EFFECT_THE_FOLD_OWES = {
     'function g() { SIDE = 1; return 2; }'
     ' var o = { m: function (a) { return 7; } };'
@@ -1026,6 +1036,25 @@ AN_ARGUMENT_WHOSE_EFFECT_THE_FOLD_OWES = {
     " function q() { LOG += 'q'; return 2; }"
     ' var o = { m: function (a, b) { return a ? b : 5; } };'
     ' console.log(o.m(p(), q()), LOG);': '5 pq\n',
+    "var LOG = '';"
+    " function g() { LOG += 'g'; return 5; }"
+    ' var o = { m: function (a, a) { return a; } };'
+    ' console.log(o.m(g(), 1), LOG);': '1 g\n',
+    'var x = 1;'
+    ' var o = { m: function (a, b) { return b + a; } };'
+    ' console.log(o.m(x, x = 5));': '6\n',
+    'var x = 1;'
+    ' var o = { m: function (a, b) { return a + b + a; } };'
+    ' console.log(o.m(x, x = 5));': '7\n',
+    "var LOG = '';"
+    " function e() { LOG += 'e'; return 'x'; }"
+    ' var o = { m: function (a, b) { return a?.[b]; } };'
+    ' console.log(o.m(null, e()), LOG);': 'undefined e\n',
+    "var LOG = '';"
+    " function f() { LOG += 'f'; return 1; }"
+    " function g() { LOG += 'g'; return 2; }"
+    ' var o = { m: function (a, b) { return a() + b; } };'
+    ' console.log(o.m(f, g()), LOG);': '3 gf\n',
     'function g() { SIDE = 1; return 2; }'
     ' var o = { m: function (a) { return a + 7; } };'
     ' console.log(o.m(g()));'
@@ -1035,6 +1064,19 @@ AN_ARGUMENT_WHOSE_EFFECT_THE_FOLD_OWES = {
     " function q() { LOG += 'q'; return 2; }"
     ' var o = { m: function (a, b) { return a + b; } };'
     ' console.log(o.m(p(), q()), LOG);': '3 pq\n',
+    "var LOG = '';"
+    " function eff() { LOG += 'e'; return 5; }"
+    ' var obj = { key: 1 };'
+    ' var o = { m: function (a, k, b) { return a[k] ||= b; } };'
+    " console.log(o.m(obj, 'key', eff()), LOG);": '1 e\n',
+    'var x = 1;'
+    ' var o = { m: function (a) { return () => a; } };'
+    ' var f = o.m(x); x = 2;'
+    ' console.log(f());': '1\n',
+    'function p() { return 1; }'
+    ' function q() { return 2; }'
+    ' var o = { m: function (a, b) { return b + a; } };'
+    ' console.log(o.m(p(), q()));': '3\n',
 }
 
 
@@ -1096,6 +1138,195 @@ class TestAFoldedCallRunsItsArgumentsAsWritten(TestJsDeobfuscator):
             ),
         )
 
+    def test_a_duplicate_parameter_keeps_the_dropped_argument(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                console.log(function(a, a) {
+                  return a;
+                }(g(), 1));
+                """
+            ),
+            self._objectfold(
+                'var o = { m: function (a, a) { return a; } }; console.log(o.m(g(), 1));'
+            ),
+        )
+
+    def test_a_read_is_not_moved_across_the_write_beside_it(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var x = 1;
+                console.log(function(a, b) {
+                  return b + a;
+                }(x, x = 5));
+                """
+            ),
+            self._objectfold(
+                'var x = 1; var o = { m: function (a, b) { return b + a; } };'
+                ' console.log(o.m(x, x = 5));'
+            ),
+        )
+
+    def test_a_read_is_not_duplicated_around_the_write_beside_it(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var x = 1;
+                console.log(function(a, b) {
+                  return a + b + a;
+                }(x, x = 5));
+                """
+            ),
+            self._objectfold(
+                'var x = 1; var o = { m: function (a, b) { return a + b + a; } };'
+                ' console.log(o.m(x, x = 5));'
+            ),
+        )
+
+    def test_an_argument_behind_an_optional_chain_still_runs(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                console.log(function(a, b) {
+                  return a?.[b];
+                }(null, e()));
+                """
+            ),
+            self._objectfold(
+                'var o = { m: function (a, b) { return a?.[b]; } }; console.log(o.m(null, e()));'
+            ),
+        )
+
+    def test_an_argument_is_not_moved_after_a_call_the_body_makes(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                console.log(function(a, b) {
+                  return a() + b;
+                }(f, g()));
+                """
+            ),
+            self._objectfold(
+                'var o = { m: function (a, b) { return a() + b; } }; console.log(o.m(f, g()));'
+            ),
+        )
+
+    def test_a_pair_read_in_order_by_a_computed_member_is_substituted(self):
+        self.assertEqual(
+            'console.log(x()[y()]);',
+            self._objectfold(
+                'var o = { m: function (a, b) { return a[b]; } }; console.log(o.m(x(), y()));'
+            ),
+        )
+
+    def test_an_effectful_argument_behind_a_logical_assignment_still_runs(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                console.log(function(a, k, b) {
+                  return a[k] ||= b;
+                }(obj, 'key', eff()));
+                """
+            ),
+            self._objectfold(
+                "var o = { m: function (a, k, b) { return a[k] ||= b; } };"
+                " console.log(o.m(obj, 'key', eff()));"
+            ),
+        )
+
+    def test_two_pure_calls_are_reordered_into_the_body(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function p() {
+                  return 1;
+                }
+                function q() {
+                  return 2;
+                }
+                console.log(q() + p());
+                """
+            ),
+            self._objectfold(
+                'function p() { return 1; } function q() { return 2; }'
+                ' var o = { m: function (a, b) { return b + a; } }; console.log(o.m(p(), q()));'
+            ),
+        )
+
+
+class TestAnArgumentReadUnderANestedScopeIsNotSubstituted(TestJsDeobfuscator):
+
+    def test_an_identifier_read_inside_a_returned_arrow_is_not_substituted(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var f = function(a) {
+                  return () => a;
+                }(x);
+                """
+            ),
+            self._objectfold(
+                'var o = { m: function (a) { return () => a; } }; var f = o.m(x);'
+            ),
+        )
+
+    def test_a_fresh_literal_read_inside_a_returned_arrow_is_not_substituted(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var f = function(a) {
+                  return () => a;
+                }([1, 2]);
+                """
+            ),
+            self._objectfold(
+                'var o = { m: function (a) { return () => a; } }; var f = o.m([1, 2]);'
+            ),
+        )
+
+    def test_a_constant_literal_read_inside_a_returned_arrow_is_substituted(self):
+        self.assertEqual(
+            'var f = () => 5;',
+            self._objectfold(
+                'var o = { m: function (a) { return () => a; } }; var f = o.m(5);'
+            ),
+        )
+
+
+class TestAFoldedFunctionKeepsItsIdentity(TestJsDeobfuscator):
+
+    def test_a_function_naming_itself_is_not_cloned_per_site(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var o = { m: function f() {
+                  return f;
+                } };
+                console.log(o.m() === o.m());
+                """
+            ),
+            self._objectfold(
+                'var o = { m: function f() { return f; } }; console.log(o.m() === o.m());'
+            ),
+        )
+
+    def test_a_function_reading_its_callee_is_not_cloned_per_site(self):
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var o = { m: function() {
+                  return arguments.callee;
+                } };
+                console.log(o.m() === o.m());
+                """
+            ),
+            self._objectfold(
+                'var o = { m: function () { return arguments.callee; } };'
+                ' console.log(o.m() === o.m());'
+            ),
+        )
+
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestNodePrintsTheSameAboutArgumentsTheFoldOwes(TestJsDeobfuscator):
@@ -1106,4 +1337,3 @@ class TestNodePrintsTheSameAboutArgumentsTheFoldOwes(TestJsDeobfuscator):
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
         )
-

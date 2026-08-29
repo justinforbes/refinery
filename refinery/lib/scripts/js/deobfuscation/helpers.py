@@ -43,6 +43,7 @@ from refinery.lib.scripts import (
     set_body,
     set_child,
     set_value,
+    tree_root,
 )
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import side_effect_free
@@ -1420,23 +1421,55 @@ def is_closed_expression(node: Node, allowed_names: set[str]) -> bool:
     return all(is_closed_expression(child, allowed_names) for child in children)
 
 
-def _collect_unconditional_identifiers(expr: Node) -> list[str]:
+def _chain_short_circuits(node: Node | None) -> bool:
+    """
+    Whether the member/call spine at *node* holds an optional link, so that evaluation can
+    short-circuit past every position above it: in `a?.b[c]` the read of `c` happens only when `a`
+    is not nullish, and in `f?.().x[c]` only when `f` is not.
+    """
+    while isinstance(node, (JsMemberExpression, JsCallExpression)):
+        if node.optional:
+            return True
+        node = node.object if isinstance(node, JsMemberExpression) else node.callee
+    return False
+
+
+def _collect_unconditional_evaluation(expr: Node) -> list[str | None]:
     """
     Walk *expr* in evaluation order, descending only into children that are unconditionally
-    evaluated (not short-circuit branches or ternary arms). Return the identifier names encountered
-    in evaluation order.
+    evaluated — not short-circuit branches, not ternary arms, not a logical assignment's right
+    side, and not the positions past an optional link's short-circuit. Return the identifier names
+    encountered, in evaluation order,
+    interleaved with `None` for every operation that can run code or raise where it applies: a call,
+    a `new`, a tagged template, a member access (its getter or setter), and an operator's coercion
+    of its operands. An argument substituted at a name after such a marker no longer evaluates
+    before the body's operations the way it did at the call site.
     """
-    names: list[str] = []
-    stack: list[Node] = [expr]
+    events: list[str | None] = []
+    stack: list[Node | None] = [expr]
     while stack:
         node = stack.pop()
-        if isinstance(node, JsIdentifier):
-            names.append(node.name)
+        if node is None:
+            events.append(None)
             continue
-        if isinstance(node, (JsBinaryExpression, JsAssignmentExpression)):
-            children: list[Node] = [c for c in (node.left, node.right) if c is not None]
+        if isinstance(node, JsIdentifier):
+            events.append(node.name)
+            continue
+        if isinstance(node, (JsCallExpression, JsNewExpression, JsTaggedTemplateExpression)):
+            events.append(None)
+            continue
+        children: list[Node | None]
+        if isinstance(node, JsAssignmentExpression):
+            children = [c for c in (node.left, node.right) if c is not None]
+            if node.operator in ('&&=', '||=', '??='):
+                children = children[:1]
+            children.append(None)
+        elif isinstance(node, JsBinaryExpression):
+            children = [c for c in (node.left, node.right) if c is not None]
+            children.append(None)
         elif isinstance(node, JsUnaryExpression):
             children = [node.operand] if node.operand is not None else []
+            children.append(None)
         elif isinstance(node, JsLogicalExpression):
             children = [node.left] if node.left is not None else []
         elif isinstance(node, JsConditionalExpression):
@@ -1445,13 +1478,19 @@ def _collect_unconditional_identifiers(expr: Node) -> list[str]:
             children = list(node.expressions)
         elif isinstance(node, JsMemberExpression):
             children = [node.object] if node.object is not None else []
-            if node.computed and node.property is not None:
+            if (
+                node.computed
+                and node.property is not None
+                and not node.optional
+                and not _chain_short_circuits(node.object)
+            ):
                 children.append(node.property)
+            children.append(None)
         else:
             continue
         for child in reversed(children):
             stack.append(child)
-    return names
+    return events
 
 
 def _param_written(expr: Node, param_names: set[str]) -> bool:
@@ -1486,8 +1525,14 @@ def arguments_substitutable(arguments: Sequence[Node], param_names: Sequence[str
     A spread element denotes however many values the iterable behind it holds, which is not one and
     is not a count the syntax states. Counting it as one argument binds a parameter to the spread
     itself, and substituting that into an expression writes `...xs` where a value belongs.
+
+    A duplicate parameter name breaks the correspondence from the other side: `function (a, a)`
+    reads only the last `a`, so substitution by name drops every earlier argument along with its
+    evaluation, and any per-name accounting over the parameters counts two positions as one.
     """
     if len(arguments) != len(param_names):
+        return False
+    if len(set(param_names)) != len(param_names):
         return False
     return not any(isinstance(argument, JsSpreadElement) for argument in arguments)
 
@@ -1518,6 +1563,30 @@ def expression_a_call_answers(func: JsFunctionNode) -> ReturnedExpression | None
     return ReturnedExpression(stmt.argument, param_names)
 
 
+def names_used_under_a_nested_scope(expr: Node) -> frozenset[str]:
+    """
+    The identifier names read at a use position inside a function or class nested in *expr* — or
+    in all of *expr*, where *expr* is itself a function or class. A substitution there does not
+    evaluate the argument where the call site did: the nested body runs later, any number of times,
+    so a non-literal argument would be re-read per run — a binding's later value instead of the
+    one the call captured, or a fresh allocation per run where the site produced one value.
+    """
+    names: set[str] = set()
+    for node in expr.walk():
+        if isinstance(node, (
+            JsFunctionExpression,
+            JsArrowFunctionExpression,
+            JsFunctionDeclaration,
+            JsClassExpression,
+            JsClassDeclaration,
+        )):
+            names.update(
+                n.name for n in node.walk()
+                if isinstance(n, JsIdentifier) and is_use_position(n)
+            )
+    return frozenset(names)
+
+
 def is_safe_iife_inline(
     expr: Node,
     param_names: Sequence[str],
@@ -1533,7 +1602,23 @@ def is_safe_iife_inline(
     distinct copies and break an identity comparison such as `x === x`. An effectful argument must
     additionally be used exactly once, in an unconditionally-evaluated position, and in declaration
     order relative to other effectful arguments, so its side effect is neither dropped, duplicated, nor
-    reordered. When *call_pure* is given (an
+    reordered.
+
+    A parameter read inside a function or class nested in the body admits only a literal argument:
+    the nested body runs after the call, any number of times, so any other argument would be
+    re-evaluated per run — `function (a) { return () => a; }` called with `x` must answer a
+    closure over the value `x` held at the call, not a live read of `x`, and called with `[1]` must
+    answer the one array the site produced, not a fresh one per run.
+
+    An effect is also ordered against everything that can observe it. Once any argument is
+    effectful, every argument that is not a literal is held to the same evaluation-order discipline
+    — at the call site each was evaluated once, before the body and in declaration order, and an
+    identifier read moved across another argument's write reads a different value (`o.m(x, x = 5)`
+    with a body of `b + a`). And every effectful argument must evaluate before the body's first own
+    operation — a call, a member access, an operator's coercion — because at the call site all
+    arguments ran before the body did, and a body operation is code the substitution cannot see
+    across (`o.m(f, g())` with a body of `a() + b` would run `f` before `g`). When *call_pure* is
+    given (an
     `refinery.lib.scripts.js.analysis.effects.EffectModel.is_pure_call`), a call argument it proves pure
     counts as side-effect-free for the ordering rules — but only when *call_established* also certifies
     its callee is in place before the call runs, and, being a call, it is not simple, so it is still not
@@ -1556,6 +1641,10 @@ def is_safe_iife_inline(
     for i, arg in enumerate(call_args):
         if use_counts[param_names[i]] > 1 and not is_simple_expression(arg):
             return False
+    deferred = names_used_under_a_nested_scope(expr)
+    for i, arg in enumerate(call_args):
+        if param_names[i] in deferred and not is_literal(arg):
+            return False
     effectful_indices = [
         i for i, arg in enumerate(call_args)
         if not side_effect_free(
@@ -1564,21 +1653,33 @@ def is_safe_iife_inline(
     ]
     if not effectful_indices:
         return True
+    effectful = set(effectful_indices)
     for i in effectful_indices:
         if use_counts[param_names[i]] != 1:
             return False
-    unconditional = _collect_unconditional_identifiers(expr)
-    effectful_names = {param_names[i] for i in effectful_indices}
-    effectful_in_eval = [n for n in unconditional if n in effectful_names]
-    if len(effectful_in_eval) != len(effectful_indices):
-        return False
+    events = _collect_unconditional_evaluation(expr)
     param_order = {name: i for i, name in enumerate(param_names)}
-    prev = -1
-    for name in effectful_in_eval:
-        idx = param_order[name]
-        if idx <= prev:
+    exposed = {i for i, arg in enumerate(call_args) if not is_literal(arg)}
+    order: list[int] = []
+    first_operation: int | None = None
+    for event in events:
+        if event is None:
+            if first_operation is None:
+                first_operation = len(order)
+            continue
+        index = param_order.get(event)
+        if index is not None and index in exposed:
+            order.append(index)
+    for i in exposed:
+        expected = 1 if i in effectful else use_counts[param_names[i]]
+        if sum(1 for k in order if k == i) != expected:
             return False
-        prev = idx
+    for p, i in enumerate(order):
+        if i in effectful and first_operation is not None and p >= first_operation:
+            return False
+        for q, j in enumerate(order):
+            if j in effectful and i != j and (i < j) != (p < q):
+                return False
     return True
 
 
@@ -1749,41 +1850,43 @@ def substitute_use_position(node: JsIdentifier, replacement: Node, *, as_spelled
 
 
 def _effect_oracles(
-    transformer: Transformer | None,
+    transformer: Transformer,
     node: Node,
 ) -> tuple[
-    Callable[..., bool] | None,
+    Callable[[JsCallExpression | JsNewExpression], bool] | None,
     Callable[[Node], bool] | None,
-    Callable[..., bool] | None,
+    Callable[[JsCallExpression | JsNewExpression], bool] | None,
 ]:
     """
     The purity, dynamic-read, and establishment oracles `is_safe_iife_inline` sharpens its
-    side-effect reading with, taken from *transformer*'s shared analysis cache over the script
-    holding *node* — or three `None` when there is no transformer or *node* stands in no script,
-    leaving the purely syntactic reading.
+    side-effect reading with, answering from *transformer*'s shared analysis cache over the script
+    holding *node* — or three `None` when *node* stands in no script, leaving the purely syntactic
+    reading. Each oracle reads the cache at the moment it is invoked rather than binding a model
+    here: the models are built only when an argument actually needs one, and a caller that mutates
+    the tree between inline attempts pays for a rebuild only where an oracle is consulted after the
+    mutation.
     """
-    if transformer is None:
-        return None, None, None
-    root = node
-    while root.parent is not None:
-        root = root.parent
+    root = tree_root(node)
     if not isinstance(root, JsScript):
         return None, None, None
-    cache = model_cache(transformer, root)
-    effects = cache.effects
-    dominance = cache.dominance
+
+    def call_pure(call: JsCallExpression | JsNewExpression) -> bool:
+        return model_cache(transformer, root).effects.is_pure_call(call)
+
+    def read_effect(read: Node) -> bool:
+        return model_cache(transformer, root).model.read_has_dynamic_effect(read)
 
     def call_established(call: JsCallExpression | JsNewExpression) -> bool:
-        return effects.call_clearable(call, lambda f: dominance.established_before(f, call))
+        return model_cache(transformer, root).call_established(call)
 
-    return effects.is_pure_call, cache.model.read_has_dynamic_effect, call_established
+    return call_pure, read_effect, call_established
 
 
 def try_inline_trivial_function(
     func: JsFunctionExpression,
     call_args: Sequence[Node],
     *,
-    transformer: Transformer | None = None,
+    transformer: Transformer,
 ) -> Node | None:
     """
     If *func* is a trivial wrapper (single return whose expression uses only the function's
@@ -1791,14 +1894,13 @@ def try_inline_trivial_function(
     inlined expression, or `None` when the function is not such a wrapper or when substituting the
     arguments would change what they do.
 
-    Admission is `is_safe_iife_inline`, the one rule for placing call-site arguments into a body
-    expression: an argument used more than once must be identity-stable, and an effectful argument
-    must be used exactly once, unconditionally, and in declaration order, so no side effect is
-    dropped, duplicated, made conditional, or reordered. Every pass answering a call with the
-    callee's return expression inlines through this function, so no pass can admit a substitution
-    the rule refuses. When *transformer* is given, the effect oracles are taken from its shared
-    analysis cache, admitting a provably pure call argument the syntactic reading counts as
-    effectful.
+    Admission is `is_safe_iife_inline`, which is where the rule against dropping, duplicating,
+    conditionalizing, or reordering an argument's evaluation lives; the effect oracles sharpening
+    it are taken from *transformer*'s shared analysis cache, admitting a provably pure call
+    argument the syntactic reading counts as effectful. The object fold and the IIFE fold both
+    inline through this function. It is not the only substitution of call arguments into a body:
+    the call-wrapper inliner and the evaluator's irreducible-call splice admit under their own,
+    differently shaped rules.
 
     Which functions have a return expression to inline at all is `expression_a_call_answers`, which
     is where the refusal to inline an async function or a generator lives.

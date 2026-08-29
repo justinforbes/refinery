@@ -41,6 +41,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     make_string_literal,
     numeric_value,
     read_data_property,
+    spelled_for_the_callee_position,
     string_value,
     try_inline_trivial_function,
     utf16_code_units,
@@ -460,7 +461,10 @@ class JsSimplifications(Transformer):
         self.generic_visit(node)
         fn = strip_parens(node.callee)
         if isinstance(fn, JsFunctionExpression):
-            return try_inline_trivial_function(fn, node.arguments, transformer=self)
+            replacement = try_inline_trivial_function(fn, node.arguments, transformer=self)
+            if replacement is None:
+                return None
+            return spelled_for_the_callee_position(node, replacement)
         return (
             self._try_fold_static_method(node)
             or self._try_fold_free_function(node)

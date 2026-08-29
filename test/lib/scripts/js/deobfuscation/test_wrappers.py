@@ -203,3 +203,138 @@ class TestAnArgumentBoundToEvalStaysAnIndirectCall(TestJsDeobfuscator):
                 JsCallWrapperInliner,
             ),
         )
+
+
+class TestAWrapperArgumentIsNotDuplicated(TestJsDeobfuscator):
+
+    def test_a_fresh_value_read_twice_by_the_body_is_not_inlined(self):
+        source = (
+            'function h(x, y) { return x === y; }'
+            ' function w(a) { return h(a, a); }'
+            ' console.log(w([]));'
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function h(x, y) {
+                  return x === y;
+                }
+                function w(a) {
+                  return h(a, a);
+                }
+                console.log(w([]));
+                """
+            ),
+            self._run_transformer(source, JsCallWrapperInliner),
+        )
+
+    def test_an_identifier_read_twice_by_the_body_is_inlined(self):
+        source = (
+            'function h(x, y) { return x === y; }'
+            ' function w(a) { return h(a, a); }'
+            ' console.log(w(u));'
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function h(x, y) {
+                  return x === y;
+                }
+                console.log(h(u, u));
+                """
+            ),
+            self._run_transformer(source, JsCallWrapperInliner),
+        )
+
+
+class TestAForwardedCalleeIsNotCaptured(TestJsDeobfuscator):
+
+    def test_a_call_site_shadowing_the_forwarded_name_is_left_alone(self):
+        source = (
+            'function w(a) { return h(a); }'
+            " function h(a) { return 'outer ' + a; }"
+            " function t() { var h = function (a) { return 'inner ' + a; }; return w(5); }"
+            ' console.log(t());'
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function w(a) {
+                  return h(a);
+                }
+                function h(a) {
+                  return 'outer ' + a;
+                }
+                function t() {
+                  var h = function(a) {
+                    return 'inner ' + a;
+                  };
+                  return w(5);
+                }
+                console.log(t());
+                """
+            ),
+            self._run_transformer(source, JsCallWrapperInliner),
+        )
+
+
+class TestAWrapperArgumentUnderANestedScopeIsNotInlined(TestJsDeobfuscator):
+
+    def test_an_identifier_captured_by_a_returned_arrow_is_not_inlined(self):
+        source = (
+            'function w(a) { return h(() => a); }'
+            ' function h(cb) { return cb; }'
+            ' var x = 1; var f = w(x); x = 2; console.log(f());'
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function w(a) {
+                  return h(() => a);
+                }
+                function h(cb) {
+                  return cb;
+                }
+                var x = 1;
+                var f = w(x);
+                x = 2;
+                console.log(f());
+                """
+            ),
+            self._run_transformer(source, JsCallWrapperInliner),
+        )
+
+    def test_a_literal_captured_by_a_returned_arrow_is_inlined(self):
+        source = (
+            'function w(a) { return h(() => a); }'
+            ' function h(cb) { return cb; }'
+            ' console.log(w(5)());'
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function h(cb) {
+                  return cb;
+                }
+                console.log(h(() => 5)());
+                """
+            ),
+            self._run_transformer(source, JsCallWrapperInliner),
+        )
+
+class TestAConstantWrapperMayCallThroughALiteral(TestJsDeobfuscator):
+
+    def test_a_closed_call_body_with_no_name_to_capture_is_inlined(self):
+        source = 'function k() { return (1)(); } try { k(); } catch (e) { console.log(e.name); }'
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                try {
+                  (1)();
+                } catch (e) {
+                  console.log(e.name);
+                }
+                """
+            ),
+            self._run_transformer(source, JsCallWrapperInliner),
+        )

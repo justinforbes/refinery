@@ -17,7 +17,7 @@ from refinery.lib.scripts.js.analysis.effects import EffectModel, build_effects
 from refinery.lib.scripts.js.analysis.liveness import LivenessModel, build_liveness
 from refinery.lib.scripts.js.analysis.model import SemanticModel, build_semantic_model
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel, build_reaching
-from refinery.lib.scripts.js.model import JsScript
+from refinery.lib.scripts.js.model import JsCallExpression, JsNewExpression, JsScript
 from refinery.lib.scripts.modelcache import ModelCacheBase
 
 
@@ -73,6 +73,18 @@ class ModelCache(ModelCacheBase):
     @property
     def reaching(self) -> ReachingModel:
         return self._lazy('_reaching', lambda: build_reaching(self.dominance, self.effects))
+
+    def call_established(self, call: JsCallExpression | JsNewExpression) -> bool:
+        """
+        Whether *call* may be cleared by the purity oracle at all: its callee is a trusted
+        intrinsic, or a local function whose definition reaches the call, so a call textually before
+        a not-yet-established function keeps its runtime throw. This is the one composition of the
+        effect and dominance models every consumer shares, so no pass can pair a purity verdict with
+        a weaker establishment reading than another.
+        """
+        return self.effects.call_clearable(
+            call, lambda func: self.dominance.established_before(func, call)
+        )
 
 
 def model_cache(transformer: Transformer, root: JsScript) -> ModelCache:
