@@ -222,11 +222,7 @@ DIVERGENCES: dict[str, _Divergence] = {
     "@('1') -contains 1"                 : _Divergence(True, False),
     "@(1) -contains '1'"                 : _Divergence(True, False),
 
-    # A PowerShell wildcard is not an fnmatch pattern: a backtick escapes the character behind it,
-    # and `[!a]` is the two-character set `!a` rather than a negated class. Nor is `-match` Python's
-    # `re.IGNORECASE`, which folds the long s onto s where .NET does not.
-    "'a*' -like 'a`*'"                   : _Divergence(True, False),
-    "'b' -like '[!a]'"                   : _Divergence(False, True),
+    # `-match` is not Python's `re.IGNORECASE`, which folds the long s onto s where .NET does not.
     "'ſ' -match 's'"                     : _Divergence(False, True),
 
     # A conversion answers inside the width of its target or not at all: a hexadecimal string

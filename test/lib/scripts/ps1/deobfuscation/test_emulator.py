@@ -1423,7 +1423,6 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
             with self.subTest(comparison):
                 self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $True')
 
-    @unittest.expectedFailure
     def test_a_backticked_asterisk_matches_the_one_character_it_spells(self):
         source = cleandoc("""
             function f {
@@ -1442,7 +1441,6 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $False')
 
-    @unittest.expectedFailure
     def test_a_wildcard_set_reads_an_exclamation_mark_as_no_negation(self):
         source = cleandoc("""
             function f {
