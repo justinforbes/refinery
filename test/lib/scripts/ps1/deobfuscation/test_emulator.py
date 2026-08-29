@@ -1566,7 +1566,6 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         # unit's own doing, so where a fold over a body runs out of stack is measurable only there.
         self.assertEqual(self._sum_of_ones(2000).encode('utf8') | ps1() | str, '$x = 2000')
 
-    @unittest.expectedFailure
     def test_the_unit_answers_a_sum_too_long_to_fold_rather_than_crashing_on_it(self):
         try:
             bytes(self._sum_of_ones(5000).encode('utf8') | ps1())
