@@ -415,10 +415,7 @@ class JsObjectFold(ScopeProcessingTransformer):
             call = parent if isinstance(parent, JsCallExpression) and parent.callee is member else None
             if call is not None and isinstance(value, JsFunctionExpression):
                 replacement = try_inline_trivial_function(
-                    value,
-                    call.arguments,
-                    relaxed=True,
-                    transformer=transformer,
+                    value, call.arguments, transformer=transformer
                 )
                 if replacement is not None:
                     _replace_in_parent(

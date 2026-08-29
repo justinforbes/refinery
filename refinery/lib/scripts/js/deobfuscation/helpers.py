@@ -81,6 +81,7 @@ from refinery.lib.scripts.js.model import (
     JsIdentifier,
     JsLogicalExpression,
     JsMemberExpression,
+    JsNewExpression,
     JsNullLiteral,
     JsNumericLiteral,
     JsObjectExpression,
@@ -1747,21 +1748,57 @@ def substitute_use_position(node: JsIdentifier, replacement: Node, *, as_spelled
     return _replace_in_parent(node, replacement)
 
 
+def _effect_oracles(
+    transformer: Transformer | None,
+    node: Node,
+) -> tuple[
+    Callable[..., bool] | None,
+    Callable[[Node], bool] | None,
+    Callable[..., bool] | None,
+]:
+    """
+    The purity, dynamic-read, and establishment oracles `is_safe_iife_inline` sharpens its
+    side-effect reading with, taken from *transformer*'s shared analysis cache over the script
+    holding *node* — or three `None` when there is no transformer or *node* stands in no script,
+    leaving the purely syntactic reading.
+    """
+    if transformer is None:
+        return None, None, None
+    root = node
+    while root.parent is not None:
+        root = root.parent
+    if not isinstance(root, JsScript):
+        return None, None, None
+    cache = model_cache(transformer, root)
+    effects = cache.effects
+    dominance = cache.dominance
+
+    def call_established(call: JsCallExpression | JsNewExpression) -> bool:
+        return effects.call_clearable(call, lambda f: dominance.established_before(f, call))
+
+    return effects.is_pure_call, cache.model.read_has_dynamic_effect, call_established
+
+
 def try_inline_trivial_function(
     func: JsFunctionExpression,
-    call_args: list,
+    call_args: Sequence[Node],
     *,
-    relaxed: bool = False,
     transformer: Transformer | None = None,
 ) -> Node | None:
     """
     If *func* is a trivial wrapper (single return whose expression uses only the function's
     parameters), substitute call-site arguments into a clone of the return expression. Returns the
-    inlined expression or `None` if the function is not a simple wrapper.
+    inlined expression, or `None` when the function is not such a wrapper or when substituting the
+    arguments would change what they do.
 
-    When *relaxed* is False (default), all arguments must be side-effect-free simple expressions.
-    When *relaxed* is True, only arguments used more than once in the return expression need to be
-    simple (prevents duplicating side effects while allowing complex single-use arguments).
+    Admission is `is_safe_iife_inline`, the one rule for placing call-site arguments into a body
+    expression: an argument used more than once must be identity-stable, and an effectful argument
+    must be used exactly once, unconditionally, and in declaration order, so no side effect is
+    dropped, duplicated, made conditional, or reordered. Every pass answering a call with the
+    callee's return expression inlines through this function, so no pass can admit a substitution
+    the rule refuses. When *transformer* is given, the effect oracles are taken from its shared
+    analysis cache, admitting a provably pure call argument the syntactic reading counts as
+    effectful.
 
     Which functions have a return expression to inline at all is `expression_a_call_answers`, which
     is where the refusal to inline an async function or a generator lives.
@@ -1774,14 +1811,11 @@ def try_inline_trivial_function(
         return None
     if not is_closed_expression(expr, set(param_names)):
         return None
-    if relaxed:
-        for i, name in enumerate(param_names):
-            uses = sum(
-                1 for n in expr.walk()
-                if isinstance(n, JsIdentifier) and n.name == name and is_use_position(n)
-            )
-            if uses > 1 and not is_simple_expression(call_args[i]):
-                return None
+    call_pure, read_effect, call_established = _effect_oracles(transformer, func)
+    if not is_safe_iife_inline(
+        expr, param_names, call_args, call_pure, read_effect, call_established,
+    ):
+        return None
     return substitute_params(expr, func.params, call_args, transformer=transformer)
 
 

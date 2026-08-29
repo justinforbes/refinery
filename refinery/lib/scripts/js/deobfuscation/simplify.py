@@ -3,8 +3,6 @@ JavaScript syntax normalization transforms.
 """
 from __future__ import annotations
 
-from typing import Callable
-
 from refinery.lib.scripts import Expression, Node, Transformer
 from refinery.lib.scripts.js.analysis.cache import ModelCache, model_cache
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
@@ -28,17 +26,13 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     MemberRead,
     access_key,
     allocated_object_type,
-    arguments_substitutable,
     converts_uninterceptably,
     denoted_value,
     escape_js_string,
     eval_binary_op,
-    expression_a_call_answers,
     extract_literal_value,
-    is_closed_expression,
     is_literal,
     is_nullish,
-    is_safe_iife_inline,
     is_simple_expression,
     is_truthy,
     is_valid_identifier,
@@ -48,7 +42,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     numeric_value,
     read_data_property,
     string_value,
-    substitute_params,
+    try_inline_trivial_function,
     utf16_code_units,
     value_to_node,
 )
@@ -466,15 +460,7 @@ class JsSimplifications(Transformer):
         self.generic_visit(node)
         fn = strip_parens(node.callee)
         if isinstance(fn, JsFunctionExpression):
-            return self._try_inline_iife(
-                node,
-                fn,
-                lambda call: self.effects.is_pure_call(call),
-                self.model.read_has_dynamic_effect,
-                lambda call: self.effects.call_clearable(
-                    call, lambda f: self.dominance.established_before(f, call)),
-                self,
-            )
+            return try_inline_trivial_function(fn, node.arguments, transformer=self)
         return (
             self._try_fold_static_method(node)
             or self._try_fold_free_function(node)
@@ -482,29 +468,6 @@ class JsSimplifications(Transformer):
             or self._try_fold_split(node)
             or self._try_fold_join(node)
         )
-
-    @staticmethod
-    def _try_inline_iife(
-        node: JsCallExpression,
-        fn: JsFunctionExpression,
-        call_pure: Callable[..., bool],
-        read_effect: Callable[[Node], bool],
-        call_established: Callable[..., bool],
-        transformer: Transformer,
-    ) -> Node | None:
-        answered = expression_a_call_answers(fn)
-        if answered is None:
-            return None
-        expr, param_names = answered
-        if not arguments_substitutable(node.arguments, param_names):
-            return None
-        if not is_closed_expression(expr, set(param_names)):
-            return None
-        if not is_safe_iife_inline(
-            expr, param_names, node.arguments, call_pure, read_effect, call_established,
-        ):
-            return None
-        return substitute_params(expr, fn.params, node.arguments, transformer=transformer)
 
     def _try_fold_static_method(self, node: JsCallExpression) -> Node | None:
         callee = node.callee
