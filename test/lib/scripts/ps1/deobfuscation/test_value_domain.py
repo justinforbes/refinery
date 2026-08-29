@@ -170,7 +170,6 @@ class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
     def test_the_length_of_null_is_zero(self):
         self.assertEqual(self._deobfuscate('$x = $null.Length'), '$x = 0')
 
-    @unittest.expectedFailure
     def test_the_count_of_an_empty_array_is_zero(self):
         self.assertEqual(self._deobfuscate('$x = @().Count'), '$x = 0')
 
@@ -932,19 +931,17 @@ class TestPs1CountingACollectionSpelledSeveralWays(TestPs1):
     elements because the array operator unrolls what it is handed, while `,(1, 2)` holds the one
     collection the comma operator wrapped around the pair.
 
-    The tool answers every one of those spellings but the two that put a collection inside `@(...)`,
-    which it declines rather than answering as the scalar they are not.
+    The tool answers every one of those spellings, the two that put a collection inside `@(...)`
+    among them: it counts the elements the array operator unrolls rather than reading the receiver
+    as the scalar it is not.
     """
 
-    @unittest.expectedFailure
     def test_the_count_of_an_array_operator_around_an_array_is_the_inner_element_count(self):
         self.assertEqual(self._deobfuscate('$x = @(@(1, 2)).Count'), '$x = 2')
 
-    @unittest.expectedFailure
     def test_the_count_of_an_array_operator_around_a_comma_list_is_the_element_count(self):
         self.assertEqual(self._deobfuscate('$x = @((1, 2)).Count'), '$x = 2')
 
-    @unittest.expectedFailure
     def test_the_length_of_an_array_operator_around_an_array_is_the_inner_element_count(self):
         self.assertEqual(self._deobfuscate('$x = @(@(1, 2)).Length'), '$x = 2')
 

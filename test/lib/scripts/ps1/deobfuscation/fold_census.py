@@ -376,7 +376,7 @@ FOLDS: dict[str, str] = {
     '$t = $null.Count; Write-Output (,$t); Write-Output $t':
         'Write-Output (,0)\nWrite-Output 0',
     '$t = @(); Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@())\nWrite-Output @().Count',
+        'Write-Output (,@())\nWrite-Output 0',
     '$t = , 1; Write-Output (,$t); Write-Output $t.Count':
         'Write-Output (,(,1))\nWrite-Output 1',
     '$t = 0xFF; Write-Output (,$t); Write-Output $t':
@@ -562,9 +562,9 @@ FOLDS: dict[str, str] = {
     "Write-Output 'abc'.Length":
         'Write-Output 3',
     '$t = @(@(1, 2)); Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@(@(1, 2)))\nWrite-Output @(@(1, 2)).Count',
+        'Write-Output (,@(@(1, 2)))\nWrite-Output 2',
     '$t = @((1, 2)); Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@((1, 2)))\nWrite-Output @((1, 2)).Count',
+        'Write-Output (,@((1, 2)))\nWrite-Output 2',
     '$t = @(@(1, 2), 3); Write-Output (,$t); Write-Output $t.Count':
         'Write-Output (,(@(1, 2), 3))\nWrite-Output 2',
     '$t = ,(1, 2); Write-Output (,$t); Write-Output $t.Count':
@@ -880,7 +880,7 @@ FOLDS: dict[str, str] = {
     "$t = @(1, 2) + 'a'; Write-Output (,$t); Write-Output $t.Count":
         "Write-Output (,(1, 2, 'a'))\nWrite-Output 3",
     '$t = @(1, 2) * 0; Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@())\nWrite-Output @().Count',
+        'Write-Output (,@())\nWrite-Output 0',
     "$t = $null + 'abc'; Write-Output (,$t); Write-Output $t":
         "Write-Output (,'abc')\nWrite-Output 'abc'",
     '$t = $null + [char]65; Write-Output (,$t); Write-Output $t':
@@ -1016,7 +1016,7 @@ FOLDS: dict[str, str] = {
     '$t = [char]65 -and $true; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
     '$t = @() * 5000; Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@())\nWrite-Output @().Count',
+        'Write-Output (,@())\nWrite-Output 0',
     '$t = (,@()) -and $true; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = (,(,(,0))) -and $true; Write-Output (,$t); Write-Output $t':

@@ -674,9 +674,12 @@ class Ps1ConstantFolding(Transformer):
         `([char]65).Length` is 1 all the same. So the receiver is read as a *value* rather than
         matched by spelling: `$null` is not one, and its `Count` is 0.
 
-        A collection is a scalar to neither, and the array arm is the only one that answers for one:
-        a spelling this cannot take apart into element nodes — `@()`, `@(@(1, 2))` — names a
-        collection all the same, and answering 1 for it is the count of a value that is not there.
+        A collection is a scalar to neither. A spelling this cannot take apart into element nodes —
+        `@()`, `@(@(1, 2))`, `@((1, 2))` — still pins how many elements it holds when every one of
+        them is a literal: `read` unrolls the array operator exactly as 5.1 does and hands back the
+        elements, and both `Count` and `Length` of the `Object[]` those build are that many. The
+        answer goes through `_selected` for the reason the array arm does, and the elements it
+        discards are the pinned literals that let `read` answer at all, so it never refuses.
         """
         name = member.lower()
         if name not in _SHAPE_MEMBERS:
@@ -690,8 +693,10 @@ class Ps1ConstantFolding(Transformer):
             return None
         if fact is NULL:
             return _integer(0)
-        if not isinstance(fact, Ps1Constant) or isinstance(fact.payload, tuple):
+        if not isinstance(fact, Ps1Constant):
             return None
+        if isinstance(fact.payload, tuple):
+            return self._selected(node, _Selection(_integer(len(fact.payload)), [obj]))
         text = text_of(fact)
         return _integer(len(text) if name == 'length' and text is not None else 1)
 
