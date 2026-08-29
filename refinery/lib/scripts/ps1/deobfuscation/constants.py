@@ -97,6 +97,7 @@ _PS1_DEFAULT_VARIABLES: dict[str, str] = {
         'ConsoleFileName'            : r'',
         'DebugPreference'            : r'SilentlyContinue',
         'ErrorActionPreference'      : r'Continue',
+        'ErrorView'                  : r'NormalView',
         'InformationPreference'      : r'SilentlyContinue',
         'ProgressPreference'         : r'Continue',
         'PSCulture'                  : r'en-US',
