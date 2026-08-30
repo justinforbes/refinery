@@ -35,16 +35,24 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: operands, so every pair whose skipped operand is one the interpreter cannot fold is new gap. These
 #: rows come back down by teaching `apply` to short circuit as well, not by computing the operand
 #: neither engine needs.
+#:
+#: The eight scalar rows were raised once more, by 168 in total, and again a fold was added rather
+#: than a wrong answer withdrawn: the interpreter now reads the `-split` max-substrings argument.
+#: `<string> -split <delimiter>, <n>` hands the operator a collection right operand the interpreter
+#: used to refuse because stringifying it needs `$OFS`; it now caps the result at `n` elements and
+#: answers, where `apply` still declines the split operators outright. `System.Object[]` alone does
+#: not move, because a split reads its left operand as text and an array left is the one `$OFS`
+#: refusal that survives. These rows come back down by teaching `apply` to split, not by computing.
 GAP: dict[str, int] = {
-    'System.String': 1713,
+    'System.String': 1743,
     'System.Object[]': 1603,
-    'System.Char': 1156,
-    'System.Int64': 1080,
-    'System.Int32': 685,
-    'System.Double': 605,
-    'System.Byte': 411,
-    'System.Boolean': 242,
-    'System.Void': 153,
+    'System.Char': 1174,
+    'System.Int64': 1104,
+    'System.Int32': 715,
+    'System.Double': 635,
+    'System.Byte': 429,
+    'System.Boolean': 254,
+    'System.Void': 159,
 }
 
 #: The witness spellings the reader cannot make a fact of, so the census is quantified over the

@@ -1326,17 +1326,21 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), "$x = 'b'")
 
-    @unittest.expectedFailure
     def test_a_split_limit_leaves_the_rest_of_the_string_in_the_final_element(self):
-        for tail, expected in [('$a.Count', '$x = 2'), ('$a[1]', "$x = 'b,c'")]:
+        for split, tail, expected in [
+            ("'a,b,c' -split ',', 2", '$a.Count', '$x = 2'),
+            ("'a,b,c' -split ',', 2", '$a[1]', "$x = 'b,c'"),
+            ("'a,b,c,d' -split ',', 2", '$a[1]', "$x = 'b,c,d'"),
+            ("'a,b,c' -split ',', 5", '$a.Count', '$x = 3'),
+        ]:
             source = cleandoc(F"""
                 function f {{
-                  $a = 'a,b,c' -split ',', 2
+                  $a = {split}
                   {tail}
                 }}
                 $x = f
             """)
-            with self.subTest(tail):
+            with self.subTest(F'{split} {tail}'):
                 self.assertEqual(self._deobfuscate(source), expected)
 
     def test_a_case_prefix_on_a_string_comparison_compares_the_way_it_names(self):

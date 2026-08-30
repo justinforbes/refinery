@@ -1341,12 +1341,41 @@ class _Ps1Interpreter:
 
     def _eval_split(self, left: _Value, right: _Value, op: str) -> list:
         s = self._to_str(left)
-        pattern = self._to_str(right)
+        delimiter, maxsplit = self._split_delimiter_and_maxsplit(right)
+        pattern = self._to_str(delimiter)
         flags = re.IGNORECASE if op != '-csplit' else 0
         try:
-            return re.split(pattern, s, flags=flags)
+            return re.split(pattern, s, maxsplit=maxsplit, flags=flags)
         except re.error:
             raise _Ps1InterpreterError
+
+    def _split_delimiter_and_maxsplit(self, right: _Value) -> tuple[_Value, int]:
+        """
+        The delimiter and the Python `maxsplit` a `-split` right operand names.
+
+        5.1 reads a right operand that is a collection as `<delimiter>, <max-substrings>, <options>`
+        in that order (`parserutils.SplitOperatorImpl`). A max-substrings of `n` caps the result at
+        `n` elements, which .NET's `Regex.Split(input, n)` reaches with `n - 1` splits; a zero caps
+        nothing and is the unlimited default the bare operator also passes. Python's `maxsplit` is
+        `n - 1` for `n` at least two, and its zero is that same unlimited, so both map across.
+
+        Three cases are refused rather than answered with a value 5.1 does not produce: a
+        max-substrings of one, which caps at a single unsplit element that `maxsplit` cannot express
+        because its zero already means unlimited; a negative one, which splits a right-to-left regex
+        Python's `re` has no equivalent for; and any explicit split option.
+        """
+        if not isinstance(right, list):
+            return right, 0
+        if len(right) == 1:
+            return right[0], 0
+        if len(right) != 2:
+            raise _Ps1InterpreterError
+        limit = self._to_int(right[1])
+        if limit == 0:
+            return right[0], 0
+        if limit < 2:
+            raise _Ps1InterpreterError
+        return right[0], limit - 1
 
     def _eval_join(self, left: _Value, right: _Value) -> str:
         separator = self._to_str(right)
