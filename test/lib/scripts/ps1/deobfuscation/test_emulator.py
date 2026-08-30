@@ -1236,6 +1236,9 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
 
     @unittest.expectedFailure
     def test_a_double_becomes_the_text_5_1_writes_it_as(self):
+        # A `[string]` of a double *literal* is folded by the value domain before emulation; a double
+        # the body is handed reaches the interpreter's own `_to_str`, which writes Python's `str` —
+        # `100000000000000000000` and a lowercase `e` — where 5.1 writes the .NET-Framework text.
         for numeral, text in [
             ('1E20', '1E+20'),
             ('0.0000001', '1E-07'),
@@ -1243,7 +1246,8 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
         ]:
             source = cleandoc(F"""
                 function f {{
-                  [string]{numeral}
+                  $a = {numeral}
+                  [string]$a
                 }}
                 Write-Output (f)
             """)

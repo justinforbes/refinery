@@ -149,9 +149,18 @@ class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
     def test_a_string_plus_a_boolean_is_the_text_the_boolean_is_written_as(self):
         self.assertEqual(self._deobfuscate("$x = 'a' + $true"), "$x = 'aTrue'")
 
-    @unittest.expectedFailure
     def test_a_string_plus_a_double_is_the_text_the_double_is_written_as(self):
         self.assertEqual(self._deobfuscate("$x = 'a' + 1.5"), "$x = 'a1.5'")
+
+    def test_a_double_cast_to_a_string_is_the_dotnet_framework_text(self):
+        for source, expected in [
+            ("$x = [string]0.5", "$x = '0.5'"),
+            ("$x = [string]1E20", "$x = '1E+20'"),
+            ("$x = [string]0.0000001", "$x = '1E-07'"),
+            ("$x = [string]1.5E-7", "$x = '1.5E-07'"),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._deobfuscate(source), expected)
 
     def test_an_equality_against_a_collection_filters_it(self):
         self.assertEqual(self._deobfuscate('$x = 10, 20, 30 -eq 20'), '$x = ,20')

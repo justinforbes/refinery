@@ -1616,22 +1616,22 @@ class TestPs1RepeatingACollectionByACountNoInt32Holds(TestPs1):
 
 class TestPs1AJoinIsFoldedOnlyWhereTheTextItAppendsIsWritten(TestPs1):
     """
-    A String or a Char on the left of `+` makes it join, whatever stands on the right of it.
-    Measured, `'5' + 5` is `55` and `'a' + 1.5` is `a1.5`, so a left operand that happens to spell a
-    number is still text and the join is still a join. The text of a Double is .NET's to write and
-    is not written here, so a join with one on its right has to be left where it stands: folding it
-    as arithmetic makes `'5' + 1.5` the Double 6.5, which is neither the value nor the type a run of
-    the script produces.
+    A String or a Char on the left of `+` makes it join, whatever stands on the right of it, and the
+    join folds wherever the text each side contributes is one this module writes. Measured, `'5' + 5`
+    is `55`, `'a' + 1.5` is `a1.5` and `[char]65 + 1` is `A1`: a left operand that happens to spell a
+    number is still text and the join is still a join. A Double on the right contributes its invariant
+    `[string]` text, which is written rather than folded as the arithmetic `'5' + 1.5` would misread —
+    the Double `6.5`, neither the value nor the type a run of the script produces.
     """
 
-    def test_a_string_that_spells_a_number_joined_with_a_double_is_left_where_it_stands(self):
-        self._assertUnchanged("$x = '5' + 1.5", Ps1ConstantFolding)
+    def test_a_string_that_spells_a_number_joined_with_a_double_is_the_text_of_both(self):
+        self.assertEqual(self._apply("$x = '5' + 1.5", Ps1ConstantFolding), "$x = '51.5'")
 
-    def test_the_empty_string_joined_with_a_double_is_left_where_it_stands(self):
-        self._assertUnchanged("$x = '' + 1.5", Ps1ConstantFolding)
+    def test_the_empty_string_joined_with_a_double_is_the_text_of_the_double(self):
+        self.assertEqual(self._apply("$x = '' + 1.5", Ps1ConstantFolding), "$x = '1.5'")
 
-    def test_a_char_joined_with_a_double_is_left_where_it_stands(self):
-        self._assertUnchanged('$x = [char]65 + 1.5', Ps1ConstantFolding)
+    def test_a_char_joined_with_a_double_is_the_text_of_both(self):
+        self.assertEqual(self._apply('$x = [char]65 + 1.5', Ps1ConstantFolding), "$x = 'A1.5'")
 
     def test_a_string_joined_with_a_number_written_here_is_the_text_of_both(self):
         self.assertEqual(self._apply("$x = '5' + 5", Ps1ConstantFolding), "$x = '55'")
@@ -1639,12 +1639,8 @@ class TestPs1AJoinIsFoldedOnlyWhereTheTextItAppendsIsWritten(TestPs1):
     def test_a_char_joined_with_a_number_written_here_is_the_text_of_both(self):
         self.assertEqual(self._apply('$x = [char]65 + 1', Ps1ConstantFolding), "$x = 'A1'")
 
-    def test_the_pipeline_folds_the_join_it_writes_and_keeps_the_one_it_does_not(self):
-        kept = inspect.cleandoc("""
-            $x = '5' + 1.5
-            Write-Output $x
-        """)
-        self.assertEqual(self._deobfuscate("$x = '5' + 1.5; Write-Output $x"), kept)
+    def test_the_pipeline_folds_a_join_with_a_double_as_it_folds_one_with_an_integer(self):
+        self.assertEqual(self._deobfuscate("$x = '5' + 1.5; Write-Output $x"), "Write-Output '51.5'")
         self.assertEqual(self._deobfuscate("$x = '5' + 5; Write-Output $x"), "Write-Output '55'")
 
 

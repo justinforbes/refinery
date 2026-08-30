@@ -421,12 +421,6 @@ DECLINED: dict[str, tuple[str, ...]] = {
         "[double]'1.5'",
         "[double]'1,5'",
     ),
-    'a Double is written by .NET formatting rather than by Python': (
-        '[string]1.5',
-        '[string]1E20',
-        '[string]0.0000001',
-        '[string]1.5E-7',
-    ),
     'a collection joins on $OFS, which only a run decides': (
         "[string]('a', 'b')",
     ),
@@ -626,6 +620,7 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    "'a' + 1.5",
     "'x' + (1.0d)",
     "'x' + 0.0d",
     "'x' + 1.000d",
@@ -793,16 +788,6 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     "'a' + 79228162514264337593543950335d",
     "'a' + [char]65",
     "'a' + [uint64]18446744073709551615",
-)
-
-#: A join with a Double on its right, over each kind of left operand `+` joins on: a String that
-#: spells a number, the empty String, and a Char. What each comes to is the text of the left operand
-#: followed by the text .NET writes the Double as, so an answer that added the two numbers instead
-#: would be a Double where a host produces a String.
-UNSPELLED_JOINS: tuple[str, ...] = (
-    "'5' + 1.5",
-    "'' + 1.5",
-    '[char]65 + 1.5',
 )
 
 #: A measured join beside the measured cast of the same value to String. `+` with a text on its left
@@ -3490,28 +3475,23 @@ class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
 
     def test_a_right_operand_whose_text_only_a_session_settles_is_not_joined(self):
         """
-        Measured, `'a' + @(1, 2)` is `a1 2` and `'a' + 1.5` is `a1.5`, and neither text is one this
-        module can write: a collection is separated by `$OFS`, and a Double is formatted by .NET.
+        Measured, `'a' + @(1, 2)` is `a1 2`, and that text is not one this module can write: a
+        collection is separated by `$OFS`, which only a run settles. So the join names no value rather
+        than the sum an arithmetic reading would have made of it.
         """
         self.assertEqual(_measured("'a' + @(1, 2)"), ('System.String', 'a1 2'))
-        self.assertEqual(_measured("'a' + 1.5"), ('System.String', 'a1.5'))
         self.assertEqual(_applied("'a' + @(1, 2)"), NOTHING)
-        self.assertEqual(_applied("'a' + 1.5"), NOTHING)
 
-    def test_a_join_whose_appended_text_is_unwritable_names_no_value_rather_than_a_sum(self):
+    def test_a_numeral_left_operand_joins_a_double_as_text_and_not_as_a_sum(self):
         """
-        Measured, `'5' + 5` is the String `55`: a numeral spelled inside the left operand is text
-        like any other and never an addend, so the operand that decides between joining and adding
-        is still the left one when both of them read as numbers. The text a Double contributes to
-        such a join is .NET's to write and no value here, so each join below is one this names
-        nothing for — where the sum of its two numbers would be a Double no run of the script ever
-        produces.
+        Measured, `'5' + 5` is the String `55` and `'a' + 1.5` is `a1.5`: a numeral spelled inside the
+        left operand is text like any other and never an addend, and a Double on the right is appended
+        as its text. Composing the two, `'5' + 1.5` is the String `51.5`, where reading it as
+        arithmetic would make the Double `6.5`, a value and a type no run of the script produces.
         """
         self.assertEqual(_measured("'5' + 5"), ('System.String', '55'))
-        self.assertEqual(
-            {expression: _applied(expression) for expression in UNSPELLED_JOINS},
-            {expression: NOTHING for expression in UNSPELLED_JOINS},
-        )
+        self.assertEqual(_measured("'a' + 1.5"), ('System.String', 'a1.5'))
+        self.assertEqual(_applied("'5' + 1.5"), Ps1Outcome(False, Ps1Constant(STRING, '51.5')))
 
     def test_a_right_operand_whose_text_is_written_here_is_joined_all_the_same(self):
         self.assertEqual(_applied("'5' + 5"), Ps1Outcome(False, Ps1Constant(STRING, '55')))
@@ -4161,7 +4141,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 195)
+        self.assertEqual(len(composed), 196)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -4402,7 +4382,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 2341)
+        self.assertEqual(len(compared), 2340)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 

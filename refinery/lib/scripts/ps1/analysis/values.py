@@ -1859,9 +1859,8 @@ def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
     what a truncation would: `[int]1.5` and `[int]2.5` are both 2, `[int]1.4` is 1 and `[int]-1.5`
     is -2, all measured.
 
-    A `Double` reaches neither `String` nor `Decimal`. Rendering one is .NET's formatting rather
-    than Python's, and widening one to a Decimal through Python would carry the binary expansion of
-    a value the host converts by its decimal digits.
+    A `Double` reaches `String` through `_double_text` but not `Decimal`: widening one to a Decimal
+    through Python would carry the binary expansion of a value the host converts by its decimal digits.
 
     A `String` is read by `_from_string`, which is a different oracle from every other source and
     reaches only the targets whose throws this module already sees.
@@ -1999,6 +1998,27 @@ def _numeric_source(fact: Ps1Constant) -> int | float | decimal.Decimal | None:
     return None
 
 
+def _double_text(payload: float) -> str | None:
+    """
+    The text 5.1 writes a `Double` as, which is the default `Double.ToString()` of the .NET Framework
+    PowerShell 5.1 runs on: fifteen significant digits rounded half to even, in fixed-point notation
+    while the exponent stays inside them and scientific notation outside. That is C's `%.15g` once its
+    `e` is raised to an `E`, the two agreeing on the rounding, the fixed/scientific threshold and the
+    two-digit-minimum exponent. Measured: `[string]0.5` is `0.5`, `[string]1E20` is `1E+20`,
+    `[string]0.0000001` is `1E-07`, and `[string]` of the Double `9223372036854775808` is
+    `9.22337203685478E+18` — each the value `%.15g` gives.
+
+    A negative zero is refused rather than guessed, its `0` and `-0` spellings not being measured, so a
+    withheld fold stands in. A non-finite value never reaches a Double fact — `_finite` keeps it out —
+    so it is refused here only defensively.
+    """
+    if payload != payload or payload in (INFINITY, -INFINITY):
+        return None
+    if payload == 0.0 and math.copysign(1.0, payload) < 0:
+        return None
+    return F'{payload:.15g}'.replace('e', 'E')
+
+
 def _rendered(fact: Ps1Constant) -> str | None:
     """
     The text a cast to `String` produces. Measured: `[string]5` is `5`, `[string]$true` is `True`,
@@ -2013,15 +2033,17 @@ def _rendered(fact: Ps1Constant) -> str | None:
     wherever the number is spelled with a positive one: `[string]1e3d` is `1000` on the host and was
     `1E+3` here, which is a text no `Decimal` .NET writes ever takes.
 
-    A `Double` and an `Object[]` are absent for the same reason in two shapes: what a host writes is
-    not what this module could compute. `[string]0.5` is `0.5` and `[string]'9223372036854775808'`
-    cast to a Double is `9.22337203685478E+18`, which is .NET's formatting rather than Python's, and
-    a collection is separated by `$OFS`, which lives in the session.
+    A `Double` is written by `_double_text`. That the cast is culture-invariant is what lets this
+    module compute it — `[string]0.5` is `0.5` on every host — where the `ToString()` a Double answers
+    is not, which is why `invariant_text` refuses one. An `Object[]` is absent for the reason that
+    survives: a collection is separated by `$OFS`, which lives in the session.
     """
     if fact.type == _STRING:
         return fact.payload if isinstance(fact.payload, str) else None
     if fact.type == _DECIMAL:
         return format(fact.payload, 'f') if isinstance(fact.payload, decimal.Decimal) else None
+    if fact.type == _DOUBLE:
+        return _double_text(fact.payload) if isinstance(fact.payload, float) else None
     if fact.type in _INTEGER_RANGE or fact.type in (_CHAR, _BOOLEAN):
         return str(fact.payload)
     return None
@@ -2415,11 +2437,11 @@ def _concatenates(fact: Ps1Fact) -> typing.TypeGuard[Ps1Constant]:
     Whether a left operand of `+` joins text rather than adding, which is the counterpart of
     `_replicated` for the other operator its left operand decides.
 
-    It is a question of its own rather than a line inside `_concatenated`, because a concatenation
-    that function *declines to spell* is not an addition: `'a' + 1.5` is the String `a1.5`,
-    measured, and `_rendered` refuses a `Double` because the text is .NET's formatting. Reading the
-    refusal as *this is not a concatenation* let `'5' + 1.5` fall through to the arithmetic and fold
-    to the number 6.5, a wrong value where a host writes `51.5`.
+    It is a question of its own rather than a line inside `_concatenated`, because whether a `+` joins
+    text or adds is decided by the *left* operand alone, not by whether the tail can be spelled. A
+    tail `_concatenated` declines — an `Object[]` the session's `$OFS` separates, a right operand that
+    is not a constant — is still a concatenation, and reading its refusal as *this is not one* would
+    let `'a' + @(1, 2)` fall through to the arithmetic, a wrong reading where a host joins the text.
     """
     return _is_text(fact)
 
@@ -2432,8 +2454,8 @@ def _concatenated(left: Ps1Constant, right: Ps1Fact) -> str | None:
 
     The right operand contributes what a cast of it to `String` would, `$null` contributing nothing:
     `'a' + $null` is `a`, measured. A value `_rendered` refuses is refused here for its own reason —
-    a `Double` because the text is .NET's formatting, an `Object[]` because `$OFS` separates it and
-    lives in the session.
+    an `Object[]` because `$OFS` separates it and lives in the session, a right operand that is not a
+    constant because there is no value to spell.
     """
     head = _rendered(left)
     if head is None:

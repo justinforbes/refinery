@@ -417,6 +417,16 @@ FOLDS: dict[str, str] = {
         'Write-Output (,-0.0)\nWrite-Output (-0.0)',
     '$t = 1e3; Write-Output (,$t); Write-Output $t':
         'Write-Output (,1e3)\nWrite-Output 1e3',
+    "$t = 'a' + 1.5; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'a1.5')\nWrite-Output 'a1.5'",
+    '$t = [string]1.5; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.5')\nWrite-Output '1.5'",
+    '$t = [string]1E20; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1E+20')\nWrite-Output '1E+20'",
+    '$t = [string]0.0000001; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1E-07')\nWrite-Output '1E-07'",
+    '$t = [string]1.5E-7; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.5E-07')\nWrite-Output '1.5E-07'",
     '$t = 4gb; Write-Output (,$t); Write-Output $t':
         'Write-Output (,4gb)\nWrite-Output 4gb',
     '$t = 1.5d; Write-Output (,$t); Write-Output $t':

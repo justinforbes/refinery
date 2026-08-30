@@ -55,10 +55,17 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: `-in`, whose left operand keys them, when its right operand is such an array. These do not come
 #: back by the domain learning to answer; the gap is smaller because the interpreter stopped
 #: answering where it should not.
+#:
+#: The `String` and `Char` rows then came back down, by 25 and 15, reversing the first raise above.
+#: The domain now spells a `Double` the way the .NET-Framework host writes it — `[string]0.5` is
+#: `0.5` and `'5' + 1.5` is `51.5` — so `+` over a String or a Char on its left joins the two texts
+#: where it used to fall through, and the pairs that were the raise are folds again rather than the
+#: arithmetic `6.5` they once misread. Only these two rows move: a Double on the *left* of `+` is an
+#: addition and never had this gap.
 GAP: dict[str, int] = {
-    'System.String': 1727,
+    'System.String': 1702,
     'System.Object[]': 1317,
-    'System.Char': 1162,
+    'System.Char': 1147,
     'System.Int64': 1088,
     'System.Int32': 695,
     'System.Double': 605,
