@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
+from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
 from refinery.lib.scripts.ps1.analysis.commands import CommandKind, Ps1CommandModel
 from refinery.lib.scripts.ps1.analysis.effects import (
     opens_a_redirection_target,
@@ -339,6 +340,30 @@ def _wildcard_to_regex(pattern: str) -> str:
     return ''.join(regex)
 
 
+def script_scope_write_names(root) -> frozenset[str]:
+    """
+    The variable names an assignment, a `foreach` header, a `++`/`--`, a parameter or a `[ref]`
+    binds outside every function body — the script scope above a folded call. A body that reads one
+    of these before it writes it observes the enclosing value the fold does not hold, so
+    `_Ps1Interpreter` refuses that read rather than answering it `$null`. A name bound only inside a
+    function is that function's own local and is not here, which is what keeps an accumulator like
+    `$r = $r + …` folding: its first `$r` is genuinely unset and reads as `$null`.
+
+    The name is taken bare of any scope qualifier, since `$script:q = 5` and a later `$q` are one
+    variable, so a write under either spelling withholds the fold of a read under the other.
+    """
+    names: set[str] = set()
+    for node in root.walk():
+        if not isinstance(node, Ps1Variable) or not is_write_occurrence(node):
+            continue
+        parent = node.parent
+        while parent is not None and not isinstance(parent, Ps1FunctionDefinition):
+            parent = parent.parent
+        if parent is None:
+            names.add(node.name.lower())
+    return frozenset(names)
+
+
 class _Ps1Interpreter:
 
     def __init__(
@@ -348,6 +373,7 @@ class _Ps1Interpreter:
         functions: Mapping[str, Ps1FunctionDefinition] | None = None,
         parent_env: Mapping[str, _Value] | None = None,
         depth: int = 0,
+        caller_scope_names: frozenset[str] = frozenset(),
     ):
         self.max_iterations = max_iterations
         self.max_string_len = max_string_len
@@ -356,6 +382,10 @@ class _Ps1Interpreter:
         self._env: dict[str, _Value] = {}
         self._iterations = 0
         self._depth = depth
+        #: The names an enclosing scope this fold was entered without may bind — the script-scope
+        #: writes the driver gives it. A read of one before this body writes it is refused, not
+        #: read as `$null`; see `_eval_variable`.
+        self._caller_scope_names = caller_scope_names
 
     def _lookup(self, key: str) -> _Value:
         """
@@ -757,6 +787,7 @@ class _Ps1Interpreter:
             functions=self._functions,
             parent_env=parent_env,
             depth=self._depth + 1,
+            caller_scope_names=self._caller_scope_names,
         )
         try:
             result = child.execute(body, bindings)
@@ -855,6 +886,16 @@ class _Ps1Interpreter:
             return None
         if name == 'psitem':
             name = '_'
+        if name in self._caller_scope_names and not self._written(name):
+            # A name an enclosing scope binds, read before this body writes it, is refused rather
+            # than read as `$null`, for the reason `_separator` states for `$OFS`: the outermost
+            # `_parent_env` is `None`, which is *unknown beyond here* and not *empty*, and the caller
+            # scope this fold is entered without is entitled to hold the value. Reading it as `$null`
+            # is a value 5.1 does not produce — `$q = $env:Temp; function f { $q + 1 }` is
+            # `$env:Temp + 1` on the host and not `1`. A name no enclosing scope writes is genuinely
+            # unset, so an accumulator like `$r = $r + …` still reads its first `$r` as `$null` and
+            # folds; only a name the script binds elsewhere withholds the fold.
+            raise _Ps1InterpreterError
         return self._lookup(name)
 
     def _eval_assignment(self, node: Ps1AssignmentExpression) -> _Value:
@@ -1636,6 +1677,7 @@ class Ps1FunctionEvaluator(Transformer):
         self._callers: dict[str, set[str]] = {}
         self._ambiguous: set[str] = set()
         self._commands: Ps1CommandModel | None = None
+        self._caller_scope_names: frozenset[str] = frozenset()
         self._entry = False
 
     def visit(self, node):
@@ -1652,6 +1694,7 @@ class Ps1FunctionEvaluator(Transformer):
             self._collect_functions(node)
             if not self._functions:
                 return None
+            self._caller_scope_names = script_scope_write_names(node)
             # Read before the fold rather than after it: folding a call into its value can neither
             # create nor destroy an `Export-ModuleMember` invocation, and asking afterwards drops
             # the whole shared model on the mutation counter to rebuild it for one boolean.
@@ -1749,6 +1792,7 @@ class Ps1FunctionEvaluator(Transformer):
             max_iterations=self.max_iterations,
             max_string_len=self.max_string_len,
             functions=self._functions,
+            caller_scope_names=self._caller_scope_names,
         )
         if funcdef.body is None:
             return None

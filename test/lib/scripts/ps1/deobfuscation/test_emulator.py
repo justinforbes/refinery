@@ -1201,11 +1201,11 @@ class TestPs1ANumeralWithAMultiplierSuffixIsAnIntegerAndNotAFraction(TestPs1):
 
 class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
     """
-    Each answer below is reached only through a body the tool emulates, and each is computed by a
-    rule 5.1 does not follow: a size string that Python's integer syntax reads and .NET's converter
-    throws on, a Double written the way `str` writes it rather than the way .NET writes it, and a
-    name the body never binds, whose value 5.1 takes from the caller and the interpreter reads as
-    `$null`.
+    Each answer below is reached only through a body the tool emulates, and each turns on a rule 5.1
+    follows and Python does not: a size string that Python's integer syntax reads and .NET's
+    converter throws on, a Double written the way `str` writes it rather than the way .NET writes it,
+    and a name the body never binds, whose value 5.1 takes from the caller so the fold is declined
+    rather than read as the `$null` an isolated body would read.
     """
 
     @unittest.expectedFailure
@@ -1250,18 +1250,38 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
             with self.subTest(numeral):
                 self.assertEqual(self._deobfuscate(source), F"Write-Output '{text}'")
 
-    @unittest.expectedFailure
     def test_an_expression_over_a_name_the_body_does_not_bind_is_not_folded(self):
-        # The caller writes a value no tool can know, so there is no number to fold the sum to;
-        # every answer here is one the reader of `$q` was never entitled to.
-        source = cleandoc("""
-            $q = $env:Temp
-            function f {
-              $q + 1
-            }
-            Write-Output (f)
-        """)
-        self.assertEqual(self._deobfuscate(source), source)
+        # The script writes `$q`, so a body that reads it takes the caller's value 5.1 gives it and
+        # not the `$null` an isolated fold would read: `$env:Temp + 1` is a concatenation, `5 + 1` is
+        # `6` and not the `1` a `$null` reads, and a read before the body's own write reaches the
+        # caller too. Every one of these is a fold the reader of `$q` was never entitled to take.
+        for source in [
+            cleandoc("""
+                $q = $env:Temp
+                function f {
+                  $q + 1
+                }
+                Write-Output (f)
+            """),
+            cleandoc("""
+                $q = 5
+                function f {
+                  $q + 1
+                }
+                Write-Output (f)
+            """),
+            cleandoc("""
+                $q = 5
+                function f {
+                  $y = $q
+                  $q = 1
+                  $y
+                }
+                Write-Output (f)
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._deobfuscate(source), source)
 
     def test_an_expression_over_a_name_the_body_binds_itself_is_folded(self):
         source = cleandoc("""
@@ -1629,12 +1649,11 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
 class TestPs1AFunctionBodyReadsWhatTheScriptScopeHolds(TestPs1):
     """
     A function body that names a variable the script assigned reads that variable when the call
-    runs. Windows PowerShell 5.1 prints `v=6` for the script below; the emulator evaluates the body
-    with the name unset, folds the call to `1`, and the assignment that fed it is then deleted as
-    unused.
+    runs. Windows PowerShell 5.1 prints `v=6` for the script below, whose value comes from a command
+    no fold can predict, so the call is left standing rather than folded as if `$g` were unset — and
+    the store that feeds it survives with it.
     """
 
-    @unittest.expectedFailure
     def test_a_call_is_not_folded_as_if_the_script_variable_were_unset(self):
         result = self._deobfuscate(cleandoc(
             """
@@ -1643,7 +1662,15 @@ class TestPs1AFunctionBodyReadsWhatTheScriptScopeHolds(TestPs1):
             Write-Host ('v=' + (zzqf))
             """
         ))
-        self.assertIn('Get-Random', result)
+        self.assertEqual(result, cleandoc(
+            """
+            $g = Get-Random -Minimum 5 -Maximum 6
+            function zzqf {
+              $g + 1
+            }
+            Write-Host ('v=' + (zzqf))
+            """
+        ))
 
 
 class TestPs1AFoldedCallKeepsItsPipelinePosition(TestPs1):
