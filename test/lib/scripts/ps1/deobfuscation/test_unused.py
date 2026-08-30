@@ -653,6 +653,11 @@ class TestPs1StrippingBareOutputDoesNotAlsoStripWhatProducedIt(TestPs1):
     one rule rather than the intent of the switch.
     """
 
+    # Not a self-contained fix: demoting the dead store to `$Null = Get-Content` (in `unused.py`)
+    # is not enough — junk removal then deletes that discard, because `Get-Content` is pure and its
+    # uncaught root-scope fault is not `fault_is_observed`. Retiring this needs the ledgered
+    # "removal deletes an uncaught root-scope fault" family (see removal-observability), or reclassifying
+    # such command producers as effectful; both are wide changes, not one increment.
     @unittest.expectedFailure
     def test_a_pure_command_whose_value_is_only_echoed_survives_as_a_discard(self):
         self._assertDeobfuscatesTo(F"""
