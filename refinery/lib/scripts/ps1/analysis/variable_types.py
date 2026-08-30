@@ -23,7 +23,12 @@ from typing import TypeGuard
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1FlowUnknown, Ps1VariableFlow
 from refinery.lib.scripts.ps1.analysis.model import Binding, is_mutated_in_place
-from refinery.lib.scripts.ps1.analysis.values import resolve_expression_type
+from refinery.lib.scripts.ps1.analysis.values import (
+    convert,
+    read,
+    render,
+    resolve_expression_type,
+)
 from refinery.lib.scripts.ps1.ast import assignment_of, unwrap_parens
 from refinery.lib.scripts.ps1.data import named_type, resolve_type
 from refinery.lib.scripts.ps1.dotnet import Ps1TypeName
@@ -263,6 +268,49 @@ def constraint_converts(binding: Binding | None, value: Expression) -> bool:
         return True
     constrained = next(iter(binding.constraints))
     return constrained is None or resolve_expression_type(value) != constrained
+
+
+def _declared_constraint_type(write: Node) -> Ps1TypeName | None:
+    """
+    The type a cast on *write*'s target constrains it to, when *write* is the target of a plain
+    assignment that carries one — the `[string]` of `[string]$q = 5`. `None` for a target with no
+    cast, or one reached through anything but a plain `=`: a compound assignment carries no fresh
+    constraint and is answered by the value it accumulates.
+    """
+    if not isinstance(write, Ps1Variable):
+        return None
+    assignment = assignment_of(write)
+    if assignment is None or assignment.operator != '=':
+        return None
+    cursor: Node = write
+    parent = cursor.parent
+    while parent is not None and parent is not assignment:
+        if isinstance(parent, Ps1CastExpression):
+            return resolve_type(parent.type_name)
+        cursor = parent
+        parent = cursor.parent
+    return None
+
+
+def value_under_declared_constraint(write: Node, value: Expression) -> Expression | None:
+    """
+    The literal a constrained assignment stores, when *write* is the target that declares the
+    constraint: `[string]$q = 5` holds the String `5`, so a read of `$q` observes `'5'` and not the
+    integer written. `None` where *write* carries no constraining cast, or where converting *value*
+    to the constrained type is a question `refinery.lib.scripts.ps1.analysis.values.convert` does not
+    settle — a collection to a String needs the session's `$OFS`, and a value the domain cannot read
+    has no conversion at all.
+
+    Only the declaring write is answered. A constraint converts a write only from the point it is in
+    force, and which writes a constraint declared elsewhere reaches is an ordering question this does
+    not settle; at the cast that installs the constraint there is none, because the cast that
+    constrains the variable is the cast that converts the value written through it.
+    """
+    constrained = _declared_constraint_type(write)
+    if constrained is None:
+        return None
+    outcome = convert(read(value), constrained)
+    return None if outcome.may_throw else render(outcome.value)
 
 
 def _multi_assignment_targets(target: Node | None) -> list[Node] | None:

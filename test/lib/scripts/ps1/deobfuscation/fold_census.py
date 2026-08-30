@@ -203,6 +203,8 @@ FOLDS: dict[str, str] = {
         '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output 3',
     "[string]$q = 5; [System.String]$q = 'ab'; Write-Output $q":
         "Write-Output 'ab'",
+    "[string]$q = 5; $q += 'a'; Write-Output (,$q)":
+        "Write-Output (,'5a')",
     '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y':
         '$x = 1, 2, 3\n$y = $x\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)',
     '$x = 1, 2, 3; $a, $b = $x, 9; $a[0] = 7; Write-Output $x[0]':

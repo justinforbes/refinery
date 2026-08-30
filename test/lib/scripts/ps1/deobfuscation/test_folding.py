@@ -1724,23 +1724,26 @@ class TestPs1AMutatingCallAndItsStoreGoWhereNoReadObservesThem(TestPs1):
 
 class TestPs1AConstraintOnAVariableConvertsWhatIsWrittenToIt(TestPs1):
     """
-    `[string]$q = 5` constrains the variable rather than that one assignment, so every later write
-    to `$q` arrives converted to a String. Measured on 5.1, `$q = 1, 2, 3` leaves the String `1 2 3`
-    whose `Length` is 5, and `$q += 'a'` leaves the String `5a`.
+    `[string]$q = 5` constrains the variable rather than that one assignment, so the value a write
+    leaves under `$q` is converted to the constrained type. Measured on 5.1, `[string]$q = 5` leaves
+    the String `5`, `$q += 'a'` accumulates the String `5a` from it, and `$q = 1, 2, 3` leaves the
+    String `1 2 3` whose `Length` is 5.
 
-    Neither is answered today, so both entries are marked.
+    The declaring write is answered — the cast that installs the constraint is the cast that converts
+    the value stored there — and the compound write follows from it. A plain later write to a
+    collection stays marked: a plain write is not where the constraint settles without an ordering
+    the model does not carry, and a collection to a String is a conversion the value domain refuses
+    because it needs the session's `$OFS`.
     """
 
-    @unittest.expectedFailure
-    def test_a_later_write_to_a_constrained_variable_arrives_as_the_constrained_type(self):
-        source = inspect.cleandoc("""
-            [string]$q = 5
-            $q = 1, 2, 3
-            Write-Output $q.Length
-        """)
-        self.assertEqual(self._deobfuscate(source), 'Write-Output 5')
+    def test_a_declaring_write_stores_the_converted_scalar(self):
+        self.assertEqual(
+            self._deobfuscate('[string]$q = 5\nWrite-Output $q'), "Write-Output '5'")
 
-    @unittest.expectedFailure
+    def test_a_declaring_write_parses_a_string_to_its_constrained_number(self):
+        self.assertEqual(
+            self._deobfuscate("[int]$n = '5'\nWrite-Output ($n + 1)"), 'Write-Output 6')
+
     def test_a_compound_write_to_a_constrained_variable_arrives_as_the_constrained_type(self):
         # The comma keeps the one object it wraps, so what 5.1 writes there is the String itself
         # and not the elements a collection would have been unrolled into.
@@ -1750,6 +1753,15 @@ class TestPs1AConstraintOnAVariableConvertsWhatIsWrittenToIt(TestPs1):
             Write-Output (,$q)
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output (,'5a')")
+
+    @unittest.expectedFailure
+    def test_a_later_write_to_a_constrained_variable_arrives_as_the_constrained_type(self):
+        source = inspect.cleandoc("""
+            [string]$q = 5
+            $q = 1, 2, 3
+            Write-Output $q.Length
+        """)
+        self.assertEqual(self._deobfuscate(source), 'Write-Output 5')
 
 
 class TestPs1AScopeQualifierNamesTheBindingItsBareSpellingNames(TestPs1):

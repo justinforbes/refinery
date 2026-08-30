@@ -578,6 +578,7 @@ CONTRIBUTION: dict[str, Contribution] = {
             "Set-Alias zzq Write-Output; $n = 'zzq'; (Get-Alias $n).Definition",
             '[int]$q = 5; Write-Output $q.ToString()',
             "[string]$q = 'abc'; Write-Output $q.Substring(1, 1)",
+            "[string]$q = 5; $q += 'a'; Write-Output (,$q)",
             "[string]$q = 5; [System.String]$q = 'ab'; Write-Output $q",
             'function f($a) { $script:k = $a }; $x = 1, 2, 3; f $x; $x[0] = 9; Write-Output $k[0]',
             'function f($a) { [Array]::Reverse($a) }; $x = 1, 2, 3; f $x; Write-Output $x',

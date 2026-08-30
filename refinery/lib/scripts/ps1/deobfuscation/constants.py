@@ -29,7 +29,10 @@ from refinery.lib.scripts.ps1.analysis.model import (
 from refinery.lib.scripts.ps1.analysis.mutation import value_after
 from refinery.lib.scripts.ps1.analysis.naming import Ps1NameRole, named_references
 from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
-from refinery.lib.scripts.ps1.analysis.variable_types import constraint_converts
+from refinery.lib.scripts.ps1.analysis.variable_types import (
+    constraint_converts,
+    value_under_declared_constraint,
+)
 from refinery.lib.scripts.ps1.analysis.values import (
     UNKNOWN,
     folded_binary,
@@ -772,7 +775,11 @@ class _Inlining:
         through = isinstance(write, Ps1Variable) and is_mutated_in_place(write)
         if not through and accumulation is None and delta is None:
             value = self.table.by_write.get(id(write))
-            return None if value is None or constraint_converts(binding, value) else value
+            if value is None:
+                return None
+            if not constraint_converts(binding, value):
+                return value
+            return value_under_declared_constraint(write, value)
         if id(write) in chased:
             return None
         previous = self._value_at(write, key, chased | {id(write)})
