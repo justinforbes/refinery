@@ -1209,7 +1209,10 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
     """
 
     @unittest.expectedFailure
-    def test_an_array_size_5_1_cannot_convert_is_not_folded_to_a_count(self):
+    def test_a_new_object_size_that_cannot_convert_folds_to_a_null_count_of_zero(self):
+        # A size 5.1's converter refuses is a non-terminating error and not a throw, so `New-Object`
+        # writes `$null` and the body runs on. `$null.Count` is 0 wherever strict mode is not armed,
+        # which is the value the whole body folds to.
         for size in ['0b10', '0o10']:
             source = cleandoc(F"""
                 function f {{
@@ -1219,7 +1222,7 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
                 Write-Output (f)
             """)
             with self.subTest(size):
-                self.assertEqual(self._deobfuscate(source), source)
+                self.assertEqual(self._deobfuscate(source), 'Write-Output 0')
 
     def test_an_array_size_5_1_can_convert_is_folded_to_the_count_it_names(self):
         source = cleandoc("""
@@ -1464,7 +1467,6 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $False')
 
-    @unittest.expectedFailure
     def test_a_string_band_cannot_convert_is_a_throw_and_not_a_number(self):
         self._assertUnchanged(cleandoc("""
             function f {

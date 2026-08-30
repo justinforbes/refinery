@@ -106,7 +106,7 @@ COVERAGE: dict[str, _Coverage] = {
     'System.Char'    : _Coverage(8, 6),
     'System.Double'  : _Coverage(40, 21),
     'System.Int16'   : _Coverage(1, 0),
-    'System.Int32'   : _Coverage(112, 74),
+    'System.Int32'   : _Coverage(112, 75),
     'System.Int64'   : _Coverage(27, 20),
     'System.SByte'   : _Coverage(2, 0),
     'System.String'  : _Coverage(65, 23),
@@ -244,12 +244,8 @@ ANSWERED_THROWS: dict[str, _Value] = {
     '[int]2147483648'               : 2147483648,
     '[char]65536'                   : chr(65536),
 
-    # A string 5.1's number parser refuses. The interpreter reads it with Python's rules, or leaves
-    # it a string and concatenates.
-    "[int]'0b1010'"                 : 10,
-    "[int]'0o17'"                   : 15,
-    "[int]'1_0'"                    : 10,
-    "'1_0' -band 15"                : 10,
+    # A right operand 5.1 reads as the left's number and refuses: an overflowing numeral and a word.
+    # The interpreter leaves each a string beside the number and concatenates the two.
     "1 + '1e400'"                   : '11e400',
     "16 + 'file'"                   : '16file',
 

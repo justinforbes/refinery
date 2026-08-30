@@ -1474,13 +1474,31 @@ class _Ps1Interpreter:
         if isinstance(value, float):
             return round(value)
         if isinstance(value, str):
-            try:
-                return int(value, 0)
-            except ValueError:
-                raise _Ps1InterpreterError
+            return _Ps1Interpreter._string_to_int(value)
         if value is None:
             return 0
         raise _Ps1InterpreterError
+
+    @staticmethod
+    def _string_to_int(text: str) -> int:
+        """
+        Read a String as Int32 the way 5.1's converter does, which is its own numeral grammar and
+        not Python's. A `0x` prefix names hexadecimal, a leading zero is just a decimal digit, and
+        neither a `0b`/`0o` prefix nor a `_` separator names anything, so `'0b10'`, `'0o10'` and
+        `'1_0'` throw where Python's own `int` would read them as two, eight and ten.
+        """
+        body = text.strip()
+        sign = -1 if body[:1] == '-' else 1
+        if body[:1] in ('+', '-'):
+            body = body[1:]
+        if not body or '_' in body:
+            raise _Ps1InterpreterError
+        try:
+            if body[:2].lower() == '0x':
+                return sign * int(body[2:], 16)
+            return sign * int(body, 10)
+        except ValueError:
+            raise _Ps1InterpreterError
 
     def _to_index(self, value: _Value) -> int:
         """
