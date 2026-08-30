@@ -103,6 +103,7 @@ from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, Ps1BlockReach
 from refinery.lib.scripts.ps1.analysis.faults import a_stop_may_be_in_force
+from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
 from refinery.lib.scripts.ps1.analysis.world import (
     WorldRole,
     assigns_an_alias_name,
@@ -556,6 +557,7 @@ class Ps1CommandModel:
         self._introspected_known = False
         self._reads_success: bool | None = None
         self._reads_error_record: bool | None = None
+        self._function_drive_reads: frozenset[str] | None = None
 
     def _project_binder(self, binder: Node) -> _BinderReach:
         """
@@ -788,6 +790,32 @@ class Ps1CommandModel:
             and node.name == _SUCCESS_VARIABLE
             for node in self._root.walk()
         )
+
+    def function_drive_reads(self) -> frozenset[str]:
+        """
+        The normalized command names a script reads back out of the function table through the
+        `$function:` variable namespace. `$function:K` reports the scriptblock bound to `K`, so a
+        pass that removes the definition of `K` deletes what that read is about, and a group is kept
+        whole where a name is read this way — the mirror for the function drive of what
+        `reads_command_success` answers for `$?`.
+
+        Only a read is one: a `$function:K = { }` write is itself a definition, and
+        `Ps1CallGraph.is_readable` already answers `False` wherever the tree holds one, so a caller
+        weighing this beside that gate reads over reads alone. The `Get-Item function:K` provider
+        path is the other spelling and reaches the same fact through `touches_identity_provider`,
+        which opens the whole world; this one names a single function and keeps only it.
+
+        Memoized for as long as the tree is unchanged, like every other whole-tree answer here.
+        """
+        if self._function_drive_reads is None:
+            self._function_drive_reads = frozenset(
+                normalize_command_name(node.name)
+                for node in self._root.walk()
+                if isinstance(node, Ps1Variable)
+                and node.scope is Ps1ScopeModifier.FUNCTION
+                and not is_write_occurrence(node)
+            )
+        return self._function_drive_reads
 
     def reads_the_error_record(self) -> bool:
         """

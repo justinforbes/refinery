@@ -100,13 +100,13 @@ class _Coverage(NamedTuple):
 #: being compared cannot hide behind another type's growth — and a row that turns from an answer
 #: into a refusal moves a number here rather than quietly leaving the comparison below.
 COVERAGE: dict[str, _Coverage] = {
-    ''               : _Coverage(3, 1),
+    ''               : _Coverage(3, 0),
     'System.Boolean' : _Coverage(173, 99),
     'System.Byte'    : _Coverage(5, 5),
     'System.Char'    : _Coverage(8, 6),
     'System.Double'  : _Coverage(40, 21),
     'System.Int16'   : _Coverage(1, 0),
-    'System.Int32'   : _Coverage(112, 74),
+    'System.Int32'   : _Coverage(112, 75),
     'System.Int64'   : _Coverage(27, 20),
     'System.SByte'   : _Coverage(2, 0),
     'System.String'  : _Coverage(65, 23),
@@ -174,15 +174,8 @@ DIVERGENCES: dict[str, _Divergence] = {
     '1.5 * [char]48'                     : _Divergence(72.0, 0.0),
     '[char]48 -band [byte]255'           : _Divergence(48, 0),
 
-    # A one-element collection is as true as the element inside it, and a Char is as true as the
-    # code point it carries. The interpreter asks Python, for which a non-empty list is true and a
-    # one-character string is true.
-    '@(0) -and $true'                    : _Divergence(False, True),
-    '@($false) -and $true'               : _Divergence(False, True),
-    "(,'') -and $true"                   : _Divergence(False, True),
-    '(,0.0) -and $true'                  : _Divergence(False, True),
-    '(,@()) -and $true'                  : _Divergence(False, True),
-    '-not @(0)'                          : _Divergence(True, False),
+    # A Char is as true as the code point it carries, so `[char]0` is false. The interpreter has no
+    # Char and holds it as a one-character string, which every non-empty string reads as true.
     '[char]0 -or $false'                 : _Divergence(False, True),
     '$true -and [char]0'                 : _Divergence(False, True),
     '-not [char]0'                       : _Divergence(True, False),
@@ -217,56 +210,31 @@ DIVERGENCES: dict[str, _Divergence] = {
     # interpreter compares the code points, which no expansion of the sharp s reaches.
     "'ss' -eq [char]0x00DF"              : _Divergence(True, False),
 
-    # `-contains` converts each element to the type of the value it is asked about before comparing
-    # it. The interpreter compares the Python objects, for which a string is never an integer.
-    "@('1') -contains 1"                 : _Divergence(True, False),
-    "@(1) -contains '1'"                 : _Divergence(True, False),
-
-    # A PowerShell wildcard is not an fnmatch pattern: a backtick escapes the character behind it,
-    # and `[!a]` is the two-character set `!a` rather than a negated class. Nor is `-match` Python's
-    # `re.IGNORECASE`, which folds the long s onto s where .NET does not.
-    "'a*' -like 'a`*'"                   : _Divergence(True, False),
-    "'b' -like '[!a]'"                   : _Divergence(False, True),
+    # `-match` is not Python's `re.IGNORECASE`, which folds the long s onto s where .NET does not.
     "'ſ' -match 's'"                     : _Divergence(False, True),
 
     # A conversion answers inside the width of its target or not at all: a hexadecimal string
-    # reaches Int32 as a bit pattern, `-as` hands back `$null` where a cast would throw, and a shift
-    # keeps the type it shifted rather than widening past it.
+    # reaches Int32 as a bit pattern, and a shift keeps the type it shifted rather than widening
+    # past it.
     "[int]'0xFFFFFFFF'"                  : _Divergence(-1, 4294967295),
-    '300 -as [byte]'                     : _Divergence(None, 44),
     '[byte]1 -shl -1'                    : _Divergence(0, -2147483648),
 
     # `$null` on the left leaves the type to the right operand, so nothing plus a Boolean is that
     # Boolean rather than the number the interpreter converts it to.
     '$null + $true'                      : _Divergence(True, 1),
-
-    # .NET writes a Double with an upper-case, signed exponent. The interpreter writes Python's own
-    # spelling, and writes a whole one out in digits.
-    '[string]1E20'                       : _Divergence('1E+20', '100000000000000000000'),
-    '[string]0.0000001'                  : _Divergence('1E-07', '1e-07'),
-    '[string]1.5E-7'                     : _Divergence('1.5E-07', '1.5e-07'),
 }
 
 #: Where 5.1 threw and the interpreter answered anyway, with the value it answered. Each entry is an
 #: expression that stops the script being folded into a constant that lets it run on.
 ANSWERED_THROWS: dict[str, _Value] = {
-    # A conversion whose source does not fit its target throws. The interpreter truncates to the
-    # width instead, so the value it folds is one the script could never have held.
-    '[byte]-1'                      : 255,
-    '[byte]300'                     : 44,
-    '[byte]400'                     : 144,
-    '[byte](200 * 2)'               : 144,
-    "[byte]'-1'"                    : 255,
-    "[byte]'0x100'"                 : 0,
+    # A conversion whose source does not fit its target throws. The interpreter answers the
+    # oversized number for an integer width and the code point Python allows for a Char, each a
+    # value the script could never have held.
     '[int]2147483648'               : 2147483648,
     '[char]65536'                   : chr(65536),
 
-    # A string 5.1's number parser refuses. The interpreter reads it with Python's rules, or leaves
-    # it a string and concatenates.
-    "[int]'0b1010'"                 : 10,
-    "[int]'0o17'"                   : 15,
-    "[int]'1_0'"                    : 10,
-    "'1_0' -band 15"                : 10,
+    # A right operand 5.1 reads as the left's number and refuses: an overflowing numeral and a word.
+    # The interpreter leaves each a string beside the number and concatenates the two.
     "1 + '1e400'"                   : '11e400',
     "16 + 'file'"                   : '16file',
 

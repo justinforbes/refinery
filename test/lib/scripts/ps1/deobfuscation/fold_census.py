@@ -47,6 +47,8 @@ FOLDS: dict[str, str] = {
         '',
     'echo a < b':
         'Write-Output a < b',
+    '$x > out.txt':
+        '>\nout.txt',
     '$x = 3..5':
         '$x = 3, 4, 5',
     '$x = 1e3.5':
@@ -145,6 +147,8 @@ FOLDS: dict[str, str] = {
         '$x = 7, 8, 9\n[Array]::Reverse($x)\nWrite-Output (9, 8, 7)',
     '$x = 1, 2, 3; $r = [Array]::Reverse($x); Write-Output $x':
         '$x = 1, 2, 3\n$Null = [Array]::Reverse($x)\nWrite-Output (3, 2, 1)',
+    '$x = 1, 2, 3; [Array]::Clear($x, 0, 1); Write-Output $x':
+        '$x = 1, 2, 3\n[Array]::Clear($x, 0, 1)\nWrite-Output ($Null, 2, 3)',
     '$x = 1, 2, 3; $y = 0, 0, 0; [Array]::Copy($x, $y, 3); Write-Output $y':
         '$y = 0, 0, 0\n[Array]::Copy((1, 2, 3), $y, 3)\nWrite-Output $y',
     '$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x':
@@ -199,6 +203,8 @@ FOLDS: dict[str, str] = {
         '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output 3',
     "[string]$q = 5; [System.String]$q = 'ab'; Write-Output $q":
         "Write-Output 'ab'",
+    "[string]$q = 5; $q += 'a'; Write-Output (,$q)":
+        "Write-Output (,'5a')",
     '$x = 1, 2, 3; $y = $($x); [Array]::Reverse($x); Write-Output $y':
         '$x = 1, 2, 3\n$y = $x\n[Array]::Reverse($x)\nWrite-Output (3, 2, 1)',
     '$x = 1, 2, 3; $a, $b = $x, 9; $a[0] = 7; Write-Output $x[0]':
@@ -308,7 +314,7 @@ FOLDS: dict[str, str] = {
     '$t = [char[]](72, 73); Write-Output (,$t); Write-Output $t':
         "Write-Output (,'HI')\nWrite-Output 'HI'",
     "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
-        "Write-Output ('HI' -Is [string])\nWrite-Output ('HI' -Is [string])",
+        'Write-Output ($True)\nWrite-Output ($True)',
     "$t = 'ABC'[0]; Write-Output (,$t); Write-Output $t":
         'Write-Output (,[char]65)\nWrite-Output ([char]65)',
     "Write-Output ('x' -replace 'x', [char]65); Write-Output ('x' -replace 'x', 'A')":
@@ -336,7 +342,7 @@ FOLDS: dict[str, str] = {
     '$c = [char]65; $s = \'A\'; Write-Output "$c"; Write-Output "$s"':
         "Write-Output 'A'\nWrite-Output 'A'",
     "Write-Output ([char]65 -is [char]); Write-Output ('A' -is [char])":
-        "Write-Output ([char]65 -Is [char])\nWrite-Output ('A' -Is [char])",
+        'Write-Output ($True)\nWrite-Output ($False)',
     "Write-Output (([char]65).Length); Write-Output (('A').Length)":
         'Write-Output 1\nWrite-Output 1',
     "Write-Output (([char]65).Count); Write-Output (('A').Count)":
@@ -361,8 +367,10 @@ FOLDS: dict[str, str] = {
         'Write-Output (,3)\nWrite-Output 3',
     "$t = 'AB'.Length; Write-Output (,$t); Write-Output $t":
         'Write-Output (,2)\nWrite-Output 2',
+    'Write-Output ((5).PSTypeNames)':
+        "Write-Output ('System.Int32', 'System.ValueType', 'System.Object')",
     "Write-Output (('AB').PSTypeNames)":
-        "Write-Output ('AB'.PSTypeNames)",
+        "Write-Output ('System.String', 'System.Object')",
     '$t = (5).Rank; Write-Output (,$t)':
         'Write-Output (,$Null)',
     "$t = 'AB'.Zqnope; Write-Output (,$t)":
@@ -370,9 +378,9 @@ FOLDS: dict[str, str] = {
     '$t = (5).Zqnope; Write-Output (,$t)':
         'Write-Output (,$Null)',
     '$t = $null.Count; Write-Output (,$t); Write-Output $t':
-        '$t = $Null.Count\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,0)\nWrite-Output 0',
     '$t = @(); Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@())\nWrite-Output @().Count',
+        'Write-Output (,@())\nWrite-Output 0',
     '$t = , 1; Write-Output (,$t); Write-Output $t.Count':
         'Write-Output (,(,1))\nWrite-Output 1',
     '$t = 0xFF; Write-Output (,$t); Write-Output $t':
@@ -411,6 +419,16 @@ FOLDS: dict[str, str] = {
         'Write-Output (,-0.0)\nWrite-Output (-0.0)',
     '$t = 1e3; Write-Output (,$t); Write-Output $t':
         'Write-Output (,1e3)\nWrite-Output 1e3',
+    "$t = 'a' + 1.5; Write-Output (,$t); Write-Output $t":
+        "Write-Output (,'a1.5')\nWrite-Output 'a1.5'",
+    '$t = [string]1.5; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.5')\nWrite-Output '1.5'",
+    '$t = [string]1E20; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1E+20')\nWrite-Output '1E+20'",
+    '$t = [string]0.0000001; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1E-07')\nWrite-Output '1E-07'",
+    '$t = [string]1.5E-7; Write-Output (,$t); Write-Output $t':
+        "Write-Output (,'1.5E-07')\nWrite-Output '1.5E-07'",
     '$t = 4gb; Write-Output (,$t); Write-Output $t':
         'Write-Output (,4gb)\nWrite-Output 4gb',
     '$t = 1.5d; Write-Output (,$t); Write-Output $t':
@@ -500,9 +518,9 @@ FOLDS: dict[str, str] = {
     '$t = -2147483648; Write-Output (,$t); Write-Output $t':
         'Write-Output (,-2147483648)\nWrite-Output (-2147483648)',
     '$t = 10, 20, 30, 20, 10 -ne 20; Write-Output (,$t); Write-Output $t':
-        '$t = 10, 20, 30, 20, 10 -NE 20\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,(10, 30, 10))\nWrite-Output (10, 30, 10)',
     '$t = 10, 20, 30 -eq 20; Write-Output (,$t); Write-Output $t':
-        '$t = 10, 20, 30 -Eq 20\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,(,20))\nWrite-Output (,20)',
     '$t = 10 -ne 20; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
     "$t = [string]('a', 'b'); Write-Output (,$t); Write-Output $t":
@@ -558,9 +576,9 @@ FOLDS: dict[str, str] = {
     "Write-Output 'abc'.Length":
         'Write-Output 3',
     '$t = @(@(1, 2)); Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@(@(1, 2)))\nWrite-Output @(@(1, 2)).Count',
+        'Write-Output (,@(@(1, 2)))\nWrite-Output 2',
     '$t = @((1, 2)); Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@((1, 2)))\nWrite-Output @((1, 2)).Count',
+        'Write-Output (,@((1, 2)))\nWrite-Output 2',
     '$t = @(@(1, 2), 3); Write-Output (,$t); Write-Output $t.Count':
         'Write-Output (,(@(1, 2), 3))\nWrite-Output 2',
     '$t = ,(1, 2); Write-Output (,$t); Write-Output $t.Count':
@@ -714,6 +732,8 @@ FOLDS: dict[str, str] = {
     "$t = 'A' -ceq 'a'; Write-Output (,$t); Write-Output $t":
         'Write-Output (,$False)\nWrite-Output $False',
     "$t = 'A' -ieq 'a'; Write-Output (,$t); Write-Output $t":
+        'Write-Output (,$True)\nWrite-Output $True',
+    '$t = 1 -ceq 1; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
     '$i = 0; if ($false -and ($i++)) { }; $t = $i; Write-Output (,$t); Write-Output $t':
         '$i = 0\nif ($False -and ($i++)) {}\n$t = $i\nWrite-Output (,$t)\nWrite-Output $t',
@@ -876,7 +896,7 @@ FOLDS: dict[str, str] = {
     "$t = @(1, 2) + 'a'; Write-Output (,$t); Write-Output $t.Count":
         "Write-Output (,(1, 2, 'a'))\nWrite-Output 3",
     '$t = @(1, 2) * 0; Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@())\nWrite-Output @().Count',
+        'Write-Output (,@())\nWrite-Output 0',
     "$t = $null + 'abc'; Write-Output (,$t); Write-Output $t":
         "Write-Output (,'abc')\nWrite-Output 'abc'",
     '$t = $null + [char]65; Write-Output (,$t); Write-Output $t':
@@ -1012,7 +1032,7 @@ FOLDS: dict[str, str] = {
     '$t = [char]65 -and $true; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$True)\nWrite-Output $True',
     '$t = @() * 5000; Write-Output (,$t); Write-Output $t.Count':
-        'Write-Output (,@())\nWrite-Output @().Count',
+        'Write-Output (,@())\nWrite-Output 0',
     '$t = (,@()) -and $true; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = (,(,(,0))) -and $true; Write-Output (,$t); Write-Output $t':
@@ -1308,7 +1328,7 @@ FOLDS: dict[str, str] = {
     '$t = $null -le -5; Write-Output (,$t); Write-Output $t':
         'Write-Output (,$False)\nWrite-Output $False',
     '$t = @(1, 2) -eq $null; Write-Output (,$t); Write-Output $t':
-        '$t = @(1, 2) -Eq $Null\nWrite-Output (,$t)\nWrite-Output $t',
+        'Write-Output (,@())\nWrite-Output @()',
     "$t = '2' -lt '10'; Write-Output (,$t); Write-Output $t":
         "$t = '2' -LT '10'\nWrite-Output (,$t)\nWrite-Output $t",
     "$t = '10' -le '9'; Write-Output (,$t); Write-Output $t":
@@ -1458,15 +1478,15 @@ FOLDS: dict[str, str] = {
     "function K { param([int] $x = '42') }; K; Write-Host 'A'":
         "Write-Host 'A'",
     "function K { $Null = 1 }; Write-Error 'e'; K; Write-Host $?":
-        "Write-Error 'e'\nWrite-Host $?",
+        "function K {}\nWrite-Error 'e'\nK\nWrite-Host $?",
     'function K { $Null = 1 }; K; Write-Host ($function:K -ne $Null)':
-        'Write-Host ($function:K -NE $Null)',
+        'function K {}\nK\nWrite-Host ($function:K -NE $Null)',
     "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'":
         "$Null = (Get-Command K).Name\nWrite-Host 'A'",
     "function vnMTH { $Null = 1 }; vnMTH; $Null = (Get-Command *vnMT*).Name; Write-Host 'A'":
         "$Null = (Get-Command *vnMT*).Name\nWrite-Host 'A'",
     'K; function K { $Null = 1 }; Write-Host $?':
-        'Write-Host $?',
+        'K\nfunction K {}\nWrite-Host $?',
     'function K { $Null = 1 }; K; $b = { K }; Write-Host $b':
         '$b = {}\nWrite-Host $b',
     'function Measure-Object { $Null = 1 }; Measure-Object; 1, 2, 3 | measure':
@@ -1503,10 +1523,28 @@ FOLDS: dict[str, str] = {
         "Write-Host 'after'",
     'try { zzqfoo =5 } catch {}; $v = Get-Variable Error; Write-Host $v.Value.Count':
         '$v = Get-Variable Error\nWrite-Host $v.Value.Count',
+    "try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }":
+        "try {\n  Write-Host 'quiet'\n} catch {\n  Write-Host 'caught'\n}",
+    'function f { $input; $input | ForEach-Object { Write-Host "seen:$_" } }; 1, 2 | f':
+        'function f {\n  $Input\n  $Input | ForEach-Object {\n'
+        '    Write-Host "seen:${_}"\n  }\n}\n1, 2 | f',
+    'function f { [void]$input; $input | ForEach-Object { Write-Host "seen:$_" } }; 1, 2 | f':
+        'function f {\n  [void]$Input\n  $Input | ForEach-Object {\n'
+        '    Write-Host "seen:${_}"\n  }\n}\n1, 2 | f',
     "try { item =5 } catch {}; Write-Host 'after'":
         "try {\n  Get-Item =5\n} catch {}\nWrite-Host 'after'",
     "trap { continue }; zzq0000=5; Write-Host 'after'":
         "zzq0000=5\nWrite-Host 'after'",
     "function f { try { 'tail' } catch {} }; Write-Host (f)":
         "Write-Host 'tail'",
+    '$n = 1; $n += 2; Write-Output $n':
+        'Write-Output 3',
+    '$n = 5; $n -= 2; Write-Output $n':
+        'Write-Output 3',
+    '$n = 1; $n++; Write-Output $n':
+        'Write-Output 2',
+    "$s = 'a'; $s += 'b'; $s += 'c'; Write-Output $s":
+        "Write-Output 'abc'",
+    "$c = 'Write-Out'; $c += 'put 5'; Invoke-Expression $c":
+        'Write-Output 5',
 }

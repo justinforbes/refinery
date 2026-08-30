@@ -366,6 +366,9 @@ def _derive_out_variable_parameters(common: dict[str, tuple[str, ...]]) -> froze
 OUT_VARIABLE_PARAMETERS = _derive_out_variable_parameters(COMMON_PARAMETERS)
 
 _VALUE_PARAMETERS: dict[str, frozenset[str]] = {}
+_SCRIPTBLOCK_PARAMETERS: dict[str, frozenset[str]] = {}
+_PARAMETER_SETS: dict[str, dict[str, frozenset[str]]] = {}
+_POSITIONAL_SCRIPTBLOCK_SETS: dict[str, frozenset[str]] = {}
 
 _COMMAND_RECORDS: dict[str, dict] = {
     _name.lower(): _record for _name, _record in _COMMAND_TABLE.items()
@@ -395,6 +398,82 @@ def value_parameters(command: str) -> frozenset[str]:
             names.add(_parameter.lower())
             names.update(_alias.lower() for _alias in _info['aliases'])
         found = _VALUE_PARAMETERS[command] = frozenset(names)
+    return found
+
+
+def scriptblock_parameters(command: str) -> frozenset[str]:
+    """
+    The lowercased parameter names and aliases of *command* that are declared to take a script
+    block, as opposed to the ones that take a value of any other kind. Empty for a command the
+    collected surface does not carry.
+
+    A caller asking where a block written as an argument ends up needs this to tell
+    `ForEach-Object -Process { ... }`, which the command runs, from `ForEach-Object -InputObject
+    { ... }`, which hands the block on as data and never runs it.
+
+    An array element type counts: `-Process` is declared `ScriptBlock[]` and `-Begin` is declared
+    `ScriptBlock`, and both are run.
+
+    Looked up and memoized per command for the reason `value_parameters` gives.
+    """
+    command = command.lower()
+    found = _SCRIPTBLOCK_PARAMETERS.get(command)
+    if found is None:
+        names: set[str] = set()
+        for _parameter, _info in _COMMAND_RECORDS.get(command, {}).get('parameters', {}).items():
+            if _info['type'].rstrip('[]') != 'System.Management.Automation.ScriptBlock':
+                continue
+            names.add(_parameter.lower())
+            names.update(_alias.lower() for _alias in _info['aliases'])
+        found = _SCRIPTBLOCK_PARAMETERS[command] = frozenset(names)
+    return found
+
+
+#: The set name the engine records for a parameter that belongs to every parameter set of its
+#: command, rather than to any one of them. Every common parameter carries it.
+EVERY_PARAMETER_SET = '__AllParameterSets'
+
+
+def parameter_sets(command: str) -> dict[str, frozenset[str]]:
+    """
+    The parameter sets each parameter of *command* belongs to, keyed by lowercased parameter name
+    and by each of its aliases. Empty for a command the collected surface does not carry.
+
+    5.1 chooses one set from the arguments a call writes, and the same position can mean a different
+    thing in each: `ForEach-Object` has a script block at position 0 of its `ScriptBlockSet` and a
+    member name at position 0 of its `PropertyAndMethodSet`. A caller reading what a positional
+    argument binds needs this to know which set the call is in.
+
+    Looked up and memoized per command for the reason `value_parameters` gives.
+    """
+    command = command.lower()
+    found = _PARAMETER_SETS.get(command)
+    if found is None:
+        table: dict[str, frozenset[str]] = {}
+        for _parameter, _info in _COMMAND_RECORDS.get(command, {}).get('parameters', {}).items():
+            names = frozenset(_set['set'] for _set in _info['sets'])
+            table[_parameter.lower()] = names
+            for _alias in _info['aliases']:
+                table[_alias.lower()] = names
+        found = _PARAMETER_SETS[command] = table
+    return found
+
+
+def positional_scriptblock_sets(command: str) -> frozenset[str]:
+    """
+    The parameter sets of *command* in which the first positional argument binds a parameter
+    declared to take a script block. Empty where the command has no such parameter at all, and a
+    positional block then binds nothing this can name.
+    """
+    command = command.lower()
+    found = _POSITIONAL_SCRIPTBLOCK_SETS.get(command)
+    if found is None:
+        names: set[str] = set()
+        for _parameter, _info in _COMMAND_RECORDS.get(command, {}).get('parameters', {}).items():
+            if _info['type'].rstrip('[]') != 'System.Management.Automation.ScriptBlock':
+                continue
+            names.update(_set['set'] for _set in _info['sets'] if _set['position'] == 0)
+        found = _POSITIONAL_SCRIPTBLOCK_SETS[command] = frozenset(names)
     return found
 
 
@@ -778,6 +857,106 @@ def engine_member(member: str) -> dict | None:
     record is what the type really carries and is never overridden by this.
     """
     return _ENGINE_MEMBERS.get(member.lower())
+
+
+def type_names(name: str | Ps1TypeName) -> list[str] | None:
+    """
+    The value a type's `PSTypeNames` enumerates: its own reflection `FullName` followed by the
+    `FullName` of every type it derives from, ending at `System.Object`. Measured on a 5.1 host; see
+    `TYPE_TRANSCRIPTS` in `test.lib.scripts.ps1.test_oracle`.
+
+    Returns `None` when the type does not resolve, is an array — whose chain is `System.Array` and
+    not that of its element type — or reaches a base that was not collected, so a caller folds a
+    chain that is known whole and never a truncated one.
+    """
+    resolved = resolve_type(name)
+    if resolved is None or resolved.is_array:
+        return None
+    names: list[str] = []
+    current: str | None = resolved.definition
+    while current is not None:
+        record = _type_record(current)
+        if record is None:
+            return None
+        names.append(current)
+        current = record.get('base')
+    return names
+
+
+def _unmodelled_for_type_test(kind: Ps1TypeName) -> bool:
+    """
+    Whether a type carries a shape the assignability model below does not settle: a generic, a
+    pointer or a by-reference type. An array is modelled and is deliberately not one of these.
+    """
+    return bool(kind.arity or kind.arguments or kind.pointers or kind.byref)
+
+
+def _array_interfaces() -> frozenset[str]:
+    """
+    The interfaces `System.Array` is recorded to implement, which every array type implements too.
+    Read on demand rather than at import so it does not depend on the type table's load order.
+    """
+    record = _type_record('System.Array')
+    return frozenset(record['interfaces']) if record is not None else frozenset()
+
+
+def _array_is_assignable_to(target: Ps1TypeName) -> bool | None:
+    """
+    Whether an array satisfies `-is target`. An array derives only `System.Array` and `System.Object`
+    and implements the interfaces `System.Array` carries, so a concrete target that is neither is a
+    definite `False`. The two the model does not settle are covariance — a different array type — and
+    the generic collection interfaces an array implements beyond `System.Array`'s own; both are
+    declined rather than denied so a fold never answers one the way 5.1 would not.
+    """
+    if target.is_array:
+        return None
+    if target.definition in ('System.Array', 'System.Object'):
+        return True
+    record = _type_record(target.definition)
+    if record is None:
+        return None
+    if record.get('kind') == 'interface':
+        return True if target.definition in _array_interfaces() else None
+    return False
+
+
+def is_assignable_to(
+    value_type: str | Ps1TypeName,
+    target_type: str | Ps1TypeName,
+) -> bool | None:
+    """
+    Whether a value whose runtime type is `value_type` satisfies `value_type -is target_type`, the
+    test PowerShell's `-is` and `-isnot` operators perform. `True` when the runtime type is the
+    target, derives from it, or implements it; `False` when the collected model settles that it is
+    none of those; and `None` where the model does not settle it — an unresolved or generic type, an
+    array against a different array type, or an array against an interface `System.Array` is not
+    recorded to carry. A `None` is a fold declined, never a `False` guessed, so a caller never
+    answers a test 5.1 would answer the other way.
+
+    For a non-array value the class relation is read whole: the base chain `type_names` returns and
+    the interface set the collected record carries are both what reflection reports for the value's
+    own type, so a target that is neither an ancestor class nor a listed interface is a definite
+    `False`.
+    """
+    value = resolve_type(value_type)
+    target = resolve_type(target_type)
+    if value is None or target is None:
+        return None
+    if _unmodelled_for_type_test(value) or _unmodelled_for_type_test(target):
+        return None
+    if value.is_array:
+        return True if value == target else _array_is_assignable_to(target)
+    if target.is_array:
+        return False
+    chain = type_names(value)
+    if chain is None:
+        return None
+    if target.definition in chain:
+        return True
+    record = _type_record(value.definition)
+    if record is None:
+        return None
+    return target.definition in record.get('interfaces', ())
 
 
 def member_record(name: str | Ps1TypeName, member: str) -> dict | MemberLookup:

@@ -14,9 +14,12 @@ once over the whole script and held in a
 different thing, and no one of them may stand in for another:
 
 - whether it performs a side effect — `statement_effect`;
-- whether it may *throw* — `is_fault_free`, which grants what the value domain computes and what a
-  syntactic allow-list names, and answers `False` for everything else. Purity is not this question:
-  `is_side_effect_free` accepts `[Int]$x` and `$a / $b`, both of which raise;
+- whether it may *throw* — `expression_cannot_fault`, the one gate every removal site goes through.
+  Its context-free half is `is_fault_free`, which grants what the value domain computes and what a
+  syntactic allow-list names and answers `False` for everything else; the other half is the single
+  fault the script rather than the expression decides, a read of a variable that was never set.
+  Purity is not this question: `is_side_effect_free` accepts `[Int]$x` and `$a / $b`, both of which
+  raise;
 - where the value it writes to the output stream is read — `output_sink` positionally, and
   `Ps1OutputFlow` through the call graph, which is the only one that can see past a function
   boundary.
@@ -92,6 +95,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1RealLiteral,
     Ps1RedirectionStream,
     Ps1ReturnStatement,
+    Ps1ScopeModifier,
     Ps1Script,
     Ps1ScriptBlock,
     Ps1StringLiteral,
@@ -287,6 +291,8 @@ _PURE_READS = _canonical_read_set({
     ('environment', 'username'),
     ('math', 'e'),
     ('math', 'pi'),
+    ('microsoft.powershell.commands.genericmeasureinfo', 'count'),
+    ('microsoft.powershell.commands.genericobjectmeasureinfo', 'count'),
     ('threading.tasks.task', 'status'),
     ('threading.thread', 'currentthread'),
     ('threading.thread', 'managedthreadid'),
@@ -716,9 +722,12 @@ def _reflection_read_is_pure(type_key: Ps1TypeName, member: str) -> bool:
     read its runtime subtype does carry.
 
     A member the object adapter supplies (`source == 'engine'`) is read off the adapter rather than
-    off the type, so no getter of the type's own runs. It is granted on the same condition as an
-    absent member and for the same reason: the grant is about this value carrying exactly the
-    surface the metadata describes, which only a sealed type settles.
+    off the type, so no getter of the type's own runs. What could still make it run one is the
+    runtime value being a *subtype* that carries a real member of that name, which the collected
+    record for the static type would then not be describing — so a sealed type settles it and is the
+    condition. An absent member needs more than that, and keeps the narrower
+    `_PURE_READ_TYPES` gate: reading one yields `$null` only while nothing has *added* the member,
+    and a module's `types.ps1xml` can add one to a sealed reference type.
     """
     record = data.member_record(type_key, member)
     surface = type_key.generic_definition
@@ -727,7 +736,7 @@ def _reflection_read_is_pure(type_key: Ps1TypeName, member: str) -> bool:
     if record is data.MemberLookup.ABSENT:
         return surface in _PURE_READ_TYPES
     if record['source'] == 'engine':
-        return surface in _PURE_READ_TYPES
+        return surface in _PURE_READ_TYPES or data.type_is_sealed(type_key)
     if record['source'] in ('ets', 'wmi'):
         return False
     if record['kind'] == 'field' and record.get('static') is False:
@@ -766,6 +775,27 @@ def _grant(verdict: bool, node, world: Ps1WorldReach) -> bool:
     return verdict and world.closed_at(node)
 
 
+#: The one variable whose read is not a read. `$input` names the enumerator over a function's
+#: pipeline input, and enumerating it advances it: measured on 5.1, `function f { $input; $input |
+#: ForEach-Object { $_ } }` fed `1, 2` writes `1` and `2` once, because the bare read drained what
+#: the pipeline below it would have enumerated. Only the enumerating spellings consume —
+#: `[Void]$input` and `$Null = $input` leave it whole, both measured — but the name is denied
+#: whole rather than per context, because a rule that reads the surrounding shape would have to
+#: be right about every spelling to stay sound and is only ever asked in the granting direction.
+_ENUMERATOR_VARIABLE = 'input'
+
+
+def _reads_the_pipeline_enumerator(node: Ps1Variable) -> bool:
+    """
+    Whether *node* is the unqualified `$input`, whose evaluation may advance the enumerator the rest
+    of the body reads — see `_ENUMERATOR_VARIABLE`.
+    """
+    return (
+        node.scope is Ps1ScopeModifier.NONE
+        and node.name.lower() == _ENUMERATOR_VARIABLE
+    )
+
+
 def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
     """
     Conservative check: return `True` only when evaluating `node` is guaranteed to produce no
@@ -773,13 +803,17 @@ def is_side_effect_free(node, world: Ps1WorldReach) -> bool:
     grant may be trusted and whether a command name still denotes what the metadata says, each at
     the position of the node it is asked about: a world opened, or a name rebound, only by
     statements no path places before the node still answers for it.
+
+    A variable read is one of the few things that is free of its own accord, and `$input` is the
+    exception the grant has to name: reading it advances an enumerator the statements below it read,
+    so a statement whose only content is that read still changes what the next one writes.
     """
     if isinstance(node, _LITERAL_EXPRESSIONS):
         return True
     if isinstance(node, Ps1TypeExpression):
         return True
     if isinstance(node, Ps1Variable):
-        return True
+        return not _reads_the_pipeline_enumerator(node)
     if isinstance(node, Ps1ParenExpression):
         return node.expression is None or is_side_effect_free(node.expression, world)
     if isinstance(node, Ps1CastExpression):
@@ -1046,6 +1080,13 @@ def is_fault_free(node) -> bool:
     Both read their operands through `Int32`, so `-'abc'` and `'a'..'z'` raise exactly what
     `[Int]'abc'` raises; neither may inherit the string-literal grant, and both go through
     `_is_numeric_constant` and `_range_is_fault_free` instead.
+
+    **A removal site asks `expression_cannot_fault` and not this**, because one fault is decided by
+    the script rather than by the operands. What still reads this directly asks a narrower question
+    on purpose: `may_be_dropped` and the range fold weigh work a rewrite would stop doing, where
+    the operand's own faults are the whole question, and
+    `refinery.lib.scripts.ps1.deobfuscation.deadcode._try_body_survivors` needs a second property
+    beside fault-freedom — that what it accepts is a constant it can carry out of the construct.
     """
     if not evaluate(node).may_throw:
         return True
@@ -1145,9 +1186,9 @@ class StatementEffect(enum.Enum):
     grow a branch to reach the verdict it already reaches. `Write-Host x` and `Get-Item x` are both
     `EFFECT`, and nothing here distinguishes them because nothing needs to.
 
-    Nor does any member say whether the statement can *throw*. That is `is_fault_free`, which a
-    caller about to remove an `OUTPUT` statement has to ask separately: `[Int]'abc'` and `1/0` are
-    both `OUTPUT`, and removing either resumes a script that had terminated.
+    Nor does any member say whether the statement can *throw*. That is `expression_cannot_fault`,
+    which a caller about to remove an `OUTPUT` statement has to ask separately: `[Int]'abc'` and
+    `1/0` are both `OUTPUT`, and removing either resumes a script that had terminated.
     """
     EFFECT = 'effect'
     OUTPUT = 'output'
@@ -1797,7 +1838,120 @@ def fault_operand(stmt: Node) -> Node | None:
     return expression
 
 
-def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
+def _is_bare_variable_read(node: Node) -> bool:
+    """
+    Whether *node* is an unqualified variable read and nothing else — the one expression shape whose
+    only way to raise is a setting of the script rather than a property of its operands.
+
+    Splatting is excluded because `@x` is not a read of the value at all, and every qualified
+    spelling is excluded because none of them shares the fact this rests on. `$global:x` and
+    `$script:x` read the same store and were measured not to raise, but `$using:x` is a different
+    construct outside the block that binds it; and a drive qualifier reads no store at all —
+    `${SomeDrive:path}` runs a provider, and what an arbitrary provider raises is not a question
+    this can answer for the drives it has never seen. One test covers them because the lexer spells
+    a drive as `Ps1ScopeModifier.DRIVE` like every other qualifier.
+
+    **Purity does not gain this gate and must not.** `is_side_effect_free` accepts a bare read
+    unconditionally, because reading a variable changes nothing whether or not the read raises. The
+    two questions are separate here, and a reader expecting them to be symmetric would be wrong.
+    """
+    return (
+        isinstance(node, Ps1Variable)
+        and not node.splatted
+        and node.scope is Ps1ScopeModifier.NONE
+    )
+
+
+def expression_cannot_fault(
+    operand: Node,
+    position: Node,
+    faults: Ps1FaultReach,
+    world: Ps1WorldReach | None,
+) -> bool:
+    """
+    Whether evaluating *operand* cannot raise **where *position* stands** — the question a removal
+    site asks before it deletes an expression whose fault would have been observed.
+
+    `is_fault_free` is the context-free half and stays exactly that: it grants only what cannot
+    raise under any semantics, so a bare `$x` is not fault-free there and must not become so. What
+    is added here is the one fault the *script* decides rather than the expression. Reading a
+    variable that was never set yields `$null` under the default semantics and raises only where
+    strict mode is armed, so a script that never arms it cannot fault on such a read — and the
+    padding an obfuscator writes as `$junk | ForEach-Object { [void]$_ }` goes.
+
+    **Two models answer that, and neither half alone is enough.**
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_may_be_in_force` reads what
+    the script itself arms, wherever it is written;
+    `refinery.lib.scripts.ps1.analysis.worldflow.Ps1WorldReach.closed_at` says whether anything the
+    analysis cannot read may have run before *position*, and a payload it cannot read may arm strict
+    mode as easily as a spelled-out call does. A caller with no world therefore gets the
+    context-free answer alone, which is the fail-closed direction: a grant refused keeps a
+    statement, a grant made in error deletes one whose handler runs.
+
+    **The world half is a bound and not an answer.** What it reports is the type world's openers,
+    and a command that runs code no tree holds is not always one of them — `Set-PSDebug -Strict`
+    arms strict mode for the *global* scope, so any call this analysis cannot read through can arm
+    it without being a leak the world names. The bound it does give is the one that covers the
+    shapes an obfuscator writes, and everything it misses is stated with the entry-scope assumption
+    on `strict_mode_may_be_in_force` rather than left silent.
+
+    It is one function rather than a clause repeated at each caller because two removal sites
+    answering it differently is a contradiction and not a difference of opinion: the same `$x` in
+    the same script would be dropped as a discard and kept as a bare output.
+    """
+    if is_fault_free(operand):
+        return True
+    return (
+        _is_bare_variable_read(operand)
+        and world is not None
+        and world.closed_at(position)
+        and not faults.strict_mode_may_be_in_force()
+    )
+
+
+def _lies_in_a_block_within(site: Node, stmt: Node) -> bool:
+    """
+    Whether *site* stands inside a script block that is itself written inside *stmt*. A script block
+    is the boundary asked about because it is what the graph builder gives a body of its own; a
+    `catch` or `trap` body written in *stmt* stays in the same graph and is judged there.
+    """
+    cursor = site.parent
+    crossed = False
+    while cursor is not None and cursor is not stmt:
+        crossed = crossed or isinstance(cursor, Ps1ScriptBlock)
+        cursor = cursor.parent
+    return crossed and cursor is stmt
+
+
+def _leaves_a_block_of(site: Node, stmt: Node, faults: Ps1FaultReach) -> bool:
+    """
+    Whether an error raised at *site* has no destination that deleting *stmt* could change: *site*
+    stands inside a script block written within *stmt*, and no handler of that block settles the
+    error.
+
+    Such an error arrives at one of two places, and neither is this gate's business. Where the block
+    runs where it is written, the error leaves it and arrives exactly where an error raised by
+    *stmt* itself arrives — which is *stmt*'s own point, weighed beside this one in the same loop.
+    Where the block is kept rather than run, the value holding it is built by evaluating *stmt*, so
+    a script without *stmt* never builds the block and never reaches the point at all.
+
+    Without this, the fallback `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.observed_at`
+    takes for a body something may call — whether a handler that acts is written anywhere else in
+    this script — answers for every block an obfuscator writes inside a discarded pipeline, and a
+    single `try` written elsewhere in the file keeps all of them.
+    """
+    return (
+        site is not stmt
+        and _lies_in_a_block_within(site, stmt)
+        and faults.escapes_the_body(site)
+    )
+
+
+def fault_is_observed(
+    stmt: Node,
+    faults: Ps1FaultReach,
+    world: Ps1WorldReach | None = None,
+) -> bool:
     """
     Whether deleting *stmt* may change which handler runs.
 
@@ -1809,11 +1963,16 @@ def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
     and a gate that refuses only what a `catch` clause is written *beside* deletes the statement a
     handler one nesting level away was waiting for.
 
-    The first half is `is_fault_free` over `fault_operand`, and the second is
+    The first half is `expression_cannot_fault` over `fault_operand`, and the second is
     `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.observed_at`. Both are asked once per
     point the graphs evaluate inside *stmt*, because a construct is deleted whole and each of its
     parts raises where it stands; a construct the graphs place nothing for at all is refused, since
     a subtree nothing models is one nothing can clear.
+
+    *stmt* is the position every point is weighed at, rather than the point itself: *stmt* is what
+    the removal takes away, so what may have run before it is what decides whether the analysis can
+    see the semantics its parts run under. A point inside a script block has no position in the root
+    graph at all, and asking the world there refuses the shape this exists to clear.
 
     **This is not the question asked before a handler is deleted.** A `trap` cannot raise, so
     nothing about its own position decides anything: what a removal changes is where the errors of
@@ -1827,7 +1986,9 @@ def fault_is_observed(stmt: Node, faults: Ps1FaultReach) -> bool:
     for site in faults.points_in(stmt):
         judged = True
         operand = fault_operand(site)
-        if operand is not None and is_fault_free(operand):
+        if operand is not None and expression_cannot_fault(operand, stmt, faults, world):
+            continue
+        if _leaves_a_block_of(site, stmt, faults):
             continue
         if faults.observed_at(site):
             return True

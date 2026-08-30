@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -488,3 +490,150 @@ class TestPs1AliasDefiningCommandShadowing(TestPs1):
             foo 'hi'
         """))
         self.assertEqual(result, "Write-Output 'hi'")
+
+
+class TestPs1ARenameOfACommandTheEngineInvokesIsNotUnused(TestPs1):
+    """
+    A `Set-Alias` whose alias no statement names is deleted as a definition nothing uses. PowerShell
+    reaches command names the script never spells, so such a binding can still be the one that runs.
+    """
+
+    #: Each script renames a command that the statement below it reaches without naming it, measured
+    #: on Windows PowerShell 5.1: the `-?` common parameter runs `Get-Help`; the shipped functions
+    #: `cd..` and `more` call `Set-Location` and `Get-Content`; and displaying an error record runs
+    #: `Set-StrictMode`. Every one of them writes an error instead, so the rename is observable.
+    _REACHED_WITHOUT_BEING_NAMED = (
+        cleandoc("""
+            Set-Alias Get-Help Write-Error
+            Write-Output -?
+        """),
+        cleandoc("""
+            Set-Alias Set-Location Write-Error
+            cd..
+        """),
+        cleandoc("""
+            Set-Alias Get-Content Write-Error
+            more 'C:/Windows/win.ini'
+        """),
+        cleandoc("""
+            Set-Alias Set-StrictMode Write-Error
+            Get-Item 'C:/zzqnope/missing'
+        """),
+    )
+
+    @unittest.expectedFailure
+    def test_the_rename_survives(self):
+        for script in self._REACHED_WITHOUT_BEING_NAMED:
+            with self.subTest(script):
+                self._assertKept(script)
+
+
+class TestPs1AnAliasTheScriptRebindsIsNotSpelledAsItsDefaultTarget(TestPs1):
+    """
+    `Set-Alias % Keep` takes the shorthand over, so `%` no longer names `ForEach-Object` anywhere
+    below it. Rewriting the call to `ForEach-Object` runs the cmdlet where Windows PowerShell 5.1
+    runs `Keep`.
+    """
+
+    @unittest.expectedFailure
+    def test_a_rebound_shorthand_keeps_its_own_spelling(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function Keep { param($s) $script:store = $s }
+            Set-Alias -Force -Option AllScope % Keep
+            1..2 | % { Write-Output 'x' }
+            & $script:store
+            """
+        ))
+        self.assertNotIn('ForEach-Object', result)
+
+
+class TestPs1AScriptThatRedefinesForEachObjectDoesNotRunTheCmdlet(TestPs1):
+    """
+    `function ForEach-Object { … }` takes the name over, so the pipeline below it runs the script's
+    own function and Windows PowerShell 5.1 prints `r=HIJACK`. The fold that rewrites a
+    `ForEach-Object` pipeline matches the written name against a fixed set of spellings and never
+    asks the shadow set, which already records `foreach-object` for this script.
+    """
+
+    def test_a_pipeline_over_a_redefined_iterator_is_not_folded(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function ForEach-Object { 'HIJACK' }
+            $r = 1, 2 | ForEach-Object { $_ * 2 }
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertIn('ForEach-Object', result)
+        self.assertIn('$_ * 2', result)
+        self.assertNotIn('2, 4', result)
+
+    def test_a_pipeline_over_a_function_drive_rebinding_is_not_folded(self):
+        """
+        `${function:ForEach-Object} = { … }` rebinds the same name through the provider drive, and
+        5.1 runs that body — the script below prints `r=H`, not `r=2 4`.
+        """
+        result = self._deobfuscate(cleandoc(
+            """
+            ${function:ForEach-Object} = { 'HIJACK' }
+            $r = 1, 2 | ForEach-Object { $_ * 2 }
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertIn('$_ * 2', result)
+        self.assertNotIn('2, 4', result)
+
+    def test_a_pipeline_over_a_set_item_function_drive_is_not_folded(self):
+        """
+        `Set-Item function:ForEach-Object { … }` rebinds through the provider drive and 5.1 runs
+        that body, so the pipeline below it is not the cmdlet's and must not fold. `measure_world`
+        reads the name a provider-path item cmdlet binds into the shadow set, and the fold gate
+        refuses the name the shadow set holds.
+        """
+        result = self._deobfuscate(cleandoc(
+            """
+            Set-Item function:ForEach-Object { 'HIJACK' }
+            $r = 1, 2 | % { $_ * 2 }
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertIn('$_ * 2', result)
+
+    _REBOUND_ITERATOR_FORMS_5_1_RUNS = (
+        "New-Item -Path function: -Name ForEach-Object -Value { 'HIJACK' }",
+        "function tmp { 'HIJACK' }\nRename-Item function:tmp ForEach-Object",
+        "Set-Item function:ForEach-Object,function:Where-Object { 'HIJACK' }",
+        "Set-Item function:/ForEach-Object { 'HIJACK' }",
+    )
+
+    @unittest.expectedFailure
+    def test_a_rebinding_the_path_extractor_cannot_read_is_still_folded(self):
+        """
+        Each line below rebinds `ForEach-Object` on Windows PowerShell 5.1 (`5.1.26100.9168`):
+        `$r = 1, 2 | % { $_ * 2 }` prints `r=HIJACK`, not `r=2 4`. `_provider_path_redefinitions`
+        reads a name only from a `provider:name` token, so a name written as a `-Name`/`-NewName`
+        operand, a positional new-name, an array element, or behind a `/` separator it does not
+        canonicalize never enters the shadow set, so the pipeline folds. One increment closes them.
+        """
+        for rebinding in self._REBOUND_ITERATOR_FORMS_5_1_RUNS:
+            with self.subTest(rebinding):
+                result = self._deobfuscate(
+                    rebinding + "\n$r = 1, 2 | % { $_ * 2 }\nWrite-Host ('r=' + $r)")
+                self.assertIn('$_ * 2', result)
+
+    @unittest.expectedFailure
+    def test_a_content_cmdlet_writing_the_function_provider_is_still_folded(self):
+        """
+        `Set-Content function:ForEach-Object -Value { ... }` rebinds the function on 5.1, so the
+        pipeline prints `r=HIJACK`. But `Set-Content` is outside `_ITEM_CMDLETS`, so it opens the
+        world without entering the shadow set and the pipeline folds. Widening the cmdlet set is
+        part of the extraction-completeness increment.
+        """
+        result = self._deobfuscate(cleandoc(
+            """
+            Set-Content function:ForEach-Object -Value { 'HIJACK' }
+            $r = 1, 2 | % { $_ * 2 }
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertIn('$_ * 2', result)

@@ -55,6 +55,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AssignmentExpression,
     Ps1ClassDefinition,
     Ps1CommandArgument,
+    Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1EnumDefinition,
     Ps1FunctionDefinition,
@@ -67,6 +68,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1TypeExpression,
     Ps1Variable,
 )
+from refinery.lib.scripts.ps1.options import eval_is_trusted
 
 
 class WorldRole(enum.Enum):
@@ -163,6 +165,13 @@ _ITEM_CMDLETS = frozenset({
     'set-item',
 })
 
+#: The keywords that define a command under a name given as an argument rather than as a definition
+#: node. `workflow NAME { ... }` and `configuration NAME { ... }` each introduce a command named NAME
+#: that shadows a same-named cmdlet under 5.1's Function-over-Cmdlet precedence, but the parser emits
+#: both as a plain invocation whose name is the keyword, so the name they take over is read off the
+#: arguments the way an item cmdlet's provider path is.
+_COMMAND_DEFINITION_KEYWORDS = frozenset({'workflow', 'configuration'})
+
 
 def command_role(name: str) -> WorldRole:
     """
@@ -229,7 +238,112 @@ class Ps1WorldMeasurement(NamedTuple):
     build_version: int
 
 
-def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
+#: The commands that write the command table with a binding written down beside them. `Import-Alias`
+#: is the aliasing cmdlet that is not one: it takes its names from a file no analysis here sees, so
+#: what it does to the table is unreadable in exactly the sense an `Invoke-Expression` payload is. A
+#: command outside this set that merely mentions a provider path — `Get-ChildItem alias:`,
+#: `Test-Path 'function:more'` — is read as an identity opener by `touches_identity_provider`, which
+#: cannot tell a read from a write, and binds nothing at all.
+_NAME_BINDING_COMMANDS = (_ALIAS_CMDLETS - {'import-alias'}) | _ITEM_CMDLETS
+
+#: The parameter spellings that carry the binding such a command performs, each a prefix of `-Name`
+#: or `-Value` because PowerShell binds a parameter by any unambiguous prefix of its name. Every
+#: other named parameter — `-Force`, `-Scope`, `-Option`, `-Description` — steers the binding
+#: without saying what it is, and reading one as part of the binding would let a `-Force:$true` make
+#: a fully written-out rebinding look unreadable.
+_BINDING_PARAMETERS = frozenset({
+    'n',
+    'na',
+    'nam',
+    'name',
+    'v',
+    'va',
+    'val',
+    'valu',
+    'value',
+})
+
+
+def _runs_unreadable_code(node, role: WorldRole) -> bool:
+    """
+    Whether the danger `role` names at `node` is that code this analysis cannot read will run — now,
+    for `WorldRole.LEAK` and `WorldRole.UNKNOWN`, or under a name a later statement invokes, for
+    `WorldRole.IDENTITY`. These are the openers
+    `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` excuses.
+
+    `WorldRole.MUTATION` is never one: it is a change the script performs in plain sight, and
+    excusing it would mean disbelieving a statement the walk can read. Neither is a command that
+    writes the command table with the whole binding spelled out beside it — `New-Alias Get-Date
+    Stop-Process`, `Set-Item alias:Out-Null Write-Host`, `Set-Item function:Get-Date { ... }`. That
+    is the same plain-sight change wearing the command table's clothes, and it is the one opener
+    nothing else covers: `_identity_redefinitions` classifies a `function` statement and a
+    `function:`/`alias:` variable write, so a name an aliasing or item cmdlet takes over never
+    reaches the shadow set, and the verdict is all that stands between such a statement and a later
+    call to the name it rebound.
+
+    A binding with an unreadable half is excused, name or target either way, which is where the
+    trade the option buys actually sits: `Set-Alias Copy-Item $t` says which name it takes over but
+    not what that name will run, and refusing it would keep every script whose payload dispatcher is
+    reached through an alias. The residual is stated rather than left silent — such a name is
+    trusted afterwards, and closing that needs the shadow set to record what an aliasing cmdlet
+    binds, which is a reading no walk here performs.
+    """
+    if role is WorldRole.MUTATION or role is WorldRole.NONE:
+        return False
+    if role is not WorldRole.IDENTITY or not isinstance(node, Ps1CommandInvocation):
+        return True
+    if normalize_command_name(resolve_command_name(node) or '') not in _NAME_BINDING_COMMANDS:
+        return True
+    return _binds_what_the_walk_cannot_read(node)
+
+
+def _binds_what_the_walk_cannot_read(cmd: Ps1CommandInvocation) -> bool:
+    """
+    Whether any argument of `cmd` that carries the binding hides what it holds.
+
+    A parameter and the value written after it reach the tree as two arguments — a switch naming the
+    parameter, then a positional holding the value — so the two are paired here. A value written
+    after `-Name` or `-Value`, and a positional that follows no parameter at all, carry the binding;
+    a value written after any other parameter steers it without saying what it is, and reading one
+    as part of the binding lets a `-Scope 1` make a fully written-out rebinding look unreadable.
+    """
+    pending: str | None = None
+    for argument in cmd.arguments:
+        if not isinstance(argument, Ps1CommandArgument):
+            if not _is_written_out(argument):
+                return True
+            continue
+        name = argument.name.lstrip('-').lower()
+        if argument.kind is Ps1CommandArgumentKind.SWITCH:
+            pending = name
+            continue
+        if argument.kind is Ps1CommandArgumentKind.NAMED:
+            carries = name in _BINDING_PARAMETERS
+        else:
+            carries = pending is None or pending in _BINDING_PARAMETERS
+        pending = None
+        if carries and not _is_written_out(argument.value):
+            return True
+    return False
+
+
+def _is_written_out(value) -> bool:
+    """
+    Whether `value` stands in the tree as something this walk reads whole: a static string, a
+    scriptblock whose body is written out, a list of such values, or the absent value of a switch.
+    Anything else — a variable, the result of a call — hides what the command holding it binds.
+    """
+    if value is None:
+        return True
+    value = unwrap_parens(value)
+    if isinstance(value, Ps1ScriptBlock):
+        return True
+    if isinstance(value, Ps1ArrayLiteral):
+        return all(_is_written_out(element) for element in value.elements)
+    return string_value(value) is not None
+
+
+def measure_world(root: Ps1Script, options: object | None = None) -> Ps1WorldMeasurement:
     """
     Walk the whole tree once, computing the command-table verdict and every position together:
     whether any node opens the world (a single opener anywhere is global and retroactive, so it
@@ -241,7 +355,13 @@ def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
     An opener is yielded as the node itself, not its role. The class or enum definition among them
     opens the world at no position — the engine compiles it before the first statement runs — and is
     recognized by `build_world_reach`, which must fail closed on it.
+
+    Under `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` an opener
+    `_runs_unreadable_code` answers for is not recorded at all, so it neither opens the whole-run
+    verdict nor floods a position. The shadow set is untouched by the option: every site in it is a
+    redefinition this walk *did* read, so nothing about it rests on what unreadable code does.
     """
+    trusting = eval_is_trusted(options)
     closed = True
     closed_but_for_alias_bindings = True
     shadowed: set[str] = set()
@@ -251,7 +371,8 @@ def measure_world(root: Ps1Script) -> Ps1WorldMeasurement:
         redefined = _identity_redefinitions(node)
         shadowed.update(record.name for record in redefined)
         shadow_sites.extend(Ps1ShadowSite(record.name, node) for record in redefined)
-        if not _opens_world(node, redefined):
+        role = _opens_world(node, redefined)
+        if role is WorldRole.NONE or (trusting and _runs_unreadable_code(node, role)):
             continue
         openers.append(node)
         closed = False
@@ -438,7 +559,9 @@ def _identity_redefinitions(node) -> tuple[_IdentityRedefinition, ...]:
     with what it binds, or an empty tuple. A `function`/`filter` definition names one command
     directly; an assignment into the `function:`/`alias:` variable namespace names one per slot it
     writes, so the multi-assignment `${function:Get-Date}, $y = { ... }, 2` records `get-date` where
-    matching one target shape against one variable would miss it.
+    matching one target shape against one variable would miss it; an item cmdlet writing a
+    `function:`/`alias:` provider path names the item that path addresses; a `workflow`/`configuration`
+    statement names the command its first argument spells.
 
     Normalizing is what makes the name usable: `function global:Get-Date` defines exactly what a
     later unqualified `Get-Date` runs, and a shadow set holding the qualified spelling answers `False`
@@ -452,6 +575,9 @@ def _identity_redefinitions(node) -> tuple[_IdentityRedefinition, ...]:
     if isinstance(node, Ps1FunctionDefinition):
         return (_IdentityRedefinition(
             normalize_command_name(node.name), _IdentityBody.VISIBLE_BLOCK),)
+    if isinstance(node, Ps1CommandInvocation):
+        keyword = _command_definition_keyword_redefinition(node)
+        return (keyword,) if keyword is not None else _provider_path_redefinitions(node)
     if not isinstance(node, Ps1AssignmentExpression):
         return ()
     targets = assignment_target_variables(node.target)
@@ -484,11 +610,115 @@ def _assigned_identity_body(
     return _IdentityBody.OPAQUE_VALUE
 
 
-def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> bool:
+def _provider_path_redefinitions(cmd: Ps1CommandInvocation) -> tuple[_IdentityRedefinition, ...]:
     """
-    Whether `node` leaves the type system or the command table in a state the collected metadata no
-    longer describes. `redefined` is the identity classification of the same node, so an assignment
-    into the identity namespaces is recognized once, not by two functions that can drift apart.
+    The command names an item cmdlet takes over by writing a `function:`/`alias:` provider path —
+    `Set-Item function:ForEach-Object { ... }` rebinds `ForEach-Object` exactly as
+    `function ForEach-Object { ... }` does, but through a path this reads out of the argument rather
+    than off the statement keyword. Only the item cmdlets are read this way: `Get-ChildItem alias:`
+    and `Test-Path 'function:x'` name the same provider and bind nothing, so a command outside
+    `_ITEM_CMDLETS` yields no name however it spells a provider.
+
+    The bound body is `OPAQUE_VALUE`: what a path write installs is not a scriptblock standing where
+    the name is declared, and the world opens on the command through `_command_opens_world` as it
+    always has. A computed path (`Set-Item $p { ... }`) spells no name here; it leaves the world
+    closed, since `touches_identity_provider` cannot read `$p` either, and catching that shape is
+    the `may_touch_identity_provider` residual the command model carries, not this walk.
+
+    A name an item cmdlet binds outside a provider-path string is not read: a `-Name`/`-NewName`
+    operand, a positional new-name (`Rename-Item function:t X`), an array element
+    (`Set-Item a,b { ... }`), or a path behind a `/` this does not canonicalize. A pipeline over
+    such a rebound iterator still folds. Measured on 5.1 and pinned in `test_aliases.py`; closing
+    it is the extraction-completeness increment.
+    """
+    if normalize_command_name(resolve_command_name(cmd) or '') not in _ITEM_CMDLETS:
+        return ()
+    redefinitions: list[_IdentityRedefinition] = []
+    for argument in cmd.arguments:
+        value = argument.value if isinstance(argument, Ps1CommandArgument) else argument
+        text = string_value(value)
+        if text is None:
+            continue
+        item = _identity_provider_item_name(text)
+        if item is not None:
+            redefinitions.append(_IdentityRedefinition(
+                normalize_command_name(item), _IdentityBody.OPAQUE_VALUE))
+    return tuple(redefinitions)
+
+
+def _identity_provider_item_name(path: str) -> str | None:
+    """
+    The command name a `function:`/`alias:` provider path addresses — `ForEach-Object` for
+    `function:ForEach-Object`, `x` for `Alias:\\x`, `Get-Date` for
+    `Microsoft.PowerShell.Core\\Function::Get-Date` — or `None` for a path naming no identity
+    provider or no item under one. The drive is read in both spellings `touches_identity_provider`
+    reads it, and the item is what follows the provider's colon, cleared of the `:` a qualified path
+    doubles and the `\\` a drive-rooted one leads with.
+    """
+    for spelling in (path, path.rpartition('\\')[2]):
+        drive, separator, item = spelling.partition(':')
+        if separator and drive.lower() in _IDENTITY_PROVIDERS:
+            item = item.lstrip('\\:')
+            if item:
+                return item
+    return None
+
+
+def command_definition_keyword_binding(
+    cmd: Ps1CommandInvocation,
+) -> tuple[str, Ps1ScriptBlock] | None:
+    """
+    The command a `workflow`/`configuration` statement defines and the scriptblock body it binds to
+    that name, or `None` when `cmd` is not one. The defined name is the statement's first positional
+    argument and the body is a scriptblock standing among the arguments; a form carrying no
+    scriptblock defines nothing and is left alone, and one whose name is not a static literal names no
+    command this can read. It is the one recognizer of these keywords, shared with
+    `refinery.lib.scripts.ps1.analysis.callgraph` so that the shadow set and the call graph cannot
+    disagree on what a `workflow` defines.
+    """
+    if resolve_command_name(cmd) not in _COMMAND_DEFINITION_KEYWORDS:
+        return None
+    positionals = [
+        argument.value
+        for argument in cmd.arguments
+        if isinstance(argument, Ps1CommandArgument)
+        and argument.kind is Ps1CommandArgumentKind.POSITIONAL
+    ]
+    body = next((value for value in positionals if isinstance(value, Ps1ScriptBlock)), None)
+    if body is None:
+        return None
+    name = string_value(positionals[0]) if positionals else None
+    if name is None:
+        return None
+    return normalize_command_name(name), body
+
+
+def _command_definition_keyword_redefinition(
+    cmd: Ps1CommandInvocation,
+) -> _IdentityRedefinition | None:
+    """
+    The identity redefinition a `workflow`/`configuration` statement performs, or `None` when `cmd`
+    is not one. The body is a `VISIBLE_BLOCK` for the same reason `function NAME { ... }` is — it
+    stands in the tree, so a mutation inside it is caught by presence and the redefinition leaves the
+    world closed.
+    """
+    binding = command_definition_keyword_binding(cmd)
+    if binding is None:
+        return None
+    name, _ = binding
+    return _IdentityRedefinition(name, _IdentityBody.VISIBLE_BLOCK)
+
+
+def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> WorldRole:
+    """
+    The role by which `node` leaves the type system or the command table in a state the collected
+    metadata no longer describes, or `WorldRole.NONE` for a node that leaves both as it found them.
+    `redefined` is the identity classification of the same node, so an assignment into the identity
+    namespaces is recognized once, not by two functions that can drift apart.
+
+    The role rather than a boolean, because `measure_world` has a caller that acts differently on
+    each: `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` excuses an opener
+    that runs code nobody can read and never one that mutates the world in plain sight.
 
     A redefinition binding a visible scriptblock does *not* open the world. Its body stands in the
     tree, so a mutation inside it is caught by presence like any other statement, and the same
@@ -503,33 +733,43 @@ def _opens_world(node, redefined: tuple[_IdentityRedefinition, ...]) -> bool:
     rather than on the presence of a body.
     """
     if isinstance(node, (Ps1ClassDefinition, Ps1EnumDefinition)):
-        return True
+        return WorldRole.MUTATION
     if isinstance(node, Ps1CommandInvocation):
         return _command_opens_world(node)
     if isinstance(node, Ps1InvokeMember):
-        return (
+        if (
             is_scriptblock_create(node)
             or is_scriptblock_invoke(node)
             or is_execution_context_invoke(node)
-            or _is_type_accelerator_mutation(node)
-            or _is_psobject_member_mutation(node)
-        )
+        ):
+            return WorldRole.LEAK
+        if _is_type_accelerator_mutation(node) or _is_psobject_member_mutation(node):
+            return WorldRole.MUTATION
+        return WorldRole.NONE
     if isinstance(node, Ps1AssignmentExpression):
-        return any(record.body is not _IdentityBody.VISIBLE_BLOCK for record in redefined)
-    return False
+        if any(record.body is not _IdentityBody.VISIBLE_BLOCK for record in redefined):
+            return WorldRole.IDENTITY
+        return WorldRole.NONE
+    return WorldRole.NONE
 
 
-def _command_opens_world(cmd: Ps1CommandInvocation) -> bool:
+def _command_opens_world(cmd: Ps1CommandInvocation) -> WorldRole:
+    """
+    The deny-list is read before the opaque-file test, so that a command the tables name keeps the
+    role they give it however it is invoked. Both spellings open the world either way, but the role
+    is what decides whether `_runs_unreadable_code` may excuse the node, and a dot-invoked
+    `Add-Type` mutates the type system in plain sight rather than running a file nobody can read.
+    """
     if is_opaque_dispatch(cmd):
-        return True
-    if runs_another_script_file(cmd):
-        return True
+        return WorldRole.UNKNOWN
     name = resolve_command_name(cmd)
+    if name is not None and (role := command_role(name)) is not WorldRole.NONE:
+        return role
+    if runs_another_script_file(cmd):
+        return WorldRole.LEAK
     if name is None:
-        return False
-    if command_role(name) is not WorldRole.NONE:
-        return True
-    return touches_identity_provider(cmd)
+        return WorldRole.NONE
+    return WorldRole.IDENTITY if touches_identity_provider(cmd) else WorldRole.NONE
 
 
 def runs_another_script_file(cmd: Ps1CommandInvocation) -> bool:

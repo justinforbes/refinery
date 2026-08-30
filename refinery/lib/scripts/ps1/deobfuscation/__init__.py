@@ -15,7 +15,6 @@ from refinery.lib.scripts.ps1.deobfuscation.emulator import Ps1ForEachPipeline, 
 from refinery.lib.scripts.ps1.deobfuscation.expandable import Ps1ExpandableStringHoist
 from refinery.lib.scripts.ps1.deobfuscation.folding import Ps1ConstantFolding
 from refinery.lib.scripts.ps1.deobfuscation.iexinline import Ps1IexInlining
-from refinery.lib.scripts.ps1.deobfuscation.options import Ps1DeobfuscationOptions
 from refinery.lib.scripts.ps1.deobfuscation.rename import Ps1VariableRenaming
 from refinery.lib.scripts.ps1.deobfuscation.securestring import Ps1SecureStringDecryptor
 from refinery.lib.scripts.ps1.deobfuscation.simplify import Ps1Simplifications
@@ -29,6 +28,7 @@ from refinery.lib.scripts.ps1.deobfuscation.unused import (
 )
 from refinery.lib.scripts.ps1.deobfuscation.wildcards import Ps1WildcardResolution
 from refinery.lib.scripts.ps1.model import Ps1Script
+from refinery.lib.scripts.ps1.options import Ps1DeobfuscationOptions
 
 _folds = (
     Ps1ConstantFolding,
@@ -102,6 +102,7 @@ def deobfuscate(
     max_steps: int = 5000,
     remove_junk: bool = True,
     preserve_bare_output: bool = False,
+    trust_eval: bool = False,
 ) -> int:
     """
     Apply all available deobfuscators to the input. When `remove_junk` is `True`, a second pass
@@ -114,21 +115,25 @@ def deobfuscate(
     default is generous — real inputs settle in the low tens of passes — so it never bounds a
     legitimate deobfuscation, only a runaway loop. Pass `0` to disable the bound entirely.
 
-    The two switches are not the same knob at different strengths. `remove_junk` decides whether
-    that second pass runs at all, so turning it off also keeps every dead store and uncalled
-    function, `preserve_bare_output` decides one question inside it — whether a statement whose only
-    effect is to write a value to the success output stream may be deleted — and leaves the rest of
-    the pass working. See `refinery.lib.scripts.ps1.deobfuscation.options.Ps1DeobfuscationOptions`
-    for what that costs and the assumption it rests on.
+    The three switches are not the same knob at three strengths. `remove_junk` decides whether that
+    second pass runs at all, so turning it off also keeps every dead store and uncalled function;
+    `preserve_bare_output` decides one question inside it — whether a statement whose only effect is
+    to write a value to the success output stream may be deleted — and leaves the rest of the pass
+    working; `trust_eval` decides nothing about any pass, and instead changes what the analysis
+    every pass reads believes about code it cannot see. See
+    `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions` for what each costs and the
+    assumption it rests on.
     """
+    # Both phases and the analysis under them are handed the same options, because a configuration
+    # they could disagree about is a configuration none of them states.
+    options = Ps1DeobfuscationOptions(
+        preserve_bare_output=preserve_bare_output,
+        trust_eval=trust_eval,
+    )
     # One analysis cache is built over the script and shared across both phases; the now-honored
     # `tree_version` counter keeps it consistent even across the two pipeline runs, so a transform in
     # either phase queries models built on the current tree instead of rebuilding them per pass.
-    cache = Ps1ModelCache(ast)
-    # Both phases are handed the same options, because a configuration two pipelines disagree about
-    # is a configuration neither of them states. Only phase 2 holds the pass that reads this one
-    # today, and building the phase-1 call that way would encode which pass that is.
-    options = Ps1DeobfuscationOptions(preserve_bare_output=preserve_bare_output)
+    cache = Ps1ModelCache(ast, options)
     steps = _phase1.run(ast, max_steps=max_steps, models=cache, options=options)
     if not remove_junk:
         return steps

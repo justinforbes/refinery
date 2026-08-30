@@ -4,7 +4,6 @@ Evaluate user-defined PowerShell functions called with constant arguments.
 from __future__ import annotations
 
 import base64
-import fnmatch
 import re
 
 from collections import ChainMap
@@ -18,6 +17,7 @@ if TYPE_CHECKING:
 from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
+from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
 from refinery.lib.scripts.ps1.analysis.commands import CommandKind, Ps1CommandModel
 from refinery.lib.scripts.ps1.analysis.effects import (
     opens_a_redirection_target,
@@ -28,6 +28,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     UNKNOWN,
     Ps1Constant,
     Ps1Fact,
+    coerced_text,
     collect_facts,
     fact_of,
     integer_at,
@@ -57,6 +58,7 @@ from refinery.lib.scripts.ps1.deobfuscation.helpers import (
     detect_encoding_chain,
     dotnet_regex_replace,
     extract_foreach_scriptblock,
+    stands_where_only_a_command_may,
     ps_divide,
     ps_modulo,
     ps_shift_left,
@@ -256,6 +258,113 @@ class _ContinueSignal(Exception):
     pass
 
 
+_WILDCARD_METACHARACTERS = frozenset('()[.?*{}^$+|\\')
+
+
+def _append_wildcard_literal(regex: list[str], char: str) -> None:
+    if char in _WILDCARD_METACHARACTERS:
+        regex.append('\\')
+    regex.append(char)
+
+
+def _append_wildcard_set_member(regex: list[str], char: str) -> None:
+    if char == '[':
+        regex.append('[')
+    elif char == ']':
+        regex.append('\\]')
+    elif char == '-':
+        regex.append('\\x2d')
+    else:
+        _append_wildcard_literal(regex, char)
+
+
+def _append_wildcard_set(regex: list[str], members: list[str], ranges: list[bool]) -> None:
+    regex.append('[')
+    index = 0
+    count = len(members)
+    while index < count:
+        if index + 2 < count and ranges[index + 1]:
+            lower, upper = members[index], members[index + 2]
+            index += 3
+            if lower > upper:
+                raise _Ps1InterpreterError
+            _append_wildcard_set_member(regex, lower)
+            regex.append('-')
+            _append_wildcard_set_member(regex, upper)
+        else:
+            _append_wildcard_set_member(regex, members[index])
+            index += 1
+    regex.append(']')
+
+
+def _wildcard_to_regex(pattern: str) -> str:
+    """
+    Translate a PowerShell wildcard pattern into the regular expression 5.1 compiles it to, so that
+    `-like` reads a pattern the way the host does rather than the way `fnmatch` does. A backtick
+    escapes the character behind it; `*` is any run and `?` is one character; a `[...]` set holds
+    literal characters and `a-z` ranges, and inside it `^`, `[` and `!` are literal, so `[!a]` is
+    the two-character set `!a` and not a negated class. An unterminated set or a reversed range is
+    a pattern 5.1 rejects, so the fold is refused rather than guessed.
+    """
+    regex: list[str] = ['^']
+    escaped = False
+    opened_set = False
+    inside_set = False
+    members: list[str] = []
+    ranges: list[bool] = []
+    for char in pattern:
+        if inside_set:
+            if char == ']' and not opened_set and not escaped:
+                inside_set = False
+                _append_wildcard_set(regex, members, ranges)
+                members, ranges = [], []
+            elif char != '`' or escaped:
+                members.append(char)
+                ranges.append(char == '-' and not escaped)
+            opened_set = False
+        elif char == '*' and not escaped:
+            regex.append('.*')
+        elif char == '?' and not escaped:
+            regex.append('.')
+        elif char == '[' and not escaped:
+            inside_set = True
+            opened_set = True
+            members, ranges = [], []
+        elif char != '`' or escaped:
+            _append_wildcard_literal(regex, char)
+        escaped = char == '`' and not escaped
+    if inside_set:
+        raise _Ps1InterpreterError
+    if escaped and pattern != '`':
+        _append_wildcard_literal(regex, pattern[-1])
+    regex.append('$')
+    return ''.join(regex)
+
+
+def script_scope_write_names(root) -> frozenset[str]:
+    """
+    The variable names an assignment, a `foreach` header, a `++`/`--`, a parameter or a `[ref]`
+    binds outside every function body — the script scope above a folded call. A body that reads one
+    of these before it writes it observes the enclosing value the fold does not hold, so
+    `_Ps1Interpreter` refuses that read rather than answering it `$null`. A name bound only inside a
+    function is that function's own local and is not here, which is what keeps an accumulator like
+    `$r = $r + …` folding: its first `$r` is genuinely unset and reads as `$null`.
+
+    The name is taken bare of any scope qualifier, since `$script:q = 5` and a later `$q` are one
+    variable, so a write under either spelling withholds the fold of a read under the other.
+    """
+    names: set[str] = set()
+    for node in root.walk():
+        if not isinstance(node, Ps1Variable) or not is_write_occurrence(node):
+            continue
+        parent = node.parent
+        while parent is not None and not isinstance(parent, Ps1FunctionDefinition):
+            parent = parent.parent
+        if parent is None:
+            names.add(node.name.lower())
+    return frozenset(names)
+
+
 class _Ps1Interpreter:
 
     def __init__(
@@ -265,6 +374,7 @@ class _Ps1Interpreter:
         functions: Mapping[str, Ps1FunctionDefinition] | None = None,
         parent_env: Mapping[str, _Value] | None = None,
         depth: int = 0,
+        caller_scope_names: frozenset[str] = frozenset(),
     ):
         self.max_iterations = max_iterations
         self.max_string_len = max_string_len
@@ -273,6 +383,10 @@ class _Ps1Interpreter:
         self._env: dict[str, _Value] = {}
         self._iterations = 0
         self._depth = depth
+        #: The names an enclosing scope this fold was entered without may bind — the script-scope
+        #: writes the driver gives it. A read of one before this body writes it is refused, not
+        #: read as `$null`; see `_eval_variable`.
+        self._caller_scope_names = caller_scope_names
 
     def _lookup(self, key: str) -> _Value:
         """
@@ -674,6 +788,7 @@ class _Ps1Interpreter:
             functions=self._functions,
             parent_env=parent_env,
             depth=self._depth + 1,
+            caller_scope_names=self._caller_scope_names,
         )
         try:
             result = child.execute(body, bindings)
@@ -772,6 +887,16 @@ class _Ps1Interpreter:
             return None
         if name == 'psitem':
             name = '_'
+        if name in self._caller_scope_names and not self._written(name):
+            # A name an enclosing scope binds, read before this body writes it, is refused rather
+            # than read as `$null`, for the reason `_separator` states for `$OFS`: the outermost
+            # `_parent_env` is `None`, which is *unknown beyond here* and not *empty*, and the caller
+            # scope this fold is entered without is entitled to hold the value. Reading it as `$null`
+            # is a value 5.1 does not produce — `$q = $env:Temp; function f { $q + 1 }` is
+            # `$env:Temp + 1` on the host and not `1`. A name no enclosing scope writes is genuinely
+            # unset, so an accumulator like `$r = $r + …` still reads its first `$r` as `$null` and
+            # folds; only a name the script binds elsewhere withholds the fold.
+            raise _Ps1InterpreterError
         return self._lookup(name)
 
     def _eval_assignment(self, node: Ps1AssignmentExpression) -> _Value:
@@ -818,7 +943,7 @@ class _Ps1Interpreter:
         lst = self._lookup(key)
         if not isinstance(lst, list):
             raise _Ps1InterpreterError
-        idx = self._to_int(self._eval(target.index))
+        idx = self._to_index(self._eval(target.index))
         value = self._eval(node.value)
         try:
             lst[idx] = value
@@ -834,6 +959,10 @@ class _Ps1Interpreter:
             left = self._eval(node.left)
             return self._apply_type_cast(node.right.name, left)
         left = self._eval(node.left)
+        if op == '-and':
+            return self._truthy(left) and self._truthy(self._eval(node.right))
+        if op == '-or':
+            return self._truthy(left) or self._truthy(self._eval(node.right))
         right = self._eval(node.right)
         if isinstance(left, bool) and op in _NO_OPERATOR_METHOD_ON_BOOLEAN:
             raise _Ps1InterpreterError
@@ -857,14 +986,8 @@ class _Ps1Interpreter:
             return self._int_op(left, right, ps_shift_left)
         if op == '-shr':
             return self._int_op(left, right, ps_shift_right)
-        if op in ('-and', '-or', '-xor'):
-            lb = self._truthy(left)
-            rb = self._truthy(right)
-            if op == '-and':
-                return lb and rb
-            if op == '-or':
-                return lb or rb
-            return lb != rb
+        if op == '-xor':
+            return self._truthy(left) != self._truthy(right)
         cmp_fn = COMPARISON_OPS.get(op)
         if cmp_fn is not None:
             return self._compare(left, right, cmp_fn)
@@ -921,13 +1044,13 @@ class _Ps1Interpreter:
             raise _Ps1InterpreterError
         if op.lower() == '-split':
             val = self._eval(node.operand)
-            parts = re.split(r'\s+', self._to_str(val))
+            parts = re.split(r'\s+', self._coerce_str(val))
             return [p for p in parts if p]
         if op.lower() == '-join':
             val = self._eval(node.operand)
             if isinstance(val, list):
-                return ''.join(self._to_str(item) for item in val)
-            return self._to_str(val)
+                return ''.join(self._coerce_str(item) for item in val)
+            return self._coerce_str(val)
         raise _Ps1InterpreterError
 
     _MEMBER_ARITHMETIC = re.compile(r'^(\w+)([+\-])(\d+)$')
@@ -1153,13 +1276,9 @@ class _Ps1Interpreter:
 
     def _eval_index(self, node: Ps1IndexExpression) -> _Value:
         obj = self._eval(node.object)
-        idx = self._eval(node.index)
-        if not isinstance(idx, int):
-            raise _Ps1InterpreterError
+        idx = self._to_index(self._eval(node.index))
         try:
-            if isinstance(obj, str):
-                return obj[idx]
-            if isinstance(obj, list):
+            if isinstance(obj, (str, list)):
                 return obj[idx]
         except IndexError:
             raise _Ps1InterpreterError
@@ -1172,7 +1291,7 @@ class _Ps1Interpreter:
     def _apply_type_cast(self, type_name: str, val: _Value) -> _Value:
         tn = normalize_dotnet_type_name(type_name)
         if tn == 'string':
-            return self._to_str(val)
+            return self._coerce_str(val)
         if tn in ('int', 'int32', 'int64'):
             return self._to_int(val)
         if tn == 'char':
@@ -1187,7 +1306,10 @@ class _Ps1Interpreter:
                 return list(val)
             raise _Ps1InterpreterError
         if tn == 'byte':
-            return self._to_int(val) & 0xFF
+            result = self._to_int(val)
+            if not 0 <= result <= 0xFF:
+                raise _Ps1InterpreterError
+            return result
         raise _Ps1InterpreterError
 
     def _add(self, left: _Value, right: _Value) -> _Value:
@@ -1196,7 +1318,7 @@ class _Ps1Interpreter:
         if isinstance(left, str) and right is None:
             return left
         if isinstance(left, str) or isinstance(right, str):
-            result = self._to_str(left) + self._to_str(right)
+            result = self._coerce_str(left) + self._coerce_str(right)
             if len(result) > self.max_string_len:
                 raise _Ps1InterpreterError
             return result
@@ -1260,25 +1382,54 @@ class _Ps1Interpreter:
         raise _Ps1InterpreterError
 
     def _eval_split(self, left: _Value, right: _Value, op: str) -> list:
-        s = self._to_str(left)
-        pattern = self._to_str(right)
+        s = self._coerce_str(left)
+        delimiter, maxsplit = self._split_delimiter_and_maxsplit(right)
+        pattern = self._coerce_str(delimiter)
         flags = re.IGNORECASE if op != '-csplit' else 0
         try:
-            return re.split(pattern, s, flags=flags)
+            return re.split(pattern, s, maxsplit=maxsplit, flags=flags)
         except re.error:
             raise _Ps1InterpreterError
 
+    def _split_delimiter_and_maxsplit(self, right: _Value) -> tuple[_Value, int]:
+        """
+        The delimiter and the Python `maxsplit` a `-split` right operand names.
+
+        5.1 reads a right operand that is a collection as `<delimiter>, <max-substrings>, <options>`
+        in that order (`parserutils.SplitOperatorImpl`). A max-substrings of `n` caps the result at
+        `n` elements, which .NET's `Regex.Split(input, n)` reaches with `n - 1` splits; a zero caps
+        nothing and is the unlimited default the bare operator also passes. Python's `maxsplit` is
+        `n - 1` for `n` at least two, and its zero is that same unlimited, so both map across.
+
+        Three cases are refused rather than answered with a value 5.1 does not produce: a
+        max-substrings of one, which caps at a single unsplit element that `maxsplit` cannot express
+        because its zero already means unlimited; a negative one, which splits a right-to-left regex
+        Python's `re` has no equivalent for; and any explicit split option.
+        """
+        if not isinstance(right, list):
+            return right, 0
+        if len(right) == 1:
+            return right[0], 0
+        if len(right) != 2:
+            raise _Ps1InterpreterError
+        limit = self._to_int(right[1])
+        if limit == 0:
+            return right[0], 0
+        if limit < 2:
+            raise _Ps1InterpreterError
+        return right[0], limit - 1
+
     def _eval_join(self, left: _Value, right: _Value) -> str:
-        separator = self._to_str(right)
+        separator = self._coerce_str(right)
         if isinstance(left, list):
-            return separator.join(self._to_str(item) for item in left)
-        return self._to_str(left)
+            return separator.join(self._coerce_str(item) for item in left)
+        return self._coerce_str(left)
 
     def _eval_replace(self, left: _Value, right: _Value, op: str) -> str:
-        s = self._to_str(left)
+        s = self._coerce_str(left)
         if isinstance(right, list) and len(right) == 2:
-            pattern = self._to_str(right[0])
-            replacement = self._to_str(right[1])
+            pattern = self._coerce_str(right[0])
+            replacement = self._coerce_str(right[1])
         else:
             raise _Ps1InterpreterError
         flags = re.IGNORECASE if op != '-creplace' else 0
@@ -1297,24 +1448,94 @@ class _Ps1Interpreter:
         except re.error:
             raise _Ps1InterpreterError
 
-    @staticmethod
-    def _eval_contains(collection: _Value, item: _Value) -> bool:
-        if isinstance(collection, list):
-            for elem in collection:
-                if isinstance(elem, str) and isinstance(item, str):
-                    if elem.lower() == item.lower():
-                        return True
-                elif elem == item:
+    def _eval_contains(self, collection: _Value, item: _Value) -> bool:
+        """
+        The `-contains`/`-in` membership test: an element matches when 5.1's `LanguagePrimitives.
+        Equals` holds between it and the item, which is the same equality `-eq` runs. A single
+        element that matches answers `$True`; an item this cannot decide against some element leaves
+        the whole test refused rather than answered `$False`, since a later element it could not
+        read might have been the one that matched.
+        """
+        if not isinstance(collection, list):
+            raise _Ps1InterpreterError
+        undecided = False
+        for elem in collection:
+            try:
+                if self._ps_equals(elem, item):
                     return True
-            return False
+            except _Ps1InterpreterError:
+                undecided = True
+        if undecided:
+            raise _Ps1InterpreterError
+        return False
+
+    def _ps_equals(self, first: _Value, second: _Value, ignore_case: bool = True) -> bool:
+        """
+        Whether 5.1's `LanguagePrimitives.Equals(first, second, ignoreCase, InvariantCulture)`
+        holds. The second operand is converted to the first's type and the two are compared, so
+        `'1' -eq 1` joins on the text `'1'` and `1 -eq '1'` on the number `1`.
+
+        The distinction this owes a wrong answer is between a conversion 5.1 *rejects* and one this
+        interpreter cannot *reproduce*. A rejection — `1 -eq 'abc'`, whose right operand is no Int32 —
+        is caught by 5.1 as an `InvalidCastException` and answered `$False`, so it is answered here
+        the same way. A conversion whose result is the host culture's to write — a `Double` rendered
+        as text, a `String` read as a `Double` — is refused with `_Ps1InterpreterError` rather than
+        answered with a value 5.1 may not share.
+        """
+        if first is None or second is None:
+            return first is None and second is None
+        if isinstance(first, list) or isinstance(second, list):
+            if first is second:
+                return True
+            raise _Ps1InterpreterError
+        if isinstance(first, str):
+            if isinstance(second, float):
+                raise _Ps1InterpreterError
+            second_string = self._to_str(second)
+            if ignore_case:
+                return first.lower() == second_string.lower()
+            return first == second_string
+        if type(first) is type(second):
+            return first == second
+        if self._is_number(first) and self._is_number(second):
+            return first == second
+        return self._equals_after_cast(first, second)
+
+    def _equals_after_cast(self, first: _Value, second: _Value) -> bool:
+        """
+        `first.Equals(secondConverted)` for the scalars 5.1 reaches by converting the second operand
+        to the type of the first. A `String` the target type rejects is not equal rather than a
+        throw; a `String` read as a `Double` is refused, since its parse is the host culture's.
+        """
+        if isinstance(first, bool):
+            if isinstance(second, str):
+                return first == (len(second) > 0)
+            return first == bool(second)
+        if isinstance(first, int):
+            if isinstance(second, bool):
+                return first == int(second)
+            if isinstance(second, str):
+                try:
+                    return first == self._string_to_int(second)
+                except _Ps1InterpreterError:
+                    return False
+            raise _Ps1InterpreterError
+        if isinstance(first, float):
+            if isinstance(second, bool):
+                return first == float(second)
+            raise _Ps1InterpreterError
         raise _Ps1InterpreterError
+
+    @staticmethod
+    def _is_number(value: _Value) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
 
     @staticmethod
     def _eval_like(left: _Value, right: _Value, op: str) -> bool:
         if not isinstance(left, str) or not isinstance(right, str):
             raise _Ps1InterpreterError
-        flags = re.IGNORECASE if op[1] != 'c' else 0
-        pattern = fnmatch.translate(right)
+        flags = re.DOTALL | (re.IGNORECASE if op[1] != 'c' else 0)
+        pattern = _wildcard_to_regex(right)
         try:
             return re.match(pattern, left, flags=flags) is not None
         except re.error:
@@ -1333,7 +1554,12 @@ class _Ps1Interpreter:
         if isinstance(value, str):
             return len(value) > 0
         if isinstance(value, list):
-            return len(value) > 0
+            if len(value) != 1:
+                return len(value) > 0
+            element = value[0]
+            if isinstance(element, list):
+                return len(element) > 0
+            return _Ps1Interpreter._truthy(element)
         return True
 
     def _to_str(self, value: _Value) -> str:
@@ -1346,12 +1572,29 @@ class _Ps1Interpreter:
         if isinstance(value, int):
             return str(value)
         if isinstance(value, float):
-            if value.is_integer():
-                return str(int(value))
-            return str(value)
+            # A `Double`'s text is the current culture's to write everywhere `_to_str` is reached —
+            # string interpolation, a `.ToString()` call, the `$OFS` separator a collection is
+            # joined with — so it is refused rather than written as a value 5.1's session may not
+            # share. A string *operator* coerces it culture-invariantly instead; that is `_coerce_str`.
+            raise _Ps1InterpreterError
         if isinstance(value, list):
             return self._separator().join(self._to_str(item) for item in value)
         raise _Ps1InterpreterError
+
+    def _coerce_str(self, value: _Value) -> str:
+        """
+        The text a value contributes where a string *operator* coerces it — the `[string]` cast,
+        `+`, `-join`, `-split` and `-replace`. That coercion is culture-invariant, so it is a text
+        this unit can write for every value, including the one whose Python `str` disagrees with
+        5.1's: a `Double`, written here by the value domain's measured `[string]` text. Every other
+        value carries no culture in its text and is deferred to `_to_str` unchanged.
+        """
+        if isinstance(value, float):
+            text = coerced_text(fact_of(value))
+            if text is None:
+                raise _Ps1InterpreterError
+            return text
+        return self._to_str(value)
 
     def _separator(self) -> str:
         """
@@ -1389,13 +1632,40 @@ class _Ps1Interpreter:
         if isinstance(value, float):
             return round(value)
         if isinstance(value, str):
-            try:
-                return int(value, 0)
-            except ValueError:
-                raise _Ps1InterpreterError
+            return _Ps1Interpreter._string_to_int(value)
         if value is None:
             return 0
         raise _Ps1InterpreterError
+
+    @staticmethod
+    def _string_to_int(text: str) -> int:
+        """
+        Read a String as Int32 the way 5.1's converter does, which is its own numeral grammar and
+        not Python's. A `0x` prefix names hexadecimal, a leading zero is just a decimal digit, and
+        neither a `0b`/`0o` prefix nor a `_` separator names anything, so `'0b10'`, `'0o10'` and
+        `'1_0'` throw where Python's own `int` would read them as two, eight and ten.
+        """
+        body = text.strip()
+        sign = -1 if body[:1] == '-' else 1
+        if body[:1] in ('+', '-'):
+            body = body[1:]
+        if not body or '_' in body:
+            raise _Ps1InterpreterError
+        try:
+            if body[:2].lower() == '0x':
+                return sign * int(body[2:], 16)
+            return sign * int(body, 10)
+        except ValueError:
+            raise _Ps1InterpreterError
+
+    def _to_index(self, value: _Value) -> int:
+        """
+        A subscript is converted to Int32 the way any value is, except that `$null` is no index:
+        5.1 raises NullArrayIndex where a plain Int32 conversion of `$null` would answer zero.
+        """
+        if value is None:
+            raise _Ps1InterpreterError
+        return self._to_int(value)
 
     def _to_float(self, value: _Value) -> float:
         if isinstance(value, (int, float)):
@@ -1425,6 +1695,7 @@ class Ps1FunctionEvaluator(Transformer):
         self._callers: dict[str, set[str]] = {}
         self._ambiguous: set[str] = set()
         self._commands: Ps1CommandModel | None = None
+        self._caller_scope_names: frozenset[str] = frozenset()
         self._entry = False
 
     def visit(self, node):
@@ -1441,6 +1712,7 @@ class Ps1FunctionEvaluator(Transformer):
             self._collect_functions(node)
             if not self._functions:
                 return None
+            self._caller_scope_names = script_scope_write_names(node)
             # Read before the fold rather than after it: folding a call into its value can neither
             # create nor destroy an `Export-ModuleMember` invocation, and asking afterwards drops
             # the whole shared model on the mutation counter to rebuild it for one boolean.
@@ -1504,6 +1776,8 @@ class Ps1FunctionEvaluator(Transformer):
 
     def visit_Ps1CommandInvocation(self, node: Ps1CommandInvocation):
         self.generic_visit(node)
+        if stands_where_only_a_command_may(node):
+            return None
         name_str = get_command_name(node)
         if name_str is None:
             return None
@@ -1536,6 +1810,7 @@ class Ps1FunctionEvaluator(Transformer):
             max_iterations=self.max_iterations,
             max_string_len=self.max_string_len,
             functions=self._functions,
+            caller_scope_names=self._caller_scope_names,
         )
         if funcdef.body is None:
             return None
@@ -1848,7 +2123,8 @@ class Ps1ForEachPipeline(Transformer):
             return None
         if cmd_elem.expression is None:
             return None
-        script_block = extract_foreach_scriptblock(cmd_elem.expression)
+        shadowed = model_cache(self, node).closed_world.shadowed_names
+        script_block = extract_foreach_scriptblock(cmd_elem.expression, shadowed)
         if script_block is None:
             return None
         if self._has_free_variables(script_block):

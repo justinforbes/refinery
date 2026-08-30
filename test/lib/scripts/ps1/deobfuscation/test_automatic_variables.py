@@ -156,38 +156,31 @@ class TestPs1TheSuccessFlagIsFalseAfterAFailure(_Ps1AutomaticVariables):
             F'{_FAULTS}\nif ($?) {{ {_PAYLOAD} }} else {{ {_OTHER} }}', _OTHER)
 
 
-class TestPs1AnEngineStringTheToolHasNoValueFor(_Ps1AutomaticVariables):
+class TestPs1AnEngineStringTheToolSupplies(_Ps1AutomaticVariables):
     """
-    5.1 hands a script `$PSEdition` as `Desktop` and `$ErrorView` as `NormalView`. Neither is ever
-    empty, so a guard reading one is a guard the script passes, whether it tests the name for truth
-    or compares it against the value the engine supplies.
-
-    The deobfuscator knows neither name and reads both as `$null`. The truth test then decides for
-    the `else` branch and the comparison decides for the wrong side, so in each case the branch 5.1
-    runs is the one deleted. Where the guard carries no `else`, the whole script comes back empty.
+    5.1 hands a script `$PSEdition` as `Desktop` and `$ErrorView` as `NormalView`, each a plain
+    string. `$ErrorView` is a bare string in 5.1 and only became an `ErrorView` enum in a later
+    edition, so its truth is a non-empty string's truth and not an enum member's numeric value.
+    Neither name is ever empty, so a guard reading one is a guard the script passes, whether it
+    tests the name for truth or compares it against the value the engine supplies.
     """
 
-    @unittest.expectedFailure
     def test_the_edition_name_takes_the_then_branch(self):
         self._assertRunsTheSameStatements(
             F'if ($PSEdition) {{ {_PAYLOAD} }} else {{ {_OTHER} }}', _PAYLOAD)
 
-    @unittest.expectedFailure
     def test_the_edition_name_compared_to_desktop_takes_the_then_branch(self):
         self._assertRunsTheSameStatements(
             F"if ($PSEdition -eq 'Desktop') {{ {_PAYLOAD} }} else {{ {_OTHER} }}", _PAYLOAD)
 
-    @unittest.expectedFailure
     def test_the_error_view_takes_the_then_branch(self):
         self._assertRunsTheSameStatements(
             F'if ($ErrorView) {{ {_PAYLOAD} }} else {{ {_OTHER} }}', _PAYLOAD)
 
-    @unittest.expectedFailure
     def test_the_error_view_compared_to_normal_view_takes_the_then_branch(self):
         self._assertRunsTheSameStatements(
             F"if ($ErrorView -eq 'NormalView') {{ {_PAYLOAD} }} else {{ {_OTHER} }}", _PAYLOAD)
 
-    @unittest.expectedFailure
     def test_the_error_view_guarding_a_branch_without_an_else_keeps_the_body(self):
         self._assertRunsTheSameStatements(
             F'if ($ErrorView) {{ {_PAYLOAD} }}\n{_TAIL}', F'{_PAYLOAD}\n{_TAIL}')

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Callable, Generator, NamedTuple
 
 from refinery.lib.scripts import Block, Node, Statement, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.values import integer_of, read
 from refinery.lib.scripts.ps1.ast import get_body, is_builtin_variable, unwrap_parens
 from refinery.lib.scripts.ps1.data import COMPARISON_OPS
 from refinery.lib.scripts.ps1.deobfuscation.emulator import evaluate_truthy
@@ -41,6 +42,7 @@ _MAX_STATES = 500
 _MAX_UNROLL_ITERATIONS = 500
 
 if TYPE_CHECKING:
+    from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
     _VarKey = tuple[str, Ps1ScopeModifier]
     _StateKey = int | float | str
 
@@ -55,13 +57,24 @@ def _is_bool_literal(node: Node) -> bool | None:
     return None
 
 
+def _integer_state_key(node: Ps1IntegerLiteral) -> int | None:
+    """
+    The integer PowerShell gives an integer literal, or `None` for a numeral too wide to type. This
+    is not `node.value`, which is the numeral's magnitude: a hexadecimal literal is typed by its
+    width and carries that width's sign, so `0xFFFFFFFF` is the Int32 -1 rather than four billion,
+    and a state machine that matches the magnitude routes itself into a case the host never enters.
+    The value the host assigns is what `read` types and `integer_of` reads back.
+    """
+    return integer_of(read(node))
+
+
 def _unwrap_constant(node) -> _StateKey | None:
     """
     Extract a constant value (int, float, or string) from an AST node.
     """
     node = unwrap_parens(node) if isinstance(node, Expression) else node
     if isinstance(node, Ps1IntegerLiteral):
-        return node.value
+        return _integer_state_key(node)
     if isinstance(node, Ps1RealLiteral):
         return node.value
     if isinstance(node, Ps1StringLiteral):
@@ -69,7 +82,8 @@ def _unwrap_constant(node) -> _StateKey | None:
     if isinstance(node, Ps1UnaryExpression) and node.operator == '-':
         inner = unwrap_parens(node.operand) if isinstance(node.operand, Expression) else node.operand
         if isinstance(inner, Ps1IntegerLiteral):
-            return -inner.value
+            magnitude = _integer_state_key(inner)
+            return None if magnitude is None else -magnitude
         if isinstance(inner, Ps1RealLiteral):
             return -inner.value
     if is_builtin_variable(node, frozenset({'null'})):
@@ -154,6 +168,11 @@ def _make_exit_check(
     Return a predicate that checks whether assigning a given state value to the state variable
     would make the while condition falsy (the loop would exit). Uses the emulator to evaluate the
     condition with the state variable bound.
+
+    A condition the emulator cannot evaluate is read as one that does not exit, which is sound only
+    because `_exit_condition_is_total` refuses the whole recovery unless the condition resolves at
+    every state value the predicate is consulted on. Without that gate a loop whose exit depends on
+    an unevaluable value — `while ($s -ne (Get-Random))` — would recover as one that never exits.
     """
     def is_exit(state_value: _StateKey) -> bool:
         bindings = {var_name: state_value}
@@ -162,6 +181,26 @@ def _make_exit_check(
             return False
         return not result
     return is_exit
+
+
+def _exit_condition_is_total(
+    condition: Expression,
+    var_name: str,
+    states: dict[_StateKey, _StateBlock],
+) -> bool:
+    """
+    Whether the loop condition resolves to a definite truth value at every state the machine can
+    hold — each case label and each transition target, which together are exactly the values
+    `_make_exit_check`'s predicate is asked about. A machine undecidable at one of them cannot be
+    shown to exit there, so recovering it would run a body the host may never run.
+    """
+    values: set[_StateKey] = set(states)
+    for block in states.values():
+        values.update(block.transition.successors)
+    return all(
+        evaluate_truthy(condition, {var_name: value}) is not None
+        for value in values
+    )
 
 
 def _is_state_assignment(
@@ -1217,6 +1256,14 @@ class Ps1ControlFlowDeflattening(Transformer):
             self._try_deflatten_body(body, parent)
 
     def _try_deflatten_body(self, body: list[Statement], parent: Node):
+        # One fault model serves every machine in this body. Each dissolution advances the tree
+        # version, so re-reading it through the cache once per machine rebuilds the control-flow
+        # graph of every block once per machine — a walk cost that is a property of the script, not
+        # of how many of its statements turn out to be removable. The machines here are siblings in
+        # one body, and dissolving one leaves the handlers around another exactly where they were, so
+        # the model built before the first dissolution answers the veto for every later one. It is
+        # read lazily so a body holding no machine at all pays for no build.
+        faults: Ps1FaultReach | None = None
         i = 0
         while i < len(body):
             stmt = body[i]
@@ -1240,6 +1287,9 @@ class Ps1ControlFlowDeflattening(Transformer):
             if entry_state not in machine:
                 i += 1
                 continue
+            if not _exit_condition_is_total(match.condition, match.state_var_name, machine):
+                i += 1
+                continue
             recovered = _recover_structure(machine, entry_state, is_exit)
             if recovered is None:
                 i += 1
@@ -1253,10 +1303,12 @@ class Ps1ControlFlowDeflattening(Transformer):
             # A vetoed half would leave the machine partly dissolved and the cursor pointing into a
             # body that no longer has the shape the arithmetic below assumes, so the whole recovery
             # stands or falls together.
+            if faults is None:
+                faults = model_cache(self, parent).faults
             plan = Ps1RemovalPlan(
                 parent,
                 all_or_nothing=True,
-                faults=model_cache(self, parent).faults,
+                faults=faults,
             )
             plan.propose(body[init_index])
             plan.propose(stmt, recovered)

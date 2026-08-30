@@ -13,11 +13,10 @@ class TestPs1TheSuccessVariableObservesACallThatRan(TestPs1):
     """
     Every command that runs writes `$?`, so a call whose own output nobody reads is still observable
     to a later read of that variable. `Ps1CommandModel.reads_command_success` answers whether the
-    script holds one, and the pass that removes an inert function together with its calls does not
-    ask it.
+    script holds one, and the pass that removes an inert function together with its calls keeps the
+    group whole where it does.
     """
 
-    @unittest.expectedFailure
     def test_a_call_removed_between_a_failure_and_a_read_of_the_success_variable_is_kept(self):
         self._assertKept(F"""
             function K {{ }}
@@ -42,11 +41,12 @@ class TestPs1TheFunctionDriveObservesADefinition(TestPs1):
     """
     `$function:K` reads the function table through the variable namespace and reports the body bound
     to the name, so a script reading it sees a definition removed from under it.
-    `Ps1CommandModel.introspected_names` collects only `Ps1ScopeModifier.ALIAS`, which is why this
-    spelling reaches no reader while the provider-path spellings do.
+    `Ps1CommandModel.function_drive_reads` collects that read and the inert-definition removal keeps
+    the group whole where it names a defined function, the mirror for this drive of what
+    `reads_command_success` does for `$?`; the provider-path spelling reaches the same fact through
+    `touches_identity_provider`, which opens the whole world rather than naming the one function.
     """
 
-    @unittest.expectedFailure
     def test_a_definition_a_function_drive_read_reports_on_is_kept(self):
         self._assertKept(F"""
             function K {{ }}
@@ -59,6 +59,19 @@ class TestPs1TheFunctionDriveObservesADefinition(TestPs1):
             function K {{ }}
             K
             Write-Host (Get-Item function:K)
+        """)
+
+    def test_a_function_drive_read_keeps_only_the_name_it_reports_on(self):
+        self._assertDeobfuscatesTo(F"""
+            function K {{ }}
+            K
+            function Z {{ }}
+            Z
+            Write-Host $function:K
+        """, F"""
+            function K {{ }}
+            K
+            Write-Host $function:K
         """)
 
 
@@ -106,11 +119,11 @@ class TestPs1ACallAboveItsDefinitionNamesNoCommand(TestPs1):
     """
     A `function` statement binds its name when it runs, so a call written above it resolves against
     whatever stood there before — nothing, in a script that defines the name once. 5.1 answers such
-    a call with a terminating `CommandNotFoundException`, which ends the script, so the statements
-    below it never run. Removing the pair lets them run.
+    a call with a `CommandNotFoundException`, which fails without ending the script and leaves `$?`
+    at false, so a later read of `$?` observes the failure. Removing the call lets that read report
+    the success that stood before it.
     """
 
-    @unittest.expectedFailure
     def test_a_call_written_above_the_only_definition_of_its_name_is_kept(self):
         self._assertKept(F"""
             K
@@ -151,13 +164,12 @@ class TestPs1AStoredBlockRendersTheStatementsInIt(TestPs1):
 
 class TestPs1AWorkflowBindsTheNameAFunctionBinds(TestPs1):
     """
-    `workflow K { }` writes the same table `function K { }` writes, so a script holding both binds
-    the name twice and a call reaches the later binding. Nothing in the analysis reads a `workflow`
-    as a definition, so the inert `function` reads as the only one and the call reads as reaching
-    it.
+    `workflow K { }` and `configuration K { }` write the same table `function K { }` writes, so a
+    script holding both binds the name twice and a call reaches the later binding. The call graph
+    reads the keyword definition beside the `function`, so the acting keyword body keeps the call
+    the inert `function` alone would have dropped.
     """
 
-    @unittest.expectedFailure
     def test_a_call_a_workflow_of_the_same_name_claims_is_kept(self):
         self._assertKept(F"""
             function K {{ }}

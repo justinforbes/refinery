@@ -45,6 +45,9 @@ class IterativeDeobfuscator(Unit, abstract=True):
         sys.setrecursionlimit(max(old_limit, 10000))
         try:
             return self._process(data)
+        except RecursionError:
+            self.log_warn('input nesting exceeded the interpreter stack; leaving it unchanged')
+            return data
         finally:
             sys.setrecursionlimit(old_limit)
 

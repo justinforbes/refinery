@@ -159,6 +159,33 @@ _ARGUMENT_FORBIDDEN_KINDS = _PIPELINE_TERMINATORS | {
     Ps1TokenKind.REDIRECT_IN,
 }
 
+#: The token kinds PowerShell refuses as a function or filter name: the punctuators, redirections,
+#: unary operators, strings and variables that could not begin a command name. Every other token
+#: stands as the name, so `function % { }` names the command `%` exactly as `function Get-Thing { }`
+#: names `Get-Thing`, and a statement written after the definition stays in the script.
+_FUNCTION_NAME_FORBIDDEN_KINDS = frozenset({
+    Ps1TokenKind.PIPE,
+    Ps1TokenKind.LPAREN,
+    Ps1TokenKind.LBRACE,
+    Ps1TokenKind.AT_LPAREN,
+    Ps1TokenKind.AT_LBRACE,
+    Ps1TokenKind.RBRACE,
+    Ps1TokenKind.RPAREN,
+    Ps1TokenKind.EOF,
+    Ps1TokenKind.SEMICOLON,
+    Ps1TokenKind.REDIRECTION,
+    Ps1TokenKind.REDIRECT_IN,
+    Ps1TokenKind.DOUBLE_AMPERSAND,
+    Ps1TokenKind.DOUBLE_PIPE,
+    Ps1TokenKind.AMPERSAND,
+    Ps1TokenKind.VARIABLE,
+    Ps1TokenKind.SPLAT_VARIABLE,
+    Ps1TokenKind.HSTRING_EXPAND,
+    Ps1TokenKind.HSTRING_VERBATIM,
+    Ps1TokenKind.STRING_VERBATIM,
+    Ps1TokenKind.STRING_EXPAND,
+})
+
 #: A block comment may stand between an expression and a member access; whitespace may not.
 _BLOCK_COMMENT = re.compile(r'<#.*?#>', re.DOTALL)
 
@@ -1799,10 +1826,7 @@ class Ps1Parser:
         name = ''
         with self._mode(Ps1LexerMode.ARGUMENT):
             self._skip_newlines()
-            if self._at(
-                Ps1TokenKind.GENERIC_TOKEN,
-                Ps1TokenKind.VARIABLE,
-            ) or self._current.kind.is_keyword:
+            if self._current.kind not in _FUNCTION_NAME_FORBIDDEN_KINDS:
                 name = self._advance().value
         with self._mode(Ps1LexerMode.EXPRESSION):
             self._skip_newlines()

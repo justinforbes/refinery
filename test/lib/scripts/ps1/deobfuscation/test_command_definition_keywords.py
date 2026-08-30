@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import unittest
-
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
 #: An acting statement that is never a removal candidate, so its survival says only that the pass
@@ -62,22 +60,15 @@ class TestPs1ACallAfterAWorkflowDefiningItsNameIsKept(_Ps1CommandDefinitionKeywo
     built-in cmdlet under PowerShell's command resolution, so a bare NAME after it resolves to the
     workflow body rather than the pure built-in the metadata describes. A discarded side-effect-free
     call to NAME may therefore no longer be trusted as pure and must be kept, just as it is after a
-    `function` redefining the name. The tool does not yet recognize the `workflow` keyword as a
-    command definition, so it still trusts the name and unsoundly deletes the call.
+    `function` redefining the name.
     """
 
-    @unittest.expectedFailure
     def test_a_null_assigned_call_after_a_workflow_of_its_name_is_kept(self):
-        # Correct behavior: the workflow redefines Get-Random ahead of this discarded call, so the
-        # call may run the workflow body and must be kept. Not yet implemented; it is dropped.
         self._assertDiscardedCallKept(
             F'workflow Get-Random {{ Start-Process calc }}\n'
             F'$Null = Get-Random -Maximum 88175\n{_ANCHOR}', '88175', 'Start-Process calc')
 
-    @unittest.expectedFailure
     def test_an_out_null_piped_call_after_a_workflow_of_its_name_is_kept(self):
-        # Correct behavior: the workflow shadows Get-Date, so this discarded pipeline now runs the
-        # workflow body and must be kept. Not yet implemented — the pipeline is dropped.
         self._assertDiscardedCallKept(
             F'workflow Get-Date {{ Start-Process notepad }}\n'
             F"Get-Date -Format 'Zqxwmp' | Out-Null\n{_ANCHOR}", 'Zqxwmp', 'Start-Process notepad')
@@ -87,22 +78,15 @@ class TestPs1ACallAfterAConfigurationDefiningItsNameIsKept(_Ps1CommandDefinition
     """
     A `configuration NAME { ... }` (DSC) statement likewise introduces a command named NAME that
     shadows a same-named built-in cmdlet, so a discarded side-effect-free call to NAME placed after
-    it resolves to the configuration body and must be kept rather than deleted. The tool does not
-    yet recognize the `configuration` keyword as a command definition and unsoundly removes it.
+    it resolves to the configuration body and must be kept rather than deleted.
     """
 
-    @unittest.expectedFailure
     def test_a_void_cast_call_after_a_configuration_of_its_name_is_kept(self):
-        # Correct behavior: the configuration redefines Get-Random ahead of this discarded call, so
-        # the call may run the configuration body and must be kept. Not yet implemented — dropped.
         self._assertDiscardedCallKept(
             F'configuration Get-Random {{ Start-Process calc }}\n'
             F'[Void](Get-Random -Maximum 44011)\n{_ANCHOR}', '44011', 'Start-Process calc')
 
-    @unittest.expectedFailure
     def test_an_out_null_piped_call_after_a_configuration_of_its_name_is_kept(self):
-        # Correct behavior: the configuration shadows Get-ChildItem, so this discarded pipeline now
-        # runs the configuration body and must be kept. Not yet implemented; it is dropped.
         self._assertDiscardedCallKept(
             F'configuration Get-ChildItem {{ Start-Process notepad }}\n'
             F"Get-ChildItem 'Vbnmqz' | Out-Null\n{_ANCHOR}", 'Vbnmqz', 'Start-Process notepad')

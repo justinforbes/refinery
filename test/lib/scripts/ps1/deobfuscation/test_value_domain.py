@@ -149,26 +149,34 @@ class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
     def test_a_string_plus_a_boolean_is_the_text_the_boolean_is_written_as(self):
         self.assertEqual(self._deobfuscate("$x = 'a' + $true"), "$x = 'aTrue'")
 
-    @unittest.expectedFailure
     def test_a_string_plus_a_double_is_the_text_the_double_is_written_as(self):
         self.assertEqual(self._deobfuscate("$x = 'a' + 1.5"), "$x = 'a1.5'")
 
-    @unittest.expectedFailure
-    def test_an_equality_against_a_collection_filters_it(self):
-        self.assertEqual(self._deobfuscate('$x = 10, 20, 30 -eq 20'), '$x = @(20)')
+    def test_a_double_cast_to_a_string_is_the_dotnet_framework_text(self):
+        for source, expected in [
+            ("$x = [string]0.5", "$x = '0.5'"),
+            ("$x = [string]1E20", "$x = '1E+20'"),
+            ("$x = [string]0.0000001", "$x = '1E-07'"),
+            ("$x = [string]1.5E-7", "$x = '1.5E-07'"),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._deobfuscate(source), expected)
 
-    @unittest.expectedFailure
+    def test_an_equality_against_a_collection_filters_it(self):
+        self.assertEqual(self._deobfuscate('$x = 10, 20, 30 -eq 20'), '$x = ,20')
+
     def test_an_inequality_against_a_collection_filters_it(self):
         self.assertEqual(
             self._deobfuscate('$x = 10, 20, 30, 20, 10 -ne 20'),
             '$x = 10, 30, 10',
         )
 
-    @unittest.expectedFailure
     def test_the_count_of_null_is_zero(self):
         self.assertEqual(self._deobfuscate('$x = $null.Count'), '$x = 0')
 
-    @unittest.expectedFailure
+    def test_the_length_of_null_is_zero(self):
+        self.assertEqual(self._deobfuscate('$x = $null.Length'), '$x = 0')
+
     def test_the_count_of_an_empty_array_is_zero(self):
         self.assertEqual(self._deobfuscate('$x = @().Count'), '$x = 0')
 
@@ -217,24 +225,65 @@ class TestPs1ConstantsThatAreComputedWrong(TestPs1):
         self.assertEqual(self._deobfuscate('$x = 1 + [char]65'), '$x = 66')
 
     @unittest.expectedFailure
-    def test_indexing_a_string_yields_a_char(self):
+    def test_a_char_array_is_not_a_string(self):
+        """
+        5.1 answers this `$False`: a `Char[]` is not a `String`. The tool folds `[char[]](72, 73)`
+        to the String `'HI'` before the test runs, so `-is [string]` then sees a String and folds to
+        `$True`. The wrong answer is the char-array-to-string erasure surfacing through the operator,
+        not the operator itself, and the same erasure is what leaves the two `.Count` tests above
+        marked.
+        """
+        self.assertEqual(self._deobfuscate('$x = [char[]](72, 73) -is [string]'), '$x = $False')
+
+
+class TestPs1TheIsOperatorTestsTheRuntimeType(TestPs1):
+    """
+    `-is` and `-isnot` test the runtime type of the left operand against the type named on the
+    right, which the value domain answers from the base chain and interface set the type model
+    carries. The result is always a `System.Boolean`, so unlike the value grid there is no measured
+    cell to stamp; a left operand whose type is unknown, or a relation the model does not settle,
+    leaves the test standing rather than guessing. Every answer here is measured on a 5.1 host.
+    """
+
+    def test_a_char_indexed_out_of_a_string_is_a_char(self):
         self.assertEqual(self._deobfuscate("$x = 'ABC'[0] -is [char]"), '$x = $True')
 
-    @unittest.expectedFailure
-    def test_a_cast_to_char_yields_a_char(self):
+    def test_a_cast_to_char_is_a_char(self):
         self.assertEqual(self._deobfuscate('$x = [char]65 -is [char]'), '$x = $True')
 
-    @unittest.expectedFailure
     def test_a_one_character_string_is_not_a_char(self):
         self.assertEqual(self._deobfuscate("$x = 'A' -is [char]"), '$x = $False')
 
-    @unittest.expectedFailure
-    def test_a_char_array_is_not_a_string(self):
-        self.assertEqual(self._deobfuscate('$x = [char[]](72, 73) -is [string]'), '$x = $False')
-
-    @unittest.expectedFailure
     def test_a_string_is_a_string(self):
         self.assertEqual(self._deobfuscate("$x = 'HI' -is [string]"), '$x = $True')
+
+    def test_isnot_is_the_negation_of_is(self):
+        self.assertEqual(self._deobfuscate('$x = [char]65 -isnot [char]'), '$x = $False')
+        self.assertEqual(self._deobfuscate("$x = 'A' -isnot [char]"), '$x = $True')
+
+    def test_a_value_is_an_interface_its_type_implements(self):
+        self.assertEqual(self._deobfuscate("$x = 'A' -is [System.IComparable]"), '$x = $True')
+
+    def test_a_value_is_a_base_class_of_its_type(self):
+        self.assertEqual(self._deobfuscate('$x = 5 -is [ValueType]'), '$x = $True')
+
+    def test_a_value_is_not_a_sibling_type_in_the_hierarchy(self):
+        self.assertEqual(self._deobfuscate('$x = [byte]5 -is [int]'), '$x = $False')
+
+    def test_an_array_is_an_array_and_an_object_array(self):
+        self.assertEqual(self._deobfuscate('$x = (1, 2, 3) -is [array]'), '$x = $True')
+        self.assertEqual(self._deobfuscate('$x = (1, 2, 3) -is [object[]]'), '$x = $True')
+
+    def test_null_is_not_of_any_type(self):
+        self.assertEqual(self._deobfuscate('$x = $null -is [object]'), '$x = $False')
+        self.assertEqual(self._deobfuscate('$x = $null -isnot [object]'), '$x = $True')
+
+    def test_a_test_against_a_different_array_type_is_left_standing(self):
+        self.assertEqual(
+            self._deobfuscate('$x = (1, 2, 3) -is [string[]]'), '$x = (1, 2, 3) -Is [string[]]')
+
+    def test_a_test_of_an_operand_whose_type_is_unknown_is_left_standing(self):
+        self.assertEqual(self._deobfuscate('$x = $args -is [int]'), '$x = $args -Is [int]')
 
 
 class TestPs1TheLeftOperandOfPlusDecidesWhetherItConcatenates(TestPs1):
@@ -825,14 +874,12 @@ class TestPs1MembersTheObjectAdapterAddsToEveryValue(TestPs1):
     def test_a_member_that_does_not_exist_is_null(self):
         self.assertEqual(self._deobfuscate("$x = 'AB'.Zqnope"), '$x = $Null')
 
-    @unittest.expectedFailure
     def test_the_pstypenames_of_a_number_are_its_type_and_its_bases(self):
         self.assertEqual(
             self._deobfuscate('$x = (5).PSTypeNames'),
             "$x = 'System.Int32', 'System.ValueType', 'System.Object'",
         )
 
-    @unittest.expectedFailure
     def test_the_pstypenames_of_a_string_are_its_type_and_its_base(self):
         self.assertEqual(
             self._deobfuscate("$x = ('AB').PSTypeNames"),
@@ -842,6 +889,74 @@ class TestPs1MembersTheObjectAdapterAddsToEveryValue(TestPs1):
     def test_the_psobject_of_a_number_has_no_constant_spelling(self):
         source = '$x = (5).PSObject'
         self.assertEqual(self._deobfuscate(source), source)
+
+
+class TestPs1TheAdapterCountAndLengthThrowUnderStrictModeVersionTwo(TestPs1):
+    """
+    The `Count` and `Length` the object adapter fakes onto a scalar or `$null` are not real members,
+    so `Set-StrictMode -Version 2` turns reading one into a statement-terminating error where the
+    default semantics and `-Version 1` hand back the adapter's value. Measured on 5.1: under
+    `-Version 2` every `Count` and the `Length` of a non-String — `$null.Count`, `$null.Length`,
+    `'AB'.Count`, `(5).Length`, `([char]65).Length` — raises `PropertyNotFoundStrict`, while a real
+    member reads on, a `String`'s own `Length` and an array's own `Count` among them. Folding the
+    fake member to its value therefore hands `-Version 2` a number for a line that never produces
+    one and lets it decide a branch the script never reaches.
+
+    The fold stands down where
+    `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_v2_may_be_in_force` holds —
+    a version-sensitive sibling of `strict_mode_may_be_in_force`, which fires at `-Version 1` too
+    where the fold is correct. It gates only the faked members, so the real-member arms the three
+    passing rows pin are folded regardless.
+    """
+
+    def test_the_count_of_null_is_not_folded_under_strict_mode_v2(self):
+        self._assertDeobfuscatesTo(
+            'Set-StrictMode -Version 2\nWrite-Output $null.Count',
+            'Set-StrictMode -Version 2\nWrite-Output $Null.Count',
+        )
+
+    def test_the_count_of_a_scalar_is_not_folded_under_strict_mode_v2(self):
+        self._assertKept("Set-StrictMode -Version 2\nWrite-Output 'AB'.Count")
+
+    def test_the_count_of_null_is_still_folded_under_strict_mode_v1(self):
+        self._assertDeobfuscatesTo(
+            'Set-StrictMode -Version 1\nWrite-Output $null.Count',
+            'Set-StrictMode -Version 1\nWrite-Output 0',
+        )
+
+    def test_the_count_of_a_scalar_is_still_folded_under_strict_mode_v1(self):
+        self._assertDeobfuscatesTo(
+            "Set-StrictMode -Version 1\nWrite-Output 'AB'.Count",
+            'Set-StrictMode -Version 1\nWrite-Output 1',
+        )
+
+    def test_the_real_length_of_a_string_is_still_folded_under_strict_mode_v2(self):
+        self._assertDeobfuscatesTo(
+            "Set-StrictMode -Version 2\nWrite-Output 'AB'.Length",
+            'Set-StrictMode -Version 2\nWrite-Output 2',
+        )
+
+    def test_the_real_count_of_an_array_is_still_folded_under_strict_mode_v2(self):
+        self._assertDeobfuscatesTo(
+            'Set-StrictMode -Version 2\nWrite-Output (1, 2).Count',
+            'Set-StrictMode -Version 2\nWrite-Output 2',
+        )
+
+    def test_a_scalar_count_still_folds_under_set_psdebug_strict(self):
+        # `Set-PSDebug -Strict` is documented as `Set-StrictMode -Version 1`, under which the
+        # adapter's faked member reads on, so it does not gate the fold the way version 2 does.
+        self._assertDeobfuscatesTo(
+            "Set-PSDebug -Strict\nWrite-Output 'AB'.Count",
+            'Set-PSDebug -Strict\nWrite-Output 1',
+        )
+
+    def test_a_scalar_count_is_not_folded_when_version_two_is_armed_through_iex(self):
+        # The payload string is unwrapped into a real `Set-StrictMode -Version 2`, and the fold
+        # stays refused beneath it rather than being decided before the arming is seen.
+        self._assertDeobfuscatesTo(
+            "Invoke-Expression 'Set-StrictMode -Version 2'\nWrite-Output 'AB'.Count",
+            "Set-StrictMode -Version 2\nWrite-Output 'AB'.Count",
+        )
 
 
 class TestPs1ACharacterOfAStringIsACharAndNotAString(TestPs1):
@@ -885,19 +1000,17 @@ class TestPs1CountingACollectionSpelledSeveralWays(TestPs1):
     elements because the array operator unrolls what it is handed, while `,(1, 2)` holds the one
     collection the comma operator wrapped around the pair.
 
-    The tool answers every one of those spellings but the two that put a collection inside `@(...)`,
-    which it declines rather than answering as the scalar they are not.
+    The tool answers every one of those spellings, the two that put a collection inside `@(...)`
+    among them: it counts the elements the array operator unrolls rather than reading the receiver
+    as the scalar it is not.
     """
 
-    @unittest.expectedFailure
     def test_the_count_of_an_array_operator_around_an_array_is_the_inner_element_count(self):
         self.assertEqual(self._deobfuscate('$x = @(@(1, 2)).Count'), '$x = 2')
 
-    @unittest.expectedFailure
     def test_the_count_of_an_array_operator_around_a_comma_list_is_the_element_count(self):
         self.assertEqual(self._deobfuscate('$x = @((1, 2)).Count'), '$x = 2')
 
-    @unittest.expectedFailure
     def test_the_length_of_an_array_operator_around_an_array_is_the_inner_element_count(self):
         self.assertEqual(self._deobfuscate('$x = @(@(1, 2)).Length'), '$x = 2')
 

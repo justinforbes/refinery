@@ -117,7 +117,7 @@ def deobfuscate(
     return _pipeline.run(
         ast,
         max_steps=max_steps,
-        models=ModelCache(ast),
+        models=ModelCache(ast, options),
         options=options,
         observer=observer,
     )

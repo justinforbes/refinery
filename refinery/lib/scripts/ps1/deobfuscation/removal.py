@@ -19,6 +19,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     fault_is_observed,
 )
 from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ExpressionStatement,
@@ -166,6 +167,7 @@ class Ps1RemovalPlan:
         all_or_nothing: bool = False,
         *,
         faults: Ps1FaultReach | None,
+        world: Ps1WorldReach | None = None,
     ):
         """
         `faults` is the model the removal verdicts are reached against, and `None` says this plan
@@ -173,12 +175,20 @@ class Ps1RemovalPlan:
         verdict to reach and nothing to reach it with, and filing a removal against such a plan is
         refused at `propose` rather than let through unchecked. The one such caller is
         `refinery.lib.scripts.ps1.deobfuscation.substitution.substitute_statement`.
+
+        `world` is the second model the veto may need, and it is optional because only one half of
+        one question reads it: whether a variable read can raise depends on the semantics in force,
+        and a payload the analysis cannot read may change those. Without it that half is refused and
+        the veto asks the context-free question alone, which is what every pass got before the
+        world was offered — see
+        `refinery.lib.scripts.ps1.analysis.effects.expression_cannot_fault`.
         """
         self.parent = parent
         self.attr = attr
         self.removals_may_fault = removals_may_fault
         self.all_or_nothing = all_or_nothing
         self.faults = faults
+        self.world = world
         self._proposals: dict[int, _Proposal] = {}
 
     def propose(
@@ -332,7 +342,7 @@ class Ps1RemovalPlan:
             return faults.removing_a_handler_is_observed(proposal.statement)
         if not self.removals_may_fault:
             return False
-        return fault_is_observed(proposal.statement, faults)
+        return fault_is_observed(proposal.statement, faults, self.world)
 
     def _allowed(self) -> list[_Proposal]:
         """
@@ -421,8 +431,9 @@ class Ps1RemovalPlans:
     veto has nothing to say about them: it declines deletions, and none of these is one.
     """
 
-    def __init__(self, faults: Ps1FaultReach):
+    def __init__(self, faults: Ps1FaultReach, world: Ps1WorldReach | None = None):
         self.faults = faults
+        self.world = world
         #: Every plan this opens may remove, so unlike `Ps1RemovalPlan` there is no
         #: substitution-only spelling of this class: a caller holding one is a pass that deletes.
         self._plans: dict[tuple[int, str], Ps1RemovalPlan] = {}
@@ -467,7 +478,12 @@ class Ps1RemovalPlans:
         try:
             return self._plans[key]
         except KeyError:
-            plan = self._plans[key] = Ps1RemovalPlan(parent, attr, faults=self.faults)
+            plan = self._plans[key] = Ps1RemovalPlan(
+                parent,
+                attr,
+                faults=self.faults,
+                world=self.world,
+            )
             return plan
 
     def propose(

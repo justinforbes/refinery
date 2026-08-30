@@ -1616,22 +1616,22 @@ class TestPs1RepeatingACollectionByACountNoInt32Holds(TestPs1):
 
 class TestPs1AJoinIsFoldedOnlyWhereTheTextItAppendsIsWritten(TestPs1):
     """
-    A String or a Char on the left of `+` makes it join, whatever stands on the right of it.
-    Measured, `'5' + 5` is `55` and `'a' + 1.5` is `a1.5`, so a left operand that happens to spell a
-    number is still text and the join is still a join. The text of a Double is .NET's to write and
-    is not written here, so a join with one on its right has to be left where it stands: folding it
-    as arithmetic makes `'5' + 1.5` the Double 6.5, which is neither the value nor the type a run of
-    the script produces.
+    A String or a Char on the left of `+` makes it join, whatever stands on the right of it, and the
+    join folds wherever the text each side contributes is one this module writes. Measured, `'5' + 5`
+    is `55`, `'a' + 1.5` is `a1.5` and `[char]65 + 1` is `A1`: a left operand that happens to spell a
+    number is still text and the join is still a join. A Double on the right contributes its invariant
+    `[string]` text, which is written rather than folded as the arithmetic `'5' + 1.5` would misread —
+    the Double `6.5`, neither the value nor the type a run of the script produces.
     """
 
-    def test_a_string_that_spells_a_number_joined_with_a_double_is_left_where_it_stands(self):
-        self._assertUnchanged("$x = '5' + 1.5", Ps1ConstantFolding)
+    def test_a_string_that_spells_a_number_joined_with_a_double_is_the_text_of_both(self):
+        self.assertEqual(self._apply("$x = '5' + 1.5", Ps1ConstantFolding), "$x = '51.5'")
 
-    def test_the_empty_string_joined_with_a_double_is_left_where_it_stands(self):
-        self._assertUnchanged("$x = '' + 1.5", Ps1ConstantFolding)
+    def test_the_empty_string_joined_with_a_double_is_the_text_of_the_double(self):
+        self.assertEqual(self._apply("$x = '' + 1.5", Ps1ConstantFolding), "$x = '1.5'")
 
-    def test_a_char_joined_with_a_double_is_left_where_it_stands(self):
-        self._assertUnchanged('$x = [char]65 + 1.5', Ps1ConstantFolding)
+    def test_a_char_joined_with_a_double_is_the_text_of_both(self):
+        self.assertEqual(self._apply('$x = [char]65 + 1.5', Ps1ConstantFolding), "$x = 'A1.5'")
 
     def test_a_string_joined_with_a_number_written_here_is_the_text_of_both(self):
         self.assertEqual(self._apply("$x = '5' + 5", Ps1ConstantFolding), "$x = '55'")
@@ -1639,12 +1639,8 @@ class TestPs1AJoinIsFoldedOnlyWhereTheTextItAppendsIsWritten(TestPs1):
     def test_a_char_joined_with_a_number_written_here_is_the_text_of_both(self):
         self.assertEqual(self._apply('$x = [char]65 + 1', Ps1ConstantFolding), "$x = 'A1'")
 
-    def test_the_pipeline_folds_the_join_it_writes_and_keeps_the_one_it_does_not(self):
-        kept = inspect.cleandoc("""
-            $x = '5' + 1.5
-            Write-Output $x
-        """)
-        self.assertEqual(self._deobfuscate("$x = '5' + 1.5; Write-Output $x"), kept)
+    def test_the_pipeline_folds_a_join_with_a_double_as_it_folds_one_with_an_integer(self):
+        self.assertEqual(self._deobfuscate("$x = '5' + 1.5; Write-Output $x"), "Write-Output '51.5'")
         self.assertEqual(self._deobfuscate("$x = '5' + 5; Write-Output $x"), "Write-Output '55'")
 
 
@@ -1654,9 +1650,10 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
     leaves behind is determined and the reads below it can be answered. Measured on 5.1, the three
     scripts here print `2` and `1`, then `a`, then an empty line and `2` and `3`.
 
-    None of the three is answered today, and each is a refusal rather than a wrong answer: the
-    emitted script is the input. The entries are marked so that a rule taking one of these folds
-    reports an unexpected success, and so that none of them can quietly stop being true meanwhile.
+    The clear is answered; the reversal reached through an element and the sort of a shared type are
+    each still a refusal rather than a wrong answer: the emitted script is the input. Their entries
+    are marked so that a rule taking one of those folds reports an unexpected success, and so that
+    neither can quietly stop being true meanwhile.
     """
 
     @unittest.expectedFailure
@@ -1691,7 +1688,6 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
         """)
         self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
 
-    @unittest.expectedFailure
     def test_a_clear_over_a_range_that_fits_empties_the_elements_it_covers(self):
         source = inspect.cleandoc("""
             $x = 1, 2, 3
@@ -1728,23 +1724,26 @@ class TestPs1AMutatingCallAndItsStoreGoWhereNoReadObservesThem(TestPs1):
 
 class TestPs1AConstraintOnAVariableConvertsWhatIsWrittenToIt(TestPs1):
     """
-    `[string]$q = 5` constrains the variable rather than that one assignment, so every later write
-    to `$q` arrives converted to a String. Measured on 5.1, `$q = 1, 2, 3` leaves the String `1 2 3`
-    whose `Length` is 5, and `$q += 'a'` leaves the String `5a`.
+    `[string]$q = 5` constrains the variable rather than that one assignment, so the value a write
+    leaves under `$q` is converted to the constrained type. Measured on 5.1, `[string]$q = 5` leaves
+    the String `5`, `$q += 'a'` accumulates the String `5a` from it, and `$q = 1, 2, 3` leaves the
+    String `1 2 3` whose `Length` is 5.
 
-    Neither is answered today, so both entries are marked.
+    The declaring write is answered — the cast that installs the constraint is the cast that converts
+    the value stored there — and the compound write follows from it. A plain later write to a
+    collection stays marked: a plain write is not where the constraint settles without an ordering
+    the model does not carry, and a collection to a String is a conversion the value domain refuses
+    because it needs the session's `$OFS`.
     """
 
-    @unittest.expectedFailure
-    def test_a_later_write_to_a_constrained_variable_arrives_as_the_constrained_type(self):
-        source = inspect.cleandoc("""
-            [string]$q = 5
-            $q = 1, 2, 3
-            Write-Output $q.Length
-        """)
-        self.assertEqual(self._deobfuscate(source), 'Write-Output 5')
+    def test_a_declaring_write_stores_the_converted_scalar(self):
+        self.assertEqual(
+            self._deobfuscate('[string]$q = 5\nWrite-Output $q'), "Write-Output '5'")
 
-    @unittest.expectedFailure
+    def test_a_declaring_write_parses_a_string_to_its_constrained_number(self):
+        self.assertEqual(
+            self._deobfuscate("[int]$n = '5'\nWrite-Output ($n + 1)"), 'Write-Output 6')
+
     def test_a_compound_write_to_a_constrained_variable_arrives_as_the_constrained_type(self):
         # The comma keeps the one object it wraps, so what 5.1 writes there is the String itself
         # and not the elements a collection would have been unrolled into.
@@ -1754,6 +1753,15 @@ class TestPs1AConstraintOnAVariableConvertsWhatIsWrittenToIt(TestPs1):
             Write-Output (,$q)
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output (,'5a')")
+
+    @unittest.expectedFailure
+    def test_a_later_write_to_a_constrained_variable_arrives_as_the_constrained_type(self):
+        source = inspect.cleandoc("""
+            [string]$q = 5
+            $q = 1, 2, 3
+            Write-Output $q.Length
+        """)
+        self.assertEqual(self._deobfuscate(source), 'Write-Output 5')
 
 
 class TestPs1AScopeQualifierNamesTheBindingItsBareSpellingNames(TestPs1):
@@ -1798,6 +1806,32 @@ class TestPs1AScopeQualifierNamesTheBindingItsBareSpellingNames(TestPs1):
             self._deobfuscate("$script:s = 'x'; Write-Output $s"), "Write-Output 'x'")
 
 
+class TestPs1AnOperatorOverANameWrittenUnderAQualifierFoldsAsIfItWereNull(TestPs1):
+    """
+    The soundness half of the defect the class above pins the recall half of. A value written under
+    `$script:` or `$global:` is filed against neither the bare name nor the qualified one, so a later
+    bare read is modelled as a variable no scope ever wrote — `$null` — and not as one whose value is
+    merely unknown. Where the bare read stands alone the loss is the withheld fold above; where an
+    operator reaches it the `$null` is a value, and the operator folds to the wrong one. Measured on
+    5.1, the three scripts here write `6`, `165` and `12`; the tool writes `1`, `255` and `$null`.
+
+    The `-bxor` row is what makes this a soundness bug rather than a curiosity: a key held in a
+    module-scoped variable is how a loader hides one, and folding it as `$null` hands back a
+    plaintext that never ran. Each row is marked so that wiring the qualifier through reports an
+    unexpected success, which is the same fix the class above waits on.
+    """
+
+    @unittest.expectedFailure
+    def test_a_bare_read_of_a_qualified_written_name_is_not_folded_as_null(self):
+        for source, expected in [
+            ('$script:q = 5; Write-Output ($q + 1)', 'Write-Output 6'),
+            ('$script:k = 0x5A; Write-Output (0xFF -bxor $k)', 'Write-Output 165'),
+            ('$global:n = 3; Write-Output ($n * 4)', 'Write-Output 12'),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._deobfuscate(source), expected)
+
+
 class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
     """
     `$x op= e` stores what `$x = $x op e` stores, and the long spelling is folded today while the
@@ -1824,22 +1858,18 @@ class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output 'abc'")
 
-    @unittest.expectedFailure
     def test_an_added_number_is_the_sum(self):
         self.assertEqual(
             self._deobfuscate('$n = 1; $n += 2; Write-Output $n'), 'Write-Output 3')
 
-    @unittest.expectedFailure
     def test_a_subtracted_number_is_the_difference(self):
         self.assertEqual(
             self._deobfuscate('$n = 5; $n -= 2; Write-Output $n'), 'Write-Output 3')
 
-    @unittest.expectedFailure
     def test_an_incremented_number_is_the_next_one(self):
         self.assertEqual(
             self._deobfuscate('$n = 1; $n++; Write-Output $n'), 'Write-Output 2')
 
-    @unittest.expectedFailure
     def test_appended_text_is_the_text_of_every_append(self):
         source = inspect.cleandoc("""
             $s = 'a'
@@ -1849,7 +1879,6 @@ class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), "Write-Output 'abc'")
 
-    @unittest.expectedFailure
     def test_a_command_accumulated_by_appending_is_run_where_it_was_built(self):
         source = inspect.cleandoc("""
             $c = 'Write-Out'
@@ -1857,6 +1886,40 @@ class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
             Invoke-Expression $c
         """)
         self.assertEqual(self._deobfuscate(source), 'Write-Output 5')
+
+
+class TestPs1AnIncrementNeedsANumberAndIsNotTheBinarySum(TestPs1):
+    """
+    `$x++` and `$x--` are not the binary `$x + 1` and `$x - 1` their long spelling would be: 5.1 adds
+    the delta to `$null` and to any numeric value, but throws `OperatorRequiresNumber` for a String,
+    a Char, a Boolean or a collection — where the binary `+` concatenates a String and reads a
+    Boolean as an integer instead. So the increment folds only where the operand is a number, and
+    stands no value where 5.1 raised rather than computing a sum the operator never reaches.
+    """
+
+    def test_incrementing_a_number_is_the_next_one(self):
+        self.assertEqual(self._deobfuscate('$x = 5; $x++; Write-Output $x'), 'Write-Output 6')
+
+    def test_decrementing_a_number_is_the_previous_one(self):
+        self.assertEqual(self._deobfuscate('$x = 5; $x--; Write-Output $x'), 'Write-Output 4')
+
+    def test_incrementing_null_is_one(self):
+        self.assertEqual(self._deobfuscate('$x = $null; $x++; Write-Output $x'), 'Write-Output 1')
+
+    def test_incrementing_a_string_is_not_folded_to_a_concatenation(self):
+        self.assertEqual(
+            self._deobfuscate('$x = "5"; $x++; Write-Output $x'),
+            '$x = "5"\n$x++\nWrite-Output $x')
+
+    def test_incrementing_a_char_is_not_folded(self):
+        self.assertEqual(
+            self._deobfuscate('$x = [char]65; $x++; Write-Output $x'),
+            '$x = [char]65\n$x++\nWrite-Output $x')
+
+    def test_incrementing_a_boolean_is_not_folded_to_the_sum_of_its_integer(self):
+        self.assertEqual(
+            self._deobfuscate('$x = $true; $x++; Write-Output $x'),
+            '$x = $True\n$x++\nWrite-Output $x')
 
 
 class TestPs1ASharedArrayIsOneOnlyBetweenTheAliasAndTheNextRebinding(TestPs1):
@@ -2350,8 +2413,9 @@ class TestPs1AValueNoStoreCanReachFoldsBesideAnObjectAStoreDoes(TestPs1):
     A String, an Int32 and a Char have no identity a store reaches: nothing a script does to an
     object it holds elsewhere changes what one of them is. So the constants standing beside an array
     the script turns around, or writes an element of, still fold into the positions that store them
-    — an accumulation, a key of a hashtable literal, a slot of a multi-assignment — and the array
-    keeps its name where the call that writes through it stands.
+    — a key of a hashtable literal and a slot of a multi-assignment keep the container they fold
+    into, while an accumulation folds on through to the value it leaves — and the array keeps its
+    name where the call that writes through it stands.
     """
 
     def test_a_string_folds_into_an_accumulation_beside_an_array_that_is_reversed(self):
@@ -2366,9 +2430,7 @@ class TestPs1AValueNoStoreCanReachFoldsBesideAnObjectAStoreDoes(TestPs1):
         expected = inspect.cleandoc("""
             $b = 1, 2, 3
             [Array]::Reverse($b)
-            $t = ''
-            $t += 'abc'
-            Write-Output $t
+            Write-Output 'abc'
         """)
         self.assertEqual(self._deobfuscate(source), expected)
 

@@ -7,10 +7,12 @@ from refinery.lib.scripts.ps1.analysis.blocks import (
     Ps1BlockIteration,
     Ps1BlockReach,
     Ps1BlockScope,
+    binds_the_pipeline_variable,
     build_block_model,
 )
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
-from refinery.lib.scripts.ps1.model import Ps1ScriptBlock
+from refinery.lib.scripts.ps1.analysis.world import measure_world
+from refinery.lib.scripts.ps1.model import Ps1FunctionDefinition, Ps1ScriptBlock
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -248,3 +250,109 @@ class TestPs1BlockFactsReachCycleModel(TestBase):
 
     def test_a_block_written_inside_a_loop_repeats_with_the_loop_around_it(self):
         self.assertTrue(self._repeats("while ($c) { & { $x = 'b' } }"))
+
+
+class TestPs1AnIteratingCommandRunsOnlyTheBlocksItIsHandedToRun(TestBase):
+    """
+    Measured on Windows PowerShell 5.1. `ForEach-Object -InputObject { 'RAN' }` never runs the
+    block: it reports `ScriptBlockArgumentNoInput` and the block's text is never evaluated.
+    `1, 2 | ForEach-Object { 'B' } { 'P' } { 'E' }` writes `B P P E`, so three positional blocks are
+    `begin`, `process` and `end`, and only the middle one sees each object.
+    `1, 2 | ForEach-Object -Begin { "[$_]" } -Process { "[$_]" }` writes `[]`, `[1]`, `[2]`.
+    """
+
+    @staticmethod
+    def _blocks(source: str):
+        tree = Ps1Parser(source).parse()
+        found = [node for node in tree.walk() if isinstance(node, Ps1ScriptBlock)]
+        return build_block_model(tree), sorted(found, key=lambda node: node.offset)
+
+    def test_a_block_handed_to_a_data_slot_has_no_site(self):
+        blocks, found = self._blocks("ForEach-Object -InputObject { 'x' }")
+        self.assertIs(blocks.facts(found[0]).reach, Ps1BlockReach.UNKNOWN)
+        self.assertIsNone(blocks.facts(found[0]).site)
+
+    def test_a_named_process_block_has_the_command_as_its_site(self):
+        blocks, found = self._blocks("1, 2 | ForEach-Object -Process { $_ }")
+        facts = blocks.facts(found[0])
+        self.assertIs(facts.reach, Ps1BlockReach.IMMEDIATE)
+        self.assertIsNotNone(facts.site)
+
+    def test_only_the_first_of_three_positional_blocks_is_placed(self):
+        blocks, found = self._blocks("1, 2 | ForEach-Object { 'B' } { 'P' } { 'E' }")
+        placed = [blocks.facts(block).reach is Ps1BlockReach.IMMEDIATE for block in found]
+        self.assertEqual(placed, [True, False, False])
+
+    def test_a_lone_positional_block_binds_the_current_object(self):
+        blocks, found = self._blocks("1, 2 | ForEach-Object { $_ }")
+        self.assertIsNotNone(binds_the_pipeline_variable(found[0]))
+
+    def test_a_begin_block_binds_no_current_object_beside_a_process_block_that_does(self):
+        blocks, found = self._blocks(
+            '1, 2 | ForEach-Object -Begin { "[$_]" } -Process { "[$_]" }')
+        self.assertIsNone(binds_the_pipeline_variable(found[0]))
+        self.assertIsNotNone(binds_the_pipeline_variable(found[1]))
+
+    def test_a_where_object_filter_binds_the_current_object(self):
+        blocks, found = self._blocks("1, 2 | Where-Object { $_ -gt 1 }")
+        self.assertIsNotNone(binds_the_pipeline_variable(found[0]))
+
+    def test_a_block_beside_another_positional_block_binds_nothing(self):
+        blocks, found = self._blocks("1, 2 | ForEach-Object { 'B' } { 'P' } { 'E' }")
+        self.assertEqual([binds_the_pipeline_variable(block) for block in found], [None] * 3)
+
+    def test_a_member_name_makes_the_positional_block_an_argument_rather_than_a_body(self):
+        """
+        Measured on 5.1: `1, 2 | ForEach-Object -MemberName ToString { Write-Host 'BLOCK_RAN' }`
+        writes the block's own text twice — it is handed to `ToString` as an argument and never run.
+        `ForEach-Object -InputObject 5 { Write-Host "P:$_" }` does run the block and writes `P:5`,
+        so what tells the two apart is the parameter *set* each written name selects.
+        """
+        blocks, found = self._blocks("1, 2 | ForEach-Object -MemberName ToString { 'x' }")
+        self.assertIs(blocks.facts(found[0]).reach, Ps1BlockReach.UNKNOWN)
+
+
+class TestPs1AShadowedIteratingCommandRunsItsOwnBodyNotTheBlock(TestBase):
+    """
+    Measured on Windows PowerShell 5.1 (`5.1.26100.9168`). A script that redefines `ForEach-Object`
+    with a `function` runs that body where the block would otherwise run, and `%` follows the same
+    redefinition because it resolves to `ForEach-Object`:
+
+        function ForEach-Object { 'HIJACK' }
+        1, 2 | % { $_ * 2 }        # writes HIJACK, not 2 4
+
+    A `function foreach` binds the separate `foreach` name that the built-in keyword outranks, so it
+    does not take over `ForEach-Object` — `1, 2 | ForEach-Object { $_ * 2 }` still writes `2 4`.
+    """
+
+    def _pipeline_block(self, source: str):
+        tree = Ps1Parser(source).parse()
+        shadowed = measure_world(tree).world.shadowed_names
+        blocks = build_block_model(tree, shadowed)
+        pipeline_block = next(
+            node for node in tree.walk()
+            if isinstance(node, Ps1ScriptBlock)
+            and not isinstance(node.parent, Ps1FunctionDefinition))
+        return blocks, pipeline_block, shadowed
+
+    def test_a_function_redefinition_makes_the_body_unplaced(self):
+        blocks, block, _ = self._pipeline_block(
+            "function ForEach-Object { 'HIJACK' }\n1, 2 | ForEach-Object { $_ * 2 }")
+        self.assertIs(blocks.facts(block).reach, Ps1BlockReach.UNKNOWN)
+
+    def test_the_percent_alias_follows_the_redefinition_of_foreach_object(self):
+        blocks, block, shadowed = self._pipeline_block(
+            "function ForEach-Object { 'HIJACK' }\n1, 2 | % { $_ * 2 }")
+        self.assertIs(blocks.facts(block).reach, Ps1BlockReach.UNKNOWN)
+        self.assertIsNone(binds_the_pipeline_variable(block, shadowed))
+
+    def test_a_body_of_an_unshadowed_command_is_still_placed(self):
+        blocks, block, shadowed = self._pipeline_block("1, 2 | % { $_ * 2 }")
+        self.assertIs(blocks.facts(block).reach, Ps1BlockReach.IMMEDIATE)
+        self.assertIsNotNone(binds_the_pipeline_variable(block, shadowed))
+
+    def test_a_redefinition_of_the_foreach_keyword_does_not_take_over_foreach_object(self):
+        blocks, block, shadowed = self._pipeline_block(
+            "function foreach { 'HIJACK' }\n1, 2 | ForEach-Object { $_ * 2 }")
+        self.assertIs(blocks.facts(block).reach, Ps1BlockReach.IMMEDIATE)
+        self.assertIsNotNone(binds_the_pipeline_variable(block, shadowed))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import unittest
+
 from inspect import cleandoc
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
@@ -605,6 +607,77 @@ class TestPs1BareOutputIsStrippedByDefault(TestPs1):
         result = self._deobfuscate(F"function Qzmr {{ 'Xtjbnwqm' }}\nQzmr\n{_ANCHOR}")
         self.assertNotIn('Xtjbnwqm', result)
         self.assertIn('ANCHOR', result)
+
+
+class TestPs1AReadThatConsumesWhatItReadsIsNotBareOutput(TestPs1):
+    """
+    Stripping bare output gives away what the console would have seen, and nothing else. `$input`
+    reads the enumerator over a function's pipeline input and advances it, so deleting the read
+    changes what the statements *below* it write — output the switch was never offered.
+    Measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`: with the bare read present the
+    pipeline below it writes nothing, and with `[void]$input` in its place, which does not
+    enumerate, it writes both.
+    """
+
+    def _assertBareStatementSurvives(self, statement: str, survives: bool) -> None:
+        body = F"""
+            function Qzmr {{
+              {statement}
+              $Input | ForEach-Object {{ Write-Host "seen:$_" }}
+            }}
+            1, 2 | Qzmr
+        """
+        self._assertDeobfuscatesTo(body, body if survives else """
+            function Qzmr {
+              $Input | ForEach-Object { Write-Host "seen:$_" }
+            }
+            1, 2 | Qzmr
+        """)
+
+    def test_a_bare_read_of_the_enumerator_is_kept(self):
+        self._assertBareStatementSurvives('$Input', survives=True)
+
+    def test_a_bare_literal_beside_it_is_still_stripped(self):
+        self._assertBareStatementSurvives("'Xtjbnwqm'", survives=False)
+
+
+class TestPs1StrippingBareOutputDoesNotAlsoStripWhatProducedIt(TestPs1):
+    """
+    Stripping bare output is a claim about the console and nothing else: the value is not the
+    artifact, but the command that produced it is what an analyst opened the listing to read. While
+    a bare `$x` was kept, the store above it had a reader and survived; now the read goes and the
+    store dies with it, so a pure command whose value is only ever echoed leaves no trace at all.
+
+    An impure producer still survives as a discard — `$c = (New-Object Net.WebClient).Download...`
+    becomes `$Null = ...` — which is the shape this asks for, and the reason the loss is a gap in
+    one rule rather than the intent of the switch.
+    """
+
+    # Not a self-contained fix: demoting the dead store to `$Null = Get-Content` (in `unused.py`)
+    # is not enough — junk removal then deletes that discard, because `Get-Content` is pure and its
+    # uncaught root-scope fault is not `fault_is_observed`. Retiring this needs the ledgered
+    # "removal deletes an uncaught root-scope fault" family (see removal-observability), or reclassifying
+    # such command producers as effectful; both are wide changes, not one increment.
+    @unittest.expectedFailure
+    def test_a_pure_command_whose_value_is_only_echoed_survives_as_a_discard(self):
+        self._assertDeobfuscatesTo(F"""
+            $q = Get-Content zzq.txt
+            $q
+            {_ANCHOR}
+        """, F"""
+            $Null = Get-Content zzq.txt
+            {_ANCHOR}
+        """)
+
+    def test_an_impure_command_in_the_same_shape_already_does(self):
+        self._assertDeobfuscatesTo(F"""
+            $q = (New-Object Net.WebClient).DownloadString('http://zzq/a')
+            $q
+            {_ANCHOR}
+        """, F"""
+            $Null = (New-Object Net.WebClient).DownloadString('http://zzq/a')
+            {_ANCHOR}
+        """)
 
 
 class TestPs1BareOutputIsKeptWhenAsked(TestPs1):
@@ -1841,29 +1914,57 @@ class TestPs1ALeakTheGraphCannotPlaceKeepsEveryRead(TestPs1):
             """))
 
 
-class TestPs1ANestedBodyReadIsRefusedWhileTheWorldIsOpen(TestPs1):
+class TestPs1ANestedBodyReadTakesThePositionOfWhatRunsIt(TestPs1):
     """
-    A read written inside a script block or function body is refused wholesale while the world is
-    open: a body may be entered again by a later call, so the intraprocedural graph cannot order a
-    read inside it against a leak. A nested-body read ahead of the leak in source is therefore kept
-    even though the root read beside it, which the graph does order, is deleted. The nested read is
-    genuinely strippable — a leak-free script strips it — so its survival is the refusal and nothing
-    else.
+    A body the statement around it runs where it is written — `& { }`, a `ForEach-Object` block —
+    is evaluated while that statement runs and at no other time, so a read inside it is ordered
+    against a leak exactly as the statement is. A body something *keeps* is refused wholesale: it
+    may be entered again by a later call, and the intraprocedural graph does not order a read
+    inside it against anything.
     """
 
-    def test_a_nested_body_read_is_kept_while_the_root_read_ahead_of_the_leak_is_deleted(self):
+    def test_a_read_in_an_invoked_body_ahead_of_the_leak_is_deleted(self):
         self.assertEqual(
             self._deobfuscate(cleandoc("""
                 & { $Null = [Math]::Sqrt(144) }
-                $Null = [Math]::Sqrt(121)
                 Invoke-Expression $c
                 Write-Host done
             """)),
             cleandoc("""
+                & {}
+                Invoke-Expression $c
+                Write-Host done
+            """))
+
+    def test_the_same_read_below_the_leak_is_kept(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                Invoke-Expression $c
+                & { $Null = [Math]::Sqrt(144) }
+                Write-Host done
+            """)),
+            cleandoc("""
+                Invoke-Expression $c
                 & {
                   $Null = [Math]::Sqrt(144)
                 }
+                Write-Host done
+            """))
+
+    def test_a_read_in_a_stored_body_is_kept_ahead_of_the_leak(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                $b = { $Null = [Math]::Sqrt(144) }
                 Invoke-Expression $c
+                & $b
+                Write-Host done
+            """)),
+            cleandoc("""
+                $b = {
+                  $Null = [Math]::Sqrt(144)
+                }
+                Invoke-Expression $c
+                & $b
                 Write-Host done
             """))
 
@@ -1930,3 +2031,43 @@ class TestPs1AScriptThatNamesItsOwnPathIsRefusedWhole(TestPs1):
         self.assertEqual(
             self._deobfuscate('$Null = [Math]::Sqrt(144); Write-Host $PSCommandPath'),
             'Write-Host $PSCommandPath')
+
+
+class TestPs1AHandlerElsewhereDoesNotGuardABodyTheStatementItselfRuns(TestPs1):
+    """
+    An error raised inside a `ForEach-Object` body leaves that body and arrives where the statement
+    holding it raises, so a `try` written elsewhere in the file is no reason to keep the statement:
+    the statement's own position already answers where its errors go, and a body that is kept rather
+    than run is not reached at all once the statement building it is gone.
+    """
+
+    def test_a_discarded_pipeline_is_removed_beside_an_unrelated_handler(self):
+        self.assertEqual(
+            self._deobfuscate(cleandoc("""
+                $zzq = 1, 2 | ForEach-Object { Get-Random }
+                try {
+                  Write-Host A
+                } catch {
+                  Write-Host B
+                }
+            """)),
+            cleandoc("""
+                try {
+                  Write-Host A
+                } catch {
+                  Write-Host B
+                }
+            """))
+
+    def test_the_same_pipeline_is_kept_under_a_handler_that_stands_over_it(self):
+        guarded = cleandoc("""
+            try {
+              $zzq = 1, 2 | ForEach-Object {
+                Get-Random
+              }
+              Write-Host A
+            } catch {
+              Write-Host B
+            }
+        """)
+        self.assertEqual(self._deobfuscate(guarded), guarded)

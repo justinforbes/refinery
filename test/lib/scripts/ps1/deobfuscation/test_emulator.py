@@ -1201,15 +1201,18 @@ class TestPs1ANumeralWithAMultiplierSuffixIsAnIntegerAndNotAFraction(TestPs1):
 
 class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
     """
-    Each answer below is reached only through a body the tool emulates, and each is computed by a
-    rule 5.1 does not follow: a size string that Python's integer syntax reads and .NET's converter
-    throws on, a Double written the way `str` writes it rather than the way .NET writes it, and a
-    name the body never binds, whose value 5.1 takes from the caller and the interpreter reads as
-    `$null`.
+    Each answer below is reached only through a body the tool emulates, and each turns on a rule 5.1
+    follows and Python does not: a size string that Python's integer syntax reads and .NET's
+    converter throws on, a Double written the way `str` writes it rather than the way .NET writes it,
+    and a name the body never binds, whose value 5.1 takes from the caller so the fold is declined
+    rather than read as the `$null` an isolated body would read.
     """
 
     @unittest.expectedFailure
-    def test_an_array_size_5_1_cannot_convert_is_not_folded_to_a_count(self):
+    def test_a_new_object_size_that_cannot_convert_folds_to_a_null_count_of_zero(self):
+        # A size 5.1's converter refuses is a non-terminating error and not a throw, so `New-Object`
+        # writes `$null` and the body runs on. `$null.Count` is 0 wherever strict mode is not armed,
+        # which is the value the whole body folds to.
         for size in ['0b10', '0o10']:
             source = cleandoc(F"""
                 function f {{
@@ -1219,7 +1222,7 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
                 Write-Output (f)
             """)
             with self.subTest(size):
-                self.assertEqual(self._deobfuscate(source), source)
+                self.assertEqual(self._deobfuscate(source), 'Write-Output 0')
 
     def test_an_array_size_5_1_can_convert_is_folded_to_the_count_it_names(self):
         source = cleandoc("""
@@ -1231,8 +1234,10 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), 'Write-Output 2')
 
-    @unittest.expectedFailure
     def test_a_double_becomes_the_text_5_1_writes_it_as(self):
+        # A `[string]` of a double *literal* is folded by the value domain before emulation; a double
+        # the body is handed reaches the interpreter's own coercion, which now writes the same
+        # .NET-Framework text the value domain does — `1E+20` and `1E-07`, not Python's `str`.
         for numeral, text in [
             ('1E20', '1E+20'),
             ('0.0000001', '1E-07'),
@@ -1240,25 +1245,61 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
         ]:
             source = cleandoc(F"""
                 function f {{
-                  [string]{numeral}
+                  $a = {numeral}
+                  [string]$a
                 }}
                 Write-Output (f)
             """)
             with self.subTest(numeral):
                 self.assertEqual(self._deobfuscate(source), F"Write-Output '{text}'")
 
-    @unittest.expectedFailure
+    def test_a_double_in_a_current_culture_context_is_kept_not_folded(self):
+        # The `[string]` cast is culture-invariant, so the text a Double casts to is one this unit can
+        # write. Its interpolation and its `.ToString()` render with the *current* culture instead —
+        # a decimal comma writes `1,5` where the cast writes `1.5` — which is a text no session pins,
+        # so the body is left standing rather than folded to the one culture Python happens to write.
+        for body in ['"$a"', '$a.ToString()']:
+            with self.subTest(body):
+                self._assertKept(F"""
+                    function f {{
+                      $a = 1E20
+                      {body}
+                    }}
+                    Write-Output (f)
+                """)
+
     def test_an_expression_over_a_name_the_body_does_not_bind_is_not_folded(self):
-        # The caller writes a value no tool can know, so there is no number to fold the sum to;
-        # every answer here is one the reader of `$q` was never entitled to.
-        source = cleandoc("""
-            $q = $env:Temp
-            function f {
-              $q + 1
-            }
-            Write-Output (f)
-        """)
-        self.assertEqual(self._deobfuscate(source), source)
+        # The script writes `$q`, so a body that reads it takes the caller's value 5.1 gives it and
+        # not the `$null` an isolated fold would read: `$env:Temp + 1` is a concatenation, `5 + 1` is
+        # `6` and not the `1` a `$null` reads, and a read before the body's own write reaches the
+        # caller too. Every one of these is a fold the reader of `$q` was never entitled to take.
+        for source in [
+            cleandoc("""
+                $q = $env:Temp
+                function f {
+                  $q + 1
+                }
+                Write-Output (f)
+            """),
+            cleandoc("""
+                $q = 5
+                function f {
+                  $q + 1
+                }
+                Write-Output (f)
+            """),
+            cleandoc("""
+                $q = 5
+                function f {
+                  $y = $q
+                  $q = 1
+                  $y
+                }
+                Write-Output (f)
+            """),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._deobfuscate(source), source)
 
     def test_an_expression_over_a_name_the_body_binds_itself_is_folded(self):
         source = cleandoc("""
@@ -1323,17 +1364,21 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), "$x = 'b'")
 
-    @unittest.expectedFailure
     def test_a_split_limit_leaves_the_rest_of_the_string_in_the_final_element(self):
-        for tail, expected in [('$a.Count', '$x = 2'), ('$a[1]', "$x = 'b,c'")]:
+        for split, tail, expected in [
+            ("'a,b,c' -split ',', 2", '$a.Count', '$x = 2'),
+            ("'a,b,c' -split ',', 2", '$a[1]', "$x = 'b,c'"),
+            ("'a,b,c,d' -split ',', 2", '$a[1]', "$x = 'b,c,d'"),
+            ("'a,b,c' -split ',', 5", '$a.Count', '$x = 3'),
+        ]:
             source = cleandoc(F"""
                 function f {{
-                  $a = 'a,b,c' -split ',', 2
+                  $a = {split}
                   {tail}
                 }}
                 $x = f
             """)
-            with self.subTest(tail):
+            with self.subTest(F'{split} {tail}'):
                 self.assertEqual(self._deobfuscate(source), expected)
 
     def test_a_case_prefix_on_a_string_comparison_compares_the_way_it_names(self):
@@ -1350,20 +1395,28 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
             with self.subTest(comparison):
                 self.assertEqual(self._deobfuscate(source), F'$x = {expected}')
 
-    @unittest.expectedFailure
     def test_a_case_prefix_on_a_comparison_of_numbers_compares_them_all_the_same(self):
         """
-        The prefix names how *text* is compared, so it makes no difference between two numbers and
-        `-ceq` answers what `-eq` answers. The grid carries no row for a prefixed operator at all,
-        which is why the string forms above fold and this one does not.
+        The prefix names how *text* is compared, so it makes no difference between two numbers —
+        `-ceq` answers what `-eq` answers — and two Chars an ordering reads by their code points are
+        numbers here too.
         """
-        source = cleandoc("""
-            function f {
-              1 -ceq 1
-            }
-            $x = f
-        """)
-        self.assertEqual(self._deobfuscate(source), '$x = $True')
+        for comparison, expected in [
+            ('1 -ceq 1', '$True'),
+            ('1 -ine 1', '$False'),
+            ('2 -cgt 1', '$True'),
+            ('1 -ilt 2', '$True'),
+            ('[char]97 -clt [char]66', '$False'),
+            ('[char]65 -ilt [char]97', '$True'),
+        ]:
+            source = cleandoc(F"""
+                function f {{
+                  {comparison}
+                }}
+                $x = f
+            """)
+            with self.subTest(comparison):
+                self.assertEqual(self._deobfuscate(source), F'$x = {expected}')
 
 
 class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
@@ -1377,7 +1430,6 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
     read no digit group separator and answer InvalidCastFromStringToInteger instead.
     """
 
-    @unittest.expectedFailure
     def test_an_increment_the_short_circuit_skips_never_happens(self):
         for condition in ['$false -and ($i++)', '$true -or ($i++)']:
             source = cleandoc(F"""
@@ -1391,16 +1443,22 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
             with self.subTest(condition):
                 self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 0')
 
-    @unittest.expectedFailure
     def test_a_collection_of_one_is_as_true_as_the_single_element_it_holds(self):
-        source = cleandoc("""
-            function f {
-              $a = @(0)
-              if ($a) { 'yes' } else { 'no' }
-            }
-            $x = f
-        """)
-        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'no'")
+        for element, expected in [
+            ('0', 'no'),
+            ('1', 'yes'),
+            ("''", 'no'),
+            ("'x'", 'yes'),
+        ]:
+            source = cleandoc(F"""
+                function f {{
+                  $a = @({element})
+                  if ($a) {{ 'yes' }} else {{ 'no' }}
+                }}
+                $x = f
+            """)
+            with self.subTest(element):
+                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), F"$x = '{expected}'")
 
     def test_a_collection_of_two_is_true_however_its_elements_read(self):
         source = cleandoc("""
@@ -1412,9 +1470,15 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'yes'")
 
-    @unittest.expectedFailure
     def test_contains_converts_the_value_it_is_given_to_the_elements_type(self):
-        for comparison in ["@('1') -contains 1", "@(1) -contains '1'"]:
+        for comparison, expected in [
+            ("@('1') -contains 1", '$x = $True'),
+            ("@(1) -contains '1'", '$x = $True'),
+            ("@('1') -contains 2", '$x = $False'),
+            ("1 -in @('1')", '$x = $True'),
+            ("@('1') -notcontains 1", '$x = $False'),
+            ("@(1) -contains 'abc'", '$x = $False'),
+        ]:
             source = cleandoc(F"""
                 function f {{
                   {comparison}
@@ -1422,9 +1486,8 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
                 $x = f
             """)
             with self.subTest(comparison):
-                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $True')
+                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), expected)
 
-    @unittest.expectedFailure
     def test_a_backticked_asterisk_matches_the_one_character_it_spells(self):
         source = cleandoc("""
             function f {
@@ -1443,7 +1506,6 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $False')
 
-    @unittest.expectedFailure
     def test_a_wildcard_set_reads_an_exclamation_mark_as_no_negation(self):
         source = cleandoc("""
             function f {
@@ -1453,7 +1515,6 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $False')
 
-    @unittest.expectedFailure
     def test_a_string_band_cannot_convert_is_a_throw_and_not_a_number(self):
         self._assertUnchanged(cleandoc("""
             function f {
@@ -1480,7 +1541,8 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
     `IgnoreCase` that a case insensitive `-match` means is .NET's culture `ToLower`, under which
     U+017F is no `s`, where Python's own folding makes it one. A sum too long for the interpreter's
     stack has to leave the unit with an answer and not with a `RecursionError`. An index written as
-    a String is an index like any other, and 5.1 answers the element it numbers.
+    a String is an index like any other and 5.1 answers the element it numbers, but `$null` is no
+    index at all and 5.1 stops there rather than reading the element a zero would name.
     """
 
     @staticmethod
@@ -1529,7 +1591,6 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'AB'")
 
-    @unittest.expectedFailure
     def test_a_byte_cast_the_value_does_not_fit_is_a_throw_and_not_a_masked_number(self):
         for cast in ['[byte]400', '[byte](200 * 2)']:
             source = cleandoc(F"""
@@ -1567,14 +1628,12 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         # unit's own doing, so where a fold over a body runs out of stack is measurable only there.
         self.assertEqual(self._sum_of_ones(2000).encode('utf8') | ps1() | str, '$x = 2000')
 
-    @unittest.expectedFailure
     def test_the_unit_answers_a_sum_too_long_to_fold_rather_than_crashing_on_it(self):
         try:
             bytes(self._sum_of_ones(5000).encode('utf8') | ps1())
         except RecursionError:
             self.fail('a RecursionError escaped the unit, which has to decline a fold instead')
 
-    @unittest.expectedFailure
     def test_an_index_written_as_a_string_is_the_element_that_number_names(self):
         source = cleandoc("""
             function f {
@@ -1585,6 +1644,15 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 20')
 
+    def test_a_null_index_is_a_throw_and_not_the_element_a_zero_would_name(self):
+        self._assertUnchanged(cleandoc("""
+            function f {
+              $a = 10, 20, 30
+              $a[$null]
+            }
+            $x = f
+        """), Ps1FunctionEvaluator)
+
     def test_an_index_written_as_a_number_is_the_element_that_number_names(self):
         source = cleandoc("""
             function f {
@@ -1594,3 +1662,48 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
             $x = f
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 20')
+
+
+class TestPs1AFunctionBodyReadsWhatTheScriptScopeHolds(TestPs1):
+    """
+    A function body that names a variable the script assigned reads that variable when the call
+    runs. Windows PowerShell 5.1 prints `v=6` for the script below, whose value comes from a command
+    no fold can predict, so the call is left standing rather than folded as if `$g` were unset — and
+    the store that feeds it survives with it.
+    """
+
+    def test_a_call_is_not_folded_as_if_the_script_variable_were_unset(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            $g = Get-Random -Minimum 5 -Maximum 6
+            function zzqf { $g + 1 }
+            Write-Host ('v=' + (zzqf))
+            """
+        ))
+        self.assertEqual(result, cleandoc(
+            """
+            $g = Get-Random -Minimum 5 -Maximum 6
+            function zzqf {
+              $g + 1
+            }
+            Write-Host ('v=' + (zzqf))
+            """
+        ))
+
+
+class TestPs1AFoldedCallKeepsItsPipelinePosition(TestPs1):
+    """
+    Only the first element of a pipeline may be an expression, so substituting a function's constant
+    result into any later element writes a script 5.1 refuses with `ExpressionsMustBeFirstInPipeline`.
+    Measured, the input prints `r=H` and the output runs nothing at all.
+    """
+
+    def test_a_function_in_a_later_pipeline_element_is_not_replaced_by_its_value(self):
+        result = self._deobfuscate(cleandoc(
+            """
+            function zzqf { 'H' }
+            $r = 'x' | zzqf
+            Write-Host ('r=' + $r)
+            """
+        ))
+        self.assertNotIn("| 'H'", result)

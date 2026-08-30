@@ -32,6 +32,8 @@ from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     binding_key,
     binds_parameter,
+    bound_argument_value,
+    resolve_command_name,
     string_value,
 )
 from refinery.lib.scripts.ps1.data import COMMON_PARAMETERS
@@ -227,6 +229,77 @@ def _writes_stop_to_the_preference(node: Node) -> bool:
     return _selects_stop(node.value)
 
 
+#: The commands that arm strict mode, in the spelling `resolve_command_name` answers with. Two
+#: rather than one, because two commands write the same engine slot: `Set-StrictMode -Version`
+#: writes the scope it stands in and `Set-PSDebug -Strict` writes the global scope, and 5.1
+#: documents the second as the first at version 1. Neither carries an alias in the collected
+#: surface, and every other way of arming either arrives as a string these are matched inside.
+_STRICT_MODE_COMMANDS = frozenset({
+    'set-psdebug',
+    'set-strictmode',
+})
+
+
+def _arms_strict_mode(node: Node) -> bool:
+    """
+    Whether *node* may turn a read of a variable that was never set into an error.
+
+    A command is the spelling that matters, resolved the deny-list way through
+    `refinery.lib.scripts.ps1.ast.resolve_command_name`, so that a module- or scope-qualified
+    spelling of one arms strict mode as the bare word does. The argument is not read: a
+    `Set-StrictMode -Off` and a `Set-PSDebug -Trace 1` are armings here like every other spelling,
+    and what that costs is the recall of a script that names either command for another purpose.
+
+    A string value need only *contain* a name, which is the asymmetry
+    `refinery.lib.scripts.ps1.analysis.worldflow._names_own_path` makes and that
+    `a_stop_may_be_in_force` makes beside it. `Invoke-Expression 'Set-StrictMode -Version 1'`
+    arms it as surely as writing the command does, and a script that spells either name anywhere is
+    read as arming it — the direction that refuses a removal rather than granting one.
+    """
+    if (
+        isinstance(node, Ps1CommandInvocation)
+        and resolve_command_name(node) in _STRICT_MODE_COMMANDS
+    ):
+        return True
+    written = string_value(node)
+    if written is None:
+        return False
+    written = written.lower()
+    return any(command in written for command in _STRICT_MODE_COMMANDS)
+
+
+def _arms_strict_mode_v2(node: Node) -> bool:
+    """
+    Whether *node* may arm strict mode at version 2 or above, under which the object adapter's
+    faked `Count` and `Length` on a scalar or `$null` become terminating errors rather than a
+    value. This is narrower than `_arms_strict_mode`: `Set-PSDebug -Strict` is documented as
+    `Set-StrictMode -Version 1`, where those fakes still read, so only `Set-StrictMode` can arm the
+    version this asks about.
+
+    The argument *is* read here, unlike in `_arms_strict_mode`, because version 1 and version 2 are
+    the two poles of the question. Only a `-Version` that is provably the integer `1` is read as
+    not arming version 2; every other spelling — a higher or non-constant version, `Latest`, `-Off`,
+    or no readable value — is read as arming it, the direction that refuses a fold rather than
+    granting one. A string value need only *contain* the command name, the way
+    `_arms_strict_mode` reads one, since the version inside it cannot be told apart.
+    """
+    if isinstance(node, Ps1CommandInvocation):
+        if resolve_command_name(node) != 'set-strictmode':
+            return False
+        version = bound_argument_value(node, 'version')
+        return not (isinstance(version, Ps1IntegerLiteral) and version.value == 1)
+    written = string_value(node)
+    if written is None or 'set-strictmode' not in written.lower():
+        return False
+    parent = node.parent
+    if isinstance(parent, Ps1CommandInvocation) and parent.name is node:
+        # A bareword command name parses as a string literal too, so a genuine `Set-StrictMode`
+        # invocation reaches this the way a concealed one does. Its version is read on the
+        # invocation above; reading the version-less name here would refuse every `-Version 1`.
+        return False
+    return True
+
+
 #: The automatic variables through which a `Stop` can be armed for commands that did not ask for
 #: one: the preference itself, and the table that binds `-ErrorAction` into every command that takes
 #: it. Spelled as names rather than as assignment shapes because `a_stop_may_be_in_force` asks
@@ -338,6 +411,31 @@ def handler_acts(handler: Ps1CatchClause | Ps1TrapStatement) -> bool:
     return False
 
 
+def _handled_in_the_body(routing: Ps1FaultRouting) -> bool:
+    """
+    Whether a handler of the body the error was raised in disposes of it in a way a run can see: a
+    `catch` or `trap` that acts, or a `trap` set the error may get past, which 5.1 answers by ending
+    the body rather than by reporting the error and stepping over it.
+
+    A `catch` that misses does not end the body — the sharp asymmetry between the two keywords — so
+    the escalation reading is keyed to the `trap` and not to the escape.
+    """
+    if any(handler_acts(handler) for handler in routing.handlers):
+        return True
+    return routing.leaves_the_body and any(
+        isinstance(handler, Ps1TrapStatement) for handler in routing.handlers
+    )
+
+
+def _escapes(routing: Ps1FaultRouting) -> bool:
+    """
+    Whether an error routed like *routing* gets past every handler of the body it was raised in. A
+    handler set it cannot leave settles it there; an empty set settles nothing, which the graphs
+    spell as no handlers and no exceptional edge out of the body.
+    """
+    return not routing.handlers or routing.leaves_the_body
+
+
 class Ps1FaultReach:
     """
     The fault routing of one script, read off its control-flow graphs.
@@ -356,6 +454,8 @@ class Ps1FaultReach:
         self._handled: set[int] | None = None
         self._ending: dict[int, bool] = {}
         self._stopping: bool | None = None
+        self._strict: bool | None = None
+        self._strict_v2: bool | None = None
 
     def routing_at(self, node: Node) -> Ps1FaultRouting | None:
         """
@@ -386,6 +486,22 @@ class Ps1FaultReach:
             if self._control_flow.node_of(inner) is not None:
                 yield inner
 
+    def escapes_the_body(self, node: Node) -> bool:
+        """
+        Whether an error raised at *node* gets past every handler written in the body *node* stands
+        in, so that where it goes next is decided by whatever ran that body and not by anything the
+        body itself says.
+
+        A position the graphs place nowhere settles nothing and escapes nothing; `False` is the
+        answer that leaves such a node to the position question, which reads an unplaced node as
+        observed.
+        """
+        located = self._control_flow.locate(node)
+        if located is None:
+            return False
+        routing = self._routing(*located)
+        return not _handled_in_the_body(routing) and _escapes(routing)
+
     def observed_at(self, node: Node) -> bool:
         """
         Whether an error raised at *node* changes which code runs: some handler it reaches acts, a
@@ -395,11 +511,8 @@ class Ps1FaultReach:
         it answers the same for a statement that cannot raise at all, which is what a caller
         weighing whether a guarded body may be emptied wants to know.
 
-        A `trap` beside `leaves_the_body` is escalation: the set was offered the error and may have
-        declined it, and 5.1 then ends the body rather than reporting the error and stepping over
-        it, so everything written after the raise stops running. A `catch` that misses does not do
-        that — the sharp asymmetry between the two keywords — so the reading is keyed to the `trap`
-        and not to the escape.
+        What the body itself decides is `_handled_in_the_body`; what is left over once the error
+        gets past it is this.
 
         **An error that gets past a function's own handlers is the caller's**, and no graph here
         holds both ends of a call. Measured: the same function whose error is reported and stepped
@@ -421,13 +534,9 @@ class Ps1FaultReach:
         a routing there is, so that the position question, the arrival question `_observed_from`
         asks of a fallback, and anything later that reads a routing cannot answer it three ways.
         """
-        if any(handler_acts(handler) for handler in routing.handlers):
+        if _handled_in_the_body(routing):
             return True
-        if routing.leaves_the_body and any(
-            isinstance(handler, Ps1TrapStatement) for handler in routing.handlers
-        ):
-            return True
-        if routing.handlers and not routing.leaves_the_body:
+        if not _escapes(routing):
             return False
         return not isinstance(graph.owner, Ps1Script) and self._handled_elsewhere(graph)
 
@@ -624,6 +733,76 @@ class Ps1FaultReach:
                 _writes_stop_to_the_preference(node) for node in root.walk()
             )
         return self._stopping
+
+    def strict_mode_may_be_in_force(self) -> bool:
+        """
+        Whether this script may arm strict mode anywhere at all, which makes reading a variable that
+        was never set an error instead of a `$null`.
+
+        Two consumers, both reading it as the one model of whether the script arms strict mode.
+        `refinery.lib.scripts.ps1.analysis.effects.expression_cannot_fault` is the single place
+        deciding whether a bare variable read can raise before a removal site deletes it;
+        `refinery.lib.scripts.ps1.deobfuscation.constants.Ps1NullVariableInlining` stands its whole
+        pass down where this holds, because a never-assigned read it would rewrite to `$null` is a
+        terminating error under strict mode and the value would decide a branch the script never
+        reaches. Measured on 5.1: under the default semantics `$unset | ForEach-Object { [void]$_ }`
+        writes nothing and the script runs on, so removing it is invisible; under
+        `Set-StrictMode -Version 1` the same line raises a statement-terminating error that a
+        `catch` and a `trap` both take, so removing it is exactly what
+        `refinery.lib.scripts.ps1.analysis.effects.fault_is_observed` exists to refuse.
+
+        Position is not asked, and the reason is not the one `_stops_on_every_error` gives. Which
+        scopes an arming covers is not one rule: `Set-StrictMode` writes the scope it stands in and
+        `Set-PSDebug -Strict` writes the global one, so the first arms nothing outside the function
+        it is written in and the second arms everything that runs anywhere afterwards. Reading the
+        whole script is what covers both without deciding which was meant. `Set-StrictMode -Off` is
+        not distinguished from an arming either, since reading the argument buys back only the
+        recall of a script that turns strict mode off again.
+
+        **What this cannot see is an arming that is not in the script.** Strict mode is resolved by
+        walking the scope chain to the global scope, so a script dot-sourced from a session that
+        armed it — a profile, a stage-1 loader, an analyst's console — runs strict while spelling
+        nothing. Nothing readable says whether that happened, so the grant this feeds assumes the
+        entry scope runs the default semantics, the way
+        `refinery.lib.scripts.ps1.analysis.worldflow` assumes a leak does not re-run the statements
+        above it. A fragment carved out of a larger script is the case where the assumption is worth
+        doubting.
+
+        **The empty pole is the opposite of the sibling's, and it is why this is not a copy of it.**
+        `_stops_on_every_error` answers `False` where the graphs place no script, which is safe
+        because a missed arming there only keeps a handler. This one grants a *removal*, so a script
+        the graphs hold nothing of has to refuse it rather than read as running under the lax
+        default.
+        """
+        if self._strict is None:
+            root = self._script
+            self._strict = root is None or any(
+                _arms_strict_mode(node) for node in root.walk()
+            )
+        return self._strict
+
+    def strict_mode_v2_may_be_in_force(self) -> bool:
+        """
+        Whether this script may arm strict mode at version 2 or above, under which the `Count` and
+        `Length` the object adapter fakes onto a scalar or `$null` raise `PropertyNotFoundStrict`
+        rather than answering. Folding one of those to its value would stand a number where the
+        script terminated and decide a branch it never reaches, so the fold in
+        `refinery.lib.scripts.ps1.deobfuscation.folding` stands down where this holds and keeps the
+        real members — a `String`'s own `Length`, an array's own `Count` — that read on regardless.
+
+        This is the version-sensitive sibling of `strict_mode_may_be_in_force`: that one refuses a
+        removal wherever any strict mode is armed, because reading an unset variable raises under
+        version 1 too, and so treats `Set-PSDebug -Strict` and every `-Version` alike. The fake
+        adapter members survive version 1, so this asks the narrower question, and everything the
+        two share — position not asked, an arming outside the script not seen, an empty script
+        refusing — is shared for the reasons written there.
+        """
+        if self._strict_v2 is None:
+            root = self._script
+            self._strict_v2 = root is None or any(
+                _arms_strict_mode_v2(node) for node in root.walk()
+            )
+        return self._strict_v2
 
     @staticmethod
     def _exceptional_closure(

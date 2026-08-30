@@ -28,16 +28,50 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: `-gt` or `-ge` is not the numerals its operands spell — measured, `'10' -lt '9'` is `$True` and
 #: `'2' -lt '10'` is `$False`, both of which reading them as numbers answers the other way. This row
 #: comes back down by a collation and not by an arithmetic.
+#:
+#: All nine rows were then raised together, by 408 in total, and what was added was a fold rather
+#: than a wrong answer: `-and` and `-or` short circuit, so the interpreter now answers them from the
+#: left operand alone and never evaluates the operand it skips. The domain's `apply` still reads both
+#: operands, so every pair whose skipped operand is one the interpreter cannot fold is new gap. These
+#: rows come back down by teaching `apply` to short circuit as well, not by computing the operand
+#: neither engine needs.
+#:
+#: The eight scalar rows were raised once more, by 168 in total, and again a fold was added rather
+#: than a wrong answer withdrawn: the interpreter now reads the `-split` max-substrings argument.
+#: `<string> -split <delimiter>, <n>` hands the operator a collection right operand the interpreter
+#: used to refuse because stringifying it needs `$OFS`; it now caps the result at `n` elements and
+#: answers, where `apply` still declines the split operators outright. `System.Object[]` alone does
+#: not move, because a split reads its left operand as text and an array left is the one `$OFS`
+#: refusal that survives. These rows come back down by teaching `apply` to split, not by computing.
+#:
+#: The eight scalar-and-array rows then fell, by 400 in total, and `System.Void` alone held. What was
+#: withdrawn is not a fold the domain will come to need but a wrong answer the interpreter gave:
+#: `-contains`, `-in` and their negations now test membership with 5.1's `LanguagePrimitives.Equals`,
+#: which converts the item to each element's type, where they used to compare with Python's `==`. So
+#: they refuse a membership test they cannot reproduce — an element or an item that is a `Double`
+#: written as text, a `String` read as a `Double`, or an array compared by reference — rather than
+#: answer it. `System.Object[]` falls furthest because it is the collection `-contains` enumerates,
+#: and one element the equality cannot read refuses the whole test; the scalar rows fall through
+#: `-in`, whose left operand keys them, when its right operand is such an array. These do not come
+#: back by the domain learning to answer; the gap is smaller because the interpreter stopped
+#: answering where it should not.
+#:
+#: The `String` and `Char` rows then came back down, by 25 and 15, reversing the first raise above.
+#: The domain now spells a `Double` the way the .NET-Framework host writes it — `[string]0.5` is
+#: `0.5` and `'5' + 1.5` is `51.5` — so `+` over a String or a Char on its left joins the two texts
+#: where it used to fall through, and the pairs that were the raise are folds again rather than the
+#: arithmetic `6.5` they once misread. Only these two rows move: a Double on the *left* of `+` is an
+#: addition and never had this gap.
 GAP: dict[str, int] = {
-    'System.String': 1633,
-    'System.Object[]': 1463,
-    'System.Char': 1096,
-    'System.Int64': 1000,
-    'System.Int32': 670,
-    'System.Double': 590,
-    'System.Byte': 402,
-    'System.Boolean': 236,
-    'System.Void': 150,
+    'System.String': 1702,
+    'System.Object[]': 1317,
+    'System.Char': 1147,
+    'System.Int64': 1088,
+    'System.Int32': 695,
+    'System.Double': 605,
+    'System.Byte': 417,
+    'System.Boolean': 246,
+    'System.Void': 159,
 }
 
 #: The witness spellings the reader cannot make a fact of, so the census is quantified over the

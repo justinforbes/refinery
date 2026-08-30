@@ -56,9 +56,22 @@ from refinery.lib.scripts.ps1.analysis.naming import (
     named_references,
 )
 from refinery.lib.scripts.ps1.analysis.opaque import writes_nobody_can_attribute
-from refinery.lib.scripts.ps1.ast import binding_key, resolve_command_name
+from refinery.lib.scripts.ps1.ast import (
+    binding_key,
+    binds_parameter,
+    bound_argument_value,
+    free_positional_values,
+    resolve_command_name,
+)
+from refinery.lib.scripts.ps1.data import (
+    EVERY_PARAMETER_SET,
+    parameter_sets,
+    positional_scriptblock_sets,
+    scriptblock_parameters,
+)
 from refinery.lib.scripts.ps1.model import (
     Ps1CommandArgument,
+    Ps1CommandArgumentKind,
     Ps1CommandInvocation,
     Ps1FunctionDefinition,
     Ps1ScopeModifier,
@@ -77,6 +90,27 @@ _ITERATING_COMMANDS = frozenset({
     'foreach-object',
     'where-object',
 })
+
+
+def names_an_intact_iterating_command(
+    cmd: Ps1CommandInvocation,
+    shadowed: frozenset[str] = frozenset(),
+) -> str | None:
+    """
+    The enumerating cmdlet *cmd* names — `foreach-object` or `where-object`, following `%`,
+    `foreach` and `?` to the full name — when the script has not taken it over, or `None`.
+
+    *shadowed* is the whole-run set of redefined command names (`Ps1TypeWorld.shadowed_names`). A
+    name in it runs the script's own body rather than the cmdlet, so a block handed to it is data:
+    measured on 5.1, `function ForEach-Object { 'H' }` makes `1, 2 | % { $_ }` run `H`, and `%`
+    follows the redefinition because it resolves to `foreach-object`. A `function foreach` binds
+    the separate `foreach` name the built-in keyword outranks and leaves `foreach-object` alone,
+    which is why the resolved name, not the written spelling, is what the set is asked about.
+    """
+    name = resolve_command_name(cmd)
+    if name in _ITERATING_COMMANDS and name not in shadowed:
+        return name
+    return None
 
 
 class Ps1BlockReach(enum.Enum):
@@ -184,9 +218,123 @@ def _named_writes(cmd: Ps1CommandInvocation) -> Iterator[Occurrence]:
         yield Occurrence(node=cmd, role=NAME_ROLES[reference.role], key=reference.key)
 
 
-def classify_block(block: Ps1ScriptBlock) -> Ps1BlockFacts:
+#: The scriptblock parameters of `_ITERATING_COMMANDS` that run their body once per input object,
+#: which is what binds `$_`. `-Begin` and `-End` run once beside them and leave `$_` at whatever the
+#: scope around the pipeline holds, so a block in either binds nothing.
+_PER_OBJECT_PARAMETERS = frozenset({
+    'filterscript',
+    'process',
+})
+
+
+def _selects_a_scriptblock_set(cmd: Ps1CommandInvocation, command: str) -> bool:
+    """
+    Whether every parameter *cmd* names leaves the call in a parameter set whose first positional
+    argument is a script block the command runs.
+
+    5.1 picks one set from the arguments a call writes, and the same position means a different
+    thing in each. Measured: `1, 2 | ForEach-Object -MemberName ToString { Write-Host 'X' }` writes
+    the block's own text twice, because `-MemberName` selects the set in which the argument after it
+    is the method's argument list rather than a body. `ForEach-Object -InputObject 5 { Write-Host
+    "P:$_" }` writes `P:5`, because `-InputObject` belongs to the scriptblock set as well.
+
+    A parameter that belongs to every set decides nothing, which is what every common parameter is.
+    A name the collected surface does not carry, and a prefix reaching any parameter that excludes
+    the set, both refuse: a wrong grant here calls a value the command passes on a body it runs.
+    """
+    wanted = positional_scriptblock_sets(command)
+    if not wanted:
+        return False
+    table = parameter_sets(command)
+    for argument in cmd.arguments:
+        if not isinstance(argument, Ps1CommandArgument):
+            continue
+        if argument.kind is Ps1CommandArgumentKind.POSITIONAL:
+            continue
+        reached = [
+            sets for parameter, sets in table.items()
+            if binds_parameter(argument.name, parameter)
+        ]
+        if not reached:
+            return False
+        if any(
+            EVERY_PARAMETER_SET not in sets and sets.isdisjoint(wanted)
+            for sets in reached
+        ):
+            return False
+    return True
+
+
+def binds_the_pipeline_variable(
+    block: Ps1ScriptBlock,
+    shadowed: frozenset[str] = frozenset(),
+) -> Ps1CommandInvocation | None:
+    """
+    The invocation whose input `$_` ranges over inside *block*, or `None` where *block* is not a
+    body run once per input object.
+
+    The slot is read by name where it is written by name, and otherwise from position: a lone free
+    positional block is the per-object body, where three of them are `begin`, `process` and `end` in
+    that order — so a positional block beside another is refused rather than guessed at.
+
+    *shadowed* is the whole-run set of command names the script has taken over. A name in it no
+    longer denotes the enumerating cmdlet, so its body is not run once per object and `$_` inside it
+    is whatever the surrounding scope holds — see `Ps1TypeWorld.shadowed_names`.
+    """
+    command = _handed_to_command(block)
+    if command is None:
+        return None
+    name = names_an_intact_iterating_command(command, shadowed)
+    if name is None:
+        return None
+    for parameter in scriptblock_parameters(name) & _PER_OBJECT_PARAMETERS:
+        if bound_argument_value(command, parameter) is block:
+            return command
+    positional = free_positional_values(command, name)
+    if len(positional) == 1 and positional[0] is block and _selects_a_scriptblock_set(command, name):
+        return command
+    return None
+
+
+def _fills_a_scriptblock_slot(
+    cmd: Ps1CommandInvocation,
+    block: Ps1ScriptBlock,
+    command: str,
+) -> bool:
+    """
+    Whether *block* sits in a slot of *cmd* that the command runs, rather than one it takes as data.
+    `ForEach-Object -Process { }` runs the block, `ForEach-Object -InputObject { }` hands it on
+    untouched, and a `site` is a claim about the first only.
+
+    A named slot is decided by the declared parameter type. A positional one is granted to the
+    *first* free positional argument alone, and only where the parameters the call names leave it
+    in a set whose first positional argument is a body — `_selects_a_scriptblock_set`. Three
+    positional blocks are `begin`, `process` and `end`, so a later one is not the first slot; and
+    a call that writes `-MemberName` is in the set where the first slot is a method name.
+    """
+    for parameter in scriptblock_parameters(command):
+        if bound_argument_value(cmd, parameter) is block:
+            return True
+    positional = free_positional_values(cmd, command)
+    return (
+        bool(positional)
+        and positional[0] is block
+        and _selects_a_scriptblock_set(cmd, command)
+    )
+
+
+def classify_block(
+    block: Ps1ScriptBlock,
+    shadowed: frozenset[str] = frozenset(),
+) -> Ps1BlockFacts:
     """
     The facts readable from where *block* sits.
+
+    *shadowed* is the whole-run set of command names the script has taken over
+    (`Ps1TypeWorld.shadowed_names`). An enumerating command whose name is in it runs the script's
+    own definition rather than the cmdlet, so a block handed to it is data this cannot place, and
+    the iterating branch below falls through to `_UNPLACED`. The default is empty for a caller that
+    reads the name at face value and applies its own trust; `Ps1WorldReach` does that positionally.
     """
     parent = block.parent
     if isinstance(parent, Ps1FunctionDefinition) and parent.body is block:
@@ -209,14 +357,15 @@ def classify_block(block: Ps1ScriptBlock) -> Ps1BlockFacts:
             site=invocation,
         )
     command = _handed_to_command(block)
-    if command is not None and resolve_command_name(command) in _ITERATING_COMMANDS:
-        return Ps1BlockFacts(
-            reach=Ps1BlockReach.IMMEDIATE,
-            scope=Ps1BlockScope.CALLER,
-            iteration=Ps1BlockIteration.REPEATED,
-            site=command,
-        )
     if command is not None:
+        name = names_an_intact_iterating_command(command, shadowed)
+        if name is not None and _fills_a_scriptblock_slot(command, block, name):
+            return Ps1BlockFacts(
+                reach=Ps1BlockReach.IMMEDIATE,
+                scope=Ps1BlockScope.CALLER,
+                iteration=Ps1BlockIteration.REPEATED,
+                site=command,
+            )
         return _UNPLACED
     return Ps1BlockFacts(
         reach=Ps1BlockReach.STORED,
@@ -232,8 +381,9 @@ class Ps1BlockModel:
     since the tree is fixed for as long as this model lives.
     """
 
-    def __init__(self, root: Ps1Script):
+    def __init__(self, root: Ps1Script, shadowed: frozenset[str] = frozenset()):
         self.root = root
+        self._shadowed = shadowed
         self._facts: dict[int, Ps1BlockFacts] = {}
         self._caller_writes: dict[int, tuple[Occurrence, ...]] = {}
         self._caller_unattributable: dict[int, bool] = {}
@@ -244,7 +394,7 @@ class Ps1BlockModel:
         """
         found = self._facts.get(id(block))
         if found is None:
-            found = self._facts[id(block)] = classify_block(block)
+            found = self._facts[id(block)] = classify_block(block, self._shadowed)
         return found
 
     def may_write_caller_scope(self, block: Ps1ScriptBlock) -> bool:
@@ -350,8 +500,13 @@ class Ps1BlockModel:
         return facts.site, facts.iteration is Ps1BlockIteration.REPEATED
 
 
-def build_block_model(root: Ps1Script) -> Ps1BlockModel:
+def build_block_model(
+    root: Ps1Script,
+    shadowed: frozenset[str] = frozenset(),
+) -> Ps1BlockModel:
     """
-    Build the `Ps1BlockModel` for a script.
+    Build the `Ps1BlockModel` for a script. *shadowed* is the whole-run set of command names the
+    script takes over (`Ps1TypeWorld.shadowed_names`), so a body handed to a `ForEach-Object` or
+    `Where-Object` the script has redefined is placed as data rather than as a body it runs.
     """
-    return Ps1BlockModel(root)
+    return Ps1BlockModel(root, shadowed)

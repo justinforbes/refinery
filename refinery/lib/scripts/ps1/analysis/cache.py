@@ -86,8 +86,12 @@ class Ps1ModelCache(ModelCacheBase):
         table intact, which command names it takes over, and where every world-opening statement
         sits. `closed_world` projects the verdict from it and `world_reach` floods from its openers,
         so the whole-run answer and the positional one are never two different readings of the tree.
+
+        The run's `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions` are read from the cache
+        because the walk is performed once per cache. A cache made without them — a model built
+        standalone in a test — measures the suspecting model, which is the sound answer.
         """
-        return self._lazy('_world_measurement', lambda: measure_world(self.root))
+        return self._lazy('_world_measurement', lambda: measure_world(self.root, self.options))
 
     @property
     def closed_world(self) -> Ps1TypeWorld:
@@ -122,7 +126,10 @@ class Ps1ModelCache(ModelCacheBase):
         supplies is one of the reasons the graph declares itself unreadable, and a graph that
         answered that differently per caller would be two graphs.
         """
-        return self._lazy('_call_graph', lambda: build_call_graph(self.root, self.closed_world))
+        return self._lazy(
+            '_call_graph',
+            lambda: build_call_graph(self.root, self.closed_world, self.options),
+        )
 
     @property
     def output_flow(self) -> Ps1OutputFlow:
@@ -172,10 +179,13 @@ class Ps1ModelCache(ModelCacheBase):
     def blocks(self) -> Ps1BlockModel:
         """
         Where each script block of this root runs — at what point, in whose scope, how many times.
-        Purely syntactic like `control_flow`, and the answer three other layers used to guess from
-        the code a block is *written* in.
+        Reads the whole-run shadow set from `closed_world` so a body handed to a `ForEach-Object` or
+        `Where-Object` the script has redefined is placed as data, and is otherwise syntactic like
+        `control_flow` — the answer three other layers used to guess from the code a block is
+        *written* in.
         """
-        return self._lazy('_blocks', lambda: build_block_model(self.root))
+        return self._lazy('_blocks', lambda: build_block_model(
+            self.root, self.closed_world.shadowed_names))
 
     @property
     def cycles(self) -> CycleModel:

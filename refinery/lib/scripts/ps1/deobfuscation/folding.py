@@ -14,6 +14,7 @@ from refinery.lib.scripts.ps1.analysis.cache import model_cache
 from refinery.lib.scripts.ps1.analysis.effects import is_fault_free, may_be_dropped
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.analysis.values import (
+    NULL,
     Ps1Constant,
     Ps1Fact,
     apply,
@@ -34,6 +35,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     render,
     text_of,
     type_of,
+    type_test,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.ast import get_member_name, unwrap_parens
@@ -57,7 +59,7 @@ from refinery.lib.scripts.ps1.deobfuscation.substitution import (
     substitute_list,
     substituted,
 )
-from refinery.lib.scripts.ps1.data import MemberLookup, member_record
+from refinery.lib.scripts.ps1.data import MemberLookup, member_record, type_names
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1ArrayExpression,
@@ -75,6 +77,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ScopeModifier,
     Ps1ScriptBlock,
     Ps1StringLiteral,
+    Ps1TypeExpression,
     Ps1UnaryExpression,
     Ps1Variable,
 )
@@ -630,7 +633,10 @@ class Ps1ConstantFolding(Transformer):
         member = get_member_name(first.member)
         if member is None:
             return None
-        sb = extract_foreach_scriptblock(second_expr) if second_expr else None
+        if second_expr is None:
+            return None
+        shadowed = model_cache(self, node).closed_world.shadowed_names
+        sb = extract_foreach_scriptblock(second_expr, shadowed)
         if sb is None or not _foreach_extracts_value(sb):
             return None
         return self._fold_regex_call_result(first, member.lower())
@@ -647,6 +653,10 @@ class Ps1ConstantFolding(Transformer):
         if shaped is not None:
             return shaped
         owner = type_of(read(obj))
+        if owner is not None and member.lower() == 'pstypenames':
+            names = type_names(owner)
+            if names is not None:
+                return Ps1ArrayLiteral(elements=[make_string_literal(name) for name in names])
         if owner is not None and member_record(owner, member) is MemberLookup.ABSENT:
             return Ps1Variable(name='Null')
         result = self._try_fold_regex_member_access(node, member)
@@ -670,9 +680,12 @@ class Ps1ConstantFolding(Transformer):
         `([char]65).Length` is 1 all the same. So the receiver is read as a *value* rather than
         matched by spelling: `$null` is not one, and its `Count` is 0.
 
-        A collection is a scalar to neither, and the array arm is the only one that answers for one:
-        a spelling this cannot take apart into element nodes — `@()`, `@(@(1, 2))` — names a
-        collection all the same, and answering 1 for it is the count of a value that is not there.
+        A collection is a scalar to neither. A spelling this cannot take apart into element nodes —
+        `@()`, `@(@(1, 2))`, `@((1, 2))` — still pins how many elements it holds when every one of
+        them is a literal: `read` unrolls the array operator exactly as 5.1 does and hands back the
+        elements, and both `Count` and `Length` of the `Object[]` those build are that many. The
+        answer goes through `_selected` for the reason the array arm does, and the elements it
+        discards are the pinned literals that let `read` answer at all, so it never refuses.
         """
         name = member.lower()
         if name not in _SHAPE_MEMBERS:
@@ -682,10 +695,29 @@ class Ps1ConstantFolding(Transformer):
             count = 1 if name == 'rank' else len(array.elements)
             return self._selected(node, _Selection(_integer(count), list(array.elements)))
         fact = read(obj)
-        if name == 'rank' or not isinstance(fact, Ps1Constant) or isinstance(fact.payload, tuple):
+        if name == 'rank':
             return None
+        if fact is NULL:
+            return None if self._strict_v2_may_be_in_force(node) else _integer(0)
+        if not isinstance(fact, Ps1Constant):
+            return None
+        if isinstance(fact.payload, tuple):
+            return self._selected(node, _Selection(_integer(len(fact.payload)), [obj]))
         text = text_of(fact)
-        return _integer(len(text) if name == 'length' and text is not None else 1)
+        if name == 'length' and text is not None:
+            return _integer(len(text))
+        if self._strict_v2_may_be_in_force(node):
+            return None
+        return _integer(1)
+
+    def _strict_v2_may_be_in_force(self, node: Node) -> bool:
+        """
+        Whether `Set-StrictMode -Version 2` may be armed at *node*, under which the `Count` and
+        `Length` the object adapter fakes onto a scalar or `$null` raise rather than answer. Only
+        those fakes ask this; a real member — a `String`'s `Length`, an array's `Count` — reads on
+        under strict mode and is folded without it.
+        """
+        return model_cache(self, node).faults.strict_mode_v2_may_be_in_force()
 
     def _try_fold_regex_member_access(
         self, node: Ps1MemberAccess, member: str,
@@ -1091,6 +1123,8 @@ class Ps1ConstantFolding(Transformer):
             return self._handle_binary_split(node, op)
         if op in ('-and', '-or', '-xor'):
             return self._handle_logical(node, op)
+        if op in ('-is', '-isnot'):
+            return self._handle_type_test(node, op)
         return self._handle_comparison(node, op) or self._handle_arithmetic(node, op)
 
     def _spelled_as_text(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
@@ -1165,6 +1199,22 @@ class Ps1ConstantFolding(Transformer):
         and a measurement that moves it moves in one place.
         """
         return _folded(apply(op, read_operand(node.left), read_operand(node.right)))
+
+    def _handle_type_test(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
+        """
+        Fold `-is` and `-isnot`, whose right operand is a type rather than a value, so the value
+        grid `_handle_comparison` reads does not answer them. The left operand's runtime type decides
+        the test and the value domain answers it; a right operand that is not a type literal, or a
+        left one whose type is not known, leaves the test standing. `-isnot` is the negation of the
+        same answer.
+        """
+        named = node.right
+        if not isinstance(named, Ps1TypeExpression):
+            return None
+        verdict = type_test(read_operand(node.left), named.name)
+        if verdict is None:
+            return None
+        return self._bool_literal(verdict if op == '-is' else not verdict)
 
     def _handle_logical(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
         """

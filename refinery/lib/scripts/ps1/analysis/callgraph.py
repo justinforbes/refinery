@@ -18,7 +18,10 @@ from __future__ import annotations
 from typing import Mapping, NamedTuple, Sequence
 
 from refinery.lib.scripts import Node
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
+from refinery.lib.scripts.ps1.analysis.world import (
+    Ps1TypeWorld,
+    command_definition_keyword_binding,
+)
 from refinery.lib.scripts.ps1.ast import (
     assignment_target_variables,
     get_command_name,
@@ -34,7 +37,9 @@ from refinery.lib.scripts.ps1.model import (
     Ps1MethodMember,
     Ps1ScopeModifier,
     Ps1Script,
+    Ps1ScriptBlock,
 )
+from refinery.lib.scripts.ps1.options import eval_is_trusted
 
 #: The variable namespaces that name a command rather than a value. Kept in step with
 #: `refinery.lib.scripts.ps1.analysis.world._IDENTITY_SCOPES`, which this module cannot reuse
@@ -132,11 +137,13 @@ class Ps1CallGraph:
     def __init__(
         self,
         definitions: Mapping[str, Sequence[Ps1FunctionDefinition]],
+        keyword_definitions: Mapping[str, Sequence[Ps1ScriptBlock]],
         call_sites: Mapping[str, Sequence[Ps1CallSite]],
         readable: bool,
         exports: bool,
     ):
         self._definitions = dict(definitions)
+        self._keyword_definitions = dict(keyword_definitions)
         self._call_sites = dict(call_sites)
         self._readable = readable
         self._exports = exports
@@ -159,6 +166,10 @@ class Ps1CallGraph:
           `_collides_with_a_definition`.
 
         Every consumer reads this as fail-closed: an unreadable graph keeps more, never less.
+
+        The first two rows are the ones
+        `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` switches off, being
+        the two that say a name is reached by code nobody can read; see `build_call_graph`.
 
         The `Export-ModuleMember` row catches the explicit export and not the general case. A
         `.psm1` with no export statement exports every function by default, and nothing in a file
@@ -187,6 +198,16 @@ class Ps1CallGraph:
         Every function definition a call to `name` could reach, in source order.
         """
         return self._definitions.get(normalize_command_name(name), ())
+
+    def keyword_definitions(self, name: str) -> Sequence[Ps1ScriptBlock]:
+        """
+        The scriptblock bodies a `workflow`/`configuration` statement binds to `name`, in source
+        order. These define the same command name a `function` does but are not themselves a
+        `refinery.lib.scripts.ps1.model.Ps1FunctionDefinition`, so a caller weighing whether a name
+        is inert reads them beside `definitions`: the empty `function` a call names may be shadowed
+        by a `workflow` whose body acts.
+        """
+        return self._keyword_definitions.get(normalize_command_name(name), ())
 
     def call_sites(self, name: str) -> Sequence[Ps1CallSite]:
         """
@@ -276,7 +297,11 @@ def _collides_with_a_definition(
     return any(name in definitions for name in resolved)
 
 
-def build_call_graph(root: Ps1Script, world: Ps1TypeWorld) -> Ps1CallGraph:
+def build_call_graph(
+    root: Ps1Script,
+    world: Ps1TypeWorld,
+    options: object | None = None,
+) -> Ps1CallGraph:
     """
     Walk the whole tree once, recording every function definition, every statically named invocation
     with the function that holds it, and every reason the result is not the whole story.
@@ -287,8 +312,16 @@ def build_call_graph(root: Ps1Script, world: Ps1TypeWorld) -> Ps1CallGraph:
 
     The collision row is decided after the walk rather than during it, because a definition may be
     written below the call that resolves onto it and a script is not read top to bottom.
+
+    `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` clears exactly the two
+    rows that say code nobody can read reaches a name — the open world, through the verdict this is
+    handed, and the opaque dispatch, here. The other three stand under it: an export and a collision
+    are written in the script, and so is an assignment into the `function:` namespace, which is a
+    definition under a spelling the scan does not read rather than a call from outside it.
     """
+    trusting = eval_is_trusted(options)
     definitions: dict[str, list[Ps1FunctionDefinition]] = {}
+    keyword_definitions: dict[str, list[Ps1ScriptBlock]] = {}
     call_sites: dict[str, list[Ps1CallSite]] = {}
     qualified: list[str] = []
     retried: dict[str, list[str]] = {}
@@ -299,9 +332,13 @@ def build_call_graph(root: Ps1Script, world: Ps1TypeWorld) -> Ps1CallGraph:
             if not _is_class_method(node):
                 definitions.setdefault(normalize_command_name(node.name), []).append(node)
         elif isinstance(node, Ps1CommandInvocation):
+            binding = command_definition_keyword_binding(node)
+            if binding is not None:
+                keyword_name, keyword_body = binding
+                keyword_definitions.setdefault(keyword_name, []).append(keyword_body)
             name = get_command_name(node)
             if name is None:
-                if is_opaque_dispatch(node):
+                if not trusting and is_opaque_dispatch(node):
                     readable = False
                 continue
             key = normalize_command_name(name)
@@ -322,4 +359,4 @@ def build_call_graph(root: Ps1Script, world: Ps1TypeWorld) -> Ps1CallGraph:
             qualified.extend(names)
     if _collides_with_a_definition(qualified, definitions):
         readable = False
-    return Ps1CallGraph(definitions, call_sites, readable, exports)
+    return Ps1CallGraph(definitions, keyword_definitions, call_sites, readable, exports)

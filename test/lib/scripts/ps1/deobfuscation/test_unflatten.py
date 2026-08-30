@@ -243,7 +243,6 @@ class TestPs1ControlFlowDeflattening(TestPs1):
         s_idx = next(i for i, ln in enumerate(lines) if '$script:second' in ln)
         self.assertLess(f_idx, s_idx)
 
-    @unittest.expectedFailure
     def test_a_hexadecimal_state_constant_is_the_value_powershell_gives_it(self):
         """
         Measured on 5.1: `0xFFFFFFFF` is the Int32 -1, not the magnitude 4294967295. So state 0 ends
@@ -263,7 +262,26 @@ class TestPs1ControlFlowDeflattening(TestPs1):
         result = self._apply(code, Ps1ControlFlowDeflattening)
         self.assertEqual(result, 'Write-Host $script:reached')
 
-    @unittest.expectedFailure
+    def test_a_state_id_too_wide_for_an_integer_is_left_flattened(self):
+        """
+        A decimal literal past Int64 is a Decimal, not an integer, so the machine reader names no
+        value for it rather than reading its magnitude as an int it is not. Recovering the machine
+        would key it on a value the host never assigns, so the dispatcher is left in place instead.
+        """
+        code = cleandoc("""
+            $s = 0
+            while ($s -ne -1) {
+              switch ($s) {
+                0 { Write-Host $script:reached; $s = 99999999999999999999 }
+                99999999999999999999 { Write-Host $script:x; $s = -1 }
+                default { break }
+              }
+            }
+        """)
+        self.assertEqual(
+            self._apply(code, Ps1ControlFlowDeflattening),
+            self._apply(code))
+
     def test_a_loop_whose_exit_condition_is_unevaluable_is_left_flattened(self):
         """
         Which state ends this loop depends on what `Get-Random` returns, so no state can be shown to
@@ -310,19 +328,20 @@ class TestPs1DeflatteningDoesNotRebuildTheModelPerMachine(TestPs1):
     """
     Every removal plan the pass opens reads the fault model, and that model is layered on the
     control-flow graph of every block in the script. A commit advances the tree version those
-    graphs are cached against, so the next plan rebuilds all of them: a body holding several
-    independent machines pays for the whole script once per machine it dissolves. What a walk over
-    a script costs is a property of the script, not of how many of its statements turn out to be
-    removable.
+    graphs are cached against, so re-reading the model through the cache once per machine would
+    rebuild all of them: a body holding several independent machines would pay for the whole script
+    once per machine it dissolves. What a walk over a script costs is a property of the script, not
+    of how many of its statements turn out to be removable.
 
-    The pass opens its plan inside the loop over the body and builds one model per machine, so the
-    count grows with the number of machines and a script holding many of them is walked many times.
+    The machines in a body are siblings, and dissolving one leaves the handlers around another where
+    they were, so the pass reads the fault model once per body and reuses it for every machine there.
+    The count is then a property of the script and does not carry the machine count.
 
     The build is `refinery.lib.scripts.ps1.analysis.cache.build_control_flow_model`, which is what
     the cache calls, counted here rather than timed so the measurement is the same on every
     machine. It is compared between two machine counts rather than against a number of its own: a
     count that answers the same for two machines as for eight is the only one that does not carry
-    the machine count in it, and which constant it settles on is the fix's to choose.
+    the machine count in it.
     """
 
     _FEW = 2
@@ -374,6 +393,5 @@ class TestPs1DeflatteningDoesNotRebuildTheModelPerMachine(TestPs1):
                     self._dissolved(count),
                 )
 
-    @unittest.expectedFailure
     def test_the_models_built_are_the_same_for_two_machines_and_for_eight(self):
         self.assertEqual(self._models_built(self._MANY), self._models_built(self._FEW))

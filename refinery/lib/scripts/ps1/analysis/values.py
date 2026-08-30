@@ -31,8 +31,8 @@ remembers anything, and remembering does not make `evaluate` answer differently;
 The type side has two views over one engine. `resolve_expression_type` is the single-type core: one
 expression, one `refinery.lib.scripts.ps1.dotnet.Ps1TypeName` or `None`. `candidate_types` is the
 set-valued view the effect layer reasons over, and it is a strict superset — it additionally
-resolves a static method call and a cmdlet whose declared output is closed, either of which can name
-several types. The set is the primitive and the single type the derived view, because a caller
+resolves a static method call, a cmdlet whose declared output is closed, and the `$_` such a cmdlet
+binds downstream of it, any of which can name several types. The set is the primitive and the single type the derived view, because a caller
 reasoning about a value must have its conclusion hold for every type the value could carry.
 """
 from __future__ import annotations
@@ -48,7 +48,7 @@ import typing
 from typing import Callable, TypeAlias, TypeVar
 from weakref import WeakKeyDictionary
 
-from refinery.lib.scripts import Node, mutation_epoch
+from refinery.lib.scripts import Node, _clone_node, mutation_epoch
 from refinery.lib.scripts.ps1.ast import (
     extract_first_positional_string,
     get_command_name,
@@ -56,6 +56,7 @@ from refinery.lib.scripts.ps1.ast import (
     is_builtin_variable,
     unwrap_parens,
 )
+from refinery.lib.scripts.ps1.analysis.blocks import binds_the_pipeline_variable
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.data import (
     OBJ_COMMANDS,
@@ -65,6 +66,7 @@ from refinery.lib.scripts.ps1.data import (
     binary_outcome,
     command_output_types,
     conversion_outcome,
+    is_assignable_to,
     named_type,
     operand_witnesses,
     resolve_member_type,
@@ -90,7 +92,11 @@ from refinery.lib.scripts.ps1.model import (
     Ps1InvokeMember,
     Ps1MemberAccess,
     Ps1ParenExpression,
+    Ps1Pipeline,
+    Ps1PipelineElement,
     Ps1RealLiteral,
+    Ps1ScopeModifier,
+    Ps1ScriptBlock,
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1TypeExpression,
@@ -326,7 +332,71 @@ def resolve_expression_type(
 #: belong here; a read on any other command's result stays unresolved, and therefore kept.
 _CLOSED_OUTPUT_CMDLETS = frozenset({
     'get-date',
+    'measure-object',
 })
+
+
+#: The names the pipeline binds the current object to. `$PSItem` is the same variable spelled out,
+#: and a script that uses one spelling to defeat a rule written over the other is the reason both
+#: are listed here rather than only the short one.
+_PIPELINE_VARIABLES = frozenset({'_', 'psitem'})
+
+
+def _is_pipeline_variable(node) -> bool:
+    """
+    Whether *node* reads the current pipeline object. A splatted or scope-qualified spelling is not
+    one: neither reads the automatic variable the pipeline binds.
+    """
+    return (
+        isinstance(node, Ps1Variable)
+        and not node.splatted
+        and node.scope is Ps1ScopeModifier.NONE
+        and node.name.lower() in _PIPELINE_VARIABLES
+    )
+
+
+def _pipeline_variable_candidates(
+    node: Ps1Variable,
+    world: Ps1WorldReach,
+    type_of_variable: Ps1VariableTyping | None,
+) -> frozenset[Ps1TypeName]:
+    """
+    The types the current pipeline object may carry where *node* reads it: the output types of the
+    command feeding the element whose body *node* stands in.
+
+    **Only a command upstream answers.** A cmdlet's declared output describes what it writes to the
+    pipeline *per object*, which is already the type `$_` is bound to. Every other expression is a
+    value the pipeline enumerates, and its type is the type of the whole — `@(1, 2) | ForEach-Object
+    { $_ }` binds an `Int32` where the array is an `Int32[]` — so an upstream that is not a command
+    contributes nothing rather than the collection's type.
+
+    The block has to be one the command runs once per input object, which is what binds the variable
+    at all; `refinery.lib.scripts.ps1.analysis.blocks.binds_the_pipeline_variable` decides it. A read
+    in a `-Begin` body, or in a block written where the enclosing scope's `$_` is what is read, is
+    refused there and answers nothing here.
+    """
+    block = node.parent
+    while block is not None and not isinstance(block, Ps1ScriptBlock):
+        block = block.parent
+    if block is None:
+        return frozenset()
+    command = binds_the_pipeline_variable(block, world.shadowed_names)
+    if command is None:
+        return frozenset()
+    element = command.parent
+    if not isinstance(element, Ps1PipelineElement):
+        return frozenset()
+    pipeline = element.parent
+    if not isinstance(pipeline, Ps1Pipeline):
+        return frozenset()
+    upstream = None
+    for candidate in pipeline.elements:
+        if candidate is element:
+            break
+        upstream = candidate
+    if upstream is None or not isinstance(upstream.expression, Ps1CommandInvocation):
+        return frozenset()
+    return _command_candidates(upstream.expression, world, type_of_variable)
 
 
 def candidate_types(
@@ -337,10 +407,11 @@ def candidate_types(
     """
     The set of canonical .NET type names the expression's value could have, or the empty set when
     the type cannot be determined. A static method call contributes the return its overloads agree
-    on, and a cmdlet call the output types it declares; either can be several, so a caller reasoning
-    about the value must have its conclusion hold for every candidate. The single-type forms —
-    literals, variables, casts, `New-Object`, WMI, and property chains — are delegated to
-    `resolve_expression_type` rather than re-derived here.
+    on, a cmdlet call the output types it declares, and `$_` the output types of whatever feeds the
+    pipeline element it is bound in; each can be several, so a caller reasoning about the value must
+    have its conclusion hold for every candidate. The single-type forms — literals, variables,
+    casts, `New-Object`, WMI, and property chains — are delegated to `resolve_expression_type`
+    rather than re-derived here.
 
     `world` is what decides whether a command name still denotes what the metadata says, so a cmdlet
     whose name the script has taken over contributes nothing. It is asked at the position of the
@@ -355,6 +426,8 @@ def candidate_types(
         return _static_method_candidates(expr)
     if isinstance(expr, Ps1CommandInvocation):
         return _command_candidates(expr, world, type_of_variable)
+    if _is_pipeline_variable(expr):
+        return _pipeline_variable_candidates(expr, world, type_of_variable)
     single = resolve_expression_type(expr, type_of_variable)
     return frozenset() if single is None else frozenset({single})
 
@@ -495,6 +568,14 @@ UNKNOWN: Ps1Fact = _Ps1Unknown()
 NULL: Ps1Fact = _Ps1Null()
 
 
+def null_expression() -> Ps1Variable:
+    """
+    The expression that spells `$null`. This is `render(NULL)`, given its own name and a precise
+    return type so a caller building a node out of it does not carry render's `Expression | None`.
+    """
+    return Ps1Variable(name='Null')
+
+
 @dataclasses.dataclass(frozen=True)
 class Ps1Typed(Ps1Fact):
     """
@@ -568,6 +649,24 @@ def type_of(fact: Ps1Fact) -> Ps1TypeName | None:
     if isinstance(fact, (Ps1Typed, Ps1Constant)):
         return fact.type
     return None
+
+
+def type_test(fact: Ps1Fact, target: str | Ps1TypeName) -> bool | None:
+    """
+    Whether `value -is target` holds for a value this fact describes: `True`, `False`, or `None`
+    where the domain cannot decide. `$null` answers `False` for every target — it has no type to be
+    one of — an `UNKNOWN` fact answers `None`, and everything else is the relation
+    `refinery.lib.scripts.ps1.data.is_assignable_to` reads off the collected type model from the
+    fact's runtime type. The result of a type test is always a `System.Boolean`, so unlike the value
+    grid there is no measured cell to stamp the answer against; the only care needed is that a `None`
+    stays a fold declined rather than becoming a guessed `False`.
+    """
+    if fact is NULL:
+        return False
+    runtime = type_of(fact)
+    if runtime is None:
+        return None
+    return is_assignable_to(runtime, target)
 
 
 def integer_of(fact: Ps1Fact) -> int | None:
@@ -1760,9 +1859,8 @@ def _cast(target: Ps1TypeName, fact: Ps1Fact) -> _Number | None:
     what a truncation would: `[int]1.5` and `[int]2.5` are both 2, `[int]1.4` is 1 and `[int]-1.5`
     is -2, all measured.
 
-    A `Double` reaches neither `String` nor `Decimal`. Rendering one is .NET's formatting rather
-    than Python's, and widening one to a Decimal through Python would carry the binary expansion of
-    a value the host converts by its decimal digits.
+    A `Double` reaches `String` through `_double_text` but not `Decimal`: widening one to a Decimal
+    through Python would carry the binary expansion of a value the host converts by its decimal digits.
 
     A `String` is read by `_from_string`, which is a different oracle from every other source and
     reaches only the targets whose throws this module already sees.
@@ -1900,6 +1998,27 @@ def _numeric_source(fact: Ps1Constant) -> int | float | decimal.Decimal | None:
     return None
 
 
+def _double_text(payload: float) -> str | None:
+    """
+    The text 5.1 writes a `Double` as, which is the default `Double.ToString()` of the .NET Framework
+    PowerShell 5.1 runs on: fifteen significant digits rounded half to even, in fixed-point notation
+    while the exponent stays inside them and scientific notation outside. That is C's `%.15g` once its
+    `e` is raised to an `E`, the two agreeing on the rounding, the fixed/scientific threshold and the
+    two-digit-minimum exponent. Measured: `[string]0.5` is `0.5`, `[string]1E20` is `1E+20`,
+    `[string]0.0000001` is `1E-07`, and `[string]` of the Double `9223372036854775808` is
+    `9.22337203685478E+18` — each the value `%.15g` gives.
+
+    A negative zero is refused rather than guessed, its `0` and `-0` spellings not being measured, so a
+    withheld fold stands in. A non-finite value never reaches a Double fact — `_finite` keeps it out —
+    so it is refused here only defensively.
+    """
+    if payload != payload or payload in (INFINITY, -INFINITY):
+        return None
+    if payload == 0.0 and math.copysign(1.0, payload) < 0:
+        return None
+    return F'{payload:.15g}'.replace('e', 'E')
+
+
 def _rendered(fact: Ps1Constant) -> str | None:
     """
     The text a cast to `String` produces. Measured: `[string]5` is `5`, `[string]$true` is `True`,
@@ -1914,15 +2033,17 @@ def _rendered(fact: Ps1Constant) -> str | None:
     wherever the number is spelled with a positive one: `[string]1e3d` is `1000` on the host and was
     `1E+3` here, which is a text no `Decimal` .NET writes ever takes.
 
-    A `Double` and an `Object[]` are absent for the same reason in two shapes: what a host writes is
-    not what this module could compute. `[string]0.5` is `0.5` and `[string]'9223372036854775808'`
-    cast to a Double is `9.22337203685478E+18`, which is .NET's formatting rather than Python's, and
-    a collection is separated by `$OFS`, which lives in the session.
+    A `Double` is written by `_double_text`. That the cast is culture-invariant is what lets this
+    module compute it — `[string]0.5` is `0.5` on every host — where the `ToString()` a Double answers
+    is not, which is why `invariant_text` refuses one. An `Object[]` is absent for the reason that
+    survives: a collection is separated by `$OFS`, which lives in the session.
     """
     if fact.type == _STRING:
         return fact.payload if isinstance(fact.payload, str) else None
     if fact.type == _DECIMAL:
         return format(fact.payload, 'f') if isinstance(fact.payload, decimal.Decimal) else None
+    if fact.type == _DOUBLE:
+        return _double_text(fact.payload) if isinstance(fact.payload, float) else None
     if fact.type in _INTEGER_RANGE or fact.type in (_CHAR, _BOOLEAN):
         return str(fact.payload)
     return None
@@ -2249,6 +2370,9 @@ def _kernel(operator: str, left: Ps1Fact, right: Ps1Fact) -> _Number | None:
         # it can be read as arithmetic.
         return None
     if operator in _COMPARISON_SPELLINGS:
+        elements = _elements(left)
+        if elements is not None:
+            return _filtered(operator, elements, right)
         return _compared(operator, left, right)
     operands = _numeric_pair(left, right)
     if operands is None:
@@ -2313,11 +2437,11 @@ def _concatenates(fact: Ps1Fact) -> typing.TypeGuard[Ps1Constant]:
     Whether a left operand of `+` joins text rather than adding, which is the counterpart of
     `_replicated` for the other operator its left operand decides.
 
-    It is a question of its own rather than a line inside `_concatenated`, because a concatenation
-    that function *declines to spell* is not an addition: `'a' + 1.5` is the String `a1.5`,
-    measured, and `_rendered` refuses a `Double` because the text is .NET's formatting. Reading the
-    refusal as *this is not a concatenation* let `'5' + 1.5` fall through to the arithmetic and fold
-    to the number 6.5, a wrong value where a host writes `51.5`.
+    It is a question of its own rather than a line inside `_concatenated`, because whether a `+` joins
+    text or adds is decided by the *left* operand alone, not by whether the tail can be spelled. A
+    tail `_concatenated` declines — an `Object[]` the session's `$OFS` separates, a right operand that
+    is not a constant — is still a concatenation, and reading its refusal as *this is not one* would
+    let `'a' + @(1, 2)` fall through to the arithmetic, a wrong reading where a host joins the text.
     """
     return _is_text(fact)
 
@@ -2330,8 +2454,8 @@ def _concatenated(left: Ps1Constant, right: Ps1Fact) -> str | None:
 
     The right operand contributes what a cast of it to `String` would, `$null` contributing nothing:
     `'a' + $null` is `a`, measured. A value `_rendered` refuses is refused here for its own reason —
-    a `Double` because the text is .NET's formatting, an `Object[]` because `$OFS` separates it and
-    lives in the session.
+    an `Object[]` because `$OFS` separates it and lives in the session, a right operand that is not a
+    constant because there is no value to spell.
     """
     head = _rendered(left)
     if head is None:
@@ -2759,7 +2883,7 @@ class _Comparison(typing.NamedTuple):
     in counts.
     """
 
-    decides: Callable[[int, int], bool]
+    decides: Callable[[_Number, _Number], bool]
     equality: bool
     negated: bool
     cased: bool
@@ -2795,11 +2919,35 @@ def _compared(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool | None:
         return _compared_as_text(comparison, left, right)
     if type_of(left) == _BOOLEAN:
         return _compared_as_truth(comparison, left, right)
-    numeric = _COMPARISONS.get(operator)
-    if numeric is None:
-        return None
     operands = _numeric_pair(left, right)
-    return None if operands is None else numeric(*operands)
+    return None if operands is None else comparison.decides(*operands)
+
+
+def _filtered(
+    operator: str,
+    elements: tuple[Ps1Fact, ...],
+    right: Ps1Fact,
+) -> tuple[Ps1Fact, ...] | None:
+    """
+    The elements a comparison keeps when its left operand is a collection, or `None` where any one
+    of them cannot be decided. 5.1 reads `10, 20, 30 -eq 20` as the elements the scalar comparison
+    holds for — `@(20)` — and `10, 20, 30, 20, 10 -ne 20` as `10, 30, 10`, so the same predicate
+    that answers the scalar case answers each element here.
+
+    An element the scalar comparison declines withholds the whole result rather than being dropped
+    from it: a collection missing the members it could not read is a different collection from the
+    one 5.1 builds. Which operators reach here is `apply`'s throw gate to decide and not this — an
+    ordering whose cell records a throw never does, so an element that would raise a comparison is
+    refused before this filters anything.
+    """
+    kept: list[Ps1Fact] = []
+    for element in elements:
+        decided = _compared(operator, element, right)
+        if decided is None:
+            return None
+        if decided:
+            kept.append(element)
+    return tuple(kept)
 
 
 def _compared_to_absent(comparison: _Comparison, left: Ps1Fact, right: Ps1Fact) -> bool | None:
@@ -2928,19 +3076,6 @@ def _compared_as_text(comparison: _Comparison, left: Ps1Fact, right: Ps1Fact) ->
     return same != comparison.negated
 
 
-#: The comparisons two numbers are computed under, which are the bare spellings alone. A case prefix
-#: cannot change what two numbers compare as, and nothing here measured one doing so either, so a
-#: pair that reaches this table under `-ceq` or `-ilt` is left to the cell rather than answered.
-_COMPARISONS = {
-    '-eq': operator_module.eq,
-    '-ne': operator_module.ne,
-    '-lt': operator_module.lt,
-    '-le': operator_module.le,
-    '-gt': operator_module.gt,
-    '-ge': operator_module.ge,
-}
-
-
 #: The literal suffix that pins a spelled number to its type, for the types that have one. The set
 #: is the whole of what 5.1 has: `l` names an Int64 and `d` a Decimal, and the rest of the suffixes
 #: a reader may expect — `y`, `uy`, `s`, `us`, `u`, `ul`, `n` — arrived in 6.2 and 7.0.
@@ -2991,7 +3126,7 @@ def render(fact: Ps1Fact) -> Expression | None:
     `refinery.lib.scripts.ps1.synth`, because only the slot knows what stands beside it.
     """
     if fact is NULL:
-        return Ps1Variable(name='Null')
+        return null_expression()
     if not isinstance(fact, Ps1Constant):
         return None
     payload = fact.payload
@@ -3016,6 +3151,49 @@ def render(fact: Ps1Fact) -> Expression | None:
     if target is None:
         return None
     return Ps1CastExpression(type_name=target, operand=Ps1IntegerLiteral(raw=str(payload)))
+
+
+def folded_binary(left: Expression, operator: str, right: Expression) -> Expression | None:
+    """
+    The expression `left operator right` folds to, or `None` where the pair is not constant or the
+    operation may throw.
+
+    The operands are read exactly as `evaluate` reads the two sides of any binary expression, so a
+    fold here agrees with folding the same operator written out longhand: the value a compound
+    assignment `$x op= e` leaves is `$x op e`, and this is what lets the short spelling reach the
+    same constant the long one does. Each operand is copied before it is read, because the throwaway
+    node built to hold them adopts the children it is handed, and a fold must leave the tree it read
+    from untouched whether or not a caller installs the result.
+    """
+    combined = Ps1BinaryExpression(
+        left=_clone_node(left),
+        operator=operator,
+        right=_clone_node(right),
+    )
+    outcome = evaluate(combined)
+    return None if outcome.may_throw else render(outcome.value)
+
+
+def folded_increment(previous: Expression, delta: int) -> Expression | None:
+    """
+    The value `$x++` or `$x--` leaves in `$x`, given its previous value `previous` and a `delta` of
+    `+1` or `-1`, or `None` where that value is not constant or the increment throws.
+
+    `++` and `--` are not the binary `$x + 1` and `$x - 1`: they require a number and add the delta
+    to it, where `+` and `-` would concatenate a String, coerce one, or read a Boolean as an integer
+    — none of which the increment does. 5.1 answers the delta itself for `$null` and throws
+    `OperatorRequiresNumber` for a String, a Char, a Boolean or a collection, so this folds only over
+    `$null` and the numeric types and refuses the rest, standing no value where 5.1 raised. Over a
+    number the increment *is* the binary sum, which is why `folded_binary` computes it once the
+    operand is one — and `$null`, which `_is_domain_integer` reads as the zero the sum needs.
+    """
+    fact = read(previous)
+    numeric = _is_domain_integer(fact) or (
+        isinstance(fact, Ps1Constant) and fact.type in (_DECIMAL, _DOUBLE)
+    )
+    if not numeric:
+        return None
+    return folded_binary(previous, '+' if delta > 0 else '-', Ps1IntegerLiteral(raw='1'))
 
 
 def _rendered_character(payload) -> Expression | None:

@@ -9,7 +9,12 @@ from unittest.mock import patch
 
 from test import TestBase
 from test.lib.scripts.ps1 import test_deobfuscation
-from test.lib.scripts.ps1.analysis import test_callgraph, test_faults
+from test.lib.scripts.ps1.analysis import (
+    test_blocks,
+    test_callgraph,
+    test_faults,
+    test_worldflow,
+)
 from test.lib.scripts.ps1.deobfuscation import (
     test_deadcode,
     test_emulator,
@@ -25,6 +30,7 @@ from test.lib.scripts.ps1.deobfuscation import (
 
 from refinery.lib.scripts import Node, owning_list
 from refinery.lib.scripts.ps1.analysis import (
+    blocks,
     callgraph,
     commands,
     effects,
@@ -91,8 +97,28 @@ _RAISE_ABANDONS = _witness(
     test_removal_observability.TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock)
 _REFERENCE = _witness(test_unused.TestPs1RemovalLeavesNoDanglingReference)
 _SELECTION = _witness(test_folding.TestPs1SelectionKeepsWhatBuildingTheContainerDid)
+_ARMING_COST = _witness(
+    test_fault_observability.TestPs1TheStrictModeScanStaysLinearInTheSizeOfTheScript)
+_ENUMERATOR = _witness(
+    test_unused.TestPs1AReadThatConsumesWhatItReadsIsNotBareOutput)
+_STRICT_MODE = _witness(
+    test_fault_observability.TestPs1AReadOfAnUnsetVariableRaisesOnlyWhereStrictModeIsArmed)
+_STRICT_MODE_FACT = _witness(
+    test_faults.TestPs1AStrictModeArmingIsReadOverTheWholeScript)
+_STRICT_MODE_PAYLOAD = _witness(
+    test_fault_observability.TestPs1AnUnreadablePayloadMayArmStrictModeWithoutSpellingIt)
+_STRICT_MODE_SHAPE = _witness(
+    test_fault_observability.TestPs1OnlyABareNameIsGrantedTheStrictModeReading)
 _SELECTION_COUNT = _witness(test_folding.TestPs1CountingAnArrayKeepsWhatBuildingItDid)
 _STRIPPED_BY_DEFAULT = _witness(test_unused.TestPs1BareOutputIsStrippedByDefault)
+_SCRIPTBLOCK_SLOT = _witness(
+    test_blocks.TestPs1AnIteratingCommandRunsOnlyTheBlocksItIsHandedToRun)
+_SHADOWED_ITERATOR = _witness(
+    test_blocks.TestPs1AShadowedIteratingCommandRunsItsOwnBodyNotTheBlock)
+_SITE_POSITION = _witness(
+    test_worldflow.TestPs1AReadInsideABlockTheStatementRunsHasTheStatementsPosition)
+_STATEMENT_RUNS_THE_BODY = _witness(
+    test_unused.TestPs1AHandlerElsewhereDoesNotGuardABodyTheStatementItselfRuns)
 _SWALLOWING_TRAP = _witness(
     test_fault_escalation.TestPs1ATrapThatTakesTheErrorAndSwallowsLeavesTheRaiseRemovable)
 _TREE = _witness(test_unused.TestPs1RemovalLeavesTheTreeConsistent)
@@ -197,6 +223,12 @@ def _leaves_anything_counting_its_own_residue(original: Callable) -> staticmetho
     return staticmethod(mutated)
 
 
+def _iterating_command_ignoring_the_shadow_set(original: Callable) -> Callable:
+    def mutated(cmd, shadowed=frozenset()):
+        return original(cmd, frozenset())
+    return mutated
+
+
 def _try_body_survivors_relaxing(*, fault_freedom: bool, abandonment: bool) -> Callable:
     """
     The survivor walk with one of its rules taken out, so that each is measured alone.
@@ -235,7 +267,11 @@ def _try_body_survivors_relaxing(*, fault_freedom: bool, abandonment: bool) -> C
     return mutated
 
 
-def _fault_observed_where_the_clause_is_written(stmt: Node, reach: faults.Ps1FaultReach) -> bool:
+def _fault_observed_where_the_clause_is_written(
+    stmt: Node,
+    reach: faults.Ps1FaultReach,
+    world=None,
+) -> bool:
     """
     The reading the routing walk superseded: a deletion is refused where the statement stands
     *directly* in the `try` block of a construct one of whose `catch` clauses has a body. One
@@ -252,7 +288,11 @@ def _fault_observed_where_the_clause_is_written(stmt: Node, reach: faults.Ps1Fau
     )
 
 
-def _fault_observed_wherever_an_error_would_go(stmt: Node, reach: faults.Ps1FaultReach) -> bool:
+def _fault_observed_wherever_an_error_would_go(
+    stmt: Node,
+    reach: faults.Ps1FaultReach,
+    world=None,
+) -> bool:
     """
     The guard with its first half dropped: every point inside *stmt* is asked where an error raised
     there would go, and no point is asked whether it can raise one, so every statement is judged as
@@ -288,6 +328,43 @@ def _observed_at_reading_only_what_acts(self: faults.Ps1FaultReach, node: Node) 
     if routing.handlers and not routing.leaves_the_body:
         return False
     return not isinstance(graph.owner, Ps1Script) and self._handled_elsewhere(graph)
+
+
+def _strict_mode_read_without_the_memo(self: faults.Ps1FaultReach) -> bool:
+    """
+    The same answer with the `_strict` slot never consulted. Nothing about what the model says
+    changes, which is the point: the memo is a cost guard and not a correctness one, so the only
+    thing that may notice its removal is a test that counts.
+    """
+    root = self._script
+    return root is None or any(faults._arms_strict_mode(node) for node in root.walk())
+
+
+def _strict_mode_with_the_siblings_empty_pole(self: faults.Ps1FaultReach) -> bool:
+    """
+    The whole-script fact copied from `_stops_on_every_error` verbatim, pole and all. That one
+    answers `False` where the graphs place no script, which keeps a handler there; this one grants a
+    removal, so the same pole grants it against a script nothing was read of.
+    """
+    root = self._script
+    return root is not None and any(faults._arms_strict_mode(node) for node in root.walk())
+
+
+def _expression_cannot_fault_without_the_world(
+    operand: Node,
+    position: Node,
+    reach: faults.Ps1FaultReach,
+    world,
+) -> bool:
+    """
+    The gate with only the half the script spells out. What it stops asking is whether anything the
+    analysis cannot read may have run before *position* — and a payload it cannot read may arm
+    strict mode without the script naming it anywhere.
+    """
+    return effects.is_fault_free(operand) or (
+        effects._is_bare_variable_read(operand)
+        and not reach.strict_mode_may_be_in_force()
+    )
 
 
 def _removing_a_handler_asked_at_the_handler(self: faults.Ps1FaultReach, handler: Node) -> bool:
@@ -429,6 +506,15 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
                     unused.Ps1UnusedVariableRemoval._dead_bindings)),
             notices='test_a_kept_value_keeps_the_variable_it_reads')
 
+    def test_reading_the_shadow_set_before_placing_an_iterating_body_is_witnessed(self):
+        self._assertWitnessed(
+            [_SHADOWED_ITERATOR],
+            patch.object(
+                blocks, 'names_an_intact_iterating_command',
+                _iterating_command_ignoring_the_shadow_set(
+                    blocks.names_an_intact_iterating_command)),
+            notices='test_a_function_redefinition_makes_the_body_unplaced')
+
     def test_the_target_slot_gate_on_a_dissolving_value_is_witnessed(self):
         self._assertWitnessed(
             [_REFERENCE],
@@ -528,7 +614,11 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
         # terminates the script where it stands.
         self._assertWitnessed(
             [_KEPT_EITHER_WAY],
-            patch.object(unused, 'is_fault_free', lambda node: True),
+            patch.object(
+                unused,
+                'expression_cannot_fault',
+                lambda operand, position, faults, world: True,
+            ),
             notices='test_a_statement_that_can_raise_is_kept')
 
     def test_the_redirection_gate_on_a_deleted_write_is_witnessed(self):
@@ -614,6 +704,78 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             patch.object(removal, 'fault_is_observed', _fault_observed_wherever_an_error_would_go),
             notices='test_a_quiet_cast_in_a_nested_if_body_is_removed')
 
+    def test_the_strict_mode_gate_on_a_deleted_variable_read_is_witnessed(self):
+        # The one fault a bare read can raise, and the reason the grant is not unconditional.
+        self._assertWitnessed(
+            [_STRICT_MODE],
+            patch.object(
+                faults.Ps1FaultReach, 'strict_mode_may_be_in_force', lambda self: False),
+            notices='test_the_discard_and_the_output_are_both_kept_where_strict_mode_is_armed')
+
+    def test_the_second_command_that_arms_strict_mode_is_witnessed(self):
+        # `Set-PSDebug -Strict` arms the same error engine-wide and resolves to a name of its own,
+        # so a table holding only the obvious command grants every removal below it.
+        self._assertWitnessed(
+            [_STRICT_MODE],
+            patch.object(faults, '_STRICT_MODE_COMMANDS', frozenset({'set-strictmode'})),
+            notices='test_the_discard_and_the_output_are_both_kept_where_the_other_command_arms_it')
+
+    def test_the_memo_that_keeps_the_arming_scan_affordable_is_witnessed(self):
+        # The scan is a walk over the whole tree and the removal path asks for it per candidate, so
+        # the slot is the only thing between one walk per batch and one per statement. Measured, the
+        # call order is *not* such a thing: asking the fact before the cheaper halves of the gate
+        # costs nothing, so a probe over the order would be satisfied by a mutation that changes no
+        # work at all.
+        self._assertWitnessed(
+            [_ARMING_COST],
+            patch.object(
+                faults.Ps1FaultReach,
+                'strict_mode_may_be_in_force',
+                _strict_mode_read_without_the_memo,
+            ),
+            notices='test_the_walk_is_taken_a_bounded_number_of_times')
+
+    def test_the_enumerator_being_denied_purity_is_witnessed(self):
+        # Reading `$input` advances what the statements below it read, so the one variable whose
+        # read is not free has to be denied where every other one is granted.
+        self._assertWitnessed(
+            [_ENUMERATOR],
+            patch.object(effects, '_reads_the_pipeline_enumerator', lambda node: False),
+            notices='test_a_bare_read_of_the_enumerator_is_kept')
+
+    def test_the_empty_pole_of_that_fact_being_the_opposite_of_its_sibling_is_witnessed(self):
+        # Mirroring `_stops_on_every_error` verbatim is the implementation a reader would write,
+        # and no deobfuscation-string test reaches the model it answers for.
+        self._assertWitnessed(
+            [_STRICT_MODE_FACT],
+            patch.object(
+                faults.Ps1FaultReach,
+                'strict_mode_may_be_in_force',
+                _strict_mode_with_the_siblings_empty_pole,
+            ),
+            notices='test_a_model_the_graphs_hold_no_script_for_refuses_the_grant')
+
+    def test_the_world_half_of_that_gate_is_witnessed(self):
+        # Patched in both modules that read the name: `fault_is_observed` reads the one in `effects`
+        # and the output twin imported its own.
+        self._assertWitnessed(
+            [_STRICT_MODE_PAYLOAD],
+            patch.object(
+                effects, 'expression_cannot_fault', _expression_cannot_fault_without_the_world),
+            patch.object(
+                unused, 'expression_cannot_fault', _expression_cannot_fault_without_the_world),
+            notices='test_a_discarded_unset_read_below_an_unreadable_payload_is_kept')
+
+    def test_the_shape_the_grant_is_restricted_to_is_witnessed(self):
+        # An index runs an indexer and a qualified name runs a provider, neither of which strict
+        # mode decides; granting them reads those faults as absent. The member read in the same
+        # class is not a witness of this gate — a getter is impure, so it never reaches the fault
+        # question at all — which is why the probe names one that is.
+        self._assertWitnessed(
+            [_STRICT_MODE_SHAPE],
+            patch.object(effects, '_is_bare_variable_read', lambda node: True),
+            notices='test_a_discarded_index_read_is_kept')
+
     def test_asking_whether_a_handler_acts_at_all_is_witnessed(self):
         # Patched in the module that owns it, where both readings of the routing consult it. The
         # empty `catch` an obfuscator writes is inert either way, so the class built on one stays
@@ -655,3 +817,37 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             [_PROTECTED_BODY],
             patch.object(removal, 'emptying_unhooks_a_handler', lambda block: False),
             notices='test_junk_removal_keeps_a_protected_try_body')
+
+    def test_the_scriptblock_slot_a_block_fills_is_witnessed(self):
+        # A block a command takes as data is one it may hand on rather than run, so reading every
+        # argument of an iterating command as a body it runs invents a site for it.
+        self._assertWitnessed(
+            [_SCRIPTBLOCK_SLOT],
+            patch.object(blocks, '_fills_a_scriptblock_slot', lambda cmd, block, command: True),
+            notices='test_a_block_handed_to_a_data_slot_has_no_site')
+
+    def test_the_name_the_climb_out_of_a_body_rests_on_is_witnessed(self):
+        # The lift is worth what the command name is worth: a script that takes `ForEach-Object`
+        # over may hand the block to something that keeps it.
+        self._assertWitnessed(
+            [_SITE_POSITION],
+            patch.object(
+                worldflow.Ps1WorldReach, '_climb_is_trusted',
+                lambda self, climbed, position: True),
+            notices='test_a_redefined_iterator_refuses_the_climb_out_of_its_body')
+
+    def test_that_a_statement_answers_for_the_bodies_it_runs_is_witnessed(self):
+        # Without it the fallback for a body something may call answers for every block written
+        # inside a discarded pipeline, and one `try` anywhere in the file keeps all of them.
+        self._assertWitnessed(
+            [_STATEMENT_RUNS_THE_BODY],
+            patch.object(effects, '_leaves_a_block_of', lambda site, stmt, faults: False),
+            notices='test_a_discarded_pipeline_is_removed_beside_an_unrelated_handler')
+
+    def test_the_parameter_set_a_positional_block_lands_in_is_witnessed(self):
+        # A command picks one parameter set from its arguments, and the first positional argument is
+        # a body in one of them and a method's argument list in another.
+        self._assertWitnessed(
+            [_SCRIPTBLOCK_SLOT],
+            patch.object(blocks, '_selects_a_scriptblock_set', lambda cmd, command: True),
+            notices='test_a_member_name_makes_the_positional_block_an_argument_rather_than_a_body')

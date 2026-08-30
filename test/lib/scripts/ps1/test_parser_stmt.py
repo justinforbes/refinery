@@ -1812,3 +1812,22 @@ class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
         dashes, recurse = self._arguments('f -- -Recurse')
         self._assertEndsTheParameters(dashes)
         self._assertIsTheWord(recurse, '-Recurse')
+
+
+class TestPs1AFunctionNamedForAnAliasCharacterDoesNotSwallowTheScript(TestBase):
+    """
+    `function % { … }` defines the name `%`, so the statement written after it belongs to the
+    script and the two are two statements, not one definition that swallows the rest. PowerShell
+    5.1 takes any token that could begin a command name as the function name, refusing only its
+    punctuators and unary operators; a bare `%` is not among those. No deobfuscation pass is
+    involved; parsing alone does it.
+    """
+
+    def test_a_statement_after_a_percent_function_stays_in_the_script(self):
+        script = Ps1Parser(inspect.cleandoc(
+            """
+            function % { 'b' }
+            Write-Host 'AFTER'
+            """
+        )).parse()
+        self.assertEqual(len(script.body), 2)

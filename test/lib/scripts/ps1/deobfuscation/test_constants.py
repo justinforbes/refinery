@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from inspect import cleandoc
+
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
 from refinery.lib.scripts.ps1.deobfuscation import Ps1ConstantInlining
@@ -29,9 +31,9 @@ class TestPs1ConstantInlining(TestPs1):
         self.assertIn('XZ', result)
         self.assertNotIn('$a', result)
 
-    def test_compound_assignment_disqualifies(self):
+    def test_compound_assignment_folds(self):
         result = self._deobfuscate("$x = 'a'; $x += 'b'; Write-Output $x")
-        self.assertIn('$x', result)
+        self.assertEqual(result, "Write-Output 'ab'")
 
     def test_same_value_multiple_assignments_inlined(self):
         result = self._deobfuscate(
@@ -100,10 +102,9 @@ class TestPs1ConstantInlining(TestPs1):
         result = self._deobfuscate("$script:x = 'val'; Write-Output $script:x")
         self.assertIn('$script:x', result)
 
-    def test_increment_not_inlined(self):
+    def test_increment_folds(self):
         result = self._deobfuscate("$i = 0; $i++; Write-Output $i")
-        self.assertIn('$i', result)
-        self.assertNotIn('0++', result)
+        self.assertEqual(result, 'Write-Output 1')
 
     def test_nonconst_value_not_inlined(self):
         result = self._deobfuscate("$x = Get-Date; Write-Output $x")
@@ -464,11 +465,11 @@ class TestPs1ReassignedVariableInlining(TestPs1):
         self.assertIn('done', result)
         self.assertNotIn('$x', result)
 
-    def test_augmented_assignment_rejects(self):
+    def test_augmented_assignment_folds(self):
         result = self._deobfuscate(
             "$x = 'hello'\n$x += ' world'\nWrite-Host $x"
         )
-        self.assertIn('$x', result)
+        self.assertEqual(result, "Write-Host 'hello world'")
 
     def test_same_stmt_assign_does_not_dominate_earlier_ref(self):
         """
@@ -923,3 +924,24 @@ class TestPs1ALaunchDependentDefaultIsNotInvented(TestPs1):
         self.assertEqual(
             self._apply('Write-Host "$PSHome"', Ps1ConstantInlining),
             'Write-Host "C:\\Windows\\System32\\WindowsPowerShell\\v1.0"')
+
+
+class TestPs1AnUnsetReadIsNotNullWhereStrictModeIsArmed(TestPs1):
+    """
+    `Set-StrictMode` turns a read of a never-assigned variable into a statement-terminating error, so
+    the name is not worth `$null` and giving it that value decides a branch the script never takes.
+    Windows PowerShell 5.1 raises for the script below and runs neither body, printing nothing.
+    """
+
+    def test_a_branch_on_an_unset_name_is_not_resolved_where_strict_mode_is_armed(self):
+        result = self._deobfuscate_iterative(cleandoc(
+            """
+            Set-StrictMode -Version 1
+            if ($zzqundefined) {
+              Write-Host 'dead'
+            } else {
+              Write-Host 'live'
+            }
+            """
+        ))
+        self.assertIn('$zzqundefined', result)

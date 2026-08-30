@@ -29,9 +29,14 @@ from refinery.lib.scripts.ps1.analysis.model import (
 from refinery.lib.scripts.ps1.analysis.mutation import value_after
 from refinery.lib.scripts.ps1.analysis.naming import Ps1NameRole, named_references
 from refinery.lib.scripts.ps1.analysis.separator import coerced_text_at
-from refinery.lib.scripts.ps1.analysis.variable_types import constraint_converts
+from refinery.lib.scripts.ps1.analysis.variable_types import (
+    constraint_converts,
+    value_under_declared_constraint,
+)
 from refinery.lib.scripts.ps1.analysis.values import (
     UNKNOWN,
+    folded_binary,
+    folded_increment,
     integer_of,
     make_string_literal,
     read,
@@ -95,9 +100,11 @@ _PS1_DEFAULT_VARIABLES: dict[str, str] = {
         'ConsoleFileName'            : r'',
         'DebugPreference'            : r'SilentlyContinue',
         'ErrorActionPreference'      : r'Continue',
+        'ErrorView'                  : r'NormalView',
         'InformationPreference'      : r'SilentlyContinue',
         'ProgressPreference'         : r'Continue',
         'PSCulture'                  : r'en-US',
+        'PSEdition'                  : r'Desktop',
         'PSEmailServer'              : r'',
         'PSHome'                     : r'C:\Windows\System32\WindowsPowerShell\v1.0',
         'PSSessionApplicationName'   : r'wsman',
@@ -459,6 +466,60 @@ def _ancestor_past_parens(node: Node) -> Node | None:
     return parent
 
 
+def _accumulation_terms(node: Node) -> tuple[str, Expression] | None:
+    """
+    The binary operator and right-hand operand that an accumulating write of `node` reads its
+    previous value against, or `None` when the write is not one — `('+', e)` for `$x += e`.
+
+    A plain `=` is excluded: it replaces the value without reading it, and its constant is the
+    ordinary `by_write` entry. An accumulating one reads the value as well, so its constant is the
+    fold of the previous value against the operand rather than a value written down anywhere. A
+    compound `op=` genuinely is `$x op e`, which is why its fold goes through `folded_binary`;
+    `++` and `--` are not, and are read by `_increment_delta` instead.
+
+    Only a write that is itself a statement counts. Its previous value is asked of the flow model,
+    which tracks control flow between statements but not within an expression: a `$i += 1` inside
+    `$false -and ($i += 1)` never runs, yet the model reports it as the definite last write to `$i`,
+    so folding it in would compute a value the script never reaches. Held to a statement, whether the
+    write runs at all is the flow model's own question to answer, and this only supplies the value
+    once it does.
+    """
+    if not isinstance(node, Ps1Variable):
+        return None
+    assignment = assignment_of(node)
+    if assignment is None:
+        return None
+    if assignment.operator == '=' or not isinstance(assignment.parent, Ps1ExpressionStatement):
+        return None
+    value = assignment.value
+    return (assignment.operator[:-1], value) if isinstance(value, Expression) else None
+
+
+def _increment_delta(node: Node) -> int | None:
+    """
+    The amount a statement-level `$x++` or `$x--` adds to its previous value — `+1` or `-1` — or
+    `None` when the write of `node` is not one.
+
+    This is kept apart from `_accumulation_terms` because `$x++` is not `$x + 1`: the increment
+    operators require a number and throw on a String, a Char or a Boolean, where binary `+` would
+    concatenate or coerce one, so their fold goes through `folded_increment` rather than the binary
+    path. The statement-only rule is `_accumulation_terms`', for the reason written there: the flow
+    model reports a write inside a never-run expression as the definite last one.
+    """
+    if not isinstance(node, Ps1Variable):
+        return None
+    parent = node.parent
+    if not isinstance(parent, Ps1UnaryExpression) or parent.operand is not node:
+        return None
+    if not isinstance(parent.parent, Ps1ExpressionStatement):
+        return None
+    if parent.operator == '++':
+        return 1
+    if parent.operator == '--':
+        return -1
+    return None
+
+
 def _constant_value_key(node: Node) -> tuple | None:
     """
     A hashable key for the constant value of a node, or `None` where the node names no value. Two
@@ -709,13 +770,27 @@ class _Inlining:
         write = self.flow.reaching_definition(var)
         if write is None:
             return None
-        if not isinstance(write, Ps1Variable) or not is_mutated_in_place(write):
+        accumulation = _accumulation_terms(write)
+        delta = _increment_delta(write)
+        through = isinstance(write, Ps1Variable) and is_mutated_in_place(write)
+        if not through and accumulation is None and delta is None:
             value = self.table.by_write.get(id(write))
-            return None if value is None or constraint_converts(binding, value) else value
+            if value is None:
+                return None
+            if not constraint_converts(binding, value):
+                return value
+            return value_under_declared_constraint(write, value)
         if id(write) in chased:
             return None
         previous = self._value_at(write, key, chased | {id(write)})
-        return None if previous is None else value_after(write, previous)
+        if previous is None:
+            return None
+        if accumulation is not None:
+            operator, right = accumulation
+            return folded_binary(previous, operator, right)
+        if delta is not None:
+            return folded_increment(previous, delta)
+        return value_after(write, previous)
 
     def binding_of(self, var: Ps1Variable) -> Binding | None:
         return self.flow.semantic.binding_of(var)
@@ -958,6 +1033,12 @@ class Ps1NullVariableInlining(Transformer):
     Replace references to never-assigned variables with `$Null`. Only operates on variables that
     appear in expression contexts where null coercion enables further simplification (arithmetic,
     comparison, cast, assignment value).
+
+    A never-assigned read is `$null` only under the default semantics; under strict mode it is a
+    statement-terminating error instead, so giving it `$null` decides a branch the script never
+    reaches. `refinery.lib.scripts.ps1.analysis.faults.Ps1FaultReach.strict_mode_may_be_in_force`
+    is the one model of whether the script arms it, shared with the removal veto, and the whole
+    pass stands down where it may be in force rather than every substitution deciding it again.
     """
 
     @staticmethod
@@ -985,6 +1066,8 @@ class Ps1NullVariableInlining(Transformer):
         return False
 
     def visit(self, node: Node):
+        if model_cache(self, node).faults.strict_mode_may_be_in_force():
+            return
         mutated = _collect_mutated_variables(node)
         for ref in list(node.walk()):
             if not isinstance(ref, Ps1Variable):

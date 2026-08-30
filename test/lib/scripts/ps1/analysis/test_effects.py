@@ -5,10 +5,13 @@ from inspect import cleandoc
 from test import TestBase
 
 from refinery.lib.scripts import Statement, _remove_from_parent
+from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     StatementEffect,
+    _reflection_read_is_pure,
     body_is_inert,
+    expression_cannot_fault,
     is_fault_free,
     is_side_effect_free,
     output_path,
@@ -17,9 +20,11 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     statement_effect,
     unconsumed_statement,
 )
-from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
-from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
+from refinery.lib.scripts.ps1.analysis.faults import build_fault_reach
+from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld, measure_world
+from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach, build_world_reach
 from refinery.lib.scripts.ps1.ast import get_body, get_command_name
+from refinery.lib.scripts.ps1.data import resolve_type
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
     Ps1CommandInvocation,
@@ -951,6 +956,39 @@ class TestPs1FaultFreedomAndSideEffectFreedomAreIndependent(Ps1EffectsTest):
                 )
 
 
+class TestPs1ReadingThePipelineEnumeratorIsNotAPureRead(Ps1EffectsTest):
+    """
+    Every other variable read yields a value and changes nothing, which is why purity grants a bare
+    name unconditionally. `$input` is the enumerator over a function's pipeline input, and
+    enumerating it advances it, so a statement whose whole content is that read still decides what
+    the statement below it writes. Measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`:
+    `function f { $input; $input | ForEach-Object { Write-Host "seen:$_" } }` fed `1, 2` writes the
+    two values once and nothing after them.
+    """
+
+    def test_a_bare_read_of_the_enumerator_is_not_pure(self):
+        self.assertFalse(self._pure(self._expression('$input')))
+
+    def test_the_spelling_does_not_decide_it(self):
+        for source in ('$input', '${input}', '$INPUT'):
+            with self.subTest(source):
+                self.assertFalse(self._pure(self._expression(source)))
+
+    def test_every_other_bare_read_stays_pure(self):
+        for source in ('$x', '$inputs', '$myinput', '$args', '$_'):
+            with self.subTest(source):
+                self.assertTrue(self._pure(self._expression(source)))
+
+    def test_the_statement_acts_where_the_same_statement_over_any_other_name_only_writes(self):
+        self.assertEqual(
+            {
+                source: self._effect(self._statement(source))
+                for source in ('$input', '$x')
+            },
+            {'$input': StatementEffect.EFFECT, '$x': StatementEffect.OUTPUT},
+        )
+
+
 class TestPs1EffectInvariant(Ps1EffectsTest):
     """
     A regression list of shapes that were each, at some point, deleted along with real work: a
@@ -1354,3 +1392,139 @@ class TestPs1OpenWorldNameTrust(Ps1EffectsTest):
         # The two questions the world answers must fail in the same direction, or a caller that
         # forgets the world gets a member grant refused and a name grant handed to it.
         self.assertFalse(is_side_effect_free(self._expression('Get-Date'), _NO_WORLD))
+
+
+class TestPs1WhetherAnExpressionCanFaultIsDecidedByTheScriptToo(Ps1EffectsTest):
+    """
+    `expression_cannot_fault` is the whole question a removal site asks, and `is_fault_free` is only
+    its context-free half. The half added on top is one fault the operands cannot decide: reading a
+    variable that was never set yields `$null` under the default semantics and raises only where
+    strict mode is armed. Measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`.
+
+    Two models answer it and both may refuse. The script may arm strict mode itself, and a payload
+    the analysis cannot read may arm it before the position — so a read below an opaque
+    `Invoke-Expression` is refused where the same read above it is granted.
+
+    A variable is not fault-free and stays that way, so the two predicates disagree about `$x` on
+    purpose: one says what holds under any semantics, the other what holds in this script here.
+    """
+
+    @staticmethod
+    def _cannot_fault(expression: str, above: str = '', below: str = '') -> bool:
+        tree = Ps1Parser(cleandoc(F'{above}{expression}{below}')).parse()
+        control_flow = build_control_flow_model(tree)
+        world = build_world_reach(measure_world(tree), lambda: control_flow)
+        statement = tree.body[above.count(chr(10))]
+        return expression_cannot_fault(
+            statement.expression, statement, build_fault_reach(control_flow), world)
+
+    def _verdicts(self, expressions: list[str], above: str = '') -> dict[str, bool]:
+        return {
+            expression: self._cannot_fault(expression, above)
+            for expression in expressions
+        }
+
+    #: Three spellings of the one shape the added half is about, so that no row below rests on how
+    #: the name happens to be written.
+    _BARE = ['$x', '${x}', '$Undefined']
+
+    def test_a_bare_variable_read_cannot_fault_where_nothing_arms_strict_mode(self):
+        self.assertEqual(self._verdicts(self._BARE), dict.fromkeys(self._BARE, True))
+
+    def test_the_same_reads_can_fault_where_the_script_arms_strict_mode(self):
+        self.assertEqual(
+            self._verdicts(self._BARE, 'Set-StrictMode -Version 1\n'),
+            dict.fromkeys(self._BARE, False),
+        )
+
+    def test_the_same_reads_can_fault_below_a_payload_the_analysis_cannot_read(self):
+        self.assertEqual(
+            self._verdicts(self._BARE, 'Invoke-Expression $env:ZZQ\n'),
+            dict.fromkeys(self._BARE, False),
+        )
+
+    def test_the_same_reads_cannot_fault_above_that_payload(self):
+        self.assertEqual(
+            {
+                expression: self._cannot_fault(
+                    expression, below='\nInvoke-Expression $env:ZZQ')
+                for expression in self._BARE
+            },
+            dict.fromkeys(self._BARE, True),
+        )
+
+    def test_no_read_that_is_more_than_a_bare_name_is_granted(self):
+        expressions = ['@x', '$env:x', '$global:x', '${zzqdrive:x}', '$x.Foo', '$x[0]', 'Get-Thing']
+        self.assertEqual(self._verdicts(expressions), dict.fromkeys(expressions, False))
+
+    def test_what_cannot_raise_under_any_semantics_is_granted_under_all_of_them(self):
+        expressions = ["'abc'", '42', '6 * 7', "[Int]'42'", '@(1, 2)']
+        for above in ('', 'Set-StrictMode -Version 1\n', 'Invoke-Expression $env:ZZQ\n'):
+            with self.subTest(above=above):
+                self.assertEqual(
+                    self._verdicts(expressions, above), dict.fromkeys(expressions, True))
+
+    def test_a_bare_variable_read_is_never_fault_free_on_its_own(self):
+        self.assertEqual(
+            {e: is_fault_free(self._expression(e)) for e in self._BARE},
+            dict.fromkeys(self._BARE, False),
+        )
+
+    def test_a_caller_with_no_world_gets_the_context_free_answer_alone(self):
+        tree = Ps1Parser('$x').parse()
+        statement = tree.body[0]
+        faults = build_fault_reach(build_control_flow_model(tree))
+        self.assertFalse(expression_cannot_fault(statement.expression, statement, faults, None))
+
+
+class TestPs1AnAdapterMemberIsReadOffTheAdapterAndNotOffTheType(Ps1EffectsTest):
+    """
+    The object adapter answers `Count`, `PSTypeNames` and `PSObject` for any value that carries no
+    member of that name, so reading one runs no getter the type declares. What could still make it
+    run one is the runtime value being a subtype with a real member of that name — which a sealed
+    type rules out, and an unsealed one does not.
+
+    Measured on 5.1: `(@('one', 'two', 'three') | Measure-Object).GetType().FullName` is the sealed
+    `Microsoft.PowerShell.Commands.TextMeasureInfo`'s sibling `GenericMeasureInfo`, and the whole
+    family carries no `Count` of its own on the text variant, where the adapter supplies it.
+    """
+
+    def test_the_adapter_count_on_a_sealed_type_that_does_not_carry_one_is_pure(self):
+        self.assertTrue(_reflection_read_is_pure(
+            resolve_type('Microsoft.PowerShell.Commands.TextMeasureInfo'), 'Count'))
+
+    def test_the_adapter_count_on_an_unsealed_type_is_not(self):
+        self.assertTrue(_reflection_read_is_pure(
+            resolve_type('System.Diagnostics.Process'), 'ProcessName'))
+        self.assertFalse(_reflection_read_is_pure(
+            resolve_type('System.Diagnostics.Process'), 'PSTypeNames'))
+
+    def test_a_member_the_type_really_carries_is_not_read_off_the_adapter(self):
+        """
+        `System.Array` declares its own `Length`, and the collected record wins over the adapter, so
+        the sealedness of the type says nothing about it.
+        """
+        self.assertFalse(_reflection_read_is_pure(resolve_type('System.Array'), 'Length'))
+
+    def test_a_member_no_collected_type_carries_stays_refused_on_a_sealed_reference_type(self):
+        self.assertFalse(_reflection_read_is_pure(
+            resolve_type('Microsoft.PowerShell.Commands.TextMeasureInfo'), 'Nonesuch'))
+
+
+class TestPs1ADiscardedMeasurementReadsItsCountWithoutRunningCode(Ps1EffectsTest):
+    """
+    `@('a', 'b') | Measure-Object | ForEach-Object { $_.Count }` writes `2` on 5.1 and does nothing
+    else, so a script that throws the value away has said nothing. Every type `Measure-Object`
+    declares has to answer for the read, since which one a call yields depends on its switches.
+    """
+
+    def test_the_whole_pipeline_is_side_effect_free(self):
+        self.assertTrue(self._pure(
+            self._expression("@('a', 'b') | Measure-Object | ForEach-Object { $_.Count }")))
+
+    def test_a_member_the_measurement_does_not_carry_is_still_refused(self):
+        self.assertFalse(self._pure(
+            self._expression("@('a', 'b') | Measure-Object | ForEach-Object { $_.Length }")))
+
+    def test_a_member_read_on_an_untyped_current_object_is_refused(self):
+        self.assertFalse(self._pure(self._expression("1, 2 | ForEach-Object { $_.Count }")))

@@ -6,7 +6,7 @@ from refinery.lib.scripts.ps1.analysis.values import candidate_types, resolve_ex
 from refinery.lib.scripts.ps1.analysis.world import Ps1TypeWorld
 from refinery.lib.scripts.ps1.analysis.worldflow import Ps1WorldReach
 from refinery.lib.scripts.ps1.data import resolve_type
-from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement
+from refinery.lib.scripts.ps1.model import Ps1ExpressionStatement, Ps1Variable
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -124,3 +124,61 @@ class TestPs1CandidateTypes(Ps1ExpressionTypeTest):
 if __name__ == '__main__':
     import unittest
     unittest.main()
+
+
+class TestPs1TheCurrentPipelineObjectIsTypedByWhatFeedsIt(Ps1ExpressionTypeTest):
+    """
+    Measured on Windows PowerShell 5.1:
+    `(@('one', 'two', 'three') | Measure-Object).GetType().FullName` is
+    `Microsoft.PowerShell.Commands.GenericMeasureInfo`, and
+    `@('one', 'two', 'three') | Measure-Object | ForEach-Object { $_.Count }` writes `3`.
+
+    A cmdlet declares what it writes to the pipeline *per object*, which is already what `$_` is
+    bound to. Anything else upstream is a value the pipeline enumerates, and the type of the whole
+    is not the type of an element — so it contributes nothing rather than the collection's type.
+    """
+
+    def _current_object(self, source: str):
+        script = Ps1Parser(source).parse()
+        node = next(
+            node for node in script.walk()
+            if isinstance(node, Ps1Variable) and node.name == '_'
+        )
+        return candidate_types(node, self.CLOSED)
+
+    def test_a_cmdlet_upstream_types_the_current_object(self):
+        self.assertEqual(
+            self._current_object("'a' | Measure-Object | ForEach-Object { $_ }"),
+            frozenset({
+                resolve_type('Microsoft.PowerShell.Commands.GenericMeasureInfo'),
+                resolve_type('Microsoft.PowerShell.Commands.GenericObjectMeasureInfo'),
+                resolve_type('Microsoft.PowerShell.Commands.TextMeasureInfo'),
+            }),
+        )
+
+    def test_an_enumerated_value_upstream_types_nothing(self):
+        self.assertEqual(self._current_object("1, 2 | ForEach-Object { $_ }"), frozenset())
+
+    def test_the_first_element_of_a_pipeline_has_nothing_upstream(self):
+        self.assertEqual(self._current_object("ForEach-Object { $_ }"), frozenset())
+
+    def test_a_begin_body_reads_a_current_object_nothing_here_bound(self):
+        self.assertEqual(
+            self._current_object("'a' | Measure-Object | ForEach-Object -Begin { $_ }"),
+            frozenset(),
+        )
+
+    def test_a_stored_body_is_not_bound_by_the_pipeline_it_is_written_in(self):
+        self.assertEqual(
+            self._current_object("'a' | Measure-Object | Out-Null; $b = { $_ }"),
+            frozenset(),
+        )
+
+    def test_a_command_the_script_takes_over_types_nothing(self):
+        world = Ps1WorldReach(Ps1TypeWorld(True, frozenset({'measure-object'})))
+        script = Ps1Parser("'a' | Measure-Object | ForEach-Object { $_ }").parse()
+        node = next(
+            node for node in script.walk()
+            if isinstance(node, Ps1Variable) and node.name == '_'
+        )
+        self.assertEqual(candidate_types(node, world), frozenset())

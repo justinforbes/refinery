@@ -7,6 +7,7 @@ from inspect import cleandoc
 from test import TestBase
 
 from refinery.lib.scripts import Statement
+from refinery.lib.scripts.analysis.cfg import ControlFlowModel
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.analysis.faults import (
     Ps1FaultReach,
@@ -15,9 +16,10 @@ from refinery.lib.scripts.ps1.analysis.faults import (
     ends_the_script,
     handler_acts,
 )
-from refinery.lib.scripts.ps1.ast import get_body
+from refinery.lib.scripts.ps1.ast import get_body, resolve_command_name
 from refinery.lib.scripts.ps1.model import (
     Ps1ArrayExpression,
+    Ps1CommandInvocation,
     Ps1Script,
     Ps1SubExpression,
     Ps1TrapStatement,
@@ -607,3 +609,138 @@ class TestPs1AStopPreferenceIsWhatMakesTheTrapUnderItWorthKeeping(TestBase):
             '$ErrorActionPreference = 2',
         ]
         self.assertEqual(self._observations(assignments), dict.fromkeys(assignments, False))
+
+
+class TestPs1AStrictModeArmingIsReadOverTheWholeScript(TestBase):
+    """
+    Reading a variable that was never set yields `$null` and raises nothing. `Set-StrictMode` makes
+    the same read a statement-terminating error that a `catch` and a `trap` both take, so a script
+    that arms it anywhere is a script where deleting such a read is observable. Both halves are
+    measured on 5.1 in `test.lib.scripts.ps1.corpus.BEHAVIOURS`.
+
+    Whether it is armed is asked of the whole script and never of a position, because which scopes
+    an arming covers is not decidable here: `Set-StrictMode` writes the scope it stands in and
+    `Set-PSDebug -Strict` writes the global one, so a call inside a function arms nothing outside it
+    in the first spelling and everything in the second. `Set-StrictMode -Off` is an arming here like
+    every other spelling, and what that costs is the recall of a script that turns it off again.
+    """
+
+    def _armings(self, scripts: list[str]) -> dict[str, bool]:
+        return {
+            script: _model(script)[1].strict_mode_may_be_in_force()
+            for script in scripts
+        }
+
+    def test_every_spelling_that_resolves_to_the_command_arms_strict_mode(self):
+        scripts = [
+            'Set-StrictMode -Version 1',
+            'Set-StrictMode -Version Latest',
+            'set-strictmode -version 2',
+            "& 'Set-StrictMode' -Version 1",
+            "& 'global:Set-StrictMode' -Version 1",
+            'Set-StrictMode -Off',
+            'function f { Set-StrictMode -Version 1 }',
+            'if ($a) { Set-StrictMode -Version 1 }',
+        ]
+        self.assertEqual(self._armings(scripts), dict.fromkeys(scripts, True))
+
+    def test_the_second_command_that_arms_it_is_read_as_an_arming_too(self):
+        """
+        `Set-PSDebug -Strict` writes the same engine slot that `Set-StrictMode -Version 1` writes,
+        and writes it for the global scope rather than the current one. Measured on 5.1 in
+        `test.lib.scripts.ps1.corpus.BEHAVIOURS`: the guarded read below it raises and the `catch`
+        runs, exactly as it does under the spelling this scan was first written for.
+        """
+        scripts = [
+            'Set-PSDebug -Strict',
+            'set-psdebug -strict',
+            'Set-PSDebug -Trace 1 -Strict',
+            "& 'Set-PSDebug' -Strict",
+            "Invoke-Expression 'Set-PSDebug -Strict'",
+            'function f { Set-PSDebug -Strict }',
+        ]
+        self.assertEqual(self._armings(scripts), dict.fromkeys(scripts, True))
+
+    def test_a_string_holding_the_name_arms_strict_mode_wherever_it_stands(self):
+        scripts = [
+            "Invoke-Expression 'Set-StrictMode -Version 1'",
+            "$c = 'Set-StrictMode -Version 1'; Invoke-Expression $c",
+            "Set-Item Variable:c 'set-strictmode -version 1'",
+        ]
+        self.assertEqual(self._armings(scripts), dict.fromkeys(scripts, True))
+
+    def test_a_script_that_never_spells_the_name_arms_nothing(self):
+        scripts = [
+            "Write-Host 'strict mode'",
+            '$strictmode = 1',
+            'Set-Variable StrictMode 1',
+            "Write-Host 'Set-Strict'",
+            "'a' + 'b'",
+        ]
+        self.assertEqual(self._armings(scripts), dict.fromkeys(scripts, False))
+
+    def test_a_name_assembled_out_of_pieces_is_not_read_as_an_arming(self):
+        """
+        The miss this scan shares with `a_stop_may_be_in_force`: a value is matched as it is
+        written, so a payload no literal spells is invisible. It costs nothing at the tool level
+        for the two spellings that fold — the concatenation and the base64 blob are resolved to the
+        literal before the removal is weighed — and what is left is a payload the analysis cannot
+        read at all, which
+        `test.lib.scripts.ps1.deobfuscation.test_fault_observability` refuses on the world instead.
+        """
+        script = "$c = 'Set-Strict' + 'Mode -Version 1'; Invoke-Expression $c"
+        self.assertEqual(self._armings([script]), {script: False})
+
+    def test_a_model_the_graphs_hold_no_script_for_refuses_the_grant(self):
+        """
+        The pole this fact does not share with `_stops_on_every_error`, which answers `False` there.
+        What this one grants is a removal, so an empty model has to refuse it: a script nothing was
+        read of is not a script that was read and found to arm nothing.
+        """
+        self.assertTrue(Ps1FaultReach(ControlFlowModel({})).strict_mode_may_be_in_force())
+
+
+class TestPs1WhetherAnErrorLeavesTheBodyItWasRaisedIn(TestBase):
+    """
+    The half of the position question that says nothing about where the error goes next, only that
+    the body it was raised in does not decide it. A caller that knows what runs the body reads this
+    and answers the rest for itself.
+    """
+
+    def _escapes(self, source: str) -> bool:
+        tree, faults = _model(source)
+        point = next(
+            node for node in tree.walk()
+            if isinstance(node, Ps1CommandInvocation)
+            and resolve_command_name(node) == 'get-random'
+        )
+        return faults.escapes_the_body(point)
+
+    def test_a_body_with_no_handler_settles_nothing(self):
+        self.assertTrue(self._escapes("1, 2 | ForEach-Object { Get-Random }"))
+
+    def test_a_catch_that_acts_settles_it(self):
+        self.assertFalse(self._escapes(
+            "1, 2 | ForEach-Object { try { Get-Random } catch { Write-Host 'h' } }"))
+
+    def test_an_empty_catch_settles_it_too(self):
+        """
+        Nothing observable happens, but the error stops there all the same, so where the body runs
+        cannot change where it went.
+        """
+        self.assertFalse(self._escapes("1, 2 | ForEach-Object { try { Get-Random } catch { } }"))
+
+    def test_a_trap_that_may_decline_the_error_ends_the_body_and_settles_it(self):
+        self.assertFalse(self._escapes(
+            "1, 2 | ForEach-Object { trap [System.IO.IOException] { } Get-Random }"))
+
+    def test_a_position_the_graphs_place_nowhere_escapes_nothing(self):
+        tree = _parse("function f ($p = $(Get-Random)) { }")
+        faults = build_fault_reach(build_control_flow_model(tree))
+        point = next(
+            node for node in tree.walk()
+            if isinstance(node, Ps1CommandInvocation)
+            and resolve_command_name(node) == 'get-random'
+        )
+        self.assertFalse(faults.escapes_the_body(point))
+        self.assertTrue(faults.observed_at(point))

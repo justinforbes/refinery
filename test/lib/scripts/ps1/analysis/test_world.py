@@ -2,15 +2,20 @@ from __future__ import annotations
 
 from test import TestBase
 
+from inspect import cleandoc
+
 from refinery.lib.scripts.ps1.analysis.world import (
     Ps1TypeWorld,
     WorldRole,
     assigns_an_alias_name,
     build_closed_world,
     command_role,
+    measure_world,
     touches_identity_provider,
 )
+from refinery.lib.scripts.ps1.ast import get_command_name
 from refinery.lib.scripts.ps1.model import Ps1CommandInvocation
+from refinery.lib.scripts.ps1.options import Ps1DeobfuscationOptions
 from refinery.lib.scripts.ps1.parser import Ps1Parser
 
 
@@ -144,6 +149,35 @@ class TestPs1ShadowedCommands(Ps1TypeWorldTest):
             with self.subTest(name):
                 self.assertTrue(world.command_shadowed(name))
         self.assertFalse(world.command_shadowed('get-childitem'))
+
+    def test_an_item_cmdlet_writing_a_provider_path_shadows_the_name_it_binds(self):
+        # `Set-Item function:Get-Date { 1 }` rebinds `Get-Date` the way `function Get-Date { 1 }`
+        # does, measured on 5.1, but through a path read out of the argument, not off the statement
+        # keyword; the alias drive is the same rebinding one provider over.
+        for source in (
+            'Set-Item function:Get-Date { 1 }',
+            'Set-Item function:Get-Date -Value { 1 }',
+            'New-Item function:Get-Date -Value { 1 }',
+            "Set-Item 'Microsoft.PowerShell.Core\\Function::Get-Date' -Value { 1 }",
+            'Set-Item Function:\\Get-Date -Value { 1 }',
+            'Set-Item alias:Get-Date Stop-Process',
+        ):
+            with self.subTest(source):
+                self.assertTrue(
+                    build_closed_world(Ps1Parser(source).parse()).command_shadowed('get-date'))
+
+    def test_a_provider_path_that_is_read_or_ordinary_shadows_nothing(self):
+        # A read the same path spells binds nothing, a command outside the item cmdlets is not a
+        # provider write however it mentions one, and an ordinary path is no provider at all, so
+        # none may distrust a name the script never redefined.
+        for source in (
+            'Get-Item function:Get-Date',
+            'Write-Output function:Get-Date',
+            'Set-Item C:\\tmp\\Get-Date.txt -Value 1',
+        ):
+            with self.subTest(source):
+                self.assertFalse(
+                    build_closed_world(Ps1Parser(source).parse()).command_shadowed('get-date'))
 
     def test_a_defined_function_does_not_open_the_world(self):
         self.assertTrue(self._closed('function Get-Date { 1 }\n$x = 2'))
@@ -614,3 +648,77 @@ class TestPs1CommandRole(TestBase):
             'Import-Module',
         )
         self.assertEqual({command_role(name) for name in spellings}, {WorldRole.MUTATION})
+
+
+class TestPs1TrustedEvalNarrowsTheOpenerListAndNothingElse(TestBase):
+    """
+    `refinery.lib.scripts.ps1.options.Ps1DeobfuscationOptions.trust_eval` withholds exactly the
+    openers whose danger is that code nobody can read will run, and leaves every other reading of
+    the same walk alone. Both models are measured over one tree holding one construct of each kind,
+    and each opener is named by the statement it was written as rather than by the classification
+    under test, so a construct that stopped being recognized shows up as a missing row.
+    """
+
+    _ONE_OF_EVERY_KIND = cleandoc("""
+        Invoke-Expression $c
+        & $f
+        . C:/stage2.ps1
+        Set-Alias Copy-Item $t
+        Set-Item alias:Out-Null Write-Host
+        Add-Type -TypeDefinition $src
+        Update-TypeData -TypeName System.Int32 -MemberName X -Value 1
+        class Zzq {
+        }
+        function Get-Date {
+        }
+    """)
+
+    @classmethod
+    def setUpClass(cls):
+        script = Ps1Parser(cls._ONE_OF_EVERY_KIND).parse()
+        cls.suspecting = measure_world(script, Ps1DeobfuscationOptions(trust_eval=False))
+        cls.trusting = measure_world(script, Ps1DeobfuscationOptions(trust_eval=True))
+
+    @staticmethod
+    def _written_as(node) -> str:
+        if isinstance(node, Ps1CommandInvocation):
+            return get_command_name(node) or '&'
+        return type(node).__name__
+
+    def test_the_suspecting_model_records_every_construct(self):
+        self.assertEqual(
+            [self._written_as(node) for node in self.suspecting.openers],
+            [
+                'Ps1ClassDefinition',
+                'Update-TypeData',
+                'Add-Type',
+                'Set-Item',
+                'Set-Alias',
+                'C:/stage2.ps1',
+                '&',
+                'Invoke-Expression',
+            ],
+        )
+
+    def test_the_trusting_model_withholds_only_the_ones_running_unreadable_code(self):
+        self.assertEqual(
+            [self._written_as(node) for node in self.trusting.openers],
+            [
+                'Ps1ClassDefinition',
+                'Update-TypeData',
+                'Add-Type',
+                'Set-Item',
+            ],
+        )
+
+    def test_the_shadow_set_is_the_same_under_both_models(self):
+        self.assertEqual(
+            self.suspecting.world.shadowed_names,
+            self.trusting.world.shadowed_names,
+        )
+
+    def test_the_verdict_and_the_opener_list_stay_one_fact(self):
+        for name in ('suspecting', 'trusting'):
+            with self.subTest(name):
+                measured = getattr(self, name)
+                self.assertEqual(measured.world.closed_for_the_whole_run, not measured.openers)

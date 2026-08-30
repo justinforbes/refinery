@@ -421,12 +421,6 @@ DECLINED: dict[str, tuple[str, ...]] = {
         "[double]'1.5'",
         "[double]'1,5'",
     ),
-    'a Double is written by .NET formatting rather than by Python': (
-        '[string]1.5',
-        '[string]1E20',
-        '[string]0.0000001',
-        '[string]1.5E-7',
-    ),
     'a collection joins on $OFS, which only a run decides': (
         "[string]('a', 'b')",
     ),
@@ -626,6 +620,7 @@ def _applied(expression: str) -> Ps1Outcome:
 #: The measured operations the domain answers with the exact value a host printed for them. Each is
 #: a fold the constant folding pass performs, so this list is what says a fold was not lost.
 PINNED_OPERATIONS: tuple[str, ...] = (
+    "'a' + 1.5",
     "'x' + (1.0d)",
     "'x' + 0.0d",
     "'x' + 1.000d",
@@ -679,6 +674,7 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     "'A' -ieq 'a'",
     '0 -eq $null',
     "0 -eq '0'",
+    '1 -ceq 1',
     "1 -eq '1.0'",
     '$null -eq $false',
     '$null -ne $null',
@@ -794,16 +790,6 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     "'a' + [uint64]18446744073709551615",
 )
 
-#: A join with a Double on its right, over each kind of left operand `+` joins on: a String that
-#: spells a number, the empty String, and a Char. What each comes to is the text of the left operand
-#: followed by the text .NET writes the Double as, so an answer that added the two numbers instead
-#: would be a Double where a host produces a String.
-UNSPELLED_JOINS: tuple[str, ...] = (
-    "'5' + 1.5",
-    "'' + 1.5",
-    '[char]65 + 1.5',
-)
-
 #: A measured join beside the measured cast of the same value to String. `+` with a text on its left
 #: appends the text its right operand writes, so the two rows of a pair ask one question twice and
 #: an answer that is right at one of them and wrong at the other is not one answer.
@@ -858,6 +844,7 @@ DECIDED_COMPARISONS: dict[str, tuple[str, ...]] = {
     ),
     'a number on the left, so the right operand is read as a number': (
         '10 -ne 20',
+        '1 -ceq 1',
         "0 -eq '0'",
         "1 -eq '1.0'",
         "10 -ne '10'",
@@ -923,14 +910,11 @@ DECIDED_COMPARISON_ROWS: tuple[str, ...] = tuple(
 )
 
 #: The measured comparisons the domain settles no value for. Refusing is allowed — ordering two
-#: texts is a culture's question, ordering a number against a text may abort, a case-marked
-#: spelling over two numbers is a question about text asked of values that have none, and a
-#: comparison against a collection answers with the elements that match rather than with a truth.
+#: texts is a culture's question, and ordering a number against a text may abort.
 #: Answering one of them differently from a host is not allowed. An entry leaving this tuple is an
 #: answer gained and one joining it an answer lost, so neither can happen without this being
 #: rewritten.
 UNDECIDED_COMPARISONS: tuple[str, ...] = (
-    '1 -ceq 1',
     "'10' -lt '9'",
     "'10' -lt 9",
     "'10' -ge 9",
@@ -943,14 +927,23 @@ UNDECIDED_COMPARISONS: tuple[str, ...] = (
     "1 -lt '5'",
     "1 -eq 'abc'",
     "1 -ne 'abc'",
-    '10, 20, 30 -eq 20',
-    '10, 20, 30, 20, 10 -ne 20',
     "'10' -gt 9",
     "'10' -le '9'",
     "'2' -lt '10'",
-    '@(1, 2) -eq $null',
     "'ss' -eq [char]0x00DF",
     "[char]0x00DF -eq 'ss'",
+)
+
+#: The measured comparisons against a collection on the left, which 5.1 answers with the elements
+#: that match the right operand rather than with a truth: `10, 20, 30 -eq 20` is the one-element
+#: collection `20` and `@(1, 2) -eq $null` is the empty one. The domain settles the same collection,
+#: so these are decided rather than refused, but the host printed the members and not a fact this
+#: module reconstructs — so the type is pinned here and the value beside the fold, in
+#: `test.lib.scripts.ps1.deobfuscation.test_value_domain`.
+FILTERED_COMPARISONS: tuple[str, ...] = (
+    '10, 20, 30 -eq 20',
+    '10, 20, 30, 20, 10 -ne 20',
+    '@(1, 2) -eq $null',
 )
 
 #: The measured Decimal literals at the extremes of the type. A `System.Decimal` is a 96 bit
@@ -2849,6 +2842,7 @@ class TestPs1MeasuredOperators(unittest.TestCase):
             len(OPERATION_ROWS), 293, 'a measured operation was added or withdrawn')
         self.assertEqual(sorted(set(PINNED_OPERATIONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(sorted(set(ABBREVIATED_OPERATIONS) - set(OPERATION_ROWS)), [])
+        self.assertEqual(sorted(set(FILTERED_COMPARISONS) - set(OPERATION_ROWS)), [])
         self.assertEqual(
             sorted(THROWN_OPERATIONS),
             [
@@ -2896,7 +2890,13 @@ class TestPs1MeasuredOperators(unittest.TestCase):
         ]
         self.assertEqual(
             sorted(rewritten),
-            sorted(PINNED_OPERATIONS + ABBREVIATED_OPERATIONS + tuple(MISFOLDED_OPERATIONS)))
+            sorted(
+                PINNED_OPERATIONS
+                + ABBREVIATED_OPERATIONS
+                + FILTERED_COMPARISONS
+                + tuple(MISFOLDED_OPERATIONS)
+            ),
+        )
 
     def test_every_operation_recorded_as_folded_wrongly_still_is(self):
         """
@@ -3475,28 +3475,23 @@ class TestPs1PlusIsDecidedByItsLeftOperand(unittest.TestCase):
 
     def test_a_right_operand_whose_text_only_a_session_settles_is_not_joined(self):
         """
-        Measured, `'a' + @(1, 2)` is `a1 2` and `'a' + 1.5` is `a1.5`, and neither text is one this
-        module can write: a collection is separated by `$OFS`, and a Double is formatted by .NET.
+        Measured, `'a' + @(1, 2)` is `a1 2`, and that text is not one this module can write: a
+        collection is separated by `$OFS`, which only a run settles. So the join names no value rather
+        than the sum an arithmetic reading would have made of it.
         """
         self.assertEqual(_measured("'a' + @(1, 2)"), ('System.String', 'a1 2'))
-        self.assertEqual(_measured("'a' + 1.5"), ('System.String', 'a1.5'))
         self.assertEqual(_applied("'a' + @(1, 2)"), NOTHING)
-        self.assertEqual(_applied("'a' + 1.5"), NOTHING)
 
-    def test_a_join_whose_appended_text_is_unwritable_names_no_value_rather_than_a_sum(self):
+    def test_a_numeral_left_operand_joins_a_double_as_text_and_not_as_a_sum(self):
         """
-        Measured, `'5' + 5` is the String `55`: a numeral spelled inside the left operand is text
-        like any other and never an addend, so the operand that decides between joining and adding
-        is still the left one when both of them read as numbers. The text a Double contributes to
-        such a join is .NET's to write and no value here, so each join below is one this names
-        nothing for — where the sum of its two numbers would be a Double no run of the script ever
-        produces.
+        Measured, `'5' + 5` is the String `55` and `'a' + 1.5` is `a1.5`: a numeral spelled inside the
+        left operand is text like any other and never an addend, and a Double on the right is appended
+        as its text. Composing the two, `'5' + 1.5` is the String `51.5`, where reading it as
+        arithmetic would make the Double `6.5`, a value and a type no run of the script produces.
         """
         self.assertEqual(_measured("'5' + 5"), ('System.String', '55'))
-        self.assertEqual(
-            {expression: _applied(expression) for expression in UNSPELLED_JOINS},
-            {expression: NOTHING for expression in UNSPELLED_JOINS},
-        )
+        self.assertEqual(_measured("'a' + 1.5"), ('System.String', 'a1.5'))
+        self.assertEqual(_applied("'5' + 1.5"), Ps1Outcome(False, Ps1Constant(STRING, '51.5')))
 
     def test_a_right_operand_whose_text_is_written_here_is_joined_all_the_same(self):
         self.assertEqual(_applied("'5' + 5"), Ps1Outcome(False, Ps1Constant(STRING, '55')))
@@ -3523,6 +3518,7 @@ class TestPs1AComparisonIsDecidedByItsLeftOperand(unittest.TestCase):
             sorted(
                 DECIDED_COMPARISON_ROWS
                 + UNDECIDED_COMPARISONS
+                + FILTERED_COMPARISONS
                 + tuple(row for row in COMPARISON_ROWS if row in THROWN_OPERATIONS)
             ),
         )
@@ -3542,8 +3538,9 @@ class TestPs1AComparisonIsDecidedByItsLeftOperand(unittest.TestCase):
 
     def test_a_comparison_this_does_not_decide_names_no_value_rather_than_a_guess(self):
         """
-        Naming the `System.Boolean` such a comparison produces is not deciding it, and is what
-        `1 -ceq 1` is answered with: a type is a bound on the value and only a value is folded.
+        A comparison this does not settle is answered with a bound on its value — the `System.Boolean`
+        its cell names, or nothing where that cell may throw — and never with a value, because a type
+        is a bound and only a value is folded.
         """
         self.assertEqual(
             {
@@ -3559,11 +3556,15 @@ class TestPs1AComparisonIsDecidedByItsLeftOperand(unittest.TestCase):
         `is_truthy` is what an `if` over a comparison asks, and it composes two steps that each may
         refuse — so it is asked here as well as `apply`, over every measured comparison including
         the two a host aborted on.
+
+        A comparison against a collection is left out: it produces the members that match and not a
+        Boolean, so the host printed no truth for it to be held against. Its `if` reads the truth of
+        that collection, which is what `is_truthy` over a collection is measured against elsewhere.
         """
         counted = {
             expression: is_truthy(_slot(expression))
             for expression in COMPARISON_ROWS
-            if is_truthy(_slot(expression)) is not None
+            if expression not in FILTERED_COMPARISONS and is_truthy(_slot(expression)) is not None
         }
         self.assertEqual(
             counted,
@@ -4140,7 +4141,7 @@ class TestPs1EvaluateComposesTheOneStepReaders(unittest.TestCase):
             for expression in OPERATION_ROWS
             if _applied(expression) != NOTHING
         }
-        self.assertEqual(len(composed), 192)
+        self.assertEqual(len(composed), 196)
         self.assertEqual(
             composed, {expression: _applied(expression) for expression in composed})
 
@@ -4381,7 +4382,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 2344)
+        self.assertEqual(len(compared), 2340)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 
