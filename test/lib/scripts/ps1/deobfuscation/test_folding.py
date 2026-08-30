@@ -1798,6 +1798,32 @@ class TestPs1AScopeQualifierNamesTheBindingItsBareSpellingNames(TestPs1):
             self._deobfuscate("$script:s = 'x'; Write-Output $s"), "Write-Output 'x'")
 
 
+class TestPs1AnOperatorOverANameWrittenUnderAQualifierFoldsAsIfItWereNull(TestPs1):
+    """
+    The soundness half of the defect the class above pins the recall half of. A value written under
+    `$script:` or `$global:` is filed against neither the bare name nor the qualified one, so a later
+    bare read is modelled as a variable no scope ever wrote — `$null` — and not as one whose value is
+    merely unknown. Where the bare read stands alone the loss is the withheld fold above; where an
+    operator reaches it the `$null` is a value, and the operator folds to the wrong one. Measured on
+    5.1, the three scripts here write `6`, `165` and `12`; the tool writes `1`, `255` and `$null`.
+
+    The `-bxor` row is what makes this a soundness bug rather than a curiosity: a key held in a
+    module-scoped variable is how a loader hides one, and folding it as `$null` hands back a
+    plaintext that never ran. Each row is marked so that wiring the qualifier through reports an
+    unexpected success, which is the same fix the class above waits on.
+    """
+
+    @unittest.expectedFailure
+    def test_a_bare_read_of_a_qualified_written_name_is_not_folded_as_null(self):
+        for source, expected in [
+            ('$script:q = 5; Write-Output ($q + 1)', 'Write-Output 6'),
+            ('$script:k = 0x5A; Write-Output (0xFF -bxor $k)', 'Write-Output 165'),
+            ('$global:n = 3; Write-Output ($n * 4)', 'Write-Output 12'),
+        ]:
+            with self.subTest(source):
+                self.assertEqual(self._deobfuscate(source), expected)
+
+
 class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
     """
     `$x op= e` stores what `$x = $x op e` stores, and the long spelling is folded today while the
