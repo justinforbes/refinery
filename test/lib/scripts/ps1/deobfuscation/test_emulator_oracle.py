@@ -174,15 +174,8 @@ DIVERGENCES: dict[str, _Divergence] = {
     '1.5 * [char]48'                     : _Divergence(72.0, 0.0),
     '[char]48 -band [byte]255'           : _Divergence(48, 0),
 
-    # A one-element collection is as true as the element inside it, and a Char is as true as the
-    # code point it carries. The interpreter asks Python, for which a non-empty list is true and a
-    # one-character string is true.
-    '@(0) -and $true'                    : _Divergence(False, True),
-    '@($false) -and $true'               : _Divergence(False, True),
-    "(,'') -and $true"                   : _Divergence(False, True),
-    '(,0.0) -and $true'                  : _Divergence(False, True),
-    '(,@()) -and $true'                  : _Divergence(False, True),
-    '-not @(0)'                          : _Divergence(True, False),
+    # A Char is as true as the code point it carries, so `[char]0` is false. The interpreter has no
+    # Char and holds it as a one-character string, which every non-empty string reads as true.
     '[char]0 -or $false'                 : _Divergence(False, True),
     '$true -and [char]0'                 : _Divergence(False, True),
     '-not [char]0'                       : _Divergence(True, False),

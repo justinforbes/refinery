@@ -1398,16 +1398,22 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
             with self.subTest(condition):
                 self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 0')
 
-    @unittest.expectedFailure
     def test_a_collection_of_one_is_as_true_as_the_single_element_it_holds(self):
-        source = cleandoc("""
-            function f {
-              $a = @(0)
-              if ($a) { 'yes' } else { 'no' }
-            }
-            $x = f
-        """)
-        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'no'")
+        for element, expected in [
+            ('0', 'no'),
+            ('1', 'yes'),
+            ("''", 'no'),
+            ("'x'", 'yes'),
+        ]:
+            source = cleandoc(F"""
+                function f {{
+                  $a = @({element})
+                  if ($a) {{ 'yes' }} else {{ 'no' }}
+                }}
+                $x = f
+            """)
+            with self.subTest(element):
+                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), F"$x = '{expected}'")
 
     def test_a_collection_of_two_is_true_however_its_elements_read(self):
         source = cleandoc("""

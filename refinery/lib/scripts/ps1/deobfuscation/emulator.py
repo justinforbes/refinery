@@ -1413,7 +1413,12 @@ class _Ps1Interpreter:
         if isinstance(value, str):
             return len(value) > 0
         if isinstance(value, list):
-            return len(value) > 0
+            if len(value) != 1:
+                return len(value) > 0
+            element = value[0]
+            if isinstance(element, list):
+                return len(element) > 0
+            return _Ps1Interpreter._truthy(element)
         return True
 
     def _to_str(self, value: _Value) -> str:
