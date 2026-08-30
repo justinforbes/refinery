@@ -28,6 +28,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     UNKNOWN,
     Ps1Constant,
     Ps1Fact,
+    coerced_text,
     collect_facts,
     fact_of,
     integer_at,
@@ -1043,13 +1044,13 @@ class _Ps1Interpreter:
             raise _Ps1InterpreterError
         if op.lower() == '-split':
             val = self._eval(node.operand)
-            parts = re.split(r'\s+', self._to_str(val))
+            parts = re.split(r'\s+', self._coerce_str(val))
             return [p for p in parts if p]
         if op.lower() == '-join':
             val = self._eval(node.operand)
             if isinstance(val, list):
-                return ''.join(self._to_str(item) for item in val)
-            return self._to_str(val)
+                return ''.join(self._coerce_str(item) for item in val)
+            return self._coerce_str(val)
         raise _Ps1InterpreterError
 
     _MEMBER_ARITHMETIC = re.compile(r'^(\w+)([+\-])(\d+)$')
@@ -1290,7 +1291,7 @@ class _Ps1Interpreter:
     def _apply_type_cast(self, type_name: str, val: _Value) -> _Value:
         tn = normalize_dotnet_type_name(type_name)
         if tn == 'string':
-            return self._to_str(val)
+            return self._coerce_str(val)
         if tn in ('int', 'int32', 'int64'):
             return self._to_int(val)
         if tn == 'char':
@@ -1317,7 +1318,7 @@ class _Ps1Interpreter:
         if isinstance(left, str) and right is None:
             return left
         if isinstance(left, str) or isinstance(right, str):
-            result = self._to_str(left) + self._to_str(right)
+            result = self._coerce_str(left) + self._coerce_str(right)
             if len(result) > self.max_string_len:
                 raise _Ps1InterpreterError
             return result
@@ -1381,9 +1382,9 @@ class _Ps1Interpreter:
         raise _Ps1InterpreterError
 
     def _eval_split(self, left: _Value, right: _Value, op: str) -> list:
-        s = self._to_str(left)
+        s = self._coerce_str(left)
         delimiter, maxsplit = self._split_delimiter_and_maxsplit(right)
-        pattern = self._to_str(delimiter)
+        pattern = self._coerce_str(delimiter)
         flags = re.IGNORECASE if op != '-csplit' else 0
         try:
             return re.split(pattern, s, maxsplit=maxsplit, flags=flags)
@@ -1419,16 +1420,16 @@ class _Ps1Interpreter:
         return right[0], limit - 1
 
     def _eval_join(self, left: _Value, right: _Value) -> str:
-        separator = self._to_str(right)
+        separator = self._coerce_str(right)
         if isinstance(left, list):
-            return separator.join(self._to_str(item) for item in left)
-        return self._to_str(left)
+            return separator.join(self._coerce_str(item) for item in left)
+        return self._coerce_str(left)
 
     def _eval_replace(self, left: _Value, right: _Value, op: str) -> str:
-        s = self._to_str(left)
+        s = self._coerce_str(left)
         if isinstance(right, list) and len(right) == 2:
-            pattern = self._to_str(right[0])
-            replacement = self._to_str(right[1])
+            pattern = self._coerce_str(right[0])
+            replacement = self._coerce_str(right[1])
         else:
             raise _Ps1InterpreterError
         flags = re.IGNORECASE if op != '-creplace' else 0
@@ -1571,12 +1572,29 @@ class _Ps1Interpreter:
         if isinstance(value, int):
             return str(value)
         if isinstance(value, float):
-            if value.is_integer():
-                return str(int(value))
-            return str(value)
+            # A `Double`'s text is the current culture's to write everywhere `_to_str` is reached —
+            # string interpolation, a `.ToString()` call, the `$OFS` separator a collection is
+            # joined with — so it is refused rather than written as a value 5.1's session may not
+            # share. A string *operator* coerces it culture-invariantly instead; that is `_coerce_str`.
+            raise _Ps1InterpreterError
         if isinstance(value, list):
             return self._separator().join(self._to_str(item) for item in value)
         raise _Ps1InterpreterError
+
+    def _coerce_str(self, value: _Value) -> str:
+        """
+        The text a value contributes where a string *operator* coerces it — the `[string]` cast,
+        `+`, `-join`, `-split` and `-replace`. That coercion is culture-invariant, so it is a text
+        this unit can write for every value, including the one whose Python `str` disagrees with
+        5.1's: a `Double`, written here by the value domain's measured `[string]` text. Every other
+        value carries no culture in its text and is deferred to `_to_str` unchanged.
+        """
+        if isinstance(value, float):
+            text = coerced_text(fact_of(value))
+            if text is None:
+                raise _Ps1InterpreterError
+            return text
+        return self._to_str(value)
 
     def _separator(self) -> str:
         """

@@ -222,12 +222,6 @@ DIVERGENCES: dict[str, _Divergence] = {
     # `$null` on the left leaves the type to the right operand, so nothing plus a Boolean is that
     # Boolean rather than the number the interpreter converts it to.
     '$null + $true'                      : _Divergence(True, 1),
-
-    # .NET writes a Double with an upper-case, signed exponent. The interpreter writes Python's own
-    # spelling, and writes a whole one out in digits.
-    '[string]1E20'                       : _Divergence('1E+20', '100000000000000000000'),
-    '[string]0.0000001'                  : _Divergence('1E-07', '1e-07'),
-    '[string]1.5E-7'                     : _Divergence('1.5E-07', '1.5e-07'),
 }
 
 #: Where 5.1 threw and the interpreter answered anyway, with the value it answered. Each entry is an

@@ -1234,11 +1234,10 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), 'Write-Output 2')
 
-    @unittest.expectedFailure
     def test_a_double_becomes_the_text_5_1_writes_it_as(self):
         # A `[string]` of a double *literal* is folded by the value domain before emulation; a double
-        # the body is handed reaches the interpreter's own `_to_str`, which writes Python's `str` —
-        # `100000000000000000000` and a lowercase `e` — where 5.1 writes the .NET-Framework text.
+        # the body is handed reaches the interpreter's own coercion, which now writes the same
+        # .NET-Framework text the value domain does — `1E+20` and `1E-07`, not Python's `str`.
         for numeral, text in [
             ('1E20', '1E+20'),
             ('0.0000001', '1E-07'),
@@ -1253,6 +1252,21 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
             """)
             with self.subTest(numeral):
                 self.assertEqual(self._deobfuscate(source), F"Write-Output '{text}'")
+
+    def test_a_double_in_a_current_culture_context_is_kept_not_folded(self):
+        # The `[string]` cast is culture-invariant, so the text a Double casts to is one this unit can
+        # write. Its interpolation and its `.ToString()` render with the *current* culture instead —
+        # a decimal comma writes `1,5` where the cast writes `1.5` — which is a text no session pins,
+        # so the body is left standing rather than folded to the one culture Python happens to write.
+        for body in ['"$a"', '$a.ToString()']:
+            with self.subTest(body):
+                self._assertKept(F"""
+                    function f {{
+                      $a = 1E20
+                      {body}
+                    }}
+                    Write-Output (f)
+                """)
 
     def test_an_expression_over_a_name_the_body_does_not_bind_is_not_folded(self):
         # The script writes `$q`, so a body that reads it takes the caller's value 5.1 gives it and
