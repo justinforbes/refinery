@@ -42,6 +42,7 @@ _MAX_STATES = 500
 _MAX_UNROLL_ITERATIONS = 500
 
 if TYPE_CHECKING:
+    from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
     _VarKey = tuple[str, Ps1ScopeModifier]
     _StateKey = int | float | str
 
@@ -1255,6 +1256,14 @@ class Ps1ControlFlowDeflattening(Transformer):
             self._try_deflatten_body(body, parent)
 
     def _try_deflatten_body(self, body: list[Statement], parent: Node):
+        # One fault model serves every machine in this body. Each dissolution advances the tree
+        # version, so re-reading it through the cache once per machine rebuilds the control-flow
+        # graph of every block once per machine — a walk cost that is a property of the script, not
+        # of how many of its statements turn out to be removable. The machines here are siblings in
+        # one body, and dissolving one leaves the handlers around another exactly where they were, so
+        # the model built before the first dissolution answers the veto for every later one. It is
+        # read lazily so a body holding no machine at all pays for no build.
+        faults: Ps1FaultReach | None = None
         i = 0
         while i < len(body):
             stmt = body[i]
@@ -1294,10 +1303,12 @@ class Ps1ControlFlowDeflattening(Transformer):
             # A vetoed half would leave the machine partly dissolved and the cursor pointing into a
             # body that no longer has the shape the arithmetic below assumes, so the whole recovery
             # stands or falls together.
+            if faults is None:
+                faults = model_cache(self, parent).faults
             plan = Ps1RemovalPlan(
                 parent,
                 all_or_nothing=True,
-                faults=model_cache(self, parent).faults,
+                faults=faults,
             )
             plan.propose(body[init_index])
             plan.propose(stmt, recovered)

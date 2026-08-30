@@ -328,19 +328,20 @@ class TestPs1DeflatteningDoesNotRebuildTheModelPerMachine(TestPs1):
     """
     Every removal plan the pass opens reads the fault model, and that model is layered on the
     control-flow graph of every block in the script. A commit advances the tree version those
-    graphs are cached against, so the next plan rebuilds all of them: a body holding several
-    independent machines pays for the whole script once per machine it dissolves. What a walk over
-    a script costs is a property of the script, not of how many of its statements turn out to be
-    removable.
+    graphs are cached against, so re-reading the model through the cache once per machine would
+    rebuild all of them: a body holding several independent machines would pay for the whole script
+    once per machine it dissolves. What a walk over a script costs is a property of the script, not
+    of how many of its statements turn out to be removable.
 
-    The pass opens its plan inside the loop over the body and builds one model per machine, so the
-    count grows with the number of machines and a script holding many of them is walked many times.
+    The machines in a body are siblings, and dissolving one leaves the handlers around another where
+    they were, so the pass reads the fault model once per body and reuses it for every machine there.
+    The count is then a property of the script and does not carry the machine count.
 
     The build is `refinery.lib.scripts.ps1.analysis.cache.build_control_flow_model`, which is what
     the cache calls, counted here rather than timed so the measurement is the same on every
     machine. It is compared between two machine counts rather than against a number of its own: a
     count that answers the same for two machines as for eight is the only one that does not carry
-    the machine count in it, and which constant it settles on is the fix's to choose.
+    the machine count in it.
     """
 
     _FEW = 2
@@ -392,6 +393,5 @@ class TestPs1DeflatteningDoesNotRebuildTheModelPerMachine(TestPs1):
                     self._dissolved(count),
                 )
 
-    @unittest.expectedFailure
     def test_the_models_built_are_the_same_for_two_machines_and_for_eight(self):
         self.assertEqual(self._models_built(self._MANY), self._models_built(self._FEW))
