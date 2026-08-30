@@ -1468,7 +1468,7 @@ FOLDS: dict[str, str] = {
     "function K { $Null = 1 }; Write-Error 'e'; K; Write-Host $?":
         "function K {}\nWrite-Error 'e'\nK\nWrite-Host $?",
     'function K { $Null = 1 }; K; Write-Host ($function:K -ne $Null)':
-        'Write-Host ($function:K -NE $Null)',
+        'function K {}\nK\nWrite-Host ($function:K -NE $Null)',
     "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'":
         "$Null = (Get-Command K).Name\nWrite-Host 'A'",
     "function vnMTH { $Null = 1 }; vnMTH; $Null = (Get-Command *vnMT*).Name; Write-Host 'A'":

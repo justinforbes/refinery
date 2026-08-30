@@ -497,10 +497,14 @@ class Ps1JunkStatementRemoval(Transformer):
         """
         if not graph.is_readable:
             return
-        reads_success = model_cache(self, node).commands.reads_command_success()
+        commands = model_cache(self, node).commands
+        reads_success = commands.reads_command_success()
+        function_reads = commands.function_drive_reads()
         groups: dict[str, list[Node]] = {}
         removable_definitions: set[Node] = set()
         for key in graph.defined_names:
+            if key in function_reads:
+                continue
             definitions = graph.definitions(key)
             if not all(body_is_inert(d.body, world) for d in definitions):
                 continue

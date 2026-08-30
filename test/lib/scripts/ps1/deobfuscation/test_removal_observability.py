@@ -41,11 +41,12 @@ class TestPs1TheFunctionDriveObservesADefinition(TestPs1):
     """
     `$function:K` reads the function table through the variable namespace and reports the body bound
     to the name, so a script reading it sees a definition removed from under it.
-    `Ps1CommandModel.introspected_names` collects only `Ps1ScopeModifier.ALIAS`, which is why this
-    spelling reaches no reader while the provider-path spellings do.
+    `Ps1CommandModel.function_drive_reads` collects that read and the inert-definition removal keeps
+    the group whole where it names a defined function, the mirror for this drive of what
+    `reads_command_success` does for `$?`; the provider-path spelling reaches the same fact through
+    `touches_identity_provider`, which opens the whole world rather than naming the one function.
     """
 
-    @unittest.expectedFailure
     def test_a_definition_a_function_drive_read_reports_on_is_kept(self):
         self._assertKept(F"""
             function K {{ }}
@@ -58,6 +59,19 @@ class TestPs1TheFunctionDriveObservesADefinition(TestPs1):
             function K {{ }}
             K
             Write-Host (Get-Item function:K)
+        """)
+
+    def test_a_function_drive_read_keeps_only_the_name_it_reports_on(self):
+        self._assertDeobfuscatesTo(F"""
+            function K {{ }}
+            K
+            function Z {{ }}
+            Z
+            Write-Host $function:K
+        """, F"""
+            function K {{ }}
+            K
+            Write-Host $function:K
         """)
 
 

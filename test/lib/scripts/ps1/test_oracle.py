@@ -317,11 +317,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'runs the conversion its type constraint names and `abc` has none, so every call raises '
         'before the body would run. The fault is the binder\'s, and an inert body says nothing '
         'about it.',
-    'function K { $Null = 1 }; K; Write-Host ($function:K -ne $Null)':
-        'The definition is removed although the script reads it back out of the function table. '
-        '`Ps1CommandModel.introspected_names` collects the `alias:` namespace only, so the '
-        '`function:` spelling reaches no reader and the read reports `False` where it reported '
-        '`True`.',
     "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'":
         'The definition is removed although `Get-Command` names it literally. A literal name that '
         'matches nothing writes a `CommandNotFoundException` to the error stream whatever is done '
