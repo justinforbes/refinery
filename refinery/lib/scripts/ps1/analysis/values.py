@@ -2861,7 +2861,7 @@ class _Comparison(typing.NamedTuple):
     in counts.
     """
 
-    decides: Callable[[int, int], bool]
+    decides: Callable[[_Number, _Number], bool]
     equality: bool
     negated: bool
     cased: bool
@@ -2897,11 +2897,8 @@ def _compared(operator: str, left: Ps1Fact, right: Ps1Fact) -> bool | None:
         return _compared_as_text(comparison, left, right)
     if type_of(left) == _BOOLEAN:
         return _compared_as_truth(comparison, left, right)
-    numeric = _COMPARISONS.get(operator)
-    if numeric is None:
-        return None
     operands = _numeric_pair(left, right)
-    return None if operands is None else numeric(*operands)
+    return None if operands is None else comparison.decides(*operands)
 
 
 def _filtered(
@@ -3055,19 +3052,6 @@ def _compared_as_text(comparison: _Comparison, left: Ps1Fact, right: Ps1Fact) ->
     if not same and not (head.isascii() and tail.isascii()):
         return None
     return same != comparison.negated
-
-
-#: The comparisons two numbers are computed under, which are the bare spellings alone. A case prefix
-#: cannot change what two numbers compare as, and nothing here measured one doing so either, so a
-#: pair that reaches this table under `-ceq` or `-ilt` is left to the cell rather than answered.
-_COMPARISONS = {
-    '-eq': operator_module.eq,
-    '-ne': operator_module.ne,
-    '-lt': operator_module.lt,
-    '-le': operator_module.le,
-    '-gt': operator_module.gt,
-    '-ge': operator_module.ge,
-}
 
 
 #: The literal suffix that pins a spelled number to its type, for the types that have one. The set

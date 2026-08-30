@@ -679,6 +679,7 @@ PINNED_OPERATIONS: tuple[str, ...] = (
     "'A' -ieq 'a'",
     '0 -eq $null',
     "0 -eq '0'",
+    '1 -ceq 1',
     "1 -eq '1.0'",
     '$null -eq $false',
     '$null -ne $null',
@@ -858,6 +859,7 @@ DECIDED_COMPARISONS: dict[str, tuple[str, ...]] = {
     ),
     'a number on the left, so the right operand is read as a number': (
         '10 -ne 20',
+        '1 -ceq 1',
         "0 -eq '0'",
         "1 -eq '1.0'",
         "10 -ne '10'",
@@ -923,13 +925,11 @@ DECIDED_COMPARISON_ROWS: tuple[str, ...] = tuple(
 )
 
 #: The measured comparisons the domain settles no value for. Refusing is allowed — ordering two
-#: texts is a culture's question, ordering a number against a text may abort, and a case-marked
-#: spelling over two numbers is a question about text asked of values that have none.
+#: texts is a culture's question, and ordering a number against a text may abort.
 #: Answering one of them differently from a host is not allowed. An entry leaving this tuple is an
 #: answer gained and one joining it an answer lost, so neither can happen without this being
 #: rewritten.
 UNDECIDED_COMPARISONS: tuple[str, ...] = (
-    '1 -ceq 1',
     "'10' -lt '9'",
     "'10' -lt 9",
     "'10' -ge 9",
@@ -3558,8 +3558,9 @@ class TestPs1AComparisonIsDecidedByItsLeftOperand(unittest.TestCase):
 
     def test_a_comparison_this_does_not_decide_names_no_value_rather_than_a_guess(self):
         """
-        Naming the `System.Boolean` such a comparison produces is not deciding it, and is what
-        `1 -ceq 1` is answered with: a type is a bound on the value and only a value is folded.
+        A comparison this does not settle is answered with a bound on its value — the `System.Boolean`
+        its cell names, or nothing where that cell may throw — and never with a value, because a type
+        is a bound and only a value is folded.
         """
         self.assertEqual(
             {

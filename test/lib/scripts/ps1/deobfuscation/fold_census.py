@@ -721,6 +721,8 @@ FOLDS: dict[str, str] = {
         'Write-Output (,$False)\nWrite-Output $False',
     "$t = 'A' -ieq 'a'; Write-Output (,$t); Write-Output $t":
         'Write-Output (,$True)\nWrite-Output $True',
+    '$t = 1 -ceq 1; Write-Output (,$t); Write-Output $t':
+        'Write-Output (,$True)\nWrite-Output $True',
     '$i = 0; if ($false -and ($i++)) { }; $t = $i; Write-Output (,$t); Write-Output $t':
         '$i = 0\nif ($False -and ($i++)) {}\n$t = $i\nWrite-Output (,$t)\nWrite-Output $t',
     '$i = 0; if ($true -or ($i++)) { }; $t = $i; Write-Output (,$t); Write-Output $t':

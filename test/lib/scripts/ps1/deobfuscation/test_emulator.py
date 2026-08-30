@@ -1350,20 +1350,28 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
             with self.subTest(comparison):
                 self.assertEqual(self._deobfuscate(source), F'$x = {expected}')
 
-    @unittest.expectedFailure
     def test_a_case_prefix_on_a_comparison_of_numbers_compares_them_all_the_same(self):
         """
-        The prefix names how *text* is compared, so it makes no difference between two numbers and
-        `-ceq` answers what `-eq` answers. The grid carries no row for a prefixed operator at all,
-        which is why the string forms above fold and this one does not.
+        The prefix names how *text* is compared, so it makes no difference between two numbers —
+        `-ceq` answers what `-eq` answers — and two Chars an ordering reads by their code points are
+        numbers here too.
         """
-        source = cleandoc("""
-            function f {
-              1 -ceq 1
-            }
-            $x = f
-        """)
-        self.assertEqual(self._deobfuscate(source), '$x = $True')
+        for comparison, expected in [
+            ('1 -ceq 1', '$True'),
+            ('1 -ine 1', '$False'),
+            ('2 -cgt 1', '$True'),
+            ('1 -ilt 2', '$True'),
+            ('[char]97 -clt [char]66', '$False'),
+            ('[char]65 -ilt [char]97', '$True'),
+        ]:
+            source = cleandoc(F"""
+                function f {{
+                  {comparison}
+                }}
+                $x = f
+            """)
+            with self.subTest(comparison):
+                self.assertEqual(self._deobfuscate(source), F'$x = {expected}')
 
 
 class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
