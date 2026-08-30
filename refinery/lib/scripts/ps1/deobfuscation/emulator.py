@@ -1406,17 +1406,87 @@ class _Ps1Interpreter:
         except re.error:
             raise _Ps1InterpreterError
 
-    @staticmethod
-    def _eval_contains(collection: _Value, item: _Value) -> bool:
-        if isinstance(collection, list):
-            for elem in collection:
-                if isinstance(elem, str) and isinstance(item, str):
-                    if elem.lower() == item.lower():
-                        return True
-                elif elem == item:
+    def _eval_contains(self, collection: _Value, item: _Value) -> bool:
+        """
+        The `-contains`/`-in` membership test: an element matches when 5.1's `LanguagePrimitives.
+        Equals` holds between it and the item, which is the same equality `-eq` runs. A single
+        element that matches answers `$True`; an item this cannot decide against some element leaves
+        the whole test refused rather than answered `$False`, since a later element it could not
+        read might have been the one that matched.
+        """
+        if not isinstance(collection, list):
+            raise _Ps1InterpreterError
+        undecided = False
+        for elem in collection:
+            try:
+                if self._ps_equals(elem, item):
                     return True
-            return False
+            except _Ps1InterpreterError:
+                undecided = True
+        if undecided:
+            raise _Ps1InterpreterError
+        return False
+
+    def _ps_equals(self, first: _Value, second: _Value, ignore_case: bool = True) -> bool:
+        """
+        Whether 5.1's `LanguagePrimitives.Equals(first, second, ignoreCase, InvariantCulture)`
+        holds. The second operand is converted to the first's type and the two are compared, so
+        `'1' -eq 1` joins on the text `'1'` and `1 -eq '1'` on the number `1`.
+
+        The distinction this owes a wrong answer is between a conversion 5.1 *rejects* and one this
+        interpreter cannot *reproduce*. A rejection — `1 -eq 'abc'`, whose right operand is no Int32 —
+        is caught by 5.1 as an `InvalidCastException` and answered `$False`, so it is answered here
+        the same way. A conversion whose result is the host culture's to write — a `Double` rendered
+        as text, a `String` read as a `Double` — is refused with `_Ps1InterpreterError` rather than
+        answered with a value 5.1 may not share.
+        """
+        if first is None or second is None:
+            return first is None and second is None
+        if isinstance(first, list) or isinstance(second, list):
+            if first is second:
+                return True
+            raise _Ps1InterpreterError
+        if isinstance(first, str):
+            if isinstance(second, float):
+                raise _Ps1InterpreterError
+            second_string = self._to_str(second)
+            if ignore_case:
+                return first.lower() == second_string.lower()
+            return first == second_string
+        if type(first) is type(second):
+            return first == second
+        if self._is_number(first) and self._is_number(second):
+            return first == second
+        return self._equals_after_cast(first, second)
+
+    def _equals_after_cast(self, first: _Value, second: _Value) -> bool:
+        """
+        `first.Equals(secondConverted)` for the scalars 5.1 reaches by converting the second operand
+        to the type of the first. A `String` the target type rejects is not equal rather than a
+        throw; a `String` read as a `Double` is refused, since its parse is the host culture's.
+        """
+        if isinstance(first, bool):
+            if isinstance(second, str):
+                return first == (len(second) > 0)
+            return first == bool(second)
+        if isinstance(first, int):
+            if isinstance(second, bool):
+                return first == int(second)
+            if isinstance(second, str):
+                try:
+                    return first == self._string_to_int(second)
+                except _Ps1InterpreterError:
+                    return False
+            raise _Ps1InterpreterError
+        if isinstance(first, float):
+            if isinstance(second, bool):
+                return first == float(second)
+            raise _Ps1InterpreterError
         raise _Ps1InterpreterError
+
+    @staticmethod
+    def _is_number(value: _Value) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
 
     @staticmethod
     def _eval_like(left: _Value, right: _Value, op: str) -> bool:

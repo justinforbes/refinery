@@ -210,11 +210,6 @@ DIVERGENCES: dict[str, _Divergence] = {
     # interpreter compares the code points, which no expansion of the sharp s reaches.
     "'ss' -eq [char]0x00DF"              : _Divergence(True, False),
 
-    # `-contains` converts each element to the type of the value it is asked about before comparing
-    # it. The interpreter compares the Python objects, for which a string is never an integer.
-    "@('1') -contains 1"                 : _Divergence(True, False),
-    "@(1) -contains '1'"                 : _Divergence(True, False),
-
     # `-match` is not Python's `re.IGNORECASE`, which folds the long s onto s where .NET does not.
     "'ſ' -match 's'"                     : _Divergence(False, True),
 

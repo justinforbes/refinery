@@ -43,15 +43,27 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: answers, where `apply` still declines the split operators outright. `System.Object[]` alone does
 #: not move, because a split reads its left operand as text and an array left is the one `$OFS`
 #: refusal that survives. These rows come back down by teaching `apply` to split, not by computing.
+#:
+#: The eight scalar-and-array rows then fell, by 400 in total, and `System.Void` alone held. What was
+#: withdrawn is not a fold the domain will come to need but a wrong answer the interpreter gave:
+#: `-contains`, `-in` and their negations now test membership with 5.1's `LanguagePrimitives.Equals`,
+#: which converts the item to each element's type, where they used to compare with Python's `==`. So
+#: they refuse a membership test they cannot reproduce — an element or an item that is a `Double`
+#: written as text, a `String` read as a `Double`, or an array compared by reference — rather than
+#: answer it. `System.Object[]` falls furthest because it is the collection `-contains` enumerates,
+#: and one element the equality cannot read refuses the whole test; the scalar rows fall through
+#: `-in`, whose left operand keys them, when its right operand is such an array. These do not come
+#: back by the domain learning to answer; the gap is smaller because the interpreter stopped
+#: answering where it should not.
 GAP: dict[str, int] = {
-    'System.String': 1743,
-    'System.Object[]': 1603,
-    'System.Char': 1174,
-    'System.Int64': 1104,
-    'System.Int32': 715,
-    'System.Double': 635,
-    'System.Byte': 429,
-    'System.Boolean': 254,
+    'System.String': 1727,
+    'System.Object[]': 1317,
+    'System.Char': 1162,
+    'System.Int64': 1088,
+    'System.Int32': 695,
+    'System.Double': 605,
+    'System.Byte': 417,
+    'System.Boolean': 246,
     'System.Void': 159,
 }
 

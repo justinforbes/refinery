@@ -1432,9 +1432,15 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'yes'")
 
-    @unittest.expectedFailure
     def test_contains_converts_the_value_it_is_given_to_the_elements_type(self):
-        for comparison in ["@('1') -contains 1", "@(1) -contains '1'"]:
+        for comparison, expected in [
+            ("@('1') -contains 1", '$x = $True'),
+            ("@(1) -contains '1'", '$x = $True'),
+            ("@('1') -contains 2", '$x = $False'),
+            ("1 -in @('1')", '$x = $True'),
+            ("@('1') -notcontains 1", '$x = $False'),
+            ("@(1) -contains 'abc'", '$x = $False'),
+        ]:
             source = cleandoc(F"""
                 function f {{
                   {comparison}
@@ -1442,7 +1448,7 @@ class TestPs1WhatAnOperatorInAnEmulatedBodyEvaluatesConvertsAndMatches(TestPs1):
                 $x = f
             """)
             with self.subTest(comparison):
-                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = $True')
+                self.assertEqual(self._apply(source, Ps1FunctionEvaluator), expected)
 
     def test_a_backticked_asterisk_matches_the_one_character_it_spells(self):
         source = cleandoc("""
