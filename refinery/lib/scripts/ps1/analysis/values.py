@@ -66,6 +66,7 @@ from refinery.lib.scripts.ps1.data import (
     binary_outcome,
     command_output_types,
     conversion_outcome,
+    is_assignable_to,
     named_type,
     operand_witnesses,
     resolve_member_type,
@@ -648,6 +649,24 @@ def type_of(fact: Ps1Fact) -> Ps1TypeName | None:
     if isinstance(fact, (Ps1Typed, Ps1Constant)):
         return fact.type
     return None
+
+
+def type_test(fact: Ps1Fact, target: str | Ps1TypeName) -> bool | None:
+    """
+    Whether `value -is target` holds for a value this fact describes: `True`, `False`, or `None`
+    where the domain cannot decide. `$null` answers `False` for every target — it has no type to be
+    one of — an `UNKNOWN` fact answers `None`, and everything else is the relation
+    `refinery.lib.scripts.ps1.data.is_assignable_to` reads off the collected type model from the
+    fact's runtime type. The result of a type test is always a `System.Boolean`, so unlike the value
+    grid there is no measured cell to stamp the answer against; the only care needed is that a `None`
+    stays a fold declined rather than becoming a guessed `False`.
+    """
+    if fact is NULL:
+        return False
+    runtime = type_of(fact)
+    if runtime is None:
+        return None
+    return is_assignable_to(runtime, target)
 
 
 def integer_of(fact: Ps1Fact) -> int | None:

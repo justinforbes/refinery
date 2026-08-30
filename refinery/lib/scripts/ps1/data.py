@@ -883,6 +883,82 @@ def type_names(name: str | Ps1TypeName) -> list[str] | None:
     return names
 
 
+def _unmodelled_for_type_test(kind: Ps1TypeName) -> bool:
+    """
+    Whether a type carries a shape the assignability model below does not settle: a generic, a
+    pointer or a by-reference type. An array is modelled and is deliberately not one of these.
+    """
+    return bool(kind.arity or kind.arguments or kind.pointers or kind.byref)
+
+
+def _array_interfaces() -> frozenset[str]:
+    """
+    The interfaces `System.Array` is recorded to implement, which every array type implements too.
+    Read on demand rather than at import so it does not depend on the type table's load order.
+    """
+    record = _type_record('System.Array')
+    return frozenset(record['interfaces']) if record is not None else frozenset()
+
+
+def _array_is_assignable_to(target: Ps1TypeName) -> bool | None:
+    """
+    Whether an array satisfies `-is target`. An array derives only `System.Array` and `System.Object`
+    and implements the interfaces `System.Array` carries, so a concrete target that is neither is a
+    definite `False`. The two the model does not settle are covariance — a different array type — and
+    the generic collection interfaces an array implements beyond `System.Array`'s own; both are
+    declined rather than denied so a fold never answers one the way 5.1 would not.
+    """
+    if target.is_array:
+        return None
+    if target.definition in ('System.Array', 'System.Object'):
+        return True
+    record = _type_record(target.definition)
+    if record is None:
+        return None
+    if record.get('kind') == 'interface':
+        return True if target.definition in _array_interfaces() else None
+    return False
+
+
+def is_assignable_to(
+    value_type: str | Ps1TypeName,
+    target_type: str | Ps1TypeName,
+) -> bool | None:
+    """
+    Whether a value whose runtime type is `value_type` satisfies `value_type -is target_type`, the
+    test PowerShell's `-is` and `-isnot` operators perform. `True` when the runtime type is the
+    target, derives from it, or implements it; `False` when the collected model settles that it is
+    none of those; and `None` where the model does not settle it — an unresolved or generic type, an
+    array against a different array type, or an array against an interface `System.Array` is not
+    recorded to carry. A `None` is a fold declined, never a `False` guessed, so a caller never
+    answers a test 5.1 would answer the other way.
+
+    For a non-array value the class relation is read whole: the base chain `type_names` returns and
+    the interface set the collected record carries are both what reflection reports for the value's
+    own type, so a target that is neither an ancestor class nor a listed interface is a definite
+    `False`.
+    """
+    value = resolve_type(value_type)
+    target = resolve_type(target_type)
+    if value is None or target is None:
+        return None
+    if _unmodelled_for_type_test(value) or _unmodelled_for_type_test(target):
+        return None
+    if value.is_array:
+        return True if value == target else _array_is_assignable_to(target)
+    if target.is_array:
+        return False
+    chain = type_names(value)
+    if chain is None:
+        return None
+    if target.definition in chain:
+        return True
+    record = _type_record(value.definition)
+    if record is None:
+        return None
+    return target.definition in record.get('interfaces', ())
+
+
 def member_record(name: str | Ps1TypeName, member: str) -> dict | MemberLookup:
     """
     The collected record for a single member of a type, or a `MemberLookup` sentinel explaining why

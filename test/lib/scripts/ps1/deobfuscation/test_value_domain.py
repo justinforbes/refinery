@@ -216,24 +216,65 @@ class TestPs1ConstantsThatAreComputedWrong(TestPs1):
         self.assertEqual(self._deobfuscate('$x = 1 + [char]65'), '$x = 66')
 
     @unittest.expectedFailure
-    def test_indexing_a_string_yields_a_char(self):
+    def test_a_char_array_is_not_a_string(self):
+        """
+        5.1 answers this `$False`: a `Char[]` is not a `String`. The tool folds `[char[]](72, 73)`
+        to the String `'HI'` before the test runs, so `-is [string]` then sees a String and folds to
+        `$True`. The wrong answer is the char-array-to-string erasure surfacing through the operator,
+        not the operator itself, and the same erasure is what leaves the two `.Count` tests above
+        marked.
+        """
+        self.assertEqual(self._deobfuscate('$x = [char[]](72, 73) -is [string]'), '$x = $False')
+
+
+class TestPs1TheIsOperatorTestsTheRuntimeType(TestPs1):
+    """
+    `-is` and `-isnot` test the runtime type of the left operand against the type named on the
+    right, which the value domain answers from the base chain and interface set the type model
+    carries. The result is always a `System.Boolean`, so unlike the value grid there is no measured
+    cell to stamp; a left operand whose type is unknown, or a relation the model does not settle,
+    leaves the test standing rather than guessing. Every answer here is measured on a 5.1 host.
+    """
+
+    def test_a_char_indexed_out_of_a_string_is_a_char(self):
         self.assertEqual(self._deobfuscate("$x = 'ABC'[0] -is [char]"), '$x = $True')
 
-    @unittest.expectedFailure
-    def test_a_cast_to_char_yields_a_char(self):
+    def test_a_cast_to_char_is_a_char(self):
         self.assertEqual(self._deobfuscate('$x = [char]65 -is [char]'), '$x = $True')
 
-    @unittest.expectedFailure
     def test_a_one_character_string_is_not_a_char(self):
         self.assertEqual(self._deobfuscate("$x = 'A' -is [char]"), '$x = $False')
 
-    @unittest.expectedFailure
-    def test_a_char_array_is_not_a_string(self):
-        self.assertEqual(self._deobfuscate('$x = [char[]](72, 73) -is [string]'), '$x = $False')
-
-    @unittest.expectedFailure
     def test_a_string_is_a_string(self):
         self.assertEqual(self._deobfuscate("$x = 'HI' -is [string]"), '$x = $True')
+
+    def test_isnot_is_the_negation_of_is(self):
+        self.assertEqual(self._deobfuscate('$x = [char]65 -isnot [char]'), '$x = $False')
+        self.assertEqual(self._deobfuscate("$x = 'A' -isnot [char]"), '$x = $True')
+
+    def test_a_value_is_an_interface_its_type_implements(self):
+        self.assertEqual(self._deobfuscate("$x = 'A' -is [System.IComparable]"), '$x = $True')
+
+    def test_a_value_is_a_base_class_of_its_type(self):
+        self.assertEqual(self._deobfuscate('$x = 5 -is [ValueType]'), '$x = $True')
+
+    def test_a_value_is_not_a_sibling_type_in_the_hierarchy(self):
+        self.assertEqual(self._deobfuscate('$x = [byte]5 -is [int]'), '$x = $False')
+
+    def test_an_array_is_an_array_and_an_object_array(self):
+        self.assertEqual(self._deobfuscate('$x = (1, 2, 3) -is [array]'), '$x = $True')
+        self.assertEqual(self._deobfuscate('$x = (1, 2, 3) -is [object[]]'), '$x = $True')
+
+    def test_null_is_not_of_any_type(self):
+        self.assertEqual(self._deobfuscate('$x = $null -is [object]'), '$x = $False')
+        self.assertEqual(self._deobfuscate('$x = $null -isnot [object]'), '$x = $True')
+
+    def test_a_test_against_a_different_array_type_is_left_standing(self):
+        self.assertEqual(
+            self._deobfuscate('$x = (1, 2, 3) -is [string[]]'), '$x = (1, 2, 3) -Is [string[]]')
+
+    def test_a_test_of_an_operand_whose_type_is_unknown_is_left_standing(self):
+        self.assertEqual(self._deobfuscate('$x = $args -is [int]'), '$x = $args -Is [int]')
 
 
 class TestPs1TheLeftOperandOfPlusDecidesWhetherItConcatenates(TestPs1):

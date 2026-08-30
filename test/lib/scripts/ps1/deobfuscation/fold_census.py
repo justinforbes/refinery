@@ -312,7 +312,7 @@ FOLDS: dict[str, str] = {
     '$t = [char[]](72, 73); Write-Output (,$t); Write-Output $t':
         "Write-Output (,'HI')\nWrite-Output 'HI'",
     "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
-        "Write-Output ('HI' -Is [string])\nWrite-Output ('HI' -Is [string])",
+        'Write-Output ($True)\nWrite-Output ($True)',
     "$t = 'ABC'[0]; Write-Output (,$t); Write-Output $t":
         'Write-Output (,[char]65)\nWrite-Output ([char]65)',
     "Write-Output ('x' -replace 'x', [char]65); Write-Output ('x' -replace 'x', 'A')":
@@ -340,7 +340,7 @@ FOLDS: dict[str, str] = {
     '$c = [char]65; $s = \'A\'; Write-Output "$c"; Write-Output "$s"':
         "Write-Output 'A'\nWrite-Output 'A'",
     "Write-Output ([char]65 -is [char]); Write-Output ('A' -is [char])":
-        "Write-Output ([char]65 -Is [char])\nWrite-Output ('A' -Is [char])",
+        'Write-Output ($True)\nWrite-Output ($False)',
     "Write-Output (([char]65).Length); Write-Output (('A').Length)":
         'Write-Output 1\nWrite-Output 1',
     "Write-Output (([char]65).Count); Write-Output (('A').Count)":

@@ -35,6 +35,7 @@ from refinery.lib.scripts.ps1.analysis.values import (
     render,
     text_of,
     type_of,
+    type_test,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.ast import get_member_name, unwrap_parens
@@ -76,6 +77,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ScopeModifier,
     Ps1ScriptBlock,
     Ps1StringLiteral,
+    Ps1TypeExpression,
     Ps1UnaryExpression,
     Ps1Variable,
 )
@@ -1121,6 +1123,8 @@ class Ps1ConstantFolding(Transformer):
             return self._handle_binary_split(node, op)
         if op in ('-and', '-or', '-xor'):
             return self._handle_logical(node, op)
+        if op in ('-is', '-isnot'):
+            return self._handle_type_test(node, op)
         return self._handle_comparison(node, op) or self._handle_arithmetic(node, op)
 
     def _spelled_as_text(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
@@ -1195,6 +1199,22 @@ class Ps1ConstantFolding(Transformer):
         and a measurement that moves it moves in one place.
         """
         return _folded(apply(op, read_operand(node.left), read_operand(node.right)))
+
+    def _handle_type_test(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
+        """
+        Fold `-is` and `-isnot`, whose right operand is a type rather than a value, so the value
+        grid `_handle_comparison` reads does not answer them. The left operand's runtime type decides
+        the test and the value domain answers it; a right operand that is not a type literal, or a
+        left one whose type is not known, leaves the test standing. `-isnot` is the negation of the
+        same answer.
+        """
+        named = node.right
+        if not isinstance(named, Ps1TypeExpression):
+            return None
+        verdict = type_test(read_operand(node.left), named.name)
+        if verdict is None:
+            return None
+        return self._bool_literal(verdict if op == '-is' else not verdict)
 
     def _handle_logical(self, node: Ps1BinaryExpression, op: str) -> Expression | None:
         """
