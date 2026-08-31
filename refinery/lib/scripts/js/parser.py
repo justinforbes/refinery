@@ -1578,7 +1578,20 @@ class JsParser:
                     optional=False,
                     offset=expr.offset,
                 )
-            elif self._eat(JsTokenKind.QUESTION_DOT):
+            elif self._at(JsTokenKind.QUESTION_DOT) or (
+                self._at(JsTokenKind.QUESTION)
+                and self._peek_next().kind == JsTokenKind.DOT
+            ):
+                # A question mark whose next token is a dot is a `?.` the source split with
+                # whitespace. That split is not a token the language has, and no well-formed program
+                # reaches it: a conditional whose consequent opens with a dot opens with a number,
+                # which the lexer reads as one float rather than a dot. Reading the two as the
+                # optional-chain operator recovers the program the source meant, recorded as a
+                # repair so the tree still reports that the file did not spell it whole.
+                if self._eat(JsTokenKind.QUESTION_DOT) is None:
+                    self._recovered = True
+                    self._advance()
+                    self._advance()
                 if self._at(JsTokenKind.LPAREN):
                     expr = self._parse_call_arguments(expr, optional=True)
                 elif self._at(JsTokenKind.LBRACKET):
