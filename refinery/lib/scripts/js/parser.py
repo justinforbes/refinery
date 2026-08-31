@@ -1471,8 +1471,17 @@ class JsParser:
         if self._eat(JsTokenKind.QUESTION):
             with self._with_no_in(False):
                 consequent = self._parse_assignment_expression()
-            self._expect(JsTokenKind.COLON)
-            alternate = self._parse_assignment_expression()
+            if self._eat(JsTokenKind.COLON):
+                alternate = self._parse_assignment_expression()
+            else:
+                # The colon a conditional requires is not here. Reading the alternate anyway would
+                # spend `_expect`, which steps over whatever stands here to invent the colon — and
+                # where that is the semicolon ending the statement, the next statement is read as
+                # the alternate and the whole tail of the block is pulled into one expression. The
+                # branch is left unwritten instead, so the boundary stays where it is and the
+                # statement after the conditional is read as itself.
+                self._recovered = True
+                alternate = JsErrorNode(offset=self._current.offset, message='expected :')
             return JsConditionalExpression(
                 test=expr,
                 consequent=consequent,
