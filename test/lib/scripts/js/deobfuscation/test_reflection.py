@@ -20,7 +20,29 @@ from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
 from refinery.lib.scripts.js.deobfuscation.reflection import JsReflectionInlining
 
 
+#: The obfuscator.io default-preset string array (rotation IIFE, self-overwriting array function,
+#: accessor) with the non-checksum string at index 0xac set to `return this` and the trailing usage
+#: replaced by a separated `Function` global finder. The finder's code is a literal only after the
+#: string-array resolver decodes `_0xe6abe5(0xac)` — a decode the reflection pass cannot perform
+#: itself — so folding it exercises reflection re-running once that surface is revealed.
+_STRING_ARRAY_REVEALS_A_GLOBAL_FINDER = (
+    r"var _0xe6abe5=_0x1b07;"
+    r"(function(_0x13a108,_0x20b5f6){var _0x2bca43=_0x1b07,_0x36965a=_0x13a108();while(!![]){try{var _0x29"
+    r"3699=-parseInt(_0x2bca43(0xa7))/0x1+-parseInt(_0x2bca43(0xa1))/0x2*(-parseInt(_0x2bca43(0xab))/0x3)+"
+    r"parseInt(_0x2bca43(0xa3))/0x4*(-parseInt(_0x2bca43(0xa9))/0x5)+parseInt(_0x2bca43(0xa6))/0x6+parseIn"
+    r"t(_0x2bca43(0xaa))/0x7*(parseInt(_0x2bca43(0xa2))/0x8)+-parseInt(_0x2bca43(0xa4))/0x9*(-parseInt(_0x"
+    r"2bca43(0xa5))/0xa)+-parseInt(_0x2bca43(0xa0))/0xb;if(_0x293699===_0x20b5f6)break;else _0x36965a['pus"
+    r"h'](_0x36965a['shift']());}catch(_0x35acf4){_0x36965a['push'](_0x36965a['shift']());}}}(_0x2fc0,0x82"
+    r"7c2));function _0x1b07(_0x3a2c1f,_0x271b5b){_0x3a2c1f=_0x3a2c1f-0xa0;var _0x2fc00e=_0x2fc0();var _0x"
+    r"1b0775=_0x2fc00e[_0x3a2c1f];return _0x1b0775;}function _0x2fc0(){var _0x581e"
+    r"61=['2435007zbgngY','return\x20this','12767458FlCTYp','2BveYOA','96VHQLDe','160CSMRCB','486kcIkKD','"
+    r"183450npXmbZ','4067550xFhrYl','462884STmCds','log','50725EqKMLb','48769HzjsUR'];_0x2fc0=function(){r"
+    r"eturn _0x581e61;};return _0x2fc0();}var _m = Function(_0xe6abe5(0xac)); sink(_m());"
+)
+
+
 class TestReflectionInlining(TestJsDeobfuscator):
+
 
     def _reflect(self, source: str) -> str:
         return self._run_transformer(source, JsReflectionInlining)
@@ -437,6 +459,88 @@ class TestReflectionInlining(TestJsDeobfuscator):
 
     def test_constructor_chain_array(self):
         self.assertEqual('1;', self._reflect("[].constructor.constructor('return 1')();"))
+
+    def test_single_constructor_hop_function_literal_returns_this(self):
+        """
+        A plain function literal's own `.constructor` is `Function`, so a single
+        `(function(){}).constructor(code)` hop constructs a function from `code`, like the double hop.
+        """
+        self.assertEqual(
+            'var g = globalThis;',
+            self._reflect("var g = (function(){}).constructor('return this')();"))
+
+    def test_single_constructor_hop_arrow_literal_returns_this(self):
+        self.assertEqual(
+            'var g = globalThis;',
+            self._reflect("var g = (() => {}).constructor('return this')();"))
+
+    def test_single_constructor_hop_function_literal_returns_value(self):
+        self.assertEqual(
+            'var x = 1;', self._reflect("var x = (function(){}).constructor('return 1')();"))
+
+    def test_single_constructor_hop_async_base_not_inlined(self):
+        """
+        An `async` function literal's `.constructor` is `AsyncFunction`, which builds a coroutine, not
+        the plain function `Function` builds, so a single hop from it is not the `Function` idiom.
+        """
+        source = "var g = (async function() {}).constructor('return this')();"
+        self.assertEqual(source, self._reflect(source))
+
+    def test_single_constructor_hop_generator_base_not_inlined(self):
+        source = "var g = (function*() {}).constructor('return this')();"
+        self.assertEqual(source, self._reflect(source))
+
+    def test_separated_function_constructor_folds_and_retires_temporary(self):
+        """
+        A `Function` construction bound to a single-use local and then invoked folds like the immediate
+        `Function(code)()`, and the temporary — now read nowhere — is dropped.
+        """
+        self.assertEqual(
+            'var g = globalThis;',
+            self._reflect("const m = Function('return this'); var g = m();"))
+
+    def test_separated_constructor_chain_folds_and_retires_temporary(self):
+        self.assertEqual(
+            'var x = 1;',
+            self._reflect("const m = (function(){}).constructor('return 1'); var x = m();"))
+
+    def test_separated_temporary_with_another_read_is_kept(self):
+        """
+        The invocation folds, but the temporary keeps its declarator: retirement requires that every
+        read of the binding was an invocation this pass inlined, and `use(m)` is a read that was not.
+        """
+        self.assertEqual(
+            "const m = Function('return 1');\nuse(m);\nvar x = 1;",
+            self._reflect("const m = Function('return 1'); use(m); var x = m();"))
+
+    def test_separated_reassigned_temporary_not_inlined(self):
+        source = "let m = Function('return 1');\nm = other;\nvar x = m();"
+        self.assertEqual(
+            source, self._reflect("let m = Function('return 1'); m = other; var x = m();"))
+
+    def test_separated_temporary_binding_parameters_not_inlined(self):
+        source = "const m = Function('a', 'return a');\nvar x = m(1);"
+        self.assertEqual(source, self._reflect("const m = Function('a','return a'); var x = m(1);"))
+
+    def test_separated_temporary_used_before_established_not_inlined(self):
+        """
+        The invocation is not folded when the construction is not established before it runs, so the
+        constructed function is never read out of its temporal dead zone.
+        """
+        source = "var x = m();\nconst m = Function('return 1');"
+        self.assertEqual(source, self._reflect("var x = m(); const m = Function('return 1');"))
+
+    def test_string_array_revealed_separated_finder_folds_to_globalthis(self):
+        """
+        A separated `Function` global finder whose code is produced only by the string-array resolver
+        folds to `globalThis` under the full pipeline, which requires the reflection pass to run again
+        once the resolver reveals the literal argument. The whole string-array scaffold and the finder
+        temporary collapse, leaving only the folded call.
+        """
+        self.assertEqual('sink(globalThis);', self._deobfuscate(_STRING_ARRAY_REVEALS_A_GLOBAL_FINDER))
+
+
+
 
     def test_eval_expression_position_single_expr(self):
         self.assertEqual("var x = 'hello';", self._reflect("var x = eval(\"'hello'\");"))
@@ -1509,3 +1613,38 @@ class TestAProgramAroundAPayloadCutShortRunsOn(TestJsDeobfuscator):
             {source: behavior(deobfuscate_source(source)) for source in sources},
             {source: (printed, None) for source in sources},
         )
+
+
+#: Programs that locate the global object through a `Function` construction — a single-`.constructor`
+#: hop on a function literal, and a construction bound to a temporary and then invoked — and print
+#: through it. Each is folded by the changes under test; Node runs the original and the deobfuscation
+#: to confirm the fold preserves what the program does.
+_A_GLOBAL_FINDER_THAT_PRINTS = {
+    'single hop function literal':
+        "var g = (function(){}).constructor('return this')(); g.console.log('finder-ok');",
+    'single hop arrow literal':
+        "var g = (() => {}).constructor('return this')(); g.console.log('finder-ok');",
+    'separated function constructor':
+        "var m = Function('return this'); var g = m(); g.console.log('finder-ok');",
+    'separated constructor chain':
+        "var m = (function(){}).constructor('return this'); var g = m(); g.console.log('finder-ok');",
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestGlobalFinderFoldPreservesBehavior(TestJsDeobfuscator):
+
+    def test_node_prints_the_same_before_and_after_deobfuscation(self):
+        sources = list(_A_GLOBAL_FINDER_THAT_PRINTS.values())
+        self.assertEqual(
+            {source: behavior(source) for source in sources},
+            {source: behavior(deobfuscate_source(source)) for source in sources},
+        )
+
+    def test_each_finder_reaches_the_global_object(self):
+        sources = list(_A_GLOBAL_FINDER_THAT_PRINTS.values())
+        self.assertEqual(
+            {source: behavior(source) for source in sources},
+            {source: ('finder-ok\n', None) for source in sources},
+        )
+

@@ -26,6 +26,7 @@ from refinery.lib.scripts.js.analysis.model import (
     REFLECTIVE_INTRINSICS,
     SYNC_EVAL_NAMES,
     TIMER_NAMES,
+    Binding,
     BindingKind,
     Scope,
     SemanticModel,
@@ -42,18 +43,15 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     get_body,
     property_key,
     references_receiver_this,
+    remove_declarator,
     rewrite_receiver_this_to_global,
     string_value,
     walk_scope,
 )
 from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.deobfuscation.strict_divergence import diverges_under_strict
-from refinery.lib.scripts.js.strict import (
-    collect_strict_violations,
-    declares_use_strict,
-    strict_mode_at,
-)
 from refinery.lib.scripts.js.model import (
+    JsArrowFunctionExpression,
     JsAssignmentExpression,
     JsAwaitExpression,
     JsBlockStatement,
@@ -71,8 +69,15 @@ from refinery.lib.scripts.js.model import (
     JsSequenceExpression,
     JsStringLiteral,
     JsUnaryExpression,
+    JsVariableDeclarator,
     Statement,
     strip_parens,
+    wraps_return,
+)
+from refinery.lib.scripts.js.strict import (
+    collect_strict_violations,
+    declares_use_strict,
+    strict_mode_at,
 )
 
 _REFLECTIVE_CALLEE_NAMES = REFLECTIVE_INTRINSICS | TIMER_NAMES | SYNC_EVAL_NAMES
@@ -280,80 +285,89 @@ def _extract_function_body_code(
     return body
 
 
-def _is_constructor_chain(
-    node: JsCallExpression | JsNewExpression, read_effect: Callable[[Node], bool] | None = None,
+def _denotes_function_constructor(
+    expr: Expression | None, read_effect: Callable[[Node], bool] | None = None,
 ) -> bool:
     """
-    Detect a constructor chain callee pattern equivalent to `Function`:
+    Whether *expr* evaluates to the `Function` intrinsic, reached by `.constructor` navigation from a
+    side-effect-free base. `Function` is what the reflective `Function("code")` idiom calls, so a callee
+    that denotes it under another spelling constructs a function from the same code. Two spellings reach
+    it:
 
-        <literal>.constructor.constructor
+        <function literal>.constructor          (a plain function or arrow literal)
+        <literal>.constructor.constructor        (any side-effect-free base)
 
-    Inlining discards the evaluation of the chain base, so the base must be side-effect free;
-    *read_effect* rejects a bare-identifier base that resolves through a `with` body's dynamic scope
-    (firing a getter or throwing), which the model-free check cannot see.
+    A plain function or arrow literal's own `.constructor` is `Function`, since every ordinary function
+    is an instance of `Function`; an `async` or generator literal is refused, its `.constructor` being
+    `AsyncFunction` or `GeneratorFunction`, which build a coroutine or generator body rather than the
+    plain function `Function` builds. Any value's `.constructor.constructor` is `Function`, because the
+    first hop yields that value's constructor — itself a function — whose own `.constructor` is
+    `Function`. Inlining discards the evaluation of the base, so it must be side-effect free; a function
+    literal always is, and for the double hop *read_effect* rejects a bare-identifier base that resolves
+    through a `with` body's dynamic scope (firing a getter or throwing), which the model-free check
+    cannot see.
     """
-    callee = node.callee
-    if not isinstance(callee, JsMemberExpression):
+    if not isinstance(expr, JsMemberExpression) or access_key(expr) != 'constructor':
         return False
-    if access_key(callee) != 'constructor':
-        return False
-    inner = callee.object
-    if not isinstance(inner, JsMemberExpression):
-        return False
-    if access_key(inner) != 'constructor':
-        return False
-    base = inner.object
+    base = strip_parens(expr.object)
     if base is None:
         return False
-    return side_effect_free(base, read_effect=read_effect)
+    if isinstance(base, (JsFunctionExpression, JsArrowFunctionExpression)):
+        return not wraps_return(base)
+    if isinstance(base, JsMemberExpression) and access_key(base) == 'constructor':
+        inner = base.object
+        return inner is not None and side_effect_free(inner, read_effect=read_effect)
+    return False
 
 
 def _extract_constructor_chain_code(
-    node: JsCallExpression,
+    ctor_call: Node,
     read_effect: Callable[[Node], bool] | None = None,
     *,
     eval_string: Callable[[Expression | None], str | None],
 ) -> str | None:
     """
-    Extract code from constructor chain IIFE patterns:
+    Extract the body code from a constructor-navigation call that constructs a function:
 
-        "".constructor.constructor("code")()
-        [].constructor.constructor("code")()
+        (function() {}).constructor("code")
+        "".constructor.constructor("code")
+        [].constructor.constructor("code")
+
+    *ctor_call* is the construction itself (the call to the navigated `Function` intrinsic), not its
+    later invocation; its callee must denote `Function` (`_denotes_function_constructor`).
     """
-    inner_call = node.callee
-    if not isinstance(inner_call, JsCallExpression):
+    if not isinstance(ctor_call, JsCallExpression):
         return None
-    if not _is_constructor_chain(inner_call, read_effect):
+    if not _denotes_function_constructor(ctor_call.callee, read_effect):
         return None
-    if len(inner_call.arguments) != 1:
+    if len(ctor_call.arguments) != 1:
         return None
-    return string_value(inner_call.arguments[0]) or eval_string(inner_call.arguments[0])
+    return string_value(ctor_call.arguments[0]) or eval_string(ctor_call.arguments[0])
 
 
-def _invoked_function_constructor_code(
-    node: JsCallExpression,
+def _function_constructor_body(
+    ctor_call: Node,
     read_effect: Callable[[Node], bool] | None = None,
     *,
     free_global_name: Callable[[Expression | None], str | None],
     eval_string: Callable[[Expression | None], str | None],
 ) -> tuple[str, bool] | None:
     """
-    If *node* immediately invokes a `Function` constructor — `Function("code")()`,
-    `new Function("code")()`, or the `<x>.constructor.constructor("code")()` chain — return its body
-    code together with whether the constructor binds parameters or is passed call arguments. A
-    `Function`-constructed function runs in the global scope with `this` bound to the global object and
-    its parameters bound to the call arguments, so inlining its body into the caller is sound only when
-    it binds neither.
+    Given the construction *ctor_call* itself — `Function("code")`, `new Function("code")`, or a
+    `<literal>.constructor…("code")` navigation — return its body code together with whether the
+    construction binds parameters (a leading string argument to the `Function` form). Returns `None`
+    when *ctor_call* is not such a construction. The caller decides how the constructed function is
+    invoked and ORs in whether that invocation passes arguments, since a body that binds either a
+    parameter or a call argument cannot be inlined.
     """
-    inner = node.callee
-    if isinstance(inner, (JsCallExpression, JsNewExpression)):
+    if isinstance(ctor_call, (JsCallExpression, JsNewExpression)):
         code = _extract_function_body_code(
-            inner, free_global_name=free_global_name, eval_string=eval_string)
+            ctor_call, free_global_name=free_global_name, eval_string=eval_string)
         if code is not None:
-            return code, len(inner.arguments) > 1 or bool(node.arguments)
-    chain = _extract_constructor_chain_code(node, read_effect, eval_string=eval_string)
+            return code, len(ctor_call.arguments) > 1
+    chain = _extract_constructor_chain_code(ctor_call, read_effect, eval_string=eval_string)
     if chain is not None:
-        return chain, bool(node.arguments)
+        return chain, False
     return None
 
 
@@ -683,6 +697,10 @@ class JsReflectionInlining(ScriptLevelTransformer):
     _read_effect: Callable[[Node], bool]
     _alias_name: Callable[[Expression | None], str | None]
     _free_global: Callable[[Expression | None], str | None]
+    _eval_string: Callable[[Expression | None], str | None]
+    _pending_retire: dict[int, Binding]
+    _retire_consumed: dict[int, int]
+    _retire_binding: dict[int, Binding]
 
     def _process_script(self, node: JsScript) -> None:
         """
@@ -706,9 +724,56 @@ class JsReflectionInlining(ScriptLevelTransformer):
             self._alias_name = self._alias_member_name(node)
             self._free_global = self._free_global_name(node)
             self._eval_string = self._string_argument_value(node)
+            self._pending_retire = {}
+            self._retire_consumed = {}
+            self._retire_binding = {}
             self._inline_statements(node)
             self._inline_expressions(node)
             self._lower_timers(node)
+            self._retire_consumed_temporaries()
+
+    def _note_retirement(self, site: Node, binding: Binding | None) -> None:
+        """
+        Record that inlining the reflective call at *site* would retire the single-use temporary
+        *binding* — the local whose sole value is the `Function` construction the call invokes. The note
+        is provisional: it is keyed by the site and only acted on once `_confirm_retirement` sees the
+        inlining committed, so a resolution the caller declines (a body that could not be reduced to an
+        expression, a statement `_sanitize_inlined_body` rejects) retires nothing.
+        """
+        if binding is not None:
+            self._pending_retire[id(site)] = binding
+
+    def _confirm_retirement(self, site: Node) -> None:
+        """
+        Acknowledge that the inlining at *site* was committed, counting the read of its temporary that
+        the inlining consumed. A temporary read at every site by such a committed inlining is retired by
+        `_retire_consumed_temporaries`; one still read elsewhere is not.
+        """
+        binding = self._pending_retire.pop(id(site), None)
+        if binding is None:
+            return
+        self._retire_consumed[id(binding)] = self._retire_consumed.get(id(binding), 0) + 1
+        self._retire_binding[id(binding)] = binding
+
+    def _retire_consumed_temporaries(self) -> None:
+        """
+        Drop the declarator of each single-assignment temporary whose every read was a `Function`
+        construction invocation this pass inlined. The construction is side-effect-free precisely
+        because the inlining succeeded — `_resolve_reflected_body` parses the code and declines a body
+        it cannot, so a construction whose body was inlined provably parses and cannot throw — which is
+        the judgment `refinery.lib.scripts.js.analysis.effects.EffectModel` withholds from an intrinsic
+        under a live reflection surface and only this pass, having parsed the code, can make.
+        """
+        for bid, binding in self._retire_binding.items():
+            if self._retire_consumed.get(bid, 0) != len(binding.reads):
+                continue
+            if binding.exported or len(binding.declarations) != 1:
+                continue
+            declarator = binding.declarations[0].parent
+            if not isinstance(declarator, JsVariableDeclarator) or declarator.init is None:
+                continue
+            remove_declarator(declarator)
+            self.mark_changed()
 
     def _dynamic_read_effect(self, root: JsScript) -> Callable[[Node], bool]:
         """
@@ -790,7 +855,8 @@ class JsReflectionInlining(ScriptLevelTransformer):
                 continue
             i = 0
             while i < len(body):
-                parsed = self._try_resolve_statement(body[i], root, container is root)
+                original = body[i]
+                parsed = self._try_resolve_statement(original, root, container is root)
                 if parsed is None:
                     i += 1
                     continue
@@ -801,6 +867,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
                 for stmt in parsed:
                     stmt.parent = container
                 body[i:i + 1] = parsed
+                self._confirm_retirement(original)
                 self.mark_changed()
                 i += len(parsed)
 
@@ -840,6 +907,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
             if replacement is None:
                 continue
             _replace_in_parent(node, replacement)
+            self._confirm_retirement(node)
             self.mark_changed()
 
     def _lower_timers(self, root: JsScript) -> None:
@@ -962,14 +1030,22 @@ class JsReflectionInlining(ScriptLevelTransformer):
         read_effect = self._read_effect
         alias_name = self._alias_name
         free_global_name = self._free_global
-        constructor = _invoked_function_constructor_code(
-            node, read_effect, free_global_name=free_global_name, eval_string=self._eval_string)
-        if constructor is not None:
-            code, binds = constructor
-            parsed = self._resolve_reflected_body(
-                code, site, root, ReflectedScope.FUNCTION_CONSTRUCTOR, at_global_scope, binds=binds,
-            )
-            return (ReflectedScope.FUNCTION_CONSTRUCTOR, parsed) if parsed is not None else None
+        resolved = self._resolved_constructor_call(node, root)
+        if resolved is not None:
+            ctor_call, retire = resolved
+            body = _function_constructor_body(
+                ctor_call, read_effect, free_global_name=free_global_name,
+                eval_string=self._eval_string)
+            if body is not None:
+                code, ctor_binds = body
+                parsed = self._resolve_reflected_body(
+                    code, site, root, ReflectedScope.FUNCTION_CONSTRUCTOR, at_global_scope,
+                    binds=ctor_binds or bool(node.arguments),
+                )
+                if parsed is not None:
+                    self._note_retirement(site, retire)
+                    return ReflectedScope.FUNCTION_CONSTRUCTOR, parsed
+                return None
         direct = _extract_eval_code(
             node, free_global_name=free_global_name, eval_string=self._eval_string)
         if direct is not None:
@@ -986,6 +1062,35 @@ class JsReflectionInlining(ScriptLevelTransformer):
             )
             return (ReflectedScope.GLOBAL_EVAL, parsed) if parsed is not None else None
         return None
+
+    def _resolved_constructor_call(
+        self, node: JsCallExpression, root: JsScript,
+    ) -> tuple[Node, Binding | None] | None:
+        """
+        The `Function` construction that *node* invokes, paired with the single-use temporary to retire
+        once its sole read is inlined (or `None` to retire nothing). For the immediate forms —
+        `Function("code")()`, `new Function(...)()`, `(function(){}).constructor("code")()` — the
+        construction is `node`'s own callee. When the callee is a bare identifier, the construction is
+        the value the name provably holds (`SemanticModel.singular_value`, which already declines a
+        reassigned or dynamically rebindable binding), taken only where that value is established before
+        *node* (`DominanceModel.binding_established_before`) so the invocation cannot read it out of its
+        temporal dead zone. The body is inlined at *node*, never the construction relocated, so a
+        `Function` reference in the initializer keeps its original scope; retiring the dead temporary is
+        left to `_retire_consumed_temporaries` once every read is accounted for.
+        """
+        callee = strip_parens(node.callee)
+        if isinstance(callee, (JsCallExpression, JsNewExpression)):
+            return callee, None
+        if not isinstance(callee, JsIdentifier):
+            return None
+        cache = model_cache(self, root)
+        binding = cache.model.resolve(callee)
+        value = strip_parens(cache.model.singular_value(binding))
+        if not isinstance(value, (JsCallExpression, JsNewExpression)):
+            return None
+        if not cache.dominance.binding_established_before(binding, node):
+            return None
+        return value, binding
 
     def _resolve_reflected_body(
         self,
