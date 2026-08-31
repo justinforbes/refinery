@@ -10,6 +10,7 @@
 > [!WARNING]  
 > **BREAKING CHANGES**
 
+- The minimum supported Python version was raised from 3.10 to 3.11.
 - The meta variable `offset` was renamed to `start`.
   It is emitted by `carve`, `dnsdomain`, `rex`, `xtp`, `xtw`, all `carve-*` units, `ngrams`, `perc`, `vsect`, `vsnip`, `xtasar`.
   Every unit that reports a `start` now also reports the matching `end`, which is the position just after the region in the input.

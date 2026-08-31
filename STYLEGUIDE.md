@@ -4,7 +4,7 @@ This document is the style guide for all code in Binary Refinery.
 
 ## Compatibility
 
-All refinery code must support **Python 3.10** and later versions.
+All refinery code must support **Python 3.11** and later versions.
 
 ## Code Style
 
