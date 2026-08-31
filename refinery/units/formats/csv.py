@@ -66,9 +66,10 @@ class csv(Unit):
     def __init__(
         self,
         quote: Param[buf, Arg('-q', help='Specify the quote character, the default is a double quote.')] = B'"',
-        delim: Param[buf, Arg('-d', help='Specify the delimiter, the default is a single comma.')] = B','
+        delim: Param[buf, Arg('-d', help='Specify the delimiter, the default is a single comma.')] = B',',
+        pretty: Param[bool, Arg('-p', help='Do not minify the JSON output.')] = False,
     ):
-        super().__init__(quote=quote, delim=delim)
+        super().__init__(quote=quote, delim=delim, pretty=pretty)
 
     def reverse(self, data: bytearray):
         try:
@@ -99,4 +100,4 @@ class csv(Unit):
             keys = next(rows)
             for row in rows:
                 out = {key: convert(value) for key, value in zip(keys, row)}
-                yield json.dumps(out)
+                yield json.dumps(out, self.args.pretty)
