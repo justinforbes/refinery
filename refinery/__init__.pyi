@@ -229,6 +229,7 @@ from refinery.units.formats.lnk import lnk as lnk
 from refinery.units.formats.macho.machometa import machometa as machometa
 from refinery.units.formats.msgpack import msgpack as msgpack
 from refinery.units.formats.msi import xtmsi as xtmsi
+from refinery.units.formats.network.dns import dns as dns
 from refinery.units.formats.network.http import http as http
 from refinery.units.formats.network.pcap import pcap as pcap
 from refinery.units.formats.network.tcp import tcp as tcp

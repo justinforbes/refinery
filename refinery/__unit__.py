@@ -228,6 +228,7 @@ UNITS = {
     'machometa'                                  : 'refinery.units.formats.macho.machometa',
     'msgpack'                                    : 'refinery.units.formats.msgpack',
     'xtmsi'                                      : 'refinery.units.formats.msi',
+    'dns'                                        : 'refinery.units.formats.network.dns',
     'http'                                       : 'refinery.units.formats.network.http',
     'pcap'                                       : 'refinery.units.formats.network.pcap',
     'tcp'                                        : 'refinery.units.formats.network.tcp',
