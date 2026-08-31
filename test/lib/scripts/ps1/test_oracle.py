@@ -637,6 +637,21 @@ TABLE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('OUT\tSystem.Management.Automation.CommandTypes\tAlias',),
 }
 
+
+def claimed_bindings(table: dict[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+    """
+    The entries of a command table that record the host *binding* a name, which is the half a
+    subset check over a live host enforces. A binding is a transcript that only wrote output; a
+    transcript carrying an error is the table recording the host *not* binding the name, and a host
+    is free to contradict that by binding more than the clean set defines.
+    """
+    return {
+        name: transcript
+        for name, transcript in table.items()
+        if transcript and all(line.startswith('OUT') for line in transcript)
+    }
+
+
 #: What 5.1 makes of a value's type and of an operation's result, measured. The unit had no place
 #: to keep a type — a Char and a one-character String were the same object to it — so every belief
 #: about one was written by us, and this is the table that ends that. Read the rule in
@@ -4219,11 +4234,26 @@ class TestPs1CommandTablesRestOnMeasuredBeliefs(Ps1OracleTest):
     These ask the host what it actually binds. They are the only scripts in the corpus written to
     depend on the machine, and the machine they depend on is a Windows PowerShell 5.1 installation,
     which is the oracle's subject.
+
+    That subject is the *default* set a clean 5.1 defines, which is what a resolver can model. A
+    particular installation may carry more — a module a runner preinstalls exports an alias into the
+    session — and a name bound there but nowhere a clean host reaches is that installation's surplus,
+    not the table's omission. So the belief the class enforces is one-directional: every binding the
+    table claims, the host must have; what the host binds beyond them, it is free to.
     """
 
-    def test_every_belief_about_what_the_host_binds_is_what_the_host_binds(self):
+    def test_every_binding_the_table_claims_the_host_also_binds(self):
+        """
+        A subset, not an equality. Every name the table records the host *binding* — an alias it
+        resolves, a cmdlet it has, a command whose type it names — the host must still bind, because
+        a binding the table claims and the host lacks is the invented one this class exists to catch.
+        The names the table records the host *not* binding are left unchecked: an installation may
+        define an alias or command beyond the clean 5.1 set the resolver models, and that surplus is
+        no fault of a table that maps the default set, so it is not required here to be absent.
+        """
         measured = dict(zip(corpus.TABLES, behaviours(corpus.TABLES)))
-        self.assertEqual(measured, TABLE_TRANSCRIPTS)
+        claimed = claimed_bindings(TABLE_TRANSCRIPTS)
+        self.assertEqual({name: measured[name] for name in claimed}, claimed)
 
     def test_a_name_the_host_binds_is_not_measured_like_one_it_does_not(self):
         """
@@ -4236,6 +4266,37 @@ class TestPs1CommandTablesRestOnMeasuredBeliefs(Ps1OracleTest):
             [line.split('\t')[0] for transcript in measured for line in transcript],
             ['OUT', 'ERROR'],
         )
+
+
+class TestPs1CommandTableCheckIsASubsetNotAnEquality(TestBase):
+    """
+    What `claimed_bindings` selects, and so which way the command-table oracle can fail, decided on
+    the table's own shape without a host. The oracle enforces one direction — every binding the
+    table claims, the host has — so an installation that binds a name the table calls unbound does
+    not fail it, while the table claiming a binding the host lacks still does. This is the property
+    that keeps a runner's preinstalled alias from reading as a fault in a table that maps the
+    default set, without letting an invented alias through.
+    """
+
+    def test_a_host_binding_a_name_the_table_calls_unbound_is_tolerated(self):
+        unbound = next(
+            name for name, transcript in TABLE_TRANSCRIPTS.items()
+            if not transcript[0].startswith('OUT')
+        )
+        measured = dict(TABLE_TRANSCRIPTS)
+        measured[unbound] = ('OUT\tSystem.Management.Automation.AliasInfo\tsurplus',)
+        claimed = claimed_bindings(TABLE_TRANSCRIPTS)
+        self.assertEqual([name for name in claimed if measured[name] != claimed[name]], [])
+
+    def test_a_binding_the_table_claims_the_host_lacks_is_caught(self):
+        invented = next(
+            name for name, transcript in TABLE_TRANSCRIPTS.items()
+            if transcript[0].startswith('OUT')
+        )
+        measured = dict(TABLE_TRANSCRIPTS)
+        measured[invented] = _NO_SUCH_ALIAS
+        claimed = claimed_bindings(TABLE_TRANSCRIPTS)
+        self.assertEqual([name for name in claimed if measured[name] != claimed[name]], [invented])
 
 
 class TestPs1NoCorpusTableListsTheSameScriptTwice(TestBase):
