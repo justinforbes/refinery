@@ -192,7 +192,7 @@ from refinery.lib.exceptions import (
 from refinery.lib.frame import MAGIC, MSIZE, Chunk, Framed, generate_frame_header
 from refinery.lib.meta import MV, check_variable_names_of_unit
 from refinery.lib.structures import MemoryFile
-from refinery.lib.types import buf, isbuffer, isstream
+from refinery.lib.types import buf, isbuffer, asbuffer, isstream
 
 if TYPE_CHECKING:
     from argparse import _MutuallyExclusiveGroup
@@ -2205,12 +2205,12 @@ class Unit(UnitBase, abstract=True):
                 message = exception_to_string(message)
             if isinstance(message, str):
                 return message
-            if isbuffer(message):
+            if b := asbuffer(message):
                 import codecs
-                assert isinstance(message, (bytes, bytearray, memoryview))
-                pmsg: str = codecs.decode(message, cls.codec, 'surrogateescape')
+                pmsg: str = codecs.decode(b, cls.codec, 'surrogateescape')
                 if not pmsg.isprintable():
-                    pmsg = message.hex().upper()
+                    import binascii
+                    pmsg = binascii.hexlify(b).decode('ascii')
                 return pmsg
             else:
                 import pprint

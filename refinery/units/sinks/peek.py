@@ -187,7 +187,7 @@ class peek(HexViewer):
         decoded = decoded.splitlines(False)
         if not wrap:
             for k, line in enumerate(decoded):
-                line = line.replace('\t', '\x20' * 4)
+                line = line.replace('\t', '\x20\x20\x20\x20')
                 if colored_text_length(line) <= width:
                     continue
                 clipped = colored_text_truncate(line, width - 3)

@@ -193,6 +193,7 @@ class MV(str, Enum):
 
 
 _INDEX = 'index'
+_TEMPVAL = '_'
 _BIGINT = '__bi__'
 
 _HIGH_ASCII = '¹²³«»¡¿¼½¾¢£¥§©®±µ·÷øÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõöùúûüýþÿ'
@@ -311,8 +312,11 @@ class ByteStringWrapper(bytearray, CustomStringRepresentation):
             pretty = None
         else:
             if not is_print_safe(pretty):
-                pretty = None
-            elif prefix != 's' or self.requires_prefix(pretty):
+                if pretty[-1:] == '\0' and is_print_safe(p := pretty[:-1]):
+                    pretty = F'{p}\\0'
+                else:
+                    pretty = None
+            if pretty is not None and (prefix != 's' or self.requires_prefix(pretty)):
                 pretty = F'{prefix}:{pretty}'
         if pretty is None:
             pretty = F'h:{self.hex()}'
@@ -368,7 +372,7 @@ def check_variable_name(name: str | None, allow_derivations=False) -> str | None
     error = None
     if name is None:
         return None
-    elif len(name) == 1 and name.upper() == name:
+    elif len(name) == 1 and name.upper() == name and name != _TEMPVAL:
         error = 'a capitalzed single letter, which are reserved for state machines.'
     elif not name.isidentifier():
         error = 'not an identifier.'
@@ -951,7 +955,7 @@ class LazyMetaOracle(metaclass=_LazyMetaMeta):
 
     def __setitem__(self, key, value):
         new = self.autowrap(key, value)
-        if not is_valid_variable_name(key):
+        if not is_valid_variable_name(key) or key == _TEMPVAL:
             self.tempval[key] = new
             return
         self.current[key] = new
