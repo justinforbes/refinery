@@ -513,6 +513,17 @@ class TestReflectionInlining(TestJsDeobfuscator):
             "const m = Function('return 1');\nuse(m);\nvar x = 1;",
             self._reflect("const m = Function('return 1'); use(m); var x = m();"))
 
+    def test_separated_temporary_named_in_with_body_is_kept(self):
+        """
+        A reference inside a `with` body is recorded as a dynamic reference, not a plain read, so the
+        count of invocations this pass inlined can equal every plain read while a use still observes
+        the binding. The invocation folds, but the declarator must be kept: dropping it would leave
+        `use(m)` naming a binding no longer declared.
+        """
+        self.assertEqual(
+            "const m = Function('return 1');\nwith (obj) {\n  use(m);\n}\nvar x = 1;",
+            self._reflect("const m = Function('return 1'); with (obj) { use(m); } var x = m();"))
+
     def test_separated_reassigned_temporary_not_inlined(self):
         source = "let m = Function('return 1');\nm = other;\nvar x = m();"
         self.assertEqual(

@@ -767,7 +767,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         for bid, binding in self._retire_binding.items():
             if self._retire_consumed.get(bid, 0) != len(binding.reads):
                 continue
-            if binding.exported or len(binding.declarations) != 1:
+            if binding.exported or binding.dynamic_refs or len(binding.declarations) != 1:
                 continue
             declarator = binding.declarations[0].parent
             if not isinstance(declarator, JsVariableDeclarator) or declarator.init is None:
