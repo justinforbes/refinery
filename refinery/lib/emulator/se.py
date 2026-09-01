@@ -184,9 +184,21 @@ class SpeakeasyEmulator(Emulator[Se, str, _T]):
 
     def _uc_hook_return(self, emu: Se, access: int, address: int, size: int, value: int, state: _T | None = None):
         inner = self.speakeasy.emu
-        if inner is not None and address in (inner.return_hook, inner.exit_hook):
+        if inner is None:
+            return None
+        if address in (inner.return_hook, inner.exit_hook):
             inner.stop()
             return True
+        # Speakeasy's API dispatch relies on _hook_mem_unmapped to intercept calls
+        # to import sentinels (UC_MEM_FETCH_UNMAPPED / INVALID_MEM_EXEC=2000).
+        # We delegate only that access type here; other invalid accesses (reads,
+        # writes, permission faults) are left to their existing handling so they
+        # do not prematurely terminate emulation of junk stub code.
+        if (e := inner.emu_eng) and e.mem_access.get(access) == 2000:
+            try:
+                return inner._hook_mem_unmapped(None, access, address, size, value)
+            except Exception:
+                return None
         return None
 
     def _enable_single_step(self):
