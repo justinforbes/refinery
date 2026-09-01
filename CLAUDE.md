@@ -113,7 +113,21 @@ Offer a prompt to me where they can select any number of the following agents to
 4. safety: design has no obvious safety flaws
 
 Run these plus a separate general purpose adversarial critic in parallel and revise the plan according to their feedback.
-After planning, pause to compact before implementation.
+
+A critic panel confirms a plan that already carries its own evidence; it is not how a plan gets checked.
+Before offering one:
+
+- **Census before design.** For every question the plan touches,
+  find the mechanism that already answers it and every guard on the code paths the plan alters.
+  Most designs are placement problems: A new mechanism needs evidence that no existing one owns the question.
+- **Falsify your own claims first.** Label every load-bearing claim in the plan measured
+  (probe and output) or argued (file:line). If a ten-line probe could break a claim, run it before any critic does.
+- **A fix drafted from panel feedback is new, unreviewed design.**
+  It gets the same census and probes before it re-enters the plan.
+- **A substantial panel finding means the pre-work was skipped.**
+  Stop and re-derive instead of scheduling another round; rounds run only when I ask for one.
+
+After a plan is approved by me, pause to compact before implementation.
 
 - When I do no approve a plan and ask a question, do not show it again. Answer what I asked and wait.
 - If a decision cannot be explained in plain words with a concrete example, do not ask me.
