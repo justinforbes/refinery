@@ -80,6 +80,7 @@ from refinery.lib.scripts.js.model import (
     JsProperty,
     JsPropertyDefinition,
     JsRestElement,
+    JsReturnStatement,
     JsScript,
     JsSpreadElement,
     JsStaticBlock,
@@ -1340,12 +1341,54 @@ def _is_call_argument(node: Node) -> bool:
     return any(strip_parens(argument) is node for argument in governor.arguments)
 
 
+def _enclosing_call(node: Node) -> JsCallExpression | JsNewExpression | None:
+    """
+    The call or `new` *node* is written as an argument of, looking through parentheses, or `None`
+    when it is not an argument. This is the call whose body may observe what *node* denotes, and it
+    is recognized the way `_is_call_argument` recognizes the position — the two ask one question,
+    one for the answer and one for the call.
+    """
+    governor = enclosing_operator(node)
+    if not isinstance(governor, (JsCallExpression, JsNewExpression)):
+        return None
+    if any(strip_parens(argument) is node for argument in governor.arguments):
+        return governor
+    return None
+
+
+def _sole_returned_function(function: Node) -> JsFunctionNode | None:
+    """
+    The single function literal *function* returns to its caller, or `None` when it returns none or
+    more than one. Only a `return` in *function*'s own receiver scope is one of its returns, so a
+    `return` inside a function it defines is not counted; `walk_receiver_scope` draws that boundary.
+    This is the shape a self-defending wrapper's factory takes — a zero-argument IIFE whose one
+    `return` yields the `function(a, b)` that a guard site calls.
+    """
+    returned: list[JsFunctionNode] = []
+    for node in walk_receiver_scope(function):
+        if not isinstance(node, JsReturnStatement) or node.argument is None:
+            continue
+        value = strip_parens(node.argument)
+        if isinstance(value, FUNCTION_NODES):
+            returned.append(value)
+    return returned[0] if len(returned) == 1 else None
+
+
 _GLOBAL_ALIAS_CHAIN_LIMIT = 4
 """
 How far `SemanticModel.names_the_global_object` follows one name to the next before it
 gives up. A program names the global object once and reads through that name; a chain of four
 is already past anything a file writes, and the bound is what keeps `var a = b, b = a` from
 recurring forever.
+"""
+
+
+_HANDED_OBJECT_OBSERVATION_DEPTH = 4
+"""
+How far `SemanticModel.global_object_argument_is_observed` follows a handed object through nested
+calls — a callee that hands its receiver on with `apply`, whose target hands it on again — before
+it gives up and takes the object for observed. The obfuscator's self-defending wrapper is one hop
+deep; the bound is what keeps a chain of mutual hand-offs from recurring forever.
 """
 
 
@@ -2631,19 +2674,31 @@ class SemanticModel:
     def _record_global_object_alias_references(self):
         """
         Record, against every binding a classic script's global object carries, the references a
-        call may make through the object once it is handed one. `a(globalThis, 'q')` and `a(this,
-        'q')` both give `a` an object whose properties are the script's top-level declarations, and
-        a body that writes one of them writes the declaration — which no identifier in the text
-        names, so the identifier walk sees nothing.
+        call may make through the object once it is handed one, but only for a hand-over the callee
+        could read a property through. `a(globalThis, 'q')` and `a(this, 'q')` both give `a` an
+        object whose properties are the script's top-level declarations, and a body that writes one
+        of them writes the declaration — which no identifier in the text names, so the identifier
+        walk sees nothing. A call that never reads a property of the object it is handed reaches no
+        declaration through it, and admitting one there freezes every fold in the file for a
+        reference the program never makes.
 
-        This is `_record_arguments_alias_references` for the other object that aliases bindings, and
-        the two record the same way: a read of every binding, so a declaration whose only use is
-        through the object is not removed, and an indefinite write of every one, so a fold does not
-        carry a value across a write the callee made. Which properties the callee touches is not
-        decided here and every binding is admitted, for the reason the argument list is admitted
-        whole — a value only some of them can hold is not a definition of any of them.
+        `global_object_argument_is_observed` decides, per hand-over, whether the callee could read a
+        property. An observed hand-over records the same way `_record_arguments_alias_references`
+        does — a read of every binding, so a declaration reached only through the object is not
+        removed, and an indefinite write of every one, so a fold does not carry a value across a
+        write the callee made. Which properties the callee touches is not decided, and every binding
+        is admitted, for the reason the argument list is admitted whole: a value only some of them
+        can hold is not a definition of any of them. An unobserved hand-over records nothing, and
+        the union is taken across hand-overs — a binding stays reachable if any one is observed.
 
-        The object is recognized by `_denotes_the_global_object`, so only the `this` a script's top
+        The gate runs in two phases because it reads `singular_value` to resolve a callee, and the
+        record it is about to make is an indefinite write that would make that query decline. Every
+        hand-over is judged first, against the model as it stands before this method writes anything,
+        and only then are the observed ones recorded. This is the order `names_the_global_object`
+        keeps for the same reason — an answer read out of the walk still recording those very writes
+        would depend on how far the walk had got, not on what the program says.
+
+        The object is recognized by `_holds_the_global_object`, so only the `this` a script's top
         level holds is one. A `this` inside a function is the receiver its call supplied, and
         admitting it costs every fold in a file that hands one to anything: obfuscator.io's
         self-defending wrapper passes its own `this` to a call, and a run that took it for the
@@ -2659,14 +2714,191 @@ class SemanticModel:
         bindings = list(self.root_scope.bindings.values())
         if not bindings:
             return
+        observed: list[ReferenceNode] = []
         for node in self.root.walk():
             if not isinstance(node, (JsIdentifier, JsThisExpression)):
                 continue
             if not self._holds_the_global_object(node) or not _is_call_argument(node):
                 continue
+            if self.global_object_argument_is_observed(node):
+                observed.append(node)
+        for node in observed:
             for binding in bindings:
                 binding.reachable_through_a_handed_object = True
                 self._record_alias_reference(binding, node, Role.READWRITE)
+
+    def global_object_argument_is_observed(self, node: Node) -> bool:
+        """
+        Whether the call *node* is handed to could read a property of the global object *node*
+        stands for. An unobserved hand-over lets the globals the object carries stay foldable; an
+        observed one, or one the model cannot resolve, is admitted whole the way it always has been.
+
+        The callee is resolved to the function it runs: a function written in place, a name whose
+        one value is a function, or a name whose one value is the zero-argument IIFE a self-defending
+        wrapper's factory is, whose single returned function is the one that runs. A callee resolving
+        to none of these is not read, so its object is observed. A function that reaches its own
+        `arguments` is observed too, because an element of that object is the handed argument under
+        another name, which the parameter walk does not follow.
+
+        The argument is matched to the parameter it binds by position; a list with a rest, default,
+        or destructuring element is not matched and its object is observed. An argument past the last
+        parameter binds nothing the callee can name and is not observed. A parameter reflection can
+        reach is observed. Otherwise `_parameter_is_observed` asks the body.
+        """
+        call = _enclosing_call(node)
+        if call is None:
+            return True
+        function = self._target_function_of_call(call)
+        if function is None:
+            return True
+        if references_own_arguments(function):
+            return True
+        mapping = self._argument_parameter_map(call, function)
+        if mapping is None:
+            return True
+        parameter = next((b for b, argument in mapping.items() if argument is node), None)
+        if parameter is None:
+            return False
+        if self.reflection_can_reach(parameter):
+            return True
+        return self._parameter_is_observed(function, parameter, mapping, {id(function)}, 0)
+
+    def _target_function_of_call(self, call: JsCallExpression | JsNewExpression) -> JsFunctionNode | None:
+        """
+        The function *call* runs, as far as it resolves without leaving the text: the callee written
+        as a function, a name whose one value is a function, or a name whose one value is a
+        zero-argument IIFE returning a single function — the shape the self-defending wrapper's
+        factory takes. `None` when the callee resolves to none of these.
+        """
+        callee = strip_parens(call.callee)
+        if isinstance(callee, FUNCTION_NODES):
+            return callee
+        if not isinstance(callee, JsIdentifier):
+            return None
+        value = self.singular_value(self.resolve(callee))
+        if value is None:
+            return None
+        value = strip_parens(value)
+        if isinstance(value, FUNCTION_NODES):
+            return value
+        if isinstance(value, JsCallExpression) and not value.arguments:
+            inner = strip_parens(value.callee)
+            if isinstance(inner, FUNCTION_NODES):
+                return _sole_returned_function(inner)
+        return None
+
+    def _argument_parameter_map(
+        self,
+        call: JsCallExpression | JsNewExpression,
+        function: JsFunctionNode,
+    ) -> dict[Binding | None, Node | None] | None:
+        """
+        A map from each parameter binding of *function* to the argument *call* supplies for it by
+        position, or `None` when a parameter is not a plain name — a rest, default, or destructuring
+        element the model cannot bind by position. A parameter the call gives no argument for maps
+        to `None`.
+        """
+        if any(not isinstance(parameter, JsIdentifier) for parameter in function.params):
+            return None
+        mapping: dict[Binding | None, Node | None] = {}
+        for index, parameter in enumerate(function.params):
+            if not isinstance(parameter, JsIdentifier):
+                continue
+            argument = strip_parens(call.arguments[index]) if index < len(call.arguments) else None
+            mapping[self.binding_of(parameter)] = argument
+        return mapping
+
+    def _parameter_is_observed(
+        self,
+        function: JsFunctionNode,
+        parameter: Binding | None,
+        mapping: dict[Binding | None, Node | None],
+        visiting: set[int],
+        depth: int,
+    ) -> bool:
+        """
+        Whether *function*'s body reads a property of the object bound to *parameter*. The parameter
+        as the base of a member access reads one; the receiver an `apply`/`call` hands to a function
+        that reads its own `this` does; a receiver handed to a `this`-free function does not, because
+        that function never reads it. Every other use — returned, aliased, enumerated, handed on as
+        a plain argument — is taken for an observation. The whole subtree is walked and each
+        identifier resolved, so a use inside a nested closure that captures the parameter counts, and
+        a shadowing binding of the same name does not.
+        """
+        if depth > _HANDED_OBJECT_OBSERVATION_DEPTH:
+            return True
+        for reference in function.walk():
+            if not isinstance(reference, JsIdentifier) or not self.is_reference(reference):
+                continue
+            if self.resolve(reference) is not parameter:
+                continue
+            access = _enclosing_member_access(reference)
+            if access is not None and strip_parens(access.object) is reference:
+                return True
+            if self._apply_receiver_is_safe(reference, mapping, visiting, depth) is not True:
+                return True
+        return False
+
+    def _apply_receiver_is_safe(
+        self,
+        node: Node,
+        mapping: dict[Binding | None, Node | None],
+        visiting: set[int],
+        depth: int,
+    ) -> bool | None:
+        """
+        For a *node* that denotes the handed object: `True` when it is the `thisArg` of an
+        `apply`/`call` whose target provably does not read its own `this`, so the object is not read
+        there; `False` when it is such a receiver but the target reads `this` or does not resolve to
+        a function; and `None` when *node* is not used as such a receiver at all, the case the caller
+        reads as an observation. The target is resolved through the argument map when it is another
+        parameter of the same call, and otherwise by its one value.
+        """
+        parent = enclosing_operator(node)
+        if not isinstance(parent, JsCallExpression):
+            return None
+        callee = strip_parens(parent.callee)
+        if not isinstance(callee, JsMemberExpression):
+            return None
+        if _member_property_name(callee) not in ('apply', 'call'):
+            return None
+        if not parent.arguments or strip_parens(parent.arguments[0]) is not node:
+            return None
+        target: Node | None = strip_parens(callee.object)
+        if isinstance(target, JsIdentifier):
+            binding = self.resolve(target)
+            if binding is None:
+                target = None
+            elif binding in mapping:
+                target = mapping[binding]
+            else:
+                value = self.singular_value(binding)
+                target = strip_parens(value) if value is not None else None
+        if not isinstance(target, FUNCTION_NODES):
+            return False
+        return not self._function_observes_its_this(target, visiting, depth + 1)
+
+    def _function_observes_its_this(
+        self,
+        function: JsFunctionNode,
+        visiting: set[int],
+        depth: int,
+    ) -> bool:
+        """
+        Whether *function* reads the `this` its caller supplies. An arrow has none of its own and
+        reads the enclosing one, so a receiver handed to it is never read; a regular function that
+        names `this` anywhere in its own receiver scope, or runs a direct `eval` that could, reads
+        it. The bound and the *visiting* set take a function that hands `this` on to itself, or a
+        chain too deep to follow, for a reader.
+        """
+        if depth > _HANDED_OBJECT_OBSERVATION_DEPTH or id(function) in visiting:
+            return True
+        if isinstance(function, JsArrowFunctionExpression):
+            return False
+        if self._function_has_direct_eval(function):
+            return True
+        return any(isinstance(node, JsThisExpression) for node in walk_receiver_scope(function))
+
 
     def _record_alias_reference(
         self,

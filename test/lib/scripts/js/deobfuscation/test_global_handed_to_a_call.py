@@ -114,3 +114,78 @@ class TestWhatIsNotTheGlobalObjectStillFolds(TestBase):
             }
             console.log(m());
             """).rstrip(chr(10)))
+
+
+#: A wrapper that reads the global object it is handed only as the `thisArg` of an `apply`/`call` to
+#: a payload never reads a property of the object, unless the payload reads its own `this` — the one
+#: way the receiver reaches the payload. The obfuscator's self-defending wrapper is this shape.
+_APPLIES_A_THIS_FREE_PAYLOAD = a_program("""
+    var q = 1;
+    var wrap = (function () {
+      var once = true;
+      return function (self, payload) {
+        var run = once ? function () { return payload.apply(self, []); } : function () {};
+        return once = false, run;
+      };
+    })();
+    wrap(this, function () { console.log('hi'); })();
+    """)
+
+_APPLIES_A_PAYLOAD_THAT_READS_THIS = a_program("""
+    var q = 1;
+    function a(g, b) { console.log(b.apply(g)); }
+    a(this, function () { return this.q; });
+    """)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAWrapperApplyingAPayloadBehavesTheWayTheHostDoes(TestBase):
+    """
+    Read under the script execution model. Whether the wrapper's payload reads the global object it
+    is applied to or not, the deobfuscation prints what the host prints.
+    """
+
+    def test_every_program_behaves_the_way_the_host_does(self):
+        for label, source in {
+            'a this-free payload never reads the object': _APPLIES_A_THIS_FREE_PAYLOAD,
+            'a payload reads the object through its this': _APPLIES_A_PAYLOAD_THAT_READS_THIS,
+        }.items():
+            with self.subTest(label):
+                before, after = before_and_after_in_a_host(source)
+                self.assertEqual(after, before)
+
+
+class TestAnUnobservedHandOverFreesWhatAnObservedOneKeeps(TestBase):
+    """
+    A global reached by nothing the text spells is removed when the only call handed the global
+    object cannot read a property through it, and kept when it can. This is the cost of the whole
+    admission narrowed to the hand-over that observes: a payload applied without reading its `this`
+    frees the object, a payload that reads its `this` keeps what it reads.
+    """
+
+    def test_an_apply_thisarg_only_hand_over_frees_an_unreferenced_global(self):
+        self.assertEqual(folded(_APPLIES_A_THIS_FREE_PAYLOAD), a_program("""
+            var wrap = (function() {
+              var once = true;
+              return function(self, payload) {
+                var run = once ? function() {
+                  return payload.apply(self, []);
+                } : function() {};
+                return once = false, run;
+              };
+            })();
+            wrap(this, function() {
+              console.log('hi');
+            })();
+            """).rstrip(chr(10)))
+
+    def test_a_payload_reading_this_keeps_the_global_it_reads(self):
+        self.assertEqual(folded(_APPLIES_A_PAYLOAD_THAT_READS_THIS), a_program("""
+            var q = 1;
+            function a(g, b) {
+              console.log(b.apply(g));
+            }
+            a(this, function() {
+              return this.q;
+            });
+            """).rstrip(chr(10)))
