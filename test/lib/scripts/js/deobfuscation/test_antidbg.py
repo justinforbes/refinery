@@ -4,7 +4,7 @@ import inspect
 
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
-from refinery.lib.scripts.js.deobfuscation.antidbg import JsRemoveReDoS
+from refinery.lib.scripts.js.deobfuscation.antidbg import JsRemoveSelfDefending
 
 
 class TestAntiDebug(TestJsDeobfuscator):
@@ -38,7 +38,7 @@ class TestAntiDebug(TestJsDeobfuscator):
             console.log(x);
             """
         )
-        self.assertEqual(source, self._run_transformer(source, JsRemoveReDoS))
+        self.assertEqual(source, self._run_transformer(source, JsRemoveSelfDefending))
 
     def test_redos_factory_preserved_when_referenced(self):
         source = self._DEFENSE_CODE + (
@@ -88,5 +88,85 @@ class TestAntiDebug(TestJsDeobfuscator):
                 console.log(other());
                 """
             ),
-            self._run_transformer(source, JsRemoveReDoS),
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+
+class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
+    """
+    Structural removal: the same run-once `apply`-payload factory template, payloads that carry no ReDoS
+    string, three guard invocation shapes, sequence-operand entanglement, and preservation when the
+    factory result is stored and read but never invoked.
+    """
+
+    _FACTORY = (
+        "var a = (function() {"
+        "  var b = true;"
+        "  return function(c, d) {"
+        "    var e = b ? function() {"
+        "      if (d) { var f = d.apply(c, arguments); return d = null, f; }"
+        "    } : function() {};"
+        "    return b = false, e;"
+        "  };"
+        "}());"
+    )
+
+    def test_console_hijack_payload_immediate_guard_is_removed(self):
+        source = (
+            self._FACTORY
+            + "a(this, function() { console.log('hijack'); })();"
+            + " console.log('done');"
+        )
+        self.assertEqual(
+            "console.log('done');",
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+    def test_regexp_payload_iife_wrapped_guard_is_removed(self):
+        source = (
+            self._FACTORY
+            + "(function() { a(this, function() { return /test/.test('test'); })(); })();"
+            + " console.log('done');"
+        )
+        self.assertEqual(
+            "console.log('done');",
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+    def test_iife_wrapped_guard_as_sequence_operand_removes_only_guard(self):
+        source = (
+            self._FACTORY
+            + "(function() { a(this, function() {})(); })(), setInterval(function() {}, 1000);"
+            + " console.log('main');"
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                setInterval(function() {}, 1000);
+                console.log('main');
+                """
+            ),
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+    def test_stored_guard_as_sequence_operand_removes_only_guard(self):
+        source = (
+            self._FACTORY
+            + "var g = a(this, function() {});"
+            + " g(), console.log('main');"
+        )
+        self.assertEqual(
+            "console.log('main');",
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+    def test_stored_result_only_read_is_not_removed(self):
+        source = (
+            self._FACTORY
+            + "var g = a(this, function() { return 42; });"
+            + " console.log(g);"
+        )
+        self.assertEqual(
+            self._run_transformers(source),
+            self._run_transformer(source, JsRemoveSelfDefending),
         )

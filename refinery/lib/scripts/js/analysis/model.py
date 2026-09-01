@@ -2899,7 +2899,6 @@ class SemanticModel:
             return True
         return any(isinstance(node, JsThisExpression) for node in walk_receiver_scope(function))
 
-
     def _record_alias_reference(
         self,
         binding: Binding | None,
