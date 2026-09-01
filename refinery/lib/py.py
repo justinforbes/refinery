@@ -70,14 +70,31 @@ def extract_code_from_buffer(buffer: buf, file_name: str | None = None) -> Gener
 
 
 def disassemble_code(code: CodeType, version: str | float | tuple[int, ...] | None = None):
-    if version is None:
-        opc = None
-    else:
+    opc = None
+    if version is not None:
         if isinstance(version, float):
             version = str(version)
-        if isinstance(version, tuple):
-            version = xdis.version_info.version_tuple_to_str(version)
-        opc = xdis.op_imports.op_imports[version]
+        if isinstance(version, str):
+            version = xdis.version_info.version_str_to_tuple(version)
+        if isinstance(version, int):
+            version = version,
+        major = next(it := iter(version))
+        try:
+            minor = next(it)
+        except StopIteration:
+            minor = 0
+        try:
+            build = next(it)
+        except StopIteration:
+            build = 0
+        while build >= 0:
+            try:
+                opc = xdis.op_imports.op_imports[
+                    xdis.version_info.version_tuple_to_str((major, minor, build))]
+            except KeyError:
+                build -= 1
+            else:
+                break
     return xdis.std.Bytecode(code, opc=opc)
 
 
