@@ -265,12 +265,19 @@ class SpeakeasyEmulator(Emulator[Se, str, _T]):
             pass
         emu = self.speakeasy.emu
         assert emu is not None
-        for hooklist in emu.hooks.values():
+        for h in list(emu.hooks):
+            hooklist = emu.hooks[h]
+            wastuple = False
+            if isinstance(hooklist, tuple):
+                wastuple = True
+                hooklist = list(hooklist)
             assert isinstance(hooklist, list)
             for k, h in enumerate(hooklist):
                 if h is hook:
                     del hooklist[k]
                     break
+            if wastuple:
+                emu.hooks[h] = tuple(hooklist)
 
     def _set_end(self, end: int | None):
         if h := self._end_hook_s:
