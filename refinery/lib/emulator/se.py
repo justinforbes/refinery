@@ -133,7 +133,16 @@ class SpeakeasyEmulator(Emulator[Se, str, _T]):
         # returning False, with its builtin _hook_mem_unmapped added last; that builtin clobbers
         # our memory hooks (and single-stepping). 2.0.0b3 has no way to make consumer hooks coexist
         # with the builtins, so we suppress them and replace the interrupt handler ourselves.
-        emu.emu.add_interrupt_hook(cb=emu.emu._hook_interrupt)
+        _orig_interrupt = emu.emu._hook_interrupt
+        _anti_emu_traps = {0x8, 0xD, 0xE}
+
+        def _interrupt_handler(e, intnum):
+            if intnum in _anti_emu_traps:
+                e.set_pc(e.get_pc() + 1)
+                return True
+            return _orig_interrupt(e, intnum)
+
+        emu.emu.add_interrupt_hook(cb=_interrupt_handler)
         emu.emu.builtin_hooks_set = True
 
         # The suppressed builtin was also what detected the run-ending fetch into the unmapped
