@@ -119,6 +119,18 @@ class TestVStack(TestUnitBase):
         test = data | unit | []
         self.assertIn(B'10.25.44'B'.1:4444', test)
 
+    def test_speakeasy_anti_emulation_x32(self):
+        shellcode = bytes.fromhex(
+            'C7050012000042424242'   # mov dword [0x1200], 0x42424242
+            '17'                     # pop ss  — triggers int 0xD (bug 3)
+            'C7050412000042424242'   # mov dword [0x1204], 0x42424242
+            'C7050812000043434343'   # mov dword [0x1208], 0x43434343
+            'C3'                     # ret
+        )
+        unit = self.load(engine='speakeasy', arch='x32')
+        result = shellcode | unit | bytes
+        self.assertIn(bytes.fromhex('43434343'), result)
+
     def test_zero_overwrites_are_not_logged(self):
         data = bytes.fromhex(
             'c6 44 24 f8 72'            # mov  BYTE PTR [esp-8], 'r'
