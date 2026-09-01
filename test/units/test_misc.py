@@ -285,7 +285,7 @@ class TestSimpleInvertible(TestUnitBase):
     def test_unit_output_01(self):
         self.assertEqual(Unit._output(lambda: B'w00t'), 'w00t')
         self.assertEqual(Unit._output(lambda: R'w00t'), 'w00t')
-        self.assertEqual(Unit._output(lambda: B'\xF3'), 'F3')
+        self.assertEqual(Unit._output(lambda: B'\xF3'), 'f3')
         self.assertEqual(Unit._output(lambda: B'\x03'), '03')
 
     def test_run_method(self):
