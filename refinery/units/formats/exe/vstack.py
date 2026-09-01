@@ -131,7 +131,10 @@ def EmuFactory(base: ET) -> ET:
         state: EmuState
 
         def stackrange(self):
-            return Range(self.stack_base, self.stack_base + self.stack_size)
+            base = getattr(self, 'stack_base', None)
+            if base is None:
+                return Range(0, 0)
+            return Range(base, base + self.stack_size)
 
         def disassemble(self, address: int):
             try:
