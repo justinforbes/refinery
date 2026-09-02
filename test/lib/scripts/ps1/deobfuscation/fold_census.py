@@ -314,9 +314,11 @@ FOLDS: dict[str, str] = {
     '$t = [char]65; Write-Output (,$t); Write-Output $t':
         'Write-Output (,[char]65)\nWrite-Output ([char]65)',
     '$t = [char[]](72, 73); Write-Output (,$t); Write-Output $t':
-        "Write-Output (,'HI')\nWrite-Output 'HI'",
+        'Write-Output (,[char[]](72, 73))\nWrite-Output ([char[]](72, 73))',
     "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
-        'Write-Output ($True)\nWrite-Output ($True)',
+        'Write-Output ($False)\nWrite-Output ($True)',
+    "$t = [char[]]'ABC'; Write-Output (,$t); Write-Output $t.Count":
+        "Write-Output (,[char[]]'ABC')\nWrite-Output 3",
     "$t = 'ABC'[0]; Write-Output (,$t); Write-Output $t":
         'Write-Output (,[char]65)\nWrite-Output ([char]65)',
     "Write-Output ('x' -replace 'x', [char]65); Write-Output ('x' -replace 'x', 'A')":

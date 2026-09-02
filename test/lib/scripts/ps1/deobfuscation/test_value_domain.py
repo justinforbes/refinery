@@ -180,10 +180,12 @@ class TestPs1ConstantsThatAreLeftUncomputed(TestPs1):
     def test_the_count_of_an_empty_array_is_zero(self):
         self.assertEqual(self._deobfuscate('$x = @().Count'), '$x = 0')
 
-    @unittest.expectedFailure
     def test_the_count_of_a_string_cast_to_a_char_array_is_its_character_count(self):
         self.assertEqual(self._deobfuscate("$x = ([char[]]'ABC').Count"), '$x = 3')
 
+    # `read` pins the value of a `[char[]]` cast over a literal, so its `.Count` folds; a
+    # `.ToCharArray()` call is a member invocation the value domain does not evaluate, so its count
+    # is left standing until method evaluation is built.
     @unittest.expectedFailure
     def test_the_count_of_to_char_array_is_the_character_count(self):
         self.assertEqual(self._deobfuscate("$x = 'ABC'.ToCharArray().Count"), '$x = 3')
@@ -224,17 +226,6 @@ class TestPs1ConstantsThatAreComputedWrong(TestPs1):
     def test_a_number_plus_a_char_is_addition(self):
         self.assertEqual(self._deobfuscate('$x = 1 + [char]65'), '$x = 66')
 
-    @unittest.expectedFailure
-    def test_a_char_array_is_not_a_string(self):
-        """
-        5.1 answers this `$False`: a `Char[]` is not a `String`. The tool folds `[char[]](72, 73)`
-        to the String `'HI'` before the test runs, so `-is [string]` then sees a String and folds to
-        `$True`. The wrong answer is the char-array-to-string erasure surfacing through the operator,
-        not the operator itself, and the same erasure is what leaves the two `.Count` tests above
-        marked.
-        """
-        self.assertEqual(self._deobfuscate('$x = [char[]](72, 73) -is [string]'), '$x = $False')
-
 
 class TestPs1TheIsOperatorTestsTheRuntimeType(TestPs1):
     """
@@ -256,6 +247,10 @@ class TestPs1TheIsOperatorTestsTheRuntimeType(TestPs1):
 
     def test_a_string_is_a_string(self):
         self.assertEqual(self._deobfuscate("$x = 'HI' -is [string]"), '$x = $True')
+
+    def test_a_char_array_is_not_a_string(self):
+        self.assertEqual(
+            self._deobfuscate('$x = [char[]](72, 73) -is [string]'), '$x = $False')
 
     def test_isnot_is_the_negation_of_is(self):
         self.assertEqual(self._deobfuscate('$x = [char]65 -isnot [char]'), '$x = $False')

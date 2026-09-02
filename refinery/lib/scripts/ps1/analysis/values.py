@@ -175,11 +175,11 @@ def collect_facts(node: Node | None) -> list[Ps1Fact] | None:
     This is the only place the elements of a collection are taken apart, and every caller that wants
     something *of* each of them — an integer, a text, a number-or-text — asks the element that
     question itself. A collector per question would each have to state again which spellings build a
-    collection, and `read` already knows: `@(1, 2)`, `(1, 2)`, `1, 2` and a cast over any of them
-    are one answer here.
+    collection, and `read` already knows: `@(1, 2)`, `(1, 2)`, `1, 2`, a `[char[]]` over any of them
+    and a cast over any of those are one answer here.
     """
     fact = read(node)
-    if isinstance(fact, Ps1Constant) and fact.type == _OBJECT_ARRAY:
+    if isinstance(fact, Ps1Constant) and fact.type in (_OBJECT_ARRAY, _CHAR_ARRAY):
         payload = fact.payload
         return None if not isinstance(payload, tuple) else list(payload)
     return None if fact is UNKNOWN else [fact]
@@ -255,6 +255,12 @@ _INT32 = _type('System.Int32')
 #: report `System.Object[]`. The rank is what makes a member read on one resolve against
 #: `System.Array`, which is where an array's members actually live.
 _OBJECT_ARRAY = _type('System.Object[]')
+
+#: The array a `[char[]]` cast builds, whose element type a `-is [string]` test reads as *not* a
+#: String. It is a container of Char and not the String its characters spell, which is the whole
+#: distinction the Char-erasure phase exists to keep — a `Char[]` has no literal, so `render` writes
+#: none and a fold that observes one reads its type rather than spelling its value.
+_CHAR_ARRAY = _type('System.Char[]')
 
 
 def resolve_expression_type(
@@ -1064,9 +1070,17 @@ def _cast_spelling(node: Ps1CastExpression) -> Ps1Fact:
     and `[int] (1 + 2)` an operator underneath one — and neither is what the source pins. That
     restriction is also what keeps `read` from walking into an expression: the only thing it
     recurses through is another spelling.
+
+    A `char[]` is read here though `render` spells none. It has no literal, so `read(render(fact))`
+    never reaches it and the roundtrip above says nothing about it; it is read because a cast of a
+    literal collection or String to it pins a value the source names — the characters — that a
+    reader of a collection and a `-join` over one both need, and refusing it would leave those folds
+    to the String erasure this phase ends. It stays literal-only for the reason every other target
+    here does: `convert` reads its elements from `read(node.operand)`, so an operator or a variable
+    underneath the cast answers `UNKNOWN` and the whole cast does too.
     """
     target = resolve_type(node.type_name)
-    if target is None or target not in _SPELLED_BY_A_CAST:
+    if target is None or (target not in _SPELLED_BY_A_CAST and target != _CHAR_ARRAY):
         return UNKNOWN
     outcome = convert(read(node.operand), target)
     return UNKNOWN if outcome.may_throw else outcome.value
@@ -1551,6 +1565,35 @@ def apply_unary(operator: str, operand: Ps1Fact) -> Ps1Outcome:
     return Ps1Outcome(False, Ps1Constant(width, complement % (high + 1) if low == 0 else complement))
 
 
+def _to_char_array(fact: Ps1Fact) -> Ps1Outcome:
+    """
+    What `[char[]] fact` produces: the `Char[]` whose elements are the characters of a String, or
+    each element of a collection converted to a Char, or `UNKNOWN` where an element does not convert
+    and the cast throws instead.
+
+    A String is taken apart into its characters rather than converted whole — measured,
+    `[char[]]'ABC'` is a `Char[]` of three, where `[char]'ABC'` throws — so it is the one operand
+    read as a sequence of Chars directly. A collection is each of its elements asked of `convert` to
+    a Char, so `[char[]](72, 73)` is `H`, `I` and `[char[]]@('AB')` throws where its element does.
+    Any other operand is refused rather than guessed at: a scalar `Char[]` cast is a one-element
+    array 5.1 builds but no measurement here covers, and `$null` and a nested collection each reach
+    the tree through no fold, so a value for them would answer a question nothing asks.
+    """
+    if isinstance(fact, Ps1Constant) and fact.type == _STRING and isinstance(fact.payload, str):
+        characters = tuple(Ps1Constant(_CHAR, one) for one in fact.payload)
+        return Ps1Outcome(False, Ps1Constant(_CHAR_ARRAY, characters))
+    elements = _elements(fact)
+    if elements is None:
+        return NOTHING
+    converted: list[Ps1Fact] = []
+    for element in elements:
+        outcome = convert(element, _CHAR)
+        if outcome.may_throw or outcome.value is UNKNOWN:
+            return Ps1Outcome(True, UNKNOWN)
+        converted.append(outcome.value)
+    return Ps1Outcome(False, Ps1Constant(_CHAR_ARRAY, tuple(converted)))
+
+
 def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
     """
     What `[target] fact` produces, read from the measured conversion grid exactly as `apply` reads
@@ -1568,7 +1611,15 @@ def convert(fact: Ps1Fact, target: Ps1TypeName) -> Ps1Outcome:
     5.1 has two of them that disagree with each other. Every other spelling reaches the grid for its
     type and stops there, which is `[int]'abc'` still being *an Int32 or a throw* — see
     `_from_conversion_cell` for why a cast may say that where an operator may not.
+
+    A `char[]` target is answered by `_to_char_array` rather than the grid. The grid was captured
+    over scalar targets, so it has no cell for an array one; but the result type of this cast is
+    settled by what is written — always a `Char[]` — so the only thing the source decides is whether
+    an element throws, which is `convert` to a Char asked of each. That is why it is the one target
+    here whose row is composed rather than measured.
     """
+    if target == _CHAR_ARRAY:
+        return _to_char_array(fact)
     source = _grid_type(fact)
     cell = None if source is None else conversion_outcome(target, source)
     if cell is None:

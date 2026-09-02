@@ -492,13 +492,14 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
     kept anyway. What it does not reach is a payload nothing decodes, which is
     `TestPs1ANoiseBarewordIsDroppedAboveAPayloadTheWalkCannotRead` below.
 
-    **The two `expectedFailure` rows below are one defect, and scanning text is not what would fix
-    it.** The drop is decided in the `fold` group and `Invoke-Expression` is inlined in `finalize`,
-    so the question is asked while the read is still a string held in a variable. A scan reaches the
+    **The `expectedFailure` row below is that defect, and scanning text is not what would fix it.**
+    The drop is decided in the `fold` group and `Invoke-Expression` is inlined in `finalize`, so the
+    question is asked while the read is still a string held in a variable. A scan reaches the
     spellings that survive as one literal and misses every one cut between two of them; measured, a
-    payload assembled from `'$Err' + 'or.Count'`, from `[char[]]`, or through a variable an earlier
-    pass has not yet folded away comes out with `$Error` standing in the output beside the deleted
-    statement that filled it.
+    payload assembled from `'$Err' + 'or.Count'`, or through a variable an earlier pass has not yet
+    folded away, comes out with `$Error` standing in the output beside the deleted statement that
+    filled it. A `[char[]]` payload is not one of them: `read` pins the cast over a literal, so
+    `-join` folds the whole name to a single string in the `fold` group where the scan reaches it.
 
     Deciding a removal on an absence — no read found — before the passes that make reads appear have
     finished is not this recognizer's mistake alone, and closing it here would fix one member of a
@@ -576,12 +577,10 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
             $Error.Count
         """)
 
-    @unittest.expectedFailure
     def test_a_noise_bareword_is_kept_where_the_read_is_built_out_of_characters(self):
-        """
-        The same defect reached without splitting a literal at all: no literal in the input spells
-        any part of the name, and the output spells the whole of it.
-        """
+        # `read` pins a `[char[]]` cast over a literal, so `-join` folds the whole name to one
+        # string literal in the fold group — before the drop is decided — where the text scan
+        # reaches it. A payload cut across variables is not folded that early; the row below is.
         self._assertDeobfuscatesTo("""
             try {
               zzqq0 =5

@@ -73,10 +73,12 @@ class TestPs1TypeCastExtra(TestPs1):
     def test_a_string_cast_of_a_string_literal_is_that_literal(self):
         self.assertEqual(self._apply('$x = [string]"foo"', Ps1TypeCasts), "$x = 'foo'")
 
-    def test_typecast_char_array(self):
-        data = '[char[]](72,101,108,108,111)'
-        result = self._deobfuscate(data)
-        self.assertIn('Hello', result)
+    def test_a_char_array_cast_stands_rather_than_folding_to_a_string(self):
+        # A Char[] has no literal, so the cast stays: folding it to 'Hello' would print one line
+        # where the five Chars 5.1 builds print five.
+        self.assertEqual(
+            self._deobfuscate('[char[]](72,101,108,108,111)'),
+            '[char[]](72, 101, 108, 108, 111)')
 
     def test_as_char_cast(self):
         self.assertEqual(self._deobfuscate('(45 -As [Char])'), '([char]45)')

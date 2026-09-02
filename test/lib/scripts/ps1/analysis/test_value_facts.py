@@ -4241,7 +4241,7 @@ class TestPs1EvaluateAgreesOrRefuses(unittest.TestCase):
 
     def test_an_expression_the_source_pins_evaluates_to_exactly_what_it_pins(self):
         compared = [site for site in SITES if read(site.node) is not UNKNOWN]
-        self.assertEqual(len(compared), 2913)
+        self.assertEqual(len(compared), 2916)
         self.assertEqual(
             [
                 site.source for site in compared
@@ -4382,7 +4382,7 @@ class TestPs1EvaluateCarriesAThrowUp(unittest.TestCase):
             for child in site.node.children()
             if isinstance(child, Expression) and evaluate(child).may_throw
         ]
-        self.assertEqual(len(compared), 2340)
+        self.assertEqual(len(compared), 2337)
         self.assertEqual(
             [site.source for site, _ in compared if not evaluate(site.node).may_throw], [])
 

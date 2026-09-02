@@ -335,11 +335,11 @@ class TestPs1ForEachPipeline(TestPs1):
 
 class TestPs1EmulatorExtra(TestPs1):
 
-    def test_cast_wrapped_array_pipeline(self):
+    def test_a_string_cast_over_an_identity_xor_pipeline_joins_on_the_default_ofs(self):
         result = self._deobfuscate(
             "[String]([Char[]] (72,101,108,108,111) | "
             "ForEach-Object { [Char]($_ -BXor 0) })")
-        self.assertIn('Hello', result)
+        self.assertEqual(result, "'H e l l o'")
 
     def test_a_string_cast_over_an_xor_pipeline_joins_on_the_default_ofs(self):
         result = self._deobfuscate("[String]([Char[]] (127,78,88,95) | % { [Char]($_ -BXor 0x2B) })")

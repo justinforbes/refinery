@@ -3700,19 +3700,16 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: those in-body refusals are pinned; a top-level ledger like this one cannot see them, which is why
 #: a regression test written against the bare expression proves nothing about the body.
 #:
-#: What is left of the Char erasure here is a wrong type: a `[char]` or `[char[]]` cast that survives
-#: the round trip reaches the tree as the String its characters spell, so a `-is [string]` test, an
-#: array of Char and `$t.Count` all answer as though a String had been folded. `[int][char]48` is no
-#: longer among the wrong values — it folds to the code point `48` the way 5.1 reads it. The rows
-#: below are that wrong type and nothing else.
+#: What is left of the Char erasure here is a wrong type in the interpreter, which computes with no
+#: Char: a `[char]` cast inside a body it folds reaches the tree as the one-character String the
+#: character spells. The value domain no longer shares that gap — a `[char[]]` cast is answered as
+#: the `Char[]` it is, so `-is [string]` over one is `False` and its `.Count` is the element count —
+#: and `[int][char]48` folds to the code point `48` the way 5.1 reads it. The row below is that
+#: wrong type and nothing else.
 TYPE_DEFECTS: dict[str, str] = {
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
         'The count is right and the elements are not: the interpreter has no Char in the values '
         'it computes with, so a [char] cast reaches the tree as a one-character String.',
-    '$t = [char[]](72, 73); Write-Output (,$t); Write-Output $t':
-        'The same erasure for an array of Char, which folds to one String.',
-    "Write-Output ([char[]](72, 73) -is [string]); Write-Output ('HI' -is [string])":
-        'A Char[] is not a String; the fold makes it answer as though it were.',
     'function f { $i = 0; $i++; $i++; $i }; $t = f; Write-Output (,$t); Write-Output $t':
         'An increment written as a statement hands nothing to the success stream on 5.1, so the '
         'body produces the one number it ends with. The interpreter contributes the value of every '
