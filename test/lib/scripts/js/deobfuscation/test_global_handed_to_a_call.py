@@ -152,6 +152,74 @@ _APPLY_TARGET_REASSIGNED_AFTER_THE_APPLY_RAN = a_program("""
     console.log(wrap(globalThis));
     """)
 
+#: The apply target is a parameter of the call that hands the object over, reassigned to a
+#: `this`-reader before the apply runs. The set of values the parameter can hold at that call
+#: contains the handed argument and the reassignment both, and one of them reads the receiver, so a
+#: gate that judges the call-site argument alone hands the payload a receiver it then deems unread.
+_APPLY_TARGET_PARAMETER_REASSIGNED_BEFORE_THE_APPLY = a_program("""
+    var secret = 'S';
+    function inner(host) { return host.secret; }
+    function wrap(recv, payload) {
+      payload = function () { return inner(this); };
+      return payload.apply(recv, []);
+    }
+    console.log(wrap(this, function () {}));
+    """)
+
+#: Nothing assigns over the target parameter, but the `apply` dispatched at the call is not the
+#: intrinsic: an own `apply` property — written directly, installed with `Object.defineProperty`,
+#: written through a second name for the same object, or inherited from a poisoned
+#: `Function.prototype` — receives the handed object as a plain argument and forwards it. The
+#: `arguments` row rebinds the parameter itself through the mapped object instead.
+_A_DISPLACED_APPLY_FORWARDS_THE_RECEIVER = {
+    'an own apply property forwards the receiver': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function wrap(recv, payload) {
+          payload.apply = function (r) { return inner(r); };
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'a defineProperty install forwards the receiver': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function wrap(recv, payload) {
+          Object.defineProperty(payload, 'apply', { value: function (r) { return inner(r); } });
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'an alias writes the own apply property': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function wrap(recv, payload) {
+          var other = payload;
+          other.apply = function (r) { return inner(r); };
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'the arguments object rebinds the target parameter': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function wrap(recv, payload) {
+          arguments[1] = function () { return inner(this); };
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'a poisoned prototype apply forwards the receiver': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        Function.prototype.apply = function (r) { return inner(r); };
+        function wrap(recv, payload) {
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+}
+
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAWrapperApplyingAPayloadBehavesTheWayTheHostDoes(TestBase):
@@ -165,6 +233,8 @@ class TestAWrapperApplyingAPayloadBehavesTheWayTheHostDoes(TestBase):
             'a this-free payload never reads the object': _APPLIES_A_THIS_FREE_PAYLOAD,
             'a payload reads the object through its this': _APPLIES_A_PAYLOAD_THAT_READS_THIS,
             'a reassigned target held a this-reader at the apply': _APPLY_TARGET_REASSIGNED_AFTER_THE_APPLY_RAN,
+            'a parameter reassigned before the apply held both values': _APPLY_TARGET_PARAMETER_REASSIGNED_BEFORE_THE_APPLY,
+            **_A_DISPLACED_APPLY_FORWARDS_THE_RECEIVER,
         }.items():
             with self.subTest(label):
                 before, after = before_and_after_in_a_host(source)

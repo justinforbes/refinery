@@ -90,6 +90,8 @@ from refinery.lib.scripts.js.model import (
     JsUpdateExpression,
     JsVariableDeclarator,
     JsYieldExpression,
+    accessor_install_method,
+    static_string,
     strip_parens,
     wraps_return,
 )
@@ -263,13 +265,6 @@ def _is_poison_pill_property(member: JsMemberExpression) -> bool:
         return isinstance(prop, JsStringLiteral) and prop.value in _POISON_PILL_PROPERTIES
     return isinstance(prop, JsIdentifier) and prop.name in _POISON_PILL_PROPERTIES
 
-
-_ACCESSOR_INSTALL_METHODS = frozenset({
-    'defineProperty',
-    'defineProperties',
-    '__defineGetter__',
-    '__defineSetter__',
-})
 
 _DENOTED_ROOT_DEPTH_LIMIT = 16
 
@@ -2465,13 +2460,13 @@ def _written_members(target: Node | None) -> Iterator[JsMemberExpression]:
 def _written_key(member: JsMemberExpression) -> str | None:
     """
     The property name *member* accesses, or `None` where it cannot be read as one name. A computed
-    key is read through `_static_string`, so a key a fold would collapse to a literal is already
-    that literal here, for the reason `_static_string` gives.
+    key is read through `static_string`, so a key a fold would collapse to a literal is already
+    that literal here, for the reason `static_string` gives.
     """
     if not member.computed:
         prop = member.property
         return prop.name if isinstance(prop, JsIdentifier) else None
-    return _static_string(member.property)
+    return static_string(member.property)
 
 
 def _installed_key(call: JsCallExpression) -> str | None:
@@ -2488,9 +2483,9 @@ def _installed_key(call: JsCallExpression) -> str | None:
     if not isinstance(prop, JsIdentifier):
         return None
     if prop.name == 'defineProperty':
-        return _static_string(call.arguments[1]) if len(call.arguments) > 1 else None
+        return static_string(call.arguments[1]) if len(call.arguments) > 1 else None
     if prop.name in ('__defineGetter__', '__defineSetter__'):
-        return _static_string(call.arguments[0]) if call.arguments else None
+        return static_string(call.arguments[0]) if call.arguments else None
     return None
 
 
@@ -2581,14 +2576,14 @@ def _reaches_intrinsic_surface(member: JsMemberExpression) -> bool:
     Whether reading *member*'s key off an intrinsic can yield an object sharing that intrinsic's mutable
     surface. A computed key whose string value is not statically known may be any of them, so it counts.
 
-    This is a *may* analysis, opposite in direction to `_static_string`'s use in `_accessor_install_method`:
+    This is a *may* analysis, opposite in direction to `static_string`'s use in `accessor_install_method`:
     there an unknown key names no method, because only a key a fold can collapse can reveal an install
     mid-pass; here an unknown key reaches everything, because a missed reach is a name that keeps its trust
     while the program patches it.
     """
     prop = member.property
     if member.computed:
-        value = _static_string(prop)
+        value = static_string(prop)
         return value is None or value in _SURFACE_KEYS
     return isinstance(prop, JsIdentifier) and prop.name in _SURFACE_KEYS
 
@@ -2805,53 +2800,6 @@ def _binding_value_roots(binding: Binding) -> Iterator[JsIdentifier]:
             yield from _denoted_roots(parent.right)
 
 
-def _accessor_install_method(node: JsMemberExpression) -> str | None:
-    """
-    The accessor-install method *node* names, through a dotted property or a computed key whose string
-    value is statically known, or `None`. Matching the dotted form alone is what let
-    `Object['defineProperty']` slip past both callers, and a fold rewriting that key to a dot would then
-    reveal the install only after the fact was consumed.
-    """
-    prop = node.property
-    if node.computed:
-        value = _static_string(prop)
-        return value if value in _ACCESSOR_INSTALL_METHODS else None
-    if isinstance(prop, JsIdentifier) and prop.name in _ACCESSOR_INSTALL_METHODS:
-        return prop.name
-    return None
-
-
-def _static_string(node: Node | None) -> str | None:
-    """
-    The string *node* certainly evaluates to, or `None`. It reads a string literal, a substitution-free
-    template, and concatenations of those — the forms a constant fold collapses to a literal.
-
-    This exists so that an analysis answer cannot change as folds fire: a property key the simplifier will
-    turn into `'defineProperty'` must already be read as that name, or a consumer holding the answer across
-    a pass would be told there is no install and then have one appear. It is deliberately a *must*
-    analysis — an unknown value yields `None`, and a key whose value is unknown names no method, since only
-    a key a fold can collapse can reveal an install mid-pass.
-    """
-    node = strip_parens(node)
-    if isinstance(node, JsStringLiteral):
-        return node.value
-    if isinstance(node, JsTemplateLiteral):
-        if node.expressions:
-            return None
-        if any(quasi.value is None for quasi in node.quasis):
-            return None
-        return ''.join(quasi.value or '' for quasi in node.quasis)
-    if isinstance(node, JsBinaryExpression) and node.operator == '+':
-        left = _static_string(node.left)
-        if left is None:
-            return None
-        right = _static_string(node.right)
-        if right is None:
-            return None
-        return left + right
-    return None
-
-
 def _accessor_install_targets(call: JsCallExpression) -> Iterator[JsIdentifier]:
     """
     The names whose properties *call* may install an accessor or data descriptor on. An
@@ -2867,7 +2815,7 @@ def _accessor_install_targets(call: JsCallExpression) -> Iterator[JsIdentifier]:
     callee = strip_parens(call.callee)
     if not isinstance(callee, JsMemberExpression):
         return
-    method = _accessor_install_method(callee)
+    method = accessor_install_method(callee)
     if method is None:
         return
     if method.startswith('__define'):
@@ -2974,7 +2922,7 @@ def _global_pristine(model: SemanticModel) -> bool:
     if model.has_reflection_surface():
         return False
     for node in model.root.walk():
-        if isinstance(node, JsMemberExpression) and _accessor_install_method(node) is not None:
+        if isinstance(node, JsMemberExpression) and accessor_install_method(node) is not None:
             return False
     return True
 

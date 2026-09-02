@@ -14,6 +14,7 @@ from refinery.lib.scripts.js.analysis.model import (
     reference_role,
 )
 from refinery.lib.scripts.js.model import (
+    JsCallExpression,
     JsFunctionDeclaration,
     JsFunctionExpression,
     JsIdentifier,
@@ -50,6 +51,15 @@ class TestSemanticModel(TestBase):
 
     def _use(self, ast, model, name: str) -> JsIdentifier:
         return next(n for n in self._idents(ast, name) if model.binding_of(n) is None)
+
+    @staticmethod
+    def _call(ast, name: str) -> JsCallExpression:
+        return next(
+            n for n in ast.walk()
+            if isinstance(n, JsCallExpression)
+            and isinstance(n.callee, JsIdentifier)
+            and n.callee.name == name
+        )
 
     def test_var_use_before_declaration_resolves_to_function_var(self):
         ast, model = self._model('function f(){ x; var x; }')
@@ -133,6 +143,42 @@ class TestSemanticModel(TestBase):
                 _, complete = model.binding_values(model.binding_of(self._decl(ast, model, 'x')))
                 self.assertFalse(complete)
                 self.assertIsNone(model.singular_value(model.binding_of(self._decl(ast, model, 'x'))))
+
+    def test_values_at_call_admits_the_mapped_argument_as_the_entry_channel(self):
+        ast, model = self._model('function f(p) { return p; }\nf(1);')
+        binding = model.binding_of(self._decl(ast, model, 'p'))
+        call = self._call(ast, 'f')
+        values, complete = model.values_at_call(binding, {binding: call.arguments[0]})
+        self.assertTrue(complete)
+        self.assertEqual([JsSynthesizer().convert(value) for value in values], ['1'])
+
+    def test_values_at_call_lists_the_argument_and_every_later_write(self):
+        ast, model = self._model('function f(p) { p = 2; return p; }\nf(1);')
+        binding = model.binding_of(self._decl(ast, model, 'p'))
+        call = self._call(ast, 'f')
+        values, complete = model.values_at_call(binding, {binding: call.arguments[0]})
+        self.assertTrue(complete)
+        self.assertEqual(sorted(JsSynthesizer().convert(value) for value in values), ['1', '2'])
+
+    def test_values_at_call_with_a_missing_argument_is_incomplete(self):
+        ast, model = self._model('function f(p) { return p; }\nf();')
+        binding = model.binding_of(self._decl(ast, model, 'p'))
+        values, complete = model.values_at_call(binding, {binding: None})
+        self.assertFalse(complete)
+        self.assertEqual(values, [])
+
+    def test_values_at_call_is_incomplete_where_a_dynamic_channel_can_rebind(self):
+        for label, source in {
+            'direct eval': 'function f(p) { eval("p = 2"); return p; }\nf(1);',
+            'escaping arguments object': 'function f(p) { console.log(arguments); return p; }\nf(1);',
+            'arguments element write': 'function f(p) { arguments[0] = 2; return p; }\nf(1);',
+        }.items():
+            with self.subTest(label):
+                ast, model = self._model(source)
+                binding = model.binding_of(self._decl(ast, model, 'p'))
+                call = self._call(ast, 'f')
+                _, complete = model.values_at_call(binding, {binding: call.arguments[0]})
+                self.assertFalse(complete)
 
     def test_let_is_block_scoped_and_outer_use_is_free(self):
         ast, model = self._model('{ let a; a; } a;')

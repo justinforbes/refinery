@@ -73,6 +73,7 @@ from refinery.lib.scripts.js.model import (
     JsMemberExpression,
     JsMethodDefinition,
     JsNewExpression,
+    JsNullLiteral,
     JsNumericLiteral,
     JsObjectExpression,
     JsObjectPattern,
@@ -96,6 +97,7 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
     JsWithStatement,
+    accessor_install_method,
     names_a_property,
     strip_parens,
 )
@@ -1948,16 +1950,40 @@ class SemanticModel:
         channels, complete = self._binding_value_channels(binding)
         return [value for _, value in channels], complete
 
+    def values_at_call(
+        self,
+        binding: Binding | None,
+        arguments: dict[Binding | None, Node | None],
+    ) -> tuple[list[Node], bool]:
+        """
+        `binding_values` read at one call site: *arguments* maps each parameter binding of the called
+        function to the argument that call supplies for it (`_argument_parameter_map`), and for a
+        binding it covers, the mapped argument is the entry channel `binding_values` cannot see — so
+        the answer can be complete where the plain query never is for a parameter. A parameter the
+        call supplies no argument for maps to `None` and stays incomplete. Every other rule is
+        `binding_values`' own: a write the text spells no value for, and any dynamic rebinding —
+        a direct `eval` in the function, and a write through its own `arguments` object — still
+        poison the answer. For a binding *arguments* does not cover, the answer is exactly
+        `binding_values`.
+        """
+        channels, complete = self._binding_value_channels(binding, arguments)
+        return [value for _, value in channels], complete
+
     def _binding_value_channels(
-        self, binding: Binding | None
+        self,
+        binding: Binding | None,
+        arguments: dict[Binding | None, Node | None] | None = None,
     ) -> tuple[list[tuple[Node, Node]], bool]:
         """
         The readable value channels of *binding* as `(site, value)` pairs — the node whose execution
         installs the value, and the value expression — plus the completeness verdict `binding_values`
-        documents. One derivation feeds `binding_values`, `singular_value`, and
-        `binding_establishment_sites`, so the three can never disagree about which channels a binding
-        has. The value of a lone-assignment channel is returned with its parentheses stripped, the
-        normalization every consumer of `singular_value` has always received there.
+        documents. One derivation feeds `binding_values`, `values_at_call`, `singular_value`, and
+        `binding_establishment_sites`, so they can never disagree about which channels a binding
+        has. With *arguments* — a call's parameter-to-argument map — a parameter declaration of a
+        covered binding is a readable channel carrying the mapped argument, the `values_at_call`
+        reading; without it, a parameter declaration is an unseen channel. The value of a
+        lone-assignment channel is returned with its parentheses stripped, the normalization every
+        consumer of `singular_value` has always received there.
         """
         if binding is None or not binding.declarations:
             return [], False
@@ -1975,6 +2001,17 @@ class SemanticModel:
                     complete = False
                 if parent.init is not None:
                     channels.append((parent, parent.init))
+            elif (
+                arguments is not None
+                and binding in arguments
+                and isinstance(parent, FUNCTION_NODES)
+                and any(parameter is declaration for parameter in parent.params)
+            ):
+                argument = arguments[binding]
+                if argument is None:
+                    complete = False
+                else:
+                    channels.append((declaration, argument))
             else:
                 complete = False
         for write in binding.writes:
@@ -2918,13 +2955,16 @@ class SemanticModel:
     ) -> bool | None:
         """
         For a *node* that denotes the handed object: `True` when it is the `thisArg` of an
-        `apply`/`call` whose target provably does not read its own `this`, so the object is not read
-        there; `False` when it is such a receiver but the target reads `this` or does not resolve to
-        a function; and `None` when *node* is not used as such a receiver at all, the case the caller
-        reads as an observation. The target is resolved through the argument map when it is another
-        parameter of the same call, and otherwise by its one value — `singular_value`'s
-        complete-singleton reading, so a target whose declaration value a later write overwrites
-        resolves to nothing and the receiver stays observed.
+        `apply`/`call` that provably never reads the object; `False` when it is such a receiver but
+        that is not proven; and `None` when *node* is not used as such a receiver at all, the case
+        the caller reads as an observation. A named target is judged over every value it can hold
+        during this call — `values_at_call`, so the argument mapped to a target parameter and every
+        value assigned over it are weighed alike — and the receiver is safe only when that set is
+        complete, non-empty, and every value never reads the receiver
+        (`_apply_target_value_observes_the_receiver`). A target the program installs properties
+        through (`_properties_installed_through`) or that reflection can reach is refused before
+        the values are asked, since either can shadow the `apply` intrinsic itself with code that
+        forwards the receiver, no matter which function the name holds.
         """
         parent = enclosing_operator(node)
         if not isinstance(parent, JsCallExpression):
@@ -2936,19 +2976,91 @@ class SemanticModel:
             return None
         if not parent.arguments or strip_parens(parent.arguments[0]) is not node:
             return None
-        target: Node | None = strip_parens(callee.object)
-        if isinstance(target, JsIdentifier):
-            binding = self.resolve(target)
-            if binding is None:
-                target = None
-            elif binding in mapping:
-                target = mapping[binding]
-            else:
-                value = self.singular_value(binding)
-                target = strip_parens(value) if value is not None else None
-        if not isinstance(target, FUNCTION_NODES):
+        target = strip_parens(callee.object)
+        if isinstance(target, FUNCTION_NODES):
+            return not self._function_observes_its_this(target, visiting, depth + 1)
+        if not isinstance(target, JsIdentifier):
             return False
-        return not self._function_observes_its_this(target, visiting, depth + 1)
+        binding = self.resolve(target)
+        if binding is None:
+            return False
+        if self.reflection_can_reach(binding):
+            return False
+        if self._properties_installed_through(binding):
+            return False
+        values, complete = self.values_at_call(binding, mapping)
+        if not complete or not values:
+            return False
+        return not any(
+            self._apply_target_value_observes_the_receiver(value, visiting, depth)
+            for value in values
+        )
+
+    def _apply_target_value_observes_the_receiver(
+        self,
+        value: Node,
+        visiting: set[int],
+        depth: int,
+    ) -> bool:
+        """
+        Whether *value*, dispatched as the target of an `apply`/`call`, may read the handed
+        receiver. A function reads it exactly when it reads its own `this`
+        (`_function_observes_its_this`). A `null` literal and an unshadowed `undefined` never do,
+        because the apply then throws before the object is touched — and the obfuscator's
+        self-defending wrapper writes `payload = null` after applying, so refusing them would
+        refuse the wrapper's own fold. Every other value is taken for a reader.
+        """
+        value = strip_parens(value) or value
+        if isinstance(value, FUNCTION_NODES):
+            return self._function_observes_its_this(value, visiting, depth + 1)
+        if isinstance(value, JsNullLiteral):
+            return False
+        if (
+            isinstance(value, JsIdentifier)
+            and value.name == 'undefined'
+            and self.resolve(value) is None
+        ):
+            return False
+        return True
+
+    def _properties_installed_through(self, binding: Binding) -> bool:
+        """
+        Whether the text may install a property on the object *binding* holds, through a reference
+        this model records: a member write whose base is the name (`t.apply = f`, `t[k] = f`), or
+        the name handed to an accessor-install method as the object installed on — the first
+        argument of a `defineProperty`/`defineProperties`, the receiver of a
+        `__defineGetter__`/`__defineSetter__`. A consumer that dispatches an inherited intrinsic
+        through the name must refuse when one exists, because an installed own property shadows the
+        intrinsic with code the intrinsic's contract says nothing about. Which key is installed is
+        not asked: a computed write names no fixed key, and refusing every install keeps the answer
+        independent of the folds that would reveal one.
+        """
+        for reference in binding.reads:
+            access = _enclosing_member_access(reference)
+            if access is not None:
+                if reference_role(access) is not Role.READ:
+                    return True
+                call = enclosing_operator(access)
+                if (
+                    isinstance(call, JsCallExpression)
+                    and strip_parens(call.callee) is access
+                    and accessor_install_method(access) in ('__defineGetter__', '__defineSetter__')
+                ):
+                    return True
+                continue
+            governor = enclosing_operator(reference)
+            if (
+                isinstance(governor, JsCallExpression)
+                and governor.arguments
+                and strip_parens(governor.arguments[0]) is reference
+            ):
+                callee = strip_parens(governor.callee)
+                if (
+                    isinstance(callee, JsMemberExpression)
+                    and accessor_install_method(callee) in ('defineProperty', 'defineProperties')
+                ):
+                    return True
+        return False
 
     def _function_observes_its_this(
         self,

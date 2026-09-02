@@ -2879,53 +2879,6 @@ class TestASubstitutedNameStillResolvesWhereItIsWritten(TestBase):
     """
 
 
-#: A classic script handing the global object as the receiver of an `apply` whose target is a
-#: parameter the body reassigns to a function that reads its own `this`. The row is mapped to the
-#: behavior a host gives it: the reassigned target reads the global through the handed receiver.
-A_HANDED_GLOBAL_AN_APPLY_TARGET_REASSIGNMENT_READS = {
-    'a reassigned apply target reads the handed global': Program(
-        a_program("""
-            var secret = 'S';
-            function inner(host) { return host.secret; }
-            function wrap(recv, payload) {
-              payload = function () { return inner(this); };
-              return payload.apply(recv, []);
-            }
-            console.log(wrap(this, function () {}));
-            """),
-        prints('S'),
-        Reading.SCRIPT,
-    ),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-@one_expected_failure_per_program(A_HANDED_GLOBAL_AN_APPLY_TARGET_REASSIGNMENT_READS)
-class TestAReassignedApplyTargetStillReadsTheHandedGlobal(TestBase):
-    """
-    The gate that keeps a global foldable decides a receiver handed to `apply`/`call` is unread when
-    its target provably does not read its own `this`. Where that target is another parameter of the
-    same call, the target is resolved through the parameter's original call-site argument, and a
-    parameter the body reassigns is judged on that original alone. A parameter reassigned to a
-    function that reads `this` is therefore taken for a this-free one, the handed global is called
-    unobserved, and the global it carries is unfrozen and deleted.
-
-    Under the script model the top-level `this` is the global object, so `inner(this)` reads the
-    global `secret` and Node prints `S`. The deobfuscation deletes `var secret`, and the read yields
-    `undefined`, so the program comes back printing `undefined`.
-
-    `refinery.lib.scripts.js.analysis.model.SemanticModel._apply_receiver_is_safe` trusts the
-    argument in its parameter map without inspecting the reassignments the body makes to that
-    parameter. The rule that closes it takes the target from the set of values the parameter can
-    hold — its argument and every value assigned to it — and calls the receiver safe only when every
-    one of them is a function that does not read `this`. A blanket bail on any write instead would
-    refuse the obfuscator's own `payload = null`, regressing the self-defending fold.
-
-    Off the release gate deliberately: the shape needs an `apply` target parameter reassigned to a
-    this-reader with the global handed as its receiver, and that is this entry's own construction.
-    """
-
-
 class TestAnObjectPropertyFlagVariantIsStillRemoved(TestBase):
     """
     The tightened structural detector requires the run-once flag to be an identifier resolving to a

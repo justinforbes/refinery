@@ -719,3 +719,58 @@ def names_a_property(node: Node) -> bool:
     if isinstance(parent, JsImportAttribute):
         return parent.key is node
     return False
+
+
+ACCESSOR_INSTALL_METHODS = frozenset({
+    'defineProperty',
+    'defineProperties',
+    '__defineGetter__',
+    '__defineSetter__',
+})
+
+
+def static_string(node: Node | None) -> str | None:
+    """
+    The string *node* certainly evaluates to, or `None`. It reads a string literal, a substitution-free
+    template, and concatenations of those — the forms a constant fold collapses to a literal.
+
+    This exists so that an analysis answer cannot change as folds fire: a property key the simplifier will
+    turn into `'defineProperty'` must already be read as that name, or a consumer holding the answer across
+    a pass would be told there is no install and then have one appear. It is deliberately a *must*
+    analysis — an unknown value yields `None`, and a key whose value is unknown names no method, since only
+    a key a fold can collapse can reveal an install mid-pass.
+    """
+    node = strip_parens(node)
+    if isinstance(node, JsStringLiteral):
+        return node.value
+    if isinstance(node, JsTemplateLiteral):
+        if node.expressions:
+            return None
+        if any(quasi.value is None for quasi in node.quasis):
+            return None
+        return ''.join(quasi.value or '' for quasi in node.quasis)
+    if isinstance(node, JsBinaryExpression) and node.operator == '+':
+        left = static_string(node.left)
+        if left is None:
+            return None
+        right = static_string(node.right)
+        if right is None:
+            return None
+        return left + right
+    return None
+
+
+def accessor_install_method(node: JsMemberExpression) -> str | None:
+    """
+    The accessor-install method *node* names, through a dotted property or a computed key whose string
+    value is statically known, or `None`. Matching the dotted form alone is what let
+    `Object['defineProperty']` slip past both callers, and a fold rewriting that key to a dot would then
+    reveal the install only after the fact was consumed.
+    """
+    prop = node.property
+    if node.computed:
+        value = static_string(prop)
+        return value if value in ACCESSOR_INSTALL_METHODS else None
+    if isinstance(prop, JsIdentifier) and prop.name in ACCESSOR_INSTALL_METHODS:
+        return prop.name
+    return None
