@@ -191,6 +191,8 @@ FOLDS: dict[str, str] = {
         "$x = 'a'\nfunction f {\n  Write-Host $x\n}\nf",
     "$env:z = 'v'; Write-Output $env:z":
         "Write-Output 'v'",
+    "$script:s = 'x'; Write-Output $s":
+        "Write-Output 'x'",
     '$x = 1, 2, 3; $y = $x; $y = 9, 9, 9; [Array]::Reverse($x); Write-Output $y':
         '$x = 1, 2, 3\n[Array]::Reverse($x)\nWrite-Output (9, 9, 9)',
     "$s = 'abcd'; $t = $s; $t = 1, 2, 3; [Array]::Reverse($t); Write-Output $s.Length":

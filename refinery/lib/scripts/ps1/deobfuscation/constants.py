@@ -186,14 +186,17 @@ def _collect_mutated_variables(root: Node) -> set[str]:
     asks it rather than repeating it. The partial copy it replaces knew about assignments and
     `[Array]::Reverse` and about nothing else, so a name only `[Array]::Sort` or `.CopyTo` ever
     wrote read as never written at all.
+
+    The key is `binding_key`, not `_candidate_key`: a write reaches the binding its qualifier
+    names, so `$script:q = 5` writes the name `q` a later bare `$q` reads, and reading it under
+    `_candidate_key` — which refuses every qualifier — left that name looking never-written, so
+    `Ps1NullVariableInlining` replaced the bare read with `$Null` and folded `$q + 1` to `1`.
     """
     mutated: set[str] = set()
     for node in root.walk():
         if not isinstance(node, Ps1Variable) or not is_write_occurrence(node):
             continue
-        key = _candidate_key(node)
-        if key is not None:
-            mutated.add(key)
+        mutated.add(binding_key(node))
     return mutated
 
 
@@ -669,8 +672,8 @@ class _ConstantTable:
             targets = assignment_target_variables(node.target)
             if len(targets) != 1:
                 continue
-            key = _candidate_key(targets[0])
-            if key is None or key in _PS1_ENGINE_VARIABLES:
+            key = binding_key(targets[0])
+            if key in _PS1_ENGINE_VARIABLES:
                 # A preference or automatic variable is the engine's as much as the script's: it
                 # reads and writes these names between statements — `$_` per pipeline object,
                 # `$Matches` at every `-match` — so what the script last assigned is not what the

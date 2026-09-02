@@ -488,6 +488,7 @@ CONTRIBUTION: dict[str, Contribution] = {
             "$s = 'abc'; $s.Substring(1, 2)",
             '$s = 0xFF; $t = "$s"; Write-Output (,$t); Write-Output $t',
             '$sb = { param($a) [Array]::Reverse($a) }; $x = 1, 2, 3; & $sb $x; Write-Output $x',
+            "$script:s = 'x'; Write-Output $s",
             "$t = 'a', 1; Write-Output (,$t); Write-Output $t",
             '$t = (1, 2), 3; Write-Output (,$t); Write-Output $t.Count',
             '$t = , 1; Write-Output (,$t); Write-Output $t.Count',

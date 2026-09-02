@@ -1770,20 +1770,28 @@ class TestPs1AScopeQualifierNamesTheBindingItsBareSpellingNames(TestPs1):
     of the three spellings is the value a read under any other observes. What 5.1 writes for each of
     these four scripts is measured in `corpus.CLAIMS`: `b`, `b`, `x`, `x`.
 
-    No read through a qualifier is folded today, and the cause is that no such read is an occurrence
-    of anything. `Ps1SemanticModel._attribute_qualified_read` files none, setting
+    A write reaches the binding its qualifier names, so a value written under a qualifier is now
+    observed by a bare read of the name — `test_a_bare_read_observes_what_the_qualified_spelling_wrote`
+    is that case, the same fix `TestPs1AnOperatorOverANameWrittenUnderAQualifierFoldsAsIfItWereNull`
+    below rests on.
+
+    A read spelled *with* a qualifier is still withheld, and the cause is that no such read is an
+    occurrence of anything. `Ps1SemanticModel._attribute_qualified_read` files none, setting
     `Binding.dynamic_or_qualified` instead, and `Ps1VariableFlow` turns that flag into
     `Ps1FlowUnknown.REACHED_BY_QUALIFIER` — an unknown over the whole binding, so one qualified read
     anywhere withholds every value of the name everywhere. `$env:` is the one qualifier whose reads
     are filed, and `test_an_environment_variable_is_folded_through_its_qualifier` below is the
-    control that says so.
-
-    Each entry is marked so that wiring a qualifier through reports an unexpected success.
+    control that says so. Each qualified-read entry is marked so that wiring one through reports an
+    unexpected success.
     """
 
     def test_an_environment_variable_is_folded_through_its_qualifier(self):
         self.assertEqual(
             self._deobfuscate("$env:z = 'v'; Write-Output $env:z"), "Write-Output 'v'")
+
+    def test_a_bare_read_observes_what_the_qualified_spelling_wrote(self):
+        self.assertEqual(
+            self._deobfuscate("$script:s = 'x'; Write-Output $s"), "Write-Output 'x'")
 
     @unittest.expectedFailure
     def test_a_read_of_a_script_qualified_name_is_the_value_written_under_it(self):
@@ -1800,28 +1808,25 @@ class TestPs1AScopeQualifierNamesTheBindingItsBareSpellingNames(TestPs1):
         self.assertEqual(
             self._deobfuscate("$s = 'x'; Write-Output $script:s"), "Write-Output 'x'")
 
-    @unittest.expectedFailure
-    def test_a_bare_read_observes_what_the_qualified_spelling_wrote(self):
-        self.assertEqual(
-            self._deobfuscate("$script:s = 'x'; Write-Output $s"), "Write-Output 'x'")
-
 
 class TestPs1AnOperatorOverANameWrittenUnderAQualifierFoldsAsIfItWereNull(TestPs1):
     """
-    The soundness half of the defect the class above pins the recall half of. A value written under
-    `$script:` or `$global:` is filed against neither the bare name nor the qualified one, so a later
-    bare read is modelled as a variable no scope ever wrote — `$null` — and not as one whose value is
-    merely unknown. Where the bare read stands alone the loss is the withheld fold above; where an
-    operator reaches it the `$null` is a value, and the operator folds to the wrong one. Measured on
-    5.1, the three scripts here write `6`, `165` and `12`; the tool writes `1`, `255` and `$null`.
+    A value written under `$script:` or `$global:` is the value a bare read of the name observes, so
+    an operator over that bare read folds to it and not to `$null`. Measured on 5.1, the three
+    scripts here write `6`, `165` and `12`.
 
-    The `-bxor` row is what makes this a soundness bug rather than a curiosity: a key held in a
-    module-scoped variable is how a loader hides one, and folding it as `$null` hands back a
-    plaintext that never ran. Each row is marked so that wiring the qualifier through reports an
-    unexpected success, which is the same fix the class above waits on.
+    The `-bxor` row is what made this a soundness bug rather than a curiosity: a key held in a
+    module-scoped variable is how a loader hides one, and folding it as `$null` handed back a
+    plaintext that never ran. The cause was that the write collectors keyed a write under
+    `_candidate_key`, which refuses every qualifier, so `$script:q = 5` left the name `q` looking
+    never-written; `Ps1NullVariableInlining` then replaced the bare `$q` with `$Null`. Keying by
+    `binding_key` files the write under the name its qualifier reaches, which is the name a bare read
+    resolves to.
+
+    The recall half of the defect — a read spelled *with* a qualifier — is still open; the class
+    above pins it.
     """
 
-    @unittest.expectedFailure
     def test_a_bare_read_of_a_qualified_written_name_is_not_folded_as_null(self):
         for source, expected in [
             ('$script:q = 5; Write-Output ($q + 1)', 'Write-Output 6'),
@@ -1830,6 +1835,11 @@ class TestPs1AnOperatorOverANameWrittenUnderAQualifierFoldsAsIfItWereNull(TestPs
         ]:
             with self.subTest(source):
                 self.assertEqual(self._deobfuscate(source), expected)
+
+    def test_a_qualified_write_that_never_runs_leaves_the_bare_read_null(self):
+        self.assertEqual(
+            self._deobfuscate('function f { $script:q = 5 }\nWrite-Output ($q + 1)'),
+            'Write-Output 1')
 
 
 class TestPs1ACompoundAssignmentLeavesTheValueItsLongSpellingLeaves(TestPs1):
