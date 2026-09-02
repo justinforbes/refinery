@@ -1151,6 +1151,8 @@ class Ps1CommandModel:
                     at = next(node for definition, node in candidates if definition is reaching)
                     if not self._binding_has_taken(graph, at, use, reaching):
                         return _Binding(None, True)
+                    if self._rebind_may_be_refused(graph, use, reaching, candidates, kills):
+                        return _Binding(None, True)
                     return _Binding(reaching, False)
                 if (
                     self._a_binder_reaches(graph, use)
@@ -1232,6 +1234,41 @@ class Ps1CommandModel:
         if self._stop_in_force is None:
             self._stop_in_force = a_stop_may_be_in_force(self._root)
         return not self._stop_in_force
+
+    def _rebind_may_be_refused(
+        self,
+        graph: ControlFlowGraph,
+        use: CfgNode,
+        reaching: AliasDefinition,
+        candidates: Sequence[tuple[AliasDefinition, CfgNode]],
+        kills: Sequence[int],
+    ) -> bool:
+        """
+        Whether the plain rebind `reaching` may have been refused against a name an earlier
+        definition left read-only, so the use runs the earlier binding rather than this one.
+
+        A `Set-Alias`/`New-Alias` carrying `-Option` or `-Force` may install a `ReadOnly` or
+        `Constant` alias — the model does not read which, so `AliasDefinition.refuse` covers them
+        all — and a plain `Set-Alias` to a name so locked is refused rather than rebinding it. 5.1
+        reports that refusal *non-terminating*: control reaches the use with the earlier binding
+        still in place, so the command the call runs is not the one this definition names. Measured
+        on 5.1, `Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'` runs
+        `Write-Error`, and rewriting the call to `Write-Output` runs a command the script does not.
+
+        Asked only of a plain rebind whose failure would carry on. A definition that itself carries
+        an option is already refused where it is the one reaching, and under an armed `Stop` the
+        refusal terminates the statement instead — so a use the run reaches is one the rebind took,
+        which is what `_cannot_raise` decides and why the two are asked together here. The lock is
+        sought by reaching definition among the same candidates: only one that strictly dominates
+        the use could have run before it, and only a locking definition earlier than the reaching
+        rebind is here to find, since a nearer one would be the reaching definition itself.
+        """
+        if reaching.refuse or not self._cannot_raise(reaching):
+            return False
+        locking = [(definition, node) for definition, node in candidates if definition.refuse]
+        if not locking:
+            return False
+        return self._reach.reaching_definition(graph, use, locking, kills) is not None
 
     def _binder_sites_in(self, graph: ControlFlowGraph) -> list[CfgNode]:
         found = self._sites_by_graph.get(id(graph))

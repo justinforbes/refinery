@@ -298,10 +298,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The handler is removed. What reaches it is the *call*, whose subtree carries no `throw`, '
         'and the callee is a body of its own; answering this needs the call graph, which the '
         'fault model deliberately has none of.',
-    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'":
-        'The call is resolved to `Write-Output`. The second definition is read as a rebind that '
-        'took, but 5.1 refuses it against the read-only entry without raising anything the '
-        'script can see, so `c` still names `Write-Error` when the call runs.',
     "function K { $Null = [Int]'abc' }; K; Write-Host 'A'":
         'The body is read as inert and the definition and its call are removed together, but the '
         'cast raises a terminating error, so 5.1 never reaches the statement below. The output '

@@ -1443,8 +1443,6 @@ FOLDS: dict[str, str] = {
         "\n  throw 'e'\n  Write-Host 'tail'\n}\nWrite-Host 'next'",
     "trap { }; [int]'a'; Write-Host 'after'":
         "[int]'a'\nWrite-Host 'after'",
-    "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'":
-        "Set-Alias c Write-Error -Option ReadOnly\nSet-Alias c Write-Output\nWrite-Output 'hi'",
     "trap { Write-Host 'e'; continue }; [int]'a'; Set-Alias c Write-Output; c 'hi'":
         "trap {\n  Write-Host 'e'\n  continue\n}\n[int]'a'\nSet-Alias c Write-Output\nWrite-Output 'hi'",
     "trap { continue }; 1/0; Write-Host 'after'":

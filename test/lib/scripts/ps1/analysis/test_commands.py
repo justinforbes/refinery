@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import unittest
 
 from test import TestBase
 
@@ -1565,13 +1564,13 @@ class TestPs1ResolvingAnAliasUnderAResumingTrapCanChangeBehaviour(TestBase):
         self.assertNotEqual(CLAIM_TRANSCRIPTS[self._INPUT], CLAIM_TRANSCRIPTS[self._RESOLVED])
 
 
-class TestPs1AReadOnlyAliasConflictIsResolvedAsIfItRebound(TestBase):
+class TestPs1AReadOnlyAliasConflictIsNotResolvedAsARebind(TestBase):
     """
-    A pre-existing defect, unrelated to trap resumption and to the forward projection: a `Set-Alias`
-    onto a read-only alias fails *without throwing*, so the name keeps its earlier binding while
-    control passes on normally. The model reads every `Set-Alias` as a rebind that took, resolves
-    the later use to the binding that never happened, and the deobfuscator emits it — so the output
-    runs a different command than the input, with no trap in sight.
+    Unrelated to trap resumption and to the forward projection: a `Set-Alias` onto a read-only alias
+    fails *without throwing*, so the name keeps its earlier binding while control passes on normally.
+    A plain rebind of a name an earlier `-Option`/`-Force` definition may have locked has therefore
+    not certainly taken, and the use below it is refused rather than resolved to the binding that may
+    never have happened — so the deobfuscator keeps the call as written, with no trap in sight.
     """
 
     _INPUT = "Set-Alias c Write-Error -Option ReadOnly; Set-Alias c Write-Output; c 'hi'"
@@ -1587,13 +1586,12 @@ class TestPs1AReadOnlyAliasConflictIsResolvedAsIfItRebound(TestBase):
             '\tMicrosoft.PowerShell.Commands.WriteErrorException')
         self.assertEqual(CLAIM_TRANSCRIPTS[self._RESOLVED][-1], 'OUT\tSystem.String\thi')
 
-    @unittest.expectedFailure
     def test_the_model_does_not_resolve_the_call_the_conflict_left_unbound(self):
         tree = _script(self._INPUT)
         use = [
             node for node in tree.walk_in_order()
             if isinstance(node, Ps1CommandInvocation) and get_command_name(node) == 'c'
         ][-1]
-        self.assertNotEqual(
+        self.assertEqual(
             Ps1ModelCache(tree).commands.denotation(use),
-            Denotation(CommandKind.ALIAS, 'Write-Output'))
+            Denotation(CommandKind.UNKNOWN, None))
