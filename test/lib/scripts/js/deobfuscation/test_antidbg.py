@@ -98,9 +98,10 @@ class TestAntiDebug(TestJsDeobfuscator):
 
 class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
     """
-    Structural removal: the same run-once `apply`-payload factory template, payloads that carry no ReDoS
-    string, three guard invocation shapes, sequence-operand entanglement, and preservation when the
-    factory result is stored and read but never invoked.
+    Structural removal: the same run-once `apply`-payload factory template, payloads marked as
+    anti-analysis without the ReDoS string, three guard invocation shapes, sequence-operand
+    entanglement, and preservation of every guard whose payload carries no marker or whose stored
+    result the program reads.
     """
 
     _FACTORY = (
@@ -115,10 +116,10 @@ class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
         "}());"
     )
 
-    def test_console_hijack_payload_immediate_guard_is_removed(self):
+    def test_console_disable_payload_immediate_guard_is_removed(self):
         source = (
             self._FACTORY
-            + "a(this, function() { console.log('hijack'); })();"
+            + "a(this, function() { console.log = function() {}; })();"
             + " console.log('done');"
         )
         self.assertEqual(
@@ -126,10 +127,11 @@ class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
             self._run_transformer(source, JsRemoveSelfDefending),
         )
 
-    def test_regexp_payload_iife_wrapped_guard_is_removed(self):
+    def test_source_regexp_payload_iife_wrapped_guard_is_removed(self):
         source = (
             self._FACTORY
-            + "(function() { a(this, function() { return /test/.test('test'); })(); })();"
+            + "(function() { a(this, function() {"
+            + " return new RegExp('function *\\\\( *\\\\)').test('x'); })(); })();"
             + " console.log('done');"
         )
         self.assertEqual(
@@ -140,7 +142,8 @@ class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
     def test_iife_wrapped_guard_as_sequence_operand_removes_only_guard(self):
         source = (
             self._FACTORY
-            + "(function() { a(this, function() {})(); })(), setInterval(function() {}, 1000);"
+            + "(function() { a(this, function() { console.error = null; })(); })(),"
+            + " setInterval(function() {}, 1000);"
             + " console.log('main');"
         )
         self.assertEqual(
@@ -156,7 +159,7 @@ class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
     def test_stored_guard_as_sequence_operand_removes_only_guard(self):
         source = (
             self._FACTORY
-            + "var g = a(this, function() {});"
+            + "var g = a(this, function() { console.warn = 0; });"
             + " g(), console.log('main');"
         )
         self.assertEqual(
@@ -167,9 +170,38 @@ class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
     def test_stored_result_only_read_is_not_removed(self):
         source = (
             self._FACTORY
-            + "var g = a(this, function() { return 42; });"
+            + "var g = a(this, function() { console.log = function() {}; return 42; });"
             + " console.log(g);"
         )
+        self.assertEqual(
+            self._run_transformers(source),
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+    def test_unmarked_payload_guard_is_not_removed(self):
+        source = (
+            self._FACTORY
+            + "a(this, function() { setup(); })();"
+            + " console.log('done');"
+        )
+        self.assertEqual(
+            self._run_transformers(source),
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+    def test_console_reading_payload_guard_is_not_removed(self):
+        source = (
+            self._FACTORY
+            + "a(this, function() { console.log('probe'); })();"
+            + " console.log('done');"
+        )
+        self.assertEqual(
+            self._run_transformers(source),
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+    def test_empty_payload_guard_is_not_removed(self):
+        source = self._FACTORY + "a(this, function() {})();"
         self.assertEqual(
             self._run_transformers(source),
             self._run_transformer(source, JsRemoveSelfDefending),
@@ -189,6 +221,23 @@ A_BENIGN_RUN_ONCE_WRAPPER = {
                 : function () {};
               return run;
             };
+            var boot = once(this, function () { console.log('ran'); });
+            boot();
+            """),
+        prints('ran'),
+        Reading.SCRIPT,
+    ),
+    'the flag is a closure variable and the payload is benign': Program(
+        a_program("""
+            var once = function () {
+              var live = true;
+              return function (context, fn) {
+                var run = live
+                  ? function () { var r = fn.apply(context, arguments); fn = null; return r; }
+                  : function () {};
+                return live = false, run;
+              };
+            }();
             var boot = once(this, function () { console.log('ran'); });
             boot();
             """),

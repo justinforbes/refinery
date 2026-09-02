@@ -20,8 +20,10 @@ This transformer detects the pattern in two independent ways and removes the fac
 invocation:
 
 - By the ReDoS signature string `(((.+)+)+)+$` carried by the payload.
-- Structurally, by the run-once `apply`-payload factory template, which covers payloads that do not
-  carry the ReDoS string (e.g. a console-hijack or a RegExp self-test).
+- Structurally, by the run-once `apply`-payload factory template together with a positive
+  anti-analysis marker in the guard's payload, which covers payloads that do not carry the ReDoS
+  string: the console-disable payload writes `console` members, and the debug-protection payload
+  tests function source text with a regular expression.
 
 Both detectors feed the same shared removal executor.
 """
@@ -146,6 +148,40 @@ def _matches_self_defending_factory(model, fn) -> bool:
         if not any(write.is_descendant_of(fn) for write in flag.writes):
             continue
         return True
+    return False
+
+
+_SOURCE_SHAPE_REGEX = 'function *\\('
+
+
+def _payload_carries_anti_analysis_marker(payload) -> bool:
+    """
+    Whether the function handed to a matched factory carries positive evidence of an anti-analysis
+    payload. Real obfuscator.io guard payloads — measured over the self-defending, console-disable,
+    and debug-protection features of versions 0.28.5, 2.19.1, and 5.6.0 — each carry at least one
+    of: the ReDoS signature string; an assignment through a `console` member, which the
+    console-disable payload uses to overwrite every log method; or a string literal spelling a
+    regular expression over function source text, which the debug-protection payload tests its
+    callers with. A benign run-once wrapper's payload carries none, so the structural remover
+    demands one before it deletes a guard. Reading a `console` member is not a marker: a benign
+    payload logs, only an anti-analysis one overwrites.
+    """
+    payload = strip_parens(payload)
+    if payload is None:
+        return False
+    for n in payload.walk():
+        if isinstance(n, JsStringLiteral):
+            if _REDOS_SIGNATURE in n.value or _SOURCE_SHAPE_REGEX in n.value:
+                return True
+        if isinstance(n, JsAssignmentExpression):
+            target = strip_parens(n.left)
+            if not isinstance(target, JsMemberExpression):
+                continue
+            prop = target.property
+            prop_name = getattr(prop, 'name', None) or getattr(prop, 'value', None)
+            base = strip_parens(target.object)
+            if prop_name == 'console' or (isinstance(base, JsIdentifier) and base.name == 'console'):
+                return True
     return False
 
 
@@ -315,6 +351,8 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
                 continue
             fn = model.target_function_of_call(node)
             if fn is None or not _matches_self_defending_factory(model, fn):
+                continue
+            if not _payload_carries_anti_analysis_marker(node.arguments[1]):
                 continue
             callee = strip_parens(node.callee)
             if isinstance(callee, JsIdentifier):

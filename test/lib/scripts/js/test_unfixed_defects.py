@@ -3009,59 +3009,6 @@ class TestAReassignedApplyTargetStillReadsTheHandedGlobal(TestBase):
     """
 
 
-#: A classic script whose run-once wrapper matches the tightened self-defending template exactly —
-#: the run-once flag is a closure variable declared outside the factory function and written false
-#: inside it — while its payload is benign. The row is mapped to the behavior a host gives it: the
-#: wrapper runs its payload once.
-A_CLOSURE_FLAG_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES = {
-    'a closure flag once wrapper runs its payload': Program(
-        a_program("""
-            var once = function () {
-              var live = true;
-              return function (context, fn) {
-                var run = live
-                  ? function () { var r = fn.apply(context, arguments); fn = null; return r; }
-                  : function () {};
-                return live = false, run;
-              };
-            }();
-            var boot = once(this, function () { console.log('ran'); });
-            boot();
-            """),
-        prints('ran'),
-        Reading.SCRIPT,
-    ),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-@one_expected_failure_per_program(A_CLOSURE_FLAG_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES)
-class TestAClosureFlagRunOnceWrapperIsNotSelfDefending(TestBase):
-    """
-    The structural self-defending detector ties its template shapes to one run-once branch whose
-    flag is a closure variable, which is the exact shape a hand-rolled run-once wrapper takes: the
-    factory here is structurally indistinguishable from the obfuscator's. Handed the global object
-    as its receiver, the wrapper is matched, the factory and stored guard are removed, and the
-    payload never runs.
-
-    Under the script model the top-level `this` is the global object, so `once(this, ...)` is a
-    hand-over the detector reads, and Node runs the payload and prints `ran`. The deobfuscation
-    deletes the whole construction and the program comes back printing nothing.
-
-    `refinery.lib.scripts.js.deobfuscation.antidbg._matches_self_defending_factory` judges the
-    factory alone, and the factory carries no evidence of intent. The evidence is in the payload:
-    a survey of real obfuscator.io emissions (versions 0.28.5, 2.19.1, and 5.6.0; self-defending,
-    console-disable, and debug-protection features) found every guard payload carrying a positive
-    anti-analysis marker — the ReDoS signature string, a write to a `console` member, or a `RegExp`
-    over function source text — and a benign payload carrying none. The rule that closes this entry
-    admits a structural removal only when the guard's payload carries such a marker.
-
-    Off the release gate deliberately: the shape needs a benign wrapper spelling the obfuscator's
-    run-once factory to the letter and handed the global object as its receiver, which a real
-    `once` utility, taking a specific context rather than the global, does not come near.
-    """
-
-
 class TestAnObjectPropertyFlagVariantIsStillRemoved(TestBase):
     """
     The tightened structural detector requires the run-once flag to be an identifier resolving to a
