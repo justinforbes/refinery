@@ -699,8 +699,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
     _free_global: Callable[[Expression | None], str | None]
     _eval_string: Callable[[Expression | None], str | None]
     _pending_retire: dict[int, Binding]
-    _retire_consumed: dict[int, int]
-    _retire_binding: dict[int, Binding]
+    _retire_consumed: dict[Binding, int]
 
     def _process_script(self, node: JsScript) -> None:
         """
@@ -726,7 +725,6 @@ class JsReflectionInlining(ScriptLevelTransformer):
             self._eval_string = self._string_argument_value(node)
             self._pending_retire = {}
             self._retire_consumed = {}
-            self._retire_binding = {}
             self._inline_statements(node)
             self._inline_expressions(node)
             self._lower_timers(node)
@@ -752,8 +750,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         binding = self._pending_retire.pop(id(site), None)
         if binding is None:
             return
-        self._retire_consumed[id(binding)] = self._retire_consumed.get(id(binding), 0) + 1
-        self._retire_binding[id(binding)] = binding
+        self._retire_consumed[binding] = self._retire_consumed.get(binding, 0) + 1
 
     def _retire_consumed_temporaries(self) -> None:
         """
@@ -764,8 +761,8 @@ class JsReflectionInlining(ScriptLevelTransformer):
         the judgment `refinery.lib.scripts.js.analysis.effects.EffectModel` withholds from an intrinsic
         under a live reflection surface and only this pass, having parsed the code, can make.
         """
-        for bid, binding in self._retire_binding.items():
-            if self._retire_consumed.get(bid, 0) != len(binding.reads):
+        for binding, consumed in self._retire_consumed.items():
+            if consumed != len(binding.reads):
                 continue
             if binding.exported or binding.dynamic_refs or len(binding.declarations) != 1:
                 continue

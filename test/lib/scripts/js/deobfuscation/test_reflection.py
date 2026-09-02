@@ -43,7 +43,6 @@ _STRING_ARRAY_REVEALS_A_GLOBAL_FINDER = (
 
 class TestReflectionInlining(TestJsDeobfuscator):
 
-
     def _reflect(self, source: str) -> str:
         return self._run_transformer(source, JsReflectionInlining)
 
@@ -549,9 +548,6 @@ class TestReflectionInlining(TestJsDeobfuscator):
         temporary collapse, leaving only the folded call.
         """
         self.assertEqual('sink(globalThis);', self._deobfuscate(_STRING_ARRAY_REVEALS_A_GLOBAL_FINDER))
-
-
-
 
     def test_eval_expression_position_single_expr(self):
         self.assertEqual("var x = 'hello';", self._reflect("var x = eval(\"'hello'\");"))

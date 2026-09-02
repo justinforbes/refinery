@@ -2877,3 +2877,181 @@ class TestASubstitutedNameStillResolvesWhereItIsWritten(TestBase):
     as a global that an alias bound outside the block still reaches, and that is not what an
     obfuscator does to names — it renames them apart, never toward a collision.
     """
+
+
+#: A reflective-inlining pass retiring a single-use `Function`-constructor temporary whose only read
+#: the pinned model counted was the invocation the pass folded, while a direct `eval` inlined in the
+#: same pass splices in a second reference to the same temporary. The row is mapped to the behavior
+#: Node gives the original, which the retirement is meant to preserve and does not.
+A_RETIRED_TEMPORARY_A_SAME_PASS_EVAL_STILL_NAMES = {
+    'an eval names the temporary the fold retired': Program(
+        a_program("""
+            const m = Function('return 41');
+            console.log(m());
+            eval('console.log(m.name)');
+            """),
+        prints('41', 'anonymous'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_RETIRED_TEMPORARY_A_SAME_PASS_EVAL_STILL_NAMES)
+class TestARetiredTemporaryIsStillNamedByASamePassEval(TestBase):
+    """
+    The reflective-inlining pass holds one model pinned for its whole run and retires a single-use
+    temporary — the local whose sole value is a `Function` construction — once every read the pinned
+    model shows was an invocation the pass inlined. A direct `eval` the same pass inlines splices in
+    code the pinned model never read, and where that code names the temporary the retirement counts
+    a live reference as none and drops the declaration out from under it.
+
+    Node runs `m()` and prints `41`, then reads `m.name` through the eval and prints `anonymous`,
+    the name a `Function` construction gives its function. The deobfuscation folds `m()` to `41`,
+    retires `const m`, and the spliced `console.log(m.name)` is left reading an undeclared `m`, so
+    the program comes back printing `41` and then throwing a `ReferenceError`.
+
+    `refinery.lib.scripts.js.deobfuscation.reflection.JsReflectionInlining._retire_consumed_temporaries`
+    compares the reads it consumed to `len(binding.reads)` taken from the model pinned before any
+    inlining, which the same pass's eval splice is invisible to. The pin's soundness argument covers
+    a fold against an intrinsic, which a live reflection surface withdraws trust from; it does not
+    cover the retirement read-count, which is a structural fact the splice changes. The rule that
+    closes it re-derives the reads against the post-inline tree, or leaves a temporary a same-pass
+    eval could reach un-retired.
+
+    Off the release gate deliberately: the shape needs a direct `eval` whose string names the very
+    reflective temporary the fold retires, and that collision is this entry's own construction.
+    """
+
+
+#: A reflective-inlining pass folding a separated `Function`-constructor temporary's invocation
+#: through the one value the pinned model holds for it, while a direct `eval` inlined in the same
+#: pass reassigns that temporary. The row is mapped to the behavior Node gives the original.
+A_REASSIGNED_TEMPORARY_A_SAME_PASS_EVAL_REBINDS = {
+    'an eval rebinds the temporary before the fold reads it': Program(
+        a_program("""
+            var m = Function('return 1');
+            eval('m = function () { return 2; };');
+            console.log(m());
+            """),
+        prints('2'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_REASSIGNED_TEMPORARY_A_SAME_PASS_EVAL_REBINDS)
+class TestAReassignedTemporaryIsFoldedFromItsStaleValue(TestBase):
+    """
+    The pass resolves a separated `Function`-constructor temporary to the single value the pinned
+    model holds for it and folds its invocation to what that construction returns. A direct `eval`
+    the same pass inlines can reassign the temporary, and the pinned model, taken before the splice,
+    still holds only the construction, so the fold reads a value the reassignment has replaced.
+
+    Node reassigns `m` through the eval to a function returning `2` and prints `2`. The deobfuscation
+    folds `m()` to `1`, the value of the `Function` construction the pinned model still holds, and
+    the program comes back printing `1`.
+
+    `refinery.lib.scripts.js.deobfuscation.reflection.JsReflectionInlining._resolved_constructor_call`
+    resolves the temporary with `singular_value` on the model pinned before inlining, the same
+    pinned-model-versus-splice root the retirement entry carries. The rule that closes it re-derives
+    the value against the post-inline tree, or declines the fold for a temporary a same-pass eval
+    could rebind.
+
+    Off the release gate deliberately: the shape needs a direct `eval` reassigning the very
+    reflective temporary the fold reads, and that is this entry's own construction.
+    """
+
+
+#: A classic script handing the global object as the receiver of an `apply` whose target is a
+#: parameter the body reassigns to a function that reads its own `this`. The row is mapped to the
+#: behavior a host gives it: the reassigned target reads the global through the handed receiver.
+A_HANDED_GLOBAL_AN_APPLY_TARGET_REASSIGNMENT_READS = {
+    'a reassigned apply target reads the handed global': Program(
+        a_program("""
+            var secret = 'S';
+            function inner(host) { return host.secret; }
+            function wrap(recv, payload) {
+              payload = function () { return inner(this); };
+              return payload.apply(recv, []);
+            }
+            console.log(wrap(this, function () {}));
+            """),
+        prints('S'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_HANDED_GLOBAL_AN_APPLY_TARGET_REASSIGNMENT_READS)
+class TestAReassignedApplyTargetStillReadsTheHandedGlobal(TestBase):
+    """
+    The gate that keeps a global foldable decides a receiver handed to `apply`/`call` is unread when
+    its target provably does not read its own `this`. Where that target is another parameter of the
+    same call, the target is resolved through the parameter's original call-site argument, and a
+    parameter the body reassigns is judged on that original alone. A parameter reassigned to a
+    function that reads `this` is therefore taken for a this-free one, the handed global is called
+    unobserved, and the global it carries is unfrozen and deleted.
+
+    Under the script model the top-level `this` is the global object, so `inner(this)` reads the
+    global `secret` and Node prints `S`. The deobfuscation deletes `var secret`, and the read yields
+    `undefined`, so the program comes back printing `undefined`.
+
+    `refinery.lib.scripts.js.analysis.model.SemanticModel._apply_receiver_is_safe` trusts the
+    argument in its parameter map without inspecting the reassignments the body makes to that
+    parameter. The rule that closes it takes the target from the set of values the parameter can
+    hold — its argument and every value assigned to it — and calls the receiver safe only when every
+    one of them is a function that does not read `this`. A blanket bail on any write instead would
+    refuse the obfuscator's own `payload = null`, regressing the self-defending fold.
+
+    Off the release gate deliberately: the shape needs an `apply` target parameter reassigned to a
+    this-reader with the global handed as its receiver, and that is this entry's own construction.
+    """
+
+
+#: A classic script whose run-once wrapper carries the three shapes the self-defending detector keys
+#: on — an empty-alternate conditional, a `payload.apply(recv, ...)`, and `payload = null` — for
+#: reasons of its own, handed the global object as its receiver. The row is mapped to the behavior a
+#: host gives it: the wrapper runs its payload once.
+A_BENIGN_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES = {
+    'a once wrapper handed the global runs its payload': Program(
+        a_program("""
+            var once = function (context, fn) {
+              var run = fn
+                ? function () { var r = fn.apply(context, arguments); fn = null; return r; }
+                : function () {};
+              return run;
+            };
+            var boot = once(this, function () { console.log('ran'); });
+            boot();
+            """),
+        prints('ran'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_BENIGN_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES)
+class TestABenignRunOnceWrapperIsNotSelfDefending(TestBase):
+    """
+    The structural self-defending detector matches a factory by three shapes it gathers one at a
+    time from anywhere in the body: a conditional whose alternate is an empty function, a
+    `payload.apply(recv, ...)`, and a `payload = null`. A run-once wrapper — the shape a `once` or
+    memoize utility takes — spells all three for reasons of its own, and handed the global object as
+    its receiver it matches the template, so the factory, the stored guard, and the payload are all
+    removed and the call the wrapper stood in front of never runs.
+
+    Under the script model the top-level `this` is the global object, so `once(this, ...)` is a
+    hand-over the detector reads, and Node runs the payload and prints `ran`. The deobfuscation
+    deletes the whole construction and the program comes back printing nothing.
+
+    `refinery.lib.scripts.js.deobfuscation.antidbg._matches_self_defending_factory` does not
+    correlate its three flags to one run-once branch, nor require that the function the factory
+    returns is invoked only for its effect. The rule that closes it ties the flags to the same
+    branch and leaves a wrapper whose result a program reads standing.
+
+    Off the release gate deliberately: the shape needs a benign wrapper that spells all three
+    template shapes and is handed the global object as its receiver, which a real `once` utility,
+    taking a specific context rather than the global, does not come near.
+    """

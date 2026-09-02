@@ -155,6 +155,50 @@ def _remove_expr(node) -> None:
         _remove_from_parent(cur)
 
 
+def _invocation_of(reference) -> JsCallExpression | None:
+    """
+    The call `reference` is the callee of, looking through parentheses, or `None` when `reference` is
+    used for anything other than being called. This is the one reference shape whose removal
+    `_remove_structural` can make clean.
+    """
+    call = reference.parent
+    while isinstance(call, JsParenthesizedExpression):
+        call = call.parent
+    if isinstance(call, JsCallExpression) and strip_parens(call.callee) is reference:
+        return call
+    return None
+
+
+def _value_is_discarded(node) -> bool:
+    """
+    Whether the context governing `node` throws its value away, so removing `node` changes no value
+    the program goes on to read: an expression statement, or a sequence operand other than the last,
+    whose value the sequence yields. Parentheses are looked through the way `_remove_expr` looks
+    through them to reach that context. A node whose value is consumed — a declarator initializer, a
+    call argument, a `return` — is not discardable, and removing it would strand its consumer.
+    """
+    cur = node
+    p = cur.parent
+    while isinstance(p, JsParenthesizedExpression):
+        cur, p = p, p.parent
+    if isinstance(p, JsExpressionStatement):
+        return True
+    if isinstance(p, JsSequenceExpression):
+        return bool(p.expressions) and p.expressions[-1] is not cur
+    return False
+
+
+def _is_discardable_invocation(reference) -> bool:
+    """
+    Whether `reference` is a call whose result is discarded, so `_remove_expr` can excise it and
+    leave the program running the same. A guard binding every one of whose references is such a call
+    can be dropped whole; one with any other reference cannot, since removing its declaration would
+    leave that reference naming an undeclared name.
+    """
+    call = _invocation_of(reference)
+    return call is not None and _value_is_discarded(call)
+
+
 class JsRemoveSelfDefending(ScriptLevelTransformer):
     """
     Detect and remove the obfuscator.io self-defending factory+guard pattern, keyed both by the ReDoS
@@ -236,7 +280,7 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
                 continue
             if not _is_global_receiver(node.arguments[0]):
                 continue
-            fn = model._target_function_of_call(node)
+            fn = model.target_function_of_call(node)
             if fn is None or not _matches_self_defending_factory(model, fn):
                 continue
             callee = strip_parens(node.callee)
@@ -249,28 +293,24 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
                 immediate_guards.append(parent)
             elif isinstance(parent, JsVariableDeclarator) and isinstance(parent.id, JsIdentifier):
                 binding = model.binding_of(parent.id)
-                if binding is None:
+                if binding is None or binding.dynamic_refs or binding.exported:
                     continue
-                guard_called = any(
-                    isinstance(ref.parent, JsCallExpression)
-                    and strip_parens(ref.parent.callee) is ref
-                    for ref in model.references(binding)
-                )
-                if guard_called:
+                references = list(model.references(binding))
+                if references and all(_is_discardable_invocation(ref) for ref in references):
                     stored_guard_bindings.append(binding)
 
         if not immediate_guards and not stored_guard_bindings:
             return
 
         for guard_call in immediate_guards:
-            _remove_expr(_removal_unit(guard_call))
+            unit = _removal_unit(guard_call)
+            if _value_is_discarded(unit):
+                _remove_expr(unit)
 
         for gb in stored_guard_bindings:
             for ref in list(model.references(gb)):
-                call = ref.parent
-                while isinstance(call, JsParenthesizedExpression):
-                    call = call.parent
-                if isinstance(call, JsCallExpression) and strip_parens(call.callee) is ref:
+                call = _invocation_of(ref)
+                if call is not None:
                     _remove_expr(call)
             for decl_site in list(gb.declarations):
                 d = decl_site.parent

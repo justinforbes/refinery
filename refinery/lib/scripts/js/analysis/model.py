@@ -2748,7 +2748,7 @@ class SemanticModel:
         call = _enclosing_call(node)
         if call is None:
             return True
-        function = self._target_function_of_call(call)
+        function = self.target_function_of_call(call)
         if function is None:
             return True
         if references_own_arguments(function):
@@ -2763,7 +2763,7 @@ class SemanticModel:
             return True
         return self._parameter_is_observed(function, parameter, mapping, {id(function)}, 0)
 
-    def _target_function_of_call(self, call: JsCallExpression | JsNewExpression) -> JsFunctionNode | None:
+    def target_function_of_call(self, call: JsCallExpression | JsNewExpression) -> JsFunctionNode | None:
         """
         The function *call* runs, as far as it resolves without leaving the text: the callee written
         as a function, a name whose one value is a function, or a name whose one value is a
@@ -2795,10 +2795,13 @@ class SemanticModel:
         """
         A map from each parameter binding of *function* to the argument *call* supplies for it by
         position, or `None` when a parameter is not a plain name — a rest, default, or destructuring
-        element the model cannot bind by position. A parameter the call gives no argument for maps
-        to `None`.
+        element the model cannot bind by position — or when an argument is a spread, whose element
+        count is not known until it runs, so no argument after it aligns with a parameter by index. A
+        parameter the call gives no argument for maps to `None`.
         """
         if any(not isinstance(parameter, JsIdentifier) for parameter in function.params):
+            return None
+        if any(isinstance(strip_parens(argument), JsSpreadElement) for argument in call.arguments):
             return None
         mapping: dict[Binding | None, Node | None] = {}
         for index, parameter in enumerate(function.params):
