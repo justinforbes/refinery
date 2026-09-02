@@ -42,7 +42,9 @@ from refinery.lib.scripts.ps1.analysis.arguments import Ps1WrittenSlots, written
 from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
 from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.values import (
+    UNKNOWN,
     candidate_types,
+    convert,
     evaluate,
     integer_of,
     read,
@@ -88,6 +90,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1MemberAccess,
     Ps1MergingRedirection,
     Ps1ParamBlock,
+    Ps1ParameterDeclaration,
     Ps1ParenExpression,
     Ps1Pipeline,
     Ps1PipelineElement,
@@ -2059,29 +2062,73 @@ def pruning_erases_body(node, survivors: Sequence[Node]) -> bool:
     )
 
 
+def _bound_default_may_throw(parameter: Ps1ParameterDeclaration) -> bool:
+    """
+    Whether the conversion a type constraint runs over this parameter's default value can raise. A
+    default with no constraint is stored as it is written and a constraint with no default converts
+    nothing; only the two together reach a conversion, and it runs on every call that omits the
+    argument. Measured on 5.1, `[int] $x = 'abc'` throws it and `[int] $x = '42'` binds the Int32 42.
+
+    Not knowing is a throw, the direction `refinery.lib.scripts.ps1.analysis.values.Ps1Outcome`
+    already reads as safe: a default the value domain cannot evaluate, or a constraint naming a type
+    it does not model, is one this cannot prove converts, so its call is kept rather than dropped.
+    """
+    default = parameter.default_value
+    constraint = next(
+        (a for a in parameter.attributes if isinstance(a, Ps1TypeExpression)), None)
+    if default is None or constraint is None:
+        return False
+    target = data.resolve_type(constraint.name)
+    if target is None:
+        return True
+    outcome = evaluate(default)
+    if outcome.may_throw or outcome.value is UNKNOWN:
+        return True
+    return convert(outcome.value, target).may_throw
+
+
+def _parameter_is_inert(
+    parameter: Ps1ParameterDeclaration,
+    world: Ps1WorldReach,
+) -> bool:
+    """
+    Whether declaring this parameter runs nothing observable on a call that omits its argument.
+    Declaring the name binds storage and evaluates nothing, but three things it may carry do: an
+    attribute is work of its own — a `[ValidateScript({...})]` body runs on every call that supplies
+    one and a `[Parameter(Mandatory)]` makes the call prompt — a default value is an expression the
+    engine runs, and a type constraint converts that default on every such call.
+
+    Attributes are rejected wholesale rather than matched against a table: which of them do
+    something observable is not a question this module can answer. A type constraint is not an
+    attribute here and does nothing on its own, but the conversion it names is asked of the default
+    it converts, because that conversion is what turns `[int] $x = 'abc'` into a call that throws
+    where `[int] $x = '42'` does not.
+    """
+    if any(isinstance(a, Ps1Attribute) for a in parameter.attributes):
+        return False
+    if parameter.default_value is None:
+        return True
+    return (
+        is_side_effect_free(parameter.default_value, world)
+        and not _bound_default_may_throw(parameter)
+    )
+
+
 def _param_block_is_inert(
     block: Ps1ParamBlock | None,
     world: Ps1WorldReach,
 ) -> bool:
     """
-    Whether a `param( ... )` block runs nothing when the function is called. Declaring a name binds
-    storage and evaluates nothing, but a default value is an expression the engine runs on every
-    call that omits the argument, and an attribute is work of its own — a `[ValidateScript({...})]`
-    body runs on every call that supplies one, and a `[Parameter(Mandatory)]` makes the call prompt.
-
-    Attributes are rejected wholesale rather than matched against a table: which of them do
-    something observable is not a question this module can answer, and a type constraint is the one
-    form that provably does not, so it is the only one let through.
+    Whether a `param( ... )` block runs nothing when the function is called, which is that every
+    parameter it declares is inert by `_parameter_is_inert`. A block-level attribute is rejected the
+    same way a parameter's is — `[CmdletBinding()]` turns the function into an advanced one — so a
+    block that carries one is never inert.
     """
     if block is None:
         return True
     if block.attributes:
         return False
-    return all(
-        not any(isinstance(a, Ps1Attribute) for a in parameter.attributes)
-        and (parameter.default_value is None or is_side_effect_free(parameter.default_value, world))
-        for parameter in block.parameters
-    )
+    return all(_parameter_is_inert(parameter, world) for parameter in block.parameters)
 
 
 def body_is_inert(node, world: Ps1WorldReach) -> bool:

@@ -312,11 +312,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'the observer nothing asked about.',
     "$Null = 1 / 0; Write-Host 'A'":
         'The same defect in its other spelling, so that neither entry rests on the cast.',
-    "function K { param([int] $x = 'abc') }; K; Write-Host 'A'":
-        'The body is empty and the definition and its call are removed, but binding the parameter '
-        'runs the conversion its type constraint names and `abc` has none, so every call raises '
-        'before the body would run. The fault is the binder\'s, and an inert body says nothing '
-        'about it.',
     "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'":
         'The definition is removed although `Get-Command` names it literally. A literal name that '
         'matches nothing writes a `CommandNotFoundException` to the error stream whatever is done '

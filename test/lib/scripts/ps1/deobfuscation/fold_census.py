@@ -1473,8 +1473,6 @@ FOLDS: dict[str, str] = {
         "Write-Host 'A'",
     "$Null = [Int]'42'; Write-Host 'A'":
         "Write-Host 'A'",
-    "function K { param([int] $x = 'abc') }; K; Write-Host 'A'":
-        "Write-Host 'A'",
     "function K { param([int] $x = '42') }; K; Write-Host 'A'":
         "Write-Host 'A'",
     "function K { $Null = 1 }; Write-Error 'e'; K; Write-Host $?":

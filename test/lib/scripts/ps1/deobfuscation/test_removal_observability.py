@@ -209,7 +209,6 @@ class TestPs1AParameterDefaultIsConvertedUnderItsTypeConstraint(TestPs1):
     body runs. A body read as inert says nothing about that, because the fault is the binder's.
     """
 
-    @unittest.expectedFailure
     def test_a_call_whose_parameter_default_does_not_convert_is_kept(self):
         self._assertKept(F"""
             function K {{ param([int] $x = 'abc') }}
