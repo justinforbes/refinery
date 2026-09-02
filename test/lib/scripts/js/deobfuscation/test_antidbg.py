@@ -95,6 +95,69 @@ class TestAntiDebug(TestJsDeobfuscator):
             self._run_transformer(source, JsRemoveSelfDefending),
         )
 
+    def test_redos_guard_invoked_as_return_sequence_operand_is_removed_whole(self):
+        source = inspect.cleandoc(
+            """
+            var total = 0;
+            function add(n) {
+              var a = (function () {
+                var b = true;
+                return function (c, d) {
+                  var e = b ? function () {
+                    if (d) { var f = d.apply(c, arguments); return d = null, f; }
+                  } : function () {};
+                  return b = false, e;
+                };
+              }());
+              var g = a(this, function () {
+                return g.toString().length + 'x'.search('(((.+)+)+)+$');
+              });
+              return g(), total += n, total;
+            }
+            add(1);
+            add(2);
+            console.log(total);
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var total = 0;
+                function add(n) {
+                  return total += n, total;
+                }
+                add(1);
+                add(2);
+                console.log(total);
+                """
+            ),
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
+    def test_redos_guard_whose_result_is_read_is_preserved_whole(self):
+        source = inspect.cleandoc(
+            """
+            var a = (function () {
+              var b = true;
+              return function (c, d) {
+                var e = b ? function () {
+                  if (d) { var f = d.apply(c, arguments); return d = null, f; }
+                } : function () {};
+                return b = false, e;
+              };
+            }());
+            var g = a(this, function () {
+              return g.toString().length + 'x'.search('(((.+)+)+)+$');
+            });
+            var r = g();
+            console.log(typeof r);
+            """
+        )
+        self.assertEqual(
+            self._run_transformers(source),
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
 
 class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
     """
@@ -207,6 +270,17 @@ class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
             self._run_transformer(source, JsRemoveSelfDefending),
         )
 
+    def test_stored_guard_self_referencing_payload_is_removed(self):
+        source = (
+            self._FACTORY
+            + "var g = a(this, function() { console.log = g; });"
+            + " g(); console.log('main');"
+        )
+        self.assertEqual(
+            "console.log('main');",
+            self._run_transformer(source, JsRemoveSelfDefending),
+        )
+
 
 #: Classic scripts whose run-once wrapper spells the template's shapes for reasons of its own,
 #: handed the global object as its receiver, mapped to the behavior a host gives them: the wrapper
@@ -252,5 +326,65 @@ class TestABenignRunOnceWrapperKeepsRunning(TestBase):
 
     def test_every_program_behaves_the_way_the_host_does(self):
         for label, row in A_BENIGN_RUN_ONCE_WRAPPER.items():
+            with self.subTest(label):
+                self.assertEqual(row.read(), row.required())
+
+
+#: Programs spelling the ReDoS-marked guard the way real emissions do, mapped to the behavior an
+#: engine gives them. The payload closes over its own guard and carries the signature string
+#: without running the catastrophic search, so an engine finishes the original; a removal must
+#: excise every invocation it orphans, and a guard whose result the program reads must stay whole.
+A_REDOS_GUARD_EMISSION = {
+    'the guard is invoked as a return sequence operand': Program(
+        a_program("""
+            var total = 0;
+            function add(n) {
+              var a = (function () {
+                var b = true;
+                return function (c, d) {
+                  var e = b ? function () {
+                    if (d) { var f = d.apply(c, arguments); return d = null, f; }
+                  } : function () {};
+                  return b = false, e;
+                };
+              }());
+              var g = a(this, function () {
+                return g.toString().length + 'x'.search('(((.+)+)+)+$');
+              });
+              return g(), total += n, total;
+            }
+            add(1);
+            add(2);
+            console.log(total);
+            """),
+        prints('3'),
+    ),
+    'the guard result is read': Program(
+        a_program("""
+            var a = (function () {
+              var b = true;
+              return function (c, d) {
+                var e = b ? function () {
+                  if (d) { var f = d.apply(c, arguments); return d = null, f; }
+                } : function () {};
+                return b = false, e;
+              };
+            }());
+            var g = a(this, function () {
+              return g.toString().length + 'x'.search('(((.+)+)+)+$');
+            });
+            var r = g();
+            console.log(typeof r);
+            """),
+        prints('number'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestARedosGuardRemovalLeavesARunningProgram(TestBase):
+
+    def test_every_program_behaves_the_way_the_engine_does(self):
+        for label, row in A_REDOS_GUARD_EMISSION.items():
             with self.subTest(label):
                 self.assertEqual(row.read(), row.required())

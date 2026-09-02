@@ -257,15 +257,28 @@ def _value_is_discarded(node) -> bool:
     return False
 
 
-def _is_discardable_invocation(reference) -> bool:
+def _discardable_guard_invocations(model, binding, declarator) -> list[JsCallExpression] | None:
     """
-    Whether `reference` is a call whose result is discarded, so `_remove_expr` can excise it and
-    leave the program running the same. A guard binding every one of whose references is such a call
-    can be dropped whole; one with any other reference cannot, since removing its declaration would
-    leave that reference naming an undeclared name.
+    The guard invocations to excise when the guard binding stored in `declarator` can be removed
+    whole, or `None` when it cannot. Every reference outside the declarator must be a call whose
+    result is discarded, so `_remove_expr` can excise it and leave the program running the same; a
+    binding with any other outside reference cannot go, since removing its declaration would leave
+    that reference naming an undeclared name. A reference inside the declarator is the payload
+    closing over its own guard — the self-defending payload reads its guard's source through it —
+    and vanishes with the declaration, so it neither blocks the removal nor needs excising. A
+    binding no invocation reaches is left alone.
     """
-    call = _invocation_of(reference)
-    return call is not None and _value_is_discarded(call)
+    if binding is None or binding.dynamic_refs or binding.exported:
+        return None
+    calls: list[JsCallExpression] = []
+    for reference in model.references(binding):
+        if reference.is_descendant_of(declarator):
+            continue
+        call = _invocation_of(reference)
+        if call is None or not _value_is_discarded(call):
+            return None
+        calls.append(call)
+    return calls if calls else None
 
 
 class JsRemoveSelfDefending(ScriptLevelTransformer):
@@ -295,7 +308,6 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
             factory_name = None
         else:
             return
-        guard_name = guard_decl.id.name
         co_names: set[str] = set()
         if factory_name is None:
             for arg in guard_decl.init.arguments:
@@ -311,15 +323,13 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
             body = body_parent.body
         else:
             return
-        for stmt in list(body):
-            if (
-                isinstance(stmt, JsExpressionStatement)
-                and isinstance(stmt.expression, JsCallExpression)
-                and isinstance(stmt.expression.callee, JsIdentifier)
-                and stmt.expression.callee.name == guard_name
-                and not stmt.expression.arguments
-            ):
-                _remove_from_parent(stmt)
+        model = model_cache(self, root).model
+        binding = model.binding_of(guard_decl.id)
+        calls = _discardable_guard_invocations(model, binding, guard_decl)
+        if calls is None:
+            return
+        for call in calls:
+            _remove_expr(call)
         remove_declarator(guard_decl)
         cleanup_names = {factory_name} if factory_name is not None else co_names
         for name in cleanup_names:
@@ -341,7 +351,7 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
     def _remove_structural(self, root: JsScript) -> None:
         model = model_cache(self, root).model
         immediate_guards: list[JsCallExpression] = []
-        stored_guard_bindings: list = []
+        stored_guards: list[tuple[JsVariableDeclarator, list[JsCallExpression]]] = []
         factory_names: set[str] = set()
 
         for node in list(root.walk()):
@@ -364,13 +374,11 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
                 immediate_guards.append(parent)
             elif isinstance(parent, JsVariableDeclarator) and isinstance(parent.id, JsIdentifier):
                 binding = model.binding_of(parent.id)
-                if binding is None or binding.dynamic_refs or binding.exported:
-                    continue
-                references = list(model.references(binding))
-                if references and all(_is_discardable_invocation(ref) for ref in references):
-                    stored_guard_bindings.append(binding)
+                calls = _discardable_guard_invocations(model, binding, parent)
+                if calls is not None:
+                    stored_guards.append((parent, calls))
 
-        if not immediate_guards and not stored_guard_bindings:
+        if not immediate_guards and not stored_guards:
             return
 
         for guard_call in immediate_guards:
@@ -378,15 +386,10 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
             if _value_is_discarded(unit):
                 _remove_expr(unit)
 
-        for gb in stored_guard_bindings:
-            for ref in list(model.references(gb)):
-                call = _invocation_of(ref)
-                if call is not None:
-                    _remove_expr(call)
-            for decl_site in list(gb.declarations):
-                d = decl_site.parent
-                if isinstance(d, JsVariableDeclarator):
-                    remove_declarator(d)
+        for declarator, calls in stored_guards:
+            for call in calls:
+                _remove_expr(call)
+            remove_declarator(declarator)
 
         model = model_cache(self, root).model
         for binding in list(model.root_scope.bindings.values()):
