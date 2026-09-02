@@ -65,45 +65,35 @@ def _is_global_receiver(node) -> bool:
     return isinstance(node, JsIdentifier) and node.name in ('globalThis', 'window', 'self', 'global')
 
 
-def _matches_self_defending_factory(model, fn) -> bool:
+def _is_empty_function(node) -> bool:
+    node = strip_parens(node)
+    return isinstance(node, JsFunctionExpression) and node.body is not None and not node.body.body
+
+
+def _holds_apply_and_nulling(model, fn, recv_b, payload_b) -> bool:
     """
-    True when `fn` matches the run-once `apply`-payload factory template: exactly two plain-identifier
-    params `(recv, payload)`; a conditional whose alternate is an empty function expression; a call of
-    the form `payload.apply(recv, ...)` or `payload.call(recv, ...)` resolved through the param bindings.
+    Whether `fn` contains both actions the template's run-once branch performs on the factory's
+    parameters: an invocation `payload.apply(recv, ...)` or `payload.call(recv, ...)`, and a
+    `payload = null` assignment, each resolved through the param bindings rather than by name.
     """
-    if not isinstance(fn, FUNCTION_NODES) or len(fn.params) != 2:
-        return False
-    if not all(isinstance(p, JsIdentifier) for p in fn.params):
-        return False
-    recv_b = model.binding_of(fn.params[0])
-    payload_b = model.binding_of(fn.params[1])
-    if recv_b is None or payload_b is None:
-        return False
-    empty_alt = False
     apply_shape = False
     payload_nulled = False
     for n in fn.walk():
-        if isinstance(n, JsConditionalExpression):
-            alt = strip_parens(n.alternate)
-            if isinstance(alt, JsFunctionExpression) and alt.body is not None and not alt.body.body:
-                empty_alt = True
         if isinstance(n, JsCallExpression):
             callee = strip_parens(n.callee)
-            if not isinstance(callee, JsMemberExpression):
-                continue
-            prop = callee.property
-            prop_name = getattr(prop, 'name', None) or getattr(prop, 'value', None)
-            if prop_name not in ('apply', 'call'):
-                continue
-            base = strip_parens(callee.object)
-            arg0 = strip_parens(n.arguments[0]) if n.arguments else None
-            if (
-                isinstance(base, JsIdentifier)
-                and model.resolve(base) is payload_b
-                and isinstance(arg0, JsIdentifier)
-                and model.resolve(arg0) is recv_b
-            ):
-                apply_shape = True
+            if isinstance(callee, JsMemberExpression):
+                prop = callee.property
+                prop_name = getattr(prop, 'name', None) or getattr(prop, 'value', None)
+                base = strip_parens(callee.object)
+                arg0 = strip_parens(n.arguments[0]) if n.arguments else None
+                if (
+                    prop_name in ('apply', 'call')
+                    and isinstance(base, JsIdentifier)
+                    and model.resolve(base) is payload_b
+                    and isinstance(arg0, JsIdentifier)
+                    and model.resolve(arg0) is recv_b
+                ):
+                    apply_shape = True
         if isinstance(n, JsAssignmentExpression) and n.operator == '=':
             lhs = strip_parens(n.left)
             rhs = strip_parens(n.right)
@@ -113,7 +103,50 @@ def _matches_self_defending_factory(model, fn) -> bool:
                 and isinstance(rhs, JsNullLiteral)
             ):
                 payload_nulled = True
-    return empty_alt and apply_shape and payload_nulled
+    return apply_shape and payload_nulled
+
+
+def _matches_self_defending_factory(model, fn) -> bool:
+    """
+    True when `fn` matches the run-once `apply`-payload factory template: exactly two plain-identifier
+    params `(recv, payload)`, and one conditional tying the template's shapes to a single run-once
+    branch — an empty function expression as its alternate, a consequent function holding both a
+    `payload.apply(recv, ...)` (or `.call`) invocation and a `payload = null` assignment resolved
+    through the param bindings, and a test naming the run-once flag: a binding that is not a
+    parameter, is declared outside `fn`, and is written inside it. A wrapper whose conditional tests
+    its payload parameter — the shape a benign `once` utility takes — has no such flag and does not
+    match.
+    """
+    if not isinstance(fn, FUNCTION_NODES) or len(fn.params) != 2:
+        return False
+    if not all(isinstance(p, JsIdentifier) for p in fn.params):
+        return False
+    recv_b = model.binding_of(fn.params[0])
+    payload_b = model.binding_of(fn.params[1])
+    if recv_b is None or payload_b is None:
+        return False
+    for n in fn.walk():
+        if not isinstance(n, JsConditionalExpression):
+            continue
+        if not _is_empty_function(n.alternate):
+            continue
+        consequent = strip_parens(n.consequent)
+        if not isinstance(consequent, FUNCTION_NODES):
+            continue
+        if not _holds_apply_and_nulling(model, consequent, recv_b, payload_b):
+            continue
+        test = strip_parens(n.test)
+        if not isinstance(test, JsIdentifier):
+            continue
+        flag = model.resolve(test)
+        if flag is None or flag is recv_b or flag is payload_b:
+            continue
+        if any(declaration.is_descendant_of(fn) for declaration in flag.declarations):
+            continue
+        if not any(write.is_descendant_of(fn) for write in flag.writes):
+            continue
+        return True
+    return False
 
 
 def _removal_unit(call: JsCallExpression) -> JsCallExpression:

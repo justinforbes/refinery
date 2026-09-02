@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import unittest
 
+from test import TestBase
+from test.lib.scripts.js.analysis.differential import node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
+from test.lib.scripts.js.ledger import Program, Reading, a_program, prints
 
 from refinery.lib.scripts.js.deobfuscation.antidbg import JsRemoveSelfDefending
 
@@ -170,3 +174,34 @@ class TestRemoveSelfDefendingStructural(TestJsDeobfuscator):
             self._run_transformers(source),
             self._run_transformer(source, JsRemoveSelfDefending),
         )
+
+
+#: Classic scripts whose run-once wrapper spells the template's shapes for reasons of its own,
+#: handed the global object as its receiver, mapped to the behavior a host gives them: the wrapper
+#: runs its payload. The structural detector must not take any of them for the self-defending
+#: template.
+A_BENIGN_RUN_ONCE_WRAPPER = {
+    'the conditional tests the payload parameter': Program(
+        a_program("""
+            var once = function (context, fn) {
+              var run = fn
+                ? function () { var r = fn.apply(context, arguments); fn = null; return r; }
+                : function () {};
+              return run;
+            };
+            var boot = once(this, function () { console.log('ran'); });
+            boot();
+            """),
+        prints('ran'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestABenignRunOnceWrapperKeepsRunning(TestBase):
+
+    def test_every_program_behaves_the_way_the_host_does(self):
+        for label, row in A_BENIGN_RUN_ONCE_WRAPPER.items():
+            with self.subTest(label):
+                self.assertEqual(row.read(), row.required())

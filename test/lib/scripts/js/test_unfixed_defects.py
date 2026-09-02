@@ -3009,19 +3009,22 @@ class TestAReassignedApplyTargetStillReadsTheHandedGlobal(TestBase):
     """
 
 
-#: A classic script whose run-once wrapper carries the three shapes the self-defending detector keys
-#: on — an empty-alternate conditional, a `payload.apply(recv, ...)`, and `payload = null` — for
-#: reasons of its own, handed the global object as its receiver. The row is mapped to the behavior a
-#: host gives it: the wrapper runs its payload once.
-A_BENIGN_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES = {
-    'a once wrapper handed the global runs its payload': Program(
+#: A classic script whose run-once wrapper matches the tightened self-defending template exactly —
+#: the run-once flag is a closure variable declared outside the factory function and written false
+#: inside it — while its payload is benign. The row is mapped to the behavior a host gives it: the
+#: wrapper runs its payload once.
+A_CLOSURE_FLAG_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES = {
+    'a closure flag once wrapper runs its payload': Program(
         a_program("""
-            var once = function (context, fn) {
-              var run = fn
-                ? function () { var r = fn.apply(context, arguments); fn = null; return r; }
-                : function () {};
-              return run;
-            };
+            var once = function () {
+              var live = true;
+              return function (context, fn) {
+                var run = live
+                  ? function () { var r = fn.apply(context, arguments); fn = null; return r; }
+                  : function () {};
+                return live = false, run;
+              };
+            }();
             var boot = once(this, function () { console.log('ran'); });
             boot();
             """),
@@ -3032,26 +3035,58 @@ A_BENIGN_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES = {
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
-@one_expected_failure_per_program(A_BENIGN_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES)
-class TestABenignRunOnceWrapperIsNotSelfDefending(TestBase):
+@one_expected_failure_per_program(A_CLOSURE_FLAG_RUN_ONCE_WRAPPER_THE_DETECTOR_MATCHES)
+class TestAClosureFlagRunOnceWrapperIsNotSelfDefending(TestBase):
     """
-    The structural self-defending detector matches a factory by three shapes it gathers one at a
-    time from anywhere in the body: a conditional whose alternate is an empty function, a
-    `payload.apply(recv, ...)`, and a `payload = null`. A run-once wrapper — the shape a `once` or
-    memoize utility takes — spells all three for reasons of its own, and handed the global object as
-    its receiver it matches the template, so the factory, the stored guard, and the payload are all
-    removed and the call the wrapper stood in front of never runs.
+    The structural self-defending detector ties its template shapes to one run-once branch whose
+    flag is a closure variable, which is the exact shape a hand-rolled run-once wrapper takes: the
+    factory here is structurally indistinguishable from the obfuscator's. Handed the global object
+    as its receiver, the wrapper is matched, the factory and stored guard are removed, and the
+    payload never runs.
 
     Under the script model the top-level `this` is the global object, so `once(this, ...)` is a
     hand-over the detector reads, and Node runs the payload and prints `ran`. The deobfuscation
     deletes the whole construction and the program comes back printing nothing.
 
-    `refinery.lib.scripts.js.deobfuscation.antidbg._matches_self_defending_factory` does not
-    correlate its three flags to one run-once branch, nor require that the function the factory
-    returns is invoked only for its effect. The rule that closes it ties the flags to the same
-    branch and leaves a wrapper whose result a program reads standing.
+    `refinery.lib.scripts.js.deobfuscation.antidbg._matches_self_defending_factory` judges the
+    factory alone, and the factory carries no evidence of intent. The evidence is in the payload:
+    a survey of real obfuscator.io emissions (versions 0.28.5, 2.19.1, and 5.6.0; self-defending,
+    console-disable, and debug-protection features) found every guard payload carrying a positive
+    anti-analysis marker — the ReDoS signature string, a write to a `console` member, or a `RegExp`
+    over function source text — and a benign payload carrying none. The rule that closes this entry
+    admits a structural removal only when the guard's payload carries such a marker.
 
-    Off the release gate deliberately: the shape needs a benign wrapper that spells all three
-    template shapes and is handed the global object as its receiver, which a real `once` utility,
-    taking a specific context rather than the global, does not come near.
+    Off the release gate deliberately: the shape needs a benign wrapper spelling the obfuscator's
+    run-once factory to the letter and handed the global object as its receiver, which a real
+    `once` utility, taking a specific context rather than the global, does not come near.
     """
+
+
+class TestAnObjectPropertyFlagVariantIsStillRemoved(TestBase):
+    """
+    The tightened structural detector requires the run-once flag to be an identifier resolving to a
+    closure binding, so a variant spelling the flag as an object property — `s.b ? ... : ...` with
+    `s.b = false` — no longer matches, and its guard survives. The payload here is a console-member
+    write, an anti-analysis marker real payloads carry, so the flag rule alone is what blocks the
+    removal. The variant is hand-written: no obfuscator.io emission spelling the flag this way is
+    witnessed, which is why the recall loss is carried here rather than paid for with matcher
+    surface. The rule that closes it extends the flag rule to a member path whose base resolves
+    outside the factory and which is written false inside it.
+    """
+
+    @unittest.expectedFailure
+    def test_the_object_property_flag_guard_is_removed(self):
+        source = a_program("""
+            var a = function () {
+              var s = { b: true };
+              return function (c, d) {
+                var e = s.b ? function () {
+                  if (d) { var f = d.apply(c, arguments); return d = null, f; }
+                } : function () {};
+                return s.b = false, e;
+              };
+            }();
+            a(this, function () { console.log = function () {}; })();
+            console.log('done');
+            """)
+        self.assertEqual("console.log('done');", deobfuscate_source(source))
