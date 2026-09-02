@@ -7,7 +7,7 @@ from typing import NamedTuple
 
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
-from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
+from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, names_used_before_defined
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     StatementEffect,
@@ -415,10 +415,18 @@ class Ps1JunkStatementRemoval(Transformer):
         cache = model_cache(self, node)
         flow = cache.output_flow
         called = cache.call_graph.reachable_names()
+        # A name used before it is defined denotes, at that use, whatever bound it earlier rather
+        # than the body written below — nothing, at script scope, where the bare word raises a
+        # non-terminating CommandNotFoundException and the run carries on to the body below. Such a
+        # function is not this pass's to reason about: pruning its body or deleting it with the calls
+        # that never reach it erases the error the earlier call raised.
+        unreached = names_used_before_defined(cache.call_graph, cache.dominance)
         plans = Ps1RemovalPlans(cache.faults, cache.world_reach)
         for parent in node.walk():
             body = get_body(parent)
             if body is None:
+                continue
+            if self._within_unreached_function(parent, unreached):
                 continue
             path = output_path(parent)
             if path.sink is OutputSink.CAPTURED:
@@ -433,9 +441,33 @@ class Ps1JunkStatementRemoval(Transformer):
         # A fresh world after the commit, not the one the loop read: the commit advanced the tree
         # version, so a held world would answer at its fail-closed pole for every function this
         # walk still has to weigh. The cache rebuilds it only because a removal landed.
-        self._remove_inert_functions(node, cache.call_graph, cache.world_reach)
+        self._remove_inert_functions(node, cache.call_graph, cache.world_reach, unreached)
 
-    def _remove_inert_functions(self, node: Node, graph: Ps1CallGraph, world: Ps1WorldReach):
+    @staticmethod
+    def _within_unreached_function(node: Node, unreached: frozenset[str]) -> bool:
+        """
+        Whether `node` sits in the body of a function some call to it does not reach the definition
+        of. This pass cannot reason about a name whose calls it cannot place, so the whole subtree is
+        left alone — not only the definition statement but the block that holds its statements, which
+        the walk reaches as a parent of its own.
+        """
+        cursor: Node | None = node
+        while cursor is not None:
+            if (
+                isinstance(cursor, Ps1FunctionDefinition)
+                and normalize_command_name(cursor.name) in unreached
+            ):
+                return True
+            cursor = cursor.parent
+        return False
+
+    def _remove_inert_functions(
+        self,
+        node: Node,
+        graph: Ps1CallGraph,
+        world: Ps1WorldReach,
+        unreached: frozenset[str],
+    ):
         """
         Remove top-level functions whose body carries no observable output or side effect together
         with the bare call statements that invoke them. After body pruning, an injected junk function
@@ -494,6 +526,10 @@ class Ps1JunkStatementRemoval(Transformer):
         `Ps1CommandModel.reads_command_success` already answers for the alias drive. A group
         carrying call statements is therefore kept whole where the script reads `$?`; a definition
         alone is transparent to the flag and drops regardless.
+
+        A name in `unreached` is skipped whole: one of its calls stands where the definition is not
+        guaranteed to have run, so the calls are not the inert no-ops this removal takes them for —
+        see `refinery.lib.scripts.ps1.analysis.callgraph.names_used_before_defined`.
         """
         if not graph.is_readable:
             return
@@ -503,6 +539,8 @@ class Ps1JunkStatementRemoval(Transformer):
         groups: dict[str, list[Node]] = {}
         removable_definitions: set[Node] = set()
         for key in graph.defined_names:
+            if key in unreached:
+                continue
             if key in function_reads:
                 continue
             definitions = graph.definitions(key)

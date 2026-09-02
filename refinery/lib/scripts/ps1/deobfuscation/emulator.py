@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
+from refinery.lib.scripts.ps1.analysis.callgraph import names_used_before_defined
 from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
 from refinery.lib.scripts.ps1.analysis.commands import CommandKind, Ps1CommandModel
@@ -1824,6 +1825,7 @@ class Ps1FunctionEvaluator(Transformer):
         self._failed_counts: dict[str, int] = {}
         self._callers: dict[str, set[str]] = {}
         self._ambiguous: set[str] = set()
+        self._unreached: frozenset[str] = frozenset()
         self._commands: Ps1CommandModel | None = None
         self._caller_scope_names: frozenset[str] = frozenset()
         self._strict_v2 = True
@@ -1853,6 +1855,7 @@ class Ps1FunctionEvaluator(Transformer):
             self._commands = cache.commands
             self._strict_v2 = cache.faults.strict_mode_v2_may_be_in_force()
             self._strict = cache.faults.strict_mode_may_be_in_force()
+            self._unreached = names_used_before_defined(cache.call_graph, cache.dominance)
             super().visit(node)
             # Folding a call into its value preserves meaning whoever else can reach the name, so
             # the substitution above is unconditional. Deleting the *definition* is a name-keyed
@@ -1917,7 +1920,7 @@ class Ps1FunctionEvaluator(Transformer):
             return None
         key = normalize_command_name(name_str)
         funcdef = self._functions.get(key)
-        if funcdef is None or key in self._ambiguous:
+        if funcdef is None or key in self._ambiguous or key in self._unreached:
             return None
         self._call_counts[key] = self._call_counts.get(key, 0) + 1
         if carried_redirections(node):

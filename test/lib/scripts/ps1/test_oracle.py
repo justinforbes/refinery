@@ -342,11 +342,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'metadata proves inert: `Length` is re-pointed to a script property and the read is '
         'folded to the number the metadata carries, so the output prints a value 5.1 never '
         'produces.',
-    "zzqfoo1; function zzqfoo1 { 'boom' }; zzqfoo1":
-        'The call above the definition is resolved to the body and folded, so the output emits '
-        'twice. 5.1 binds the name where the `function` statement runs, so the first call '
-        'raises `CommandNotFoundException`, which is terminating at script scope and emits '
-        'nothing at all.',
     "trap { continue }; zzq0000=5; Write-Host 'after'":
         'The handler is removed as inert, but `continue` is what makes the run survive the '
         'bareword: the snippet resumes at the statement below and prints, and the output ends '

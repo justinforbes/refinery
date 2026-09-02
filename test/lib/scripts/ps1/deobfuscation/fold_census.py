@@ -1481,8 +1481,6 @@ FOLDS: dict[str, str] = {
         "$Null = (Get-Command K).Name\nWrite-Host 'A'",
     "function vnMTH { $Null = 1 }; vnMTH; $Null = (Get-Command *vnMT*).Name; Write-Host 'A'":
         "$Null = (Get-Command *vnMT*).Name\nWrite-Host 'A'",
-    'K; function K { $Null = 1 }; Write-Host $?':
-        'K\nfunction K {}\nWrite-Host $?',
     'function K { $Null = 1 }; K; $b = { K }; Write-Host $b':
         '$b = {}\nWrite-Host $b',
     'function Measure-Object { $Null = 1 }; Measure-Object; 1, 2, 3 | measure':
@@ -1511,8 +1509,6 @@ FOLDS: dict[str, str] = {
         '',
     "try { zzq0000=5 } catch {}; 'next'":
         "'next'",
-    "zzqfoo1; function zzqfoo1 { 'boom' }; zzqfoo1":
-        "'boom'\n'boom'",
     "function zzqfoo1 { 'boom' }; zzqfoo1":
         "'boom'",
     "try { zzqq0 =5 } catch {}; Write-Host 'after'":

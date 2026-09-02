@@ -15,7 +15,10 @@ value it produces is the effect layer's question, asked through here rather than
 """
 from __future__ import annotations
 
-from typing import Mapping, NamedTuple, Sequence
+from typing import TYPE_CHECKING, Mapping, NamedTuple, Sequence
+
+if TYPE_CHECKING:
+    from refinery.lib.scripts.analysis.dominance import DominatorModel
 
 from refinery.lib.scripts import Node
 from refinery.lib.scripts.ps1.analysis.world import (
@@ -249,6 +252,42 @@ class Ps1CallGraph:
                 if name in self._definitions:
                     frontier.append(name)
         return frozenset(reachable)
+
+
+def names_used_before_defined(
+    graph: Ps1CallGraph,
+    dominance: DominatorModel,
+) -> frozenset[str]:
+    """
+    The keys with a call site that no definition of the name is guaranteed to have run before. Such
+    a call names, at the point it stands, whatever bound the name earlier — nothing, at script
+    scope, where Windows PowerShell 5.1 answers the bare word with a `CommandNotFoundException`. That
+    error is non-terminating there, so the run carries on and a later call does reach the body, but
+    the earlier call ran the error rather than the body — measured: `zzqfoo1; function zzqfoo1
+    { 'boom' }; zzqfoo1` writes an error record and then `boom`. A pass that folds that earlier call
+    into the body invents the body's value for a statement that raised, and one that deletes it with
+    the definition as an inert pair erases the error; which body the call reaches, and whether it
+    reaches one at all, is order the fold does not carry, so every definition and call of a name
+    reported here is left alone rather than resolved for the reachable calls alone.
+
+    Only a call the definition shares a control-flow graph with is ordered. A call inside another
+    function's body runs when that body is invoked, an ordering no per-body graph carries, and
+    dominance across two graphs is always false; reading that as unreached would refuse every helper
+    that calls another, so a cross-graph call is treated as reached — the direction that keeps a
+    fold the pass already takes. **Strict** dominance, so a definition and a call sharing one node
+    do not read as ordered: statement granularity cannot order a use and a definition written on one
+    line, and the reflexive answer for that pair is the use-before-definition this refuses.
+    """
+    unreached: set[str] = set()
+    for key in graph.defined_names:
+        definitions = graph.definitions(key)
+        for site in graph.call_sites(key):
+            call = site.invocation
+            colocated = [d for d in definitions if dominance.locate_pair(d, call) is not None]
+            if colocated and not any(dominance.strictly_dominates(d, call) for d in colocated):
+                unreached.add(key)
+                break
+    return frozenset(unreached)
 
 
 def _collides_with_a_definition(

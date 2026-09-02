@@ -404,7 +404,6 @@ class TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock(TestPs1):
             'next'
         """, "'next'")
 
-    @unittest.expectedFailure
     def test_a_call_above_the_definition_of_its_name_is_not_folded_to_the_body(self):
         self._assertKept("""
             zzqfoo1
@@ -416,6 +415,13 @@ class TestPs1ARaiseAbandonsTheStatementsBelowItInTheSameBlock(TestPs1):
         self._assertDeobfuscatesTo("""
             function zzqfoo1 { 'boom' }
             zzqfoo1
+        """, "'boom'")
+
+    def test_a_call_reached_only_through_a_later_invocation_is_folded(self):
+        self._assertDeobfuscatesTo("""
+            function A { zzqfoo1 }
+            function zzqfoo1 { 'boom' }
+            A
         """, "'boom'")
 
 class TestPs1TheHandlerAroundANoiseBarewordHasToMatchIt(TestPs1):
