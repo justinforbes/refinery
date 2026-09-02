@@ -191,6 +191,11 @@ class ReachingModel:
         the same reason a lexical declaration is: the value arrives where the declaration runs, so a
         read of the name before it answers something else and may not move across it. A function
         declared in the scope it names is not, its value being there before any statement runs.
+
+        The flow-aware sibling of `SemanticModel.binding_values`: that query lists the values a
+        binding's readable channels store and whether the list is complete, while this one enumerates
+        the sites whose execution changes which value a read observes — every write, whatever it
+        stores, is a kill here even where it is no readable channel there.
         """
         yield from binding.writes
         lexical = binding.is_lexical

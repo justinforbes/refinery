@@ -89,6 +89,51 @@ class TestSemanticModel(TestBase):
         ast, model = self._model('var x;\nx = 1;\nx = 2;')
         self.assertIsNone(model.singular_value(model.binding_of(self._decl(ast, model, 'x'))))
 
+    def test_singular_value_is_none_when_a_write_overwrites_the_declaration_value(self):
+        for label, source in {
+            'initializer': 'var x = 1; x = 5; console.log(x);',
+            'function declaration': 'function x() {} x = 5; console.log(x);',
+            'class declaration': 'class x {} x = 5; console.log(x);',
+        }.items():
+            with self.subTest(label):
+                ast, model = self._model(source)
+                binding = model.binding_of(self._decl(ast, model, 'x'))
+                self.assertIsNone(model.singular_value(binding))
+                self.assertIsNone(model.binding_establishment_sites(binding))
+
+    def test_binding_values_lists_every_spelled_value_of_a_multiply_written_name(self):
+        ast, model = self._model('var x = 1;\nx = 2;\nx = 3;\nconsole.log(x);')
+        values, complete = model.binding_values(model.binding_of(self._decl(ast, model, 'x')))
+        self.assertTrue(complete)
+        self.assertEqual(sorted(JsSynthesizer().convert(value) for value in values), ['1', '2', '3'])
+
+    def test_binding_values_of_a_parameter_are_incomplete(self):
+        for label, expected in {
+            'function f(p) { return p; }': [],
+            'function f(p) { p = 1; return p; }': ['1'],
+        }.items():
+            with self.subTest(label):
+                ast, model = self._model(label)
+                values, complete = model.binding_values(model.binding_of(self._decl(ast, model, 'p')))
+                self.assertFalse(complete)
+                self.assertEqual([JsSynthesizer().convert(value) for value in values], expected)
+
+    def test_binding_values_are_incomplete_where_a_channel_spells_no_value(self):
+        for label, source in {
+            'compound assignment': 'var x = 1; x += 2; console.log(x);',
+            'update': 'var x = 1; x++; console.log(x);',
+            'destructured initializer': 'var { x } = console; console.log(x);',
+            'destructured assignment': 'var x; [x] = [1]; console.log(x);',
+            'for-of head': 'for (var x of [1]) { console.log(x); }',
+            'for-in head': 'for (var x in console) { console.log(x); }',
+            'catch parameter': 'try {} catch (x) { console.log(x); }',
+        }.items():
+            with self.subTest(label):
+                ast, model = self._model(source)
+                _, complete = model.binding_values(model.binding_of(self._decl(ast, model, 'x')))
+                self.assertFalse(complete)
+                self.assertIsNone(model.singular_value(model.binding_of(self._decl(ast, model, 'x'))))
+
     def test_let_is_block_scoped_and_outer_use_is_free(self):
         ast, model = self._model('{ let a; a; } a;')
         a_decl, a_inner, a_outer = self._idents(ast, 'a')

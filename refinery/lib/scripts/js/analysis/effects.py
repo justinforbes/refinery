@@ -1718,12 +1718,11 @@ class EffectModel:
     ) -> JsFunctionDeclaration | JsFunctionExpression | JsArrowFunctionExpression | None:
         """
         The single function *binding* names for a consumer that resolves calls without execution ordering
-        — the interpreter — or `None`. `function_of` narrowed to that ordering-free view: a pure function
-        declaration, or a hoisted `var`/`let` assigned a function exactly once (`var f; f = function(){}`,
-        the bare-assignment form namespace flattening leaves), qualifies; a name that already carried a
-        value from its declaration — a function/class declaration, an initialized declarator, or a
-        parameter — and is then reassigned holds two values across its life and is refused. This reproduces
-        the filter the evaluator's visible-functions map applied before interpretation routed resolution
+        — the interpreter — or `None`. A name that carried a value from its declaration and is then
+        reassigned holds two values across its life and is refused; since `SemanticModel.singular_value`
+        took the complete-singleton contract, that refusal is the query's own, and this answer equals
+        `function_of`. The name survives for the intent it documents at its call sites — the ordering-free
+        view the evaluator's visible-functions map applied before interpretation routed resolution
         through the model.
         """
         return _unambiguous_function(self.model, binding)
@@ -2115,10 +2114,14 @@ class EffectModel:
     def _trusted_global_alias_read(self, member: JsMemberExpression) -> Binding | None:
         """
         The local binding *member*'s base reads when *member* is a non-computed access of a trusted
-        global data property through a single-assignment local whose value is provably the global object
-        — a `globalThis` alias or a `globalThis || ...` guard — under `global_pristine`; `None`
-        otherwise. The binding is returned rather than a verdict because whether it already holds the
-        global where it is read is an ordering question for a layer that sees control flow.
+        global data property through a local provably holding the global object — a `globalThis` alias
+        or a `globalThis || ...` guard — under `global_pristine`; `None` otherwise. This answer drives
+        a rewrite, so it takes the removing polarity over `SemanticModel.binding_values`: the value set
+        must be complete, non-empty (a complete empty set answers the universal question vacuously),
+        and EVERY value must be the object — the opposite reading from the recording
+        `names_the_global_object`, which admits on ANY value. The binding is returned rather than a
+        verdict because whether it already holds the global where it is read is an ordering question
+        for a layer that sees control flow.
         """
         if not self.global_pristine or member.computed:
             return None
@@ -2131,13 +2134,16 @@ class EffectModel:
         binding = self.model.resolve(base)
         if binding is None or self.model.reflection_can_reach(binding):
             return None
-        return binding if self._value_is_global_object(self.model.singular_value(binding)) else None
+        values, complete = self.model.binding_values(binding)
+        if not complete or not values:
+            return None
+        return binding if all(self._value_is_global_object(value) for value in values) else None
 
     def _value_is_global_object(self, node: Node | None) -> bool:
         """
-        Whether *node*, the value a local is single-assigned, is provably the global object: the
-        canonical `globalThis`, or a `globalThis || ...` existence guard whose truthy left is exactly it.
-        A host alias that may be `undefined` is excluded, so a read through the local cannot throw on a
+        Whether *node*, one value a local holds, is provably the global object: the canonical
+        `globalThis`, or a `globalThis || ...` existence guard whose truthy left is exactly it. A host
+        alias that may be `undefined` is excluded, so a read through the local cannot throw on a
         nullish base.
         """
         return self.intrinsic_of(node) is GLOBAL_OBJECT
@@ -2689,22 +2695,8 @@ def _unambiguous_function(
     The module-scope form of `EffectModel.unambiguous_function`, which delegates here. See that method for
     which bindings qualify.
     """
-    if binding is None:
-        return None
     value = model.singular_value(binding)
-    if not isinstance(value, FUNCTION_NODES):
-        return None
-    if not binding.writes:
-        return value
-    declaration = binding.declarations[0]
-    parent = declaration.parent
-    if (
-        isinstance(parent, JsVariableDeclarator)
-        and parent.id is declaration
-        and parent.init is None
-    ):
-        return value
-    return None
+    return value if isinstance(value, FUNCTION_NODES) else None
 
 
 class _IntrinsicAliases:
@@ -2793,6 +2785,14 @@ def _binding_value_roots(binding: Binding) -> Iterator[JsIdentifier]:
     *may* analysis, and `arguments[k] = Math` stores the intrinsic under a parameter's name whether
     or not the text says which parameter or whether the call supplied it; leaving it out is exactly
     the missed alias the caller's docstring names as a wrong answer.
+
+    The may-side sibling of `SemanticModel.binding_values`, deliberately wider than its readable
+    channels: a compound assignment's right side contributes here where the must-query refuses the
+    whole binding, because `_value_escapes`'s rebinding arm spares a target only while the names it
+    may denote are still attributed back, and narrowing this walk would turn those rebindings into
+    escapes. A channel neither walk reads — an intrinsic stored through a pattern, a parameter fed at
+    a call site — is covered at its source instead: the intrinsic *read* that fed it escapes, which
+    withdraws the key trust there.
     """
     for declaration in binding.declarations:
         parent = getattr(declaration, 'parent', None)

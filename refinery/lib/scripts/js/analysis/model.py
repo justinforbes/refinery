@@ -1031,6 +1031,18 @@ def annex_b_copies_into(binding: Binding) -> bool:
     return statement_list_holding(declaration) is not _statement_list_holder_of(binding.scope)
 
 
+def _loop_head_assigns(declarator: JsVariableDeclarator) -> bool:
+    """
+    Whether *declarator* is the target a `for-in`/`for-of` head writes on each iteration — a value
+    channel that spells no stored value, so a binding it declares has no complete value set.
+    """
+    declaration = declarator.parent
+    if not isinstance(declaration, JsVariableDeclaration):
+        return False
+    head = declaration.parent
+    return isinstance(head, (JsForInStatement, JsForOfStatement)) and head.left is declaration
+
+
 def _statement_list_holder_of(scope: Scope) -> Node | None:
     """
     The node whose statement list *scope* binds the declarations of, which is the scope's own node
@@ -1903,44 +1915,100 @@ class SemanticModel:
         )
         return points
 
+    def binding_values(self, binding: Binding | None) -> tuple[list[Node], bool]:
+        """
+        Every value expression the text stores under *binding* through a channel that spells its stored
+        value, in no promised order, and whether that list is complete — whether no other channel can
+        give the name a value.
+        The readable channels are a declarator's initializer, the function or class of a declaration,
+        and the right side of a plain `=` written through the referencing identifier. Every other way a
+        value can arrive makes the answer incomplete without contributing a value: **every** parameter
+        is incomplete, because the call site is a value channel this model cannot see, and so are a
+        catch or import binding and a function expression's own name; a compound assignment, an update,
+        a `for-in`/`for-of` head, and a destructuring target store a value they do not spell; a write
+        recorded with no value and a dynamic rebinding (`binding_maybe_reassigned_dynamically`) say a
+        value arrived without saying which. A write through a member access on a global-object alias is
+        left unread and breaks completeness too, because the walk recording those entries consults this
+        query through `names_the_global_object`, so an answer built on them would depend on how far
+        that walk had got. A binding with no declaration — an implicit global, and the binding
+        `_ensure_implicit_global_from_alias_write` mints — contributes nothing and is never complete,
+        for that same walk-order reason.
+
+        The values hold wherever the name is not in their temporal dead zone; a bare declarator
+        contributes no value even though the name reads `undefined` there, and a consumer that needs a
+        value established before a use orders it separately (`binding_establishment_sites`). A
+        recognizer whose safe direction is admitting decides on ANY value and ignores completeness; a
+        consumer whose rewrite needs the binding to hold nothing else requires completeness first, and
+        must also require a value, since a complete empty list answers every universal question
+        vacuously. `refinery.lib.scripts.js.analysis.effects._binding_value_roots` is the may-side
+        sibling that over-approximates where this list refuses, and
+        `refinery.lib.scripts.js.analysis.reaching.ReachingModel._value_definitions` the flow-aware one
+        that enumerates kill sites rather than values.
+        """
+        channels, complete = self._binding_value_channels(binding)
+        return [value for _, value in channels], complete
+
+    def _binding_value_channels(
+        self, binding: Binding | None
+    ) -> tuple[list[tuple[Node, Node]], bool]:
+        """
+        The readable value channels of *binding* as `(site, value)` pairs — the node whose execution
+        installs the value, and the value expression — plus the completeness verdict `binding_values`
+        documents. One derivation feeds `binding_values`, `singular_value`, and
+        `binding_establishment_sites`, so the three can never disagree about which channels a binding
+        has. The value of a lone-assignment channel is returned with its parentheses stripped, the
+        normalization every consumer of `singular_value` has always received there.
+        """
+        if binding is None or not binding.declarations:
+            return [], False
+        channels: list[tuple[Node, Node]] = []
+        complete = not self.binding_maybe_reassigned_dynamically(binding)
+        for declaration in binding.declarations:
+            parent = declaration.parent
+            if (
+                isinstance(parent, (JsFunctionDeclaration, JsClassDeclaration))
+                and parent.id is declaration
+            ):
+                channels.append((parent, parent))
+            elif isinstance(parent, JsVariableDeclarator) and parent.id is declaration:
+                if _loop_head_assigns(parent):
+                    complete = False
+                if parent.init is not None:
+                    channels.append((parent, parent.init))
+            else:
+                complete = False
+        for write in binding.writes:
+            assignment = write.parent
+            stored = None
+            if (
+                isinstance(write, JsIdentifier)
+                and isinstance(assignment, JsAssignmentExpression)
+                and assignment.operator == '='
+                and strip_parens(assignment.left) is write
+            ):
+                stored = strip_parens(assignment.right)
+            if stored is None:
+                complete = False
+            else:
+                channels.append((write, stored))
+        return channels, complete
+
     def singular_value(self, binding: Binding | None) -> Node | None:
         """
-        The single value node a *binding* provably holds: the initializer of a sole `var`/`let`/`const`
-        declarator, the function of a sole function declaration, or the right-hand side of the one
-        assignment that establishes a name written exactly once (`x = <value>`, the form namespace
-        flattening leaves). `None` when the binding is absent, redeclared, reassigned to more than one
-        value, dynamically rebindable, or declared with no initializer and never assigned. The value is
+        The single value node a *binding* provably holds: the sole entry of a complete
+        `binding_values` answer. `None` when the binding is absent, stores more than one value, or has
+        any channel the text does not spell — a name whose declaration carries a value and is then
+        assigned holds two values across its life and is refused, as is every parameter. The value is
         what the name denotes wherever it is not in the value's temporal dead zone; a consumer that also
         needs the value established before a use orders it separately, since a bare-assignment binding
         reads `undefined` before its write. `EffectModel.function_of` is the function-typed specialization
         of this query, and it is the value-resolution the bare-assignment recognition sites route through
         instead of re-deriving binding shapes.
         """
-        if binding is None or len(binding.declarations) != 1:
+        channels, complete = self._binding_value_channels(binding)
+        if not complete or len(channels) != 1:
             return None
-        if binding.written_at_entry:
-            return None
-        if self.binding_maybe_reassigned_dynamically(binding):
-            return None
-        decl = binding.declarations[0]
-        parent = decl.parent
-        if not binding.writes:
-            if isinstance(parent, JsFunctionDeclaration) and parent.id is decl:
-                return parent
-            if isinstance(parent, JsClassDeclaration) and parent.id is decl:
-                return parent
-            if isinstance(parent, JsVariableDeclarator) and parent.id is decl:
-                return parent.init
-            return None
-        if len(binding.writes) == 1:
-            assignment = binding.writes[0].parent
-            if (
-                isinstance(assignment, JsAssignmentExpression)
-                and assignment.operator == '='
-                and strip_parens(assignment.left) is binding.writes[0]
-            ):
-                return strip_parens(assignment.right)
-        return None
+        return channels[0][1]
 
     def establishment_sites(self, function: Node) -> list[Node] | None:
         """
@@ -1958,30 +2026,23 @@ class SemanticModel:
         before any statement runs — a function declaration — so no ordering is required; the declarator
         when the value is a `var`/`let`/`const` initializer, which is absent until that declarator runs;
         the class declaration when the value is a class, which is in its temporal dead zone until it runs;
-        the recorded writes when a lone assignment installs it (`f = function(){}`, the form namespace
-        flattening leaves). `None` when the binding holds no single such value, so its presence cannot be
-        ordered and the caller declines — which is also the answer where a write leaves no `writes`
-        entry because nothing says what it stored, since an empty `writes` would otherwise read as a
-        value hoisted into place before any statement runs. This mirrors `singular_value`'s binding
-        shapes exactly, one query returning the value and the other the nodes that establish it.
+        the recorded write when a lone assignment installs it (`f = function(){}`, the form namespace
+        flattening leaves). `None` when the binding holds no single such value, so its presence cannot
+        be ordered and the caller declines — decided by the same complete-singleton `binding_values`
+        answer `singular_value` requires, so the two queries can never disagree about which bindings
+        have an orderable value: one returns the value and the other the node that establishes it.
         Ordering the returned nodes against the use is the caller's job, since that needs the
         dominance model this layer must not depend on.
         """
-        if binding is None or len(binding.declarations) != 1:
+        if binding is None:
             return None
-        if binding.has_indefinite_write:
+        channels, complete = self._binding_value_channels(binding)
+        if not complete or len(channels) != 1:
             return None
-        if binding.writes:
-            return list(binding.writes)
-        declaration = binding.declarations[0]
-        parent = declaration.parent
-        if isinstance(parent, JsFunctionDeclaration):
-            return [parent] if annex_b_copies_into(binding) else []
-        if isinstance(parent, JsClassDeclaration):
-            return [parent]
-        if isinstance(parent, JsVariableDeclarator):
-            return [parent]
-        return None
+        site, _ = channels[0]
+        if isinstance(site, JsFunctionDeclaration):
+            return [site] if annex_b_copies_into(binding) else []
+        return [site]
 
     def is_shadowed(self, name: str, at: Node, outer: Scope) -> bool:
         """
@@ -2476,24 +2537,27 @@ class SemanticModel:
 
     def names_the_global_object(self, node: Node | None, *, depth: int = 0) -> bool:
         """
-        Whether *node* is a name whose one value is the global object, so a property read on it is a
-        read of a global. The value comes from `singular_value`, so a name written more than once,
-        redeclared, or reachable by a dynamic rebinding has none and is refused.
+        Whether *node* is a name the file gives the global object, so a property read on it may be a
+        read of a global. ANY value of `binding_values` being the object is enough, and completeness
+        is not asked: the callers record a reference, where one admission too many keeps a
+        declaration and one refusal too many deletes one, so admitting is this answer's safe
+        direction — a name that held the object on one branch of its life records the reads made
+        through it even where another branch gave it something else.
 
-        A name the file only ever assigns has none either: `_ensure_implicit_global_from_alias_write`
-        mints its binding without a declaration and both value queries decline for it. That is what
-        keeps this answer out of the walk which is still recording those very writes — a read
-        admitted or refused by how far that walk had got would depend on nothing the program says.
+        A name the file only ever assigns still answers nothing:
+        `_ensure_implicit_global_from_alias_write` mints its binding without a declaration and
+        `binding_values` declines for it. That is what keeps this answer out of the walk which is
+        still recording those very writes — a read admitted or refused by how far that walk had got
+        would depend on nothing the program says.
 
-        The value holds wherever the name is not in its temporal dead zone, and nothing here orders
-        the establishing definition before the read. A caller driving a rewrite has to; the callers
-        here record a reference, where one admission too many keeps a declaration and one refusal
-        too many deletes one.
+        The values hold wherever the name is not in their temporal dead zone, and nothing here orders
+        an establishing definition before the read. A caller driving a rewrite has to — and needs the
+        complete-singleton reading `singular_value` gives, not this one.
         """
         if depth >= _GLOBAL_ALIAS_CHAIN_LIMIT or not isinstance(node, JsIdentifier):
             return False
-        return self._value_is_the_global_object(
-            self.singular_value(self.resolve(node)), depth + 1)
+        values, _ = self.binding_values(self.resolve(node))
+        return any(self._value_is_the_global_object(value, depth + 1) for value in values)
 
     def _value_is_the_global_object(self, value: Node | None, depth: int) -> bool:
         """
@@ -2768,7 +2832,10 @@ class SemanticModel:
         The function *call* runs, as far as it resolves without leaving the text: the callee written
         as a function, a name whose one value is a function, or a name whose one value is a
         zero-argument IIFE returning a single function — the shape the self-defending wrapper's
-        factory takes. `None` when the callee resolves to none of these.
+        factory takes. `None` when the callee resolves to none of these. A named callee is read
+        through `singular_value`, the complete-singleton reading: a name that may hold another value
+        — a parameter, or a declaration value later overwritten — resolves to `None`, and every
+        consumer treats an unresolved callee as the observed hand-over.
         """
         callee = strip_parens(call.callee)
         if isinstance(callee, FUNCTION_NODES):
@@ -2855,7 +2922,9 @@ class SemanticModel:
         there; `False` when it is such a receiver but the target reads `this` or does not resolve to
         a function; and `None` when *node* is not used as such a receiver at all, the case the caller
         reads as an observation. The target is resolved through the argument map when it is another
-        parameter of the same call, and otherwise by its one value.
+        parameter of the same call, and otherwise by its one value — `singular_value`'s
+        complete-singleton reading, so a target whose declaration value a later write overwrites
+        resolves to nothing and the receiver stays observed.
         """
         parent = enclosing_operator(node)
         if not isinstance(parent, JsCallExpression):

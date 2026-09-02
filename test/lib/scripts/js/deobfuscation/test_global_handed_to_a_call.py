@@ -137,6 +137,21 @@ _APPLIES_A_PAYLOAD_THAT_READS_THIS = a_program("""
     a(this, function () { return this.q; });
     """)
 
+#: The apply target held a `this`-reader when the apply ran and was reassigned to a `this`-free
+#: function only afterwards. A receiver gate that answers from the reassigned value alone deems the
+#: hand-over unobserved and deletes the global the payload read through its `this`.
+_APPLY_TARGET_REASSIGNED_AFTER_THE_APPLY_RAN = a_program("""
+    var secret = 'S';
+    function inner(host) { return host.secret; }
+    function wrap(recv) {
+      var t = function () { return inner(this); };
+      var r = t.apply(recv, []);
+      t = function () { return 'plain'; };
+      return r;
+    }
+    console.log(wrap(globalThis));
+    """)
+
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestAWrapperApplyingAPayloadBehavesTheWayTheHostDoes(TestBase):
@@ -149,6 +164,7 @@ class TestAWrapperApplyingAPayloadBehavesTheWayTheHostDoes(TestBase):
         for label, source in {
             'a this-free payload never reads the object': _APPLIES_A_THIS_FREE_PAYLOAD,
             'a payload reads the object through its this': _APPLIES_A_PAYLOAD_THAT_READS_THIS,
+            'a reassigned target held a this-reader at the apply': _APPLY_TARGET_REASSIGNED_AFTER_THE_APPLY_RAN,
         }.items():
             with self.subTest(label):
                 before, after = before_and_after_in_a_host(source)
