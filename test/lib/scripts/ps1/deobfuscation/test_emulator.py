@@ -1236,7 +1236,6 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
         """)
         self._assertKept(source)
 
-    @unittest.expectedFailure
     def test_a_read_of_an_unset_name_in_a_body_is_withheld_under_strict_mode(self):
         # `Set-StrictMode` turns a read of a never-assigned variable into a statement-terminating
         # error, so a body 5.1 aborts must not fold to the value an isolated body reads `$q` as the

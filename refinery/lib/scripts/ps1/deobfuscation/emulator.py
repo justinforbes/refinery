@@ -376,6 +376,7 @@ class _Ps1Interpreter:
         depth: int = 0,
         caller_scope_names: frozenset[str] = frozenset(),
         strict_v2_may_be_in_force: bool = True,
+        strict_may_be_in_force: bool = False,
     ):
         self.max_iterations = max_iterations
         self.max_string_len = max_string_len
@@ -389,6 +390,12 @@ class _Ps1Interpreter:
         #: the safe one: a body evaluated without a script to scan for the arming withholds those
         #: fakes. Only the driver that has scanned the whole script lowers it. See `_resolve_property`.
         self._strict_v2 = strict_v2_may_be_in_force
+        #: Whether the script may arm `Set-StrictMode` at any version, under which a read of a
+        #: never-assigned name is a statement-terminating error rather than the `$null` a default
+        #: read answers. This gates an *existing* fold, so the default is the current behaviour —
+        #: a body evaluated without a script to scan reads an unset name as `$null` — and only the
+        #: driver that measured the arming raises it. See `_eval_variable`.
+        self._strict = strict_may_be_in_force
         #: The names an enclosing scope this fold was entered without may bind — the script-scope
         #: writes the driver gives it. A read of one before this body writes it is refused, not
         #: read as `$null`; see `_eval_variable`.
@@ -796,6 +803,7 @@ class _Ps1Interpreter:
             depth=self._depth + 1,
             caller_scope_names=self._caller_scope_names,
             strict_v2_may_be_in_force=self._strict_v2,
+            strict_may_be_in_force=self._strict,
         )
         try:
             result = child.execute(body, bindings)
@@ -912,6 +920,14 @@ class _Ps1Interpreter:
             # `$env:Temp + 1` on the host and not `1`. A name no enclosing scope writes is genuinely
             # unset, so an accumulator like `$r = $r + …` still reads its first `$r` as `$null` and
             # folds; only a name the script binds elsewhere withholds the fold.
+            raise _Ps1InterpreterError
+        if self._strict and not self._written(name):
+            # Under `Set-StrictMode` a read of a never-assigned name is a statement-terminating
+            # error, not the `$null` an isolated body reads it as, so the fold is withheld rather
+            # than answered with a value 5.1 throws on. This is the emulator's half of what
+            # `Ps1NullVariableInlining` does at script scope, where the same arming stands the whole
+            # pass down. The accumulator the comment above folds — a first `$r` read as `$null` — is
+            # exactly a never-assigned read, and it too raises here where strict mode may be armed.
             raise _Ps1InterpreterError
         return self._lookup(name)
 
@@ -1719,6 +1735,7 @@ class Ps1FunctionEvaluator(Transformer):
         self._commands: Ps1CommandModel | None = None
         self._caller_scope_names: frozenset[str] = frozenset()
         self._strict_v2 = True
+        self._strict = False
         self._entry = False
 
     def visit(self, node):
@@ -1743,6 +1760,7 @@ class Ps1FunctionEvaluator(Transformer):
             exports = cache.call_graph.exports_a_name
             self._commands = cache.commands
             self._strict_v2 = cache.faults.strict_mode_v2_may_be_in_force()
+            self._strict = cache.faults.strict_mode_may_be_in_force()
             super().visit(node)
             # Folding a call into its value preserves meaning whoever else can reach the name, so
             # the substitution above is unconditional. Deleting the *definition* is a name-keyed
@@ -1836,6 +1854,7 @@ class Ps1FunctionEvaluator(Transformer):
             functions=self._functions,
             caller_scope_names=self._caller_scope_names,
             strict_v2_may_be_in_force=self._strict_v2,
+            strict_may_be_in_force=self._strict,
         )
         if funcdef.body is None:
             return None
