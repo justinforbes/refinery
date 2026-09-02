@@ -35,9 +35,14 @@ class ModelCache(ModelCacheBase):
     observes models consistent with the current tree. The derived models are always built on the
     current semantic model, so dropping them together keeps them consistent.
 
-    A transform whose own rewrites cannot change the answers it reads may hold the models for the length
-    of one pass through `pinned`, which suppresses both drops until the pass ends. See that method for
-    the obligation this places on the caller.
+    A transform may hold the models for the length of one pass through `pinned`, which suppresses both
+    drops until the pass ends. The obligation is the one
+    `refinery.lib.scripts.modelcache.ModelCacheBase.pinned` states: the transform's own rewrites must
+    never make the models it reads more permissive. A rewrite that only restricts what the models would
+    answer makes the held answer the stricter one, so the pass declines where it could have proceeded;
+    one that could reveal a fact the held models predate would act on the stale, more permissive answer
+    and must not read them pinned. The `--no-pin` differential (`test/conftest.py`) is the mechanical
+    check: the whole suite must pass identically with every pin neutralized.
     """
 
     _SLOTS = ('_model', '_control_flow', '_effects', '_liveness', '_dominance', '_reaching')

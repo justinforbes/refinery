@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import os
+import unittest
+
 from contextlib import contextmanager
 
 from test import TestBase
 
 import refinery.lib.scripts.js.analysis.cache as cache_module
-from refinery.lib.scripts import _remove_from_parent
+from refinery.lib.scripts import Transformer, _remove_from_parent
 from refinery.lib.scripts.js.analysis.cache import ModelCache
 from refinery.lib.scripts.js.analysis.dominance import build_dominance
 from refinery.lib.scripts.js.analysis.liveness import build_liveness
 from refinery.lib.scripts.js.deobfuscation.reflection import JsReflectionInlining
 from refinery.lib.scripts.js.deobfuscation.simplify import JsSimplifications
+from refinery.lib.scripts.js.deobfuscation.wrappers import JsCallWrapperInliner
 from refinery.lib.scripts.js.model import JsIdentifier, JsVariableDeclaration
 from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
@@ -22,6 +26,37 @@ def _no_pin(self):
     A pin that holds nothing, standing in for the unpinned cache in a comparison.
     """
     yield self
+
+
+#: The `--no-pin` differential removes the pin mechanism, so a test of that mechanism — a build
+#: count the pin flattens, or the holding behavior itself — holds only outside the differential.
+#: Every result-equality assertion stays in force there, which is the differential's whole point.
+_a_property_of_the_pin_itself = unittest.skipIf(
+    bool(os.environ.get('REFINERY_TEST_NO_PIN')),
+    'the no-pin differential removed the mechanism this test measures',
+)
+
+
+def _transform_root_builds(transform: type[Transformer], source: str) -> tuple[int, str]:
+    """
+    How many times the script's own semantic model is built during one pass of *transform*, with the
+    resulting script. Builds over freshly parsed fragments are excluded by identity of the root node.
+    """
+    script = JsParser(source).parse()
+    count = {'n': 0}
+    real_model = cache_module.build_semantic_model
+
+    def counting_model(root):
+        if root is script:
+            count['n'] += 1
+        return real_model(root)
+
+    cache_module.build_semantic_model = counting_model
+    try:
+        transform().visit(script)
+    finally:
+        cache_module.build_semantic_model = real_model
+    return count['n'], JsSynthesizer().convert(script)
 
 
 class TestModelCache(TestBase):
@@ -88,6 +123,7 @@ class TestModelCache(TestBase):
         )
 
 
+@_a_property_of_the_pin_itself
 class TestPinnedModels(TestBase):
     """
     A pinned cache holds its models across tree mutations for the length of a block, which is what stops a
@@ -245,11 +281,13 @@ class TestSimplificationDoesNotRebuildPerFold(TestBase):
             cache_module.build_effects = real_effects
         return counts['model'], counts['effects'], JsSynthesizer().convert(script)
 
+    @_a_property_of_the_pin_itself
     def test_gated_folds_do_not_multiply_model_builds(self):
         few = self._builds(self._gated(10))[:2]
         many = self._builds(self._gated(80))[:2]
         self.assertEqual(few, many)
 
+    @_a_property_of_the_pin_itself
     def test_gated_folds_build_each_model_once(self):
         self.assertEqual((1, 1), self._builds(self._gated(40))[:2])
 
@@ -312,32 +350,17 @@ class TestReflectiveInliningDoesNotRebuildPerSite(TestBase):
         return F'{body}\nSINK({" + ".join(F"m{i}()" for i in range(count))});'
 
     def _root_builds(self, source: str) -> tuple[int, str]:
-        """
-        How many times the script's own semantic model is built during one reflective-inlining pass, with
-        the resulting script. Builds over inlined fragments are excluded by identity of the root node.
-        """
-        script = JsParser(source).parse()
-        count = {'n': 0}
-        real_model = cache_module.build_semantic_model
+        return _transform_root_builds(JsReflectionInlining, source)
 
-        def counting_model(root):
-            if root is script:
-                count['n'] += 1
-            return real_model(root)
-
-        cache_module.build_semantic_model = counting_model
-        try:
-            JsReflectionInlining().visit(script)
-        finally:
-            cache_module.build_semantic_model = real_model
-        return count['n'], JsSynthesizer().convert(script)
-
+    @_a_property_of_the_pin_itself
     def test_root_model_is_built_once_regardless_of_site_count(self):
         self.assertEqual(self._root_builds(self._sites(2))[0], self._root_builds(self._sites(16))[0])
 
+    @_a_property_of_the_pin_itself
     def test_root_model_is_built_exactly_once(self):
         self.assertEqual(1, self._root_builds(self._sites(8))[0])
 
+    @_a_property_of_the_pin_itself
     def test_retirement_pays_one_rebuild_regardless_of_temporary_count(self):
         self.assertEqual(2, self._root_builds(self._temporaries(2))[0])
         self.assertEqual(2, self._root_builds(self._temporaries(16))[0])
@@ -345,12 +368,10 @@ class TestReflectiveInliningDoesNotRebuildPerSite(TestBase):
     def test_sites_sharing_free_reads_all_inline_in_one_pass(self):
         """
         The stale-name veto is fed only by names a splice declares or writes, so sites whose bodies
-        merely read the same free names defer nothing to the next pass: one pass with one model build
-        inlines all of them.
+        merely read the same free names defer nothing to the next pass: one pass inlines all of them.
         """
         body = '\n'.join(F"eval('SINK({i}, shared);');" for i in range(64))
-        builds, output = self._root_builds(body)
-        self.assertEqual(1, builds)
+        output = self._root_builds(body)[1]
         self.assertNotIn('eval', output)
         self.assertEqual(64, output.count('SINK('))
 
@@ -359,6 +380,47 @@ class TestReflectiveInliningDoesNotRebuildPerSite(TestBase):
         A held model that suppressed an inline would also flatten the count, so the output must match the
         unpinned pass exactly.
         """
+        source = self._sites(8)
+        with_pin = self._root_builds(source)[1]
+        original = ModelCache.pinned
+        ModelCache.pinned = _no_pin
+        try:
+            without_pin_builds, without_pin = self._root_builds(source)
+        finally:
+            ModelCache.pinned = original
+        self.assertEqual(with_pin, without_pin)
+        self.assertGreater(without_pin_builds, 1)
+
+
+class TestWrapperInliningDoesNotRebuildPerSite(TestBase):
+    """
+    The call-wrapper inliner holds the models for its pass because every replacement advances the
+    tree's mutation counter and an unpinned read would rebuild them once per call site. Nothing its
+    loop does makes a model it reads more permissive — a replaced call is gone and no declaration
+    moves — so the held answers stay the stricter ones; the output comparison checks that the pinned
+    pass writes exactly what the unpinned one does.
+    """
+
+    @staticmethod
+    def _sites(count: int) -> str:
+        """
+        A script with one call wrapper and *count* call sites it reaches, each replaced in one pass.
+        """
+        calls = '\n'.join(F'var r{i} = w({i}, {i + 1});' for i in range(count))
+        return (
+            'function w(a, b) { return target(a, b); }\n'
+            F'{calls}\nSINK({", ".join(F"r{i}" for i in range(count))});'
+        )
+
+    def _root_builds(self, source: str) -> tuple[int, str]:
+        return _transform_root_builds(JsCallWrapperInliner, source)
+
+    @_a_property_of_the_pin_itself
+    def test_root_model_is_built_once_regardless_of_site_count(self):
+        self.assertEqual(1, self._root_builds(self._sites(2))[0])
+        self.assertEqual(1, self._root_builds(self._sites(16))[0])
+
+    def test_holding_the_model_does_not_change_the_result(self):
         source = self._sites(8)
         with_pin = self._root_builds(source)[1]
         original = ModelCache.pinned
