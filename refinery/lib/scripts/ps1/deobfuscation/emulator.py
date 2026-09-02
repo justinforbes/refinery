@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Mapping, TypeAlias
 
-    _Value: TypeAlias = str | int | float | bool | list | None
+    _Value: TypeAlias = 'str | int | float | bool | list | None | _MatchTable'
 
 from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
@@ -230,6 +230,41 @@ class _Char(str):
     String would — it concatenates, coerces and indexes the same — and only the places that must tell
     the two apart look for this type.
     """
+
+
+class _MatchTable:
+    """
+    The `$Matches` automatic variable, the `System.Hashtable` a successful `-match` leaves behind. It
+    holds the whole match under the Int32 key `0` and each group that took part under its own number,
+    every value a String. It answers a subscript and nothing else: a script reads its captures as
+    `$Matches[<n>]`, so an index into it is honoured, and every other use — coercing it to text,
+    adding to it, spelling it back as a value — is left to fall through to the interpreter's refusal,
+    which stops a fold at the first step that would need a hashtable this does not model rather than
+    inventing one.
+    """
+    __slots__ = ('entries',)
+
+    def __init__(self, entries: dict[int, str]):
+        self.entries = entries
+
+
+#: The lowercased name of the `$Matches` automatic variable in the interpreter's scope.
+_MATCHES_NAME = 'matches'
+
+
+def _matches_table(match: re.Match) -> _MatchTable:
+    """
+    The `$Matches` table a successful match leaves: the whole match under the Int32 key `0` and each
+    group that took part under its own number. A group an optional quantifier skipped is absent from
+    the table rather than empty, which is how 5.1 fills it — `'ac' -match '(a)(b)?(c)'` leaves keys
+    `0`, `1` and `3` and reads `$Matches[2]` as `$null`.
+    """
+    entries: dict[int, str] = {0: match.group(0)}
+    for index in range(1, match.re.groups + 1):
+        captured = match.group(index)
+        if captured is not None:
+            entries[index] = captured
+    return _MatchTable(entries)
 
 
 class _Ps1InterpreterError(Exception):
@@ -1341,6 +1376,8 @@ class _Ps1Interpreter:
 
     def _eval_index(self, node: Ps1IndexExpression) -> _Value:
         obj = self._eval(node.object)
+        if isinstance(obj, _MatchTable):
+            return self._match_group(obj, self._eval(node.index))
         idx = self._to_index(self._eval(node.index))
         try:
             if isinstance(obj, str):
@@ -1349,6 +1386,23 @@ class _Ps1Interpreter:
                 return obj[idx]
         except IndexError:
             raise _Ps1InterpreterError
+        raise _Ps1InterpreterError
+
+    @staticmethod
+    def _match_group(table: _MatchTable, index: _Value) -> _Value:
+        """
+        A subscript into `$Matches`. 5.1 keys the table by Int32 group number and reads a key it does
+        not hold as `$null` — `$Matches['1']` is empty where `$Matches[1]` is the first group, and a
+        group an optional quantifier skipped is no key at all — so a String or an out-of-range number
+        answers absent rather than a wrong group. An index that is neither a number nor text is
+        refused, so the fold stops rather than guessing which group a value names.
+        """
+        if isinstance(index, bool):
+            raise _Ps1InterpreterError
+        if isinstance(index, int):
+            return table.entries.get(index)
+        if isinstance(index, str):
+            return None
         raise _Ps1InterpreterError
 
     def _eval_cast(self, node: Ps1CastExpression) -> _Value:
@@ -1505,15 +1559,24 @@ class _Ps1Interpreter:
         except re.error:
             raise _Ps1InterpreterError
 
-    @staticmethod
-    def _eval_match(left: _Value, right: _Value, op: str) -> bool:
+    def _eval_match(self, left: _Value, right: _Value, op: str) -> bool:
+        """
+        The `-match` family, which answers whether the pattern is found and, on a find, refills the
+        `$Matches` table with the whole match and every group that took part. 5.1 leaves `$Matches`
+        untouched where the pattern is not found — a failed `-match` and a `-notmatch` whose pattern
+        misses both read the table an earlier match left — so it is rewritten only where the search
+        returns a match, and the value returned stays the bare found/not-found the operator negates.
+        """
         if not isinstance(left, str) or not isinstance(right, str):
             raise _Ps1InterpreterError
         flags = re.IGNORECASE if op[1] != 'c' else 0
         try:
-            return re.search(right, left, flags=flags) is not None
+            found = re.search(right, left, flags=flags)
         except re.error:
             raise _Ps1InterpreterError
+        if found is not None:
+            self._env[_MATCHES_NAME] = _matches_table(found)
+        return found is not None
 
     def _eval_contains(self, collection: _Value, item: _Value) -> bool:
         """

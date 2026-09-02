@@ -1405,7 +1405,6 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), "$x = 'Zb'")
 
-    @unittest.expectedFailure
     def test_a_match_leaves_the_group_it_captured_in_the_matches_variable(self):
         source = cleandoc("""
             function f {
@@ -1415,6 +1414,36 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
             $x = f
         """)
         self.assertEqual(self._deobfuscate(source), "$x = 'b'")
+
+    def test_the_zero_key_of_the_matches_variable_is_the_whole_match(self):
+        source = cleandoc("""
+            function f {
+              $null = 'abc' -match 'a(b)c'
+              $Matches[0]
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), "$x = 'abc'")
+
+    def test_a_notmatch_that_finds_the_pattern_fills_the_matches_variable(self):
+        source = cleandoc("""
+            function f {
+              $null = 'abc' -notmatch 'a(b)c'
+              $Matches[1]
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), "$x = 'b'")
+
+    def test_a_group_after_a_skipped_one_keeps_its_own_number_in_the_matches_variable(self):
+        source = cleandoc("""
+            function f {
+              $null = 'ac' -match 'a(b)?(c)'
+              $Matches[2]
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), "$x = 'c'")
 
     def test_a_split_limit_leaves_the_rest_of_the_string_in_the_final_element(self):
         for split, tail, expected in [
