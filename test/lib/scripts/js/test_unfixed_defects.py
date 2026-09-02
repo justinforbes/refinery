@@ -2879,50 +2879,6 @@ class TestASubstitutedNameStillResolvesWhereItIsWritten(TestBase):
     """
 
 
-#: A reflective-inlining pass retiring a single-use `Function`-constructor temporary whose only read
-#: the pinned model counted was the invocation the pass folded, while a direct `eval` inlined in the
-#: same pass splices in a second reference to the same temporary. The row is mapped to the behavior
-#: Node gives the original, which the retirement is meant to preserve and does not.
-A_RETIRED_TEMPORARY_A_SAME_PASS_EVAL_STILL_NAMES = {
-    'an eval names the temporary the fold retired': Program(
-        a_program("""
-            const m = Function('return 41');
-            console.log(m());
-            eval('console.log(m.name)');
-            """),
-        prints('41', 'anonymous'),
-    ),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-@one_expected_failure_per_program(A_RETIRED_TEMPORARY_A_SAME_PASS_EVAL_STILL_NAMES)
-class TestARetiredTemporaryIsStillNamedByASamePassEval(TestBase):
-    """
-    The reflective-inlining pass holds one model pinned for its whole run and retires a single-use
-    temporary — the local whose sole value is a `Function` construction — once every read the pinned
-    model shows was an invocation the pass inlined. A direct `eval` the same pass inlines splices in
-    code the pinned model never read, and where that code names the temporary the retirement counts
-    a live reference as none and drops the declaration out from under it.
-
-    Node runs `m()` and prints `41`, then reads `m.name` through the eval and prints `anonymous`,
-    the name a `Function` construction gives its function. The deobfuscation folds `m()` to `41`,
-    retires `const m`, and the spliced `console.log(m.name)` is left reading an undeclared `m`, so
-    the program comes back printing `41` and then throwing a `ReferenceError`.
-
-    `refinery.lib.scripts.js.deobfuscation.reflection.JsReflectionInlining._retire_consumed_temporaries`
-    compares the reads it consumed to `len(binding.reads)` taken from the model pinned before any
-    inlining, which the same pass's eval splice is invisible to. The pin's soundness argument covers
-    a fold against an intrinsic, which a live reflection surface withdraws trust from; it does not
-    cover the retirement read-count, which is a structural fact the splice changes. The rule that
-    closes it re-derives the reads against the post-inline tree, or leaves a temporary a same-pass
-    eval could reach un-retired.
-
-    Off the release gate deliberately: the shape needs a direct `eval` whose string names the very
-    reflective temporary the fold retires, and that collision is this entry's own construction.
-    """
-
-
 #: A reflective-inlining pass folding a separated `Function`-constructor temporary's invocation
 #: through the one value the pinned model holds for it, while a direct `eval` inlined in the same
 #: pass reassigns that temporary. The row is mapped to the behavior Node gives the original.

@@ -525,6 +525,32 @@ class TestReflectionInlining(TestJsDeobfuscator):
             "const m = Function('return 1');\nwith (obj) {\n  use(m);\n}\nvar x = 1;",
             self._reflect("const m = Function('return 1'); with (obj) { use(m); } var x = m();"))
 
+    def test_separated_temporary_a_lowered_timer_body_names_is_kept(self):
+        """
+        The lowered timer body names `m`, a read no model taken before the lowering contains, so the
+        declarator must survive the same pass that lowered the timer. The shape has no engine witness:
+        Node rejects string timer arguments outright.
+        """
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var m = Function('return 41');
+                41;
+                setTimeout(function() {
+                  console.log(m.name);
+                }, 0);
+                """
+            ),
+            self._reflect("var m = Function('return 41'); m(); setTimeout('console.log(m.name)', 0);"))
+
+    def test_separated_temporary_the_analyst_names_an_entrypoint_is_kept(self):
+        self.assertEqual(
+            "var m = Function('return 41');\nconsole.log(41);",
+            self._run_transformer(
+                "var m = Function('return 41'); console.log(m());",
+                JsReflectionInlining,
+                DeobfuscationOptions(entrypoints=('m',))))
+
     def test_separated_reassigned_temporary_not_inlined(self):
         source = "let m = Function('return 1');\nm = other;\nvar x = m();"
         self.assertEqual(
@@ -546,10 +572,15 @@ class TestReflectionInlining(TestJsDeobfuscator):
         """
         A separated `Function` global finder whose code is produced only by the string-array resolver
         folds to `globalThis` under the full pipeline, which requires the reflection pass to run again
-        once the resolver reveals the literal argument. The whole string-array scaffold and the finder
-        temporary collapse, leaving only the folded call.
+        once the resolver reveals the literal argument. The string-array scaffold collapses, but the
+        finder temporary must stay declared: the fold hands the global object to `sink`, a callee the
+        model cannot resolve, and under the script model the temporary is a property of that object —
+        `function sink(o) { console.log(typeof o._m); }` prints `function` for the original and would
+        print `undefined` once the declaration is retired.
         """
-        self.assertEqual('sink(globalThis);', self._deobfuscate(_STRING_ARRAY_REVEALS_A_GLOBAL_FINDER))
+        self.assertEqual(
+            "var _m = Function('return this');\nsink(globalThis);",
+            self._deobfuscate(_STRING_ARRAY_REVEALS_A_GLOBAL_FINDER))
 
     def test_eval_expression_position_single_expr(self):
         self.assertEqual("var x = 'hello';", self._reflect("var x = eval(\"'hello'\");"))
@@ -1787,6 +1818,76 @@ class TestAReflectiveSpliceTheSiteWouldRebindIsDeclined(TestBase):
 
     def test_every_program_behaves_the_way_the_engine_does(self):
         for label, row in A_REFLECTIVE_SPLICE_THE_SITE_WOULD_REBIND.items():
+            with self.subTest(label):
+                self.assertEqual(row.read(), row.required())
+
+
+#: Programs in which something still names the single-use `Function`-constructor temporary after the
+#: pass has inlined its invocations — a same-pass eval splice, an eval the pass declines, the global
+#: object a folded finder hands away, or the construction argument's own effect — mapped to the
+#: behavior an engine gives them: the name keeps answering, so the declaration must survive.
+A_CONSUMED_TEMPORARY_SOMETHING_STILL_NAMES = {
+    'an eval splice reads it in expression position': Program(
+        a_program("""
+            const m = Function('return 41');
+            console.log(m());
+            eval('console.log(m.name)');
+            """),
+        prints('41', 'anonymous'),
+    ),
+    'an eval splice reads it in statement position': Program(
+        a_program("""
+            var m = Function('return 41');
+            m();
+            eval('console.log(m.name);');
+            """),
+        prints('anonymous'),
+    ),
+    'a declined direct eval reads it': Program(
+        a_program("""
+            var m = Function('return 41');
+            console.log(m());
+            function run(src) { eval(src); }
+            run('console.log(typeof m);');
+            """),
+        prints('41', 'function'),
+    ),
+    'a declined indirect eval reads it': Program(
+        a_program("""
+            var m = Function('return 41');
+            console.log(m());
+            function run(src) { (0, eval)(src); }
+            run('console.log(typeof m);');
+            """),
+        prints('41', 'function'),
+        Reading.SCRIPT,
+    ),
+    'the handed-away global reads it as a property': Program(
+        a_program("""
+            function sink(o) { console.log(typeof o._m); }
+            var _m = Function('return this');
+            sink(_m());
+            """),
+        prints('function'),
+        Reading.SCRIPT,
+    ),
+    'the construction argument writes what the program reads': Program(
+        a_program("""
+            var seen = 0;
+            var m = Function((seen = 1, 'return 41'));
+            console.log(m());
+            console.log(seen);
+            """),
+        prints('41', '1'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAConsumedTemporaryStillNamedKeepsItsDeclaration(TestBase):
+
+    def test_every_program_behaves_the_way_the_engine_does(self):
+        for label, row in A_CONSUMED_TEMPORARY_SOMETHING_STILL_NAMES.items():
             with self.subTest(label):
                 self.assertEqual(row.read(), row.required())
 

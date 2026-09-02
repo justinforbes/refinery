@@ -287,6 +287,11 @@ class TestReflectiveInliningDoesNotRebuildPerSite(TestBase):
     so the total build count necessarily grows with the number of sites; asserting on the total would be
     asserting that a required build does not happen. The assertion below therefore isolates builds over the
     script being transformed.
+
+    A pass that consumed a separated `Function`-constructor temporary pays exactly one more build: whether
+    the temporary is still named is a structural fact the splices themselves change, so the retirement
+    decides on the model rebuilt after the pin is released, never on the pinned one. A pass with no
+    retirement candidate — every `eval`-only script — never reads the post-pin model and stays at one.
     """
 
     @staticmethod
@@ -296,6 +301,15 @@ class TestReflectiveInliningDoesNotRebuildPerSite(TestBase):
         """
         body = '\n'.join(F"eval('var v{i} = {i};');" for i in range(count))
         return F'{body}\nSINK({", ".join(F"v{i}" for i in range(count))});'
+
+    @staticmethod
+    def _temporaries(count: int) -> str:
+        """
+        A script with *count* separated `Function`-constructor temporaries, each consumed by one folded
+        invocation, so each is a retirement candidate.
+        """
+        body = '\n'.join(F"var m{i} = Function('return {i}');" for i in range(count))
+        return F'{body}\nSINK({" + ".join(F"m{i}()" for i in range(count))});'
 
     def _root_builds(self, source: str) -> tuple[int, str]:
         """
@@ -323,6 +337,10 @@ class TestReflectiveInliningDoesNotRebuildPerSite(TestBase):
 
     def test_root_model_is_built_exactly_once(self):
         self.assertEqual(1, self._root_builds(self._sites(8))[0])
+
+    def test_retirement_pays_one_rebuild_regardless_of_temporary_count(self):
+        self.assertEqual(2, self._root_builds(self._temporaries(2))[0])
+        self.assertEqual(2, self._root_builds(self._temporaries(16))[0])
 
     def test_holding_the_model_does_not_change_the_result(self):
         """

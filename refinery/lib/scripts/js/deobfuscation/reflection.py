@@ -39,8 +39,10 @@ from refinery.lib.scripts.js.analysis.model import (
 )
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
+    a_host_reaches_the_binding,
     access_key,
     get_body,
+    nothing_still_names,
     property_key,
     references_receiver_this,
     remove_declarator,
@@ -739,7 +741,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
     _free_global: Callable[[Expression | None], str | None]
     _eval_string: Callable[[Expression | None], str | None]
     _pending_retire: dict[int, Binding]
-    _retire_consumed: dict[Binding, int]
+    _retire_candidates: dict[int, JsIdentifier]
 
     def _process_script(self, node: JsScript) -> None:
         """
@@ -755,6 +757,11 @@ class JsReflectionInlining(ScriptLevelTransformer):
         before the pin is released and the model rebuilt. Inlining can only turn that flag off, never on,
         which leaves the held answer the stricter one.
 
+        The retirement of consumed temporaries is the one decision that argument cannot carry — whether a
+        temporary is still named is a structural fact the splices themselves change — so it runs after the
+        pin is released, against the model rebuilt over the post-splice tree. That rebuild is the second
+        root-model build a pass with a retirement candidate pays, and the only one.
+
         Should this transform ever run on a script with no reflective surface, or should that flag stop
         gating intrinsic trust, this argument does not hold and the pin must be reconsidered.
         """
@@ -764,11 +771,11 @@ class JsReflectionInlining(ScriptLevelTransformer):
             self._free_global = self._free_global_name(node)
             self._eval_string = self._string_argument_value(node)
             self._pending_retire = {}
-            self._retire_consumed = {}
+            self._retire_candidates = {}
             self._inline_statements(node)
             self._inline_expressions(node)
             self._lower_timers(node)
-            self._retire_consumed_temporaries()
+        self._retire_consumed_temporaries(node)
 
     def _note_retirement(self, site: Node, binding: Binding | None) -> None:
         """
@@ -783,32 +790,75 @@ class JsReflectionInlining(ScriptLevelTransformer):
 
     def _confirm_retirement(self, site: Node) -> None:
         """
-        Acknowledge that the inlining at *site* was committed, counting the read of its temporary that
-        the inlining consumed. A temporary read at every site by such a committed inlining is retired by
-        `_retire_consumed_temporaries`; one still read elsewhere is not.
+        Acknowledge that the inlining at *site* was committed, marking its temporary a retirement
+        candidate. Whether the candidate may actually go is decided by `_retire_consumed_temporaries`
+        against the model rebuilt after the pin, where every read the splices added is visible.
         """
         binding = self._pending_retire.pop(id(site), None)
-        if binding is None:
+        if binding is None or len(binding.declarations) != 1:
             return
-        self._retire_consumed[binding] = self._retire_consumed.get(binding, 0) + 1
+        declaration = binding.declarations[0]
+        self._retire_candidates[id(declaration)] = declaration
 
-    def _retire_consumed_temporaries(self) -> None:
+    def _retire_consumed_temporaries(self, root: JsScript) -> None:
         """
-        Drop the declarator of each single-assignment temporary whose every read was a `Function`
-        construction invocation this pass inlined. The construction is side-effect-free precisely
-        because the inlining succeeded — `_resolve_reflected_body` parses the code and declines a body
-        it cannot, so a construction whose body was inlined provably parses and cannot throw — which is
-        the judgment `refinery.lib.scripts.js.analysis.effects.EffectModel` withholds from an intrinsic
-        under a live reflection surface and only this pass, having parsed the code, can make.
+        Drop the declarator of each single-assignment temporary whose construction invocations this
+        pass inlined and which nothing in the post-splice tree still names. The construction itself is
+        side-effect-free precisely because the inlining succeeded — `_resolve_reflected_body` parses the
+        code and declines a body it cannot, so a construction whose body was inlined provably parses and
+        cannot throw — which is the judgment `refinery.lib.scripts.js.analysis.effects.EffectModel`
+        withholds from an intrinsic under a live reflection surface and only this pass, having parsed
+        the code, can make. That judgment covers the construction alone: its arguments are ordinary
+        expressions whose effects the retirement would delete, so each must be droppable on its own.
+
+        Every question is asked of the model rebuilt after the pin, because the splices this pass
+        committed are exactly what the pinned model cannot see: a spliced `eval` body or lowered timer
+        that names the temporary, the handed-over global object a folded finder minted through which a
+        callee reads it as a property (both counted by `nothing_still_names`), and the name the analyst
+        declared a host reaches (`a_host_reaches_the_binding`). A reflective surface that survives the
+        pass — an `eval` this pass declined, a string timer it could not lower — can name the temporary
+        at runtime with no reference any model records, so any such site outside the candidates' own
+        constructions refuses the retirement; the constructions themselves are the one surface whose
+        code this pass parsed, which is what makes them transparent rather than opaque.
         """
-        for binding, consumed in self._retire_consumed.items():
-            if consumed != len(binding.reads):
-                continue
-            if binding.exported or binding.dynamic_refs or len(binding.declarations) != 1:
+        if not self._retire_candidates:
+            return
+        cache = model_cache(self, root)
+        model = cache.model
+        transparent: set[int] = set()
+        candidates: list[tuple[Binding, JsVariableDeclarator, JsCallExpression | JsNewExpression]] = []
+        for declaration in self._retire_candidates.values():
+            binding = model.binding_of(declaration)
+            if binding is None or binding.exported or len(binding.declarations) != 1:
                 continue
             declarator = binding.declarations[0].parent
             if not isinstance(declarator, JsVariableDeclarator) or declarator.init is None:
                 continue
+            construction = strip_parens(declarator.init)
+            if not isinstance(construction, (JsCallExpression, JsNewExpression)):
+                continue
+            transparent.add(id(construction.callee))
+            candidates.append((binding, declarator, construction))
+        retired: list[JsVariableDeclarator] = []
+        for binding, declarator, construction in candidates:
+            if not nothing_still_names(model, [declarator]):
+                continue
+            if a_host_reaches_the_binding(model, binding, self.options):
+                continue
+            if any(
+                id(site) not in transparent
+                for site in model.reflection_surface_sites(binding)
+            ):
+                continue
+            if not all(
+                cache.effects.is_side_effect_free(
+                    argument, None,
+                    call_established=cache.call_established, discarded=True)
+                for argument in construction.arguments
+            ):
+                continue
+            retired.append(declarator)
+        for declarator in retired:
             remove_declarator(declarator)
             self.mark_changed()
 
@@ -1119,7 +1169,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         *node* (`DominanceModel.binding_established_before`) so the invocation cannot read it out of its
         temporal dead zone. The body is inlined at *node*, never the construction relocated, so a
         `Function` reference in the initializer keeps its original scope; retiring the dead temporary is
-        left to `_retire_consumed_temporaries` once every read is accounted for.
+        left to `_retire_consumed_temporaries` on the model rebuilt after the pass.
         """
         callee = strip_parens(node.callee)
         if isinstance(callee, (JsCallExpression, JsNewExpression)):
