@@ -221,6 +221,17 @@ def _carried(fact: Ps1Fact) -> _Value:
     return None
 
 
+class _Char(str):
+    """
+    A `System.Char` the interpreter carries as the one-character string it spells, kept apart from an
+    ordinary String so that an operation a String has and a Char does not is refused rather than run.
+    5.1 repeats a String on the left of `*` and throws for a Char there, so `[char]65 * 2` stops the
+    fold where `'A' * 2` folds to `AA`. Being a `str` subclass, a Char reads as its text everywhere a
+    String would — it concatenates, coerces and indexes the same — and only the places that must tell
+    the two apart look for this type.
+    """
+
+
 class _Ps1InterpreterError(Exception):
     pass
 
@@ -1140,7 +1151,7 @@ class _Ps1Interpreter:
         name = member.lower()
         args = [self._eval(a) for a in node.arguments]
         if isinstance(obj, str):
-            return self._invoke_string_method(obj, name, args)
+            return self._invoke_string_method(str(obj), name, args)
         if isinstance(obj, list):
             return self._invoke_list_method(obj, name, args)
         raise _Ps1InterpreterError
@@ -1181,7 +1192,7 @@ class _Ps1Interpreter:
             if method == 'toint64' and len(args) == 2:
                 return int(self._to_str(args[0]), self._to_int(args[1]))
             if method == 'tochar' and len(args) == 1:
-                return chr(self._to_int(args[0]))
+                return _Char(chr(self._to_int(args[0])))
             if method == 'tostring' and len(args) == 1:
                 return self._to_str(args[0])
             if method == 'frombase64string' and len(args) == 1:
@@ -1292,7 +1303,7 @@ class _Ps1Interpreter:
             raise _Ps1InterpreterError
         try:
             if method == 'tochararray' and not args:
-                return list(s)
+                return [_Char(c) for c in s]
             if method == 'padleft' and len(args) >= 1:
                 width = self._to_int(args[0])
                 ch = self._to_str(args[1]) if len(args) > 1 else ' '
@@ -1316,7 +1327,9 @@ class _Ps1Interpreter:
         obj = self._eval(node.object)
         idx = self._to_index(self._eval(node.index))
         try:
-            if isinstance(obj, (str, list)):
+            if isinstance(obj, str):
+                return _Char(obj[idx])
+            if isinstance(obj, list):
                 return obj[idx]
         except IndexError:
             raise _Ps1InterpreterError
@@ -1335,13 +1348,13 @@ class _Ps1Interpreter:
         if tn == 'char':
             if isinstance(val, int):
                 try:
-                    return chr(val)
+                    return _Char(chr(val))
                 except (ValueError, OverflowError):
                     raise _Ps1InterpreterError
             raise _Ps1InterpreterError
         if tn == 'char[]':
             if isinstance(val, str):
-                return list(val)
+                return [_Char(c) for c in val]
             raise _Ps1InterpreterError
         if tn == 'byte':
             result = self._to_int(val)
@@ -1369,7 +1382,7 @@ class _Ps1Interpreter:
         raise _Ps1InterpreterError
 
     def _multiply(self, left: _Value, right: _Value) -> _Value:
-        if isinstance(left, str) and isinstance(right, int):
+        if isinstance(left, str) and not isinstance(left, _Char) and isinstance(right, int):
             result = left * right
             if len(result) > self.max_string_len:
                 raise _Ps1InterpreterError

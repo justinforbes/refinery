@@ -4,17 +4,20 @@ held against what a real Windows PowerShell 5.1 host printed for the same expres
 from here: the measurements are the ones already taken and checked in as
 `test.lib.scripts.ps1.test_oracle.TYPE_TRANSCRIPTS`, and this module reads them as data.
 
-**The interpreter's currency carries no .NET type.** A `System.Char` and a one-character
-`System.String` are the same Python `str` to it, and a `System.Byte`, an `Int32` and an `Int64` are
-the same Python `int`, so the recording says more than the interpreter can answer. `_CURRENCY` is
-where that is decided: it names, for each measured .NET type, the one value of the currency a
-correct interpreter has to produce, and every type that collapses onto another collapses there and
-nowhere else. What it does *not* collapse is `int` against `float`, `str` and `bool` and `None`
-against each other: those the currency does spell apart, the interpreter does produce each of them,
-and the value that reaches a folded script is one of them rather than the other — so a mismatch
-between two of those is a wrong answer and is recorded as one. A `Decimal` and a `Single` have no
-counterpart in the currency at all and their rows are held against nothing, which is why the types
-that leave the population are pinned by name beside the population itself.
+**The interpreter's currency carries almost no .NET type.** A `System.Byte`, an `Int32` and an
+`Int64` are the same Python `int` to it, so the recording says more than the interpreter can answer.
+`_CURRENCY` is where that is decided: it names, for each measured .NET type, the one value of the
+currency a correct interpreter has to produce, and every type that collapses onto another collapses
+there and nowhere else. The one .NET type the interpreter keeps apart from the value it would
+otherwise share is `System.Char`: it carries one as a `_Char`, a `str` subtype, rather than as the
+one-character `System.String` it prints as, so that an operation a String has and a Char does not —
+a `*` on its left — is refused rather than run. What the currency does *not* collapse is `int`
+against `float`, `str` and `bool` and `None` against each other: those the currency does spell
+apart, the interpreter does produce each of them, and the value that reaches a folded script is one
+of them rather than the other — so a mismatch between two of those is a wrong answer and is recorded
+as one. A `Decimal` and a `Single` have no counterpart in the currency at all and their rows are
+held against nothing, which is why the types that leave the population are pinned by name beside the
+population itself.
 
 Two populations, because refusing to answer and answering wrongly are different things and the
 deobfuscator only survives one of them. `_measured_rows` is what 5.1 computed a value for, and a
@@ -39,6 +42,7 @@ from test.lib.scripts.ps1.test_oracle import TYPE_TRANSCRIPTS
 
 from refinery.lib.scripts.ps1.deobfuscation.emulator import (
     InvokeExpression,
+    _Char,
     _Ps1Interpreter,
     _Ps1InterpreterError,
 )
@@ -79,7 +83,7 @@ _CURRENCY: dict[str, Callable[[str], _Value]] = {
     'System.UInt64'  : int,
     'System.Double'  : float,
     'System.Boolean' : _boolean,
-    'System.Char'    : str,
+    'System.Char'    : _Char,
     'System.String'  : str,
     ''               : _null,
 }
@@ -244,11 +248,6 @@ ANSWERED_THROWS: dict[str, _Value] = {
     # A Char carries none of the String methods, so asking for one is a MethodNotFound.
     '([char]65).ToUpper()'          : 'A',
     '([char]65).Substring(0)'       : 'A',
-
-    # A Char on the left of `*` has no multiplication at all on 5.1. The interpreter holds it as a
-    # one-character Python string, for which `*` is repetition, so a script that stops folds to the
-    # character written twice.
-    '[char]48 * 2'                  : '00',
 
     # A repeat count of four billion is a string .NET will not allocate.
     "'ab' * 0xFFFFFFFF"             : '',

@@ -62,10 +62,17 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: where it used to fall through, and the pairs that were the raise are folds again rather than the
 #: arithmetic `6.5` they once misread. Only these two rows move: a Double on the *left* of `+` is an
 #: addition and never had this gap.
+#:
+#: The `Char` row then fell again, by 36, and what was withdrawn was a wrong answer rather than a
+#: fold: `*` on a Char's left has no multiplication on 5.1, which throws `NotADefinedOperationForType`
+#: there, where the interpreter held the Char as a one-character string and repeated it. The
+#: interpreter now carries a Char apart from a String and refuses the repeat, so the pairs that were
+#: `[char]65 * 2` folding to `AA` leave the gap. This does not come back by the domain learning to
+#: answer; the gap is smaller because the interpreter stopped answering where it should not.
 GAP: dict[str, int] = {
     'System.String': 1702,
     'System.Object[]': 1317,
-    'System.Char': 1147,
+    'System.Char': 1111,
     'System.Int64': 1088,
     'System.Int32': 695,
     'System.Double': 605,

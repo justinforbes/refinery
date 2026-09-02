@@ -1625,7 +1625,6 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'A'")
 
-    @unittest.expectedFailure
     def test_a_char_times_a_number_is_a_throw_and_not_a_repeated_string(self):
         self._assertUnchanged(cleandoc("""
             function f {
