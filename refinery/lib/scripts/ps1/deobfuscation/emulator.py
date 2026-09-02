@@ -1150,8 +1150,10 @@ class _Ps1Interpreter:
             raise _Ps1InterpreterError
         name = member.lower()
         args = [self._eval(a) for a in node.arguments]
+        if isinstance(obj, _Char):
+            return self._invoke_char_method(str(obj), name, args)
         if isinstance(obj, str):
-            return self._invoke_string_method(str(obj), name, args)
+            return self._invoke_string_method(obj, name, args)
         if isinstance(obj, list):
             return self._invoke_list_method(obj, name, args)
         raise _Ps1InterpreterError
@@ -1289,6 +1291,20 @@ class _Ps1Interpreter:
                 return max(a, b)
         except (ValueError, OverflowError, TypeError):
             raise _Ps1InterpreterError
+        raise _Ps1InterpreterError
+
+    def _invoke_char_method(
+        self, s: str, method: str, args: list[_Value],
+    ) -> _Value:
+        """
+        A `System.Char` carries none of a String's text methods, so 5.1 throws for
+        `([char]65).ToUpper()`, `.Substring(0)`, `.Trim()` and their like where it would fold the
+        same call on a String. Only `ToString`, which every value answers, folds here, and it yields
+        the one-character String the Char spells; everything else refuses so the fold stops where the
+        script would.
+        """
+        if method == 'tostring' and not args:
+            return s
         raise _Ps1InterpreterError
 
     def _invoke_string_method(

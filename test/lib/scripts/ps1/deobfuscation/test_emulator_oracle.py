@@ -245,10 +245,6 @@ ANSWERED_THROWS: dict[str, _Value] = {
     # `Convert.ToInt32` reads a based string as unsigned and rejects the sign in front of it.
     "[Convert]::ToInt32('-10', 16)" : -16,
 
-    # A Char carries none of the String methods, so asking for one is a MethodNotFound.
-    '([char]65).ToUpper()'          : 'A',
-    '([char]65).Substring(0)'       : 'A',
-
     # A repeat count of four billion is a string .NET will not allocate.
     "'ab' * 0xFFFFFFFF"             : '',
 }

@@ -3694,23 +3694,22 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
 #: where it is not. Their host-free twins in
 #: `test.lib.scripts.ps1.deobfuscation.test_value_domain` are what ratchets them now.
 #:
-#: **The worst of the Char erasure is not in this ledger, and cannot be.** `([char]65).ToUpper()`,
+#: **The throwing half of the Char erasure is closed.** `([char]65).ToUpper()`,
 #: `([char]65).Substring(0)` and `([char]65) * 3` are measured to throw on 5.1, and a fold that
-#: answered `A` would be a script that stopped answering — the direction that turns a triage note
-#: into a wrong one. Every one of those is a corpus row and none of them is an entry here, because
-#: at the top level the tool leaves them alone: `emulator._value_of`'s round trip declines to carry
-#: a Char across the tree boundary at all, so nothing folds and nothing differs.
+#: answered `A` or `AAA` would be a script that stopped answering — the direction that turns a
+#: triage note into a wrong one. None is an entry here and none folds anywhere now: at the top level
+#: `emulator._value_of`'s round trip declines to carry a Char across the tree boundary at all, and
+#: one level in — inside a function body the tool emulates — the interpreter carries a Char as a
+#: value apart from a String and refuses a text method or a repeat on it, where it once computed in
+#: its own currency and answered `A`. `test.lib.scripts.ps1.deobfuscation.test_emulator` is where
+#: those in-body refusals are pinned; a top-level ledger like this one cannot see them, which is why
+#: a regression test written against the bare expression proves nothing about the body.
 #:
-#: One level in it does fold, and this ledger has no way to see it: a `([char]65).ToUpper()` written
-#: inside a function body the tool emulates emits `'A'`, because in there the interpreter computes
-#: in its own currency and a Char is a one-character Python string. A row here is a *top-level*
-#: snippet whose behaviour changes
-#: under rewriting, so a defect reachable only through an emulated body is invisible to it however
-#: bad it is. `test.lib.scripts.ps1.deobfuscation.test_emulator` is where those are pinned, and the
-#: gap between the two is why a regression test written against the bare expression proves nothing.
-#:
-#: So the Char erasure is a wrong type, a wrong value (`[int][char]48`), a wrong lookup (a Char
-#: hashtable key), and a throw that does not happen — and this ledger holds only the first two.
+#: What is left of the Char erasure here is a wrong type: a `[char]` or `[char[]]` cast that survives
+#: the round trip reaches the tree as the String its characters spell, so a `-is [string]` test, an
+#: array of Char and `$t.Count` all answer as though a String had been folded. `[int][char]48` is no
+#: longer among the wrong values — it folds to the code point `48` the way 5.1 reads it. The rows
+#: below are that wrong type and nothing else.
 TYPE_DEFECTS: dict[str, str] = {
     '$t = 65, 66 | ForEach-Object { [char]$_ }; Write-Output $t.Count; Write-Output $t':
         'The count is right and the elements are not: the interpreter has no Char in the values '

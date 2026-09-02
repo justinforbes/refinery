@@ -1607,7 +1607,6 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         chain = ' +\n  '.join(['1'] * terms)
         return F'function f {{\n  {chain}\n}}\n$x = f'
 
-    @unittest.expectedFailure
     def test_a_toupper_call_on_a_char_is_a_throw_and_not_the_char_it_was_called_on(self):
         self._assertUnchanged(cleandoc("""
             function f {
