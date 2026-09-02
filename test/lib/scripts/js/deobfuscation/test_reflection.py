@@ -525,6 +525,23 @@ class TestReflectionInlining(TestJsDeobfuscator):
             "const m = Function('return 1');\nwith (obj) {\n  use(m);\n}\nvar x = 1;",
             self._reflect("const m = Function('return 1'); with (obj) { use(m); } var x = m();"))
 
+    def test_a_site_naming_an_earlier_splices_declaration_waits_a_pass(self):
+        """
+        The second eval's body reads `a`, a name the first splice declared, so every pinned answer
+        about it is stale and the site defers to the next pass; the fixpoint then completes it.
+        """
+        source = "eval('var a = 1;'); eval('console.log(a);');"
+        self.assertEqual("var a = 1;\neval('console.log(a);');", self._reflect(source))
+        self.assertEqual('console.log(1);', self._deobfuscate(source))
+
+    def test_fold_of_a_temporary_a_same_pass_splice_rebinds_is_declined(self):
+        self.assertEqual(
+            "var m = Function('return 1');\nm = function() {\n  return 2;\n};\nconsole.log(m());",
+            self._reflect(
+                "var m = Function('return 1');"
+                " eval('m = function () { return 2; };');"
+                " console.log(m());"))
+
     def test_separated_temporary_a_lowered_timer_body_names_is_kept(self):
         """
         The lowered timer body names `m`, a read no model taken before the lowering contains, so the
@@ -1822,11 +1839,20 @@ class TestAReflectiveSpliceTheSiteWouldRebindIsDeclined(TestBase):
                 self.assertEqual(row.read(), row.required())
 
 
-#: Programs in which something still names the single-use `Function`-constructor temporary after the
-#: pass has inlined its invocations — a same-pass eval splice, an eval the pass declines, the global
-#: object a folded finder hands away, or the construction argument's own effect — mapped to the
-#: behavior an engine gives them: the name keeps answering, so the declaration must survive.
+#: Programs in which something still names the single-use `Function`-constructor temporary the pass
+#: is consuming — a same-pass eval splice reading or rebinding it, an eval the pass declines, the
+#: global object a folded finder hands away, or the construction argument's own effect — mapped to
+#: the behavior an engine gives them: the name keeps answering, so the declaration must survive and
+#: no fold may read the value a spliced rebind replaced.
 A_CONSUMED_TEMPORARY_SOMETHING_STILL_NAMES = {
+    'an eval splice rebinds it before the read': Program(
+        a_program("""
+            var m = Function('return 1');
+            eval('m = function () { return 2; };');
+            console.log(m());
+            """),
+        prints('2'),
+    ),
     'an eval splice reads it in expression position': Program(
         a_program("""
             const m = Function('return 41');

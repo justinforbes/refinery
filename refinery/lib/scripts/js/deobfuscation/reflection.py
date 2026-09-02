@@ -28,6 +28,7 @@ from refinery.lib.scripts.js.analysis.model import (
     TIMER_NAMES,
     Binding,
     BindingKind,
+    Role,
     Scope,
     SemanticModel,
     build_semantic_model,
@@ -36,6 +37,7 @@ from refinery.lib.scripts.js.analysis.model import (
     is_member_write_target,
     is_simple_assignment_target,
     name_uses_in_scope,
+    reference_role,
 )
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     ScriptLevelTransformer,
@@ -685,6 +687,25 @@ def _body_declared_names(body_model: SemanticModel) -> set[str]:
     }
 
 
+def _body_written_free_names(body_model: SemanticModel, parsed: JsScript) -> set[str]:
+    """
+    The names *parsed* writes without binding them locally — the subset of `_body_free_names` whose
+    reference is an assignment target rather than a read. A body that only reads a free name changes
+    nothing about what the name denotes elsewhere, while one that writes it gives every later
+    consultation of that name a value the pinned model has never seen.
+    """
+    written: set[str] = set()
+    for ident in parsed.walk():
+        if not isinstance(ident, JsIdentifier) or not body_model.is_reference(ident):
+            continue
+        if reference_role(ident) is Role.READ:
+            continue
+        binding = body_model.resolve(ident)
+        if binding is None or binding.kind is BindingKind.IMPLICIT_GLOBAL:
+            written.add(ident.name)
+    return written
+
+
 def _hoist_path_is_clear(names: set[str], site_scope: Scope, var_scope: Scope) -> bool:
     """
     Whether each hoisted `var`/function name can rise from the call site to *var_scope* without
@@ -742,6 +763,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
     _eval_string: Callable[[Expression | None], str | None]
     _pending_retire: dict[int, Binding]
     _retire_candidates: dict[int, JsIdentifier]
+    _spliced_names: set[str]
 
     def _process_script(self, node: JsScript) -> None:
         """
@@ -766,6 +788,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         gating intrinsic trust, this argument does not hold and the pin must be reconsidered.
         """
         with model_cache(self, node).pinned():
+            self._spliced_names = set()
             self._read_effect = self._dynamic_read_effect(node)
             self._alias_name = self._alias_member_name(node)
             self._free_global = self._free_global_name(node)
@@ -886,11 +909,17 @@ class JsReflectionInlining(ScriptLevelTransformer):
             member = strip_parens(callee)
             if not isinstance(member, JsMemberExpression):
                 return None
+            base = strip_parens(member.object)
+            if isinstance(base, JsIdentifier) and base.name in self._spliced_names:
+                return None
             model = model_cache(self, root).model
             if model.scope_of(member) is None:
                 return None
-            return model.global_alias_member_name(
+            name = model.global_alias_member_name(
                 member, module_scope=module_execution(self.options))
+            if name is not None and name in self._spliced_names:
+                return None
+            return name
         return resolve
 
     def _free_global_name(self, root: JsScript) -> Callable[[Expression | None], str | None]:
@@ -910,6 +939,8 @@ class JsReflectionInlining(ScriptLevelTransformer):
             ident = strip_parens(callee)
             if not isinstance(ident, JsIdentifier) or ident.name not in _REFLECTIVE_CALLEE_NAMES:
                 return None
+            if ident.name in self._spliced_names:
+                return None
             model = model_cache(self, root).model
             if model.scope_of(ident) is None:
                 return None
@@ -928,6 +959,11 @@ class JsReflectionInlining(ScriptLevelTransformer):
         """
         def resolve(node: Expression | None) -> str | None:
             if node is None:
+                return None
+            if self._spliced_names and any(
+                isinstance(ident, JsIdentifier) and ident.name in self._spliced_names
+                for ident in node.walk()
+            ):
                 return None
             model = model_cache(self, root).model
             if model.scope_of(node) is None:
@@ -1176,6 +1212,8 @@ class JsReflectionInlining(ScriptLevelTransformer):
             return callee, None
         if not isinstance(callee, JsIdentifier):
             return None
+        if callee.name in self._spliced_names:
+            return None
         cache = model_cache(self, root)
         binding = cache.model.resolve(callee)
         value = strip_parens(cache.model.singular_value(binding))
@@ -1237,6 +1275,13 @@ class JsReflectionInlining(ScriptLevelTransformer):
         introduced resolves at the site by construction, the accessor spelling it being defined
         there, so it is not held to the global-resolution rule the reflected code's own free names
         must meet. Every other check still applies to it.
+
+        Every name-based answer above is read from the model pinned before any splice, so a body
+        naming what an earlier splice this pass declared or wrote is declined outright: for such a
+        name the pinned lookup, capture, and dominance answers describe a tree that no longer
+        exists. The declined site is untouched and inlines on the next pass, whose model has seen
+        the splice. A body that only reads names no splice bound contributes nothing to that veto,
+        so a chain of sites sharing free reads still inlines in one pass.
         """
         resolves_globally = scope is not ReflectedScope.DIRECT_EVAL
         site_is_strict = strict_mode_at(site)
@@ -1255,6 +1300,8 @@ class JsReflectionInlining(ScriptLevelTransformer):
         if resolves_globally and 'arguments' in free:
             return None
         declared = _body_declared_names(body_model)
+        if not self._spliced_names.isdisjoint(free | declared):
+            return None
         if not free and not declared:
             return parsed
         root_model = model_cache(self, root).model
@@ -1276,6 +1323,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
             body_model, root_model, site_scope, site, scope, at_global_scope,
         ):
             return None
+        self._spliced_names |= declared | _body_written_free_names(body_model, parsed)
         return parsed
 
     def _reflected_declarations_safe(

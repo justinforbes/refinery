@@ -2879,45 +2879,6 @@ class TestASubstitutedNameStillResolvesWhereItIsWritten(TestBase):
     """
 
 
-#: A reflective-inlining pass folding a separated `Function`-constructor temporary's invocation
-#: through the one value the pinned model holds for it, while a direct `eval` inlined in the same
-#: pass reassigns that temporary. The row is mapped to the behavior Node gives the original.
-A_REASSIGNED_TEMPORARY_A_SAME_PASS_EVAL_REBINDS = {
-    'an eval rebinds the temporary before the fold reads it': Program(
-        a_program("""
-            var m = Function('return 1');
-            eval('m = function () { return 2; };');
-            console.log(m());
-            """),
-        prints('2'),
-    ),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-@one_expected_failure_per_program(A_REASSIGNED_TEMPORARY_A_SAME_PASS_EVAL_REBINDS)
-class TestAReassignedTemporaryIsFoldedFromItsStaleValue(TestBase):
-    """
-    The pass resolves a separated `Function`-constructor temporary to the single value the pinned
-    model holds for it and folds its invocation to what that construction returns. A direct `eval`
-    the same pass inlines can reassign the temporary, and the pinned model, taken before the splice,
-    still holds only the construction, so the fold reads a value the reassignment has replaced.
-
-    Node reassigns `m` through the eval to a function returning `2` and prints `2`. The deobfuscation
-    folds `m()` to `1`, the value of the `Function` construction the pinned model still holds, and
-    the program comes back printing `1`.
-
-    `refinery.lib.scripts.js.deobfuscation.reflection.JsReflectionInlining._resolved_constructor_call`
-    resolves the temporary with `singular_value` on the model pinned before inlining, the same
-    pinned-model-versus-splice root the retirement entry carries. The rule that closes it re-derives
-    the value against the post-inline tree, or declines the fold for a temporary a same-pass eval
-    could rebind.
-
-    Off the release gate deliberately: the shape needs a direct `eval` reassigning the very
-    reflective temporary the fold reads, and that is this entry's own construction.
-    """
-
-
 #: A classic script handing the global object as the receiver of an `apply` whose target is a
 #: parameter the body reassigns to a function that reads its own `this`. The row is mapped to the
 #: behavior a host gives it: the reassigned target reads the global through the handed receiver.

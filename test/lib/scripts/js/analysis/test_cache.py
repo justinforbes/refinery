@@ -342,6 +342,18 @@ class TestReflectiveInliningDoesNotRebuildPerSite(TestBase):
         self.assertEqual(2, self._root_builds(self._temporaries(2))[0])
         self.assertEqual(2, self._root_builds(self._temporaries(16))[0])
 
+    def test_sites_sharing_free_reads_all_inline_in_one_pass(self):
+        """
+        The stale-name veto is fed only by names a splice declares or writes, so sites whose bodies
+        merely read the same free names defer nothing to the next pass: one pass with one model build
+        inlines all of them.
+        """
+        body = '\n'.join(F"eval('SINK({i}, shared);');" for i in range(64))
+        builds, output = self._root_builds(body)
+        self.assertEqual(1, builds)
+        self.assertNotIn('eval', output)
+        self.assertEqual(64, output.count('SINK('))
+
     def test_holding_the_model_does_not_change_the_result(self):
         """
         A held model that suppressed an inline would also flatten the count, so the output must match the
