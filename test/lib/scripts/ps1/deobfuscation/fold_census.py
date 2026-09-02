@@ -722,7 +722,7 @@ FOLDS: dict[str, str] = {
     'function f { ,$args }; $t = f 1 2; Write-Output (,$t); Write-Output $t.Count':
         'Write-Output (,(1, 2))\nWrite-Output 2',
     "$t = 'abc' -replace '(?<x>b)', '[${x}]'; Write-Output (,$t); Write-Output $t":
-        "$t = 'abc' -Replace '(?<x>b)', '[${x}]'\nWrite-Output (,$t)\nWrite-Output $t",
+        "Write-Output (,'a[b]c')\nWrite-Output 'a[b]c'",
     "$null = 'abc' -match '(b)'; $t = $Matches[1]; Write-Output (,$t); Write-Output $t":
         "$Null = 'abc' -Match '(b)'\n$t = $Matches[1]\nWrite-Output (,$t)\nWrite-Output $t",
     "$a = 'a,b,c' -split ',', 2; $t = $a.Count; Write-Output (,$t); Write-Output $t":

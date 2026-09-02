@@ -109,7 +109,7 @@ COVERAGE: dict[str, _Coverage] = {
     'System.Int32'   : _Coverage(112, 75),
     'System.Int64'   : _Coverage(27, 20),
     'System.SByte'   : _Coverage(2, 0),
-    'System.String'  : _Coverage(65, 23),
+    'System.String'  : _Coverage(65, 24),
     'System.UInt16'  : _Coverage(2, 0),
     'System.UInt32'  : _Coverage(4, 0),
     'System.UInt64'  : _Coverage(2, 0),

@@ -1343,7 +1343,6 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), '$x = 2')
 
-    @unittest.expectedFailure
     def test_a_named_group_is_substituted_under_the_name_it_was_captured_with(self):
         source = cleandoc("""
             function f {
@@ -1352,6 +1351,33 @@ class TestPs1RuntimeSurfacesThatAnswerTheSameInEverySession(TestPs1):
             $x = f
         """)
         self.assertEqual(self._deobfuscate(source), "$x = 'a[b]c'")
+
+    def test_the_quoted_spelling_of_a_named_group_is_substituted_the_same_way(self):
+        source = cleandoc("""
+            function f {
+              'abc' -replace "(?'x'b)", '[${x}]'
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), "$x = 'a[b]c'")
+
+    def test_a_lookbehind_is_not_read_as_a_named_group(self):
+        source = cleandoc("""
+            function f {
+              'aXb' -replace '(?<=a)X', 'Y'
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), "$x = 'aYb'")
+
+    def test_a_named_backreference_matches_what_its_group_captured(self):
+        source = cleandoc(r"""
+            function f {
+              'abab' -replace '(?<c>a)b\k<c>', 'Z'
+            }
+            $x = f
+        """)
+        self.assertEqual(self._deobfuscate(source), "$x = 'Zb'")
 
     @unittest.expectedFailure
     def test_a_match_leaves_the_group_it_captured_in_the_matches_variable(self):

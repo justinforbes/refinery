@@ -365,13 +365,95 @@ def _dotnet_replacement(template: str, text: str) -> Callable[[re.Match], str]:
     return repl
 
 
+_REGEX_GROUP_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+
+
+def _character_class_end(pattern: str, start: int) -> int:
+    """
+    The index one past the character class that opens at `start`, where `pattern[start]` is `[`. A
+    `]` at the front of a class (after an optional `^`) is a literal, a backslash carries the
+    character behind it across, and a class that never closes runs to the end — where Python's own
+    engine then refuses it, the same refusal an untranslated pattern already earns.
+    """
+    j = start + 1
+    n = len(pattern)
+    if j < n and pattern[j] == '^':
+        j += 1
+    if j < n and pattern[j] == ']':
+        j += 1
+    while j < n and pattern[j] != ']':
+        j += 2 if pattern[j] == '\\' else 1
+    return min(j + 1, n)
+
+
+def dotnet_regex_pattern(pattern: str) -> str:
+    """
+    Rewrite a .NET regular expression into the one Python's `re` compiles, in the single place the
+    two dialects name one construct differently: a *named* group. .NET writes it `(?<name>...)` or
+    `(?'name'...)`, and refers back to it as `\\k<name>` or `\\k'name'`; Python writes these
+    `(?P<name>...)` and `(?P=name)`. Every other piece the two spell alike, so a pattern that names
+    no group is returned unchanged, and one Python already rejects is left for its own engine to
+    reject.
+
+    Three things share the `(?<` opening a name is read from and are none: a look-behind `(?<=...)`
+    or `(?<!...)`, a `(?<` a backslash before it makes literal, and one inside a character class
+    `[...]`, where every metacharacter is text. A class is copied whole for the last reason, and a
+    backslash takes the character behind it with it, so an escaped `(` never opens a group.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == '\\':
+            if pattern.startswith((r'\k<', r"\k'"), i):
+                close = '>' if pattern[i + 2] == '<' else "'"
+                end = pattern.find(close, i + 3)
+                name = pattern[i + 3:end] if end > 0 else ''
+                if _REGEX_GROUP_NAME.fullmatch(name):
+                    out.append(F'(?P={name})')
+                    i = end + 1
+                    continue
+            out.append(pattern[i:i + 2])
+            i += 2
+            continue
+        if c == '[':
+            end = _character_class_end(pattern, i)
+            out.append(pattern[i:end])
+            i = end
+            continue
+        if pattern.startswith('(?<', i) and i + 3 < n and pattern[i + 3] not in '=!':
+            end = pattern.find('>', i + 3)
+            name = pattern[i + 3:end] if end > 0 else ''
+            if _REGEX_GROUP_NAME.fullmatch(name):
+                out.append(F'(?P<{name}>')
+                i = end + 1
+                continue
+        elif pattern.startswith("(?'", i):
+            end = pattern.find("'", i + 3)
+            name = pattern[i + 3:end] if end > 0 else ''
+            if _REGEX_GROUP_NAME.fullmatch(name):
+                out.append(F'(?P<{name}>')
+                i = end + 1
+                continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
 def dotnet_regex_replace(pattern: str, replacement: str, text: str, *, flags: int = 0) -> str:
     """
     Replace every match of `pattern` in `text` with the .NET-style `replacement`, honoring .NET
-    substitution tokens. Replace-all is direction independent, so the regex `RightToLeft` option
-    does not change the result here.
+    substitution tokens and .NET's spelling of a named group (see `dotnet_regex_pattern`).
+    Replace-all is direction independent, so the regex `RightToLeft` option does not change the
+    result here.
     """
-    return re.sub(pattern, _dotnet_replacement(replacement, text), text, flags=flags)
+    return re.sub(
+        dotnet_regex_pattern(pattern),
+        _dotnet_replacement(replacement, text),
+        text,
+        flags=flags,
+    )
 
 
 _BARE_COMMAND_NAME = re.compile(r'''[^\s'"`(){};|&<>@]+''')
