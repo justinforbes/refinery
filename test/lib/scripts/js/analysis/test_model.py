@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+
 from test import TestBase
 
 from refinery.lib.scripts.js.analysis.model import (
@@ -847,6 +849,18 @@ class TestSemanticModel(TestBase):
         _, model = self._model('var a = 1; console.log(a);')
         self.assertFalse(model.has_reflection_surface())
 
+    def test_an_escaping_constructor_read_is_a_reflection_surface(self):
+        _, model = self._model("var F = (function () {}).constructor; F('x')();")
+        self.assertTrue(model.has_reflection_surface())
+
+    def test_an_invoked_constructor_read_is_not_a_reflection_surface(self):
+        _, model = self._model("g.toString().constructor(g).search('a');")
+        self.assertFalse(model.has_reflection_surface())
+
+    def test_a_constructor_read_ending_in_a_plain_key_is_not_a_reflection_surface(self):
+        _, model = self._model("t(''.__proto__.constructor.name);")
+        self.assertFalse(model.has_reflection_surface())
+
     def test_local_reachable_by_eval_inside_its_function(self):
         ast, model = self._model("function f(){ var x; eval('x'); }")
         self.assertTrue(model.reflection_can_reach(model.binding_of(self._decl(ast, model, 'x'))))
@@ -1378,6 +1392,152 @@ class TestWhichBindingsAreReachedThroughTheGlobalObject(TestBase):
             self._reached_through_the_global_object('var y = 1; globalThis.y;', 'y'),
             (False, True),
         )
+
+
+class TestWhenAHandedApplyReceiverIsObserved(TestBase):
+    """
+    The gate that lets the global object handed as an `apply`/`call` receiver stay foldable, asked
+    on each text as written. The behavior rows over these same shapes run the whole pipeline,
+    where another pass can rewrite the shape before the gate answers — collapsing an alias into
+    the name it copies, or freezing every global on a reflection surface — so only the direct
+    question proves the gate itself refuses each displacement.
+    """
+
+    @staticmethod
+    def _observed(source: str) -> bool:
+        ast = JsParser(inspect.cleandoc(source)).parse()
+        model = build_semantic_model(ast)
+        call = next(
+            n for n in ast.walk()
+            if isinstance(n, JsCallExpression)
+            and isinstance(n.callee, JsIdentifier)
+            and n.callee.name == 'wrap'
+        )
+        return model.global_object_argument_is_observed(call.arguments[0])
+
+    def test_each_displaced_apply_target_marks_the_hand_over_observed(self):
+        for label, source in {
+            'an own apply property write': """
+                function inner(host) { return host.secret; }
+                function wrap(recv, payload) {
+                  payload.apply = function (r) { return inner(r); };
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a defineProperty install': """
+                function inner(host) { return host.secret; }
+                function wrap(recv, payload) {
+                  Object.defineProperty(payload, 'apply', {
+                    value: function (r) { return inner(r); }
+                  });
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a two-valued alias write': """
+                function inner(host) { return host.secret; }
+                function wrap(recv, payload, flag) {
+                  var other = flag ? payload : payload;
+                  other.apply = function (r) { return inner(r); };
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}, 1));
+                """,
+            'a helper handed the target': """
+                function inner(host) { return host.secret; }
+                function install(x) { x.apply = function (r) { return inner(r); }; }
+                function wrap(recv, payload) {
+                  install(payload);
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'an assign copies the forwarder': """
+                function inner(host) { return host.secret; }
+                function wrap(recv, payload) {
+                  Object.assign(payload, { apply: function (r) { return inner(r); } });
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a prototype swap': """
+                function inner(host) { return host.secret; }
+                function wrap(recv, payload) {
+                  Object.setPrototypeOf(payload, { apply: function (r) { return inner(r); } });
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a chain write through __proto__': """
+                function inner(host) { return host.secret; }
+                function wrap(recv, payload) {
+                  payload.__proto__.apply = function (r) { return inner(r); };
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a constructor-reached prototype': """
+                function inner(host) { return host.secret; }
+                (function () {}).constructor.prototype.apply = function (r) { return inner(r); };
+                function wrap(recv, payload) {
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a poisoned Function prototype': """
+                function inner(host) { return host.secret; }
+                Function.prototype.apply = function (r) { return inner(r); };
+                function wrap(recv, payload) {
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a reassignment to a this-reader': """
+                function inner(host) { return host.secret; }
+                function wrap(recv, payload) {
+                  payload = function () { return inner(this); };
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+        }.items():
+            with self.subTest(label):
+                self.assertTrue(self._observed(source))
+
+    def test_an_undisplaced_this_free_apply_leaves_the_hand_over_unobserved(self):
+        for label, source in {
+            'a plain this-free payload': """
+                function wrap(recv, payload) {
+                  return payload.apply(recv, []);
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a truth-guarded apply': """
+                function wrap(recv, payload) {
+                  if (payload) {
+                    return payload.apply(recv, []);
+                  }
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a typeof-guarded apply': """
+                function wrap(recv, payload) {
+                  return typeof payload === 'function' ? payload.apply(recv, []) : 0;
+                }
+                console.log(wrap(this, function () {}));
+                """,
+            'a null reassignment after the apply': """
+                function wrap(recv, payload) {
+                  var kept = payload.apply(recv, []);
+                  payload = null;
+                  return kept;
+                }
+                console.log(wrap(this, function () {}));
+                """,
+        }.items():
+            with self.subTest(label):
+                self.assertFalse(self._observed(source))
 
 
 def _how_each_occurrence_is_read(source: str, name: str) -> list[tuple[bool, bool]]:

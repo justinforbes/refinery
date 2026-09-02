@@ -425,6 +425,28 @@ class TestUnusedCodeRemoval(TestJsDeobfuscator):
         )
         self.assertEqual(source, self._remove_unused(source))
 
+    def test_escaping_constructor_read_preserves_dead_init_global(self):
+        source = inspect.cleandoc(
+            """
+            var deadGlobal = 1;
+            var F = (function() {}).constructor;
+            F('deadGlobal')();
+            """
+        )
+        self.assertEqual(source, self._remove_unused(source))
+
+    def test_invoked_constructor_read_still_removes_dead_init_global(self):
+        source = inspect.cleandoc(
+            """
+            var deadGlobal = 1;
+            console.log(''.__proto__.constructor.name);
+            """
+        )
+        self.assertEqual(
+            "console.log(''.__proto__.constructor.name);",
+            self._remove_unused(source),
+        )
+
     def test_eval_alias_preserves_dead_init_global(self):
         source = inspect.cleandoc(
             """

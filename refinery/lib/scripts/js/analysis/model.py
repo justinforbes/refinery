@@ -41,6 +41,7 @@ from refinery.lib.scripts.js.model import (
     JsArrowFunctionExpression,
     JsAssignmentExpression,
     JsAssignmentPattern,
+    JsBinaryExpression,
     JsBlockStatement,
     JsBreakStatement,
     JsCallExpression,
@@ -97,8 +98,8 @@ from refinery.lib.scripts.js.model import (
     JsVarKind,
     JsWhileStatement,
     JsWithStatement,
-    accessor_install_method,
     names_a_property,
+    static_property_key,
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import canonical_array_index, exact_integer
@@ -122,6 +123,37 @@ SYNC_EVAL_NAMES = frozenset({'execScript'})
 STRING_EVAL_NAMES = TIMER_NAMES | SYNC_EVAL_NAMES
 
 REFLECTIVE_INTRINSICS = frozenset({'eval', 'Function'})
+
+_PROTOTYPE_YIELDING_KEYS = frozenset({'__proto__', 'constructor'})
+"""
+The two member keys whose value shares the prototype surface of the object they are read off —
+the species keys the effect layer refuses for the same reason — so a write through what they
+return lands on the surface an inherited method is dispatched over.
+"""
+
+_PROTOTYPE_KEEPING_KEYS = _PROTOTYPE_YIELDING_KEYS | frozenset({'prototype'})
+"""
+The member keys that keep yielding a prototype surface when read off one, so a chain climbing
+through them still holds the surface: another species key, and `prototype`, which is the chain.
+"""
+
+_PROTOTYPE_REFLECTING_CALLEES = frozenset({'getPrototypeOf', 'setPrototypeOf'})
+"""
+The member names that reach or replace an object's prototype as calls, so their mere presence —
+aliased and invoked later, perhaps — lets text touch the surface with no chain this model can
+climb.
+"""
+
+_DISPLACING_CHAIN_KEYS = _PROTOTYPE_YIELDING_KEYS | frozenset({
+    '__defineGetter__',
+    '__defineSetter__',
+})
+"""
+The member keys a read may not pass while its base stays trusted for intrinsic dispatch: a
+prototype-yielding key hands out the surface a write would displace the dispatch through, and the
+`__defineGetter__`/`__defineSetter__` pair installs on its receiver when invoked anywhere along
+the chain.
+"""
 
 GUARANTEED_GLOBALS = frozenset({
     'globalThis',
@@ -797,6 +829,78 @@ def is_simple_assignment_target(node: Node) -> bool:
         and governor.operator == '='
         and strip_parens(governor.left) is target
     )
+
+
+_VERDICT_UNARY_OPERATORS = frozenset({'!', 'typeof', 'void'})
+
+_VERDICT_BINARY_OPERATORS = frozenset({'===', '!=='})
+
+
+def _read_forwards_no_alias(node: Node) -> bool:
+    """
+    Whether the position *node* stands in consumes the value it denotes entirely, so no alias of
+    the object can flow onward from it: the operand of a `!`, `typeof` or `void`, either side of a
+    strict equality, or the test of an `if`, a loop, or a conditional. Each yields a verdict — a
+    boolean, a type name, or `undefined` — never the object itself, and invokes nothing on it,
+    since a strict equality compares without conversion. A caller refusing on escapes may clear
+    one of these; everything else — a loose equality included, whose `ToPrimitive` conversion runs
+    a method the object's prototype chain chooses — forwards or consults the object and stays an
+    escape.
+    """
+    governor = enclosing_operator(node)
+    if isinstance(governor, JsUnaryExpression):
+        return (
+            governor.operator in _VERDICT_UNARY_OPERATORS
+            and strip_parens(governor.operand) is node
+        )
+    if isinstance(governor, JsBinaryExpression):
+        return governor.operator in _VERDICT_BINARY_OPERATORS
+    if isinstance(governor, (JsIfStatement, JsWhileStatement, JsDoWhileStatement, JsForStatement)):
+        return governor.test is not None and strip_parens(governor.test) is node
+    if isinstance(governor, JsConditionalExpression):
+        return strip_parens(governor.test) is node
+    return False
+
+
+def _member_reaches_dispatch_surface(member: JsMemberExpression) -> bool:
+    """
+    Whether *member* lets text touch a prototype surface that intrinsic dispatch walks: a
+    `getPrototypeOf`/`setPrototypeOf` member on sight, or a prototype-yielding key whose value is
+    written through or flows onward. The per-access half of `_dispatch_surface_reachable`, which
+    says why each form counts.
+    """
+    key = static_property_key(member)
+    if key in _PROTOTYPE_REFLECTING_CALLEES:
+        return True
+    if key not in _PROTOTYPE_YIELDING_KEYS:
+        return False
+    return _prototype_surface_escapes(member)
+
+
+def _prototype_surface_escapes(access: JsMemberExpression) -> bool:
+    """
+    Whether the prototype-surface value the member *access* yields can be written through or flow
+    onward. The chain above it is climbed while its keys keep yielding the surface
+    (`_PROTOTYPE_KEEPING_KEYS`, and a key not statically known stays conservative); a write
+    reached on that climb lands on the surface and counts, and so does a chain result that is
+    neither invoked nor consumed as a bare verdict, since an escape may be the surface itself
+    under a new name. A read of any other key ends the climb holding an ordinary property, and a
+    write into the access's own key merely swaps one object's chain, so neither counts.
+    """
+    cursor: JsMemberExpression = access
+    while True:
+        outer = _enclosing_member_access(cursor)
+        if outer is None:
+            if _is_invocation_of(enclosing_operator(cursor), cursor):
+                return False
+            if is_member_write_target(cursor):
+                return False
+            return not _read_forwards_no_alias(cursor)
+        key = static_property_key(outer)
+        if key is None or key in _PROTOTYPE_KEEPING_KEYS:
+            cursor = outer
+            continue
+        return is_member_write_target(outer)
 
 
 def _walk_skipping_functions(stmts: list) -> Iterator[Node]:
@@ -1530,20 +1634,33 @@ def _is_a_named_global_object_base(node: Node | None) -> bool:
 
 def _is_reflective_member(member: JsMemberExpression) -> bool:
     """
-    Whether a member access is a reflective surface — one through which code obtains the `eval`/`Function`
-    intrinsic or reads an unknown global by a runtime-computed name. A statically named property is a
-    surface exactly when the name is a reflective intrinsic: `window.eval`, `g['Function']`, and the same
-    under any unrecognized base, since the base may alias the global object. A computed access with a
-    non-literal key is a surface when its base is a global-object alias (`window[expr]`), through which any
-    global can be named at runtime; on any other base it designates a property of one specific object and
-    is not a surface.
+    Whether a member access is a reflective surface — one through which code obtains the
+    `eval`/`Function` intrinsic or reads an unknown global by a runtime-computed name. A
+    statically named property is a surface exactly when the name is a reflective intrinsic:
+    `window.eval`, `g['Function']`, and the same under any unrecognized base, since the base may
+    alias the global object. A computed access with a non-literal key is a surface when its base
+    is a global-object alias (`window[expr]`), through which any global can be named at runtime;
+    on any other base it designates a property of one specific object and is not a surface.
+
+    A `constructor` key whose yield flows onward is one more spelling of the read: what it hands
+    out is a constructor — off a function value, the `Function` intrinsic itself — so an alias
+    of it compiles strings the way the named intrinsic does. One only invoked in place or feeding a
+    further non-surface read is left uncounted (`_prototype_surface_escapes`), the measured shape
+    of the obfuscator's own defense payloads, which invoke `.constructor(...)` on values this
+    detector cannot type.
     """
     prop = member.property
     if member.computed:
         if isinstance(prop, JsStringLiteral):
-            return prop.value in REFLECTIVE_INTRINSICS
+            if prop.value in REFLECTIVE_INTRINSICS:
+                return True
+            return prop.value == 'constructor' and _prototype_surface_escapes(member)
         return is_global_object_base(member.object)
-    return isinstance(prop, JsIdentifier) and prop.name in REFLECTIVE_INTRINSICS
+    if not isinstance(prop, JsIdentifier):
+        return False
+    if prop.name in REFLECTIVE_INTRINSICS:
+        return True
+    return prop.name == 'constructor' and _prototype_surface_escapes(member)
 
 
 def is_direct_eval_call(node: Node) -> bool:
@@ -1615,6 +1732,7 @@ class SemanticModel:
         self._binding_of: dict[int, Binding] = {}
         self._reflection_surface: bool | None = None
         self._opaque_surface_sites: list[Node] | None = None
+        self._dispatch_surface_reached: bool | None = None
         self._function_direct_eval_sites: dict[int, list[Node]] = {}
         self.root_scope: Scope = _ScopeBuilder(self).build(root)
         self._build_def_use()
@@ -1956,10 +2074,10 @@ class SemanticModel:
         arguments: dict[Binding | None, Node | None],
     ) -> tuple[list[Node], bool]:
         """
-        `binding_values` read at one call site: *arguments* maps each parameter binding of the called
-        function to the argument that call supplies for it (`_argument_parameter_map`), and for a
-        binding it covers, the mapped argument is the entry channel `binding_values` cannot see — so
-        the answer can be complete where the plain query never is for a parameter. A parameter the
+        `binding_values` read at one call site: *arguments* maps each parameter binding of the
+        called function to the argument that call supplies for it (`_argument_parameter_map`), and
+        for a binding it covers, the mapped argument is the entry channel `binding_values` cannot
+        see — so the answer can be complete where the plain query never is. A parameter the
         call supplies no argument for maps to `None` and stays incomplete. Every other rule is
         `binding_values`' own: a write the text spells no value for, and any dynamic rebinding —
         a direct `eval` in the function, and a write through its own `arguments` object — still
@@ -2005,7 +2123,7 @@ class SemanticModel:
                 arguments is not None
                 and binding in arguments
                 and isinstance(parent, FUNCTION_NODES)
-                and any(parameter is declaration for parameter in parent.params)
+                and declaration in parent.params
             ):
                 argument = arguments[binding]
                 if argument is None:
@@ -2961,10 +3079,14 @@ class SemanticModel:
         during this call — `values_at_call`, so the argument mapped to a target parameter and every
         value assigned over it are weighed alike — and the receiver is safe only when that set is
         complete, non-empty, and every value never reads the receiver
-        (`_apply_target_value_observes_the_receiver`). A target the program installs properties
-        through (`_properties_installed_through`) or that reflection can reach is refused before
-        the values are asked, since either can shadow the `apply` intrinsic itself with code that
-        forwards the receiver, no matter which function the name holds.
+        (`_apply_target_value_observes_the_receiver`). Every target — a name or a function written
+        in place — presumes the intrinsic `apply` is what the dispatch finds, so any target is
+        refused while a reflection surface stands, since reflected code can replace that intrinsic
+        with a forwarder no matter which function the name holds — and this subsumes every way
+        reflection could reach the target binding itself — and likewise while text can reach the
+        prototype surface the dispatch walks (`_dispatch_surface_reachable`); a named target is
+        further refused when the program installs properties through it
+        (`_properties_installed_through`), which can shadow the intrinsic on the object alone.
         """
         parent = enclosing_operator(node)
         if not isinstance(parent, JsCallExpression):
@@ -2976,6 +3098,10 @@ class SemanticModel:
             return None
         if not parent.arguments or strip_parens(parent.arguments[0]) is not node:
             return None
+        if self.has_reflection_surface():
+            return False
+        if self._dispatch_surface_reachable():
+            return False
         target = strip_parens(callee.object)
         if isinstance(target, FUNCTION_NODES):
             return not self._function_observes_its_this(target, visiting, depth + 1)
@@ -2983,8 +3109,6 @@ class SemanticModel:
             return False
         binding = self.resolve(target)
         if binding is None:
-            return False
-        if self.reflection_can_reach(binding):
             return False
         if self._properties_installed_through(binding):
             return False
@@ -3025,42 +3149,63 @@ class SemanticModel:
 
     def _properties_installed_through(self, binding: Binding) -> bool:
         """
-        Whether the text may install a property on the object *binding* holds, through a reference
-        this model records: a member write whose base is the name (`t.apply = f`, `t[k] = f`), or
-        the name handed to an accessor-install method as the object installed on — the first
-        argument of a `defineProperty`/`defineProperties`, the receiver of a
-        `__defineGetter__`/`__defineSetter__`. A consumer that dispatches an inherited intrinsic
-        through the name must refuse when one exists, because an installed own property shadows the
-        intrinsic with code the intrinsic's contract says nothing about. Which key is installed is
-        not asked: a computed write names no fixed key, and refusing every install keeps the answer
-        independent of the folds that would reveal one.
+        Whether the text may install a property on the object *binding* holds, or on a prototype
+        that object dispatches through — the two ways an own or inherited name can come to shadow
+        an intrinsic a consumer trusts. Judged over every recorded read by what its position lets
+        code do with the object, refusing wherever the answer would otherwise depend on code the
+        model does not read. A member write anywhere on the access chain installs (`t.apply = f`,
+        `t[k] = f`, and through the chain, `t.__proto__.apply = f`). A read whose chain passes a
+        key that is not statically known, reaches the prototype surface, or names an accessor
+        installer may perform or reveal an install (`_DISPLACING_CHAIN_KEYS`). Any escape hands
+        the object to code that may install on it under another name — an alias, a call argument,
+        which is how a `defineProperty` or an `Object.assign` receives its target, a return —
+        except a position that consumes the value as a bare verdict and forwards nothing
+        (`_read_forwards_no_alias`). A plain rebind of the name is a write of the binding rather
+        than of the object, weighed by `values_at_call` and recorded as a write, so it never
+        appears among the reads walked here. Which key an install stores is never asked: a
+        computed write names no fixed key, and refusing every install keeps the answer independent
+        of the folds that would reveal one.
         """
         for reference in binding.reads:
-            access = _enclosing_member_access(reference)
-            if access is not None:
-                if reference_role(access) is not Role.READ:
-                    return True
-                call = enclosing_operator(access)
-                if (
-                    isinstance(call, JsCallExpression)
-                    and strip_parens(call.callee) is access
-                    and accessor_install_method(access) in ('__defineGetter__', '__defineSetter__')
-                ):
-                    return True
+            role = container_reference_role(reference)
+            if role is ContainerRole.MEMBER_WRITE:
+                return True
+            if role is ContainerRole.REBIND:
                 continue
-            governor = enclosing_operator(reference)
-            if (
-                isinstance(governor, JsCallExpression)
-                and governor.arguments
-                and strip_parens(governor.arguments[0]) is reference
-            ):
-                callee = strip_parens(governor.callee)
-                if (
-                    isinstance(callee, JsMemberExpression)
-                    and accessor_install_method(callee) in ('defineProperty', 'defineProperties')
-                ):
+            if role is ContainerRole.ESCAPE:
+                if _read_forwards_no_alias(reference):
+                    continue
+                return True
+            access = _enclosing_member_access(reference)
+            while access is not None:
+                key = static_property_key(access)
+                if key is None or key in _DISPLACING_CHAIN_KEYS:
                     return True
+                access = _enclosing_member_access(access)
         return False
+
+    def _dispatch_surface_reachable(self) -> bool:
+        """
+        Whether text can obtain and then write through the prototype surface an `apply`/`call`
+        dispatch walks, without spelling `Function` — a name whose read is already a reflection
+        surface. A write there may replace the intrinsic the dispatch is trusted to find, so while
+        one is possible anywhere, no receiver hand-over is safe. A `getPrototypeOf`/
+        `setPrototypeOf` member reaches the surface as a call and counts on sight, since an alias
+        of it leaves no chain to climb. A `__proto__` or `constructor` key yields the surface as a
+        value and counts exactly when what it yields is written through or flows onward
+        (`_prototype_surface_escapes`): the obfuscator's own defense reads `.constructor(...)`
+        merely to invoke it, and a gate refusing every such read would refuse the corpus it exists
+        to fold. Keys are read statically (`static_property_key`), so a computed key no fold
+        collapses stays unrecognized — the documented residual of every static key reading in
+        this model.
+        """
+        if self._dispatch_surface_reached is None:
+            self._dispatch_surface_reached = any(
+                isinstance(node, JsMemberExpression)
+                and _member_reaches_dispatch_surface(node)
+                for node in self.root.walk()
+            )
+        return self._dispatch_surface_reached
 
     def _function_observes_its_this(
         self,

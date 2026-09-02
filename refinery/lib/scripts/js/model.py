@@ -731,14 +731,16 @@ ACCESSOR_INSTALL_METHODS = frozenset({
 
 def static_string(node: Node | None) -> str | None:
     """
-    The string *node* certainly evaluates to, or `None`. It reads a string literal, a substitution-free
-    template, and concatenations of those — the forms a constant fold collapses to a literal.
+    The string *node* certainly evaluates to, or `None`. It reads a string literal, a
+    substitution-free template, and concatenations of those — the forms a constant fold collapses
+    to a literal.
 
-    This exists so that an analysis answer cannot change as folds fire: a property key the simplifier will
-    turn into `'defineProperty'` must already be read as that name, or a consumer holding the answer across
-    a pass would be told there is no install and then have one appear. It is deliberately a *must*
-    analysis — an unknown value yields `None`, and a key whose value is unknown names no method, since only
-    a key a fold can collapse can reveal an install mid-pass.
+    This exists so that an analysis answer cannot change as folds fire: a property key the
+    simplifier will turn into `'defineProperty'` must already be read as that name, or a consumer
+    holding the answer across a pass would be told there is no install and then have one appear.
+    It is deliberately a *must* analysis — an unknown value yields `None`, and a key whose value
+    is unknown names no method, since only a key a fold can collapse can reveal an install
+    mid-pass.
     """
     node = strip_parens(node)
     if isinstance(node, JsStringLiteral):
@@ -760,17 +762,24 @@ def static_string(node: Node | None) -> str | None:
     return None
 
 
-def accessor_install_method(node: JsMemberExpression) -> str | None:
+def static_property_key(node: JsMemberExpression) -> str | None:
     """
-    The accessor-install method *node* names, through a dotted property or a computed key whose string
-    value is statically known, or `None`. Matching the dotted form alone is what let
-    `Object['defineProperty']` slip past both callers, and a fold rewriting that key to a dot would then
-    reveal the install only after the fact was consumed.
+    The property name *node* accesses, or `None` where no single static name is known: the
+    identifier of a dotted access, or the string a computed key certainly evaluates to
+    (`static_string`), so a key a fold would collapse to a literal already reads as that name.
     """
     prop = node.property
     if node.computed:
-        value = static_string(prop)
-        return value if value in ACCESSOR_INSTALL_METHODS else None
-    if isinstance(prop, JsIdentifier) and prop.name in ACCESSOR_INSTALL_METHODS:
-        return prop.name
-    return None
+        return static_string(prop)
+    return prop.name if isinstance(prop, JsIdentifier) else None
+
+
+def accessor_install_method(node: JsMemberExpression) -> str | None:
+    """
+    The accessor-install method *node* names, through a dotted property or a computed key whose
+    string value is statically known, or `None`. Matching the dotted form alone is what let
+    `Object['defineProperty']` slip past both callers, and a fold rewriting that key to a dot
+    would then reveal the install only after the fact was consumed.
+    """
+    name = static_property_key(node)
+    return name if name in ACCESSOR_INSTALL_METHODS else None

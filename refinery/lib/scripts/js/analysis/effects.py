@@ -91,6 +91,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclarator,
     JsYieldExpression,
     accessor_install_method,
+    static_property_key,
     static_string,
     strip_parens,
     wraps_return,
@@ -2433,7 +2434,7 @@ def _global_writes_by_name(model: SemanticModel) -> _GlobalWrites:
         for member in _written_members(target):
             base = _member_chain_root(member)
             if base is not None:
-                record(aliases.names_denoted_by(base), _written_key(member))
+                record(aliases.names_denoted_by(base), static_property_key(member))
     return _GlobalWrites(
         frozenset(names),
         {name: None if written is None else frozenset(written) for name, written in keys.items()},
@@ -2455,18 +2456,6 @@ def _written_members(target: Node | None) -> Iterator[JsMemberExpression]:
         for node in cursor.walk():
             if isinstance(node, JsMemberExpression):
                 yield node
-
-
-def _written_key(member: JsMemberExpression) -> str | None:
-    """
-    The property name *member* accesses, or `None` where it cannot be read as one name. A computed
-    key is read through `static_string`, so a key a fold would collapse to a literal is already
-    that literal here, for the reason `static_string` gives.
-    """
-    if not member.computed:
-        prop = member.property
-        return prop.name if isinstance(prop, JsIdentifier) else None
-    return static_string(member.property)
 
 
 def _installed_key(call: JsCallExpression) -> str | None:
@@ -2573,13 +2562,14 @@ def _forwarded_value(node: JsIdentifier) -> Node | None:
 
 def _reaches_intrinsic_surface(member: JsMemberExpression) -> bool:
     """
-    Whether reading *member*'s key off an intrinsic can yield an object sharing that intrinsic's mutable
-    surface. A computed key whose string value is not statically known may be any of them, so it counts.
+    Whether reading *member*'s key off an intrinsic can yield an object sharing that intrinsic's
+    mutable surface. A computed key whose string value is not statically known may be any of them,
+    so it counts.
 
-    This is a *may* analysis, opposite in direction to `static_string`'s use in `accessor_install_method`:
-    there an unknown key names no method, because only a key a fold can collapse can reveal an install
-    mid-pass; here an unknown key reaches everything, because a missed reach is a name that keeps its trust
-    while the program patches it.
+    This is a *may* analysis, opposite in direction to the use `accessor_install_method` makes of
+    `static_string`: there an unknown key names no method, because only a key a fold can collapse
+    can reveal an install mid-pass; here an unknown key reaches everything, because a missed reach
+    is a name that keeps its trust while the program patches it.
     """
     prop = member.property
     if member.computed:

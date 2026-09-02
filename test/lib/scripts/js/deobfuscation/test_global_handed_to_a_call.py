@@ -168,9 +168,11 @@ _APPLY_TARGET_PARAMETER_REASSIGNED_BEFORE_THE_APPLY = a_program("""
 
 #: Nothing assigns over the target parameter, but the `apply` dispatched at the call is not the
 #: intrinsic: an own `apply` property — written directly, installed with `Object.defineProperty`,
-#: written through a second name for the same object, or inherited from a poisoned
-#: `Function.prototype` — receives the handed object as a plain argument and forwards it. The
-#: `arguments` row rebinds the parameter itself through the mapped object instead.
+#: copied on by `Object.assign`, written through a second name for the same object or by a helper
+#: the object is handed to — or an inherited one, from a swapped prototype or a `Function`
+#: prototype poisoned under any spelling — receives the handed object as a plain argument and
+#: forwards it. The `arguments` row rebinds the parameter itself through the mapped object
+#: instead.
 _A_DISPLACED_APPLY_FORWARDS_THE_RECEIVER = {
     'an own apply property forwards the receiver': a_program("""
         var secret = 'S';
@@ -196,6 +198,62 @@ _A_DISPLACED_APPLY_FORWARDS_THE_RECEIVER = {
         function wrap(recv, payload) {
           var other = payload;
           other.apply = function (r) { return inner(r); };
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'a two-valued alias writes the own apply property': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function wrap(recv, payload, flag) {
+          var other = flag ? payload : payload;
+          other.apply = function (r) { return inner(r); };
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}, 1));
+        """),
+    'a helper handed the target installs the forwarder': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function install(x) { x.apply = function (r) { return inner(r); }; }
+        function wrap(recv, payload) {
+          install(payload);
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'an assign copies the forwarder onto the target': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function wrap(recv, payload) {
+          Object.assign(payload, { apply: function (r) { return inner(r); } });
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'a prototype swap makes the forwarder inherited': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function wrap(recv, payload) {
+          Object.setPrototypeOf(payload, { apply: function (r) { return inner(r); } });
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'a chain write through the target poisons the prototype': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        function wrap(recv, payload) {
+          payload.__proto__.apply = function (r) { return inner(r); };
+          return payload.apply(recv, []);
+        }
+        console.log(wrap(this, function () {}));
+        """),
+    'a constructor-reached prototype forwards the receiver': a_program("""
+        var secret = 'S';
+        function inner(host) { return host.secret; }
+        (function () {}).constructor.prototype.apply = function (r) { return inner(r); };
+        function wrap(recv, payload) {
           return payload.apply(recv, []);
         }
         console.log(wrap(this, function () {}));
@@ -274,4 +332,25 @@ class TestAnUnobservedHandOverFreesWhatAnObservedOneKeeps(TestBase):
             a(this, function() {
               return this.q;
             });
+            """).rstrip(chr(10)))
+
+    def test_a_truth_guarded_apply_still_frees_an_unreferenced_global(self):
+        source = a_program("""
+            var q = 1;
+            function wrap(recv, payload) {
+              if (payload) {
+                return payload.apply(recv, []);
+              }
+            }
+            console.log(wrap(this, function () { return 'hi'; }));
+            """)
+        self.assertEqual(folded(source), a_program("""
+            function wrap(recv, payload) {
+              if (payload) {
+                return payload.apply(recv, []);
+              }
+            }
+            console.log(wrap(this, function() {
+              return 'hi';
+            }));
             """).rstrip(chr(10)))
