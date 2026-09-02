@@ -1208,7 +1208,6 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
     rather than read as the `$null` an isolated body would read.
     """
 
-    @unittest.expectedFailure
     def test_a_new_object_size_that_cannot_convert_folds_to_a_null_count_of_zero(self):
         # A size 5.1's converter refuses is a non-terminating error and not a throw, so `New-Object`
         # writes `$null` and the body runs on. `$null.Count` is 0 wherever strict mode is not armed,
@@ -1223,6 +1222,19 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
             """)
             with self.subTest(size):
                 self.assertEqual(self._deobfuscate(source), 'Write-Output 0')
+
+    def test_the_null_count_a_bad_size_folds_to_is_withheld_under_strict_mode_version_two(self):
+        # `Set-StrictMode -Version 2` turns the faked `$null.Count` into a statement-terminating
+        # error, so the body 5.1 aborts must not fold to the 0 it answers without strict mode.
+        source = cleandoc("""
+            Set-StrictMode -Version 2
+            function f {
+              $a = New-Object byte[] '0b10'
+              $a.Count
+            }
+            Write-Output (f)
+        """)
+        self._assertKept(source)
 
     def test_an_array_size_5_1_can_convert_is_folded_to_the_count_it_names(self):
         source = cleandoc("""

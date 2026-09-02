@@ -375,6 +375,7 @@ class _Ps1Interpreter:
         parent_env: Mapping[str, _Value] | None = None,
         depth: int = 0,
         caller_scope_names: frozenset[str] = frozenset(),
+        strict_v2_may_be_in_force: bool = True,
     ):
         self.max_iterations = max_iterations
         self.max_string_len = max_string_len
@@ -383,6 +384,11 @@ class _Ps1Interpreter:
         self._env: dict[str, _Value] = {}
         self._iterations = 0
         self._depth = depth
+        #: Whether the script may arm `Set-StrictMode -Version 2`, under which the `Count` and
+        #: `Length` the object adapter fakes onto `$null` raise rather than answer. The default is
+        #: the safe one: a body evaluated without a script to scan for the arming withholds those
+        #: fakes. Only the driver that has scanned the whole script lowers it. See `_resolve_property`.
+        self._strict_v2 = strict_v2_may_be_in_force
         #: The names an enclosing scope this fold was entered without may bind — the script-scope
         #: writes the driver gives it. A read of one before this body writes it is refused, not
         #: read as `$null`; see `_eval_variable`.
@@ -789,6 +795,7 @@ class _Ps1Interpreter:
             parent_env=parent_env,
             depth=self._depth + 1,
             caller_scope_names=self._caller_scope_names,
+            strict_v2_may_be_in_force=self._strict_v2,
         )
         try:
             result = child.execute(body, bindings)
@@ -841,7 +848,16 @@ class _Ps1Interpreter:
         type_name = positional[0]
         if not isinstance(type_name, str) or not type_name.lower().endswith('[]'):
             raise _Ps1InterpreterError
-        size = self._to_int(positional[1])
+        size_arg = positional[1]
+        try:
+            size = self._to_int(size_arg)
+        except _Ps1InterpreterError:
+            # A size that 5.1's `[int]` converter refuses is a non-terminating error, so the cmdlet
+            # writes `$null` and the body runs on rather than throwing. Only a String reaches that
+            # converter; a value this cannot read at all leaves the fold refused.
+            if isinstance(size_arg, str):
+                return None
+            raise
         if size < 0 or size > self.max_string_len:
             raise _Ps1InterpreterError
         return [0] * size
@@ -1077,8 +1093,14 @@ class _Ps1Interpreter:
                 return base + offset
         raise _Ps1InterpreterError
 
-    @staticmethod
-    def _resolve_property(obj: _Value, name: str) -> _Value:
+    def _resolve_property(self, obj: _Value, name: str) -> _Value:
+        if obj is None:
+            # The object adapter fakes a `Count` of 0 onto `$null`, which reads on wherever
+            # `Set-StrictMode -Version 2` is not armed and raises where it is; a real `Length` it
+            # does not fake, so that stays refused. This mirrors the value-domain folder's own gate.
+            if name == 'count' and not self._strict_v2:
+                return 0
+            return None
         if isinstance(obj, str):
             if name == 'length':
                 return len(obj)
@@ -1696,6 +1718,7 @@ class Ps1FunctionEvaluator(Transformer):
         self._ambiguous: set[str] = set()
         self._commands: Ps1CommandModel | None = None
         self._caller_scope_names: frozenset[str] = frozenset()
+        self._strict_v2 = True
         self._entry = False
 
     def visit(self, node):
@@ -1719,6 +1742,7 @@ class Ps1FunctionEvaluator(Transformer):
             cache = model_cache(self, node)
             exports = cache.call_graph.exports_a_name
             self._commands = cache.commands
+            self._strict_v2 = cache.faults.strict_mode_v2_may_be_in_force()
             super().visit(node)
             # Folding a call into its value preserves meaning whoever else can reach the name, so
             # the substitution above is unconditional. Deleting the *definition* is a name-keyed
@@ -1811,6 +1835,7 @@ class Ps1FunctionEvaluator(Transformer):
             max_string_len=self.max_string_len,
             functions=self._functions,
             caller_scope_names=self._caller_scope_names,
+            strict_v2_may_be_in_force=self._strict_v2,
         )
         if funcdef.body is None:
             return None
