@@ -405,7 +405,8 @@ def _extract_setter_target(func: Expression | None) -> str | None:
 
         { return <global> = <param>; }
 
-    where the function has exactly one parameter.
+    where the function has exactly one parameter. A setter assigning its own parameter names
+    nothing outside the setter, so it yields no target.
     """
     if not isinstance(func, JsFunctionExpression):
         return None
@@ -426,7 +427,7 @@ def _extract_setter_target(func: Expression | None) -> str | None:
         return None
     if not isinstance(expr, JsAssignmentExpression) or expr.operator != '=':
         return None
-    if not isinstance(expr.left, JsIdentifier):
+    if not isinstance(expr.left, JsIdentifier) or expr.left.name == param_name:
         return None
     if not isinstance(expr.right, JsIdentifier) or expr.right.name != param_name:
         return None
@@ -470,47 +471,69 @@ def _build_proxy_mapping(
 
 def _substitute_proxy_accesses(
     parsed: JsScript,
+    body_model: SemanticModel,
     param_name: str,
     getters: dict[str, str | JsUnaryExpression],
     setters: dict[str, str],
-) -> bool:
+) -> list[JsIdentifier] | None:
     """
-    Replace all `param[key]` accesses in the parsed code with the resolved globals from the proxy
-    mapping. A plain read resolves to the getter target and a simple `key = v` write to the setter
-    target; a compound, update, or delete access reads via the getter AND writes via the setter, which
-    no single global substitution preserves, so it makes resolution fail. Returns `True` if every
-    access was resolved successfully.
+    Replace every free `param[key]` access in the parsed code with the name the proxy mapping
+    resolves it to, returning the replacement identifiers (a `typeof` target's operand for that
+    getter form) or `None` where resolution fails. Only a reference the body leaves free is the
+    constructed function's parameter: one a nested function binds is that function's own and is
+    left alone, while a top-level binding of the name aliases the parameter itself, which no script
+    splice reproduces, so it fails resolution — as does a free use that is not a member access,
+    since it uses the proxy object as a value. A plain read resolves to the getter target and a
+    simple `key = v` write to the setter target; a compound, update, or delete access reads via the
+    getter AND writes via the setter, which no single substitution preserves, so it fails too.
     """
+    bound = body_model.root_scope.bindings.get(param_name)
+    if bound is not None and bound.kind is not BindingKind.IMPLICIT_GLOBAL:
+        return None
+    replaced: list[JsIdentifier] = []
     for node in list(parsed.walk()):
-        if not isinstance(node, JsMemberExpression):
+        if not isinstance(node, JsIdentifier) or node.name != param_name:
             continue
-        if not isinstance(node.object, JsIdentifier) or node.object.name != param_name:
+        if not body_model.is_reference(node):
             continue
-        key = access_key(node)
+        binding = body_model.resolve(node)
+        if binding is not None and binding.kind is not BindingKind.IMPLICIT_GLOBAL:
+            continue
+        member = node.parent
+        if not isinstance(member, JsMemberExpression) or member.object is not node:
+            return None
+        key = access_key(member)
         if key is None:
-            return False
-        if is_simple_assignment_target(node):
+            return None
+        if is_simple_assignment_target(member):
             if key not in setters:
-                return False
-            _replace_in_parent(node, JsIdentifier(name=setters[key]))
-        elif is_member_write_target(node):
-            return False
+                return None
+            replacement: JsIdentifier | JsUnaryExpression = JsIdentifier(name=setters[key])
+        elif is_member_write_target(member):
+            return None
         else:
-            if key not in getters:
-                return False
-            target = getters[key]
+            target = getters.get(key)
+            if target is None:
+                return None
             if isinstance(target, str):
-                _replace_in_parent(node, JsIdentifier(name=target))
+                replacement = JsIdentifier(name=target)
             else:
-                _replace_in_parent(node, _clone_node(target))
-    return True
+                replacement = _clone_node(target)
+        _replace_in_parent(member, replacement)
+        if isinstance(replacement, JsIdentifier):
+            replaced.append(replacement)
+        elif isinstance(replacement.operand, JsIdentifier):
+            replaced.append(replacement.operand)
+        else:
+            return None
+    return replaced
 
 
 def _try_unpack_function_constructor(
     node: JsCallExpression,
     *,
     free_global_name: Callable[[Expression | None], str | None],
-) -> list[Statement] | None:
+) -> tuple[JsScript, frozenset[str]] | None:
     """
     Unpack an immediately-invoked `Function` constructor whose single argument is a proxy object
     with getter/setter properties that redirect to global variables:
@@ -519,10 +542,16 @@ def _try_unpack_function_constructor(
             {get abc() { return x }, set abc(v) { x = v }, get def() { return y }, ...}
         )
 
-    Parses the code string, resolves all `p.key` accesses through the proxy mapping back to their
-    original global identifiers, and returns the recovered statement list. Returns `None` if the node
-    does not match — including when the inner callee is not the free global `Function` — or if any
-    proxy access cannot be resolved.
+    Parses the code string and resolves all free `p.key` accesses through the proxy mapping back to
+    their original identifiers. Returns the substituted body paired with the names whose site
+    resolution the substitution has already settled, or `None` if the node does not match —
+    including when the inner callee is not the free global `Function` — or if any proxy access
+    cannot be resolved. The caller must still admit the body the way every reflected body is
+    admitted; this function earns only the one exemption it returns. A getter or setter target is
+    spelled inside an accessor defined at the call site itself, so it resolves at the site exactly
+    as the accessor does, provided the substituted occurrence is still free where it lands in the
+    body — a body binding capturing one fails here — and provided the packed code did not also read
+    the name freely, in which case it stays held to the global-resolution rule and is not returned.
     """
     inner = node.callee
     if not isinstance(inner, JsCallExpression):
@@ -552,9 +581,20 @@ def _try_unpack_function_constructor(
     parsed = _try_parse(code, top_level_await=False, strict=strict_mode_at(node))
     if parsed is None:
         return None
-    if param_name and not _substitute_proxy_accesses(parsed, param_name, getters, setters):
+    if not param_name:
+        return parsed, frozenset()
+    body_model = build_semantic_model(parsed)
+    originally_free = _body_free_names(body_model, parsed)
+    replaced = _substitute_proxy_accesses(parsed, body_model, param_name, getters, setters)
+    if replaced is None:
         return None
-    return list(parsed.body)
+    substituted_model = build_semantic_model(parsed)
+    for ident in replaced:
+        binding = substituted_model.resolve(ident)
+        if binding is not None and binding.kind is not BindingKind.IMPLICIT_GLOBAL:
+            return None
+    introduced = {ident.name for ident in replaced}
+    return parsed, frozenset(introduced - (originally_free - {param_name}))
 
 
 def _is_pack_shaped(
@@ -957,11 +997,12 @@ class JsReflectionInlining(ScriptLevelTransformer):
     ) -> list[Statement] | None:
         """
         Resolve a statement-position reflective call to the statements it should become, or `None`. A
-        `Function`-constructor pack, a direct or indirect `eval`, and a `Function` body are handled by
-        `_resolve_reflected_call`; `execScript("code")` runs its code synchronously in the global scope
-        and discards the value, so at statement position it is replaced by that code inlined in place. An
-        `await`-ed call is not a plain call expression here, so it is left for the expression pass, which
-        rewrites the `eval` inside `await eval("expr")` to `await (expr)` without dropping the `await`.
+        `Function`-constructor pack is unpacked and its substituted body admitted like any constructed
+        body; a direct or indirect `eval` and a `Function` body are handled by `_resolve_reflected_call`;
+        `execScript("code")` runs its code synchronously in the global scope and discards the value, so
+        at statement position it is replaced by that code inlined in place. An `await`-ed call is not a
+        plain call expression here, so it is left for the expression pass, which rewrites the `eval`
+        inside `await eval("expr")` to `await (expr)` without dropping the `await`.
         """
         if not isinstance(stmt, JsExpressionStatement) or stmt.expression is None:
             return None
@@ -982,10 +1023,15 @@ class JsReflectionInlining(ScriptLevelTransformer):
             if parsed is None or _has_top_level_await(parsed.body):
                 return None
             return parsed.body
-        pack_result = _try_unpack_function_constructor(
+        pack = _try_unpack_function_constructor(
             node, free_global_name=self._free_global)
-        if pack_result is not None:
-            return pack_result
+        if pack is not None:
+            packed, site_resolved = pack
+            admitted = self._admit_reflected_body(
+                packed, stmt, root, ReflectedScope.FUNCTION_CONSTRUCTOR, at_global_scope,
+                site_resolved=site_resolved,
+            )
+            return list(admitted.body) if admitted is not None else None
         if _is_pack_shaped(node, free_global_name=self._free_global):
             return None
         resolved = self._resolve_reflected_call(node, stmt, root, at_global_scope)
@@ -1100,10 +1146,34 @@ class JsReflectionInlining(ScriptLevelTransformer):
         binds: bool = False,
     ) -> JsScript | None:
         """
-        Parse reflectively evaluated *code* and decide whether inlining its body at *site* preserves
-        meaning, given the `ReflectedScope` it runs in. Global-scope code — a `Function`-constructed
-        body or indirect `eval`/string-timer code — must run in the global sloppy mode it would have: a
-        strict context at *site* declines a body that would diverge under strict mode
+        Parse reflectively evaluated *code* and admit it through `_admit_reflected_body`, or decline
+        (`None`). A body that binds parameters or observes its arguments (*binds*) cannot be inlined
+        as text, so it declines before the parse.
+        """
+        if binds:
+            return None
+        resolves_globally = scope is not ReflectedScope.DIRECT_EVAL
+        top_level_await = not resolves_globally and _site_in_async_function(site)
+        parsed = _try_parse(code, top_level_await=top_level_await, strict=strict_mode_at(site))
+        if parsed is None:
+            return None
+        return self._admit_reflected_body(parsed, site, root, scope, at_global_scope)
+
+    def _admit_reflected_body(
+        self,
+        parsed: JsScript,
+        site: Node,
+        root: JsScript,
+        scope: ReflectedScope,
+        at_global_scope: bool,
+        *,
+        site_resolved: frozenset[str] = frozenset(),
+    ) -> JsScript | None:
+        """
+        Decide whether inlining the reflected body *parsed* at *site* preserves meaning, given the
+        `ReflectedScope` it runs in. Global-scope code — a `Function`-constructed body or indirect
+        `eval`/string-timer code — must run in the global sloppy mode it would have: a strict
+        context at *site* declines a body that would diverge under strict mode
         (`diverges_under_strict`), as does a `"use strict"` prologue; every receiver `this` becomes
         `globalThis`; and a body reading `arguments`, `super`, or `new.target`, or a free
         name that no longer denotes the same global at *site* — including one a `with` on the path could
@@ -1112,15 +1182,14 @@ class JsReflectionInlining(ScriptLevelTransformer):
         `return` is a SyntaxError in evaluated code, so an eval body with one declines. Declaration
         handling is delegated to `_reflected_declarations_safe`. Anything not provably safe is left
         intact (returns `None`) — declining is always sound.
+
+        *site_resolved* is the one exemption the pack route earns: a name its proxy substitution
+        introduced resolves at the site by construction, the accessor spelling it being defined
+        there, so it is not held to the global-resolution rule the reflected code's own free names
+        must meet. Every other check still applies to it.
         """
-        if binds:
-            return None
         resolves_globally = scope is not ReflectedScope.DIRECT_EVAL
-        top_level_await = not resolves_globally and _site_in_async_function(site)
         site_is_strict = strict_mode_at(site)
-        parsed = _try_parse(code, top_level_await=top_level_await, strict=site_is_strict)
-        if parsed is None:
-            return None
         if declares_use_strict(parsed) and (resolves_globally or not site_is_strict):
             return None
         if resolves_globally:
@@ -1146,6 +1215,8 @@ class JsReflectionInlining(ScriptLevelTransformer):
             if crosses_dynamic_scope(site_scope):
                 return None
             for name in free:
+                if name in site_resolved:
+                    continue
                 binding = root_model.lookup(name, site_scope)
                 if binding is not None and not root_model.reaches_global_object(
                     binding, module_scope=module_execution(self.options),

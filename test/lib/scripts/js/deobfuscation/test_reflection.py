@@ -6,6 +6,7 @@ import unittest
 
 from typing import NamedTuple
 
+from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
     JsEvaluation,
     behavior,
@@ -14,6 +15,7 @@ from test.lib.scripts.js.analysis.differential import (
     node_executable,
 )
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
+from test.lib.scripts.js.ledger import Program, Reading, a_program, prints
 from test.lib.scripts.js.test_directive_prologue import NOT_A_PROGRAM
 
 from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
@@ -621,6 +623,46 @@ class TestReflectionInlining(TestJsDeobfuscator):
             """
         )
         self.assertEqual(source, self._reflect(source))
+
+    def test_pack_nested_function_own_parameter_name_left_alone(self):
+        source = inspect.cleandoc(
+            """
+            Function('p', 'function g(p) { console.log(p); } g(7); p.out = 1;')(
+            { set out(x) { return s = x; }, get out() { return s; } });
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function g(p) {
+                  console.log(p);
+                }
+                g(7);
+                s = 1;
+                """
+            ),
+            self._reflect(source),
+        )
+
+    def test_module_pack_setter_target_naming_a_module_var_still_inlined(self):
+        source = inspect.cleandoc(
+            """
+            var x = 1;
+            Function('p', 'p.out = 2;')(
+            { set out(v) { return x = v; }, get out() { return x; } });
+            console.log(x);
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var x = 1;
+                x = 2;
+                console.log(x);
+                """
+            ),
+            self._reflect_module(source),
+        )
 
     def test_eval_multi_statement_inlined_in_statement_position(self):
         self.assertEqual(
@@ -1654,4 +1696,97 @@ class TestGlobalFinderFoldPreservesBehavior(TestJsDeobfuscator):
             {source: behavior(source) for source in sources},
             {source: ('finder-ok\n', None) for source in sources},
         )
+
+
+#: Programs with a reflective site whose splice must be declined, each mapped to the behavior an
+#: engine gives the original. The first three are `Function`-constructor packs whose body, once
+#: substituted, would resolve a name differently at the call site than the constructed function
+#: does: a packed `var` a site read would bind to, a packed free name a site parameter shadows, and
+#: a setter assigning its own parameter, which names nothing outside the setter.
+A_REFLECTIVE_SPLICE_THE_SITE_WOULD_REBIND = {
+    'a packed var the site reads': Program(
+        a_program("""
+            var r = 'outer';
+            function f() {
+              Function('p', 'var v = 1; p.out = v;')({
+                get out() { return r; },
+                set out(x) { r = x; }
+              });
+              return v;
+            }
+            f();
+            console.log(r);
+            """),
+        ('', 'ReferenceError'),
+    ),
+    'a packed free name a site parameter shadows': Program(
+        a_program("""
+            var q = 'global';
+            var r = 0;
+            function f(q) {
+              Function('p', 'p.out = q;')({
+                get out() { return r; },
+                set out(x) { r = x; }
+              });
+              return r;
+            }
+            console.log(f('local'));
+            """),
+        prints('global'),
+        Reading.SCRIPT,
+    ),
+    'a setter assigning its own parameter': Program(
+        a_program("""
+            Function('p', 'p.out = 1;')({
+              set out(x) { return x = x; },
+              get out() { return g; }
+            });
+            console.log(typeof x);
+            """),
+        prints('undefined'),
+    ),
+    'a bare use of the proxy parameter': Program(
+        a_program("""
+            Function('p', 'console.log(typeof p); p.out = 1;')({
+              set out(x) { return s = x; },
+              get out() { return s; }
+            });
+            """),
+        prints('object'),
+    ),
+    'a packed var capturing a setter target': Program(
+        a_program("""
+            var r = 0;
+            function f() {
+              Function('p', 'var r = 9; p.out = 5;')({
+                set out(x) { return r = x; },
+                get out() { return r; }
+              });
+            }
+            f();
+            console.log(r);
+            """),
+        prints('5'),
+    ),
+    'a packed var aliasing the proxy parameter': Program(
+        a_program("""
+            var r = 5;
+            Function('p', 'var p = 0; p.out = 1;')({
+              set out(x) { return r = x; },
+              get out() { return r; }
+            });
+            console.log(r);
+            """),
+        prints('5'),
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReflectiveSpliceTheSiteWouldRebindIsDeclined(TestBase):
+
+    def test_every_program_behaves_the_way_the_engine_does(self):
+        for label, row in A_REFLECTIVE_SPLICE_THE_SITE_WOULD_REBIND.items():
+            with self.subTest(label):
+                self.assertEqual(row.read(), row.required())
 
