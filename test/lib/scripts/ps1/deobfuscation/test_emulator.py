@@ -1236,6 +1236,21 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
         """)
         self._assertKept(source)
 
+    @unittest.expectedFailure
+    def test_a_read_of_an_unset_name_in_a_body_is_withheld_under_strict_mode(self):
+        # `Set-StrictMode` turns a read of a never-assigned variable into a statement-terminating
+        # error, so a body 5.1 aborts must not fold to the value an isolated body reads `$q` as the
+        # `$null` for. The faked-member gate above answers this for `$null.Count`; a plain unset read
+        # is the same host rule and the emulator still folds it.
+        source = cleandoc("""
+            Set-StrictMode -Version 1
+            function f {
+              $q + 1
+            }
+            Write-Output (f)
+        """)
+        self._assertKept(source)
+
     def test_an_array_size_5_1_can_convert_is_folded_to_the_count_it_names(self):
         source = cleandoc("""
             function f {
