@@ -1776,6 +1776,8 @@ class Ps1Parser:
         while self._at(Ps1TokenKind.CATCH):
             self._advance()
             self._skip_newlines()
+            with self._mode(Ps1LexerMode.EXPRESSION):
+                filtered = self._at(Ps1TokenKind.LBRACKET)
             types: list[str] = []
             while True:
                 te = self._try_parse_type_literal()
@@ -1788,7 +1790,7 @@ class Ps1Parser:
                 self._skip_newlines()
             body = self._parse_block()
             catch_clauses.append(Ps1CatchClause(
-                offset=body.offset, types=types, body=body))
+                offset=body.offset, types=types, body=body, filtered=filtered))
             self._skip_newlines()
         finally_block = None
         if self._at(Ps1TokenKind.FINALLY):

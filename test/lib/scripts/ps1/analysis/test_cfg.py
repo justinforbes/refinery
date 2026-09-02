@@ -907,12 +907,14 @@ class TestPs1ACatchWhoseTypeFilterCannotBeReadIsNotUnfiltered(_Ps1ControlFlowGra
     A `catch` carrying no type filter takes every error, and one carrying a filter takes only what
     the filter matches — so whether a throw the guarded block makes can get past the clause is
     decided by reading the filter. `Ps1CatchClause.types` spells *no filter written* and *a filter
-    this could not read* the same way, as the empty list, and the graph reads both as unfiltered.
+    this could not read* the same way, as the empty list, so `Ps1CatchClause.filtered` records that
+    a bracket was written and keeps the two apart.
 
     5.1 rejects `catch [] { }` outright, reporting `MissingTypename`, so the conflation is out of
-    reach of any script a host will run. What pins it is the direction it errs in: a clause read as
-    taking everything closes the exceptional edge the construct would otherwise pass outward, and an
-    enclosing handler then looks like one no error reaches.
+    reach of any script a host will run. What pins it is the direction it would err in: a clause
+    read as taking everything closes the exceptional edge the construct would otherwise pass
+    outward, and an enclosing handler then looks like one no error reaches. An unread filter takes
+    nothing certain, so the error leaves the construct.
     """
 
     def _guarded_statement(self, source: str) -> tuple[ControlFlowGraph, Statement]:
@@ -930,7 +932,6 @@ class TestPs1ACatchWhoseTypeFilterCannotBeReadIsNotUnfiltered(_Ps1ControlFlowGra
             "try { 'a' } catch [System.IO.IOException] { 'b' }")
         self.assertIn(graph.exit, self._reached_by_an_error_at(graph, guarded))
 
-    @unittest.expectedFailure
     def test_a_catch_whose_filter_is_an_empty_bracket_lets_the_error_leave_the_construct(self):
         graph, guarded = self._guarded_statement("try { 'a' } catch [] { 'b' }")
         self.assertIn(graph.exit, self._reached_by_an_error_at(graph, guarded))

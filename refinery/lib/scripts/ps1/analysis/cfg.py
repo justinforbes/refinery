@@ -109,9 +109,10 @@ _CATCHES_EVERY_ERROR = frozenset({
 
 def _names_every_error(name: str) -> bool:
     """
-    Whether *name* is a type filter every terminating error matches. An empty name is no filter at
-    all, which is the same answer for a different reason and the reason a `catch` clause and a
-    `trap` can ask one question: both spell *unfiltered* as nothing written.
+    Whether *name* is a type filter every terminating error matches. An empty name is a `trap`
+    carrying no type filter, which takes every error the way a bare `catch` does. A `catch` clause
+    reaches this only with the names it could read: whether it carried a filter at all is
+    `Ps1CatchClause.filtered`, so an unreadable one is never spelled here as the empty name.
     """
     return not name.strip() or name.strip().lower() in _CATCHES_EVERY_ERROR
 
@@ -122,9 +123,12 @@ def _catch_takes_every_error(clause: Ps1CatchClause) -> bool:
     no type filter at all, or one of the filters it carries names a type every terminating error is.
 
     A clause carrying several types matches when *any* of them does, so one universal name among
-    them settles it however narrow the others are.
+    them settles it however narrow the others are. A clause whose filter was written but could not
+    be read carries an empty `types` for a different reason than an unfiltered clause does, and
+    `filtered` is what tells the two apart: erring towards *takes everything* would close the
+    exceptional edge an enclosing handler still needs, so the unread filter takes nothing certain.
     """
-    if not clause.types:
+    if not clause.filtered:
         return True
     return any(_names_every_error(name) for name in clause.types)
 

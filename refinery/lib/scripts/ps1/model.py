@@ -480,6 +480,7 @@ class Ps1SwitchStatement(Statement):
 class Ps1CatchClause(Node):
     types: list[str] = field(default_factory=list)
     body: Block | None = None
+    filtered: bool = False
 
 
 @dataclass(repr=False, eq=False)
