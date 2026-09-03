@@ -1589,10 +1589,38 @@ class JsParser:
             return JsAwaitExpression(argument=operand, offset=tok.offset)
         return self._parse_update_expression()
 
+    @staticmethod
+    def _is_simple_reference(node: Expression) -> bool:
+        """
+        Whether *node* is a reference `++` or `--` may write back to, which §13.4 requires of the
+        operand of either: its AssignmentTargetType must be simple. A name is one, and so is a
+        member access, and so is a call, in the sloppy code a script is until a directive makes it
+        strict. A parenthesis wraps a reference only where what it holds is one, and a single `?.`
+        anywhere in the chain makes the whole an optional expression the language forbids an update
+        from writing to. Everything else — a function or class made on the spot, a literal, `this`,
+        a `new`, a sequence — is a value and no reference, so an update written against it is an
+        early error, and a file holding one is read with the repair recorded so that nothing takes
+        the tree for a program.
+        """
+        current: Expression | None = node
+        while isinstance(current, JsParenthesizedExpression):
+            current = current.expression
+        if isinstance(current, JsIdentifier):
+            return True
+        if not isinstance(current, (JsMemberExpression, JsCallExpression)):
+            return False
+        while isinstance(current, (JsMemberExpression, JsCallExpression)):
+            if current.optional:
+                return False
+            current = current.object if isinstance(current, JsMemberExpression) else current.callee
+        return True
+
     def _parse_update_expression(self) -> Expression:
         if self._at(JsTokenKind.INC, JsTokenKind.DEC):
             tok = self._advance()
             argument = self._parse_call_expression()
+            if not self._is_simple_reference(argument):
+                self._recovered = True
             return JsUpdateExpression(
                 operator=tok.value, argument=argument, prefix=True, offset=tok.offset)
         expr = self._parse_call_expression()
@@ -1600,6 +1628,8 @@ class JsParser:
             JsTokenKind.INC, JsTokenKind.DEC,
         ):
             tok = self._advance()
+            if not self._is_simple_reference(expr):
+                self._recovered = True
             return JsUpdateExpression(
                 operator=tok.value, argument=expr, prefix=False, offset=expr.offset)
         return expr

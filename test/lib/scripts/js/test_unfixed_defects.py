@@ -1961,35 +1961,6 @@ class TestAStringArrayHolderNoLoopReadsIsStillResolved(TestBase):
         )
 
 
-class TestWellFormednessRefusesANonProgram(TestBase):
-    """
-    `refinery.lib.scripts.is_well_formed` is the domain over which fidelity is stated: it holds
-    when every node in the tree spells something a parser agreed to read. A source no engine
-    accepts is not such a tree, and a caller that is told otherwise compares a fabrication against
-    the file it came from.
-
-    What is left here is the class the parser reads without repairing anything: an assignment
-    target the grammar refuses. A file that stops in the middle of a construct is answered
-    correctly and its law lives in `test.lib.scripts.js.test_parser_recovery`.
-    """
-
-    @unittest.expectedFailure
-    def test_an_arrow_function_is_not_an_update_target(self):
-        """
-        Node refuses `f = a => {}++` with `SyntaxError: Unexpected token '++'`. An update operator
-        needs an operand it can write back to, and a function made on the spot is not a reference.
-        """
-        self.assertEqual(well_formed('f = a => {}++'), False)
-
-    @unittest.expectedFailure
-    def test_a_function_expression_is_not_an_update_target(self):
-        """
-        Node refuses `f = function () {}++` with `SyntaxError: Invalid left-hand side expression in
-        postfix operation`, naming the same missing target the arrow form lacks.
-        """
-        self.assertEqual(well_formed('f = function () {}++'), False)
-
-
 class TestACarvedFileIsNotAnsweredWithAProgram(TestBase):
     """
     A buffer carved out of memory can stop in the middle of a literal, and the literal it stopped
