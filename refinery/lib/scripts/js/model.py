@@ -597,6 +597,8 @@ class JsExportNamedDeclaration(Statement):
     declaration: Statement | None = None
     specifiers: list[JsExportSpecifier] = field(default_factory=list)
     source: JsStringLiteral | None = None
+    attributes: list[JsImportAttribute] = field(default_factory=list)
+    attributes_keyword: str = ''
 
 
 @dataclass(repr=False, eq=False)
@@ -608,6 +610,8 @@ class JsExportDefaultDeclaration(Statement):
 class JsExportAllDeclaration(Statement):
     source: JsStringLiteral | None = None
     exported: Expression | None = None
+    attributes: list[JsImportAttribute] = field(default_factory=list)
+    attributes_keyword: str = ''
 
 
 @dataclass(repr=False, eq=False)

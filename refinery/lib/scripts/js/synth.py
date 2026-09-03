@@ -996,7 +996,10 @@ class JsSynthesizer(Synthesizer):
         self._emit_import_attributes(node)
         self._write(';')
 
-    def _emit_import_attributes(self, node: JsImportDeclaration):
+    def _emit_import_attributes(
+        self,
+        node: JsImportDeclaration | JsExportNamedDeclaration | JsExportAllDeclaration,
+    ):
         if not node.attributes_keyword:
             return
         self._write(F' {node.attributes_keyword} {{ ')
@@ -1074,6 +1077,7 @@ class JsSynthesizer(Synthesizer):
         if node.source:
             self._write(' from ')
             self.visit(node.source)
+            self._emit_import_attributes(node)
         self._write(';')
 
     def visit_JsExportDefaultDeclaration(self, node: JsExportDefaultDeclaration):
@@ -1093,6 +1097,7 @@ class JsSynthesizer(Synthesizer):
         self._write(' from ')
         if node.source:
             self.visit(node.source)
+            self._emit_import_attributes(node)
         self._write(';')
 
     def visit_JsExportSpecifier(self, node: JsExportSpecifier):

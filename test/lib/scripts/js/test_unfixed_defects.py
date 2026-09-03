@@ -81,7 +81,6 @@ from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_
 from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
 
 from refinery.lib.scripts import UnspellableNode
-from refinery.lib.scripts.js.analysis.model import is_use_position
 from refinery.lib.scripts.js.model import (
     JsIdentifier,
     JsPropertyDefinition,
@@ -1443,58 +1442,6 @@ class TestAnObjectLiteralSpellingProtoIsCounted(TestBase):
             {source: folded(source) for source in rows},
             {source: F'console.log({prints.strip()});' for source, prints in rows.items()},
         )
-
-
-#: Declarations carrying an import-attribute clause, mapped to whether that clause is on an `import`
-#: or on a re-`export`. The `import` rows are the controls: the clause is read there, and the two
-#: forms are the same clause in the same place in the grammar.
-A_DECLARATION_CARRYING_IMPORT_ATTRIBUTES = {
-    "import j from './x.json' with { type: 'json' };": True,
-    "import * as ns from './x.json' with { type: 'json' };": True,
-    "export { default as j } from './x.json' with { type: 'json' };": False,
-    "export * from './x.json' with { type: 'json' };": False,
-    "export * as ns from './x.json' with { type: 'json' };": False,
-}
-
-
-class TestAReExportCarriesTheAttributesItWasWrittenWith(TestBase):
-    """
-    An import attribute clause stands on a re-export exactly as it stands on an import, and the
-    parser has it only on the import. What follows the module specifier is read as a `with`
-    statement instead, so `with { type: 'json' }` becomes a statement whose object is a read of a
-    binding named `type` and whose body is the string, and the brace that closed the clause closes
-    nothing: the text that comes back holds one more `}` than any file can.
-
-    `refinery.lib.scripts.is_well_formed` answers `False` for each, so nothing is spliced anywhere,
-    and what is wrong is that `refinery.js` writes the file at all. The attribute key becomes a read
-    besides — `refinery.lib.scripts.js.analysis.model.is_use_position` counts it as one where the
-    import form counts none — so a pass asking which names the module reads is told a name the
-    module never mentions, and a rename would rewrite the key.
-    """
-
-    @unittest.expectedFailure
-    def test_a_re_export_reads_its_attribute_clause_as_a_clause(self):
-        """
-        Each declaration of `A_DECLARATION_CARRYING_IMPORT_ATTRIBUTES` names one attribute, `type`,
-        and no binding of that name, so no occurrence of it is a read. The three re-export rows
-        report one read each and come back as text no engine parses.
-        """
-        rows = A_DECLARATION_CARRYING_IMPORT_ATTRIBUTES
-        self.assertEqual(
-            {source: (well_formed(source), _reads_named_type(source)) for source in rows},
-            {source: (True, 0) for source in rows},
-        )
-
-
-def _reads_named_type(source: str) -> int:
-    """
-    How many occurrences of the name `type` in *source* stand where a binding is read or written.
-    """
-    tree = JsParser(source).parse()
-    return sum(
-        is_use_position(node) for node in tree.walk()
-        if isinstance(node, JsIdentifier) and node.name == 'type'
-    )
 
 
 #: Programs whose `for-in` walk the language alone decides although the file wrote a prototype,

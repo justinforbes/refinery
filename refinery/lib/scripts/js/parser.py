@@ -1418,9 +1418,15 @@ class JsParser:
             source = self._module_specifier()
             if source is None:
                 return self._unread_since(offset, 'a module declaration with no specifier')
+            keyword, attributes = self._parse_import_attributes()
             self._eat_semicolon()
             return JsExportAllDeclaration(
-                source=source, exported=exported, offset=offset)
+                source=source,
+                exported=exported,
+                attributes=attributes,
+                attributes_keyword=keyword,
+                offset=offset,
+            )
 
         if self._at(JsTokenKind.LBRACE):
             return self._parse_export_named(offset)
@@ -1459,18 +1465,25 @@ class JsParser:
                 self._expect(JsTokenKind.COMMA)
         self._expect(JsTokenKind.RBRACE)
         source = None
+        keyword, attributes = '', []
         if self._at(JsTokenKind.FROM):
             self._advance()
             source = self._module_specifier()
             if source is None:
                 return self._unread_since(offset, 'a module declaration with no specifier')
+            keyword, attributes = self._parse_import_attributes()
         if source is None and any(
             isinstance(specifier.local, JsStringLiteral) for specifier in specifiers
         ):
             self._recovered = True
         self._eat_semicolon()
         return JsExportNamedDeclaration(
-            specifiers=specifiers, source=source, offset=offset)
+            specifiers=specifiers,
+            source=source,
+            attributes=attributes,
+            attributes_keyword=keyword,
+            offset=offset,
+        )
 
     def _at_async_function(self) -> bool:
         """
