@@ -943,13 +943,12 @@ byte order mark. Every character outside it is a character `atob` throws on, so 
 padding deletes a throw.
 """
 _RE_NON_BASE64 = re.compile(r'[^A-Za-z0-9+/=]')
-_RE_INCOMPLETE_ESCAPE = re.compile(r'%(?![0-9A-Fa-f]{2})')
+_RE_URI_ESCAPE = re.compile('%([0-9A-Fa-f]{2})')
 """
-A percent sign that introduces no complete escape. `decodeURIComponent` scans its argument for `%` and
-throws a `URIError` unless two hexadecimal digits follow, so such a sign is not a character the decode
-passes through: `decodeURIComponent('100%')` throws where `urllib.parse.unquote` answers `'100%'`.
-Searching every `%` decides the whole argument, because the scan advances over the two digits of each
-escape it accepts and neither digit can itself be a `%`, so no sign it would have reached is skipped.
+One escape of a URI: a percent sign and the two hexadecimal digits spelling one octet. A decode
+throws a `URIError` for a percent sign anything else follows, so a sign this does not match is not
+a character it passes through: `decodeURIComponent('100%')` throws where `urllib.parse.unquote`
+answers `'100%'`.
 """
 
 
@@ -961,20 +960,59 @@ def _global_unescape(args: list[Value]) -> Value:
     return _UNESCAPE_PATTERN.sub(lambda m: chr(int(m.group(1) or m.group(2), 16)), s)
 
 
+def _uri_escape_octet(s: str, index: int) -> int:
+    match = _RE_URI_ESCAPE.match(s, index)
+    if match is None:
+        raise InterpreterError
+    return int(match.group(1), 16)
+
+
+def _utf8_sequence_length(lead: int) -> int:
+    if 0xC0 <= lead < 0xE0:
+        return 2
+    if 0xE0 <= lead < 0xF0:
+        return 3
+    if 0xF0 <= lead < 0xF8:
+        return 4
+    raise InterpreterError
+
+
 @_register((None, 'decodeURIComponent'))
 def _global_decode_uri_component(args: list[Value]) -> Value:
+    """
+    Apply the `Decode` operation of the specification over the code units of the argument, with no
+    escape preserved. A character no escape introduced is copied straight into the answer, a
+    surrogate the argument itself spells included; an escaped octet outside ASCII must open a run
+    of escaped octets that is strict UTF-8 — an overlong form, an encoded surrogate, or a code
+    point past the last one all throw — and the code point that run encodes comes back as the code
+    units that spell it, so a decoded astral character is the pair a literal holding it would be.
+    """
     if not args:
         raise InterpreterError
     s = to_string(args[0])
-    if _RE_INCOMPLETE_ESCAPE.search(s):
-        raise InterpreterError
-    try:
-        result = urllib.parse.unquote(s, encoding='utf-8', errors='surrogatepass')
-        if any('\uD800' <= c <= '\uDFFF' for c in result):
+    result: list[str] = []
+    index = 0
+    while index < len(s):
+        unit = s[index]
+        if unit != '%':
+            result.append(unit)
+            index += 1
+            continue
+        lead = _uri_escape_octet(s, index)
+        index += 3
+        if lead < 0x80:
+            result.append(chr(lead))
+            continue
+        octets = bytearray([lead])
+        for _ in range(_utf8_sequence_length(lead) - 1):
+            octets.append(_uri_escape_octet(s, index))
+            index += 3
+        try:
+            decoded = octets.decode('utf-8')
+        except UnicodeDecodeError:
             raise InterpreterError
-        return result
-    except Exception:
-        raise InterpreterError
+        result.append(to_code_units(decoded))
+    return ''.join(result)
 
 
 @_register((None, 'encodeURIComponent'))

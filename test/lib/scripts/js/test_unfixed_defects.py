@@ -94,9 +94,6 @@ from refinery.lib.scripts.js.parser import JsParser
 from refinery.lib.scripts.js.synth import JsSynthesizer
 
 
-_ASTRAL = chr(0x1F600)
-
-
 def _sole_property_definition(source: str) -> JsPropertyDefinition:
     return [
         node for node in JsParser(source).parse().walk()
@@ -570,39 +567,6 @@ class TestCommentWithNoFollowingStatement(TestBase):
         """
         sources = ['x = 1;\n/* note */', 'x = 1;\n// note', 'x = 1;\n/* note']
         self.assertEqual(tuple(printed(source) for source in sources), tuple(sources))
-
-
-class TestADecodeReadsBackTheCharactersNoEscapeIntroduced(TestBase):
-    """
-    `decodeURIComponent` copies every character of its argument that no escape introduced straight
-    into its answer, and a character above the basic multilingual plane is two code units there as
-    it is anywhere else. For `C` the one character U+1F600, Node answers `decodeURIComponent(C)`
-    with `C` and `decodeURIComponent(C + '%41')` with `C` followed by an `A`; and for an argument
-    that is the lone high surrogate D800 it answers with that surrogate, an argument holding no
-    escape being one a decode has nothing to refuse about.
-
-    The fold refuses all three. A value is held as the code units a JavaScript string is made of, so
-    the surrogates the argument itself spells are read as though the decoded bytes had produced
-    them, and a call over an ordinary string is left standing for want of an answer.
-    """
-
-    @unittest.expectedFailure
-    def test_a_character_the_argument_already_holds_survives_the_decode(self):
-        backslash = chr(92)
-        lone_surrogate = F'{backslash}uD800'
-        programs = [
-            F"console.log(decodeURIComponent('{_ASTRAL}'));",
-            F"console.log(decodeURIComponent('{_ASTRAL}%41'));",
-            F"console.log(decodeURIComponent('{lone_surrogate}'));",
-        ]
-        self.assertEqual(
-            [folded(program) for program in programs],
-            [
-                F"console.log('{_ASTRAL}');",
-                F"console.log('{_ASTRAL}A');",
-                F"console.log('{lone_surrogate}');",
-            ],
-        )
 
 
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
