@@ -2782,6 +2782,44 @@ class TestANameTheFileInstallsOnTheGlobalObjectHoldsIt(TestBase):
     """
 
 
+#: A declared name rebound to the global object by a plain write and then read through as a global,
+#: mapped to what a host running the file as a classic script prints for it.
+A_DECLARED_NAME_REBOUND_TO_THE_GLOBAL_OBJECT = {
+    'a global is read through the rebound name': Program(
+        a_program("""
+            var secret = 'S';
+            var g = {};
+            g = globalThis;
+            console.log(g.secret);
+            """),
+        prints('S'),
+        Reading.SCRIPT,
+    ),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+@one_expected_failure_per_program(A_DECLARED_NAME_REBOUND_TO_THE_GLOBAL_OBJECT)
+class TestADeclaredNameReboundToTheGlobalObjectHoldsIt(TestBase):
+    """
+    The sibling of `TestANameTheFileInstallsOnTheGlobalObjectHoldsIt` on a binding that has a
+    declaration. Asked after the model is built, the recognizer answers correctly: the write's
+    `globalThis` is among the name's values, and any value being the object admits it. But each
+    member read is classified by the same walk that records that write, so whether `g.secret` is
+    recorded as a read of the global depends on whether the walk reaches the read or the rebinding
+    write first — which is not a fact about the program. The declaration deletes, and the read
+    comes back `undefined`.
+
+    The rule that closes it is the one the sibling entry names: establish every write before any
+    member read is classified, a change to how the model is built rather than to what it knows.
+
+    Off the release gate deliberately: a file names the global object once, at the declaration —
+    initializing a name to junk and rebinding it to the object afterwards is this entry's own
+    construction. The one-write spellings are the law
+    `test.lib.scripts.js.deobfuscation.test_a_name_holding_the_global_object` holds green.
+    """
+
+
 #: A classic script handing the global object to a call from inside a function body, mapped to the
 #: behavior a host gives it. Every row spells the object as the `this` of a function nothing calls as
 #: a method, which §10.2.1.2 makes the global object for the duration of the call.
