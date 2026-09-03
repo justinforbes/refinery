@@ -7,7 +7,7 @@ from typing import NamedTuple
 
 from refinery.lib.scripts import Node, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
-from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, names_used_before_defined
+from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph
 from refinery.lib.scripts.ps1.analysis.effects import (
     OutputSink,
     StatementEffect,
@@ -418,9 +418,9 @@ class Ps1JunkStatementRemoval(Transformer):
         # A name used before it is defined denotes, at that use, whatever bound it earlier rather
         # than the body written below — nothing, at script scope, where the bare word raises a
         # non-terminating CommandNotFoundException and the run carries on to the body below. Such a
-        # function is not this pass's to reason about: pruning its body or deleting it with the calls
-        # that never reach it erases the error the earlier call raised.
-        unreached = names_used_before_defined(cache.call_graph, cache.dominance)
+        # function is not this pass's to reason about: pruning its body or deleting it with the
+        # calls that never reach it erases the error the earlier call raised.
+        unreached = cache.used_before_defined
         plans = Ps1RemovalPlans(cache.faults, cache.world_reach)
         for parent in node.walk():
             body = get_body(parent)
@@ -447,9 +447,9 @@ class Ps1JunkStatementRemoval(Transformer):
     def _within_unreached_function(node: Node, unreached: frozenset[str]) -> bool:
         """
         Whether `node` sits in the body of a function some call to it does not reach the definition
-        of. This pass cannot reason about a name whose calls it cannot place, so the whole subtree is
-        left alone — not only the definition statement but the block that holds its statements, which
-        the walk reaches as a parent of its own.
+        of. This pass cannot reason about a name whose calls it cannot place, so the whole subtree
+        is left alone — not only the definition statement but the block that holds its statements,
+        which the walk reaches as a parent of its own.
         """
         cursor: Node | None = node
         while cursor is not None:

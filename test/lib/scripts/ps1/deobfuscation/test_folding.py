@@ -929,6 +929,19 @@ class TestPs1FoldingExtra(TestPs1):
         result = self._apply(r"'aXb' -replace '(a)X','Q\1Z'", Ps1ConstantFolding)
         self.assertEqual(result, r"'Q\1Zb'")
 
+    def test_replace_leaves_a_pattern_mixing_a_named_and_an_unnamed_group_unfolded(self):
+        # .NET numbers unnamed groups first and named ones after; Python strictly by position. A
+        # numeric reference then resolves to a different group in each, so `(?<n>a)(b)` with `$1` is
+        # `b` on 5.1 and would fold to `a`. The mixed pattern is left for the engine to refuse.
+        self.assertEqual(
+            self._apply("'ab' -replace '(?<n>a)(b)', '$1'", Ps1ConstantFolding),
+            "'ab' -replace '(?<n>a)(b)', '$1'",
+        )
+
+    def test_replace_folds_a_pattern_whose_groups_are_all_named(self):
+        self.assertEqual(
+            self._apply("'ab' -replace '(?<n>a)(?<m>b)', '${m}'", Ps1ConstantFolding), "'b'")
+
     def test_format_hex_negative_twos_complement(self):
         result = self._apply("'{0:X}' -f -1", Ps1ConstantFolding)
         self.assertEqual(result, "'FFFFFFFF'")

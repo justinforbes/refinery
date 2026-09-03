@@ -1260,6 +1260,20 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), 'Write-Output 2')
 
+    def test_a_char_size_is_not_the_unreadable_string_that_folds_to_a_null_count(self):
+        # A `[char]` size is read by 5.1 as its code point, a size that never refuses, so
+        # `New-Object byte[] ([char]65)` builds a 65-element array where an unreadable string folds
+        # to `$null`. The interpreter builds no array literal for a size, so it leaves the body
+        # standing rather than folding it to the count-of-zero a genuine unreadable size earns.
+        source = cleandoc("""
+            function f {
+              $a = New-Object byte[] ([char]65)
+              $a.Count
+            }
+            Write-Output (f)
+        """)
+        self._assertKept(source)
+
     def test_a_double_becomes_the_text_5_1_writes_it_as(self):
         # A `[string]` of a double *literal* is folded by the value domain before emulation; a double
         # the body is handed reaches the interpreter's own coercion, which now writes the same
@@ -1669,6 +1683,20 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
             $x = f
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'AB'")
+
+    # The interpreter carries a Char as the one-character string it spells and reads that string
+    # where an integer conversion asks for a number, so `[int][char]53` folds to 5 where 5.1 reads
+    # the code point 53. The value domain converts a Char literal by its code point already; the
+    # emulator's own `_to_int` does not, and correcting it shifts the measured oracle counts.
+    @unittest.expectedFailure
+    def test_a_char_coerced_to_an_integer_in_a_body_is_its_code_point(self):
+        source = cleandoc("""
+            function f($n) {
+              [int][char]$n
+            }
+            $x = f 53
+        """)
+        self.assertEqual(self._apply(source, Ps1FunctionEvaluator), '$x = 53')
 
     def test_a_byte_cast_the_value_does_not_fit_is_a_throw_and_not_a_masked_number(self):
         for cast in ['[byte]400', '[byte](200 * 2)']:

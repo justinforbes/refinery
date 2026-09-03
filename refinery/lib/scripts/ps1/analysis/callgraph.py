@@ -261,14 +261,14 @@ def names_used_before_defined(
     """
     The keys with a call site that no definition of the name is guaranteed to have run before. Such
     a call names, at the point it stands, whatever bound the name earlier — nothing, at script
-    scope, where Windows PowerShell 5.1 answers the bare word with a `CommandNotFoundException`. That
-    error is non-terminating there, so the run carries on and a later call does reach the body, but
-    the earlier call ran the error rather than the body — measured: `zzqfoo1; function zzqfoo1
-    { 'boom' }; zzqfoo1` writes an error record and then `boom`. A pass that folds that earlier call
-    into the body invents the body's value for a statement that raised, and one that deletes it with
-    the definition as an inert pair erases the error; which body the call reaches, and whether it
-    reaches one at all, is order the fold does not carry, so every definition and call of a name
-    reported here is left alone rather than resolved for the reachable calls alone.
+    scope, where Windows PowerShell 5.1 answers the bare word with a `CommandNotFoundException`.
+    That error is non-terminating there, so the run carries on and a later call does reach the
+    body, but the earlier call ran the error rather than the body — measured: `zzqfoo1; function
+    zzqfoo1 { 'boom' }; zzqfoo1` writes an error record and then `boom`. A pass that folds that
+    earlier call into the body invents the body's value for a statement that raised, and one that
+    deletes it with the definition as an inert pair erases the error; which body the call reaches,
+    and whether it reaches one at all, is order the fold does not carry, so every definition and
+    call of a name reported here is left alone rather than resolved for the reachable calls alone.
 
     Only a call the definition shares a control-flow graph with is ordered. A call inside another
     function's body runs when that body is invoked, an ordering no per-body graph carries, and

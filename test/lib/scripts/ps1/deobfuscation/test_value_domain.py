@@ -1014,3 +1014,12 @@ class TestPs1CountingACollectionSpelledSeveralWays(TestPs1):
 
     def test_the_count_of_a_collection_the_comma_operator_wrapped_is_one(self):
         self.assertEqual(self._deobfuscate('$x = (,(1, 2)).Count'), '$x = 1')
+
+    def test_the_count_of_an_array_operator_around_a_char_array_is_its_element_count(self):
+        self.assertEqual(self._deobfuscate('$x = @([char[]](72, 73, 74)).Count'), '$x = 3')
+
+    def test_the_count_of_an_array_operator_around_a_char_array_from_a_string(self):
+        self.assertEqual(self._deobfuscate("$x = @([char[]]'ABC').Count"), '$x = 3')
+
+    def test_a_char_array_one_level_inside_the_array_operator_stays_a_single_element(self):
+        self.assertEqual(self._deobfuscate('$x = @([char[]](72, 73, 74), 99).Count'), '$x = 2')

@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 from refinery.lib.scripts import Block, Transformer
 from refinery.lib.scripts.ps1.analysis.cache import model_cache
-from refinery.lib.scripts.ps1.analysis.callgraph import names_used_before_defined
 from refinery.lib.scripts.ps1.analysis.faults import Ps1FaultReach
 from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
 from refinery.lib.scripts.ps1.analysis.commands import CommandKind, Ps1CommandModel
@@ -224,24 +223,24 @@ def _carried(fact: Ps1Fact) -> _Value:
 
 class _Char(str):
     """
-    A `System.Char` the interpreter carries as the one-character string it spells, kept apart from an
-    ordinary String so that an operation a String has and a Char does not is refused rather than run.
-    5.1 repeats a String on the left of `*` and throws for a Char there, so `[char]65 * 2` stops the
-    fold where `'A' * 2` folds to `AA`. Being a `str` subclass, a Char reads as its text everywhere a
-    String would — it concatenates, coerces and indexes the same — and only the places that must tell
-    the two apart look for this type.
+    A `System.Char` the interpreter carries as the one-character string it spells, kept apart
+    from an ordinary String so that an operation a String has and a Char does not is refused rather
+    than run. 5.1 repeats a String on the left of `*` and throws for a Char there, so `[char]65 * 2`
+    stops the fold where `'A' * 2` folds to `AA`. Being a `str` subclass, a Char reads as its text
+    everywhere a String would — it concatenates, coerces and indexes the same — and only the places
+    that must tell the two apart look for this type.
     """
 
 
 class _MatchTable:
     """
-    The `$Matches` automatic variable, the `System.Hashtable` a successful `-match` leaves behind. It
-    holds the whole match under the Int32 key `0` and each group that took part under its own number,
-    every value a String. It answers a subscript and nothing else: a script reads its captures as
-    `$Matches[<n>]`, so an index into it is honoured, and every other use — coercing it to text,
-    adding to it, spelling it back as a value — is left to fall through to the interpreter's refusal,
-    which stops a fold at the first step that would need a hashtable this does not model rather than
-    inventing one.
+    The `$Matches` automatic variable, the `System.Hashtable` a successful `-match` leaves behind.
+    It holds the whole match under the Int32 key `0` and each group that took part under its own
+    number, every value a String. It answers a subscript and nothing else: a script reads its
+    captures as `$Matches[<n>]`, so an index into it is honoured, and every other use — coercing it
+    to text, adding to it, spelling it back as a value — is left to fall through to the
+    interpreter's refusal, which stops a fold at the first step that would need a hashtable this
+    does not model rather than inventing one.
     """
     __slots__ = ('entries',)
 
@@ -435,7 +434,8 @@ class _Ps1Interpreter:
         #: Whether the script may arm `Set-StrictMode -Version 2`, under which the `Count` and
         #: `Length` the object adapter fakes onto `$null` raise rather than answer. The default is
         #: the safe one: a body evaluated without a script to scan for the arming withholds those
-        #: fakes. Only the driver that has scanned the whole script lowers it. See `_resolve_property`.
+        #: fakes. Only the driver that has scanned the whole script lowers it. See
+        #: `_resolve_property`.
         self._strict_v2 = strict_v2_may_be_in_force
         #: Whether the script may arm `Set-StrictMode` at any version, under which a read of a
         #: never-assigned name is a statement-terminating error rather than the `$null` a default
@@ -909,8 +909,10 @@ class _Ps1Interpreter:
         except _Ps1InterpreterError:
             # A size that 5.1's `[int]` converter refuses is a non-terminating error, so the cmdlet
             # writes `$null` and the body runs on rather than throwing. Only a String reaches that
-            # converter; a value this cannot read at all leaves the fold refused.
-            if isinstance(size_arg, str):
+            # converter; a value this cannot read at all leaves the fold refused. A Char is not a
+            # String here — 5.1 reads it as its code point, a size that never refuses — so it is
+            # excluded rather than folded to the `$null` a genuine unreadable String earns.
+            if isinstance(size_arg, str) and not isinstance(size_arg, _Char):
                 return None
             raise
         if size < 0 or size > self.max_string_len:
@@ -1335,9 +1337,9 @@ class _Ps1Interpreter:
         """
         A `System.Char` carries none of a String's text methods, so 5.1 throws for
         `([char]65).ToUpper()`, `.Substring(0)`, `.Trim()` and their like where it would fold the
-        same call on a String. Only `ToString`, which every value answers, folds here, and it yields
-        the one-character String the Char spells; everything else refuses so the fold stops where the
-        script would.
+        same call on a String. Only `ToString`, which every value answers, folds here, and it
+        yields the one-character String the Char spells; everything else refuses so the fold stops
+        where the script would.
         """
         if method == 'tostring' and not args:
             return s
@@ -1392,11 +1394,11 @@ class _Ps1Interpreter:
     @staticmethod
     def _match_group(table: _MatchTable, index: _Value) -> _Value:
         """
-        A subscript into `$Matches`. 5.1 keys the table by Int32 group number and reads a key it does
-        not hold as `$null` — `$Matches['1']` is empty where `$Matches[1]` is the first group, and a
-        group an optional quantifier skipped is no key at all — so a String or an out-of-range number
-        answers absent rather than a wrong group. An index that is neither a number nor text is
-        refused, so the fold stops rather than guessing which group a value names.
+        A subscript into `$Matches`. 5.1 keys the table by Int32 group number and reads a key it
+        does not hold as `$null` — `$Matches['1']` is empty where `$Matches[1]` is the first group,
+        and a group an optional quantifier skipped is no key at all — so a String or an out-of-range
+        number answers absent rather than a wrong group. An index that is neither a number nor text
+        is refused, so the fold stops rather than guessing which group a value names.
         """
         if isinstance(index, bool):
             raise _Ps1InterpreterError
@@ -1855,7 +1857,7 @@ class Ps1FunctionEvaluator(Transformer):
             self._commands = cache.commands
             self._strict_v2 = cache.faults.strict_mode_v2_may_be_in_force()
             self._strict = cache.faults.strict_mode_may_be_in_force()
-            self._unreached = names_used_before_defined(cache.call_graph, cache.dominance)
+            self._unreached = cache.used_before_defined
             super().visit(node)
             # Folding a call into its value preserves meaning whoever else can reach the name, so
             # the substitution above is unconditional. Deleting the *definition* is a name-keyed

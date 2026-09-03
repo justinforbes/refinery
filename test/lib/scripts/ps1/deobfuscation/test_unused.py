@@ -609,6 +609,25 @@ class TestPs1BareOutputIsStrippedByDefault(TestPs1):
         self.assertIn('ANCHOR', result)
 
 
+class TestPs1TheLastBareOutputSurvivesADeadSiblingAnotherPassRemoves(TestPs1):
+    """
+    `refinery.lib.scripts.ps1.analysis.effects.pruning_erases_body` keeps the script root from being
+    stripped to nothing, so a lone bare literal is kept even under the stripping model. A dead `if`
+    above one defeats that guard the way a `trap` once did: junk removal strips the literal while the
+    dead `if` still stands as a surviving sibling, and dead-code elimination then removes the `if`,
+    leaving the empty script the guard exists to forbid. The literal-false control below is identical
+    on 5.1 — both print `z` — but removes the `if` first, so the two disagree only by the order the
+    passes run in. Closing this is a pass-ordering change the guard's trap analog does not yet cover.
+    """
+
+    @unittest.expectedFailure
+    def test_a_dead_if_above_a_bare_literal_does_not_carry_the_literal_away(self):
+        self.assertEqual(self._deobfuscate("if ($c) { 1 }; 'z'"), "'z'")
+
+    def test_a_literal_false_if_above_a_bare_literal_keeps_the_literal(self):
+        self.assertEqual(self._deobfuscate("if (0) { 1 }; 'z'"), "'z'")
+
+
 class TestPs1AReadThatConsumesWhatItReadsIsNotBareOutput(TestPs1):
     """
     Stripping bare output gives away what the console would have seen, and nothing else. `$input`

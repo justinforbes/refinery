@@ -15,7 +15,11 @@ from refinery.lib.scripts.analysis.cycles import CycleModel
 from refinery.lib.scripts.analysis.dominance import DominatorModel
 from refinery.lib.scripts.modelcache import ModelCacheBase
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, build_block_model
-from refinery.lib.scripts.ps1.analysis.callgraph import Ps1CallGraph, build_call_graph
+from refinery.lib.scripts.ps1.analysis.callgraph import (
+    Ps1CallGraph,
+    build_call_graph,
+    names_used_before_defined,
+)
 from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.analysis.commands import Ps1CommandModel, build_command_model
 from refinery.lib.scripts.ps1.analysis.dataflow import Ps1VariableFlow, build_variable_flow
@@ -59,6 +63,7 @@ class Ps1ModelCache(ModelCacheBase):
         '_cycles',
         '_variable_flow',
         '_commands',
+        '_used_before_defined',
     )
 
     root: Ps1Script
@@ -74,6 +79,7 @@ class Ps1ModelCache(ModelCacheBase):
     _cycles: CycleModel | None
     _variable_flow: Ps1VariableFlow | None
     _commands: Ps1CommandModel | None
+    _used_before_defined: frozenset[str] | None
 
     @property
     def model(self) -> Ps1SemanticModel:
@@ -225,6 +231,20 @@ class Ps1ModelCache(ModelCacheBase):
         """
         return self._lazy('_variable_flow', lambda: build_variable_flow(
             self.model, self.control_flow, self.dominance, self.blocks, self.cycles))
+
+    @property
+    def used_before_defined(self) -> frozenset[str]:
+        """
+        The command names some call to which no definition of the name is guaranteed to have run
+        before, over `call_graph` and `dominance`. The single place that ordering is asked of the
+        call graph: a pass that folds a call into its body or deletes a definition with its calls
+        reads this rather than resolving a name whose earlier binding — nothing, at script scope —
+        the fold cannot carry. It composes the two models here because
+        `refinery.lib.scripts.ps1.analysis.callgraph.names_used_before_defined` needs the ordering
+        `dominance` owns, which the deliberately syntactic `call_graph` does not carry.
+        """
+        return self._lazy('_used_before_defined', lambda: names_used_before_defined(
+            self.call_graph, self.dominance))
 
 
 def model_cache(transformer: Transformer, root: Node) -> Ps1ModelCache:

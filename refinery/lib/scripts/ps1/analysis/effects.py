@@ -2067,7 +2067,8 @@ def _bound_default_may_throw(parameter: Ps1ParameterDeclaration) -> bool:
     Whether the conversion a type constraint runs over this parameter's default value can raise. A
     default with no constraint is stored as it is written and a constraint with no default converts
     nothing; only the two together reach a conversion, and it runs on every call that omits the
-    argument. Measured on 5.1, `[int] $x = 'abc'` throws it and `[int] $x = '42'` binds the Int32 42.
+    argument. Measured on 5.1, `[int] $x = 'abc'` throws it and `[int] $x = '42'` binds the Int32
+    42.
 
     Not knowing is a throw, the direction `refinery.lib.scripts.ps1.analysis.values.Ps1Outcome`
     already reads as safe: a default the value domain cannot evaluate, or a constraint naming a type
@@ -2075,7 +2076,9 @@ def _bound_default_may_throw(parameter: Ps1ParameterDeclaration) -> bool:
     """
     default = parameter.default_value
     constraint = next(
-        (a for a in parameter.attributes if isinstance(a, Ps1TypeExpression)), None)
+        (a for a in parameter.attributes if isinstance(a, Ps1TypeExpression)),
+        None,
+    )
     if default is None or constraint is None:
         return False
     target = data.resolve_type(constraint.name)

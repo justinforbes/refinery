@@ -399,10 +399,21 @@ def dotnet_regex_pattern(pattern: str) -> str:
     or `(?<!...)`, a `(?<` a backslash before it makes literal, and one inside a character class
     `[...]`, where every metacharacter is text. A class is copied whole for the last reason, and a
     backslash takes the character behind it with it, so an escaped `(` never opens a group.
+
+    A pattern that mixes a named group with an *unnamed* one is left untranslated, because the two
+    dialects disagree about what number the named one takes: .NET numbers every unnamed group first
+    and the named ones after, while Python's `(?P<name>...)` numbers strictly by position. A numeric
+    token — a `\1` backreference or a `$1` in the replacement — would then resolve to a different
+    group than 5.1 reads, so `'ab' -replace '(?<n>a)(b)', '$1'` is `b` on the host and would fold to
+    `a`. Returning the pattern unchanged leaves the `(?<name>` for Python's engine to reject, the
+    same refusal an untranslated named group already earned before this rewrite existed. A pattern
+    whose groups are all named, or all unnamed, numbers alike in both and is translated.
     """
     out: list[str] = []
     i = 0
     n = len(pattern)
+    named = False
+    unnamed = False
     while i < n:
         c = pattern[i]
         if c == '\\':
@@ -427,6 +438,7 @@ def dotnet_regex_pattern(pattern: str) -> str:
             name = pattern[i + 3:end] if end > 0 else ''
             if _REGEX_GROUP_NAME.fullmatch(name):
                 out.append(F'(?P<{name}>')
+                named = True
                 i = end + 1
                 continue
         elif pattern.startswith("(?'", i):
@@ -434,11 +446,14 @@ def dotnet_regex_pattern(pattern: str) -> str:
             name = pattern[i + 3:end] if end > 0 else ''
             if _REGEX_GROUP_NAME.fullmatch(name):
                 out.append(F'(?P<{name}>')
+                named = True
                 i = end + 1
                 continue
+        if c == '(' and not pattern.startswith('(?', i):
+            unnamed = True
         out.append(c)
         i += 1
-    return ''.join(out)
+    return pattern if named and unnamed else ''.join(out)
 
 
 def dotnet_regex_replace(pattern: str, replacement: str, text: str, *, flags: int = 0) -> str:

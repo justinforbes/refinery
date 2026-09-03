@@ -1018,8 +1018,10 @@ def _stream(
             return None
         outcome = of(statement.expression)
         inner = outcome.value
-        if isinstance(inner, Ps1Constant) and inner.type == _OBJECT_ARRAY and isinstance(
-            inner.payload, tuple
+        if (
+            isinstance(inner, Ps1Constant)
+            and inner.type in (_OBJECT_ARRAY, _CHAR_ARRAY)
+            and isinstance(inner.payload, tuple)
         ):
             outcomes.extend(Ps1Outcome(outcome.may_throw, one) for one in inner.payload)
         else:
