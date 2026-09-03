@@ -504,36 +504,6 @@ class TestCommentWithNoFollowingStatement(TestBase):
         self.assertEqual(tuple(printed(source) for source in sources), tuple(sources))
 
 
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAnAllocationThatCannotBeBuiltAnswersNothing(TestBase):
-    """
-    A question the shape of an allocation answers — what `typeof` calls it, whether it is truthy —
-    is answered without the allocation, which is then discarded along with every element in it. It
-    may be discarded only if building it does nothing that can be observed, and resolving a name is
-    such a thing: a reference no binding resolves throws a `ReferenceError`. The gate that asks
-    whether an allocation is free of effects answers yes all the same, so the answer is printed
-    where the file threw. Counting an array literal asked that same gate and no longer does; those
-    reads are law in `test.lib.scripts.js.deobfuscation.test_array_length_reads`.
-    """
-
-    @unittest.expectedFailure
-    def test_a_literal_holding_a_name_that_does_not_resolve_still_throws(self):
-        """
-        Node refuses both of these programs with a `ReferenceError` and prints nothing. Each
-        deobfuscation prints instead: `object` for the `typeof`, and `1` for the branch a truthy
-        object picks.
-        """
-        refused = ('', 'ReferenceError')
-        sources = [
-            'console.log(typeof [zzz]);',
-            'console.log({p: zzz} ? 1 : 2);',
-        ]
-        self.assertEqual(
-            [before_and_after(source) for source in sources],
-            [(refused, refused)] * len(sources),
-        )
-
-
 class TestALiteralNoElementOfWhichRunsIsCounted(TestBase):
     """
     An array literal's `length` is the number of positions it was written with, and reading it
@@ -1078,10 +1048,14 @@ class TestAReadOfANameNothingBindsThrowsWhereverItStands(TestBase):
     No dead zone is involved and no host is: the name is bound nowhere, under every engine, and
     Node refuses each of these programs having printed nothing.
 
-    `TestAnAllocationThatCannotBeBuiltAnswersNothing` pins the same gate at the allocation, where
-    the program does ask a question of the value — what `typeof [zzz]` calls it, which branch
-    `{p: zzz} ? 1 : 2` picks — and the answer is given without building it. Here nothing is asked:
-    the expression is thrown away whole, so the same gate is reached with no fold in front of it.
+    The same gate is reached at an allocation whose shape a fold reads — what `typeof [zzz]` calls
+    it, which branch `{p: zzz} ? 1 : 2` picks — where the program does ask a question of the value
+    and the answer is given without building it. That fold now demands the throw half of the gate at
+    its own site, keeping the allocation where building it would throw
+    (`test.lib.scripts.js.deobfuscation.test_simplify
+    .TestAnAllocationDiscardedForItsShapeKeepsWhatBuildingItThrows`); the sweep here cannot take that
+    demand, which is the whole of what this entry is about. Here nothing is asked: the expression is
+    thrown away whole, so the gate is reached with no fold in front of it.
     `TestAReadOfALexicalBindingBeforeItsDeclarationThrows` is the case where the name does resolve
     and the read may still not happen; the last paragraph of that entry is about this defect, the
     other half of the fix it needs.

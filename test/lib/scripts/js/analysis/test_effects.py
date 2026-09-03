@@ -1132,6 +1132,43 @@ class TestEffectModel(TestBase):
         )
         self.assertTrue(effects.is_side_effect_free(iife))
 
+    def test_side_effect_free_default_clears_allocation_holding_an_unresolved_read(self):
+        """
+        The default read effect is the getter half alone, which a name no binding resolves does not
+        trip, so a discarded allocation holding one is cleared. The store-removal sweep rests on this
+        (`test_unfixed_defects.TestAReadOfANameNothingBindsThrowsWhereverItStands`).
+        """
+        for source, kind in [('x = [zzz];', JsArrayExpression), ('x = ({p: zzz});', JsObjectExpression)]:
+            ast, effects = self._effects(source)
+            node = next(n for n in ast.walk_in_order() if isinstance(n, kind))
+            with self.subTest(source=source):
+                self.assertTrue(effects.is_side_effect_free(node, discarded=True))
+
+    def test_side_effect_free_reads_may_throw_rejects_allocation_holding_an_unresolved_read(self):
+        """
+        With the throw half demanded, the same allocation is rejected: reading `zzz` throws a
+        `ReferenceError` as the element is evaluated, which discarding the value does not avert.
+        """
+        for source, kind in [('x = [zzz];', JsArrayExpression), ('x = ({p: zzz});', JsObjectExpression)]:
+            ast, effects = self._effects(source)
+            node = next(n for n in ast.walk_in_order() if isinstance(n, kind))
+            with self.subTest(source=source):
+                self.assertFalse(
+                    effects.is_side_effect_free(node, discarded=True, reads_may_throw=True))
+
+    def test_side_effect_free_reads_may_throw_clears_allocation_whose_reads_resolve(self):
+        """
+        The demand is about a read that may throw and nothing else: a resolved local and a name the
+        specification mandates on the global object both resolve for certain, so an allocation over
+        them stays free even with the throw half demanded.
+        """
+        for source in ['var a = 1; x = [a];', 'x = [undefined, NaN];']:
+            ast, effects = self._effects(source)
+            node = next(n for n in ast.walk_in_order() if isinstance(n, JsArrayExpression))
+            with self.subTest(source=source):
+                self.assertTrue(
+                    effects.is_side_effect_free(node, discarded=True, reads_may_throw=True))
+
     @staticmethod
     def _container(source: str, name: str = 'a', *, member_calls_mutate: bool = True) -> bool:
         ast = JsParser(F'function W(){{ {source} }}').parse()

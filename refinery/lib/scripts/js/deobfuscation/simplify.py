@@ -620,7 +620,9 @@ class JsSimplifications(Transformer):
         if kept is None:
             return None
         receiver_sensitive = is_invocation_target(node) and callee_form_sensitive(kept)
-        if not receiver_sensitive and self.effects.is_side_effect_free(test, discarded=True):
+        if not receiver_sensitive and self.effects.is_side_effect_free(
+            test, discarded=True, reads_may_throw=True
+        ):
             return kept
         return JsSequenceExpression(expressions=[test, kept])
 
@@ -756,7 +758,8 @@ class JsSimplifications(Transformer):
         node = strip_parens(operand)
         if node is None:
             return None
-        return kind if self.effects.is_side_effect_free(node, discarded=True) else None
+        free = self.effects.is_side_effect_free(node, discarded=True, reads_may_throw=True)
+        return kind if free else None
 
     def _member_key(self, node: JsMemberExpression) -> str | None:
         """

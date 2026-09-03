@@ -1259,6 +1259,64 @@ class TestASequenceOperandThatMayThrowIsKept(TestJsDeobfuscator):
         )
 
 
+class TestAnAllocationDiscardedForItsShapeKeepsWhatBuildingItThrows(TestJsDeobfuscator):
+    """
+    The type and the truthiness of an object are read from the way it is written, without the
+    object, which is discarded along with every element in it. Discarding it is licence only where
+    building it does nothing observable and cannot throw: a name no binding resolves throws a
+    `ReferenceError` as its element is evaluated, so an allocation holding one is left standing where
+    its shape would otherwise have answered. `TestASequenceOperandThatMayThrowIsKept` keeps the same
+    throw one indirection out, at the operand of a sequence.
+    """
+
+    def test_a_typeof_over_a_throwing_allocation_is_left_standing(self):
+        self.assertEqual(
+            'console.log(typeof [zzz]);', self._simplify('console.log(typeof [zzz]);'))
+        self.assertEqual(
+            'console.log(!{ p: zzz });', self._simplify('console.log(!{p: zzz});'))
+
+    def test_a_branch_a_throwing_allocation_picks_keeps_the_allocation(self):
+        """
+        The fold answers the branch from the object's truthiness and drops the test, so the throw the
+        test raised is kept in front of the branch as a sequence: `({ p: zzz }, 1)` evaluates the
+        object and throws before it reaches `1`, exactly as `{p: zzz} ? 1 : 2` does.
+        """
+        self.assertEqual(
+            'console.log(({ p: zzz }, 1));', self._simplify('console.log({p: zzz} ? 1 : 2);'))
+        self.assertEqual(
+            'console.log(([zzz], 1));', self._simplify('console.log([zzz] ? 1 : 2);'))
+
+    def test_an_allocation_nothing_in_which_throws_is_still_discarded_for_its_shape(self):
+        """
+        The control: a literal, a global value name, a function expression, and a resolved local each
+        build without throwing, so the object is discarded and its shape answers. A refusal reached
+        for every allocation rather than only a throwing one would fold none of these.
+        """
+        self.assertEqual("console.log('object');", self._simplify('console.log(typeof {p: 1});'))
+        self.assertEqual('console.log(false);', self._simplify('console.log(!{p: 1});'))
+        self.assertEqual(
+            "console.log('object');", self._simplify('console.log(typeof [undefined, NaN]);'))
+        self.assertEqual(
+            "console.log('object');", self._simplify('console.log(typeof [function () {}]);'))
+        self.assertEqual(
+            "var a = 1, b = 2;\nconsole.log('object');",
+            self._simplify('var a = 1, b = 2;\nconsole.log(typeof [a, b]);'))
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_node_refuses_each_throwing_allocation_before_and_after(self):
+        for source in [
+            'console.log(typeof [zzz]);',
+            'console.log(!{p: zzz});',
+            'console.log({p: zzz} ? 1 : 2);',
+            'console.log([zzz] ? 1 : 2);',
+        ]:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    (behavior(source), behavior(self._simplify(source))),
+                    (('', 'ReferenceError'), ('', 'ReferenceError')),
+                )
+
+
 class TestConcatReassociation(TestJsDeobfuscator):
     """
     A `+` chain whose left end is not a literal still has adjacent literals in it, and splitting a

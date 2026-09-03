@@ -983,6 +983,7 @@ class EffectModel:
         member_safe: Callable[[JsMemberExpression], bool] | None = None,
         call_established: Callable[[JsCallExpression | JsNewExpression], bool] | None = None,
         discarded: bool = False,
+        reads_may_throw: bool = False,
     ) -> bool:
         """
         Whether evaluating *node* can be dropped or reordered without an observable side effect, with
@@ -1001,16 +1002,40 @@ class EffectModel:
         With *discarded* the caller asserts *node*'s own value is thrown away, so a top-level call leaf is
         cleared through `is_pure_call_discarded` and a callee that only mutates a local it returns is
         droppable — the removal contexts of `JsUnusedCodeRemoval` supply it.
+
+        With *reads_may_throw* the read leaf is rejected not only when it fires a `with` object's getter
+        but also when it may throw a `ReferenceError`, which is the throw half of the *read_effect*
+        contract that `read_has_dynamic_effect` supplies only the getter half of. A caller discarding an
+        allocation to answer its type or truthiness asks for it, so the throw that reading the allocation
+        would have raised is kept where the value is dropped. It is off by default because the
+        store-removal sweep cannot yet take it — dropping the write that establishes a name in the same
+        round the read of it is preserved would leave a read of a name nothing binds
+        (`test_unfixed_defects.TestAReadOfANameNothingBindsThrowsWhereverItStands`).
         """
+        read_effect = self.model.read_has_dynamic_effect
+        if reads_may_throw:
+            read_effect = self._read_effectful_or_throwing
         return side_effect_free(
             node,
             defunct,
             self.is_pure_call,
-            self.model.read_has_dynamic_effect,
+            read_effect,
             member_safe or self._getter_free_read,
             call_established or self._established_call_default,
             discarded,
             self.is_pure_call_discarded,
+        )
+
+    def _read_effectful_or_throwing(self, node: Node) -> bool:
+        """
+        Whether reading *node* fires a `with` object's getter or may throw a `ReferenceError` — the
+        whole of the *read_effect* contract `side_effect_free` states, of which
+        `read_has_dynamic_effect` alone answers the getter half. `read_may_throw` asks about a
+        reference the program neither declares nor is certain the host defines, so an allocation
+        discarded to answer its shape keeps the throw that reading it would have raised.
+        """
+        return self.model.read_has_dynamic_effect(node) or (
+            isinstance(node, JsIdentifier) and self.model.read_may_throw(node)
         )
 
     def binding_is_immutable_container(
