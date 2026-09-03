@@ -186,8 +186,10 @@ def _sorted(previous: Expression, bounds: Sequence[Expression]) -> Expression | 
     The collection `previous` names put in the order `[Array]::Sort` leaves it, or `None` where this
     names none.
 
-    Only the whole-array form is answered: a comparer, a range or a two-array form passes a
-    non-empty `bounds` and is refused, since the order those produce is not the one computed here.
+    Only the whole-array form is answered. A comparer, a range or a two-array form takes more than
+    one argument, so at every such arity the written-slot union is `{0, 1}` — `Sort(Array, Array)`
+    writes both — and `value_after`'s slot guard refuses it before dispatch. Only the one-argument
+    form reaches here, where `bounds` is always empty; refusing a non-empty one is a defensive floor.
     The elements must share one real type — 5.1 throws on an array whose elements do not compare, so
     a value over a heterogeneous or unreadable one would stand where the script raised — and their
     keys must be distinct, because `[Array]::Sort` is not a stable sort and elements that compare

@@ -576,7 +576,6 @@ CONTRIBUTION: dict[str, Contribution] = {
             '$x = 1, 2, 3; [Array]::Reverse($x, 0, 2); Write-Output $x',
             '$x = 1, 2, 3; [Array]::Reverse(($x)); Write-Output $x',
             "$x = @('a', 'b'); $x[1]",
-            "$x = @('b', 'a'); [Array]::Sort($x); Write-Host $x[0]",
             '$z = 1.100d; $t = $z + 0d; Write-Output (,$t); Write-Output $t',
             '$z = 1.50d; $t = $z + 1.50d; Write-Output (,$t); Write-Output $t',
             "Set-Alias zzq Write-Host; $c = 'Set-Alias'; & $c zzq Write-Output; zzq 'x'",

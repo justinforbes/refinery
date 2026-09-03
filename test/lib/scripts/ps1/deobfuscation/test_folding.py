@@ -1690,16 +1690,17 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
 
     def test_a_sort_of_elements_that_share_a_type_orders_the_array_it_is_handed(self):
         # `[Array]::Sort` throws where the elements do not compare, so a value for it rests on the
-        # elements being of one type and not merely on all of them being known.
+        # elements being of one type and not merely on all of them being known. Chars compare by
+        # code point, ordinally, so the order does not depend on the host's culture.
         source = inspect.cleandoc("""
-            $x = @('b', 'a')
+            $x = @([char]98, [char]97)
             [Array]::Sort($x)
             Write-Output $x[0]
         """)
         expected = inspect.cleandoc("""
-            $x = @('b', 'a')
+            $x = @([char]98, [char]97)
             [Array]::Sort($x)
-            Write-Output 'a'
+            Write-Output ([char]97)
         """)
         self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
 
@@ -1720,12 +1721,13 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
 class TestPs1ASortOrdersAnArrayOfOneComparableType(TestPs1):
     """
     `[Array]::Sort($x)` reorders in place the array `$x` holds, so a read below it sees the sorted
-    order. It is answered only for the whole-array form over elements that share one type and whose
-    order is determined: numbers order by magnitude, a Char by its code point, and a String by 5.1's
-    two-level CurrentCulture collation over ASCII letters. A cross-type array throws, an unreadable
-    element leaves the order unknown, a comparer or a range is a form with no rule here, a String
-    outside those letters is not ordered, and elements that compare equal are left in an order .NET
-    does not fix.
+    order. It is answered only for the whole-array form over elements that share one type whose order
+    is ordinal and so culture-independent: numbers by magnitude, a Char by its code point, a Boolean
+    with `$false` before `$true`. A String array is refused, since `[Array]::Sort` compares strings by
+    the current culture and the emitted script's culture is not knowable here — measured, `aa` sorts
+    before `z` under en-US and after it under da-DK. A cross-type array throws, an unreadable element
+    leaves the order unknown, a comparer or a range is a form with no rule here, and elements that
+    compare equal are left in an order .NET does not fix.
     """
 
     def test_numbers_order_by_magnitude_and_not_by_spelling(self):
@@ -1733,6 +1735,12 @@ class TestPs1ASortOrdersAnArrayOfOneComparableType(TestPs1):
             self._apply(
                 '$x = 10, 2, 1\n[Array]::Sort($x)\nWrite-Output $x', Ps1ConstantInlining),
             '$x = 10, 2, 1\n[Array]::Sort($x)\nWrite-Output (1, 2, 10)')
+
+    def test_negative_integers_order_by_magnitude(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 1, -2, -1\n[Array]::Sort($x)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = 1, -2, -1\n[Array]::Sort($x)\nWrite-Output (-2, -1, 1)')
 
     def test_chars_order_by_code_point(self):
         self.assertEqual(
@@ -1742,31 +1750,15 @@ class TestPs1ASortOrdersAnArrayOfOneComparableType(TestPs1):
             '$x = @([char]66, [char]65, [char]67)\n[Array]::Sort($x)\n'
             'Write-Output ([char]65, [char]66, [char]67)')
 
-    def test_a_later_letter_difference_outranks_an_earlier_case_difference(self):
+    def test_booleans_order_false_before_true(self):
         self.assertEqual(
             self._apply(
-                "$x = @('Ab', 'ac')\n[Array]::Sort($x)\nWrite-Output $x[0]", Ps1ConstantInlining),
-            "$x = @('Ab', 'ac')\n[Array]::Sort($x)\nWrite-Output 'Ab'")
+                '$x = @($true, $false)\n[Array]::Sort($x)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = @($true, $false)\n[Array]::Sort($x)\nWrite-Output ($false, $true)')
 
-    def test_a_shorter_word_precedes_the_one_it_is_a_prefix_of(self):
-        self.assertEqual(
-            self._apply(
-                "$x = @('aa', 'A')\n[Array]::Sort($x)\nWrite-Output $x[0]", Ps1ConstantInlining),
-            "$x = @('aa', 'A')\n[Array]::Sort($x)\nWrite-Output 'A'")
-
-    def test_the_first_differing_letter_decides_across_the_word(self):
-        self.assertEqual(
-            self._apply(
-                "$x = @('Bc', 'bd', 'ba')\n[Array]::Sort($x)\nWrite-Output $x[0]",
-                Ps1ConstantInlining),
-            "$x = @('Bc', 'bd', 'ba')\n[Array]::Sort($x)\nWrite-Output 'ba'")
-
-    def test_case_breaks_a_full_primary_tie_lowercase_first(self):
-        self.assertEqual(
-            self._apply(
-                "$x = @('B', 'a', 'A', 'b')\n[Array]::Sort($x)\nWrite-Output $x[0]",
-                Ps1ConstantInlining),
-            "$x = @('B', 'a', 'A', 'b')\n[Array]::Sort($x)\nWrite-Output 'a'")
+    def test_a_string_array_is_not_ordered_because_its_order_is_cultural(self):
+        self._assertUnchanged(
+            "$x = @('b', 'a')\n[Array]::Sort($x)\nWrite-Output $x", Ps1ConstantInlining)
 
     def test_a_cross_type_array_is_not_ordered(self):
         self._assertUnchanged(
@@ -1783,10 +1775,6 @@ class TestPs1ASortOrdersAnArrayOfOneComparableType(TestPs1):
     def test_a_range_form_has_no_rule(self):
         self._assertUnchanged(
             '$x = 1, 2, 3\n[Array]::Sort($x, 0, 2)\nWrite-Output $x', Ps1ConstantInlining)
-
-    def test_a_string_carrying_a_non_letter_is_not_ordered(self):
-        self._assertUnchanged(
-            "$x = @('b1', 'a2')\n[Array]::Sort($x)\nWrite-Output $x", Ps1ConstantInlining)
 
     def test_an_empty_array_is_left_alone(self):
         self._assertUnchanged(

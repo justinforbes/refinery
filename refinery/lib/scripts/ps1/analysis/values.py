@@ -2051,49 +2051,27 @@ def _numeric_source(fact: Ps1Constant) -> int | float | decimal.Decimal | None:
     return None
 
 
-def _collation_key(text: str) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
-    """
-    The key a String sorts by under 5.1's CurrentCulture collation, or `None` for a text carrying
-    any character outside the ASCII letters this reproduces.
-
-    The collation is two-level rather than per-character: every letter's primary weight — its
-    lowercased code point — is compared across the whole word first, and only a full primary tie is
-    broken by the case weights, lowercase before uppercase. Measured on 5.1, the two-level key
-    matches and a per-character one does not: `@('Ab', 'ac')` sorts to `Ab, ac` where a per-character
-    key gives `ac, Ab`, `@('aa', 'A')` to `A, aa`, and `@('Bc', 'bd', 'ba')` to `ba, Bc, bd`.
-
-    Only ASCII letters are answered for. Real culture collation is multi-level with contractions and
-    ignorable marks a fixed key cannot reproduce, so the sub-domain grows only by re-measurement
-    against a host, never by adding a character class here.
-    """
-    primary: list[int] = []
-    case: list[int] = []
-    for character in text:
-        if 'a' <= character <= 'z':
-            primary.append(ord(character))
-            case.append(0)
-        elif 'A' <= character <= 'Z':
-            primary.append(ord(character) + 32)
-            case.append(1)
-        else:
-            return None
-    return (tuple(primary), tuple(case))
-
-
 def sort_key(fact: Ps1Fact) -> tuple | None:
     """
     The key a value sorts by under `[Array]::Sort`, or `None` for a value whose order this module
-    does not settle. A String orders by `_collation_key`; every other value orders by the number a
-    cast reads it as, so a Char sorts by its code point and the numeric widths by magnitude.
+    does not settle. A value orders by the number a cast reads it as, so a Char sorts by its code
+    point, a Boolean with `$false` before `$true`, and the numeric widths by magnitude — every one of
+    those orderings ordinal and culture-independent, the way `Comparer.Default` compares those types.
 
-    A NaN is refused. It sorts before everything under .NET, and `_numeric_source` would hand back a
-    payload that does not compare — though no NaN Double fact reaches here from `read`, which keeps
-    non-finite values out of a Double, so the guard is a defensive floor.
+    A String is refused, because `[Array]::Sort` compares strings by the *current culture* and the
+    culture the emitted script will run under is not knowable here. Measured on 5.1:
+    `[string]::Compare('aa', 'z')` is negative under en-US and positive under da-DK, where `aa`
+    collates as `å` after `z`, so `@('aa', 'z')` sorts one way on one host and the other way on
+    another. This is the same reason `invariant_text` refuses a current-culture rendering rather than
+    guessing one; `_numeric_source` names no number for a String, so the refusal needs no branch here.
+
+    A NaN is refused: `_numeric_source` would hand back a payload that does not compare, and .NET
+    sorts a NaN before everything. The guard is a defensive floor, because no NaN reaches here —
+    PowerShell has no NaN literal, so `read` builds none. An infinite Double does reach (`1e400`
+    reads as `+Infinity`) and orders by magnitude like any finite one, which is what 5.1 does.
     """
     if not isinstance(fact, Ps1Constant):
         return None
-    if fact.type == _STRING and isinstance(fact.payload, str):
-        return _collation_key(fact.payload)
     number = _numeric_source(fact)
     if number is None or number != number:
         return None
