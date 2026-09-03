@@ -331,6 +331,8 @@ class TestNulFollowedByDigitSurvivesPrinting(TestJsDeobfuscator):
         literal = statement.expression
         if not isinstance(literal, JsStringLiteral):
             self.fail(F'{printed!r} did not parse as a string literal')
+        if literal.value is None:
+            self.fail(F'{printed!r} did not denote a string')
         return literal.value
 
     def test_nul_before_seven_reads_back_as_a_nul_and_a_seven(self):
@@ -358,7 +360,10 @@ class TestEscapeAndDecodeInvertOnNulFollowedByDigit(TestJsDeobfuscator):
     """
 
     def _round_trip(self, value: str) -> str:
-        return decode_js_string_body(escape_js_string(value))
+        decoded = decode_js_string_body(escape_js_string(value))
+        if decoded is None:
+            self.fail(F'the escaping of {value!r} did not denote a string')
+        return decoded
 
     def test_every_digit_after_a_nul_is_recovered(self):
         values = [F'\x00{digit}' for digit in '0123456789']

@@ -406,7 +406,7 @@ def _resolve_member_access(
     prop = node.property
     if isinstance(prop, JsIdentifier):
         key = prop.name
-    elif isinstance(prop, JsStringLiteral):
+    elif isinstance(prop, JsStringLiteral) and prop.value is not None:
         key = prop.value
     else:
         return None
@@ -820,6 +820,8 @@ def _eval_checksum(
             radix = _checksum_radix(node.arguments[1:], recurse)
             inner = node.arguments[0]
             if isinstance(inner, JsStringLiteral):
+                if inner.value is None:
+                    raise _EvalError
                 result = js_parse_int(inner.value, radix)
                 if result is None:
                     raise _EvalError

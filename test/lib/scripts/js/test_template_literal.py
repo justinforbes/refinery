@@ -285,14 +285,16 @@ class TestJsTemplateValue(TemplateLiteralTest):
                 self.assertEqual(self._string_text(string), text)
                 self.assertEqual(self._runs(self._template(template)), [None])
 
-    def test_an_escape_the_grammar_does_not_have_leaves_the_template_denoting_nothing(self):
+    def test_an_escape_the_grammar_does_not_have_leaves_neither_literal_denoting_anything(self):
         """
         Node refuses both spellings of each of these, so neither literal names any text: reporting
-        one is inventing a string the file could never have carried. What the string half of the
-        table is read as is pinned in `test.lib.scripts.js.test_unfixed_defects`.
+        one is inventing a string the file could never have carried. A string keeps the legacy
+        escapes a template refuses, so the escape that leaves it too denoting nothing is a `\\x` or
+        `\\u` naming no character, which is the whole of what parts this table from the one above.
         """
-        for _, template in AN_ESCAPE_NEITHER_LITERAL_HAS:
-            with self.subTest(template=template):
+        for string, template in AN_ESCAPE_NEITHER_LITERAL_HAS:
+            with self.subTest(string=string, template=template):
+                self.assertEqual(self._string_text(string), None)
                 self.assertEqual(self._runs(self._template(template)), [None])
 
     def test_the_run_carrying_the_refused_escape_is_the_only_one_denoting_nothing(self):

@@ -2328,6 +2328,8 @@ class JsInterpreter:
             elif isinstance(prop.key, JsIdentifier):
                 key = prop.key.name
             elif isinstance(prop.key, JsStringLiteral):
+                if prop.key.value is None:
+                    raise InterpreterError
                 key = prop.key.value
             elif isinstance(prop.key, JsNumericLiteral):
                 key = to_string(prop.key.value)

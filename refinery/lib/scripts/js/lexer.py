@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import enum
 import re
 import unicodedata
 
@@ -130,24 +131,40 @@ def _at_identifier_start(src: str, pos: int) -> bool:
     return _opens_a_name(c) or _begins_unicode_escape(src, pos)
 
 
-def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int, bool]:
+class _EscapeUse(enum.Enum):
     """
-    What the escape opened at *pos* denotes, where it ends, and whether it is an escape the grammar
-    has. The third answer is what the two literals disagree about: a string keeps the escapes Annex
-    B holds open for sloppy code and reads anything else as the character behind the backslash,
-    while a template admits neither, so a run written with one denotes nothing at all.
+    Which literals accept an escape. Every escape a template accepts a string accepts too, so the
+    three are ordered: one a template has, one only a string keeps, and one no literal has at all. A
+    literal carrying an escape it does not accept denotes nothing.
+
+    `STRING` is the legacy octal escape and `\\8`/`\\9` Annex B holds open for sloppy code, which a
+    template refuses and a string reads as the character it names. `NEITHER` is a `\\x` or `\\u`
+    naming no character, which neither literal has: the reading that answers with the letters behind
+    the backslash reports a value for a file that has none.
+    """
+    EITHER = enum.auto()
+    STRING = enum.auto()
+    NEITHER = enum.auto()
+
+
+def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int, _EscapeUse]:
+    """
+    What the escape opened at *pos* denotes, where it ends, and which literals accept it. The third
+    answer is what the two literals disagree about: a string keeps the escapes Annex B holds open
+    for sloppy code and reads anything else as the character behind the backslash, while a template
+    admits neither; and an escape naming no character is one no literal has.
 
     Refusal is reported here rather than scanned for again, because the classification is this
     decode: which spellings of `\\x` and `\\u` are malformed is a fact about the escape grammar, and
     a second reader of the same text would be a second statement of it.
     """
     if pos >= length:
-        return '', pos, False
+        return '', pos, _EscapeUse.NEITHER
     c = src[pos]
     pos += 1
     mapped = _ESCAPE_MAP.get(c)
     if mapped is not None:
-        return mapped, pos, True
+        return mapped, pos, _EscapeUse.EITHER
     if c in _OCTAL:
         value = int(c, 8)
         remaining = 2 if c in '0123' else 1
@@ -159,14 +176,14 @@ def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int, bool]
             legacy = True
         if not legacy and pos < length and src[pos] in _DECIMAL:
             legacy = True
-        return chr(value), pos, not legacy
+        return chr(value), pos, _EscapeUse.STRING if legacy else _EscapeUse.EITHER
     if c in '89':
-        return c, pos, False
+        return c, pos, _EscapeUse.STRING
     if c == 'x':
         hexstr = src[pos:pos + 2]
         if len(hexstr) == 2 and _HEX.issuperset(hexstr):
-            return chr(int(hexstr, 16)), pos + 2, True
-        return 'x', pos, False
+            return chr(int(hexstr, 16)), pos + 2, _EscapeUse.EITHER
+        return 'x', pos, _EscapeUse.NEITHER
     if c == 'u':
         if pos < length and src[pos] == '{':
             end = pos + 1
@@ -175,18 +192,18 @@ def _decode_one_escape(src: str, pos: int, length: int) -> tuple[str, int, bool]
             if end > pos + 1 and end < length and src[end] == '}':
                 value = int(src[pos + 1:end], 16)
                 if value <= _MAX_CODE_POINT:
-                    return code_units(value), end + 1, True
-                return 'u', end + 1, False
+                    return code_units(value), end + 1, _EscapeUse.EITHER
+                return 'u', end + 1, _EscapeUse.NEITHER
         else:
             hexstr = src[pos:pos + 4]
             if len(hexstr) == 4 and _HEX.issuperset(hexstr):
-                return chr(int(hexstr, 16)), pos + 4, True
-        return 'u', pos, False
+                return chr(int(hexstr, 16)), pos + 4, _EscapeUse.EITHER
+        return 'u', pos, _EscapeUse.NEITHER
     if c in LINE_TERMINATORS:
         if c == '\r' and pos < length and src[pos] == '\n':
             pos += 1
-        return '', pos, True
-    return c, pos, True
+        return '', pos, _EscapeUse.EITHER
+    return c, pos, _EscapeUse.EITHER
 
 
 _FOUR_CHAR_OPS: dict[str, JsTokenKind] = {
@@ -665,9 +682,11 @@ class JsLexer:
             yield JsToken(JsTokenKind.ERROR, c, start)
 
 
-def _decode_body(text: str) -> tuple[str, bool]:
+def _decode_body(text: str) -> tuple[str, bool, bool]:
     """
-    The text a literal body denotes, and whether every escape in it is one the grammar has.
+    The text a literal body denotes, whether a string may carry it, and whether a template may. A
+    string may carry every escape but the ones naming no character; a template may carry only the
+    escapes a string and a template share, so its answer implies the other.
 
     The text is the code units the string is made of. A character above the basic plane is two of
     them however it was written — as itself, as one `\\u{...}` escape, or as the two `\\uXXXX`
@@ -679,9 +698,10 @@ def _decode_body(text: str) -> tuple[str, bool]:
     may invent the partner it lacks.
     """
     if '\\' not in text:
-        return to_code_units(text), True
+        return to_code_units(text), True, True
     parts: list[str] = []
-    valid = True
+    string_valid = True
+    template_valid = True
     i = 0
     length = len(text)
     while i < length:
@@ -690,11 +710,12 @@ def _decode_body(text: str) -> tuple[str, bool]:
             parts.append(c)
             i += 1
             continue
-        decoded, i, ok = _decode_one_escape(text, i + 1, length)
-        valid = valid and ok
+        decoded, i, use = _decode_one_escape(text, i + 1, length)
+        string_valid = string_valid and use is not _EscapeUse.NEITHER
+        template_valid = template_valid and use is _EscapeUse.EITHER
         if decoded:
             parts.append(decoded)
-    return to_code_units(''.join(parts)), valid
+    return to_code_units(''.join(parts)), string_valid, template_valid
 
 
 def _read_unicode_escape(text: str, pos: int) -> tuple[int, int] | None:
@@ -766,13 +787,15 @@ def identifier_string_value(text: str) -> str | None:
     return ''.join(parts) or None
 
 
-def decode_js_string_body(text: str) -> str:
+def decode_js_string_body(text: str) -> str | None:
     """
-    The text a string literal body denotes. Every spelling denotes something here, because the one
-    a string has no rule for is the character behind the backslash; the reading a template gives
-    the same text is `decode_js_template_body`.
+    The text a string literal body denotes, or `None` where it denotes nothing. A string keeps the
+    legacy escapes Annex B holds open for sloppy code, reading each as the character it names, so
+    the one spelling it has no rule for is a `\\x` or `\\u` naming no character; the reading a
+    template gives the same text is `decode_js_template_body`.
     """
-    return _decode_body(text)[0]
+    text_value, string_valid, _ = _decode_body(text)
+    return text_value if string_valid else None
 
 
 def has_legacy_numeric_escape(text: str) -> bool:
@@ -823,5 +846,5 @@ def decode_js_template_body(text: str) -> str | None:
     """
     if '\r' in text:
         text = text.replace('\r\n', '\n').replace('\r', '\n')
-    decoded, valid = _decode_body(text)
-    return decoded if valid else None
+    decoded, _, template_valid = _decode_body(text)
+    return decoded if template_valid else None

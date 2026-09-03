@@ -1349,7 +1349,7 @@ class JsParser:
         """
         if self._at(JsTokenKind.STRING_SINGLE, JsTokenKind.STRING_DOUBLE):
             literal = self._parse_string_literal()
-            if not is_well_formed_unicode(literal.value):
+            if literal.value is None or not is_well_formed_unicode(literal.value):
                 self._recovered = True
             return literal
         if not self._at_identifier_name():

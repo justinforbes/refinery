@@ -500,8 +500,9 @@ class JsConstantInlining(ScopeProcessingTransformer):
             count = ref_counts.get(name, 0)
             if count <= 1:
                 continue
-            if isinstance(value, JsStringLiteral) and len(value.value) > self.max_inline_length:
-                bloat_blocked.add(name)
+            if isinstance(value, JsStringLiteral) and value.value is not None:
+                if len(value.value) > self.max_inline_length:
+                    bloat_blocked.add(name)
 
         assert self._root is not None
         cache = model_cache(self, self._root)

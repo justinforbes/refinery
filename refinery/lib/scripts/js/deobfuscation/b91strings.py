@@ -107,7 +107,7 @@ def _try_string_array(init: Node) -> list[str] | None:
         return None
     strings: list[str] = []
     for el in elements:
-        if not isinstance(el, JsStringLiteral):
+        if not isinstance(el, JsStringLiteral) or el.value is None:
             return None
         strings.append(el.value)
     return strings
@@ -218,14 +218,15 @@ def _extract_alphabet(body: Sequence[Node]) -> str | None:
         for decl in stmt.declarations:
             if not isinstance(decl, JsVariableDeclarator):
                 continue
-            if not isinstance(decl.init, JsStringLiteral):
+            if not isinstance(decl.init, JsStringLiteral) or decl.init.value is None:
                 continue
             if _is_base91_alphabet(decl.init.value):
                 return decl.init.value
     for stmt in body:
         for node in stmt.walk():
-            if isinstance(node, JsStringLiteral) and _is_base91_alphabet(node.value):
-                return node.value
+            if isinstance(node, JsStringLiteral) and node.value is not None:
+                if _is_base91_alphabet(node.value):
+                    return node.value
     return None
 
 

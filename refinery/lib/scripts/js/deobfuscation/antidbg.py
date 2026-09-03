@@ -170,7 +170,7 @@ def _payload_carries_anti_analysis_marker(payload) -> bool:
     if payload is None:
         return False
     for n in payload.walk():
-        if isinstance(n, JsStringLiteral):
+        if isinstance(n, JsStringLiteral) and n.value is not None:
             if _REDOS_SIGNATURE in n.value or _SOURCE_SHAPE_REGEX in n.value:
                 return True
         if isinstance(n, JsAssignmentExpression):
@@ -289,8 +289,9 @@ class JsRemoveSelfDefending(ScriptLevelTransformer):
 
     def _process_script(self, node: JsScript):
         for literal in list(node.walk()):
-            if isinstance(literal, JsStringLiteral) and _REDOS_SIGNATURE in literal.value:
-                self._remove_redos(literal, node)
+            if isinstance(literal, JsStringLiteral) and literal.value is not None:
+                if _REDOS_SIGNATURE in literal.value:
+                    self._remove_redos(literal, node)
         self._remove_structural(node)
 
     def _remove_redos(self, redos_literal: JsStringLiteral, root: JsScript) -> None:

@@ -2094,7 +2094,7 @@ def _strip_scope_prefix_walk(node: Node, scope_param_name: str) -> None:
                 _strip_scope_prefix_walk(child, scope_param_name)
                 continue
             if child.computed:
-                if not isinstance(child.property, JsStringLiteral):
+                if not isinstance(child.property, JsStringLiteral) or child.property.value is None:
                     _strip_scope_prefix_walk(child, scope_param_name)
                     continue
                 prop_name = child.property.value

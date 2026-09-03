@@ -406,7 +406,7 @@ class JsScrambleStringDecoder(ScriptLevelTransformer):
             if len(node.arguments) != 1:
                 continue
             arg = node.arguments[0]
-            if not isinstance(arg, JsStringLiteral):
+            if not isinstance(arg, JsStringLiteral) or arg.value is None:
                 continue
             try:
                 decoded = cipher.decode(arg.value)

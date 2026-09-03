@@ -1598,7 +1598,7 @@ def _aliased_parameter_positions(member: JsMemberExpression, count: int) -> rang
         return range(0)
     if isinstance(prop, JsNumericLiteral):
         index = exact_integer(prop.value)
-    elif isinstance(prop, JsStringLiteral):
+    elif isinstance(prop, JsStringLiteral) and prop.value is not None:
         index = canonical_array_index(prop.value)
     else:
         return None

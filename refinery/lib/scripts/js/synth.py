@@ -283,7 +283,7 @@ class JsSynthesizer(Synthesizer):
         self._write(node.raw)
 
     def visit_JsStringLiteral(self, node: JsStringLiteral):
-        if self._unescape_strings:
+        if self._unescape_strings and node.value is not None:
             self._write(self._encode_string(node.value, node.raw))
         else:
             self._write(node.raw)

@@ -117,12 +117,17 @@ class JsStringLiteral(Expression, spelling='raw'):
     A String literal. `value` is the text it denotes and `raw` is how the source spelled it, which
     part ways wherever an escape stands between them.
 
+    `value` is `None` where the literal denotes nothing, which is a literal written with a `\\x` or
+    `\\u` escape that names no character. A string keeps the legacy escapes Annex B holds open for
+    sloppy code, so those still denote text; an escape no literal has at all denotes none, the way
+    the same escape leaves a `JsTemplateElement` denoting none.
+
     `terminated` reports whether the closing quote was there. A literal the source never closed is
     not a form the language has, so no text spells it: printing what was written runs the literal on
     into whatever the synthesizer prints next, and printing the quote that is missing turns a file
     that does not parse into a program that runs.
     """
-    value: str = ''
+    value: str | None = ''
     raw: str = "''"
     terminated: bool = True
 

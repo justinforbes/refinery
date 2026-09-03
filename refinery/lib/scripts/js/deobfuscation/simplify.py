@@ -423,7 +423,7 @@ class JsSimplifications(Transformer):
         if op in RELATIONAL_OPS:
             if left_str is not None and right_str is not None:
                 return JsBooleanLiteral(value=RELATIONAL_OPS[op](left_str, right_str))
-        if op == 'in' and isinstance(node.left, JsStringLiteral):
+        if op == 'in' and isinstance(node.left, JsStringLiteral) and node.left.value is not None:
             result = self._resolve_in(node, node.left.value)
             if result is not None:
                 return JsBooleanLiteral(value=result)
@@ -584,7 +584,7 @@ class JsSimplifications(Transformer):
             return None
         parts: list[str] = []
         for e in obj.elements:
-            if not isinstance(e, JsStringLiteral):
+            if not isinstance(e, JsStringLiteral) or e.value is None:
                 return None
             parts.append(e.value)
         if node.arguments:
@@ -960,7 +960,7 @@ class JsSimplifications(Transformer):
         escape hiding a space in `'use\\x20strict'` is what keeps that line from being a directive,
         and re-spelling it makes every line behind it strict code.
         """
-        if not node.terminated:
+        if not node.terminated or node.value is None:
             return None
         quote = node.raw[0] if node.raw else '\''
         rebuilt = quote + escape_js_string(node.value, quote) + quote

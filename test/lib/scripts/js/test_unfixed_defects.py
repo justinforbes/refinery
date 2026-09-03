@@ -77,14 +77,12 @@ from test.lib.scripts.js.test_parser_recovery import (
     A_POSITION_NAMING_A_BINDING_THE_FILE_CREATES,
     A_WORD_NO_MODULE_MAY_BIND,
 )
-from test.lib.scripts.js.test_template_literal import AN_ESCAPE_NEITHER_LITERAL_HAS
 from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROGRAM
 
 from refinery.lib.scripts import UnspellableNode
 from refinery.lib.scripts.js.model import (
     JsIdentifier,
     JsPropertyDefinition,
-    JsStringLiteral,
 )
 from refinery.lib.scripts.js.parser import JsParser
 
@@ -93,13 +91,6 @@ def _sole_property_definition(source: str) -> JsPropertyDefinition:
     return [
         node for node in JsParser(source).parse().walk()
         if isinstance(node, JsPropertyDefinition)
-    ][0]
-
-
-def _sole_string_literal(source: str) -> JsStringLiteral:
-    return [
-        node for node in JsParser(source).parse().walk()
-        if isinstance(node, JsStringLiteral)
     ][0]
 
 
@@ -366,31 +357,6 @@ class TestAFunctionDeclarationIsAClauseOnlyWhereAnnexBSaysSo(TestBase):
                 for mode, source in A_FUNCTION_DECLARATION_AS_AN_IF_CLAUSE.items()
             },
             {'sloppy': True, 'strict': False},
-        )
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAStringLiteralReadsOnlyTheEscapesTheGrammarHas(TestBase):
-    """
-    A string literal and a template part company over the escapes each of them reads, but neither
-    reads an escape the grammar has no rule for at all.
-    """
-
-    @unittest.expectedFailure
-    def test_a_string_holding_an_escape_the_grammar_lacks_denotes_nothing(self):
-        """
-        Node refuses every one of the twelve files in
-        `test.lib.scripts.js.test_template_literal.AN_ESCAPE_NEITHER_LITERAL_HAS` with a SyntaxError
-        naming the escape: a hexadecimal escape short of its digits or holding a character that is
-        not one, and a braced code point that is empty, out of range, unterminated, or written with
-        anything besides hexadecimal digits. None of these files is a program in any mode, so no
-        text is what the literal carries. The reader drops the backslash and answers with the
-        letters that followed it, which reports a value for a file that has none, and the template
-        beside each string is already refused.
-        """
-        self.assertEqual(
-            [_sole_string_literal(string).value for string, _ in AN_ESCAPE_NEITHER_LITERAL_HAS],
-            [None] * len(AN_ESCAPE_NEITHER_LITERAL_HAS),
         )
 
 
