@@ -263,9 +263,10 @@ REFUSED: tuple[str, ...] = tuple(
     expression for expression, transcript in _NUMERAL_ROWS.items() if _throws(transcript)
 )
 
-#: Measured spellings the host pins to a value that the domain does not answer. `-(2147483648)` is
-#: a unary minus over a parenthesized literal, which 5.1 types by the width of the literal that was
-#: negated rather than by the width the negated value needs.
+#: Measured spellings `read` refuses although the host pins each to a value: a unary minus over a
+#: parenthesized literal is an operator over a value, so reaching past the parenthesis to the numeral
+#: would report its width without its sign. `evaluate` applies the operator and answers the width the
+#: parenthesis decides — `-(2147483648)` stays the Int64 it negates, `-(2147483647)` the Int32.
 UNANSWERED: tuple[str, ...] = (
     '-(2147483648)',
     '-(2147483647)',
@@ -1767,17 +1768,20 @@ class TestPs1MeasuredNumerals(unittest.TestCase):
             with self.subTest(expression):
                 self.assertEqual(_read(expression), UNKNOWN)
 
-    @unittest.expectedFailure
     def test_a_negated_parenthesized_literal_keeps_the_width_of_the_literal_it_negates(self):
         """
         `-2147483648` is one literal that fits an Int32, while `-(2147483648)` negates the Int64
-        literal `2147483648` and stays an Int64 — the same value under two types. The domain reads
-        the first and refuses the second, so the width the parenthesis decides is not answered.
+        literal `2147483648` and stays an Int64 — the same value under two types. A `-` glued to the
+        numeral is part of it and `read` answers it; a `-` over a parenthesized literal is an
+        operator, which `read` refuses because reaching past the parenthesis would report the
+        literal's width without its sign. `evaluate` applies the operator and answers the width the
+        parenthesis decides.
         """
         self.assertEqual(_read('-2147483648'), MEASURED['-2147483648'])
         for expression in ('-(2147483648)', '-(2147483647)'):
             with self.subTest(expression):
-                self.assertEqual(_read(expression), MEASURED[expression])
+                self.assertEqual(_read(expression), UNKNOWN)
+                self.assertEqual(_evaluated(expression).value, MEASURED[expression])
 
     def test_a_real_with_a_long_suffix_is_the_rounded_int64_the_host_prints(self):
         """
