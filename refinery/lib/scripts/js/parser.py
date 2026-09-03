@@ -443,16 +443,26 @@ class JsParser:
         body = self._parse_statement_list(JsTokenKind.EOF)
         return JsScript(body=body, offset=offset, recovered=self._recovered)
 
-    def _parse_statement(self, *, single_statement: bool = False) -> Statement | None:
+    def _parse_statement(
+        self,
+        *,
+        single_statement: bool = False,
+        annex_b_function: bool = False,
+    ) -> Statement | None:
         """
         One statement. A *single_statement* position takes no `let` or `const` and no class
         declaration: `let` reads as the name it spells, decided by `_at_variable_declaration`,
         while a `const` or a `class` reads as the declaration it opens with the repair recorded,
-        every engine refusing the file. A `var` is a statement and a function declaration is
-        Annex B's to admit, so both read there as they read anywhere. The one spelling an
-        ExpressionStatement may not open with is `let [`, with no line terminator freeing it, so a
-        `let` the bracket follows reads as the member expression it spells with the repair
-        recorded.
+        every engine refusing the file. A `var` is a statement and reads there as it reads anywhere.
+        The one spelling an ExpressionStatement may not open with is `let [`, with no line terminator
+        freeing it, so a `let` the bracket follows reads as the member expression it spells with the
+        repair recorded.
+
+        A function declaration is admitted as a single statement only where *annex_b_function* says
+        Annex B lets one stand — the clause of an `if` and the body of a label — and there only if it
+        is a plain function, never a generator or an async one. The body of a loop and of `with` take
+        no function at all. A function the position forbids reads as the declaration it opens with the
+        repair recorded, since every engine refuses the file.
         """
         offset = self._current.offset
         kind = self._current.kind
@@ -489,6 +499,10 @@ class JsParser:
         if kind == JsTokenKind.CONTINUE:
             return self._parse_continue_statement()
         if kind == JsTokenKind.FUNCTION:
+            if single_statement and (
+                not annex_b_function or self._peek_next().kind == JsTokenKind.STAR
+            ):
+                self._recovered = True
             return self._parse_function_declaration()
         if kind == JsTokenKind.AT:
             decorators = self._parse_decorators()
@@ -516,6 +530,8 @@ class JsParser:
         if kind == JsTokenKind.EXPORT:
             return self._parse_export_declaration()
         if self._at_async_function():
+            if single_statement:
+                self._recovered = True
             self._advance()
             return self._parse_function_declaration(is_async=True)
 
@@ -532,7 +548,7 @@ class JsParser:
             isinstance(expr, JsIdentifier)
             and self._eat(JsTokenKind.COLON)
         ):
-            body = self._parse_statement(single_statement=True)
+            body = self._parse_statement(single_statement=True, annex_b_function=True)
             return JsLabeledStatement(label=expr, body=body, offset=offset)
 
         self._eat_semicolon()
@@ -736,10 +752,10 @@ class JsParser:
         self._expect(JsTokenKind.LPAREN)
         test = self._parse_expression()
         self._expect(JsTokenKind.RPAREN)
-        consequent = self._parse_statement(single_statement=True)
+        consequent = self._parse_statement(single_statement=True, annex_b_function=True)
         alternate = None
         if self._eat(JsTokenKind.ELSE):
-            alternate = self._parse_statement(single_statement=True)
+            alternate = self._parse_statement(single_statement=True, annex_b_function=True)
         return JsIfStatement(
             test=test, consequent=consequent, alternate=alternate, offset=offset)
 

@@ -20,15 +20,13 @@ running one. Nothing from `samples` may ever be fed to this.
 """
 from __future__ import annotations
 
-import functools
-import subprocess
-import tempfile
 import unittest
 
-from pathlib import Path
-
 from test import TestBase
-from test.lib.scripts.js.analysis.differential import node_executable
+from test.lib.scripts.js.analysis.differential import (
+    node_executable,
+    node_reads_as_a_program,
+)
 from test.lib.scripts.js.ledger import printed, well_formed
 
 
@@ -79,26 +77,6 @@ A_DECLARATION_WHEREVER_IT_STANDS = {
 }
 
 
-@functools.lru_cache(maxsize=None)
-def _node_reads_as_a_program(source: str) -> bool:
-    """
-    Whether `node --check` reads *source* as a program, parsing it as a script and never running it.
-    A missing initializer is a syntax error the check reports, so this is the engine answering the
-    same question `well_formed` answers.
-    """
-    executable = node_executable()
-    assert executable is not None
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / 'snippet.js'
-        path.write_text(source, encoding='utf8')
-        completed = subprocess.run(
-            [executable, '--check', str(path)],
-            capture_output=True,
-            text=True,
-        )
-    return completed.returncode == 0
-
-
 def _canonical(text: str) -> str:
     return ''.join(text.split())
 
@@ -138,7 +116,7 @@ class TestTheEngineReadsEachDeclarationAsTheCorpusRecords(TestBase):
     def test_node_reads_each_declaration_as_the_corpus_records_it(self):
         self.assertEqual(
             {
-                source: _node_reads_as_a_program(source)
+                source: node_reads_as_a_program(source)
                 for source in A_DECLARATION_WHEREVER_IT_STANDS
             },
             A_DECLARATION_WHEREVER_IT_STANDS,

@@ -24,6 +24,7 @@ those is forbidden.
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -48,6 +49,26 @@ def node_executable() -> str | None:
     The path to the Node.js executable, or `None` when it is not installed.
     """
     return shutil.which('node')
+
+
+@functools.lru_cache(maxsize=None)
+def node_reads_as_a_program(source: str) -> bool:
+    """
+    Whether `node --check` reads *source* as a program, parsing it as a script and never running it.
+    A file the grammar refuses is a syntax error the check reports, so this is the engine answering
+    the same question `refinery.lib.scripts.is_well_formed` answers about the tree the parser built.
+    """
+    executable = node_executable()
+    assert executable is not None
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / 'snippet.js'
+        path.write_text(source, encoding='utf8')
+        completed = subprocess.run(
+            [executable, '--check', str(path)],
+            capture_output=True,
+            text=True,
+        )
+    return completed.returncode == 0
 
 
 def deobfuscate_source(

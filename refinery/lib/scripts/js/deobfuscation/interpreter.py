@@ -1650,7 +1650,7 @@ class JsInterpreter:
         if expr is None:
             return None
         if isinstance(expr, JsStringLiteral):
-            if not expr.terminated:
+            if not expr.terminated or expr.value is None:
                 raise IrreducibleExpression(expr)
             return expr.value
         if isinstance(expr, JsNumericLiteral):

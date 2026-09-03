@@ -8,8 +8,16 @@ from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 from test.lib.scripts.js.ledger import before_and_after, each_program_still_prints
 
 from refinery.lib.scripts.js.analysis.cache import ModelCache
-from refinery.lib.scripts.js.deobfuscation.dispatcher import JsDispatcherUnwrapper
-from refinery.lib.scripts.js.model import JsFunctionDeclaration
+from refinery.lib.scripts.js.deobfuscation.dispatcher import (
+    _UNREADABLE,
+    JsDispatcherUnwrapper,
+    _flag_argument,
+)
+from refinery.lib.scripts.js.model import (
+    JsCallExpression,
+    JsExpressionStatement,
+    JsFunctionDeclaration,
+)
 from refinery.lib.scripts.js.parser import JsParser
 
 
@@ -429,4 +437,31 @@ class TestADispatchIsReadPastItsKey(TestBase):
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
+        )
+
+
+class TestFlagArgumentReadsAPresentArgumentThatDenotesNothingAsUnreadable(TestBase):
+    """
+    `_flag_argument` keeps three answers apart: the fixed string an argument denotes, `None` where
+    the call has no argument at that index, and `_UNREADABLE` where it has one this pass cannot read
+    as a fixed string. A string written with a `\\x` escape naming no character is present but
+    denotes nothing, so it is unreadable and not absent — answering `None` for it would let the pass
+    read a flag it cannot see as a flag that is not there and take the safety gate off the
+    unwrapping. The backslash is spelled with `chr(92)` so nothing between the source and the parser
+    reads it as an escape of its own.
+    """
+
+    @staticmethod
+    def _call(source: str) -> JsCallExpression:
+        statement = JsParser(source + ';').parse().body[0]
+        assert isinstance(statement, JsExpressionStatement)
+        call = statement.expression
+        assert isinstance(call, JsCallExpression)
+        return call
+
+    def test_a_present_argument_that_denotes_nothing_is_unreadable_not_absent(self):
+        call = self._call(F'f("K", "{chr(92)}xZZ", g())')
+        self.assertEqual(
+            [_flag_argument(call, index) for index in range(4)],
+            ['K', _UNREADABLE, _UNREADABLE, None],
         )

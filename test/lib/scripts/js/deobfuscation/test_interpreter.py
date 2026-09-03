@@ -1597,3 +1597,29 @@ class TestInterpreterSwitchStatement(TestJsDeobfuscator):
             ['throw SyntaxError'],
             completion_values([F'{_SWITCH_WITH_TWO_DEFAULTS}\nf(9);']),
         )
+
+
+class TestAStringDenotingNothingIsIrreducible(TestJsDeobfuscator):
+    """
+    A string written with a `\\x` or `\\u` escape naming no character denotes nothing, so the
+    interpreter has no value to reduce it to: it refuses the fold that reads one and leaves the
+    expression as it was written. Reading it as a value would hand the operation `undefined` — the
+    interpreter reads `None` as that — and collapse `['\\xZZ'].join('')` to the empty string. A
+    well-formed operation beside it still folds, so the refusal costs no genuine reduction. The
+    backslash is spelled with `chr(92)` so nothing between the source and the parser reads it as an
+    escape of its own.
+    """
+
+    def test_a_join_reading_a_string_that_denotes_nothing_is_left_standing(self):
+        source = inspect.cleandoc(
+            F"""
+            function f() {{
+              return ["a", "{chr(92)}xZZ"].join("-");
+            }}
+            var x = f();
+            """
+        )
+        self.assertEqual(source, self._evaluate(source))
+
+    def test_a_well_formed_join_beside_it_still_folds(self):
+        self.assertEqual("var x = 'a-b';", self._fold('["a", "b"].join("-")'))

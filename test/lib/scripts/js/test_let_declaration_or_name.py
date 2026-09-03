@@ -180,6 +180,28 @@ A_DECLARATION_NO_SINGLE_STATEMENT_BODY_TAKES = [
     'l: class C {}',
 ]
 
+#: A function written as the single statement of every body position that governs one, mapped to
+#: whether the file is a program. Annex B admits a function there in exactly two positions and for
+#: exactly one kind: a plain function as the clause of an `if` and as the body of a label. A loop
+#: body and a `with` body take no function at all, and a generator or an async function stands in no
+#: single-statement position, so each of those reads as the declaration it opens with the repair
+#: recorded. The accepted rows are the control the refusals must not reach.
+A_FUNCTION_IN_A_SINGLE_STATEMENT_BODY = {
+    'while (0) function f() {}': False,
+    'do function f() {} while (0);': False,
+    'for (;;) function f() {}': False,
+    'for (x in y) function f() {}': False,
+    'for (x of y) function f() {}': False,
+    'with (o) function f() {}': False,
+    'if (0) function* g() {}': False,
+    'foo: function* g() {}': False,
+    'if (0) async function f() {}': False,
+    'foo: async function f() {}': False,
+    'if (0) function f() {}': True,
+    'if (0) function f() {} else function g() {}': True,
+    'foo: function f() {}': True,
+}
+
 
 class TestJsLetDeclarationOrName(TestBase):
 
@@ -314,3 +336,19 @@ class TestJsLetDeclarationOrName(TestBase):
         for source in A_DECLARATION_NO_SINGLE_STATEMENT_BODY_TAKES:
             with self.subTest(source=source):
                 self.assertEqual(is_well_formed(JsParser(source).parse()), False)
+
+    def test_only_an_if_clause_or_a_label_takes_a_plain_function_as_a_single_statement(self):
+        """
+        Node refuses every `False` file of `A_FUNCTION_IN_A_SINGLE_STATEMENT_BODY` with a
+        `SyntaxError` and runs every `True` one: a loop or `with` body takes no function, a generator
+        or async function stands in no single-statement position, and only a plain function in an
+        `if` clause or a label body is a program. Reading them together keeps a refusal from reaching
+        the two positions Annex B admits.
+        """
+        self.assertEqual(
+            {
+                source: is_well_formed(JsParser(source).parse())
+                for source in A_FUNCTION_IN_A_SINGLE_STATEMENT_BODY
+            },
+            A_FUNCTION_IN_A_SINGLE_STATEMENT_BODY,
+        )

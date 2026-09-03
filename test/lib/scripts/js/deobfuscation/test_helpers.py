@@ -24,6 +24,7 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
 )
 from refinery.lib.scripts.js.lexer import decode_js_string_body
 from refinery.lib.scripts.js.model import (
+    Expression,
     JsBlockStatement,
     JsExportSpecifier,
     JsExpressionStatement,
@@ -715,3 +716,40 @@ class TestASubstitutedCalleeKeepsTheCallTheNameMade(TestJsDeobfuscator):
 
     def test_a_member_written_for_a_read_stands_bare(self):
         self.assertEqual('typeof ns.f;', self._substituting_the_callee_of('typeof f;', 'ns.f'))
+
+
+#: A string written with a `\x` or `\u` escape naming no character, whose `value` is `None`, and a
+#: well-formed string beside it. The backslash is spelled with `chr(92)` so that no tool between the
+#: source and the parser reads it as an escape of its own.
+_BS = chr(92)
+A_STRING_AND_THE_VALUE_IT_HOLDS = {
+    F'"{_BS}xZZ"': (False, None),
+    F'"{_BS}u123"': (False, None),
+    F'"{_BS}x"': (False, None),
+    '"ab"': (True, 'ab'),
+    F'"a{_BS}tb"': (True, 'a\tb'),
+    "''": (True, ''),
+}
+
+
+class TestExtractLiteralValueRefusesAStringDenotingNothing(TestJsDeobfuscator):
+    """
+    A string written with a `\\x` or `\\u` escape naming no character denotes nothing, so it holds
+    no value to extract. Reporting `(True, None)` for it would hand the caller the value `undefined`
+    — the interpreter and `value_to_node` both read `None` as that — folding a run the file could
+    never have carried into a value it never named. A well-formed string beside it is read as the
+    text it denotes, so the refusal costs no genuine literal its value.
+    """
+
+    @staticmethod
+    def _expression(source: str) -> Expression:
+        statement = JsParser(source + ';').parse().body[0]
+        assert isinstance(statement, JsExpressionStatement) and statement.expression is not None
+        return statement.expression
+
+    def test_a_string_holds_its_value_only_where_it_denotes_one(self):
+        self.assertEqual(
+            {source: extract_literal_value(self._expression(source))
+             for source in A_STRING_AND_THE_VALUE_IT_HOLDS},
+            A_STRING_AND_THE_VALUE_IT_HOLDS,
+        )

@@ -1018,6 +1018,11 @@ def extract_literal_value(node: Node) -> tuple[bool, LiteralValue]:
     boolean, null literals, `void expr`, negative numerics, `!0`/`!1`, `0 / 0`, and array
     expressions where all elements are themselves literals.
 
+    A string literal that denotes nothing — one written with a `\\x` or `\\u` escape naming no
+    character, whose `value` is `None` — is not a recognized literal form: reporting `(True, None)`
+    for it would hand the caller the value `undefined`, folding a run the file could never have
+    carried into a value it never named.
+
     The two forms that are operator expressions rather than literals, `void 0` and `0 / 0`, are here
     because they are what `undefined` and `NaN` have instead of a literal: an expression built from
     an operator, which no scope can rebind, rather than from one of the global names, which any
@@ -1025,7 +1030,9 @@ def extract_literal_value(node: Node) -> tuple[bool, LiteralValue]:
     and this must stay paired with `value_to_node`, its declared inverse.
     """
     if isinstance(node, JsStringLiteral):
-        return (True, node.value) if node.terminated else (False, None)
+        if not node.terminated or node.value is None:
+            return False, None
+        return True, node.value
     if isinstance(node, JsNumericLiteral):
         return True, node.value
     if isinstance(node, JsBooleanLiteral):

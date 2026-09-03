@@ -78,7 +78,7 @@ def _flag_argument(
     if len(call.arguments) <= index:
         return None
     argument = strip_parens(call.arguments[index])
-    if isinstance(argument, JsStringLiteral):
+    if isinstance(argument, JsStringLiteral) and argument.value is not None:
         return argument.value
     return _UNREADABLE
 
