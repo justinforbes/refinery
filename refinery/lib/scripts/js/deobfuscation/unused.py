@@ -37,6 +37,7 @@ from refinery.lib.scripts.js.analysis.model import (
     Scope,
     ScopeKind,
     SemanticModel,
+    annex_b_suppressor_names,
     is_simple_assignment_target,
     is_the_this_of_a_script,
     may_be_global_object_base,
@@ -1077,8 +1078,15 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         for stmt in list(body):
             if not isinstance(stmt, JsVariableDeclaration):
                 continue
+            load_bearing = (
+                annex_b_suppressor_names(stmt)
+                if stmt.kind in (JsVarKind.LET, JsVarKind.CONST)
+                else frozenset()
+            )
             for decl in list(stmt.declarations):
                 if not isinstance(decl, JsVariableDeclarator) or not isinstance(decl.id, JsIdentifier):
+                    continue
+                if decl.id.name in load_bearing:
                     continue
                 binding = self.model.binding_of(decl.id)
                 if self._reflection_reachable(binding):

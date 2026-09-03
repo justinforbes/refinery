@@ -1113,6 +1113,48 @@ def annex_b_var_home(
     return None
 
 
+def annex_b_suppressor_names(
+    declaration: Statement, cache: LexicalNameCache | None = None,
+) -> frozenset[str]:
+    """
+    The names *declaration* binds lexically whose binding keeps a block-scoped function declaration
+    of the same name from being copied to an enclosing `var` scope by §B.3.3.1.
+
+    A `let`, `const` or class between such a function and the body that would give it a `var` is one
+    of the three things `annex_b_var_home` reads as stopping the copy, so the name it binds decides
+    that the function means nothing outside its block. That is a use no reader of the name can see:
+    the binding may have no reference anywhere and still be load-bearing, and removing it lets the
+    function reach the scope around it. A pass that removes a lexically declared name it finds no
+    reference to reads this to leave such a binding standing.
+
+    The answer is the subset of the names, so a `let f, g` where only `f` suppresses a copy keeps
+    `f` and gives up `g`. It is a lower bound in the safe direction: a name is reported wherever a
+    same-named block function has no `var` home, which counts a home stopped by a nearer binding or
+    by the mode as well, so the name is kept where removing it could not in fact free the function.
+    """
+    names = lexically_declared_names([declaration])
+    if not names:
+        return frozenset()
+    home = statement_list_holding(declaration)
+    if home is None:
+        return frozenset()
+    stmts = statement_list_of(home)
+    if stmts is None:
+        return frozenset()
+    cache = cache if cache is not None else LexicalNameCache()
+    suppressed: set[str] = set()
+    for node in _walk_skipping_functions(stmts):
+        if (
+            isinstance(node, JsFunctionDeclaration)
+            and node.id is not None
+            and node.id.name in names
+            and node.id.name not in suppressed
+            and annex_b_var_home(node, cache) is None
+        ):
+            suppressed.add(node.id.name)
+    return frozenset(suppressed)
+
+
 def annex_b_copies_into(binding: Binding) -> bool:
     """
     Whether *binding* holds a function Annex B copies into its scope rather than declares there.

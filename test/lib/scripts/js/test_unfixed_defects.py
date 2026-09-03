@@ -2269,46 +2269,6 @@ class TestAPromotedClosureIsStillOneObjectAcrossCalls(TestBase):
         )
 
 
-#: A program whose block-declared function is kept out of the enclosing scope by a lexical binding
-#: of the same name, mapped to the behavior an engine gives it. The `let` is what stops the copy, so
-#: it is read by the placement whether or not anything else in the program names it.
-A_LEXICAL_BINDING_THAT_STOPS_A_BLOCK_FUNCTION_ESCAPING = {
-    'a let nothing else reads': Program(
-        a_program("""
-            function outer() {
-              { let f = 1; { function f() { return 2; } } }
-              console.log(typeof f);
-            }
-            outer();
-            """),
-        prints('undefined'),
-    ),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-@one_expected_failure_per_program(A_LEXICAL_BINDING_THAT_STOPS_A_BLOCK_FUNCTION_ESCAPING)
-class TestALexicalBindingThatStopsABlockFunctionEscapingIsKept(TestBase):
-    """
-    A `let` between a block-declared function and the variable scope stops Annex B giving that
-    function a `var` outside its block (§B.3.3.1), so the name means nothing after the block and
-    `typeof` answers `undefined`. Reading the `let` is the whole of what it is for: no other
-    statement of the program has to name it for it to decide that.
-
-    `refinery.lib.scripts.js.deobfuscation.unused` removes a declarator nothing references, and a
-    declarator whose only consumer is the placement of another declaration is one it counts as
-    unreferenced. With the `let` gone the copy runs, the name reaches the enclosing scope, and the
-    program comes back printing `function`.
-
-    The removal is what is wrong here rather than the placement, which is why this is its own entry:
-    `refinery.lib.scripts.js.analysis.model.annex_b_var_home` reads the `let` correctly, and answers
-    a different question once a pass has deleted it.
-
-    Off the release gate deliberately: no real file writes a `let` whose one consumer is the
-    placement of a block function two blocks in, probed by a `typeof` after both.
-    """
-
-
 #: A program whose parameter default runs a direct `eval` declaring a name the body reads, mapped
 #: to the behavior an engine gives it.
 A_DIRECT_EVAL_IN_A_DEFAULT_DECLARING_A_NAME = {

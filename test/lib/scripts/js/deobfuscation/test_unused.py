@@ -1987,6 +1987,68 @@ class TestAGlobalPropertyWriteSurvivesWhereTheGlobalObjectEscapes(TestJsDeobfusc
         self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
 
 
+class TestALexicalBindingThatStopsABlockFunctionEscapingIsKept(TestJsDeobfuscator):
+    """
+    A `let` between a block-scoped function declaration and the `var` scope around it keeps §B.3.3.1
+    from copying the function out, so the name means nothing after the block. Reading the `let` is
+    the whole of what it is for, which the reference-counting removal does not see: the binding has
+    no reference, and removing it lets the copy run and the name reach the enclosing scope.
+    """
+
+    def _remove_unused(self, source: str) -> str:
+        return self._run_transformer(source, JsUnusedCodeRemoval)
+
+    @unittest.skipIf(node_executable() is None, 'node.js is not available')
+    def test_the_suppressing_binding_is_kept_so_the_name_stays_unbound(self):
+        """
+        Node prints `undefined` for this program: `let f` stops the inner `function f` from being
+        given a `var` in `outer`, so `typeof f` finds no binding. Removing the `let` as unreferenced
+        makes the program print `function` instead.
+        """
+        source = inspect.cleandoc(
+            """
+            function outer() {
+              { let f = 1; { function f() { return 2; } } }
+              console.log(typeof f);
+            }
+            outer();
+            """
+        )
+        self.assertEqual(behavior(self._remove_unused(source)), ('undefined\n', None))
+
+    def test_a_binding_no_block_function_shares_a_name_with_is_still_removed(self):
+        """
+        The guard keys on the name a block function is declared with, not on any `let` standing in a
+        block: where the `let` binds a name no block-scoped function shares, it suppresses no copy
+        and the unreferenced binding is removed as before.
+        """
+        source = inspect.cleandoc(
+            """
+            function outer() {
+              { let d = 1; { function g() { return 2; } } }
+              console.log(typeof g);
+            }
+            outer();
+            """
+        )
+        expected = inspect.cleandoc(
+            """
+            function outer() {
+              {
+                {
+                  function g() {
+                    return 2;
+                  }
+                }
+              }
+              console.log(typeof g);
+            }
+            outer();
+            """
+        )
+        self.assertEqual(self._remove_unused(source), expected)
+
+
 @unittest.skipIf(node_executable() is None, 'node.js is not available')
 class TestNodePrintsTheSameWhereTheGlobalObjectEscapes(TestJsDeobfuscator):
 
