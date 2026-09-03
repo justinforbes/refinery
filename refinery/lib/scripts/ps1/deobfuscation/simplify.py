@@ -218,20 +218,37 @@ class Ps1Simplifications(Transformer):
             if '`' in node.name:
                 set_value(node, 'name', _strip_backtick_noop(node.name))
                 self.mark_changed()
-            name_lower = node.name.lower()
-            normalized = KNOWN_PS_OPERATORS.get(name_lower)
-            if normalized is None:
-                normalized = KNOWN_PS_SWITCHES.get(name_lower)
-            if normalized is None:
-                bare = name_lower.lstrip('-')
-                if bare != name_lower:
-                    canonical = ALL_PARAMETER_NAMES.get(bare)
-                    if canonical is not None:
-                        normalized = F'-{canonical}'
-            if normalized is not None and normalized != node.name:
-                set_value(node, 'name', normalized)
-                self.mark_changed()
+            if self._binds_parameters_by_name(node):
+                name_lower = node.name.lower()
+                normalized = KNOWN_PS_OPERATORS.get(name_lower)
+                if normalized is None:
+                    normalized = KNOWN_PS_SWITCHES.get(name_lower)
+                if normalized is None:
+                    bare = name_lower.lstrip('-')
+                    if bare != name_lower:
+                        canonical = ALL_PARAMETER_NAMES.get(bare)
+                        if canonical is not None:
+                            normalized = F'-{canonical}'
+                if normalized is not None and normalized != node.name:
+                    set_value(node, 'name', normalized)
+                    self.mark_changed()
         return None
+
+    def _binds_parameters_by_name(self, argument: Ps1CommandArgument) -> bool:
+        """
+        Whether the command `argument` is written against completes and case-normalizes parameter
+        names the way this rewrite assumes. A cmdlet, function or alias binds an argument name
+        case-insensitively and by unambiguous prefix, so respelling `-noprofile` to `-NoProfile`
+        leaves the run unchanged. A native program receives every argument as text — `openssl -in`
+        reaches it as `-in` — so a spelling nothing may rewrite. The model refusing the name a
+        concrete command (`Denotation.is_a_name` is false for the unknown and unresolved names an
+        external executable reads as, and for one that denotes nothing) forbids the rewrite, and no
+        command model at all is the same refusal.
+        """
+        command = argument.parent
+        if self._commands is None or not isinstance(command, Ps1CommandInvocation):
+            return False
+        return self._commands.denotation(command).is_a_name
 
     def visit_Ps1TypeExpression(self, node: Ps1TypeExpression):
         self._normalize_type_field(node, 'name')

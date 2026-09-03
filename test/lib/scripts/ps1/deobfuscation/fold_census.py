@@ -1417,10 +1417,6 @@ FOLDS: dict[str, str] = {
         "Write-Output (,'1.100')\nWrite-Output '1.100'",
     "$t = 'x' + (1.0d); Write-Output (,$t); Write-Output $t":
         "Write-Output (,'x1')\nWrite-Output 'x1'",
-    'openssl enc -d -a -in x':
-        'openssl enc -d -a -In x',
-    'foo.exe -noprofile -file x':
-        'foo.exe -NoProfile -File x',
     "trap { continue }; [int]'a'; Write-Host 'after'":
         "[int]'a'\nWrite-Host 'after'",
     "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'":

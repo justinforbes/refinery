@@ -884,7 +884,6 @@ class TestPs1Corruptions(_Ps1Ledger):
             'the block was taken out of the remote invocation and now runs on this machine',
         )
 
-    @unittest.expectedFailure
     def test_native_openssl_argument_spelling_survives(self):
         """
         `openssl enc -d -a -in x` invokes a native program, which receives `-in` as text.
@@ -904,7 +903,6 @@ class TestPs1Corruptions(_Ps1Ledger):
             'the operands of the native program did not survive unchanged',
         )
 
-    @unittest.expectedFailure
     def test_native_executable_switch_spelling_survives(self):
         """
         `foo.exe -noprofile -file x` passes both switches to a native program as text, so neither

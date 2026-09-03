@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import re
 
 from test.lib.scripts.ps1.deobfuscation import TestPs1
 
@@ -178,6 +177,45 @@ class TestPs1SimplifyExtra(TestPs1):
     def test_gcm_concrete_name_resolved(self):
         result = self._apply("& (gcm Write-Output) 'hi'", Ps1Simplifications)
         self.assertEqual(result, "Write-Output 'hi'")
+
+
+class TestPs1AParameterNameIsCompletedOnlyForACommandThatBindsByName(TestPs1):
+    """
+    5.1 completes and case-normalizes a parameter name for a cmdlet, function or alias, whose binder
+    matches `-recurse` to `-Recurse` regardless of case. A native program receives every argument as
+    text, so its spelling is the whole of it and the same rewrite would change what the program is
+    handed. The only thing varied across these rows is what the command name denotes.
+    """
+
+    def test_a_cmdlet_parameter_is_completed_to_its_canonical_spelling(self):
+        self.assertEqual(
+            self._apply('Get-ChildItem -recurse', Ps1Simplifications),
+            'Get-ChildItem -Recurse',
+        )
+
+    def test_an_alias_parameter_is_completed_to_its_canonical_spelling(self):
+        self.assertEqual(
+            self._apply('gci -recurse', Ps1Simplifications),
+            'gci -Recurse',
+        )
+
+    def test_a_function_parameter_is_completed_to_its_canonical_spelling(self):
+        self.assertEqual(
+            self._apply('function f { } ; f -recurse', Ps1Simplifications),
+            'function f {}\nf -Recurse',
+        )
+
+    def test_a_native_program_argument_keeps_the_spelling_it_was_written_with(self):
+        self.assertEqual(
+            self._apply('foo.exe -recurse', Ps1Simplifications),
+            'foo.exe -recurse',
+        )
+
+    def test_an_unresolved_bareword_command_keeps_the_argument_spelling(self):
+        self.assertEqual(
+            self._apply('zqcmd -recurse', Ps1Simplifications),
+            'zqcmd -recurse',
+        )
 
 
 class TestPs1SimplifyRedirections(TestPs1):
