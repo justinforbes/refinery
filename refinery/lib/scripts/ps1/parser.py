@@ -245,6 +245,7 @@ class Ps1Parser:
         self._pending: Ps1Token | None = None
         self._previous_end = 0
         self._disable_comma = False
+        self._argument_head = False
 
     @property
     def _current(self) -> Ps1Token:
@@ -322,13 +323,22 @@ class Ps1Parser:
         mode discards the lookahead, so a token scanned in one mode is never handed to a parse that
         asked for another. That is the whole of the rule: it lives here rather than in the memory of
         whoever writes the next call site.
+
+        Every nested delimiter opens through here, so this is also where `_argument_head` is cleared:
+        the head of a command argument is where a bare word is a value, and a construct read inside a
+        bracket, an index or a call's arguments is not that head however the ambient lexer mode reads.
+        The flag is restored on the way out, so the argument's own postfix chain — `$x.Foo(1).` —
+        finds it set again once the `(1)` it descended into has closed.
         """
         previous = self._lexer.mode
+        previous_head = self._argument_head
+        self._argument_head = False
         self._switch_mode(mode)
         try:
             yield
         finally:
             self._switch_mode(previous)
+            self._argument_head = previous_head
 
     def _attempt(self, mode: Ps1LexerMode, rule: Callable[[], _T | None]) -> _T | None:
         """
@@ -948,6 +958,13 @@ class Ps1Parser:
             return None
         with self._mode(Ps1LexerMode.EXPRESSION):
             if self._current.kind in self._ARGUMENT_PRIMARY_KINDS:
+                # The head of a command argument is where a bare word is a value, so a `.` or `::`
+                # with nothing behind it belongs to the word rather than naming a member: `f $x.`
+                # passes `$x` and then the word `.`, and `f $x.<newline>g 1` does not read `g` for
+                # the member of `$x`. `_member_access` asks the lexer for the operator in argument
+                # mode while this is set, which is where that refusal lives; the value grammar still
+                # reads in expression mode. `_mode` clears the flag at every nested delimiter.
+                self._argument_head = True
                 value = self._parse_unary_expression()
                 if value is not None:
                     return value
@@ -1163,7 +1180,11 @@ class Ps1Parser:
         """
         offset = self._current.offset
         self._resync(offset)
-        token = self._lexer.scan_member_access()
+        if self._argument_head:
+            with self._mode(Ps1LexerMode.ARGUMENT):
+                token = self._lexer.scan_member_access()
+        else:
+            token = self._lexer.scan_member_access()
         if token is None:
             self._resync(offset)
             return None

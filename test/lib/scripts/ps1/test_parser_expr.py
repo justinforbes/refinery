@@ -1204,26 +1204,26 @@ class TestPs1AnOperatorTouchingAValueNamesAMemberOfIt(TestBase):
             'f $x .5'  : ['$x', '.5'],
         })
 
-    @unittest.expectedFailure
     def test_an_access_with_nothing_behind_it_belongs_to_the_word_it_was_written_against(self):
         """
-        `f $x.` passes the one argument `$x.` and names no member of `$x`. What that argument is
-        spelled as in the tree is the parser's own business, so what is stated here is that the
-        script asks for no member and that the argument comes back as it was written.
+        `f $x.` passes `$x` and then the word `.`, and names no member of `$x`: at the head of a
+        command argument a bare word is a value, so a `.` with nothing behind it belongs to the word
+        rather than opening a member access. Measured on 5.1, the two are separate command elements —
+        the variable `$x` and the constant `.` — which the synthesizer spaces apart.
         """
         script = Ps1Parser('f $x.').parse()
-        self.assertEqual(Ps1Synthesizer().convert(script), 'f $x.')
+        self.assertEqual(Ps1Synthesizer().convert(script), 'f $x .')
         self.assertEqual([
             type(node).__name__ for node in script.walk()
             if isinstance(node, (Ps1MemberAccess, Ps1InvokeMember))
         ], [])
 
-    @unittest.expectedFailure
     def test_an_access_with_nothing_behind_it_does_not_reach_into_the_next_statement(self):
         """
-        The same defect, in the spelling that makes it change what a script means rather than only
-        what it says: an access that names nothing takes the newline for whitespace and the next
-        pipeline for a member name, so two statements come back as one.
+        The same rule in the spelling that makes it change what a script means rather than only what
+        it says: an access that names nothing must not take the newline for whitespace and read the
+        next pipeline for a member name. Measured on 5.1, `f $x.` and `g 1` are two statements.
         """
-        self.assertEqual(
-            Ps1Synthesizer().convert(Ps1Parser('f $x.\ng 1').parse()), 'f $x.\ng 1')
+        script = Ps1Parser('f $x.\ng 1').parse()
+        self.assertEqual(len(script.body), 2)
+        self.assertEqual(Ps1Synthesizer().convert(script), 'f $x .\ng 1')

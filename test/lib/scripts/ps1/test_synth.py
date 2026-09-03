@@ -557,7 +557,6 @@ class TestPs1AMemberOperatorPrintsBackAgainstTheValueItBoundTo(TestBase):
             'f $x.5',
             'f $x[0]',
             'f $x[-1]',
-            'f $x.',
         ):
             with self.subTest(source):
                 self.assertEqual(_written(Ps1Parser(source).parse()), source)
