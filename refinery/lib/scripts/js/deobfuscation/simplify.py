@@ -642,6 +642,7 @@ class JsSimplifications(Transformer):
             if i == len(node.expressions) - 1
             or not is_simple_expression(e)
             or self.model.read_has_dynamic_effect(e)
+            or (isinstance(e, JsIdentifier) and self.model.read_may_throw(e))
         ]
         if len(filtered) == len(node.expressions):
             return None

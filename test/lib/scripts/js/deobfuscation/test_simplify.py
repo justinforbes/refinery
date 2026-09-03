@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import unittest
 
+from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.units.scripting.js import js
@@ -82,7 +83,12 @@ class TestBasicSimplifications(TestJsDeobfuscator):
         self.assertEqual("'c';", self._simplify("'a', 'b', 'c';"))
 
     def test_tuple_side_effect_free(self):
-        self.assertEqual("'c';", self._simplify("'a', x, 'c';"))
+        """
+        A resolved read cannot throw and carries no other effect, so the middle operand is dropped;
+        a free `x` would throw a `ReferenceError` and is kept by
+        `TestASequenceOperandThatMayThrowIsKept`.
+        """
+        self.assertEqual("var x = 0;\n'c';", self._simplify("var x = 0;\n'a', x, 'c';"))
 
     def test_tuple_with_side_effect(self):
         self.assertEqual("f(), 'c';", self._simplify("'a', f(), 'c';"))
@@ -1211,6 +1217,46 @@ class TestCalleeSequencePreserved(TestJsDeobfuscator):
 
     def test_sequence_callee_collapsed_for_plain_identifier(self):
         self.assertEqual('f(x);', self._simplify('(0, f)(x);'))
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestASequenceOperandThatMayThrowIsKept(TestJsDeobfuscator):
+    """
+    Every operand of a sequence is evaluated in order and every one but the last has its value
+    discarded, but discarding the value is not licence to skip the evaluation: a bare read of a
+    name no binding resolves throws a `ReferenceError` before the operands behind it, so dropping
+    it lets a program that ended there run on.
+    """
+
+    def test_a_throwing_operand_is_kept_at_the_head_of_a_statement(self):
+        """
+        Node refuses `missing, console.log(1);` with a `ReferenceError` and prints nothing; the
+        simplification has to throw the same way rather than come back printing `1`.
+        """
+        self.assertEqual(
+            behavior(self._simplify('missing, console.log(1);')),
+            ('', 'ReferenceError'),
+        )
+
+    def test_a_throwing_operand_is_kept_inside_a_call_argument(self):
+        """
+        The same read spelled where a sequence stands in an argument list: `console.log((missing,
+        1));` throws before the call, and its simplification keeps the throw.
+        """
+        self.assertEqual(
+            behavior(self._simplify('console.log((missing, 1));')),
+            ('', 'ReferenceError'),
+        )
+
+    def test_a_resolved_operand_is_still_dropped(self):
+        """
+        A read that resolves cannot throw and carries no other effect, so the operand is dropped
+        and the sequence collapses to the value the last operand decides.
+        """
+        self.assertEqual(
+            'var x = 1;\nconsole.log(1);',
+            self._simplify('var x = 1;\nx, console.log(1);'),
+        )
 
 
 class TestConcatReassociation(TestJsDeobfuscator):

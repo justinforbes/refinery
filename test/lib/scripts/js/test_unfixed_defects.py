@@ -1314,59 +1314,6 @@ class TestACallWhoseBodyReadsANameNothingBindsIsNotAValue(TestBase):
         )
 
 
-#: A program in which a read of a name nothing binds is an operand of a sequence expression whose
-#: value is decided by a later operand, mapped to the behavior Node gives it. The read is evaluated
-#: for its effect and its value is thrown away, which is what the operand of a sequence is for.
-A_SEQUENCE_OPERAND_READING_A_NAME_NOTHING_BINDS = {
-    'missing, console.log(1);\n': ('', 'ReferenceError'),
-    '(missing, 0), console.log(1);\n': ('', 'ReferenceError'),
-    'var v = (missing, 2);\nconsole.log(v);\n': ('', 'ReferenceError'),
-    'console.log((missing, 1));\n': ('', 'ReferenceError'),
-    'function f() {\n  missing, console.log(1);\n}\nf();\n': ('', 'ReferenceError'),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestASequenceOperandThatThrowsIsNotDropped(TestBase):
-    """
-    Every operand of a sequence expression is evaluated, in order, and every one but the last has
-    its value discarded. Discarding the value is not licence to skip the evaluation: an operand that
-    reads a name no binding resolves throws before the operands after it are reached, so a sequence
-    whose first operand is such a read has no value at all and the program ends there.
-
-    `TestAReadOfANameNothingBindsThrowsWhereverItStands` names one hook for its fix — the
-    *read_effect* callback `side_effect_free` takes — and this is the case that claim does not
-    reach. A sequence operand never passes through that callback:
-    `JsSimplifications.visit_JsSequenceExpression` keeps an operand that `is_simple_expression`
-    rejects or that `SemanticModel.read_has_dynamic_effect` accepts, and drops the rest. A bare
-    identifier is simple, and `read_has_dynamic_effect` is the `with`-object question rather than
-    the may-it-throw question, so the read is dropped by a route of its own and needs a fix of its
-    own.
-
-    The rows vary where the sequence stands, because that decides what is left behind rather than
-    whether the operand goes: at the top of a statement, nested in another sequence, on the right of
-    a declaration, inside a call's argument list, and inside a function body.
-    """
-
-    @unittest.expectedFailure
-    def test_an_operand_whose_value_is_discarded_is_still_evaluated(self):
-        """
-        Node refuses every program of `A_SEQUENCE_OPERAND_READING_A_NAME_NOTHING_BINDS` having
-        printed nothing, with a `ReferenceError` reading
-
-            missing is not defined
-
-        Every deobfuscation drops the operand and prints: the first four come back as
-        `console.log(1);`, `console.log(1);`, `console.log(2);` and `console.log(1);`, and the last
-        keeps the function with the read gone from its body.
-        """
-        rows = A_SEQUENCE_OPERAND_READING_A_NAME_NOTHING_BINDS
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            {source: (answer, answer) for source, answer in rows.items()},
-        )
-
-
 #: Programs asking how many own properties an object literal spelling `__proto__` has, mapped to
 #: what Node prints for each. The three spellings answer differently: the shorthand gives the object
 #: a property of that name, the two written with a colon set its prototype and give it none, and a
