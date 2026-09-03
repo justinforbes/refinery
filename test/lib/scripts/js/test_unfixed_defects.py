@@ -83,10 +83,7 @@ from test.lib.scripts.js.test_truncated_source import FOLDS_ANSWERED_WITH_A_PROG
 from refinery.lib.scripts import UnspellableNode
 from refinery.lib.scripts.js.analysis.model import is_use_position
 from refinery.lib.scripts.js.model import (
-    JsBigIntLiteral,
     JsIdentifier,
-    JsNumericLiteral,
-    JsProperty,
     JsPropertyDefinition,
     JsStringLiteral,
 )
@@ -97,13 +94,6 @@ def _sole_property_definition(source: str) -> JsPropertyDefinition:
     return [
         node for node in JsParser(source).parse().walk()
         if isinstance(node, JsPropertyDefinition)
-    ][0]
-
-
-def _sole_property(source: str) -> JsProperty:
-    return [
-        node for node in JsParser(source).parse().walk()
-        if isinstance(node, JsProperty)
     ][0]
 
 
@@ -1449,83 +1439,6 @@ class TestAStringNamedSpecifierTheGrammarBansIsRefused(TestBase):
         self.assertEqual(
             {source: well_formed(source) for source in sources},
             {source: False for source in sources},
-        )
-
-
-class TestAPropertyKeyIsSpelledByAName(TestBase):
-    """
-    An object literal names a property with an IdentifierName, with a string literal, with a
-    numeric literal, or with a bracketed expression, and with nothing else. An IdentifierName is
-    wider than a name the code around it could refer to, every reserved word spelling one, which is
-    what makes `x = { if: 1 };` a program; it is a name all the same, and a punctuator is not one.
-    `node --check` over a script refuses:
-
-        x = { +: 1 };       SyntaxError: Unexpected token '+'
-        x = { ,: 1 };       SyntaxError: Unexpected token ','
-        x = { ;: 1 };       SyntaxError: Unexpected token ';'
-        x = { ): 1 };       SyntaxError: Unexpected token ')'
-        x = { %: 1 };       SyntaxError: Unexpected token '%'
-        x = { ++: 1 };      SyntaxError: Unexpected token '++'
-        x = { =>: 1 };      SyntaxError: Unexpected token '=>'
-        x = { @: 1 };       SyntaxError: Invalid or unexpected token
-        x = { #a: 1 };      SyntaxError: Unexpected identifier '#a'
-        x = { +() {} };     SyntaxError: Unexpected token '+'
-        class C { +() {} }  SyntaxError: Unexpected token '+'
-
-    and reads `{ a: 1 }`, `{ if: 1 }`, `{ 'a b': 1 }`, `{ 1: 1 }`, `{ .5: 1 }`, `{ 08: 1 }`,
-    `{ 1_0: 1 }`, `{ 1n: 1 }` and `{ [k]: 1 }`. Whatever token stands in the position is taken for
-    the name and kept in a `refinery.lib.scripts.js.model.JsIdentifier` spelled by that token's
-    text, so a key named `+` is a name to every consumer that reads one, the file prints back
-    unchanged, and `refinery.lib.scripts.is_well_formed` calls the tree a program. The private name
-    is the same reading one step further on: `#a` names a field of a class and nothing else, and an
-    object literal that borrows it is no program either.
-
-    A numeral carrying the BigInt suffix is what parts a fix from a careless one. It is a
-    NumericLiteral like any other, so `x = { 1n: 1 };` is a program and Node answers the one key
-    `1` for `Object.keys({ 1n: 1 })`. A key position narrowed to an identifier, a string and a
-    plain decimal stops reading a file the language reads.
-    """
-
-    @unittest.expectedFailure
-    def test_a_key_position_holding_no_name_is_not_a_well_formed_program(self):
-        rows = {
-            'x = { a: 1 };': True,
-            'x = { if: 1 };': True,
-            "x = { 'a b': 1 };": True,
-            'x = { 1: 1 };': True,
-            'x = { .5: 1 };': True,
-            'x = { 08: 1 };': True,
-            'x = { 1_0: 1 };': True,
-            'x = { 1n: 1 };': True,
-            'x = { [k]: 1 };': True,
-            'x = { +: 1 };': False,
-            'x = { ,: 1 };': False,
-            'x = { ;: 1 };': False,
-            'x = { ): 1 };': False,
-            'x = { %: 1 };': False,
-            'x = { ++: 1 };': False,
-            'x = { =>: 1 };': False,
-            'x = { @: 1 };': False,
-            'x = { #a: 1 };': False,
-            'x = { +() {} };': False,
-            'class C { +() {} }': False,
-        }
-        self.assertEqual({source: well_formed(source) for source in rows}, rows)
-
-    @unittest.expectedFailure
-    def test_a_numeral_in_a_key_position_is_the_numeral_it_is_anywhere_else(self):
-        """
-        `x = 1n;` is read as the BigInt numeral it spells and `x = { 1n: 1 };` is not, though the
-        same literal is written in both: the key is kept as a name whose text is `1n`, a spelling
-        no identifier may carry and a property no object has. The decimal beside it is read as the
-        numeral it is, so the position is not one that nothing reaches.
-        """
-        self.assertEqual(
-            (
-                type(_sole_property('x = { 1n: 1 };').key),
-                type(_sole_property('x = { 1: 1 };').key),
-            ),
-            (JsBigIntLiteral, JsNumericLiteral),
         )
 
 

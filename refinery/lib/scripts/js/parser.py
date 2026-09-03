@@ -1132,7 +1132,7 @@ class JsParser:
             if self._eat(JsTokenKind.STAR):
                 is_generator = True
 
-        key, computed = self._parse_property_key()
+        key, computed = self._parse_property_key(class_element=True)
 
         if kind == JsMethodKind.METHOD and not is_generator and not self._at(JsTokenKind.LPAREN):
             return self._finish_class_field(key, is_static, computed, offset)
@@ -2089,15 +2089,28 @@ class JsParser:
             key=key, value=value, computed=computed,
             shorthand=False, method=True, kind=kind, offset=offset)
 
-    def _parse_property_key(self) -> tuple[Expression, bool]:
+    def _parse_property_key(self, *, class_element: bool = False) -> tuple[Expression, bool]:
         if self._at(JsTokenKind.LBRACKET):
             self._advance()
             key = self._parse_assignment_expression()
             self._expect(JsTokenKind.RBRACKET)
             return key, True
-        return self._parse_property_name(), False
+        return self._parse_property_name(class_element=class_element), False
 
-    def _parse_property_name(self) -> Expression:
+    def _parse_property_name(self, *, class_element: bool = False) -> Expression:
+        """
+        The name a property is written with: an IdentifierName, a string, or a numeral, and in a
+        class body a private name besides. A `[` opens a computed key and is read before this is
+        reached, so what stands here spells one of those or it spells no property name at all. A
+        numeral carries its own kind, so a `1n` key is the BigInt it is anywhere else and not a
+        name whose text reads `1n`.
+
+        A punctuator is the token that spells no name, and so, outside a class body, is a private
+        name the object grammar has no room for. A key written with either is an early error and
+        the file no program, so it is read with the repair recorded — the tree kept so the file
+        still prints as written — and `refinery.lib.scripts.is_well_formed`, the domain every
+        fidelity law is stated over, answers False for it.
+        """
         tok = self._current
         if self._at(JsTokenKind.INTEGER, JsTokenKind.FLOAT):
             self._advance()
@@ -2108,11 +2121,23 @@ class JsParser:
                 raw=raw,
                 offset=tok.offset,
             )
+        if self._at(JsTokenKind.BIGINT):
+            self._advance()
+            raw = tok.value
+            return JsBigIntLiteral(
+                value=self._parse_int_text(raw.replace('_', '').rstrip('n')),
+                raw=raw,
+                offset=tok.offset,
+            )
         if self._at(JsTokenKind.STRING_SINGLE, JsTokenKind.STRING_DOUBLE):
             return self._parse_string_literal()
         if self._at(JsTokenKind.PRIVATE_IDENTIFIER):
+            if not class_element:
+                self._recovered = True
             self._advance()
             return self._private_identifier(tok, tok.offset)
+        if not self._at_identifier_name():
+            self._recovered = True
         self._advance()
         return self._name_or_error(tok.value, tok.offset, may_be_reserved=True)
 
