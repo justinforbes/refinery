@@ -96,6 +96,7 @@ from refinery.lib.scripts.js.model import (
 )
 from refinery.lib.scripts.js.strict import mark_directives, mark_module
 from refinery.lib.scripts.js.token import RESERVED_WORD_NAMES, JsToken, JsTokenKind
+from refinery.lib.scripts.js.utf16 import is_well_formed as is_well_formed_unicode
 
 _PREC_EXPONENTIATION = 15
 
@@ -1341,9 +1342,16 @@ class JsParser:
         would hand it a text that opens with a quote. Anything else is a token the parser steps
         over in order to answer with a name at all, and reading `,` as the name a module exports
         under is a repair however well it prints back.
+
+        A module export name written as a string must denote a well-formed run of code units, a lone
+        surrogate spelling no character a boundary name may carry, so a string holding one is read
+        with the repair recorded.
         """
         if self._at(JsTokenKind.STRING_SINGLE, JsTokenKind.STRING_DOUBLE):
-            return self._parse_string_literal()
+            literal = self._parse_string_literal()
+            if not is_well_formed_unicode(literal.value):
+                self._recovered = True
+            return literal
         if not self._at_identifier_name():
             self._recovered = True
         tok = self._advance()
@@ -1368,6 +1376,8 @@ class JsParser:
             if self._at(JsTokenKind.AS):
                 self._advance()
                 local = self._parse_binding_identifier()
+            elif isinstance(imported, JsStringLiteral):
+                self._recovered = True
             specs.append(JsImportSpecifier(
                 imported=imported, local=local, offset=spec_offset))
             if not self._at(JsTokenKind.RBRACE):
@@ -1454,6 +1464,10 @@ class JsParser:
             source = self._module_specifier()
             if source is None:
                 return self._unread_since(offset, 'a module declaration with no specifier')
+        if source is None and any(
+            isinstance(specifier.local, JsStringLiteral) for specifier in specifiers
+        ):
+            self._recovered = True
         self._eat_semicolon()
         return JsExportNamedDeclaration(
             specifiers=specifiers, source=source, offset=offset)

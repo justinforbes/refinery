@@ -32,6 +32,7 @@ from collections.abc import Iterable, Mapping
 
 from test import TestBase
 from test.lib.scripts.js.analysis.differential import (
+    behavior,
     deobfuscate_source,
     module_graph_behavior,
     node_executable,
@@ -281,4 +282,106 @@ class TestAProgramNodeRefusesIsNotAnsweredWithOneThatRuns(TestBase):
                 for source, files in rows.items()
             },
             {source: (('', 'SyntaxError'), ('', 'SyntaxError')) for source in rows},
+        )
+
+
+#: A string standing where a specifier names the local binding it creates rather than the far side of
+#: the boundary, mapped to the smallest edit that lets the same string stand. A `from` clause makes a
+#: named export a re-export, whose near side is a boundary name and not a local; an `as` clause moves
+#: the string off the import binding onto the boundary. A local binding is a name the file refers to
+#: and no string spells one, so Node refuses every left side at parse and reads every right one.
+A_STRING_WHERE_A_LOCAL_BINDING_BELONGS = {
+    "export { 'a' };": "export { 'a' } from 'm';",
+    "export { 'a' as b };": "export { 'a' as b } from 'm';",
+    "import { 'a' } from 'm';": "import { 'a' as b } from 'm';",
+}
+
+
+#: A boundary name written as a string that carries a lone surrogate, mapped to the same declaration
+#: with that surrogate paired. A lone surrogate — a high one no low one follows, or a low one on its
+#: own — is a code unit spelling no character a name may hold, so Node refuses every left side at
+#: parse and reads every right one. Each surrogate is a JavaScript escape assembled from `chr(92)`,
+#: so the code unit it names is the parser's to resolve and never Python's.
+A_LONE_SURROGATE = _an_escape(0xD800)
+A_LONE_LOW_SURROGATE = _an_escape(0xDC00)
+A_SURROGATE_PAIR = A_LONE_SURROGATE + A_LONE_LOW_SURROGATE
+A_BOUNDARY_NAME_HOLDING_A_LONE_SURROGATE = {
+    F"export {{ a as '{A_LONE_SURROGATE}' }} from 'm';":
+        F"export {{ a as '{A_SURROGATE_PAIR}' }} from 'm';",
+    F"import {{ '{A_LONE_LOW_SURROGATE}' as v }} from 'm';":
+        F"import {{ '{A_SURROGATE_PAIR}' as v }} from 'm';",
+    F"export * as '{A_LONE_SURROGATE}' from 'm';":
+        F"export * as '{A_SURROGATE_PAIR}' from 'm';",
+}
+
+
+class TestAStringNamesTheBoundaryAndOnlyAWellFormedOne(TestBase):
+    """
+    A string may name what a specifier reaches across the boundary, and there alone. The near side of
+    a specifier names a binding the file creates, which no string spells, and a boundary name a
+    string does spell must denote a well-formed run of code units. A declaration written against
+    either rule is read with the repair recorded, so `refinery.lib.scripts.is_well_formed` answers
+    `False` for it, while the smallest edit obeying the rule is a program the same reader admits.
+
+    Nothing is answered wrongly: each refused declaration prints back as the text it was written as,
+    the position holding the string that was there and not a name.
+    """
+
+    def test_a_string_naming_a_local_binding_is_no_program_and_its_boundary_twin_is(self):
+        rows = A_STRING_WHERE_A_LOCAL_BINDING_BELONGS
+        self.assertEqual(
+            {source: well_formed(source) for source in rows},
+            {source: False for source in rows},
+        )
+        self.assertEqual(
+            {twin: well_formed(twin) for twin in rows.values()},
+            {twin: True for twin in rows.values()},
+        )
+        self.assertEqual(
+            {source: printed(source) for source in rows},
+            {source: source for source in rows},
+        )
+
+    def test_a_boundary_name_with_a_lone_surrogate_is_no_program_and_its_paired_twin_is(self):
+        rows = A_BOUNDARY_NAME_HOLDING_A_LONE_SURROGATE
+        self.assertEqual(_unspelled(list(rows) + list(rows.values())), [])
+        self.assertEqual(
+            {source: well_formed(source) for source in rows},
+            {source: False for source in rows},
+        )
+        self.assertEqual(
+            {twin: well_formed(twin) for twin in rows.values()},
+            {twin: True for twin in rows.values()},
+        )
+        self.assertEqual(
+            {source: printed(source) for source in rows},
+            {source: source for source in rows},
+        )
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNodeRefusesAStringOutOfPositionAndParsesItsTwin(TestBase):
+    """
+    Every left side of the two tables is a file Node refuses at parse with a `SyntaxError`, and every
+    right side is one it parses and turns away only at the link, for the module `m` none of them
+    provides. The parse clearing on the right is what makes the refusal on the left about where the
+    string stands and how it is spelled, and not about a string standing in a specifier at all.
+    """
+
+    def test_node_refuses_each_out_of_position_string_and_parses_its_twin(self):
+        banned = (
+            list(A_STRING_WHERE_A_LOCAL_BINDING_BELONGS)
+            + list(A_BOUNDARY_NAME_HOLDING_A_LONE_SURROGATE)
+        )
+        twins = (
+            list(A_STRING_WHERE_A_LOCAL_BINDING_BELONGS.values())
+            + list(A_BOUNDARY_NAME_HOLDING_A_LONE_SURROGATE.values())
+        )
+        self.assertEqual(
+            {source: behavior(source, module=True)[1] for source in banned},
+            {source: 'SyntaxError' for source in banned},
+        )
+        self.assertEqual(
+            {twin: behavior(twin, module=True)[1] for twin in twins},
+            {twin: 'ERROR' for twin in twins},
         )

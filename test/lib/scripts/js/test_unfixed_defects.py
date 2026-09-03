@@ -1402,46 +1402,6 @@ class TestASequenceOperandThatThrowsIsNotDropped(TestBase):
         )
 
 
-class TestAStringNamedSpecifierTheGrammarBansIsRefused(TestBase):
-    """
-    An import or export list may name what it reads or writes across the module boundary with a
-    string literal instead of a word, which is how a module reaches a name no identifier spells.
-    What such a specifier names is the text the literal denotes, and
-    `test.lib.scripts.js.test_module_export_names` states that law and the tool's compliance with
-    it.
-
-    Where the literal may stand is the part that is still wrong. Three positions the grammar bans
-    it in are read all the same, so `refinery.lib.scripts.is_well_formed` answers `True` for a tree
-    that spells no program, which is the domain every fidelity law is stated over. Nothing is
-    answered wrongly: each of the three prints back as the text it was written as.
-
-    Every answer below is Node's over a `.mjs` file, a module being the only kind of code these
-    declarations appear in.
-    """
-
-    @unittest.expectedFailure
-    def test_a_string_named_specifier_the_grammar_bans_is_not_a_well_formed_program(self):
-        """
-        Node refuses `export { 'a' };` with `SyntaxError: String literal module export names must
-        be followed by a 'from' clause`, refuses `import { 'a' } from 'm';` with `SyntaxError:
-        Unexpected reserved word`, a string being no name a module may bind a local to, and refuses
-        the name holding an unpaired surrogate with `SyntaxError: Invalid module export name:
-        contains unpaired surrogate`. It accepts `export { 'a' } from 'm';`,
-        `import { 'a' as b } from 'm';` and `var a = 1; export { a as 'a' };`, so each refusal is
-        about where the string stands and not about a string standing there at all.
-        """
-        unpaired_surrogate = F'{chr(92)}uD800'
-        sources = [
-            "export { 'a' };",
-            "import { 'a' } from 'm';",
-            F"var a = 1; export {{ a as '{unpaired_surrogate}' }};",
-        ]
-        self.assertEqual(
-            {source: well_formed(source) for source in sources},
-            {source: False for source in sources},
-        )
-
-
 #: Programs asking how many own properties an object literal spelling `__proto__` has, mapped to
 #: what Node prints for each. The three spellings answer differently: the shorthand gives the object
 #: a property of that name, the two written with a colon set its prototype and give it none, and a

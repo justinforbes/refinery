@@ -12,6 +12,23 @@ readings of such a string have to agree on: what `from_code_units` joins back in
 and what a walk over code points takes one step across.
 """
 
+_A_SURROGATE = re.compile('[\ud800-\udfff]')
+
+
+def is_well_formed(text: str) -> bool:
+    """
+    Whether *text*, read as UTF-16 code units, carries no lone surrogate: every high surrogate in it
+    is followed by a low one and no low surrogate stands on its own. A lone surrogate is a code unit
+    that spells no character, which is what `String.prototype.isWellFormed` answers `false` for and
+    what a module export name may not be written with.
+
+    A string below the surrogate range everywhere holds none of them, so ASCII text and the common
+    case are answered without a scan.
+    """
+    if text.isascii():
+        return True
+    return not _A_SURROGATE.search(SURROGATE_PAIR.sub('', text))
+
 
 def code_units(value: int) -> str:
     """
