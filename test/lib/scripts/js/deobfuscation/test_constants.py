@@ -999,6 +999,49 @@ class TestConstantInlining(TestJsDeobfuscator):
         )
         self.assertEqual(source, self._inline(source))
 
+    def test_alias_not_inlined_where_its_free_name_is_shadowed(self):
+        source = inspect.cleandoc(
+            """
+            function f() {
+              var g = parseInt;
+              {
+                let parseInt = function(s) {
+                  return 99;
+                };
+                console.log(g('7'));
+              }
+            }
+            f();
+            """
+        )
+        self.assertEqual(source, self._inline(source))
+
+    def test_alias_inlined_where_its_free_name_stays_free(self):
+        source = inspect.cleandoc(
+            """
+            function f() {
+              var g = parseInt;
+              {
+                console.log(g('7'));
+              }
+            }
+            f();
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                function f() {
+                  {
+                    console.log(parseInt('7'));
+                  }
+                }
+                f();
+                """
+            ),
+            self._inline(source),
+        )
+
     def test_non_bare_intrinsic_alias_not_inlined(self):
         source = inspect.cleandoc(
             """

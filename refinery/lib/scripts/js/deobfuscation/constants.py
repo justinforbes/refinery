@@ -823,15 +823,23 @@ class JsConstantInlining(ScopeProcessingTransformer):
         value: Node, use: Node, model: SemanticModel, reaching: ReachingModel,
     ) -> bool:
         """
-        Whether every variable *value* reads holds, at *use*, the value it held where *value* was defined
-        — so re-evaluating *value* at *use* yields the same result. Each identifier that resolves to a
-        binding is checked with `ReachingModel.value_preserved`; an identifier that resolves to no
-        binding (a global) is left to the caller's `mutated` gate.
+        Whether re-evaluating *value* at *use* yields the same result it had where *value* was
+        defined. Each name *value* reads must resolve, from *use*'s scope, to the binding it read
+        where it was defined — a name a block or function around *use* shadows would read a
+        different binding there, so a global read at the definition becomes a local read once
+        substituted — and, where that binding exists, must still hold the value it held
+        (`ReachingModel.value_preserved`). A free name that stays free preserves its value by the
+        caller's `mutated` gate, so only its resolution is checked here. This is the twin of
+        `JsCallWrapperInliner._forwarded_callee_reaches`, which guards the same capture for a
+        forwarded callee.
         """
+        use_scope = model.scope_of(use)
         for ident in value.walk():
-            if not isinstance(ident, JsIdentifier):
+            if not isinstance(ident, JsIdentifier) or not model.is_reference(ident):
                 continue
             binding = model.resolve(ident)
+            if model.lookup(ident.name, use_scope) is not binding:
+                return False
             if binding is not None and not reaching.value_preserved(binding, value, use):
                 return False
         return True
