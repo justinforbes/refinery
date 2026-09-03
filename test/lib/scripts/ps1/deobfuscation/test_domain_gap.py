@@ -69,16 +69,27 @@ from refinery.lib.scripts.ps1.parser import Ps1Parser
 #: interpreter now carries a Char apart from a String and refuses the repeat, so the pairs that were
 #: `[char]65 * 2` folding to `AA` leave the gap. This does not come back by the domain learning to
 #: answer; the gap is smaller because the interpreter stopped answering where it should not.
+#:
+#: Six rows then moved on one change, in opposite directions. The `Byte`, `Int32`, `Int64`, `String`
+#: and `Void` rows rose together, by 64 in total, and what was added was a fold: `-shl` and `-shr`
+#: read a `System.Char` on the *right* as the code point that is the shift count, where the
+#: interpreter used to read the one-character string the Char spells and throw on a letter that is
+#: no numeral. The `Char` row fell, by 43, and what was withdrawn was a wrong answer: a Char on the
+#: *left* of `-shl` or `-shr` has no method on 5.1 — the `not defined` that `*` already throws — so
+#: the interpreter now refuses it where it used to read the Char as a string and fold a shift the
+#: host never runs. The five rises come back down by teaching `apply` the code point of a shift
+#: count; the fall does not come back, the gap is smaller because the interpreter stopped answering
+#: where it should not.
 GAP: dict[str, int] = {
-    'System.String': 1702,
+    'System.String': 1714,
     'System.Object[]': 1317,
-    'System.Char': 1111,
-    'System.Int64': 1088,
-    'System.Int32': 695,
+    'System.Char': 1068,
+    'System.Int64': 1104,
+    'System.Int32': 715,
     'System.Double': 605,
-    'System.Byte': 417,
+    'System.Byte': 429,
     'System.Boolean': 246,
-    'System.Void': 159,
+    'System.Void': 163,
 }
 
 #: The witness spellings the reader cannot make a fact of, so the census is quantified over the

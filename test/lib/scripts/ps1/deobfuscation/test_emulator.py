@@ -13,6 +13,7 @@ from refinery.lib.scripts.ps1.deobfuscation import (
 )
 from refinery.lib.scripts.ps1.deobfuscation.emulator import (
     _NO_OPERATOR_METHOD_ON_BOOLEAN,
+    _NO_OPERATOR_METHOD_ON_CHAR,
     _Ps1Interpreter,
 )
 from refinery.lib.scripts.ps1.model import Ps1ScriptBlock
@@ -33,6 +34,17 @@ def _boolean_cell(operator: str, right: str) -> data.OperatorOutcome:
     cell = data.binary_outcome(operator, 'System.Boolean', right)
     if cell is None:
         raise KeyError(F'the grid has no cell for a Boolean {operator} {right}')
+    return cell
+
+
+def _char_cell(operator: str, right: str) -> data.OperatorOutcome:
+    """
+    The grid cell a Char left operand and `right` index, raising for a cell the grid does not cover
+    for the same reason `_boolean_cell` does.
+    """
+    cell = data.binary_outcome(operator, 'System.Char', right)
+    if cell is None:
+        raise KeyError(F'the grid has no cell for a Char {operator} {right}')
     return cell
 
 
@@ -1123,6 +1135,64 @@ class TestPs1WhichSideOfWhichOperatorABooleanMayStandOn(TestPs1):
         })
 
 
+class TestPs1WhichSideOfWhichOperatorACharMayStandOn(TestPs1):
+    """
+    Measured on 5.1 against the Int32 `2`, for every binary arithmetic and bitwise operator, with a
+    `Char` on each side. An operator dispatches to a method on its *left* operand's type, and the
+    three a `Char` carries none of are `*`, `-shl` and `-shr` — the same three a `Boolean` lacks:
+    each answers `The operation '[System.Char] -shl [System.Int32]' is not defined`. The bitwise
+    three convert it to its code point and answer a number, so `[char]65 -bor 2` is `67`. A `Char`
+    on the *right* is converted before any dispatch and is a value there for every operator reading
+    a number: it is the count `-shl` and `-shr` mask and the number the bitwise three fold against.
+    """
+
+    def _body(self, expression: str) -> str:
+        return cleandoc(F"""
+            function f {{
+              {expression}
+            }}
+            $x = f
+        """)
+
+    def test_the_operators_a_char_left_operand_has_no_method_for_leave_their_call_alone(self):
+        for operator in ['*', '-shl', '-shr']:
+            with self.subTest(F'[char]65 {operator} 2'):
+                self._assertUnchanged(self._body(F'[char]65 {operator} 2'), Ps1FunctionEvaluator)
+
+    def test_the_bitwise_operators_a_char_left_operand_has_fold_to_its_code_point(self):
+        for expression, expected in [
+            ('[char]65 -band 15', '1'),
+            ('[char]65 -bor 2', '67'),
+            ('[char]65 -bxor 1', '64'),
+        ]:
+            with self.subTest(expression):
+                self.assertEqual(
+                    self._apply(self._body(expression), Ps1FunctionEvaluator), F'$x = {expected}')
+
+    def test_a_char_right_operand_is_the_code_point_the_reading_operators_fold_against(self):
+        for expression, expected in [
+            ('1 -shl [char]65', '2'),
+            ('256 -shr [char]66', '64'),
+            ('3 -band [char]65', '1'),
+        ]:
+            with self.subTest(expression):
+                self.assertEqual(
+                    self._apply(self._body(expression), Ps1FunctionEvaluator), F'$x = {expected}')
+
+    def test_the_operators_refused_are_the_ones_the_grid_says_always_throw_for_a_char(self):
+        """
+        The list is hand written and the grid is measured, so it is the measurement the list has to
+        keep agreeing with: an operator whose Char cell stops always throwing, and one that becomes
+        so, are both a row of the capture the refusal no longer follows.
+        """
+        operators = list(data._OPERATORS['binary'])
+        self.assertEqual(len(operators), 63)
+        self.assertEqual(
+            {operator for operator in operators if _char_cell(operator, INT32).always_throws},
+            set(_NO_OPERATOR_METHOD_ON_CHAR),
+        )
+
+
 class TestPs1AHexadecimalNumeralInsideABodyDenotesThePatternItFills(TestPs1):
     """
     The same reading as for an argument, measured at the position an emulated body writes it in:
@@ -1260,11 +1330,9 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
         """)
         self.assertEqual(self._deobfuscate(source), 'Write-Output 2')
 
-    def test_a_char_size_is_not_the_unreadable_string_that_folds_to_a_null_count(self):
-        # A `[char]` size is read by 5.1 as its code point, a size that never refuses, so
-        # `New-Object byte[] ([char]65)` builds a 65-element array where an unreadable string folds
-        # to `$null`. The interpreter builds no array literal for a size, so it leaves the body
-        # standing rather than folding it to the count-of-zero a genuine unreadable size earns.
+    def test_a_char_new_object_size_is_read_as_its_code_point_element_count(self):
+        # `[char]65` is the code point 65, so `New-Object byte[] ([char]65)` builds a 65-element
+        # array where an unreadable String size would fold to the count-of-zero of a `$null`.
         source = cleandoc("""
             function f {
               $a = New-Object byte[] ([char]65)
@@ -1272,7 +1340,7 @@ class TestPs1AnEmulatedBodyAnswersWithTheHostsRulesAndNotWithPythons(TestPs1):
             }
             Write-Output (f)
         """)
-        self._assertKept(source)
+        self._assertDeobfuscatesTo(source, 'Write-Output 65')
 
     def test_a_double_becomes_the_text_5_1_writes_it_as(self):
         # A `[string]` of a double *literal* is folded by the value domain before emulation; a double
@@ -1684,11 +1752,6 @@ class TestPs1AFoldedBodyAnswersWhereTheHostAnswersAndNowhereElse(TestPs1):
         """)
         self.assertEqual(self._apply(source, Ps1FunctionEvaluator), "$x = 'AB'")
 
-    # The interpreter carries a Char as the one-character string it spells and reads that string
-    # where an integer conversion asks for a number, so `[int][char]53` folds to 5 where 5.1 reads
-    # the code point 53. The value domain converts a Char literal by its code point already; the
-    # emulator's own `_to_int` does not, and correcting it shifts the measured oracle counts.
-    @unittest.expectedFailure
     def test_a_char_coerced_to_an_integer_in_a_body_is_its_code_point(self):
         source = cleandoc("""
             function f($n) {

@@ -110,7 +110,7 @@ COVERAGE: dict[str, _Coverage] = {
     'System.Char'    : _Coverage(8, 6),
     'System.Double'  : _Coverage(40, 21),
     'System.Int16'   : _Coverage(1, 0),
-    'System.Int32'   : _Coverage(112, 75),
+    'System.Int32'   : _Coverage(112, 77),
     'System.Int64'   : _Coverage(27, 20),
     'System.SByte'   : _Coverage(2, 0),
     'System.String'  : _Coverage(65, 24),
@@ -171,12 +171,12 @@ DIVERGENCES: dict[str, _Divergence] = {
     "$true + ''"                         : _Divergence(1, 'True'),
     '0 + [char]65'                       : _Divergence(65, '0A'),
 
-    # A Char is a number wherever a number is wanted, and its code point is the number. The
-    # interpreter holds it as a one-character string, which reads as zero.
-    '[int][char]48'                      : _Divergence(48, 0),
+    # A Char is a number wherever a number is wanted, and its code point is the number, which the
+    # cast, index and bitwise paths now read. Subtraction and multiplication still route it through
+    # the arithmetic, which reads the one-character string it spells rather than its code point, so
+    # `[char]48` reaches them as the numeral zero the string parses to.
     '[char]48 - 0.0'                     : _Divergence(48.0, 0.0),
     '1.5 * [char]48'                     : _Divergence(72.0, 0.0),
-    '[char]48 -band [byte]255'           : _Divergence(48, 0),
 
     # A Char is as true as the code point it carries, so `[char]0` is false. The interpreter has no
     # Char and holds it as a one-character string, which every non-empty string reads as true.

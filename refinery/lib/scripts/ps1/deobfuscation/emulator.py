@@ -133,6 +133,14 @@ _MAX_INTERPRETER_DEPTH = 64
 #: `ps_modulo` already refuse where it stands.
 _NO_OPERATOR_METHOD_ON_BOOLEAN = frozenset({'*', '-shl', '-shr'})
 
+#: The operators whose *left* operand a `Char` may not be, the same three the grid's `System.Char`
+#: row marks as always throwing. 5.1 dispatches to a method on the left type and a `Char` carries
+#: none of these, so `[char]65 -shl 2` is `The operation '[System.Char] -shl [System.Int32]' is not
+#: defined` — where the interpreter, carrying the Char as the one-character string it spells, would
+#: shift its code point. A Char on the *right* is a value for every one: it is the count a shift
+#: reads and the number `-band`, `-bor` and `-bxor` fold against.
+_NO_OPERATOR_METHOD_ON_CHAR = frozenset({'*', '-shl', '-shr'})
+
 #: The one element type `Ps1ForEachPipeline._get_constant_array` may drop off an array cast that the
 #: script's own spelling does not already name: a `Char` is measured against `UInt16` because a code
 #: point is what it holds, and the domain's integer widths carry no cell for `Char` itself.
@@ -909,10 +917,9 @@ class _Ps1Interpreter:
         except _Ps1InterpreterError:
             # A size that 5.1's `[int]` converter refuses is a non-terminating error, so the cmdlet
             # writes `$null` and the body runs on rather than throwing. Only a String reaches that
-            # converter; a value this cannot read at all leaves the fold refused. A Char is not a
-            # String here — 5.1 reads it as its code point, a size that never refuses — so it is
-            # excluded rather than folded to the `$null` a genuine unreadable String earns.
-            if isinstance(size_arg, str) and not isinstance(size_arg, _Char):
+            # converter; a value this cannot read at all leaves the fold refused. A Char never
+            # refuses — it reads as its code point in the branch above — so it is not seen here.
+            if isinstance(size_arg, str):
                 return None
             raise
         if size < 0 or size > self.max_string_len:
@@ -1046,6 +1053,8 @@ class _Ps1Interpreter:
             return self._truthy(left) or self._truthy(self._eval(node.right))
         right = self._eval(node.right)
         if isinstance(left, bool) and op in _NO_OPERATOR_METHOD_ON_BOOLEAN:
+            raise _Ps1InterpreterError
+        if isinstance(left, _Char) and op in _NO_OPERATOR_METHOD_ON_CHAR:
             raise _Ps1InterpreterError
         if op == '+':
             return self._add(left, right)
@@ -1455,7 +1464,7 @@ class _Ps1Interpreter:
         raise _Ps1InterpreterError
 
     def _multiply(self, left: _Value, right: _Value) -> _Value:
-        if isinstance(left, str) and not isinstance(left, _Char) and isinstance(right, int):
+        if isinstance(left, str) and isinstance(right, int):
             result = left * right
             if len(result) > self.max_string_len:
                 raise _Ps1InterpreterError
@@ -1764,6 +1773,8 @@ class _Ps1Interpreter:
             return value
         if isinstance(value, float):
             return round(value)
+        if isinstance(value, _Char):
+            return ord(value)
         if isinstance(value, str):
             return _Ps1Interpreter._string_to_int(value)
         if value is None:
@@ -1801,6 +1812,8 @@ class _Ps1Interpreter:
         return self._to_int(value)
 
     def _to_float(self, value: _Value) -> float:
+        if isinstance(value, _Char):
+            return float(ord(value))
         if isinstance(value, (int, float)):
             return float(value)
         return float(self._to_str(value))
