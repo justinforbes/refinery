@@ -1764,12 +1764,9 @@ class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
     5.1 names that parameter `-` where we name a switch by the whole word it was written as, which
     is why `--` is the name here and `-Recurse` is the name there.
 
-    We end the command at the `--` instead, so `f -- x` becomes two statements and the second,
-    `-- 'x'`, asks 5.1 to decrement a string literal. Nothing below can be reached until that is
-    fixed, so all of it fails together; each still fails on its own once it is.
-
-    None of these is a `BOUNDARIES` row, because what we print for them is a script 5.1 refuses and
-    the differential that would carry the row has no ledger for that.
+    The marker is only the space-isolated `--`: a `--` glued to a value (`$x--`, `--$x`, `f--`) is
+    one word the lexer reads whole and never ends the parameters, which the boundary test below
+    pins on both sides.
     """
 
     def _shaped(self, node: object, kind: type[_T]) -> _T:
@@ -1794,24 +1791,35 @@ class TestPs1ADoubleDashIsAnArgumentAndNotAStatement(TestBase):
         self.assertEqual(argument.kind, Ps1CommandArgumentKind.SWITCH)
         self.assertEqual(argument.name, '--')
 
-    @unittest.expectedFailure
     def test_a_double_dash_argument_leaves_the_command_whole(self):
         dashes, word = self._arguments('f -- x')
         self._assertEndsTheParameters(dashes)
         self._assertIsTheWord(word, 'x')
 
-    @unittest.expectedFailure
     def test_only_the_first_double_dash_ends_the_parameters(self):
         first, second, word = self._arguments('f -- -- x')
         self._assertEndsTheParameters(first)
         self._assertIsTheWord(second, '--')
         self._assertIsTheWord(word, 'x')
 
-    @unittest.expectedFailure
     def test_a_switch_behind_a_double_dash_is_a_word(self):
         dashes, recurse = self._arguments('f -- -Recurse')
         self._assertEndsTheParameters(dashes)
         self._assertIsTheWord(recurse, '-Recurse')
+
+    def test_the_space_before_a_double_dash_is_what_makes_it_the_marker(self):
+        self.assertEqual(
+            [(argument.kind, argument.name) for argument in self._arguments('f $x -- y')],
+            [
+                (Ps1CommandArgumentKind.POSITIONAL, ''),
+                (Ps1CommandArgumentKind.SWITCH, '--'),
+                (Ps1CommandArgumentKind.POSITIONAL, ''),
+            ],
+        )
+        self.assertEqual(
+            [argument.kind for argument in self._arguments('f $x-- y')],
+            [Ps1CommandArgumentKind.POSITIONAL, Ps1CommandArgumentKind.POSITIONAL],
+        )
 
 
 class TestPs1AFunctionNamedForAnAliasCharacterDoesNotSwallowTheScript(TestBase):

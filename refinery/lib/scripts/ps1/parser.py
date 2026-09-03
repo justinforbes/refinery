@@ -159,6 +159,16 @@ _ARGUMENT_FORBIDDEN_KINDS = _PIPELINE_TERMINATORS | {
     Ps1TokenKind.REDIRECT_IN,
 }
 
+#: Once a `--` has ended a command's parameters, these are the tokens that would otherwise be read
+#: as a switch or refused outright and are instead the literal word they spell: a later `-Switch`, a
+#: second `--`, a `++`, or an operator such as `-eq`. See `Ps1Parser._parse_command`.
+_END_OF_PARAMETERS_WORD_KINDS = frozenset({
+    Ps1TokenKind.PARAMETER,
+    Ps1TokenKind.OPERATOR,
+    Ps1TokenKind.DECREMENT,
+    Ps1TokenKind.INCREMENT,
+})
+
 #: The token kinds PowerShell refuses as a function or filter name: the punctuators, redirections,
 #: unary operators, strings and variables that could not begin a command name. Every other token
 #: stands as the name, so `function % { }` names the command `%` exactly as `function Get-Thing { }`
@@ -790,6 +800,12 @@ class Ps1Parser:
         than after it, so the name arrives as the one token PowerShell resolves: `foo=123`,
         `C:\\x\\y.exe` and `.\\a.ps1` are each whole, while `. { }` and `. $sb` still split, because
         argument mode ends a token at a dot that is followed by a space.
+
+        A `--` standing among the arguments is the end-of-parameters marker: it is kept as a switch
+        named `--` and every argument after it is positional, so a later `-Switch`, a second `--` or
+        an operator is the literal word it spells rather than a parameter. The marker is only the
+        space-isolated `--`; a `--` glued to a value (`$i--`, `--$i`) is one word the lexer already
+        reads whole. See `_END_OF_PARAMETERS_WORD_KINDS`.
         """
         with self._mode(Ps1LexerMode.ARGUMENT):
             offset = self._current.offset
@@ -822,8 +838,17 @@ class Ps1Parser:
 
             arguments: list[Ps1CommandArgument | Expression] = []
             redirections: list[Ps1Redirection] = []
+            parameters_ended = False
             while not self._is_pipeline_terminator():
-                if self._at(Ps1TokenKind.PARAMETER):
+                if not parameters_ended and self._at(Ps1TokenKind.DECREMENT):
+                    tok = self._advance()
+                    arguments.append(Ps1CommandArgument(
+                        offset=tok.offset,
+                        kind=Ps1CommandArgumentKind.SWITCH,
+                        name=tok.value,
+                    ))
+                    parameters_ended = True
+                elif not parameters_ended and self._at(Ps1TokenKind.PARAMETER):
                     tok = self._advance()
                     name = tok.value
                     if name.endswith(':'):
@@ -852,12 +877,19 @@ class Ps1Parser:
                     self._advance()
                 elif (redirection := self._try_parse_redirection()) is not None:
                     redirections.append(redirection)
-                elif self._at(Ps1TokenKind.OPERATOR):
+                elif not parameters_ended and self._at(Ps1TokenKind.OPERATOR):
                     tok = self._advance()
                     arguments.append(Ps1CommandArgument(
                         offset=tok.offset,
                         kind=Ps1CommandArgumentKind.SWITCH,
                         name=tok.value,
+                    ))
+                elif parameters_ended and self._current.kind in _END_OF_PARAMETERS_WORD_KINDS:
+                    tok = self._advance()
+                    arguments.append(Ps1CommandArgument(
+                        offset=tok.offset,
+                        kind=Ps1CommandArgumentKind.POSITIONAL,
+                        value=self._bare_string(tok),
                     ))
                 else:
                     val = self._parse_argument_value()
