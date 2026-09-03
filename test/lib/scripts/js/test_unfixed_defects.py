@@ -91,7 +91,6 @@ from refinery.lib.scripts.js.model import (
     JsStringLiteral,
 )
 from refinery.lib.scripts.js.parser import JsParser
-from refinery.lib.scripts.js.synth import JsSynthesizer
 
 
 def _sole_property_definition(source: str) -> JsPropertyDefinition:
@@ -339,25 +338,6 @@ class TestABindingNamedByAWordNoModuleMayBindIsNoProgram(TestBase):
         """
         sources = ['import { yield } from "m";', 'export { yield } from "m";']
         self.assertEqual([well_formed(source) for source in sources], [False, True])
-
-
-class TestLexicalDeclarationIsNotAStatement(TestBase):
-    """
-    A `let` declaration is a Declaration, and the body of an `if` is a Statement, so a declaration
-    can never be the single-statement body of one.
-    """
-
-    @unittest.expectedFailure
-    def test_a_lexical_declaration_cannot_be_a_single_statement_body(self):
-        """
-        `if (0) let` followed by `x = 1;` on the next line is two statements. Since `let` cannot
-        open a declaration in that position it is the name it spells, and automatic semicolon
-        insertion ends the branch before `x`. Node runs the program and leaves `x` at `1`, which a
-        parser that draws the assignment into the never-taken branch cannot reproduce.
-        """
-        script = JsParser('if (0) let\nx = 1;').parse()
-        self.assertEqual(len(script.body), 2)
-        self.assertEqual(JsSynthesizer().convert(script.body[1]), 'x = 1;')
 
 
 #: A function declaration written as the whole of an `if` clause, in each of the modes. Annex B.3.4

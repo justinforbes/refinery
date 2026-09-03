@@ -330,17 +330,23 @@ class JsParser:
             or self._at(JsTokenKind.YIELD, JsTokenKind.AWAIT)
         )
 
-    def _at_variable_declaration(self) -> bool:
+    def _at_variable_declaration(self, *, single_statement: bool = False) -> bool:
         """
         Whether a variable declaration begins here, rather than an expression that merely opens with
         the same word. ECMA-262 reserves `let` in strict code only, so wherever a statement may also
         be read as an expression, a `let` declares nothing unless a binding follows it: it is a name
         being called in `let(1)`, divided in `let / 2` and read in `let.a`, and only `let [` is the
         spelling a statement is forbidden to take as an expression.
+
+        A *single_statement* position — the body of an `if` clause or of a loop, of `with`, or of a
+        label — is handed a Statement by the grammar, and a lexical declaration is not one, so `let`
+        opens no declaration there whatever follows it: after `if (0) let` and a line break, the
+        word is the name it spells, automatic semicolon insertion ends the body at it, and the
+        binding that seemed to follow is the next statement, outside the body.
         """
         if self._at(JsTokenKind.VAR, JsTokenKind.CONST):
             return True
-        if not self._at(JsTokenKind.LET):
+        if single_statement or not self._at(JsTokenKind.LET):
             return False
         ahead = self._peek_next()
         return (
@@ -436,7 +442,17 @@ class JsParser:
         body = self._parse_statement_list(JsTokenKind.EOF)
         return JsScript(body=body, offset=offset, recovered=self._recovered)
 
-    def _parse_statement(self) -> Statement | None:
+    def _parse_statement(self, *, single_statement: bool = False) -> Statement | None:
+        """
+        One statement. A *single_statement* position takes no `let` or `const` and no class
+        declaration: `let` reads as the name it spells, decided by `_at_variable_declaration`,
+        while a `const` or a `class` reads as the declaration it opens with the repair recorded,
+        every engine refusing the file. A `var` is a statement and a function declaration is
+        Annex B's to admit, so both read there as they read anywhere. The one spelling an
+        ExpressionStatement may not open with is `let [`, with no line terminator freeing it, so a
+        `let` the bracket follows reads as the member expression it spells with the repair
+        recorded.
+        """
         offset = self._current.offset
         kind = self._current.kind
 
@@ -445,7 +461,9 @@ class JsParser:
         if kind == JsTokenKind.SEMICOLON:
             self._advance()
             return JsEmptyStatement(offset=offset)
-        if self._at_variable_declaration():
+        if self._at_variable_declaration(single_statement=single_statement):
+            if single_statement and self._at(JsTokenKind.CONST):
+                self._recovered = True
             return self._parse_variable_declaration()
         if kind == JsTokenKind.IF:
             return self._parse_if_statement()
@@ -483,6 +501,8 @@ class JsParser:
                 offset=offset,
             )
         if kind == JsTokenKind.CLASS:
+            if single_statement:
+                self._recovered = True
             return self._parse_class_declaration()
         if kind == JsTokenKind.DEBUGGER:
             self._advance()
@@ -498,13 +518,20 @@ class JsParser:
             self._advance()
             return self._parse_function_declaration(is_async=True)
 
+        if (
+            single_statement
+            and kind == JsTokenKind.LET
+            and self._peek_next().kind == JsTokenKind.LBRACKET
+        ):
+            self._recovered = True
+
         expr = self._parse_expression()
 
         if (
             isinstance(expr, JsIdentifier)
             and self._eat(JsTokenKind.COLON)
         ):
-            body = self._parse_statement()
+            body = self._parse_statement(single_statement=True)
             return JsLabeledStatement(label=expr, body=body, offset=offset)
 
         self._eat_semicolon()
@@ -684,10 +711,10 @@ class JsParser:
         self._expect(JsTokenKind.LPAREN)
         test = self._parse_expression()
         self._expect(JsTokenKind.RPAREN)
-        consequent = self._parse_statement()
+        consequent = self._parse_statement(single_statement=True)
         alternate = None
         if self._eat(JsTokenKind.ELSE):
-            alternate = self._parse_statement()
+            alternate = self._parse_statement(single_statement=True)
         return JsIfStatement(
             test=test, consequent=consequent, alternate=alternate, offset=offset)
 
@@ -697,13 +724,13 @@ class JsParser:
         self._expect(JsTokenKind.LPAREN)
         test = self._parse_expression()
         self._expect(JsTokenKind.RPAREN)
-        body = self._parse_statement()
+        body = self._parse_statement(single_statement=True)
         return JsWhileStatement(test=test, body=body, offset=offset)
 
     def _parse_do_while_statement(self) -> JsDoWhileStatement:
         offset = self._current.offset
         self._expect(JsTokenKind.DO)
-        body = self._parse_statement()
+        body = self._parse_statement(single_statement=True)
         self._expect(JsTokenKind.WHILE)
         self._expect(JsTokenKind.LPAREN)
         test = self._parse_expression()
@@ -759,13 +786,13 @@ class JsParser:
         if self._eat(JsTokenKind.IN):
             right = self._parse_expression()
             self._expect(JsTokenKind.RPAREN)
-            body = self._parse_statement()
+            body = self._parse_statement(single_statement=True)
             return JsForInStatement(left=left, right=right, body=body, offset=offset)
         if self._at(JsTokenKind.OF):
             self._advance()
             right = self._parse_assignment_expression()
             self._expect(JsTokenKind.RPAREN)
-            body = self._parse_statement()
+            body = self._parse_statement(single_statement=True)
             return JsForOfStatement(
                 left=left, right=right, body=body, is_await=is_await, offset=offset)
         return None
@@ -783,7 +810,7 @@ class JsParser:
         if not self._at(JsTokenKind.RPAREN):
             update = self._parse_expression()
         self._expect(JsTokenKind.RPAREN)
-        body = self._parse_statement()
+        body = self._parse_statement(single_statement=True)
         return JsForStatement(
             init=init, test=test, update=update, body=body, offset=offset)
 
@@ -851,7 +878,7 @@ class JsParser:
         self._expect(JsTokenKind.LPAREN)
         obj = self._parse_expression()
         self._expect(JsTokenKind.RPAREN)
-        body = self._parse_statement()
+        body = self._parse_statement(single_statement=True)
         return JsWithStatement(object=obj, body=body, offset=offset)
 
     def _parse_return_statement(self) -> JsReturnStatement:

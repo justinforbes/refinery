@@ -4,7 +4,7 @@ import inspect
 
 from test import TestBase
 
-from refinery.lib.scripts import Node
+from refinery.lib.scripts import Node, is_well_formed
 from refinery.lib.scripts.js.analysis.model import pattern_identifiers
 from refinery.lib.scripts.js.model import (
     JsArrayPattern,
@@ -17,6 +17,7 @@ from refinery.lib.scripts.js.model import (
     JsVariableDeclaration,
 )
 from refinery.lib.scripts.js.parser import JsParser
+from refinery.lib.scripts.js.synth import JsSynthesizer
 
 LET_IS_A_NAME = 'let is a name'
 PARSE_ERROR = 'parse error'
@@ -144,10 +145,39 @@ THE_WORD_LET_OWNED_BY_ANOTHER_BINDER = [
     (A_FUNCTION_NAMED_LET, [LET_IS_A_NAME] * 2),
 ]
 
-LET_IN_A_BLOCK_OR_A_SINGLE_STATEMENT_BODY = [
+LET_IN_A_STATEMENT_LIST = [
     ('{ let a = 42; log.push(a); }', ['let declares a']),
+    ('{ let\na = 42; log.push(a); }', ['let declares a']),
+    ('switch (1) { case 1: let a = 42; }', ['let declares a']),
     ('{ let.x = 42; log.push(let.x); }', [LET_IS_A_NAME] * 2),
+]
+
+LET_IN_A_SINGLE_STATEMENT_BODY = [
     ('if (true) let.x = 42;', [LET_IS_A_NAME]),
+    ('if (0) let\na = 42;', [LET_IS_A_NAME]),
+    ('if (1) {} else let\na = 42;', [LET_IS_A_NAME]),
+    ('while (0) let\na = 42;', [LET_IS_A_NAME]),
+    ('var let = 9;\ndo let\nwhile (0);\na = 42;', ['var declares let', LET_IS_A_NAME]),
+    (
+        'var let = 9;\nfor (var i = 0; i < 1; i++) let\na = 42;',
+        ['var declares let', 'var declares i', LET_IS_A_NAME],
+    ),
+    ('var let = 9;\nl: let\na = 42;', ['var declares let', LET_IS_A_NAME]),
+    ('var let = 9;\nwith (Math) let\na = 42;', ['var declares let', LET_IS_A_NAME]),
+]
+
+A_LET_BINDING_NO_SINGLE_STATEMENT_BODY_TAKES = [
+    'if (0) let a = 42;',
+    'if (0) let [a] = [42];',
+    'if (0) let\n[a] = [42];',
+    'if (0) let {a} = {};',
+]
+
+A_DECLARATION_NO_SINGLE_STATEMENT_BODY_TAKES = [
+    'if (0) const a = 42;',
+    'l: const a = 42;',
+    'if (0) class C {}',
+    'l: class C {}',
 ]
 
 
@@ -238,7 +268,49 @@ class TestJsLetDeclarationOrName(TestBase):
             with self.subTest(source=source):
                 self.assertEqual(self._let_readings(source), expected)
 
-    def test_a_block_and_a_single_statement_body_decide_a_let_the_same_way(self):
-        for source, expected in LET_IN_A_BLOCK_OR_A_SINGLE_STATEMENT_BODY:
+    def test_a_statement_list_reads_a_let_binding_wherever_the_list_stands(self):
+        for source, expected in LET_IN_A_STATEMENT_LIST:
             with self.subTest(source=source):
                 self.assertEqual(self._let_readings(source), expected)
+
+    def test_a_single_statement_body_reads_let_as_a_name(self):
+        """
+        A position the grammar hands a Statement rather than a StatementListItem takes no lexical
+        declaration, so `let` there is the name it spells whatever follows it. Node runs every file
+        of `LET_IN_A_SINGLE_STATEMENT_BODY`: where a binding seemed to follow the word, a line
+        terminator lets automatic semicolon insertion end the body at the name, and the assignment
+        behind it is the next statement, outside the body.
+        """
+        for source, expected in LET_IN_A_SINGLE_STATEMENT_BODY:
+            with self.subTest(source=source):
+                self.assertEqual(self._let_readings(source), expected)
+
+    def test_the_assignment_a_split_body_leaves_is_the_next_statement(self):
+        """
+        Node runs `if (0) let` and a line break and `x = 1;` leaving `x` at `1`: the branch holds
+        only the name, and the assignment runs unconditionally after the `if`.
+        """
+        script = JsParser('if (0) let\nx = 1;').parse()
+        self.assertEqual(is_well_formed(script), True)
+        self.assertEqual(len(script.body), 2)
+        self.assertEqual(JsSynthesizer().convert(script.body[1]), 'x = 1;')
+
+    def test_a_let_binding_no_single_statement_body_takes_is_refused(self):
+        """
+        Node refuses each file of `A_LET_BINDING_NO_SINGLE_STATEMENT_BODY_TAKES` with `SyntaxError:
+        Lexical declaration cannot appear in a single-statement context`. The bracket rows are the
+        one spelling an ExpressionStatement may not open with, `let [`, which no line terminator
+        frees; the others are the name with nothing left to end the statement at it.
+        """
+        for source in A_LET_BINDING_NO_SINGLE_STATEMENT_BODY_TAKES:
+            with self.subTest(source=source):
+                self.assertEqual(is_well_formed(JsParser(source).parse()), False)
+
+    def test_a_const_or_a_class_in_a_single_statement_body_is_refused(self):
+        """
+        Node refuses each file of `A_DECLARATION_NO_SINGLE_STATEMENT_BODY_TAKES` with a
+        `SyntaxError` naming the keyword as an unexpected token.
+        """
+        for source in A_DECLARATION_NO_SINGLE_STATEMENT_BODY_TAKES:
+            with self.subTest(source=source):
+                self.assertEqual(is_well_formed(JsParser(source).parse()), False)
