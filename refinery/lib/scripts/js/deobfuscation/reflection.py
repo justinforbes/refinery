@@ -100,7 +100,13 @@ class ReflectedScope(enum.Enum):
     DIRECT_EVAL = enum.auto()
 
 
-def _try_parse(code: str, *, top_level_await: bool, strict: bool) -> JsScript | None:
+def _try_parse(
+    code: str,
+    *,
+    top_level_await: bool,
+    strict: bool,
+    module: bool = False,
+) -> JsScript | None:
     """
     The tree the reflected code spells, or `None` where it spells no program. Inlining is the one
     place a parse has to be believed rather than merely used: what comes back is printed into the
@@ -129,6 +135,13 @@ def _try_parse(code: str, *, top_level_await: bool, strict: bool) -> JsScript | 
     site catches and carries on from. The two arrive by different routes at the same requirement, which
     is why one seed answers for every surface.
 
+    *module* is the destination's goal symbol, told apart from its mode because a module carries one
+    rule beyond a strict script: `await` names nothing it may bind. The reflected text runs its code as
+    a script wherever it stood, so a payload binding `await` is legal there and a `SyntaxError` only
+    once inlined into a module — the very throw that would take the file down where the call it
+    replaced merely raised one the site caught. So it is refused here, on the same seed and for the same
+    reason as a strict violation, whichever surface the text reached the file through.
+
     Module-only syntax is refused for the same reason and needs no mode to decide it. Every surface
     that reaches here evaluates its text as a Script, where an `import` or `export` declaration is a
     `SyntaxError` the call site catches; spliced into the file it is a `SyntaxError` the file cannot
@@ -151,7 +164,7 @@ def _try_parse(code: str, *, top_level_await: bool, strict: bool) -> JsScript | 
         return None
     if parsed.module:
         return None
-    if collect_strict_violations(parsed, strict=strict):
+    if collect_strict_violations(parsed, strict=strict, module=module):
         return None
     return parsed
 
@@ -537,6 +550,7 @@ def _try_unpack_function_constructor(
     node: JsCallExpression,
     *,
     free_global_name: Callable[[Expression | None], str | None],
+    module: bool = False,
 ) -> tuple[JsScript, frozenset[str]] | None:
     """
     Unpack an immediately-invoked `Function` constructor whose single argument is a proxy object
@@ -582,7 +596,7 @@ def _try_unpack_function_constructor(
     if mapping is None:
         return None
     getters, setters = mapping
-    parsed = _try_parse(code, top_level_await=False, strict=strict_mode_at(node))
+    parsed = _try_parse(code, top_level_await=False, strict=strict_mode_at(node), module=module)
     if parsed is None:
         return None
     if not param_name:
@@ -1110,7 +1124,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
                 return None
             return parsed.body
         pack = _try_unpack_function_constructor(
-            node, free_global_name=self._free_global)
+            node, free_global_name=self._free_global, module=module_execution(self.options))
         if pack is not None:
             packed, site_resolved = pack
             admitted = self._admit_reflected_body(
@@ -1242,7 +1256,12 @@ class JsReflectionInlining(ScriptLevelTransformer):
             return None
         resolves_globally = scope is not ReflectedScope.DIRECT_EVAL
         top_level_await = not resolves_globally and _site_in_async_function(site)
-        parsed = _try_parse(code, top_level_await=top_level_await, strict=strict_mode_at(site))
+        parsed = _try_parse(
+            code,
+            top_level_await=top_level_await,
+            strict=strict_mode_at(site),
+            module=module_execution(self.options),
+        )
         if parsed is None:
             return None
         return self._admit_reflected_body(parsed, site, root, scope, at_global_scope)

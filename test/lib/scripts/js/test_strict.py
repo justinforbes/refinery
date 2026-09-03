@@ -19,8 +19,10 @@ from refinery.lib.scripts.js.synth import JsSynthesizer
 
 class TestJsStrict(TestBase):
 
-    def _violations(self, source: str, *, strict: bool = False) -> list[StrictViolation]:
-        return collect_strict_violations(JsParser(source).parse(), strict=strict)
+    def _violations(
+        self, source: str, *, strict: bool = False, module: bool = False,
+    ) -> list[StrictViolation]:
+        return collect_strict_violations(JsParser(source).parse(), strict=strict, module=module)
 
     def test_octal_literal_flagged_in_strict(self):
         for source in ['010', '0755', '017', '00', '08', '09', '019', '08.5']:
@@ -188,6 +190,31 @@ class TestJsStrict(TestBase):
         for source in ['typeof eval', '({eval: 1})', '({}).arguments', 'eval()', 'arguments[0]']:
             with self.subTest(source=source):
                 self.assertEqual(self._violations(source, strict=True), [])
+
+    def test_await_bound_in_module_flagged(self):
+        cases = [
+            'var await = 1',
+            '(function (await) {})',
+            'function f(){ function g(await){} }',
+            'var f = (await) => 1;',
+            'try {} catch (await) {}',
+            'await = 1',
+        ]
+        for source in cases:
+            with self.subTest(source=source):
+                self.assertEqual(
+                    self._violations(source, strict=True, module=True),
+                    [StrictViolation(source.index('await'), 'await-in-module', 'await')])
+
+    def test_await_bound_is_a_module_rule_not_a_strict_one(self):
+        for source in ['var await = 1', '(function (await) {})', 'try {} catch (await) {}']:
+            with self.subTest(source=source):
+                self.assertEqual(self._violations(source, strict=True, module=False), [])
+
+    def test_await_reference_in_module_clean(self):
+        for source in ['typeof await', '({await: 1})', 'o.await', 'x.await = 1']:
+            with self.subTest(source=source):
+                self.assertEqual(self._violations(source, strict=True, module=True), [])
 
     def test_eval_in_binding_pattern(self):
         cases = [

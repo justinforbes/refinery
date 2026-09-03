@@ -91,7 +91,9 @@ class StrictViolation:
     repeated name in a list the grammar requires to be unique, the arity of an accessor, and a name
     reserved by the kind of function it stands in are refused in *either* mode, so a caller that treats
     an empty result as "sloppy code is safe" is reading it right, and one that treats a non-empty
-    result as "only strict code would refuse this" is not.
+    result as "only strict code would refuse this" is not. One more asks neither about the mode but
+    about the goal symbol: `await-in-module` records a name a module refuses to bind, reported only
+    when the tree is read as module code.
     """
     offset: int
     rule: str
@@ -663,30 +665,43 @@ def _target_identifiers(target: Node | None) -> list[JsIdentifier]:
     return result
 
 
-def _flag_name(ident: JsIdentifier, out: list[StrictViolation]) -> None:
+def _flag_name(ident: JsIdentifier, strict: bool, module: bool, out: list[StrictViolation]) -> None:
     """
-    Report *ident* where strict code refuses the name it carries. The name is the one its escapes
-    denote, which is what ECMA-262 states these rules over: a StringValue is asked for, not the
-    text that spelled it.
+    Report *ident* where the code it binds refuses the name it carries. The name is the one its
+    escapes denote, which is what ECMA-262 states these rules over: a StringValue is asked for, not
+    the text that spelled it.
 
-    V8 asks the text at two of the positions this reaches. `function f(ev\\u0061l) {}` and
+    Two of the rules are strict-mode ones, and one is a module one. `await` names nothing a module
+    binds — §13.1.1 refuses it wherever the goal symbol is Module, in every function nesting and
+    async code or not, where a script under `"use strict"` binds it freely — so the word is
+    module-reserved and not strict-reserved, and is reported under *module* rather than under
+    *strict*.
+
+    V8 asks the text at two of the strict positions this reaches. `function f(ev\\u0061l) {}` and
     `argum\\u0065nts = 1` are accepted there under strict where `function f(eval) {}` and
     `arguments = 1` are refused, though `var ev\\u0061l = 1` is refused like its plain spelling.
     Reporting all of them is the specification's answer and the deliberate divergence: what reads
     this decides whether a text may be spliced somewhere, so agreeing with the specification costs
     a splice nobody writes and disagreeing with it would pass one no other engine runs.
     """
-    if ident.name in _EVAL_ARGS:
+    if strict and ident.name in _EVAL_ARGS:
         out.append(StrictViolation(ident.offset, 'eval-arguments-target', ident.name))
-    elif ident.name in _STRICT_RESERVED:
+    elif strict and ident.name in _STRICT_RESERVED:
         out.append(StrictViolation(ident.offset, 'reserved-word', ident.name))
+    elif module and ident.name == 'await':
+        out.append(StrictViolation(ident.offset, 'await-in-module', ident.name))
 
 
-def _flag_bound(target: Node | None, strict: bool, out: list[StrictViolation], handled: set[int]) -> None:
+def _flag_bound(
+    target: Node | None,
+    strict: bool,
+    module: bool,
+    out: list[StrictViolation],
+    handled: set[int],
+) -> None:
     for ident in _target_identifiers(target):
         handled.add(id(ident))
-        if strict:
-            _flag_name(ident, out)
+        _flag_name(ident, strict, module, out)
 
 
 def _suspend_operator_in_parameters(fn: JsFunctionNode) -> Node | None:
@@ -717,6 +732,7 @@ def _suspend_operator_in_parameters(fn: JsFunctionNode) -> Node | None:
 def _check_function(
     fn: JsFunctionNode,
     strict: bool,
+    module: bool,
     out: list[StrictViolation],
     handled: set[int],
 ) -> None:
@@ -755,8 +771,7 @@ def _check_function(
     for param in fn.params:
         for ident in _target_identifiers(param):
             handled.add(id(ident))
-            if strict:
-                _flag_name(ident, out)
+            _flag_name(ident, strict, module, out)
             if ident.name not in seen:
                 seen.add(ident.name)
             elif repeats_are_errors:
@@ -767,29 +782,30 @@ def _check_names(
     node: Node,
     cur_strict: bool,
     child_strict: bool,
+    module: bool,
     out: list[StrictViolation],
     handled: set[int],
 ) -> None:
     if isinstance(node, (JsFunctionDeclaration, JsFunctionExpression)):
-        _check_function(node, child_strict, out, handled)
-        _flag_bound(node.id, child_strict, out, handled)
+        _check_function(node, child_strict, module, out, handled)
+        _flag_bound(node.id, child_strict, module, out, handled)
     elif isinstance(node, JsArrowFunctionExpression):
-        _check_function(node, child_strict, out, handled)
+        _check_function(node, child_strict, module, out, handled)
     elif isinstance(node, (JsClassDeclaration, JsClassExpression)):
-        _flag_bound(node.id, child_strict, out, handled)
+        _flag_bound(node.id, child_strict, module, out, handled)
     elif isinstance(node, JsVariableDeclarator):
-        _flag_bound(node.id, cur_strict, out, handled)
+        _flag_bound(node.id, cur_strict, module, out, handled)
     elif isinstance(node, JsCatchClause):
-        _flag_bound(node.param, cur_strict, out, handled)
+        _flag_bound(node.param, cur_strict, module, out, handled)
     elif isinstance(node, (JsImportSpecifier, JsImportDefaultSpecifier, JsImportNamespaceSpecifier)):
-        _flag_bound(node.local, cur_strict, out, handled)
+        _flag_bound(node.local, cur_strict, module, out, handled)
     elif isinstance(node, JsAssignmentExpression):
-        _flag_bound(node.left, cur_strict, out, handled)
+        _flag_bound(node.left, cur_strict, module, out, handled)
     elif isinstance(node, JsUpdateExpression):
-        _flag_bound(node.argument, cur_strict, out, handled)
+        _flag_bound(node.argument, cur_strict, module, out, handled)
     elif isinstance(node, (JsForInStatement, JsForOfStatement)):
         if not isinstance(node.left, JsVariableDeclaration):
-            _flag_bound(node.left, cur_strict, out, handled)
+            _flag_bound(node.left, cur_strict, module, out, handled)
     elif isinstance(node, JsIdentifier):
         if (
             id(node) not in handled
@@ -800,12 +816,22 @@ def _check_names(
             out.append(StrictViolation(node.offset, 'reserved-word', node.name))
 
 
-def collect_strict_violations(node: Node, *, strict: bool = False) -> list[StrictViolation]:
+def collect_strict_violations(
+    node: Node,
+    *,
+    strict: bool = False,
+    module: bool = False,
+) -> list[StrictViolation]:
     """
     Every early error in the tree rooted at *node*, in source order. *strict* seeds the strictness of
     *node* itself; the pass then forces strict inside class bodies and inside any function whose body
     opens with a `"use strict"` directive, so a violation is recorded even when the seed is sloppy but
     the offending code sits in an inherently strict region.
+
+    *module* asks the tree as though its goal symbol were Module, which unlike strictness is a fact of
+    the whole file and never reset by a nested region: it adds the one rule a module carries beyond a
+    strict script, that `await` names nothing a binding may be. It is off by default, since a tree read
+    on its own is a Script; a caller weighing text against a module destination seeds it True.
 
     Not every rule asks about the mode. A Use Strict Directive under a parameter list that is not
     simple, a repeated name where the grammar requires a unique list, the arity of an accessor, and a
@@ -824,7 +850,7 @@ def collect_strict_violations(node: Node, *, strict: bool = False) -> list[Stric
         child_strict = _child_strictness(current, current_strict)
         _check_node(current, current_strict, out)
         _check_kind_reserved(current, out)
-        _check_names(current, current_strict, child_strict, out, handled)
+        _check_names(current, current_strict, child_strict, module, out, handled)
         for child in current.children():
             stack.append((child, child_strict))
     out.sort(key=lambda violation: violation.offset)

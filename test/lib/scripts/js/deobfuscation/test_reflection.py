@@ -296,6 +296,25 @@ class TestReflectionInlining(TestJsDeobfuscator):
     def test_module_indirect_eval_expression_still_inlined(self):
         self.assertEqual('foo();', self._reflect_module("(0, eval)('foo();');"))
 
+    def test_module_indirect_eval_binding_await_not_inlined(self):
+        """
+        `await` names nothing a module binds, so a payload binding it is a `SyntaxError` once spliced
+        into the module though the eval runs its text as a script where the binding is legal.
+        """
+        source = "(0, eval)('console.log(function (await) { return await + 2; }(1));');"
+        self.assertEqual(source, self._reflect_module(source))
+
+    def test_indirect_eval_binding_await_inlined_as_a_script(self):
+        self.assertEqual(
+            'console.log(function(await) {\n  return await + 2;\n}(1));',
+            self._reflect("(0, eval)('console.log(function (await) { return await + 2; }(1));');"))
+
+    def test_module_function_constructor_binding_await_not_inlined(self):
+        self.assertEqual(
+            "var _m = Function('return function (await) { return await; }')();\nsink(_m);",
+            self._reflect_module(
+                "var _m = Function('return function (await) { return await; }')(); sink(_m);"))
+
     def test_function_constructor_reading_top_level_var_inlined_in_script_mode(self):
         """
         A `Function`-constructed body is a sloppy global-scope function, so it resolves `out` against
@@ -1540,6 +1559,42 @@ class TestAProgramCatchingAModulePayloadStillCatchesIt(TestJsDeobfuscator):
         self.assertEqual(
             {source: behavior(deobfuscate_source(source)) for source in sources},
             {source: ('SyntaxError\n', None) for source in sources},
+        )
+
+
+#: An indirect eval whose payload binds `await`, which a script binds freely and a module refuses
+#: everywhere its goal symbol reaches. The eval runs its text as a script wherever it stood, so the
+#: binding is legal there; the payload returns 3.
+_A_PAYLOAD_BINDING_AWAIT = "(0, eval)('console.log(function (await) { return await + 2; }(1));');"
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAPayloadBindingAwaitStaysBehindTheEvalInAModule(TestJsDeobfuscator):
+    """
+    Unlike a payload spelling `import` or `export`, one binding `await` is a program a script reads:
+    the word is module-reserved and not strict-reserved. Splicing it into a module is a `SyntaxError`
+    the file cannot survive, where the eval it replaces threw one the call site caught, so the gate
+    refuses the splice at a module destination and leaves the eval standing. At a script destination
+    the same payload inlines, and the program behaves the same across the rewrite either way.
+    """
+
+    def test_a_module_keeps_printing_what_the_eval_printed(self):
+        source = 'export {};\n' + _A_PAYLOAD_BINDING_AWAIT
+        self.assertEqual(
+            (
+                behavior(source, module=True),
+                behavior(deobfuscate_source(source, module=True), module=True),
+            ),
+            (('3\n', None), ('3\n', None)),
+        )
+
+    def test_the_script_twin_inlines_and_prints_the_same(self):
+        self.assertEqual(
+            (
+                behavior(_A_PAYLOAD_BINDING_AWAIT),
+                behavior(deobfuscate_source(_A_PAYLOAD_BINDING_AWAIT)),
+            ),
+            (('3\n', None), ('3\n', None)),
         )
 
 

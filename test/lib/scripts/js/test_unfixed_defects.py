@@ -917,47 +917,6 @@ class TestAConstAModuleExportsIsDeadUntilTheModuleRuns(TestBase):
         )
 
 
-#: A module holding an indirect eval whose payload binds the name `await` and hoists nothing. The
-#: eval runs its text as a script, whatever kind of code called it, and a script may bind that name;
-#: the module around the eval may not spell it at all. The payload binds it as a function-expression
-#: parameter because a `var` or a function declaration would be refused already — for scoping, a
-#: global-eval hoist landing on the global object where a module-level one would not — and this
-#: ledger is about the refusal that is missing, not the one that happens to stand in front of it.
-A_PAYLOAD_ONLY_A_SCRIPT_MAY_SPELL = (
-    'export {};\n'
-    "(0, eval)('console.log(function (await) { return await + process.argv.length; }(1));');"
-)
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestANameTheModuleReservesStaysBehindTheEval(TestBase):
-    """
-    §13.1.1 refuses `await` as a binding name wherever the goal symbol is Module — everywhere in
-    the file, async code or not, directive or none — while a script under `'use strict'` binds it
-    freely: the word is module-reserved and not strict-reserved. Splicing a payload that binds it
-    into the module that called the eval therefore has to be refused, and the gate that decides,
-    `collect_strict_violations` seeded with the destination's strictness, has no way to say so:
-    strictness is the only destination fact the collector is handed, and the fact that matters here
-    is the destination's goal symbol. The fix is the missing channel — the collector takes the
-    destination's module-ness beside its strictness and reports the binding under it, and the
-    reflection gate seeds both from the tree the payload would land in.
-
-    Node prints `3` for the module and refuses its deobfuscation whole with a `SyntaxError`, the
-    payload having come back spliced into the module with `function (await)` in it.
-    """
-
-    @unittest.expectedFailure
-    def test_a_module_keeps_printing_what_the_evalprinted(self):
-        source = A_PAYLOAD_ONLY_A_SCRIPT_MAY_SPELL
-        self.assertEqual(
-            (
-                behavior(source, module=True),
-                behavior(deobfuscate_source(source, module=True), module=True),
-            ),
-            (('3\n', None), ('3\n', None)),
-        )
-
-
 #: A program whose one function reads a global-object alias Node does not put on the global object,
 #: mapped to the behavior Node gives it. The read is everything the function does and the call is
 #: everything the program does before it prints, so what the read does is all that decides a row.
