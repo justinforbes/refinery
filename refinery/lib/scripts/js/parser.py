@@ -555,7 +555,31 @@ class JsParser:
         while self._eat(JsTokenKind.COMMA):
             declarations.append(self._parse_variable_declarator())
         self._eat_semicolon()
+        self._require_declarator_initializers(kind, declarations)
         return JsVariableDeclaration(declarations=declarations, kind=kind, offset=offset)
+
+    def _require_declarator_initializers(
+        self,
+        kind: JsVarKind,
+        declarations: list[JsVariableDeclarator],
+    ) -> None:
+        """
+        A declarator is written with an initializer unless it binds a plain name under `var` or
+        `let`: a `const` leaves nothing to hold the value it may not go without, and a destructuring
+        target has nothing to take apart, so a bare one of either is a declaration every engine
+        refuses. A for-in or for-of head is the one position that lifts the requirement, handing the
+        binding its value on each pass, and it never reaches here — this is called for a statement,
+        for the first clause of a C-style head, and for an exported declaration, all positions where
+        the requirement stands. A file that breaks it is read with the repair recorded, so its text
+        comes back as it went in and nothing takes the tree for a program.
+        """
+        for declarator in declarations:
+            if declarator.init is not None:
+                continue
+            if kind is JsVarKind.CONST or isinstance(
+                declarator.id, (JsArrayPattern, JsObjectPattern)
+            ):
+                self._recovered = True
 
     def _parse_variable_declarator(self) -> JsVariableDeclarator:
         offset = self._current.offset
@@ -767,6 +791,7 @@ class JsParser:
                 with self._with_no_in(True):
                     decl.declarations.append(self._parse_variable_declarator())
             self._expect(JsTokenKind.SEMICOLON)
+            self._require_declarator_initializers(kind, decl.declarations)
             return self._parse_for_rest(decl, offset)
 
         with self._with_no_in(True):
