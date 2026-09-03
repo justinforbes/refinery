@@ -1140,11 +1140,14 @@ class TestPs1ACallWritingThroughAnArgumentIsAWriteOfThatVariable(TestPs1):
             '$p = @(@(1, 2), @(3, 4))\n[Array]::Reverse($p[0])\nWrite-Output $p[0]',
             Ps1ConstantInlining)
 
-    def test_a_sort_writes_through_its_argument_without_the_value_being_known(self):
-        # 5.1 prints `1`: `[Array]::Sort` reorders the array the variable holds. The slot is a
-        # write, so the read below it is not answered with the order from above.
-        self._assertUnchanged(
-            '$x = 3, 1, 2\n[Array]::Sort($x)\nWrite-Output $x[0]', Ps1ConstantInlining)
+    def test_a_read_below_a_sort_sees_the_order_the_call_left(self):
+        # 5.1 prints `1`: `[Array]::Sort` reorders the array the variable holds, so the read below
+        # sees the sorted order and never the `3` the assignment put first. The slot stays a write:
+        # the occurrence in the call is not replaced by the array's value.
+        self.assertEqual(
+            self._apply(
+                '$x = 3, 1, 2\n[Array]::Sort($x)\nWrite-Output $x[0]', Ps1ConstantInlining),
+            '$x = 3, 1, 2\n[Array]::Sort($x)\nWrite-Output 1')
 
     def test_a_reversal_under_a_condition_that_is_not_known_is_not_answered(self):
         self._assertUnchanged(
@@ -1663,10 +1666,10 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
     leaves behind is determined and the reads below it can be answered. Measured on 5.1, the three
     scripts here print `2` and `1`, then `a`, then an empty line and `2` and `3`.
 
-    The clear is answered; the reversal reached through an element and the sort of a shared type are
-    each still a refusal rather than a wrong answer: the emitted script is the input. Their entries
-    are marked so that a rule taking one of those folds reports an unexpected success, and so that
-    neither can quietly stop being true meanwhile.
+    The sort and the clear are answered; only the reversal reached through an element is still a
+    refusal rather than a wrong answer: the emitted script is the input. Its entry is marked so that
+    a rule taking that fold reports an unexpected success, and so that it cannot quietly stop being
+    true meanwhile.
     """
 
     @unittest.expectedFailure
@@ -1685,7 +1688,6 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
         """)
         self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
 
-    @unittest.expectedFailure
     def test_a_sort_of_elements_that_share_a_type_orders_the_array_it_is_handed(self):
         # `[Array]::Sort` throws where the elements do not compare, so a value for it rests on the
         # elements being of one type and not merely on all of them being known.
@@ -1713,6 +1715,90 @@ class TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined(Te
             Write-Output ($Null, 2, 3)
         """)
         self.assertEqual(self._apply(source, Ps1ConstantInlining), expected)
+
+
+class TestPs1ASortOrdersAnArrayOfOneComparableType(TestPs1):
+    """
+    `[Array]::Sort($x)` reorders in place the array `$x` holds, so a read below it sees the sorted
+    order. It is answered only for the whole-array form over elements that share one type and whose
+    order is determined: numbers order by magnitude, a Char by its code point, and a String by 5.1's
+    two-level CurrentCulture collation over ASCII letters. A cross-type array throws, an unreadable
+    element leaves the order unknown, a comparer or a range is a form with no rule here, a String
+    outside those letters is not ordered, and elements that compare equal are left in an order .NET
+    does not fix.
+    """
+
+    def test_numbers_order_by_magnitude_and_not_by_spelling(self):
+        self.assertEqual(
+            self._apply(
+                '$x = 10, 2, 1\n[Array]::Sort($x)\nWrite-Output $x', Ps1ConstantInlining),
+            '$x = 10, 2, 1\n[Array]::Sort($x)\nWrite-Output (1, 2, 10)')
+
+    def test_chars_order_by_code_point(self):
+        self.assertEqual(
+            self._apply(
+                '$x = @([char]66, [char]65, [char]67)\n[Array]::Sort($x)\nWrite-Output $x',
+                Ps1ConstantInlining),
+            '$x = @([char]66, [char]65, [char]67)\n[Array]::Sort($x)\n'
+            'Write-Output ([char]65, [char]66, [char]67)')
+
+    def test_a_later_letter_difference_outranks_an_earlier_case_difference(self):
+        self.assertEqual(
+            self._apply(
+                "$x = @('Ab', 'ac')\n[Array]::Sort($x)\nWrite-Output $x[0]", Ps1ConstantInlining),
+            "$x = @('Ab', 'ac')\n[Array]::Sort($x)\nWrite-Output 'Ab'")
+
+    def test_a_shorter_word_precedes_the_one_it_is_a_prefix_of(self):
+        self.assertEqual(
+            self._apply(
+                "$x = @('aa', 'A')\n[Array]::Sort($x)\nWrite-Output $x[0]", Ps1ConstantInlining),
+            "$x = @('aa', 'A')\n[Array]::Sort($x)\nWrite-Output 'A'")
+
+    def test_the_first_differing_letter_decides_across_the_word(self):
+        self.assertEqual(
+            self._apply(
+                "$x = @('Bc', 'bd', 'ba')\n[Array]::Sort($x)\nWrite-Output $x[0]",
+                Ps1ConstantInlining),
+            "$x = @('Bc', 'bd', 'ba')\n[Array]::Sort($x)\nWrite-Output 'ba'")
+
+    def test_case_breaks_a_full_primary_tie_lowercase_first(self):
+        self.assertEqual(
+            self._apply(
+                "$x = @('B', 'a', 'A', 'b')\n[Array]::Sort($x)\nWrite-Output $x[0]",
+                Ps1ConstantInlining),
+            "$x = @('B', 'a', 'A', 'b')\n[Array]::Sort($x)\nWrite-Output 'a'")
+
+    def test_a_cross_type_array_is_not_ordered(self):
+        self._assertUnchanged(
+            "$x = @('b', 5)\n[Array]::Sort($x)\nWrite-Output $x", Ps1ConstantInlining)
+
+    def test_an_unreadable_element_leaves_the_order_unknown(self):
+        self._assertUnchanged(
+            "$x = @($a, 'b')\n[Array]::Sort($x)\nWrite-Output $x", Ps1ConstantInlining)
+
+    def test_a_comparer_form_has_no_rule(self):
+        self._assertUnchanged(
+            '$x = 1, 2, 3\n[Array]::Sort($x, $c)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_a_range_form_has_no_rule(self):
+        self._assertUnchanged(
+            '$x = 1, 2, 3\n[Array]::Sort($x, 0, 2)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_a_string_carrying_a_non_letter_is_not_ordered(self):
+        self._assertUnchanged(
+            "$x = @('b1', 'a2')\n[Array]::Sort($x)\nWrite-Output $x", Ps1ConstantInlining)
+
+    def test_an_empty_array_is_left_alone(self):
+        self._assertUnchanged(
+            '$x = @()\n[Array]::Sort($x)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_decimals_of_one_value_and_different_scale_are_not_ordered(self):
+        self._assertUnchanged(
+            '$x = @(1.0d, 1.00d)\n[Array]::Sort($x)\nWrite-Output $x', Ps1ConstantInlining)
+
+    def test_a_repeated_value_is_not_ordered(self):
+        self._assertUnchanged(
+            '$x = @(1, 1)\n[Array]::Sort($x)\nWrite-Output $x', Ps1ConstantInlining)
 
 
 class TestPs1AMutatingCallAndItsStoreGoWhereNoReadObservesThem(TestPs1):

@@ -27,6 +27,8 @@ from refinery.lib.scripts.ps1.analysis.values import (
     integer_of,
     null_expression,
     read,
+    sort_key,
+    type_of,
     unwrap_to_array_literal,
 )
 from refinery.lib.scripts.ps1.model import (
@@ -40,6 +42,7 @@ from refinery.lib.scripts.ps1.model import (
 #: lowercased member name.
 _REVERSE = (data.required_type_key('array'), 'reverse')
 _CLEAR = (data.required_type_key('array'), 'clear')
+_SORT = (data.required_type_key('array'), 'sort')
 
 
 def value_after(occurrence: Ps1Variable, previous: Expression) -> Expression | None:
@@ -47,13 +50,23 @@ def value_after(occurrence: Ps1Variable, previous: Expression) -> Expression | N
     The value the name *occurrence* stands for holds once the call around it has run, given the
     value `previous` it held before it, or `None` where no rule names one.
 
-    `None` is the answer to every kind of doubt: a member with no rule, an overload the arity
-    does not settle, a call that writes more than the one slot, a conversion standing between
-    the name and the slot, an operand this cannot read as a collection, and a range that would
-    throw. A caller must fold nothing on it.
+    `None` is the answer to every kind of doubt: a member with no rule, a call that writes more
+    than the one slot, a conversion standing between the name and the slot, an operand this cannot
+    read as a collection, and a range that would throw. A caller must fold nothing on it.
+
+    It does *not* refuse a call the arity leaves unsettled. `[Array]::Sort($x)` binds two captured
+    overloads at one argument — `Sort(Array)` and the generic `Sort<T>(T[])` — and every member
+    dispatched below has a rule total over its same-arity overloads that write the one slot: both
+    Sort overloads order the array ascending, and Reverse and Clear are positional. So the write
+    being exactly the one slot is the whole precondition, and `settled` is left to the one caller
+    that must tell an empty write set from an unbound call.
     """
     found = written_call_slot(occurrence)
-    if found is None or not found.written.settled or found.written.slots != {found.slot}:
+    if found is None or found.written.slots != {found.slot}:
+        # The write is exactly the one slot; not that the arity settled the overload. Every member
+        # dispatched below has a value rule total over its same-arity overloads that write that
+        # slot, so an unsettled arity (Sort at one argument) is still answered. The witness in
+        # `test_witnessed` fails if a `settled` term is put back here.
         return None
     if found.slot == RECEIVER:
         # No rule here is about a receiver yet, and the bounds below are the arguments *after* the
@@ -88,6 +101,8 @@ def value_after(occurrence: Ps1Variable, previous: Expression) -> Expression | N
         return _reversed(previous, bounds)
     if member == _CLEAR:
         return _cleared(previous, bounds)
+    if member == _SORT:
+        return _sorted(previous, bounds)
     return None
 
 
@@ -164,3 +179,37 @@ def _cleared(previous: Expression, bounds: Sequence[Expression]) -> Expression |
     elements = [_clone_node(element) for element in array.elements]
     cleared = [null_expression() for _ in range(start, stop)]
     return Ps1ArrayLiteral(elements=[*elements[:start], *cleared, *elements[stop:]])
+
+
+def _sorted(previous: Expression, bounds: Sequence[Expression]) -> Expression | None:
+    """
+    The collection `previous` names put in the order `[Array]::Sort` leaves it, or `None` where this
+    names none.
+
+    Only the whole-array form is answered: a comparer, a range or a two-array form passes a
+    non-empty `bounds` and is refused, since the order those produce is not the one computed here.
+    The elements must share one real type — 5.1 throws on an array whose elements do not compare, so
+    a value over a heterogeneous or unreadable one would stand where the script raised — and their
+    keys must be distinct, because `[Array]::Sort` is not a stable sort and elements that compare
+    equal are left in an order 5.1 does not fix, observable wherever they render differently.
+
+    The elements are copied before the answer is built out of them, for the reason `_reversed` copies
+    them: a node adopts the children it is handed, and a value read out of the tree has to be free of
+    it whether the caller installs it or not.
+    """
+    array = unwrap_to_array_literal(previous)
+    if array is None or bounds:
+        return None
+    facts = [read(element) for element in array.elements]
+    if len({type_of(fact) for fact in facts}) != 1 or type_of(facts[0]) is None:
+        return None
+    keys: list[tuple] = []
+    for fact in facts:
+        key = sort_key(fact)
+        if key is None:
+            return None
+        keys.append(key)
+    if len(set(keys)) != len(keys):
+        return None
+    order = sorted(range(len(keys)), key=keys.__getitem__)
+    return Ps1ArrayLiteral(elements=[_clone_node(array.elements[index]) for index in order])

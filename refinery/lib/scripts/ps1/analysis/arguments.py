@@ -45,8 +45,9 @@ class Ps1WrittenSlots(typing.NamedTuple):
 
     `slots` is the union over every overload the call's arity matches, so a caller may read it as
     *every* slot that could be written and none that could not. `settled` says whether the arity
-    picked out a single overload: only then is `slots` the set that call actually writes, which is
-    what a rule computing the value the call leaves behind has to have.
+    picked out a single overload. Its one reader is the empty-`slots` distinction below: a rule
+    computing the value a call leaves behind does not consult it, because that rule is total over
+    the same-arity overloads that write its one slot whether or not the arity picked one out.
 
     An empty `slots` therefore means two different things and the difference is `settled`.
     Exact and empty is a claim: this call writes nothing. Unsettled and empty is a refusal: the

@@ -35,6 +35,7 @@ from refinery.lib.scripts.ps1.analysis import (
     commands,
     effects,
     faults,
+    mutation,
     worldflow,
 )
 from refinery.lib.scripts.ps1.analysis.effects import (
@@ -43,6 +44,7 @@ from refinery.lib.scripts.ps1.analysis.effects import (
     is_side_effect_free,
 )
 from refinery.lib.scripts.ps1.deobfuscation import (
+    constants,
     deadcode,
     emulator,
     folding,
@@ -55,6 +57,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ExpressionStatement,
     Ps1Script,
     Ps1TryCatchFinally,
+    Ps1Variable,
 )
 
 
@@ -68,6 +71,8 @@ def _witness(witness: type) -> str:
     return F'{witness.__module__}.{witness.__qualname__}'
 
 
+_ARRAY_EFFECT = _witness(
+    test_folding.TestPs1AnArrayACallWritesThroughIsComputedWhereverItsEffectIsDetermined)
 _CALL_GRAPH = _witness(test_callgraph.TestPs1CallGraphReadability)
 _DEAD_CODE = _witness(test_deadcode.TestPs1DeadCodeElimination)
 _DEAD_CODE_EXTRA = _witness(test_deadcode.TestPs1DeadCodeExtra)
@@ -377,6 +382,22 @@ def _removing_a_handler_asked_at_the_handler(self: faults.Ps1FaultReach, handler
     return self.observed_at(handler)
 
 
+def _value_after_refusing_an_unsettled_slot(original: Callable) -> Callable:
+    """
+    The value rule with the `settled` term put back into its slot guard, so a call the arity does
+    not narrow to one overload is refused — the guard as it read before `[Array]::Sort`, whose
+    one-argument form binds two captured overloads, needed answering. `[Array]::Reverse` and
+    `[Array]::Clear` settle at their folding arities and are untouched, which is what lets a Sort
+    fold be the thing that notices.
+    """
+    def mutated(occurrence: Ps1Variable, previous):
+        found = mutation.written_call_slot(occurrence)
+        if found is not None and not found.written.settled:
+            return None
+        return original(occurrence, previous)
+    return mutated
+
+
 class TestPs1RemovalGuardsAreWitnessed(TestBase):
     """
     Each test removes one guard in memory and runs the tests that are supposed to notice. A guard
@@ -442,6 +463,14 @@ class TestPs1RemovalGuardsAreWitnessed(TestBase):
             self._methods(without.failures),
             F'{notices} is not among the tests that noticed; '
             F'{sorted(self._methods(without.failures))} did')
+
+    def test_folding_a_sort_although_its_slot_is_unsettled_is_witnessed(self):
+        self._assertWitnessed(
+            [_ARRAY_EFFECT],
+            patch.object(
+                constants, 'value_after',
+                _value_after_refusing_an_unsettled_slot(constants.value_after)),
+            notices='test_a_sort_of_elements_that_share_a_type_orders_the_array_it_is_handed')
 
     def test_the_handler_veto_is_witnessed(self):
         self._assertWitnessed(
