@@ -33,6 +33,7 @@ alone is not what an advanced function runs.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Sequence
 
 from refinery.lib.scripts import Block, Node
@@ -59,6 +60,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ReturnStatement,
     Ps1Script,
     Ps1ScriptBlock,
+    Ps1SubExpression,
     Ps1SwitchStatement,
     Ps1ThrowStatement,
     Ps1TrapStatement,
@@ -203,10 +205,45 @@ class _TrapBody:
     rethrows: bool = False
 
 
+#: The value-producing constructs whose operand is a statement list PowerShell runs in sequence, so a
+#: statement-terminating error inside one is reported and stepped over to the next statement *within*
+#: the construct. A subexpression `$( )` is the seed. An array expression `@( )` has the same shape
+#: and joins this tuple when a measured row needs it. A pipeline is deliberately absent: its stages
+#: stream rather than run in sequence, and a soft error ends the whole pipeline and resumes after it,
+#: so threading its elements would fabricate a step-over the language never performs.
+_DESCENDED_EXPRESSIONS = (Ps1SubExpression,)
+
+
+def _descended_bodies(statement: Node) -> list[list[Node]]:
+    """
+    The statement lists of the `_DESCENDED_EXPRESSIONS` written in *statement*'s expression tree, in
+    source order — the sub-statement granularity the fault reader needs and no coarser consumer wants.
+
+    Only the outermost such construct on each path is collected: one nested inside another is reached
+    when the outer body's statements are built, each of which passes back through `statement` and this
+    descent again, so the nesting is handled by recursion through the builder rather than flattened
+    here. A nested script block is its own graph and is left to it.
+    """
+    bodies: list[list[Node]] = []
+
+    def collect(node: Node) -> None:
+        for child in node.children():
+            if isinstance(child, Ps1ScriptBlock):
+                continue
+            if isinstance(child, _DESCENDED_EXPRESSIONS):
+                bodies.append(list(child.body))
+                continue
+            collect(child)
+
+    collect(statement)
+    return bodies
+
+
 class _Builder(CfgBuilder):
-    def __init__(self, owner: Node):
+    def __init__(self, owner: Node, descend: bool = False):
         super().__init__(owner)
         self._trap_body: _TrapBody | None = None
+        self._descend = descend
 
     def block(self, statements: Sequence[Node], frontier: list[CfgNode]) -> list[CfgNode]:
         """
@@ -415,7 +452,39 @@ class _Builder(CfgBuilder):
             if trap is not None and not self.has_continue_target(label):
                 return self._resume(trap.resumes, statement, frontier)
             return self.jump_back(statement, label, frontier)
+        if self._descend:
+            descended = self._descend_statement(statement, frontier)
+            if descended is not None:
+                return descended
         return self.opaque(statement, frontier)
+
+    def _descend_statement(
+        self, statement: Node, frontier: list[CfgNode],
+    ) -> list[CfgNode] | None:
+        """
+        A leaf statement carrying a value construct whose operand is a statement list — a subexpression
+        `$( )` — modelled at sub-statement granularity so the fault reader sees a statement-terminating
+        error step over to the next statement *inside* the construct. `None` when it carries none, so
+        the caller falls back to `opaque`.
+
+        Each inner statement list is built through `block`, so a `trap` declared inside the construct
+        installs as a handler over its siblings, not as noise the enclosing block owns. The inner
+        frontier then feeds the outer statement's own node: the construct yields its value, then the
+        statement consuming it runs. This inner-then-outer order is the soundness hinge — a soft raiser
+        that is the last inner statement has the outer node as its successor, which keeps a trap that
+        guards it, where the reverse order would drop it.
+
+        Reached only where `descend` is set, which is only the fault reader's own graph; every other
+        consumer reads the coarse model, in which this statement is one atomic node.
+        """
+        bodies = _descended_bodies(statement)
+        if not bodies:
+            return None
+        for body in bodies:
+            frontier = self.block(body, frontier)
+        node = self.node(statement)
+        self.link(frontier, node)
+        return [node]
 
     def _resume(
         self, resumes: list[CfgNode], statement: Node, frontier: list[CfgNode],
@@ -499,12 +568,18 @@ class _Builder(CfgBuilder):
         )
 
 
-def build_ps1_control_flow(root: Ps1Script) -> dict[int, ControlFlowGraph]:
+def build_ps1_control_flow(root: Ps1Script, descend: bool = False) -> dict[int, ControlFlowGraph]:
     """
     One control-flow graph per script block — see `FUNCTION_NODES` — and one for the script itself.
+
+    With *descend* set, a statement carrying a `_DESCENDED_EXPRESSIONS` construct is modelled at
+    sub-statement granularity rather than as one atomic node — the finer graph the fault reader needs
+    to see a statement-terminating error step over inside a `$( )`. It is off by default because every
+    consumer but the fault reader wants the coarse one-statement-one-node graph, and turning it on
+    changes only the graph the caller who asks for it reads.
     """
-    return build_control_flow(root, _Builder, FUNCTION_NODES)
+    return build_control_flow(root, partial(_Builder, descend=descend), FUNCTION_NODES)
 
 
-def build_control_flow_model(root: Ps1Script) -> ControlFlowModel:
-    return ControlFlowModel(build_ps1_control_flow(root))
+def build_control_flow_model(root: Ps1Script, descend: bool = False) -> ControlFlowModel:
+    return ControlFlowModel(build_ps1_control_flow(root, descend))

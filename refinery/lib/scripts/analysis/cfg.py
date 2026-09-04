@@ -32,7 +32,7 @@ import enum
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import AbstractSet as Set, Iterable, Iterator, Sequence
+from typing import AbstractSet as Set, Callable, Iterable, Iterator, Sequence
 
 from refinery.lib.scripts import Node
 
@@ -1266,7 +1266,7 @@ class ControlFlowModel:
 
 def build_control_flow(
     root: Node,
-    builder: type[CfgBuilder],
+    builder: Callable[[Node], CfgBuilder],
     function_nodes: tuple[type, ...],
 ) -> dict[int, ControlFlowGraph]:
     """
