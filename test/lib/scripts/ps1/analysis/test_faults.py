@@ -36,16 +36,6 @@ def _model(source: str) -> tuple[Ps1Script, Ps1FaultReach]:
     return tree, build_fault_reach(build_control_flow_model(tree))
 
 
-def _model_fine(source: str) -> tuple[Ps1Script, Ps1FaultReach]:
-    """
-    A reader whose trap-removal transpose is handed the finer control-flow graph, the way the
-    analysis cache hands it one, so the sub-statement step-over inside a `$( )` is a path it reads.
-    """
-    tree = _parse(source)
-    coarse = build_control_flow_model(tree)
-    return tree, build_fault_reach(coarse, lambda: build_control_flow_model(tree, descend=True))
-
-
 #: The subexpression that `TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression` is measured
 #: over, and whose shape `TestPs1TheBracketFixturesHoldTheShapeTheirPinsAssume` keeps.
 _TRAP_IN_A_SUBEXPRESSION = "$x = $(trap { 'h' }; 'a')"
@@ -444,10 +434,14 @@ class TestPs1AResumingTrapOverASoftErrorInABracketedStatementListIsKept(TestBase
     instead resumes past it. Where those two land differently the trap changes what runs and cannot
     be removed. The coarse graph cannot tell them apart, because the whole assignment is one node
     there; the finer graph the transpose reads separates the local step-over from the resume point.
+
+    The reader is handed only the coarse model — the one construction there is — and draws that finer
+    graph itself from its own root, so every reader here reads the step-over and none can be left
+    blind and silently remove a load-bearing trap.
     """
 
-    def _trap_removal_is_observed(self, source: str, *, fine: bool) -> bool:
-        tree, reach = _model_fine(source) if fine else _model(source)
+    def _trap_removal_is_observed(self, source: str) -> bool:
+        tree, reach = _model(source)
         trap = tree.body[0]
         if not isinstance(trap, Ps1TrapStatement):
             self.fail('the source does not open with a trap')
@@ -455,35 +449,42 @@ class TestPs1AResumingTrapOverASoftErrorInABracketedStatementListIsKept(TestBase
 
     def test_a_soft_error_inside_a_subexpression_keeps_the_trap_that_resumes_past_it(self):
         self.assertTrue(self._trap_removal_is_observed(
-            "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x", fine=True))
+            "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x"))
 
     def test_a_soft_error_that_is_the_last_statement_of_the_subexpression_keeps_the_trap(self):
         self.assertTrue(self._trap_removal_is_observed(
-            "trap { continue }; $x = $('a'; [int]'b')", fine=True))
+            "trap { continue }; $x = $('a'; [int]'b')"))
 
     def test_a_division_by_zero_inside_a_subexpression_keeps_the_trap(self):
         self.assertTrue(self._trap_removal_is_observed(
-            "trap { continue }; $x = $(1/0; 'in'); Write-Host $x", fine=True))
+            "trap { continue }; $x = $(1/0; 'in'); Write-Host $x"))
 
     def test_a_soft_error_inside_an_array_expression_keeps_the_trap_that_resumes_past_it(self):
         self.assertTrue(self._trap_removal_is_observed(
-            "trap { continue }; $x = @([int]'a'; 'in'); Write-Host $x", fine=True))
+            "trap { continue }; $x = @([int]'a'; 'in'); Write-Host $x"))
 
     def test_an_array_expression_that_raises_no_soft_error_lets_the_trap_go(self):
         self.assertFalse(self._trap_removal_is_observed(
-            "trap { continue }; $x = @('a'; 'b'); Write-Host $x", fine=True))
+            "trap { continue }; $x = @('a'; 'b'); Write-Host $x"))
 
     def test_a_soft_error_at_script_scope_whose_step_over_reconverges_lets_the_trap_go(self):
         self.assertFalse(self._trap_removal_is_observed(
-            "trap { continue }; [int]'a'; Write-Host 'after'", fine=True))
+            "trap { continue }; [int]'a'; Write-Host 'after'"))
 
     def test_a_subexpression_that_raises_no_soft_error_lets_the_trap_go(self):
         self.assertFalse(self._trap_removal_is_observed(
-            "trap { continue }; $x = $('a'; 'b')", fine=True))
+            "trap { continue }; $x = $('a'; 'b')"))
 
-    def test_the_coarse_graph_alone_reads_the_step_over_case_as_a_removable_trap(self):
-        self.assertFalse(self._trap_removal_is_observed(
-            "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x", fine=False))
+    @unittest.expectedFailure
+    def test_a_soft_error_shape_the_roster_does_not_yet_list_is_missed(self):
+        """
+        The roster is extended shape by shape; a statement-terminating error it does not yet name —
+        here a method call that throws, an out-of-range `Substring` — is not seen as a soft source,
+        so the trap it makes load-bearing is wrongly judged removable. Tracks the known gap until the
+        roster covers the shape.
+        """
+        self.assertTrue(self._trap_removal_is_observed(
+            "trap { continue }; $x = $('A'.Substring(5); 'in'); Write-Host $x"))
 
 
 class TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression(TestBase):

@@ -23,7 +23,7 @@ rather than guessing, and a caller reads it as *unknown* wherever a caller might
 """
 from __future__ import annotations
 
-from typing import Callable, Iterator, NamedTuple
+from typing import Iterator, NamedTuple
 
 from refinery.lib.scripts import Node, tree_root
 from refinery.lib.scripts.analysis.cfg import (
@@ -32,7 +32,9 @@ from refinery.lib.scripts.analysis.cfg import (
     ControlFlowGraph,
     ControlFlowModel,
 )
+from refinery.lib.scripts.ps1.analysis.cfg import build_control_flow_model
 from refinery.lib.scripts.ps1.ast import (
+    STATEMENT_LIST_EXPRESSIONS,
     argument_text,
     assignment_target_variables,
     binding_key,
@@ -468,21 +470,22 @@ class Ps1FaultReach:
     """
     The fault routing of one script, read off its control-flow graphs.
 
-    Built over `refinery.lib.scripts.analysis.cfg.ControlFlowModel` and nothing else: where an error
-    goes is decided by the graph the builder already wired, so this needs no semantic model, no call
-    graph and no world. It is a view rather than a solver — every answer is one walk over the
-    exceptional edges, memoized per node for the life of the model, and the model itself is
-    discarded whenever the tree moves.
+    Built over `refinery.lib.scripts.analysis.cfg.ControlFlowModel`: where an error goes is decided
+    by the graph the builder already wired, so this needs no semantic model, no call graph and no
+    world. It is a view rather than a solver — every answer is one walk over the exceptional edges,
+    memoized per node for the life of the model, and the model itself is discarded whenever the tree
+    moves. The trap-removal transpose reads one further graph — the same script at the sub-statement
+    granularity `refinery.lib.scripts.ps1.analysis.cfg.build_control_flow_model` draws with
+    `descend`, built here from this reader's own root on first demand — so that a soft error stepping
+    over inside a `$( )` or `@( )` is a path it can read. It builds that itself rather than taking it
+    from a caller, so no caller can hand it a reader that silently cannot see the step-over and
+    removes a load-bearing trap.
     """
 
-    def __init__(
-        self,
-        control_flow: ControlFlowModel,
-        control_flow_fine: Callable[[], ControlFlowModel] | None = None,
-    ):
+    def __init__(self, control_flow: ControlFlowModel):
         self._control_flow = control_flow
-        self._control_flow_fine = control_flow_fine
         self._fine: ControlFlowModel | None = None
+        self._descendable: bool | None = None
         self._forward: dict[int, Ps1FaultRouting] = {}
         self._backward: dict[int, bool] = {}
         self._handled: set[int] | None = None
@@ -570,11 +573,7 @@ class Ps1FaultReach:
         routing = self._routing(graph, start)
         if self._reading_is_observed(graph, routing):
             return True
-        return (
-            _escapes(routing)
-            and not _handled_in_the_body(routing)
-            and self._terminates(node)
-        )
+        return _escapes(routing) and self._terminates(node)
 
     def _reading_is_observed(self, graph: ControlFlowGraph, routing: Ps1FaultRouting) -> bool:
         """
@@ -695,15 +694,36 @@ class Ps1FaultReach:
     def _fine_model(self) -> ControlFlowModel | None:
         """
         The finer control-flow graph the trap-removal transpose reads, built once on first demand
-        and only where the coarse verdict has already reached the soft-error case that needs it. A
-        reader built without one — a test that hands the coarse model alone — has none and reads no
-        step-over, which only ever keeps a trap the coarse graph already judged.
+        from this reader's own root — the same tree the coarse model was built over, redrawn with
+        `descend`. `None` only where the graphs place no script at all (an empty model), which reaches
+        no trap to weigh. Building it here rather than taking it from a caller is what removes the
+        blind reader: there is no way to construct one that cannot see the step-over.
         """
-        if self._control_flow_fine is None:
-            return None
         if self._fine is None:
-            self._fine = self._control_flow_fine()
+            root = self._script
+            if isinstance(root, Ps1Script):
+                self._fine = build_control_flow_model(root, descend=True)
         return self._fine
+
+    def _has_a_descendable_soft_source(self) -> bool:
+        """
+        Whether the script writes a soft-error source inside a `STATEMENT_LIST_EXPRESSIONS` construct
+        anywhere. A soft raiser standing at statement level steps over to the same statement a
+        resuming `trap` lands on, so it never makes the trap load bearing; only one inside such a
+        construct has a local step-over that differs from where the trap resumes. The finer graph is
+        therefore worth building only where this holds, which the common `trap { continue }` over a
+        bare cast or division does not — read before `_fine_model` so that shape pays for no second
+        whole-script graph.
+        """
+        if self._descendable is None:
+            root = self._script
+            self._descendable = root is not None and any(
+                is_soft_error_source(statement)
+                for node in root.walk()
+                if isinstance(node, STATEMENT_LIST_EXPRESSIONS)
+                for statement in node.body
+            )
+        return self._descendable
 
     def _soft_step_over_is_observed(self, handler: Node) -> bool:
         """
@@ -720,6 +740,8 @@ class Ps1FaultReach:
         successors share all downstream behaviour, so this only ever keeps a trap — never removes a
         load-bearing one — which is the sound direction for a may-analysis.
         """
+        if not self._has_a_descendable_soft_source():
+            return False
         fine = self._fine_model()
         if fine is None:
             return False
@@ -931,13 +953,10 @@ class Ps1FaultReach:
                 stack.append(node)
 
 
-def build_fault_reach(
-    control_flow: ControlFlowModel,
-    control_flow_fine: Callable[[], ControlFlowModel] | None = None,
-) -> Ps1FaultReach:
+def build_fault_reach(control_flow: ControlFlowModel) -> Ps1FaultReach:
     """
-    The `Ps1FaultReach` over one script's control-flow graphs. *control_flow_fine* is the thunk the
-    trap-removal transpose reads the sub-statement step-over off, absent where a caller wants only
-    the coarse reading.
+    The `Ps1FaultReach` over one script's control-flow graphs. The finer graph the trap-removal
+    transpose also reads is drawn by the reader itself from the same root, so nothing is passed here
+    but the coarse model.
     """
-    return Ps1FaultReach(control_flow, control_flow_fine)
+    return Ps1FaultReach(control_flow)

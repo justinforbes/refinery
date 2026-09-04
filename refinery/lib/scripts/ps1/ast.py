@@ -670,15 +670,24 @@ def is_soft_error_source(node: Node) -> bool:
     reports and steps over to the next statement, as opposed to a terminating error that ends the
     script (those are named where `ends_the_script` classifies them) or no error at all.
 
-    A may-predicate and a pure shape: it reads syntax, never a value, so it answers True wherever the
-    shape *can* fail and accepts that some instances of the shape never do — a cast that always
-    succeeds is still a source here. That is a missed simplification, never an unsound removal, and is
-    the same conservative direction the fault reader takes everywhere else.
+    A may-predicate and a pure shape: it reads syntax, never a value, so within a shape it lists it
+    answers True wherever that shape *can* fail and accepts that some instances never do — a cast that
+    always succeeds is still a source here, a missed simplification rather than a wrong answer.
 
-    The roster is extended shape by shape, as a measured row needs one. Today:
+    **Completeness is the other axis, and here the roster is deliberately partial.** A soft-error
+    shape it does not list reads as no source at all, so the one place this feeds — the trap-removal
+    transpose — will judge a trap that shape makes load-bearing removable. That is a genuine unsound
+    removal, not a missed simplification, and it is the standing cost of building the list shape by
+    shape rather than deriving it. Each shape is added as a measured row demands it; the list closes
+    the gap one shape at a time, and a known-missing shape is tracked as an expected failure. Today:
 
     - a cast or conversion `[T]x`, whose conversion may fail;
     - a division or remainder `x / y`, `x % y`, whose divisor may be zero.
+
+    Not yet listed, and therefore missed: a throwing method call, a bitwise operator on an operand
+    that does not convert, an out-of-range index, an unresolved command, arithmetic 5.1 defines for
+    no operand pairing — every shape `ends_the_script`'s complement names but this has not yet earned
+    a row for.
 
     The walk stops at a `STATEMENT_LIST_EXPRESSIONS` construct and at a nested script block, because a
     soft source inside one becomes that construct's own node in the finer control-flow graph: claiming

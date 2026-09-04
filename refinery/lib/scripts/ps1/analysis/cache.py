@@ -57,7 +57,6 @@ class Ps1ModelCache(ModelCacheBase):
         '_call_graph',
         '_output_flow',
         '_control_flow',
-        '_control_flow_fine',
         '_faults',
         '_dominance',
         '_blocks',
@@ -74,7 +73,6 @@ class Ps1ModelCache(ModelCacheBase):
     _call_graph: Ps1CallGraph | None
     _output_flow: Ps1OutputFlow | None
     _control_flow: ControlFlowModel | None
-    _control_flow_fine: ControlFlowModel | None
     _faults: Ps1FaultReach | None
     _dominance: DominatorModel | None
     _blocks: Ps1BlockModel | None
@@ -162,21 +160,6 @@ class Ps1ModelCache(ModelCacheBase):
         return self._lazy('_control_flow', lambda: build_control_flow_model(self.root))
 
     @property
-    def control_flow_fine(self) -> ControlFlowModel:
-        """
-        `control_flow` with the finer granularity that descends into a subexpression's statement
-        list, so a statement-terminating error stepping over inside a `$( )` is a path the graph
-        carries rather than detail hidden in one atomic node.
-
-        It is a second model, not a replacement. Every ordering and reaching answer is built on the
-        coarse one-statement-one-node `control_flow`; only the fault reader's trap-removal transpose
-        needs this one, and it asks for it through a thunk, so only a script whose trap removal turns
-        on a soft error inside such a construct ever pays to build it.
-        """
-        return self._lazy(
-            '_control_flow_fine', lambda: build_control_flow_model(self.root, descend=True))
-
-    @property
     def faults(self) -> Ps1FaultReach:
         """
         Where a terminating error raised at a point in this root goes, over `control_flow`. The
@@ -184,18 +167,15 @@ class Ps1ModelCache(ModelCacheBase):
         question every removing pass used to answer for itself by looking at the statement's
         immediate holder, which reads a handler one nesting level away as no handler at all.
 
-        The transpose that weighs deleting a `trap` reads `control_flow_fine` in addition, and only
-        there, so a soft error stepping over inside a `$( )` is the local path it is rather than
-        detail hidden in the one node the coarse graph gives the whole statement. It is passed as a
-        thunk because that finer graph is worth building only where a resuming trap is actually up
-        for removal over such a construct.
+        The transpose that weighs deleting a `trap` reads one further graph — this root at the finer
+        granularity that descends into a `$( )` or `@( )` — so a soft error stepping over inside such
+        a construct is the local path it is rather than detail hidden in the one node the coarse
+        graph gives the whole statement. The reader draws that itself, on demand, from the root it
+        already holds, so only a script whose trap removal turns on such a step-over ever pays for it.
 
         Purely syntactic like the graphs it reads, so it joins nothing else and orders nothing else.
         """
-        return self._lazy(
-            '_faults',
-            lambda: build_fault_reach(self.control_flow, lambda: self.control_flow_fine),
-        )
+        return self._lazy('_faults', lambda: build_fault_reach(self.control_flow))
 
     @property
     def dominance(self) -> DominatorModel:
