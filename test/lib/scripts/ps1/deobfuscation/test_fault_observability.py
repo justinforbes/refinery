@@ -523,48 +523,44 @@ class TestPs1ATrapThatSwallowsOrIsOutOfScopeLeavesTheStatementRemovable(TestPs1)
         """)
 
 
-class TestPs1ARaisingStatementIsObservedByTheStatementsItSkips(TestPs1):
+class TestPs1AStatementTerminatingRaiseAboveAStatementIsRemovable(TestPs1):
     """
-    A terminating error ends the enclosing script block, so the statements written below a raising
-    one do not run. Deleting the raising statement lets them run, which is a behaviour change with
-    no handler standing anywhere: the statements it skips observe it as surely as a `catch` body
-    does. Measured against a 5.1 host and recorded in
-    `test.lib.scripts.ps1.test_oracle.BEHAVIOUR_DEFECTS`.
+    A statement-terminating error — a failed cast, a division by zero — is reported to the error
+    stream and stepped over, so the statement written below a raising one runs whether the raise
+    stands or not. The raise's only effect is an error record nothing here reads, which the unit's
+    default treats as not the artifact, so deleting it is sound and the tool does. Recorded as a
+    deliberate divergence in `test.lib.scripts.ps1.test_oracle.BEHAVIOUR_DIVERGENCES`.
 
-    The quiet twin runs to completion, so nothing below it is skipped and its removal is the job.
+    The quiet twin computes a value and discards it, so it has no effect at all; both are removed.
     """
 
-    @unittest.expectedFailure
-    def test_a_raising_cast_above_a_statement_at_script_scope_is_kept(self):
-        self._assertKept(F"""
+    def test_a_raising_cast_above_a_statement_at_script_scope_is_removed(self):
+        self._assertRemoved(F"""
             {_RAISE}
             {_ANCHOR}
-        """)
+        """, _RAISE)
 
-    @unittest.expectedFailure
-    def test_a_raising_division_above_a_statement_at_script_scope_is_kept(self):
-        self._assertKept(F"""
+    def test_a_raising_division_above_a_statement_at_script_scope_is_removed(self):
+        self._assertRemoved(F"""
             {_RAISE_DIV}
             {_ANCHOR}
-        """)
+        """, _RAISE_DIV)
 
-    @unittest.expectedFailure
-    def test_a_raising_cast_in_a_called_function_above_a_statement_is_kept(self):
-        self._assertKept(F"""
+    def test_a_raising_cast_in_a_called_function_leaves_only_the_statement_below(self):
+        self._assertDeobfuscatesTo(F"""
             function Invoke-Thing {{ {_RAISE} }}
             Invoke-Thing
             {_ANCHOR}
-        """)
+        """, _ANCHOR)
 
-    @unittest.expectedFailure
-    def test_a_raising_cast_above_a_statement_in_the_same_branch_body_is_kept(self):
-        self._assertKept(F"""
+    def test_a_raising_cast_above_a_statement_in_the_same_branch_body_is_removed(self):
+        self._assertRemoved(F"""
             if ({_OPAQUE}) {{
               {_RAISE}
               Write-Host 'BRANCH_RUNS'
             }}
             {_ANCHOR}
-        """)
+        """, _RAISE)
 
     def test_a_quiet_cast_above_a_statement_at_script_scope_is_removed(self):
         self._assertRemoved(F"""
