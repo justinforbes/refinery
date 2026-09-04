@@ -326,9 +326,9 @@ def behaviour(
     payload = base64.b64encode(snippet.encode('utf-8')).decode('ascii')
     result = run(_BEHAVIOUR_SCRIPT.replace('@PAYLOAD@', payload), timeout)
     written = [
-        base64.b64decode(token).decode('utf-8')
+        base64.b64decode(stripped).decode('utf-8')
         for token in result.output.split('\n')
-        if token.strip()
+        if (stripped := token.strip())
     ]
     if result.status != 0:
         written.append(F'THROW\t{_terminating_error(result.errors)}')
