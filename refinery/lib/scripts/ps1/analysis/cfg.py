@@ -457,8 +457,8 @@ class _Builder(CfgBuilder):
         self, statement: Node, frontier: list[CfgNode],
     ) -> list[CfgNode] | None:
         """
-        A leaf statement carrying a value construct whose operand is a statement list — a subexpression
-        `$( )` — modelled at sub-statement granularity so the fault reader sees a statement-terminating
+        A leaf statement carrying a value construct whose operand is a statement list — a `$( )` or a
+        `@( )` — modelled at sub-statement granularity so the fault reader sees a statement-terminating
         error step over to the next statement *inside* the construct. `None` when it carries none, so
         the caller falls back to `opaque`.
 
@@ -567,11 +567,11 @@ def build_ps1_control_flow(root: Ps1Script, descend: bool = False) -> dict[int, 
     """
     One control-flow graph per script block — see `FUNCTION_NODES` — and one for the script itself.
 
-    With *descend* set, a statement carrying a `_DESCENDED_EXPRESSIONS` construct is modelled at
+    With *descend* set, a statement carrying a `STATEMENT_LIST_EXPRESSIONS` construct is modelled at
     sub-statement granularity rather than as one atomic node — the finer graph the fault reader needs
-    to see a statement-terminating error step over inside a `$( )`. It is off by default because every
-    consumer but the fault reader wants the coarse one-statement-one-node graph, and turning it on
-    changes only the graph the caller who asks for it reads.
+    to see a statement-terminating error step over inside a `$( )` or `@( )`. It is off by default
+    because every consumer but the fault reader wants the coarse one-statement-one-node graph, and
+    turning it on changes only the graph the caller who asks for it reads.
     """
     return build_control_flow(root, partial(_Builder, descend=descend), FUNCTION_NODES)
 

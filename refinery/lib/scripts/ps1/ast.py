@@ -27,6 +27,7 @@ from refinery.lib.scripts.ps1.data import (
 from refinery.lib.scripts.ps1.model import (
     Expression,
     Ps1AccessKind,
+    Ps1ArrayExpression,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
     Ps1BinaryExpression,
@@ -647,14 +648,14 @@ def is_reference_cast(expr: Node | None) -> bool:
 
 #: The value-producing constructs whose operand is a statement list PowerShell runs in sequence, so a
 #: statement-terminating error inside one is reported and stepped over to the next statement *within*
-#: the construct rather than ending it. A subexpression `$( )` is the seed. An array expression `@( )`
-#: has the same shape and joins this tuple when a measured row needs it. A pipeline is deliberately
-#: absent: its stages stream rather than run in sequence, and a soft error ends the whole pipeline and
-#: resumes after it, so it is not a statement list. Both the finer control-flow graph (which descends
-#: into one) and `is_soft_error_source` (which stops at one) read this single language-shape fact.
+#: the construct rather than ending it — a subexpression `$( )` and an array expression `@( )`, which
+#: share that shape. A pipeline is deliberately absent: its stages stream rather than run in sequence,
+#: and a soft error ends the whole pipeline and resumes after it, so it is not a statement list. Both
+#: the finer control-flow graph (which descends into one) and `is_soft_error_source` (which stops at
+#: one) read this single language-shape fact.
 #: Left unannotated so an `isinstance` against it narrows to the construct's own type, which is what
 #: lets a caller read the matched construct's statement list off it.
-STATEMENT_LIST_EXPRESSIONS = (Ps1SubExpression,)
+STATEMENT_LIST_EXPRESSIONS = (Ps1SubExpression, Ps1ArrayExpression)
 
 #: The arithmetic operators whose right operand a zero makes fail: division and remainder both raise
 #: a statement-terminating error when it is zero. Read as a shape — the operand's value is not

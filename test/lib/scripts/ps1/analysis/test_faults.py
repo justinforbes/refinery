@@ -437,10 +437,10 @@ class TestPs1RemovingATrapIsJudgedByWhereItsErrorsWouldGoInstead(TestBase):
             swallowing.body[0].try_block.body[0]))
 
 
-class TestPs1AResumingTrapOverASoftErrorInASubexpressionIsKept(TestBase):
+class TestPs1AResumingTrapOverASoftErrorInABracketedStatementListIsKept(TestBase):
     """
-    A statement-terminating error inside `$( )` steps over to the next statement within the bracket,
-    and the subexpression then yields that value; a resuming `trap` around the whole statement
+    A statement-terminating error inside `$( )` or `@( )` steps over to the next statement within
+    the bracket, and the bracket then yields that value; a resuming `trap` around the whole statement
     instead resumes past it. Where those two land differently the trap changes what runs and cannot
     be removed. The coarse graph cannot tell them apart, because the whole assignment is one node
     there; the finer graph the transpose reads separates the local step-over from the resume point.
@@ -464,6 +464,14 @@ class TestPs1AResumingTrapOverASoftErrorInASubexpressionIsKept(TestBase):
     def test_a_division_by_zero_inside_a_subexpression_keeps_the_trap(self):
         self.assertTrue(self._trap_removal_is_observed(
             "trap { continue }; $x = $(1/0; 'in'); Write-Host $x", fine=True))
+
+    def test_a_soft_error_inside_an_array_expression_keeps_the_trap_that_resumes_past_it(self):
+        self.assertTrue(self._trap_removal_is_observed(
+            "trap { continue }; $x = @([int]'a'; 'in'); Write-Host $x", fine=True))
+
+    def test_an_array_expression_that_raises_no_soft_error_lets_the_trap_go(self):
+        self.assertFalse(self._trap_removal_is_observed(
+            "trap { continue }; $x = @('a'; 'b'); Write-Host $x", fine=True))
 
     def test_a_soft_error_at_script_scope_whose_step_over_reconverges_lets_the_trap_go(self):
         self.assertFalse(self._trap_removal_is_observed(
