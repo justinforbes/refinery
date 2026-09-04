@@ -114,7 +114,16 @@ from refinery.lib.scripts.js.strict import (
 # it: its statements run once, at class-definition time, as part of the enclosing function.
 HOIST_BOUNDARY = FUNCTION_NODES + (JsStaticBlock,)
 
-GLOBAL_OBJECT_ALIASES = frozenset({'globalThis', 'global', 'window', 'self', 'top', 'frames'})
+#: The spellings of the global object that name *this* realm's, which is the one a file's own
+#: top-level declarations are properties of. `GLOBAL_OBJECT_ALIASES` knows two more, `top` and
+#: `frames`, deliberately absent here: which document's global object each names depends on where
+#: the file runs — `top` is another document's in a framed one, and both are read by the document a
+#: frame is embedded in — so a removal must not trust either to be this realm's, since deleting a
+#: write for want of a reader in this file deletes one another document reads. A removal keys on
+#: this set; a reading of what code may reach keys on the wider one.
+SAME_REALM_GLOBAL_OBJECT_ALIASES = frozenset({'globalThis', 'global', 'window', 'self'})
+
+GLOBAL_OBJECT_ALIASES = SAME_REALM_GLOBAL_OBJECT_ALIASES | frozenset({'top', 'frames'})
 
 TIMER_NAMES = frozenset({'setTimeout', 'setInterval', 'setImmediate'})
 

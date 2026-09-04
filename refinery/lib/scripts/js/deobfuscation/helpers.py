@@ -49,6 +49,7 @@ from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import side_effect_free
 from refinery.lib.scripts.js.analysis.model import (
     FUNCTION_NODES,
+    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     Binding,
     Role,
     SemanticModel,
@@ -57,10 +58,6 @@ from refinery.lib.scripts.js.analysis.model import (
     is_use_position,
     reference_role,
     walk_receiver_scope,
-)
-from refinery.lib.scripts.js.deobfuscation.options import (
-    is_host_entrypoint,
-    module_execution,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
@@ -111,6 +108,10 @@ from refinery.lib.scripts.js.numbers import (
     js_string_to_number,
     to_js_number,
 )
+from refinery.lib.scripts.js.options import (
+    is_host_entrypoint,
+    module_execution,
+)
 from refinery.lib.scripts.js.strict import (
     directive_prologue,
     is_prologue_host,
@@ -124,19 +125,6 @@ SIMPLE_IDENTIFIER = re.compile(r'^[a-zA-Z_$][a-zA-Z_$0-9]*$')
 
 JS_RESERVED = frozenset(set(KEYWORDS) | FUTURE_RESERVED | {'undefined'})
 
-#: The spellings of the global object that name *this* realm's, which is the one a file's own
-#: top-level declarations are properties of. `refinery.lib.scripts.js.analysis.model` knows two
-#: more, `top` and `frames`, deliberately absent here: which document's global object each names
-#: depends on where the file runs — `top` is another document's in a framed one, and both are read
-#: by the document a frame is embedded in — so a removal must not trust either to be this realm's,
-#: since deleting a write for want of a reader in this file deletes one another document reads. A
-#: removal keys on this set; a reading of what code may reach keys on the wider one.
-SAME_REALM_GLOBAL_OBJECT_ALIASES: frozenset[str] = frozenset({
-    'globalThis',
-    'global',
-    'window',
-    'self',
-})
 VOID_LITERAL_OPERANDS = (JsNumericLiteral, JsStringLiteral, JsBooleanLiteral, JsNullLiteral)
 
 OBJECT_PROTOTYPE_MEMBERS = frozenset({

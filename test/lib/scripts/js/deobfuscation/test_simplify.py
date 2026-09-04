@@ -842,6 +842,118 @@ class TestGlobalAliasStripping(TestJsDeobfuscator):
         )
         self.assertEqual(source, self._simplify(source))
 
+    def test_implicit_global_alias_member_stripped_inside_a_function_called_after_the_write(self):
+        """
+        The read stands in a body no statement order relates to the write, but every call of `f` runs
+        after it, so the definite-assignment model carries the fact through the call site into the
+        body and the alias member collapses there too.
+        """
+        source = inspect.cleandoc(
+            """
+            X = 5;
+            function f() {
+              return globalThis.X;
+            }
+            console.log(f());
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                X = 5;
+                function f() {
+                  return X;
+                }
+                console.log(f());
+                """
+            ),
+            self._simplify(source),
+        )
+
+    def test_implicit_global_alias_member_stripped_after_a_member_spelled_write(self):
+        """
+        `globalThis.X = 5` creates the property in either mode, so the later read collapses; the
+        write itself keeps its member spelling, being a write and not a read.
+        """
+        source = inspect.cleandoc(
+            """
+            globalThis.X = 5;
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                globalThis.X = 5;
+                y = X;
+                """
+            ),
+            self._simplify(source),
+        )
+
+    def test_implicit_global_alias_member_not_stripped_where_a_delete_addresses_the_name(self):
+        """
+        A `delete` anywhere in the program can unbind the name between the write and the read, so no
+        fact about it may be trusted; both spellings of the delete refuse the collapse.
+        """
+        for spelling in ['delete globalThis.X;', 'delete X;']:
+            source = F'X = 5;\n{spelling}\ny = globalThis.X;'
+            with self.subTest(spelling=spelling):
+                self.assertEqual(source, self._simplify(source))
+
+    def test_implicit_global_alias_member_not_stripped_where_the_write_is_strict(self):
+        """
+        In strict code an assignment to an undeclared name throws instead of creating the property,
+        so the write establishes nothing and the alias member is preserved.
+        """
+        source = inspect.cleandoc(
+            """
+            function s() {
+              'use strict';
+              X = 5;
+            }
+            s();
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(source, self._simplify(source))
+
+    def test_implicit_global_alias_member_not_stripped_under_a_reflection_surface(self):
+        """
+        A direct `eval` between the write and the read can unbind the name with code no scan reads,
+        so a reflection-reachable binding is never vouched for.
+        """
+        source = inspect.cleandoc(
+            """
+            X = 5;
+            eval(c);
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(source, self._simplify(source))
+
+    def test_implicit_global_alias_member_not_stripped_after_another_realms_write(self):
+        """
+        `top` and `frames` name another document's global object, so a write through either creates
+        no property a bare name in this file reads.
+        """
+        for alias in ['top', 'frames']:
+            source = F'{alias}.X = 5;\ny = globalThis.X;'
+            with self.subTest(alias=alias):
+                self.assertEqual(source, self._simplify(source))
+
+    def test_implicit_global_alias_member_not_stripped_after_a_conditional_write(self):
+        """
+        The write completes only on the branch its guard takes, so no fact holds at the read.
+        """
+        source = inspect.cleandoc(
+            """
+            cond && (X = 5);
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(source, self._simplify(source))
+
     def test_global_alias_preserved_when_locally_shadowed(self):
         source = inspect.cleandoc(
             """

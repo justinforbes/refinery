@@ -1135,8 +1135,9 @@ class TestEffectModel(TestBase):
     def test_side_effect_free_default_clears_allocation_holding_an_unresolved_read(self):
         """
         The default read effect is the getter half alone, which a name no binding resolves does not
-        trip, so a discarded allocation holding one is cleared. The store-removal sweep rests on this
-        (`test_unfixed_defects.TestAReadOfANameNothingBindsThrowsWhereverItStands`).
+        trip, so a discarded allocation holding one is cleared. Every removal context has moved off
+        this default onto *reads_may_throw* with a definite-assignment vouch; the default remains for
+        callers that reorder rather than discard, where the read is kept either way.
         """
         for source, kind in [('x = [zzz];', JsArrayExpression), ('x = ({p: zzz});', JsObjectExpression)]:
             ast, effects = self._effects(source)

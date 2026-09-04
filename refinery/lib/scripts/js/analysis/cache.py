@@ -11,6 +11,10 @@ slots and their `build_*` wiring.
 from __future__ import annotations
 
 from refinery.lib.scripts import Transformer
+from refinery.lib.scripts.js.analysis.assignment import (
+    DefiniteAssignmentModel,
+    build_definite_assignment,
+)
 from refinery.lib.scripts.js.analysis.cfg import ControlFlowModel, build_control_flow_model
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel, build_dominance
 from refinery.lib.scripts.js.analysis.effects import EffectModel, build_effects
@@ -18,6 +22,7 @@ from refinery.lib.scripts.js.analysis.liveness import LivenessModel, build_liven
 from refinery.lib.scripts.js.analysis.model import SemanticModel, build_semantic_model
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel, build_reaching
 from refinery.lib.scripts.js.model import JsCallExpression, JsNewExpression, JsScript
+from refinery.lib.scripts.js.options import module_execution
 from refinery.lib.scripts.modelcache import ModelCacheBase
 
 
@@ -27,8 +32,10 @@ class ModelCache(ModelCacheBase):
     `refinery.lib.scripts.js.analysis.effects.EffectModel`, the
     `refinery.lib.scripts.js.analysis.cfg.ControlFlowModel` shared by the
     `refinery.lib.scripts.js.analysis.liveness.LivenessModel` and
-    `refinery.lib.scripts.js.analysis.dominance.DominanceModel`, and the
-    `refinery.lib.scripts.js.analysis.reaching.ReachingModel` layered on them, for one root script.
+    `refinery.lib.scripts.js.analysis.dominance.DominanceModel`, the
+    `refinery.lib.scripts.js.analysis.reaching.ReachingModel` layered on them, and the
+    `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel` built under the run's
+    execution model, for one root script.
     The memoized models are dropped whenever this root's AST-mutation counter advances past the
     value they were built at, so a transform that reads the cache after an earlier mutation in the
     same pass — even one not yet announced through `refinery.lib.scripts.Transformer.changed` —
@@ -45,7 +52,15 @@ class ModelCache(ModelCacheBase):
     check: the whole suite must pass identically with every pin neutralized.
     """
 
-    _SLOTS = ('_model', '_control_flow', '_effects', '_liveness', '_dominance', '_reaching')
+    _SLOTS = (
+        '_model',
+        '_control_flow',
+        '_effects',
+        '_liveness',
+        '_dominance',
+        '_reaching',
+        '_assignment',
+    )
 
     root: JsScript
     _model: SemanticModel | None
@@ -54,6 +69,7 @@ class ModelCache(ModelCacheBase):
     _liveness: LivenessModel | None
     _dominance: DominanceModel | None
     _reaching: ReachingModel | None
+    _assignment: DefiniteAssignmentModel | None
 
     @property
     def model(self) -> SemanticModel:
@@ -78,6 +94,17 @@ class ModelCache(ModelCacheBase):
     @property
     def reaching(self) -> ReachingModel:
         return self._lazy('_reaching', lambda: build_reaching(self.dominance, self.effects))
+
+    @property
+    def assignment(self) -> DefiniteAssignmentModel:
+        """
+        The `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel` for this root,
+        built under the execution model the run's options select. It is the one establishment
+        answer for implicit-global reads: every consumer in a run reads this slot, so no tree is
+        ever judged under two establishment answers at once.
+        """
+        return self._lazy('_assignment', lambda: build_definite_assignment(
+            self.model, self.control_flow, module_scope=module_execution(self.options)))
 
     def call_established(self, call: JsCallExpression | JsNewExpression) -> bool:
         """

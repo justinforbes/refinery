@@ -1340,7 +1340,7 @@ A_GLOBAL_PROPERTY_NAMED_THROUGH_A_REALM = {
 
 class TestARealmDecidesWhetherAnAliasCollapses(TestBase):
     """
-    `refinery.lib.scripts.js.deobfuscation.helpers.SAME_REALM_GLOBAL_OBJECT_ALIASES` is the set a
+    `refinery.lib.scripts.js.analysis.model.SAME_REALM_GLOBAL_OBJECT_ALIASES` is the set a
     rewrite keys on and the wider one in `refinery.lib.scripts.js.analysis.model` is what a reading
     of code's reach keys on. `refinery.lib.scripts.js.deobfuscation.simplify` read the wider one, so
     a property written on another document's global object was collapsed to a bare name of this one

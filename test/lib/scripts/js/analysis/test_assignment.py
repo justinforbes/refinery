@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+from test import TestBase
+
+from refinery.lib.scripts.js.analysis.assignment import build_definite_assignment
+from refinery.lib.scripts.js.analysis.model import build_semantic_model
+from refinery.lib.scripts.js.model import JsCallExpression, JsIdentifier
+from refinery.lib.scripts.js.parser import JsParser
+
+
+class TestDefiniteAssignment(TestBase):
+    """
+    Laws over `DefiniteAssignmentModel.definitely_assigned_at`. Each program reads the implicit
+    global `X` exactly once as the argument of a call to `probe`, and the assertion is whether a
+    write to `X` has certainly completed before that read runs — under JavaScript semantics, never
+    under what any transform would like the answer to be.
+    """
+
+    @staticmethod
+    def _vouched(source: str, *, module_scope: bool = False) -> bool:
+        ast = JsParser(source).parse()
+        model = build_semantic_model(ast)
+        assignment = build_definite_assignment(model, module_scope=module_scope)
+        for node in ast.walk():
+            if (
+                isinstance(node, JsCallExpression)
+                and isinstance(node.callee, JsIdentifier)
+                and node.callee.name == 'probe'
+            ):
+                argument = node.arguments[0]
+                assert isinstance(argument, JsIdentifier)
+                return assignment.definitely_assigned_at(model.resolve(argument), argument)
+        raise AssertionError('no probe call in the program')
+
+    def test_a_straight_line_write_vouches(self):
+        self.assertTrue(self._vouched('X = 1;\nprobe(X);'))
+
+    def test_a_write_whose_right_hand_side_may_throw_still_vouches(self):
+        """
+        `f()` may throw, but then the statement does not complete and the raising edge carries no
+        facts; on the one path that reaches the probe, the write completed.
+        """
+        self.assertTrue(self._vouched('X = f();\nprobe(X);'))
+
+    def test_a_compound_write_vouches(self):
+        """
+        `X += 1` reads `X` before writing it, so a normal completion proves the name already existed.
+        """
+        self.assertTrue(self._vouched('X += 1;\nprobe(X);'))
+
+    def test_a_member_spelled_write_through_this_realms_global_vouches(self):
+        self.assertTrue(self._vouched('globalThis.X = 1;\nprobe(X);'))
+
+    def test_a_ternary_writing_in_both_arms_vouches(self):
+        self.assertTrue(self._vouched('c ? (X = 1) : (X = 2);\nprobe(X);'))
+
+    def test_a_literal_store_inside_a_try_vouches(self):
+        """
+        Evaluating `X = 1` in sloppy script code cannot throw, so the raising edge out of the `try`
+        is never taken and may carry the write vacuously.
+        """
+        self.assertTrue(self._vouched('try { X = 1; } catch (e) {}\nprobe(X);'))
+
+    def test_a_throwable_store_inside_a_try_does_not_vouch(self):
+        """
+        When `f()` throws, the `catch` runs with `X` still unbound, and both paths join in front of
+        the probe.
+        """
+        self.assertFalse(self._vouched('try { X = f(); } catch (e) {}\nprobe(X);'))
+
+    def test_a_called_functions_exit_summary_vouches(self):
+        self.assertTrue(self._vouched('function w() { X = 1; }\nw();\nprobe(X);'))
+
+    def test_an_iifes_exit_summary_vouches(self):
+        self.assertTrue(self._vouched('(function () { X = 1; })();\nprobe(X);'))
+
+    def test_a_generator_callee_does_not_vouch(self):
+        """
+        Calling a generator runs no statement of its body; the body runs when the result is driven,
+        which the call completing says nothing about.
+        """
+        self.assertFalse(self._vouched('function* g() { X = 1; }\ng();\nprobe(X);'))
+
+    def test_an_async_callee_does_not_vouch(self):
+        """
+        An async call completing normally means the promise exists, not that the body ran to its
+        end; the write is real here, and the refusal is the conservative side of that gap.
+        """
+        self.assertFalse(self._vouched('async function a() { X = 1; }\na();\nprobe(X);'))
+
+    def test_a_fact_at_every_direct_call_site_enters_the_body(self):
+        self.assertTrue(self._vouched('X = 1;\nfunction f() { probe(X); }\nf();'))
+
+    def test_a_fact_at_an_iifes_call_site_enters_the_body(self):
+        self.assertTrue(self._vouched('X = 1;\n(function () { probe(X); })();'))
+
+    def test_a_call_site_before_the_write_gives_the_body_no_fact(self):
+        self.assertFalse(self._vouched('function f() { probe(X); }\nf();\nX = 1;'))
+
+    def test_a_function_a_second_name_reaches_gets_no_entry_fact(self):
+        """
+        `h()` is not a direct call of `f`'s own name, so the meet over `f`'s call sites cannot see
+        every invocation and the body starts empty.
+        """
+        self.assertFalse(self._vouched('X = 1;\nfunction f() { probe(X); }\nvar h = f;\nh();'))
+
+    def test_a_write_after_the_read_does_not_vouch(self):
+        self.assertFalse(self._vouched('probe(X);\nX = 1;'))
+
+    def test_a_write_in_the_reads_own_statement_does_not_vouch(self):
+        """
+        Facts hold at statement entry, so strict dominance is required and a same-statement write is
+        refused.
+        """
+        self.assertFalse(self._vouched('(X = 1, probe(X));'))
+
+    def test_a_short_circuited_write_does_not_vouch(self):
+        self.assertFalse(self._vouched('c && (X = 1);\nprobe(X);'))
+
+    def test_a_ternary_writing_in_one_arm_does_not_vouch(self):
+        self.assertFalse(self._vouched('c ? (X = 1) : 0;\nprobe(X);'))
+
+    def test_a_logical_assignments_right_hand_side_does_not_vouch(self):
+        self.assertFalse(self._vouched('a ||= (X = 1);\nprobe(X);'))
+
+    def test_a_write_behind_an_optional_link_does_not_vouch(self):
+        self.assertFalse(self._vouched('o?.p[X = 1];\nprobe(X);'))
+
+    def test_a_loop_head_target_does_not_vouch(self):
+        """
+        A `for-in` over an empty subject writes its target zero times.
+        """
+        self.assertFalse(self._vouched('for (X in obj) {}\nprobe(X);'))
+
+    def test_a_write_under_an_opaque_loop_test_does_not_vouch(self):
+        self.assertFalse(self._vouched('while (c) { X = 1; break; }\nprobe(X);'))
+
+    def test_a_name_a_bare_delete_addresses_is_never_vouched_for(self):
+        self.assertFalse(self._vouched('X = 1;\ndelete X;\nprobe(X);'))
+
+    def test_a_name_a_member_delete_addresses_is_never_vouched_for(self):
+        """
+        The delete stands after the probe, but a getter or an iterator can run it between any write
+        and any read, so the name is not tracked at all.
+        """
+        self.assertFalse(self._vouched('X = 1;\nprobe(X);\ndelete globalThis.X;'))
+
+    def test_a_computed_delete_through_the_global_unvouches_everything(self):
+        self.assertFalse(self._vouched('X = 1;\ndelete globalThis[k];\nprobe(X);'))
+
+    def test_a_reflection_reachable_name_is_never_vouched_for(self):
+        self.assertFalse(self._vouched('X = 1;\neval(c);\nprobe(X);'))
+
+    def test_a_strict_write_does_not_vouch(self):
+        """
+        In strict code the assignment throws instead of creating the property.
+        """
+        self.assertFalse(self._vouched(
+            "function s() { 'use strict'; X = 1; }\ns();\nprobe(X);"))
+
+    def test_no_bare_write_vouches_under_the_module_reading(self):
+        self.assertFalse(self._vouched('X = 1;\nprobe(X);', module_scope=True))
+
+    def test_a_top_level_this_write_vouches_only_under_the_script_reading(self):
+        source = 'this.X = 1;\nprobe(X);'
+        self.assertTrue(self._vouched(source))
+        self.assertFalse(self._vouched(source, module_scope=True))
+
+    def test_a_write_through_another_realms_alias_does_not_vouch(self):
+        for alias in ['top', 'frames']:
+            with self.subTest(alias=alias):
+                self.assertFalse(self._vouched(F'{alias}.X = 1;\nprobe(X);'))
+
+    def test_an_unreachable_read_is_not_vouched_for(self):
+        self.assertFalse(self._vouched('X = 1;\nfunction f() { return; probe(X); }\nf();'))

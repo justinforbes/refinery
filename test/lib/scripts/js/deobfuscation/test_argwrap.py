@@ -5,7 +5,7 @@ import inspect
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.deobfuscation.argwrap import JsAssignmentsAsFunctionArgs
-from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
+from refinery.lib.scripts.js.options import DeobfuscationOptions
 
 
 class TestStackUnwrapper(TestJsDeobfuscator):

@@ -984,6 +984,7 @@ class EffectModel:
         call_established: Callable[[JsCallExpression | JsNewExpression], bool] | None = None,
         discarded: bool = False,
         reads_may_throw: bool = False,
+        read_established: Callable[[JsIdentifier], bool] | None = None,
     ) -> bool:
         """
         Whether evaluating *node* can be dropped or reordered without an observable side effect, with
@@ -1007,14 +1008,16 @@ class EffectModel:
         but also when it may throw a `ReferenceError`, which is the throw half of the *read_effect*
         contract that `read_has_dynamic_effect` supplies only the getter half of. A caller discarding an
         allocation to answer its type or truthiness asks for it, so the throw that reading the allocation
-        would have raised is kept where the value is dropped. It is off by default because the
-        store-removal sweep cannot yet take it — dropping the write that establishes a name in the same
-        round the read of it is preserved would leave a read of a name nothing binds
-        (`test_unfixed_defects.TestAReadOfANameNothingBindsThrowsWhereverItStands`).
+        would have raised is kept where the value is dropped; so does every removal context, so a
+        discarded expression cannot take an unestablished read with it. With *read_established* such a
+        caller passes its establishment proof — in every consumer the query of one shared
+        `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel` — and a may-throw read the
+        proof vouches a completed creating write for is free again, which is what lets a sweep still
+        drop `X = 5; y = X;` whole rather than keep the read of `X` a kept store establishes.
         """
         read_effect = self.model.read_has_dynamic_effect
         if reads_may_throw:
-            read_effect = self._read_effectful_or_throwing
+            read_effect = self._throwing_read_effect(read_established)
         return side_effect_free(
             node,
             defunct,
@@ -1025,6 +1028,26 @@ class EffectModel:
             discarded,
             self.is_pure_call_discarded,
         )
+
+    def _throwing_read_effect(
+        self, read_established: Callable[[JsIdentifier], bool] | None,
+    ) -> Callable[[Node], bool]:
+        """
+        The read leaf for a caller that keeps the throw half of the contract: rejects a read that
+        fires a `with` object's getter or may throw a `ReferenceError`, except one *read_established*
+        vouches a creating write has certainly completed for.
+        """
+        if read_established is None:
+            return self._read_effectful_or_throwing
+
+        def read_effect(node: Node) -> bool:
+            if self.model.read_has_dynamic_effect(node):
+                return True
+            if not isinstance(node, JsIdentifier) or not self.model.read_may_throw(node):
+                return False
+            return not read_established(node)
+
+        return read_effect
 
     def _read_effectful_or_throwing(self, node: Node) -> bool:
         """

@@ -25,13 +25,15 @@ This transformer performs four phases:
 """
 from __future__ import annotations
 
-from refinery.lib.scripts import Node, _remove_from_parent
+from refinery.lib.scripts import Node, _remove_from_parent, owning_list
+from refinery.lib.scripts.js.analysis.assignment import DefiniteAssignmentModel
 from refinery.lib.scripts.js.analysis.cache import model_cache
 from refinery.lib.scripts.js.analysis.effects import EffectModel, object_member_access_runs_accessor
 from refinery.lib.scripts.js.analysis.liveness import LivenessModel
 from refinery.lib.scripts.js.analysis.model import (
     FUNCTION_NODES,
     GLOBAL_OBJECT_ALIASES,
+    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     Binding,
     BindingKind,
     Scope,
@@ -44,7 +46,6 @@ from refinery.lib.scripts.js.analysis.model import (
 )
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
-    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     BodyProcessingTransformer,
     a_host_reaches_the_binding,
     access_key,
@@ -381,6 +382,7 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         self._effects: EffectModel | None = None
         self._liveness: LivenessModel | None = None
         self._reaching: ReachingModel | None = None
+        self._defassign: DefiniteAssignmentModel | None = None
 
     def visit_JsScript(self, node: JsScript):
         """
@@ -398,6 +400,7 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
             self._effects = cache.effects
             self._liveness = cache.liveness
             self._reaching = cache.reaching
+            self._defassign = cache.assignment
             self._has_reflection = self._model.has_reflection_surface()
             self._remove_dead_stores(node)
             self._localize_pseudo_globals(node)
@@ -563,7 +566,11 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         """
         return self.effects.is_side_effect_free(
             node, defunct, member_safe=self._member_read_ok, call_established=self._call_established,
-            discarded=True)
+            discarded=True, reads_may_throw=True, read_established=self._read_established)
+
+    def _read_established(self, node: JsIdentifier) -> bool:
+        assert self._defassign is not None
+        return self._defassign.definitely_assigned_at(self.model.resolve(node), node)
 
     def _call_established(self, call: JsCallExpression | JsNewExpression) -> bool:
         """
@@ -759,11 +766,9 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
                 stores.setdefault(binding, []).append(node)
         if not stores:
             return set(), set()
-        dead = self._dead_store_bindings(stores)
+        dead, removable = self._dead_store_bindings(stores, defunct)
         if not dead:
             return set(), set()
-        dead_names = {binding.name for binding in dead}
-        all_defunct = defunct | dead_names
         preserved: set[JsExpressionStatement] = set()
         eliminated: set[str] = set()
         for binding in dead:
@@ -771,7 +776,7 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
             for stmt in stores[binding]:
                 expr = stmt.expression
                 assert isinstance(expr, JsAssignmentExpression)
-                if expr.right is None or self._is_removable(expr.right, all_defunct):
+                if expr.right is None or removable[id(stmt)]:
                     if _remove_from_parent(stmt):
                         self.mark_changed()
                     else:
@@ -787,8 +792,8 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         return eliminated, preserved
 
     def _dead_store_bindings(
-        self, stores: dict[Binding, list[JsExpressionStatement]],
-    ) -> set[Binding]:
+        self, stores: dict[Binding, list[JsExpressionStatement]], defunct: set[str],
+    ) -> tuple[set[Binding], dict[int, bool]]:
         """
         From candidate bindings mapped to their removable assignments, return those that are dead. A
         binding is live if it has a read that is *not* contained in the right-hand side of any candidate
@@ -802,28 +807,69 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         """
         candidates = set(stores)
         rhs_owner: dict[int, Binding] = {}
+        rhs_names: dict[int, frozenset[str]] = {}
+        all_statements: list[JsExpressionStatement] = []
         for binding, statements in stores.items():
             for stmt in statements:
+                all_statements.append(stmt)
                 expr = stmt.expression
                 if isinstance(expr, JsAssignmentExpression) and expr.right is not None:
                     rhs_owner[id(expr.right)] = binding
-        readers: dict[Binding, set[Binding]] = {binding: set() for binding in candidates}
+                    rhs_names[id(stmt)] = frozenset(collect_identifier_names(expr.right))
         live: set[Binding] = set()
-        for binding in candidates:
-            for read in binding.reads:
-                owner = self._covering_store(read, rhs_owner)
-                if owner is None or owner is binding:
-                    live.add(binding)
+        removable: dict[int, bool] = {}
+        rhs_verdicts: dict[int, bool] = {}
+        pending = list(all_statements)
+        while True:
+            assumed_dead = candidates - live
+            defunct_now = defunct | {binding.name for binding in assumed_dead}
+            for stmt in pending:
+                expr = stmt.expression
+                if isinstance(expr, JsAssignmentExpression) and expr.right is not None:
+                    verdict = self._is_removable(expr.right, defunct_now)
+                    removable[id(stmt)] = verdict
+                    rhs_verdicts[id(expr.right)] = verdict and owning_list(stmt) is not None
                 else:
-                    readers[binding].add(owner)
-        changed = True
-        while changed:
-            changed = False
+                    removable[id(stmt)] = True
+            grown = set(live)
             for binding in candidates - live:
-                if readers[binding] & live:
-                    live.add(binding)
-                    changed = True
-        return candidates - live
+                for read in binding.reads:
+                    owner = self._covering_store(read, rhs_owner)
+                    if owner is None or owner is binding:
+                        grown.add(binding)
+                        break
+                    if not self._read_deleted(read, rhs_owner, rhs_verdicts, assumed_dead):
+                        grown.add(binding)
+                        break
+            newly_live = grown - live
+            if not newly_live:
+                break
+            live = grown
+            newly_names = {binding.name for binding in newly_live}
+            pending = [
+                stmt for stmt in all_statements
+                if rhs_names.get(id(stmt), frozenset()) & newly_names
+            ]
+        return candidates - live, removable
+
+    @staticmethod
+    def _read_deleted(
+        read: Node,
+        rhs_owner: dict[int, Binding],
+        rhs_verdicts: dict[int, bool],
+        assumed_dead: set[Binding],
+    ) -> bool:
+        cursor: Node | None = read
+        while cursor is not None:
+            owner = rhs_owner.get(id(cursor))
+            if (
+                owner is not None
+                and owner in assumed_dead
+                and rhs_verdicts.get(id(cursor), False)
+            ):
+                return True
+            cursor = cursor.parent
+        return False
 
     @staticmethod
     def _covering_store(node: Node, rhs_owner: dict[int, Binding]) -> Binding | None:

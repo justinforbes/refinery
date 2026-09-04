@@ -1001,10 +1001,13 @@ class TestAReadOfALexicalBindingBeforeItsDeclarationThrows(TestBase):
     and for the same program with the declaration written in front of the read; both of those calls
     are discarded rightly.
 
-    Resolving the read correctly is not the whole of the fix. The sweep that removes the store asks
-    no question of the read either, so a store holding a free name is removed from these same
-    positions and its program comes back running too; a dead zone read is the case where the name
-    does resolve and the answer is still that the read may not happen.
+    Resolving the read correctly is the whole of what is missing. The sweep that removes the store
+    does ask its question of the read now — a store holding a name nothing binds is kept, with a
+    definite-assignment model deciding when a creating write has certainly run
+    (`refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel`) — but that question is
+    only reached for a read `SemanticModel.read_may_throw` flags, and a dead zone read resolves, so
+    it is never flagged; a dead zone read is the case where the name does resolve and the answer is
+    still that the read may not happen.
     """
 
     @unittest.expectedFailure
@@ -1026,129 +1029,6 @@ class TestAReadOfALexicalBindingBeforeItsDeclarationThrows(TestBase):
         )
 
 
-#: A program whose one failure is a read of a name nothing binds, mapped to the behavior Node gives
-#: it. Each read stands where nothing goes on to use the value around it — a store no later
-#: statement reads, an assignment to a name no later statement reads, and a container built into
-#: such a store — so the expression holding the read is discarded and the read goes with it.
-A_DISCARDED_READ_OF_A_NAME_NOTHING_BINDS = {
-    'function f() { let v = zzz; }\nf();\nconsole.log(1);\n': ('', 'ReferenceError'),
-    'function f() { var v = zzz; }\nf();\nconsole.log(1);\n': ('', 'ReferenceError'),
-    'y = a;\nconsole.log(1);\n': ('', 'ReferenceError'),
-    'var o = { p: g };\nconsole.log(1);\n': ('', 'ReferenceError'),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAReadOfANameNothingBindsThrowsWhereverItStands(TestBase):
-    """
-    Reading a name no binding resolves throws a `ReferenceError`, and the gate that decides whether
-    evaluating an expression may be dropped — `refinery.lib.scripts.js.analysis.effects` and its
-    `side_effect_free` — answers that such a read does nothing. Wherever an expression is discarded
-    the read inside it is therefore discarded too, and the program comes back running to the end.
-    No dead zone is involved and no host is: the name is bound nowhere, under every engine, and
-    Node refuses each of these programs having printed nothing.
-
-    The same gate is reached at an allocation whose shape a fold reads — what `typeof [zzz]` calls
-    it, which branch `{p: zzz} ? 1 : 2` picks — where the program does ask a question of the value
-    and the answer is given without building it. That fold now demands the throw half of the gate at
-    its own site, keeping the allocation where building it would throw
-    (`test.lib.scripts.js.deobfuscation.test_simplify
-    .TestAnAllocationDiscardedForItsShapeKeepsWhatBuildingItThrows`); the sweep here cannot take that
-    demand, which is the whole of what this entry is about. Here nothing is asked: the expression is
-    thrown away whole, so the gate is reached with no fold in front of it.
-    `TestAReadOfALexicalBindingBeforeItsDeclarationThrows` is the case where the name does resolve
-    and the read may still not happen; the last paragraph of that entry is about this defect, the
-    other half of the fix it needs.
-
-    The hook for the fix already exists and is already documented for it: `side_effect_free` takes
-    a *read_effect* whose contract says the read it rejects may fire the `with` object's getter or
-    throw, and `EffectModel.is_side_effect_free` supplies only the getter half of that contract,
-    which is `SemanticModel.read_has_dynamic_effect`. Widening it to reject every read that
-    `SemanticModel.read_may_throw` rejects was measured, and it does correct every row below. It
-    also breaks a program that is right today:
-
-        X = 5; y = X; console.log(1);
-
-    Node prints `1` for it and so does the deobfuscation as it stands. Under the widened hook the
-    program comes back as `X;` in front of the print, which throws: the store-removal pass drops
-    the write that establishes `X` in the same round in which the preserved right-hand side of
-    `y = X` keeps the read of it standing. Widening the hook by itself therefore buys the four rows
-    below at the price of a fifth answer, and a fix has to settle what that pass does with a store
-    whose value it may no longer drop.
-    """
-
-    @unittest.expectedFailure
-    def test_a_read_of_a_name_nothing_binds_is_not_dropped_with_its_expression(self):
-        """
-        Node refuses each program of `A_DISCARDED_READ_OF_A_NAME_NOTHING_BINDS` having printed
-        nothing, with a `ReferenceError` reading `zzz is not defined` and the same for `a` and for
-        `g`. Every deobfuscation prints `1`: the two programs that call a function come back as
-        `void 0;` in front of the print, and the two written at the top of the file come back as
-        the print alone.
-        """
-        rows = A_DISCARDED_READ_OF_A_NAME_NOTHING_BINDS
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            {source: (answer, answer) for source, answer in rows.items()},
-        )
-
-
-#: A program whose discarded read of a name nothing binds stands inside a `try`, mapped to what Node
-#: prints for it. The read throws, the `catch` clause runs, and the program goes on to the end, so
-#: the whole of the defect is one line of output and neither the program nor its deobfuscation ends
-#: in an error. The last two rows are the controls: a `throw` and a member read on `null` reach the
-#: same `catch` from the same block and are kept.
-A_DISCARDED_READ_A_TRY_CATCHES = {
-    'try {\n  var x = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
-    'try {\n  let v = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
-    'try {\n  y = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
-    'try {\n  var o = { p: missing };\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
-        '2\n3\n',
-    'try {\n  throw 1;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
-    'try {\n  null.p;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n': '2\n3\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAReadOfANameNothingBindsInsideATryIsCaught(TestBase):
-    """
-    This is the same gate `TestAReadOfANameNothingBindsThrowsWhereverItStands` pins — a
-    discarded expression holding a read of a name no binding resolves is dropped, read and all —
-    asked in the one place where dropping it costs no error. It is a separate entry rather than a
-    row of `A_DISCARDED_READ_OF_A_NAME_NOTHING_BINDS` because every row of that corpus is a
-    program Node refuses and a deobfuscation that runs, and the law over it is stated in those
-    terms; here both sides run to the end and print, and only the first line of output tells them
-    apart. A ledger of behavior-preservation defects that only ever compares an error against
-    no error would not have this defect in it at all, which is the reason to keep it stated on
-    its own.
-
-    A `catch` clause is what turns the throw into output: the read fails, the clause runs, and the
-    program carries on. Emptying the `try` block takes the clause's run away with it, so the line
-    the clause prints is gone and the line after the statement is all that is left.
-
-    The last two rows are the control. A `throw` and a member read on `null` reach the same clause
-    from the same block, are not reads of a name, and are kept, so an entry that started passing by
-    refusing to touch a `try` at all would be reported as an unexpected success here.
-    """
-
-    @unittest.expectedFailure
-    def test_a_read_that_throws_inside_a_try_still_reaches_the_catch(self):
-        """
-        Node prints `2` and then `3` for every program of `A_DISCARDED_READ_A_TRY_CATCHES`, the
-        first line from the `catch` clause the failed read reaches and the second from the statement
-        after the `try`. The four deobfuscations whose block holds a read come back with that block
-        emptied — `try {} catch (e) { console.log(2); }` — and print `3` alone.
-        """
-        rows = A_DISCARDED_READ_A_TRY_CATCHES
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
-#: A program that calls a function whose body reads a name nothing binds and prints the result,
-#: mapped to the behavior Node gives it. The read stands in a store no later statement reads, which
-#: is what lets the body be emptied down to the value it returns. The last two rows are the
 #: A program handing a name nothing binds to a wrapper whose body reads the parameter under
 #: `typeof`, mapped to what Node prints for it. At the call site the argument is read as a value
 #: and throws; substituted into the `typeof` operand, the same spelling stands in the one position
@@ -1171,11 +1051,12 @@ class TestAReadMovedUnderTypeofKeepsItsThrow(TestBase):
     `typeof` is the one operand position where reading a name nothing binds does not throw, so
     substituting a call-site argument into it erases the `ReferenceError` the call site raised.
     The admission — `refinery.lib.scripts.js.deobfuscation.helpers.is_safe_iife_inline` — counts
-    a bare identifier argument as side-effect-free wherever the body uses it, because the effect
-    gate `TestAReadOfANameNothingBindsThrowsWhereverItStands` pins answers that such a read does
-    nothing. Even under the widening documented there, an argument moved into a `typeof` operand
-    mutes the throw the widened gate would order, so the admission additionally has to refuse the
-    position, not only classify the read.
+    a bare identifier argument as side-effect-free wherever the body uses it, asking no
+    establishment question of the read. The removal contexts now ask that question of every
+    may-throw read (`refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel`), but
+    classifying this read correctly is not enough for the admission: an argument moved into a
+    `typeof` operand mutes the throw even when the gate orders it kept, so the admission
+    additionally has to refuse the position, not only classify the read.
     """
 
     @unittest.expectedFailure
@@ -1189,61 +1070,6 @@ class TestAReadMovedUnderTypeofKeepsItsThrow(TestBase):
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             each_program_still_prints(rows),
-        )
-
-
-#: controls: the same read written where no store holds it, and the returned value itself.
-A_CALL_WHOSE_BODY_READS_A_NAME_NOTHING_BINDS = {
-    'function f() {\n  var x = missing;\n  return 7;\n}\nconsole.log(f());\n':
-        ('', 'ReferenceError'),
-    'function f() {\n  var x = { p: missing };\n  return 7;\n}\nconsole.log(f());\n':
-        ('', 'ReferenceError'),
-    'var f = () => {\n  var x = missing;\n  return 7;\n};\nconsole.log(f());\n':
-        ('', 'ReferenceError'),
-    'function f() {\n  missing;\n  return 7;\n}\nconsole.log(f());\n': ('', 'ReferenceError'),
-    'function f() {\n  return missing;\n}\nconsole.log(f());\n': ('', 'ReferenceError'),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestACallWhoseBodyReadsANameNothingBindsIsNotAValue(TestBase):
-    """
-    A call that cannot return, because evaluating its body throws, is not a call that may be written
-    as the value it would have returned. The result here is not merely a call that survives where it
-    should have gone: the call is replaced by a literal, so the program that refused to run comes
-    back printing a number.
-
-    Two gates have to be passed for that, and widening the one
-    `TestAReadOfANameNothingBindsThrowsWhereverItStands` names would only close the first. The store
-    holding the read is dropped because the gate that entry is about answers that the read does
-    nothing, which leaves a body that only returns. What then replaces the call is decided by
-    `EffectSummary.is_literal_replaceable`, and that property does not consult
-    `EffectSummary.throws` at all — deliberately, since a literal replacement is meant for an
-    evaluator that ran the call to a value, and such an evaluator reproduces the throw by
-    throwing. `throws` is set for every function below; it is the second gate, not the summary,
-    that has to learn the difference between a value an evaluator computed and one the body was
-    read to have.
-
-    The last two rows are the control, and they pass today: the same read written as a statement of
-    its own and the same read written as the returned expression are both kept, so an entry that
-    began passing by refusing to fold any call at all would be an unexpected success here.
-    """
-
-    @unittest.expectedFailure
-    def test_a_call_that_cannot_return_is_not_replaced_by_what_it_would_have_returned(self):
-        """
-        Node refuses every program of `A_CALL_WHOSE_BODY_READS_A_NAME_NOTHING_BINDS` having printed
-        nothing, with a `ReferenceError` reading
-
-            missing is not defined
-
-        The three deobfuscations whose read stands in a store come back as `console.log(7);` and
-        print `7`.
-        """
-        rows = A_CALL_WHOSE_BODY_READS_A_NAME_NOTHING_BINDS
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            {source: (answer, answer) for source, answer in rows.items()},
         )
 
 

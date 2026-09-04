@@ -19,7 +19,6 @@ from refinery.lib.scripts.js.deobfuscation.globalfinder import JsGlobalFinderInl
 from refinery.lib.scripts.js.deobfuscation.iifeaccessor import JsIIFEAccessorPromoter
 from refinery.lib.scripts.js.deobfuscation.namespaces import JsNamespaceFlattening
 from refinery.lib.scripts.js.deobfuscation.objectfold import JsObjectFold
-from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
 from refinery.lib.scripts.js.deobfuscation.protospelling import JsPrototypeSpellingNormalization
 from refinery.lib.scripts.js.deobfuscation.reflection import JsReflectionInlining
 from refinery.lib.scripts.js.deobfuscation.restunpack import JsRestArrayUnpacking
@@ -30,6 +29,7 @@ from refinery.lib.scripts.js.deobfuscation.unshuffle import JsArrayUnshuffle
 from refinery.lib.scripts.js.deobfuscation.unused import JsUnusedCodeRemoval
 from refinery.lib.scripts.js.deobfuscation.wrappers import JsCallWrapperInliner
 from refinery.lib.scripts.js.model import JsScript
+from refinery.lib.scripts.js.options import DeobfuscationOptions
 from refinery.lib.scripts.pipeline import (
     DeobfuscationPipeline,
     PipelineObserver,
@@ -109,7 +109,7 @@ def deobfuscate(
     legitimate deobfuscation, only a runaway loop. Pass `0` to disable the bound entirely. *module*
     selects the execution model the input is assumed to run under and *entrypoints* names top-level
     functions a host calls by name; see
-    `refinery.lib.scripts.js.deobfuscation.options.DeobfuscationOptions`. *observer* is called around
+    `refinery.lib.scripts.js.options.DeobfuscationOptions`. *observer* is called around
     every transformer, which is how a property of the tree is attributed to the pass that moved it; see
     `refinery.lib.scripts.js.deobfuscation.audit.StrictModeAudit`.
     """

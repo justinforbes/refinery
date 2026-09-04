@@ -52,7 +52,6 @@ from refinery.lib.scripts.js.deobfuscation.helpers import (
     string_value,
     walk_scope,
 )
-from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.deobfuscation.strict_divergence import diverges_under_strict
 from refinery.lib.scripts.js.model import (
     JsArrowFunctionExpression,
@@ -78,6 +77,7 @@ from refinery.lib.scripts.js.model import (
     strip_parens,
     wraps_return,
 )
+from refinery.lib.scripts.js.options import module_execution
 from refinery.lib.scripts.js.strict import (
     collect_strict_violations,
     declares_use_strict,

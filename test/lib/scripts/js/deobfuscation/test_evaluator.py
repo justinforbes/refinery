@@ -6,7 +6,7 @@ from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
 from refinery.lib.scripts.js.deobfuscation.evaluator import JsFunctionEvaluator
 from refinery.lib.scripts.js.deobfuscation.interpreter import IrreducibleExpression, JsInterpreter
-from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
+from refinery.lib.scripts.js.options import DeobfuscationOptions
 from refinery.lib.scripts.js.deobfuscation.helpers import JsBuffer
 from refinery.lib.scripts.js.model import (
     JsFunctionDeclaration,

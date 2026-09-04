@@ -6,7 +6,7 @@ import unittest
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
-from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
+from refinery.lib.scripts.js.options import DeobfuscationOptions
 from refinery.lib.scripts.js.deobfuscation.simplify import JsSimplifications
 from refinery.lib.scripts.js.deobfuscation.unused import (
     JsUnusedCodeRemoval,
@@ -2056,6 +2056,120 @@ class TestNodePrintsTheSameWhereTheGlobalObjectEscapes(TestJsDeobfuscator):
         rows = {
             **A_GLOBAL_PROPERTY_WRITE_AN_UNSPELLED_READ_OBSERVES,
             **A_DEAD_PROPERTY_WRITE_ON_ANOTHER_REALMS_GLOBAL,
+        }
+        self.assertEqual(
+            {source: behavior(self._deobfuscate(source)) for source in rows},
+            {source: behavior(source) for source in rows},
+        )
+
+
+#: A program whose one failure is a read of a name nothing binds, standing where nothing uses the
+#: value around it, mapped to the text the deobfuscation writes for it. Reading such a name throws a
+#: `ReferenceError`, so the read survives every discarding context: the store around it may go — the
+#: third row keeps its right-hand side as a bare expression — but the read itself stays and the
+#: program still refuses to run.
+A_KEPT_READ_OF_A_NAME_NOTHING_BINDS: dict[str, str] = {
+    'function f() { let v = zzz; }\nf();\nconsole.log(1);\n':
+        'function f() {\n  let v = zzz;\n}\nf();\nconsole.log(1);',
+    'function f() { var v = zzz; }\nf();\nconsole.log(1);\n':
+        'function f() {\n  var v = zzz;\n}\nf();\nconsole.log(1);',
+    'y = a;\nconsole.log(1);\n': 'a;\nconsole.log(1);',
+    'var o = { p: g };\nconsole.log(1);\n': 'var o = { p: g };\nconsole.log(1);',
+}
+
+#: The same read standing inside a `try`, mapped to the text the deobfuscation writes for it. The
+#: read throws, the `catch` clause runs and prints, and the program carries on, so both sides run
+#: to the end and only the first line of output tells them apart; emptying the block would take the
+#: clause's run away. The store around the read may still go — the third row keeps the read as a
+#: bare expression — and the last two rows are the controls: a `throw` and a member read on `null`
+#: reach the same clause from the same block and are not reads of a name.
+A_KEPT_READ_A_TRY_CATCHES: dict[str, str] = {
+    'try {\n  var x = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
+        'try {\n  var x = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);',
+    'try {\n  let v = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
+        'try {\n  let v = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);',
+    'try {\n  y = missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
+        'try {\n  missing;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);',
+    'try {\n  var o = { p: missing };\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
+        'try {\n  var o = { p: missing };\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);',
+    'try {\n  throw 1;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
+        'try {\n  throw 1;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);',
+    'try {\n  null.p;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
+        'try {\n  null.p;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);',
+}
+
+#: A program that calls a function whose body reads a name nothing binds and prints the result,
+#: mapped to the text the deobfuscation writes for it — the program itself. Evaluating the body
+#: throws, so the call is not a call that may be written as the value it would have returned, and
+#: neither the store holding the read nor the call goes. The last two rows are the controls: the
+#: same read written as a statement of its own and as the returned expression.
+A_KEPT_CALL_WHOSE_BODY_CANNOT_RETURN: dict[str, str] = {
+    source: source.rstrip('\n')
+    for source in [
+        'function f() {\n  var x = missing;\n  return 7;\n}\nconsole.log(f());\n',
+        'function f() {\n  var x = { p: missing };\n  return 7;\n}\nconsole.log(f());\n',
+        'var f = () => {\n  var x = missing;\n  return 7;\n};\nconsole.log(f());\n',
+        'function f() {\n  missing;\n  return 7;\n}\nconsole.log(f());\n',
+        'function f() {\n  return missing;\n}\nconsole.log(f());\n',
+    ]
+}
+
+#: The same shapes with every read established or resolved, mapped to the text the deobfuscation
+#: writes for them. These are the controls against over-refusal: a read the definite-assignment
+#: model vouches a completed creating write for is droppable with its store, so the first program
+#: still reduces to its print, the call whose body cannot throw is still written as its value, and
+#: the `try` around a store that cannot throw still empties.
+AN_ESTABLISHED_STORE_STILL_REDUCES: dict[str, str] = {
+    'X = 5;\ny = X;\nconsole.log(1);\n': 'console.log(1);',
+    'function f() {\n  var x = 1;\n  return 7;\n}\nconsole.log(f());\n': 'console.log(7);',
+    'try {\n  var x = 1;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
+        'try {} catch (e) {\n  console.log(2);\n}\nconsole.log(3);',
+}
+
+
+class TestAReadOfANameNothingBindsIsKept(TestJsDeobfuscator):
+    """
+    The removal contexts ask the throw half of the read contract and take the establishment answer
+    from `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel`, so a read of a name
+    no completed write establishes keeps its `ReferenceError` wherever its expression is discarded.
+    """
+
+    def test_the_read_survives_where_its_expression_is_discarded(self):
+        rows = A_KEPT_READ_OF_A_NAME_NOTHING_BINDS
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_the_read_survives_inside_a_try_so_the_catch_still_runs(self):
+        rows = A_KEPT_READ_A_TRY_CATCHES
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_a_call_whose_body_cannot_return_is_not_replaced_by_its_value(self):
+        rows = A_KEPT_CALL_WHOSE_BODY_CANNOT_RETURN
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_a_store_the_model_vouches_for_still_reduces(self):
+        rows = AN_ESTABLISHED_STORE_STILL_REDUCES
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNodePrintsTheSameAboutAReadOfANameNothingBinds(TestJsDeobfuscator):
+
+    def test_each_free_reading_program_still_refuses_to_run(self):
+        rows = {
+            **A_KEPT_READ_OF_A_NAME_NOTHING_BINDS,
+            **A_KEPT_CALL_WHOSE_BODY_CANNOT_RETURN,
+        }
+        self.assertEqual(
+            {source: behavior(source) for source in rows},
+            {source: ('', 'ReferenceError') for source in rows},
+        )
+
+    def test_each_program_behaves_as_it_did_before(self):
+        rows = {
+            **A_KEPT_READ_OF_A_NAME_NOTHING_BINDS,
+            **A_KEPT_READ_A_TRY_CATCHES,
+            **A_KEPT_CALL_WHOSE_BODY_CANNOT_RETURN,
+            **AN_ESTABLISHED_STORE_STILL_REDUCES,
         }
         self.assertEqual(
             {source: behavior(self._deobfuscate(source)) for source in rows},

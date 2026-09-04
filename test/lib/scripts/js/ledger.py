@@ -123,7 +123,7 @@ def before_and_after(
 
     It selects the file the oracle writes and nothing else. Both files the oracle can write are the
     module execution model as
-    `refinery.lib.scripts.js.deobfuscation.options.DeobfuscationOptions` means it, an ES module and
+    `refinery.lib.scripts.js.options.DeobfuscationOptions` means it, an ES module and
     a CommonJS file being alike in the one thing that model decides: a top-level declaration is
     scoped to the file and never reaches the global object. So the deobfuscation is always asked
     for under that model, and asking for it under the script model instead would rewrite the source

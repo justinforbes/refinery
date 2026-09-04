@@ -4,12 +4,14 @@ JavaScript syntax normalization transforms.
 from __future__ import annotations
 
 from refinery.lib.scripts import Expression, Node, Transformer
+from refinery.lib.scripts.js.analysis.assignment import DefiniteAssignmentModel
 from refinery.lib.scripts.js.analysis.cache import ModelCache, model_cache
 from refinery.lib.scripts.js.analysis.dominance import DominanceModel
 from refinery.lib.scripts.js.analysis.effects import GLOBAL_OBJECT, EffectModel
 from refinery.lib.scripts.js.analysis.model import (
     FUNCTION_NODES,
     GUARANTEED_GLOBALS,
+    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     Binding,
     BindingKind,
     SemanticModel,
@@ -21,7 +23,6 @@ from refinery.lib.scripts.js.analysis.reaching import ReachingModel
 from refinery.lib.scripts.js.deobfuscation.helpers import (
     OBJECT_PROTOTYPE_MEMBERS,
     RELATIONAL_OPS,
-    SAME_REALM_GLOBAL_OBJECT_ALIASES,
     UNARY_OPS,
     MemberRead,
     access_key,
@@ -52,7 +53,6 @@ from refinery.lib.scripts.js.deobfuscation.interpreter import (
     STATIC_OBJECTS,
     to_string,
 )
-from refinery.lib.scripts.js.deobfuscation.options import module_execution
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
     JsArrowFunctionExpression,
@@ -82,6 +82,7 @@ from refinery.lib.scripts.js.model import (
     strip_parens,
 )
 from refinery.lib.scripts.js.numbers import exact_integer
+from refinery.lib.scripts.js.options import module_execution
 from refinery.lib.scripts.js.precedence import parens_required
 from refinery.lib.scripts.js.strict import joins_directive_prologue, spelling_states
 
@@ -129,6 +130,7 @@ class JsSimplifications(Transformer):
     def __init__(self):
         super().__init__()
         self._cache: ModelCache | None = None
+        self._defassign: DefiniteAssignmentModel | None = None
 
     @property
     def model(self) -> SemanticModel:
@@ -206,6 +208,7 @@ class JsSimplifications(Transformer):
         granted to withdrawn — which is the direction a held model may be stale in.
         """
         self._cache = model_cache(self, node)
+        self._defassign = self._cache.assignment
         with self._cache.pinned():
             self.generic_visit(node)
         return None
@@ -237,11 +240,8 @@ class JsSimplifications(Transformer):
         binding = self.model.lookup(name, self.model.scope_of(member))
         if binding is None:
             return name in GUARANTEED_GLOBALS
-        return any(
-            self._write_puts_the_name_on_the_global_object(w)
-            and self.dominance.runs_before(w, member)
-            for w in binding.writes
-        )
+        assert self._defassign is not None
+        return self._defassign.definitely_assigned_at(binding, member)
 
     def _names_a_global(self, member: JsMemberExpression) -> str | None:
         """
@@ -260,21 +260,6 @@ class JsSimplifications(Transformer):
             return None
         return self.model.global_alias_member_name(
             member, module_scope=module_execution(self.options))
-
-    def _write_puts_the_name_on_the_global_object(self, write: Node) -> bool:
-        """
-        Whether *write*, one of the writes recorded against a global's binding, is one that creates
-        the property a later read through an alias would find.
-
-        A write spelled as a plain name does. One spelled as a member access does only where that
-        access names a global under the model this run was asked for: the model records a write
-        through the `this` of a top level under the script model, and under the module model that
-        same write puts a property on the file's exports, where no read through `globalThis` finds
-        it.
-        """
-        if not isinstance(write, JsMemberExpression):
-            return True
-        return self._names_a_global(write) is not None
 
     def _resolve_in(self, node: JsBinaryExpression, key: str) -> bool | None:
         """
@@ -621,10 +606,14 @@ class JsSimplifications(Transformer):
             return None
         receiver_sensitive = is_invocation_target(node) and callee_form_sensitive(kept)
         if not receiver_sensitive and self.effects.is_side_effect_free(
-            test, discarded=True, reads_may_throw=True
+            test, discarded=True, reads_may_throw=True, read_established=self._read_established
         ):
             return kept
         return JsSequenceExpression(expressions=[test, kept])
+
+    def _read_established(self, node: JsIdentifier) -> bool:
+        assert self._defassign is not None
+        return self._defassign.definitely_assigned_at(self.model.resolve(node), node)
 
     def visit_JsConditionalExpression(self, node: JsConditionalExpression):
         self.generic_visit(node)
@@ -758,7 +747,8 @@ class JsSimplifications(Transformer):
         node = strip_parens(operand)
         if node is None:
             return None
-        free = self.effects.is_side_effect_free(node, discarded=True, reads_may_throw=True)
+        free = self.effects.is_side_effect_free(
+            node, discarded=True, reads_may_throw=True, read_established=self._read_established)
         return kind if free else None
 
     def _member_key(self, node: JsMemberExpression) -> str | None:

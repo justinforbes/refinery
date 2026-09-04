@@ -18,7 +18,7 @@ from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 from test.lib.scripts.js.ledger import Program, Reading, a_program, prints
 from test.lib.scripts.js.test_directive_prologue import NOT_A_PROGRAM
 
-from refinery.lib.scripts.js.deobfuscation.options import DeobfuscationOptions
+from refinery.lib.scripts.js.options import DeobfuscationOptions
 from refinery.lib.scripts.js.deobfuscation.reflection import JsReflectionInlining
 
 
