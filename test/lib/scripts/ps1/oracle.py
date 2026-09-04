@@ -20,6 +20,7 @@ import base64
 import concurrent.futures
 import functools
 import json
+import re
 import shutil
 import subprocess
 import typing
@@ -80,51 +81,56 @@ ConvertTo-Json @{ reports = $reports } -Depth 8 -Compress
 '''
 
 #: A snippet's whole observable effect is what it writes, so every stream is merged into one ordered
-#: transcript and handed back as base64. What is recorded per item is deliberately structural rather
-#: than rendered: PowerShell renders an error with the source line that raised it, which differs
-#: between two spellings of the same program and would report every rewrite as a behaviour change —
-#: and for a redirected stream it renders the *harness* line rather than the snippet's. So an error
-#: contributes its identifier and exception type, and nothing positional.
+#: transcript. What is recorded per item is deliberately structural rather than rendered: PowerShell
+#: renders an error with the source line that raised it, which differs between two spellings of the
+#: same program and would report every rewrite as a behaviour change — and for a redirected stream it
+#: renders the *harness* line rather than the snippet's. So an error record contributes its
+#: identifier and exception type, and nothing positional.
+#:
+#: There is no top-level handler, because the two kinds of PowerShell error need opposite
+#: dispositions and a handler has only one. A statement-terminating error — a failed cast, a division
+#: by zero — is reported and stepped over, so the statement after it runs; a terminating error — a
+#: `throw`, a command `-ErrorAction Stop`, a `Stop` preference, a `trap` that rethrows — ends the
+#: run. A `try` or a `trap` wrapped around the snippet would catch both alike and report the first
+#: kind as ending the run, which is the deployment it is not. So each classified line is written to
+#: stdout as it is produced — a stepped-over error is an `ERROR` line and the tail still runs, and
+#: output written before a terminating error survives — and the terminating error's identity is
+#: recovered from stderr by `behaviour`, since it unwinds before the pipeline can classify it.
 #:
 #: The snippet is dot-sourced rather than called, so that its top level is the host's top level, as
 #: it is in a script file or an encoded command. Called instead, it would run one scope deeper than
 #: it ever really does, and `$script:` would name the harness rather than the snippet: measured that
 #: way, `$x = 'a'; & { $script:x }` reads empty and `[ref]$script:i` throws.
 #:
-#: The transcript is built by a pipeline rather than a `foreach` over one, because a parenthesized
-#: pipeline is drained before the loop begins: everything a snippet wrote before it threw would be
-#: discarded, and printing then throwing would be indistinguishable from throwing alone.
+#: The transcript is streamed by a pipeline rather than gathered and printed at the end, because a
+#: terminating error unwinds the script before an end-of-run print is reached: everything a snippet
+#: wrote before it threw would be lost, and printing then throwing would be indistinguishable from
+#: throwing alone. Each line travels as its own base64 token, one per line of stdout, so that a tab
+#: or a newline inside a message cannot be mistaken for the structure around it.
 #:
 #: Dot-sourcing puts the snippet's variables in the same scope as this script's own, which is what
 #: the `Oracle` in their names is for.
 _BEHAVIOUR_SCRIPT = R'''
 $ErrorActionPreference = 'Continue'
 $OracleSource = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('@PAYLOAD@'))
-$OracleLines = New-Object System.Collections.ArrayList
-function Write-OracleLine([string] $text) { [void]$OracleLines.Add($text) }
-try {
-    . ([ScriptBlock]::Create($OracleSource)) *>&1 | ForEach-Object {
-        if ($null -eq $_) {
-            Write-OracleLine "OUT`t`t<null>"
-        } elseif ($_ -is [System.Management.Automation.ErrorRecord]) {
-            $OracleType = $_.Exception.GetType().FullName
-            Write-OracleLine "ERROR`t$($_.FullyQualifiedErrorId)`t$OracleType"
-        } elseif ($_ -is [System.Management.Automation.WarningRecord]) {
-            Write-OracleLine "WARNING`t$($_.Message)"
-        } elseif ($_ -is [System.Management.Automation.VerboseRecord]) {
-            Write-OracleLine "VERBOSE`t$($_.Message)"
-        } elseif ($_ -is [System.Management.Automation.DebugRecord]) {
-            Write-OracleLine "DEBUG`t$($_.Message)"
-        } elseif ($_ -is [System.Management.Automation.InformationRecord]) {
-            Write-OracleLine "INFO`t$($_.MessageData)"
-        } else {
-            Write-OracleLine "OUT`t$($_.GetType().FullName)`t$_"
-        }
+. ([ScriptBlock]::Create($OracleSource)) *>&1 | ForEach-Object {
+    if ($null -eq $_) {
+        $OracleLine = "OUT`t`t<null>"
+    } elseif ($_ -is [System.Management.Automation.ErrorRecord]) {
+        $OracleLine = "ERROR`t$($_.FullyQualifiedErrorId)`t$($_.Exception.GetType().FullName)"
+    } elseif ($_ -is [System.Management.Automation.WarningRecord]) {
+        $OracleLine = "WARNING`t$($_.Message)"
+    } elseif ($_ -is [System.Management.Automation.VerboseRecord]) {
+        $OracleLine = "VERBOSE`t$($_.Message)"
+    } elseif ($_ -is [System.Management.Automation.DebugRecord]) {
+        $OracleLine = "DEBUG`t$($_.Message)"
+    } elseif ($_ -is [System.Management.Automation.InformationRecord]) {
+        $OracleLine = "INFO`t$($_.MessageData)"
+    } else {
+        $OracleLine = "OUT`t$($_.GetType().FullName)`t$_"
     }
-} catch {
-    Write-OracleLine "THROW`t$($_.FullyQualifiedErrorId)`t$($_.Exception.GetType().FullName)"
+    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($OracleLine))
 }
-[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($OracleLines -join "`n")))
 '''
 
 #: Hands each source straight back, so that what the host received can be compared with what was
@@ -303,6 +309,12 @@ def behaviour(
     One process per snippet, which is what makes each one independent: sharing a host and reusing a
     runspace is faster and is not an isolation boundary, because functions survive a reset and
     `$env:` leaks between runspaces in the same process.
+
+    A non-zero exit is the ordinary shape of a snippet that ends in a terminating error rather than a
+    sign the host could not be run: the error unwound before the transcript pipeline could classify
+    it, so its `THROW` line is recovered from stderr and appended to what the snippet wrote before it.
+    A non-zero exit stderr names no terminating error only when the host genuinely failed, and that
+    stays an `OracleError`.
     """
     if snippet not in executable():
         raise OracleError(
@@ -313,10 +325,14 @@ def behaviour(
         snippet = rewrite(snippet)
     payload = base64.b64encode(snippet.encode('utf-8')).decode('ascii')
     result = run(_BEHAVIOUR_SCRIPT.replace('@PAYLOAD@', payload), timeout)
+    written = [
+        base64.b64decode(token).decode('utf-8')
+        for token in result.output.split('\n')
+        if token.strip()
+    ]
     if result.status != 0:
-        raise OracleError(F'the host exited with {result.status}: {result.errors.strip()}')
-    written = base64.b64decode(result.output.strip()).decode('utf-8')
-    return tuple(written.split('\n')) if written else ()
+        written.append(F'THROW\t{_terminating_error(result.errors)}')
+    return tuple(written)
 
 
 def behaviours(
@@ -402,6 +418,47 @@ def _ask(script: str, batch: typing.Sequence[str], field: str, timeout: float) -
     if len(reported) != len(batch):
         raise OracleError(F'asked about {len(batch)} sources and heard about {len(reported)}')
     return reported
+
+
+#: The chunks a redirected error stream is serialized into. `powershell.exe` writes the error stream
+#: as CLIXML when it is captured, and a terminating error the snippet did not handle is rendered into
+#: it as a run of `<S S="Error">` strings — the formatted error display, not the record.
+_CLIXML_ERROR = re.compile(r'<S S="Error">(?P<chunk>.*?)</S>', re.DOTALL)
+
+#: The label the rendered error display gives its `FullyQualifiedErrorId` line. The host is gated to
+#: `Desktop` / `FullLanguage` by `HostInfo.usable`, so the display is the one this label belongs to.
+_FQEID_LINE = re.compile(r'FullyQualifiedErrorId\s*:\s*(?P<id>.+)')
+
+#: How CLIXML encodes the characters it may not carry literally, and the XML entities it escapes.
+_CLIXML_ESCAPES = (
+    ('_x000D_', '\r'),
+    ('_x000A_', '\n'),
+    ('_x0009_', '\t'),
+    ('&lt;', '<'),
+    ('&gt;', '>'),
+    ('&quot;', '"'),
+    ('&amp;', '&'),
+)
+
+
+def _terminating_error(stderr: str) -> str:
+    """
+    The `FullyQualifiedErrorId` of the terminating error the host reported on stderr. A terminating
+    error unwinds before the transcript pipeline can classify it, so its identity is read here from
+    the CLIXML the host serializes the error display into — the identifier alone, since what reaches
+    stderr is the formatted display rather than the record, and the exception category it shows there
+    is lossy where the record's .NET type is not.
+
+    A non-zero exit whose stderr names no such error is a host that genuinely failed, which is an
+    `OracleError` like every other way the host cannot be run.
+    """
+    text = ''.join(match['chunk'] for match in _CLIXML_ERROR.finditer(stderr))
+    for encoded, literal in _CLIXML_ESCAPES:
+        text = text.replace(encoded, literal)
+    identity = _FQEID_LINE.search(text)
+    if identity is None:
+        raise OracleError(F'the host exited non-zero without a terminating error: {stderr[:200]}')
+    return identity['id'].strip()
 
 
 def _decode(result: Behaviour) -> dict:

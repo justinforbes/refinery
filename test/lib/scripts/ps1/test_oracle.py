@@ -114,11 +114,14 @@ DEFECTS: dict[str, str] = {
 
 #: Snippets whose deobfuscation writes something different from the snippet on purpose. The unit's
 #: default strips a statement whose only effect is a value on the success output stream, treating the
-#: input as a standalone script whose console output is not the artifact; `ps1 -k` keeps it. So a
-#: divergence here is the documented behaviour of that default and not a bug, which is why it is held
-#: apart from `BEHAVIOUR_DEFECTS` the way the parser's `DIVERGENCES` are held apart from its
-#: `DEFECTS`. Both tables are checked against the measured set in both directions, so a divergence
-#: that stops happening and a new one that starts both fail.
+#: input as a standalone script whose console output is not the artifact; `ps1 -k` keeps it. The
+#: error stream is read the same way: a statement-terminating error 5.1 reports and steps over leaves
+#: a record nothing here reads, so a raise whose only effect is that record, or an inert handler that
+#: merely suppressed one, is removed without changing the artifact. So a divergence here is the
+#: documented behaviour of that default and not a bug, which is why it is held apart from
+#: `BEHAVIOUR_DEFECTS` the way the parser's `DIVERGENCES` are held apart from its `DEFECTS`. Both
+#: tables are checked against the measured set in both directions, so a divergence that stops
+#: happening and a new one that starts both fail.
 BEHAVIOUR_DIVERGENCES: dict[str, str] = {
     "try { throw 'x' } catch { 'caught' }":
         "The catch body is a bare expression whose only effect is the success stream, so the "
@@ -133,6 +136,25 @@ BEHAVIOUR_DIVERGENCES: dict[str, str] = {
         'the snippet writes `next` and the default writes nothing. `ps1 -k` emits the input '
         'unchanged. The carry itself is measured where the value has a consumer that the strip '
         'leaves alone, which is its function-scope spelling in the corpus.',
+    "$Null = [Int]'abc'; Write-Host 'A'":
+        'The cast is removed. 5.1 reports the failed conversion, steps over it and runs `A`, so the '
+        'only difference is the error record the removal drops; the error stream, like the success '
+        'stream, is not the artifact. `ps1 -k` keeps the cast.',
+    "$Null = 1 / 0; Write-Host 'A'":
+        'The same in its division spelling, so that neither entry rests on the cast.',
+    "function K { $Null = [Int]'abc' }; K; Write-Host 'A'":
+        'The same fault in a called body: the definition and its only call are removed together and '
+        '`A` runs, where the snippet also left the error record the cast raised.',
+    "trap { continue }; [int]'a'; Write-Host 'after'":
+        'The handler is removed. The cast raises a statement-terminating error 5.1 steps over with '
+        'or without a `trap`, so `after` runs either way and the handler only suppressed the record '
+        'the removal now lets through.',
+    "trap { continue }; 1/0; Write-Host 'after'":
+        'The same handler over a division rather than a cast.',
+    "trap { continue }; zzq0000=5; Write-Host 'after'":
+        'The same over a bareword 5.1 cannot resolve: the CommandNotFound is statement-terminating '
+        'and steps over with or without the `trap`, so `after` runs and the removal only lets its '
+        'record through.',
 }
 
 #: Snippets whose deobfuscation does not behave like the snippet. Each is a semantics defect: the
@@ -242,15 +264,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         '`Ps1Simplifications` rewrites `$($x)` to `$x` before the alias relation is built, minting '
         'a share the script does not have, so the defect is in that pass rather than in the '
         'aliasing.',
-    "trap { continue }; [int]'a'; Write-Host 'after'":
-        'The handler is removed. An implicit terminating error nothing takes at script scope is '
-        'reported and the next statement runs, which is what makes an inert `trap` over one look '
-        'removable — but 5.1 hands such an error to a `catch` anywhere up the call stack, and this '
-        'oracle dot-sources every snippet inside one, so with the handler the snippet writes '
-        '`after` and without it the error leaves the script.',
-    "trap { }; [int]'a'; Write-Host 'after'":
-        'The same handler removed in its other inert spelling, where the disposition is the '
-        'default resumption rather than `continue`.',
     "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'":
         'The handler is kept and the `if` around the raise is resolved into the statements it '
         'holds, which moves the point the handler resumes at: a raise inside a nested block '
@@ -264,9 +277,10 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'one of its blocks holds. A `switch` on a constant is folded to the arm that matches, '
         'and the arm body lands where the handler resumes.',
     "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
-        'The same handler removed where the raise stands inside `$( )`. 5.1 abandons the whole '
-        'assignment and resumes at the statement after it, so `$x` holds nothing and the snippet '
-        'writes an empty line; without the handler the error leaves the script instead.',
+        'The handler removed where the raise stands inside `$( )`. With it, 5.1 abandons the whole '
+        'assignment when the cast fails and `$x` holds nothing; without it the cast is stepped over '
+        'inside the sub-expression, so `in` reaches `$x` and the output prints it where the snippet '
+        'prints an empty line.',
     "trap { continue }; iex 'throw 1'; Write-Host 'after'":
         'The handler is removed, and the removal is self-inflicting: a command that runs a string '
         'is read as raising nothing, so the `trap` goes in one round, and a later round then '
@@ -282,32 +296,16 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The handler is removed. The table binds `-ErrorAction Stop` into every command that '
         'takes one, so no action is written at the call site and no preference is assigned; '
         'neither gate is looking at an index expression.',
-    "trap { continue }; 1/0; Write-Host 'after'":
-        'The handler is removed and the script then dies on the division. A failing cast, a '
-        'division by zero and a member access on `$null` all raise errors a `trap` resumes '
-        'on, and the fault model reads none of them as raising anything: only a written '
-        '`throw` and an explicit `-ErrorAction Stop` are raisers, so a handler guarding any '
-        'of the others reads as guarding nothing.',
     "trap { continue }; $x = \"$(1/0)$(Set-Alias zzq Write-Output)\"; zzq 'hi'":
-        'The same removal reached through a sub-expression, and it costs a second answer: '
-        'with the handler gone nothing carries past the division, so the `Set-Alias` beside '
-        'it reads as having run and the call below is resolved to `Write-Output`. 5.1 '
-        'resumes past the whole assignment with the name still unbound.',
+        'The handler is removed, and the tool reads the `Set-Alias` beside the failing division as '
+        'having run, so the call below is resolved to `Write-Output` and the output prints `hi`. '
+        '5.1 abandons the whole assignment at the division and resumes with the name still unbound, '
+        'so it prints nothing.',
     "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' "
     "}; Wrap; Write-Host 'after'":
         'The handler is removed. What reaches it is the *call*, whose subtree carries no `throw`, '
         'and the callee is a body of its own; answering this needs the call graph, which the '
         'fault model deliberately has none of.',
-    "function K { $Null = [Int]'abc' }; K; Write-Host 'A'":
-        'The body is read as inert and the definition and its call are removed together, but the '
-        'cast raises a terminating error, so 5.1 never reaches the statement below. The output '
-        'writes `A` where the snippet writes nothing at all.',
-    "$Null = [Int]'abc'; Write-Host 'A'":
-        'The same fault standing at script scope rather than in a body: the statement is removed '
-        'because no `catch` and no `trap` observes it, and the statement it would have skipped is '
-        'the observer nothing asked about.',
-    "$Null = 1 / 0; Write-Host 'A'":
-        'The same defect in its other spelling, so that neither entry rests on the cast.',
     "function K { $Null = 1 }; K; $Null = (Get-Command K).Name; Write-Host 'A'":
         'The definition is removed although `Get-Command` names it literally. A literal name that '
         'matches nothing writes a `CommandNotFoundException` to the error stream whatever is done '
@@ -342,11 +340,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'metadata proves inert: `Length` is re-pointed to a script property and the read is '
         'folded to the number the metadata carries, so the output prints a value 5.1 never '
         'produces.',
-    "trap { continue }; zzq0000=5; Write-Host 'after'":
-        'The handler is removed as inert, but `continue` is what makes the run survive the '
-        'bareword: the snippet resumes at the statement below and prints, and the output ends '
-        'there instead. What the removal costs is control flow rather than anything the '
-        'handler emits.',
 }
 
 
@@ -381,8 +374,10 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('INFO\ta',),
     "trap { continue }; throw 'e'; Write-Host 'after'":
         ('INFO\tafter',),
-    "[int]'a'; Write-Host 'after'":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "[int]'a'; Write-Host 'after'": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'INFO\tafter',
+    ),
     "trap { continue }; [int]'a'; Write-Host 'after'":
         ('INFO\tafter',),
     "trap { continue }; Write-Host 'one'; throw 'e'; Write-Host 'three'":
@@ -432,47 +427,37 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         'OUT\tSystem.String\thi',
     ),
     "trap { break }; [int]'a'; Write-Host 'after'":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+        ('THROW\tInvalidCastFromStringToInteger',),
     "trap { }; [int]'a'; Write-Host 'after'": (
         'ERROR\tInvalidCastFromStringToInteger'
         '\tSystem.Management.Automation.RuntimeException',
         'INFO\tafter',
     ),
-    "Get-Item nope -ErrorAction Stop; Write-Host 'after'": (
-        'THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-        '\tSystem.Management.Automation.ItemNotFoundException',
-    ),
+    "Get-Item nope -ErrorAction Stop; Write-Host 'after'":
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand',),
     "trap { continue }; Get-Item nope -ErrorAction Stop; Write-Host 'after'":
         ('INFO\tafter',),
-    "Get-Item nope -ErrorAc Stop; Write-Host 'after'": (
-        'THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-        '\tSystem.Management.Automation.ItemNotFoundException',
-    ),
-    "Get-Item nope -ErrorAction:Stop; Write-Host 'after'": (
-        'THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-        '\tSystem.Management.Automation.ItemNotFoundException',
-    ),
-    "Get-Item nope -ErrorAction 1; Write-Host 'after'": (
-        'THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-        '\tSystem.Management.Automation.ItemNotFoundException',
-    ),
+    "Get-Item nope -ErrorAc Stop; Write-Host 'after'":
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand',),
+    "Get-Item nope -ErrorAction:Stop; Write-Host 'after'":
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand',),
+    "Get-Item nope -ErrorAction 1; Write-Host 'after'":
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand',),
     "Get-Item nope -ErrorAction Continue; Write-Host 'after'": (
         'ERROR\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
         '\tSystem.Management.Automation.ItemNotFoundException',
         'INFO\tafter',
     ),
-    "$ErrorActionPreference = 'Stop'; [int]'a'; Write-Host 'after'": (
-        'THROW\tInvalidCastFromStringToInteger'
-        '\tSystem.Management.Automation.RuntimeException',
-    ),
+    "$ErrorActionPreference = 'Stop'; [int]'a'; Write-Host 'after'":
+        ('THROW\tInvalidCastFromStringToInteger',),
     "throw 'e'; Write-Host 'after'":
-        ('THROW\te\tSystem.Management.Automation.RuntimeException',),
+        ('THROW\te',),
     "$x = $(trap { continue }; [int]'a'; 'in'); Write-Host $x":
         ('INFO\tin',),
     "$(trap { continue }); [int]'a'; Write-Host 'after'": (
         'OUT\t\t<null>',
-        'THROW\tInvalidCastFromStringToInteger'
-        '\tSystem.Management.Automation.RuntimeException',
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'INFO\tafter',
     ),
     "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
         ('INFO\t',),
@@ -544,19 +529,14 @@ CLAIM_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
     "Get-Item nope -e Stop; Write-Host 'after'":
         ('INFO\tafter',),
     "Get-Item nope -errora Stop; Write-Host 'after'":
-        (
-            'THROW'
-            '\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand'
-            '\tSystem.Management.Automation.ItemNotFoundException',
-        ),
-    "Get-Item nope -ErrorAction S; Write-Host 'after'":
-        (
-            'THROW'
-            '\tCannotConvertArgumentNoMessage,Microsoft.PowerShell.Commands.GetItemCommand'
-            '\tSystem.Management.Automation.ParameterBindingException',
-        ),
+        ('THROW\tPathNotFound,Microsoft.PowerShell.Commands.GetItemCommand',),
+    "Get-Item nope -ErrorAction S; Write-Host 'after'": (
+        'ERROR\tCannotConvertArgumentNoMessage,Microsoft.PowerShell.Commands.GetItemCommand'
+        '\tSystem.Management.Automation.ParameterBindingException',
+        'INFO\tafter',
+    ),
     "& { trap { break }; [int]'a' }; Write-Host 'after'":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+        ('THROW\tInvalidCastFromStringToInteger',),
     "trap { continue }; & { trap { break }; [int]'a' }; Write-Host 'after'":
         ('INFO\tafter',),
     "trap { continue }; iex 'throw 1'; Write-Host 'after'":
@@ -716,13 +696,12 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tA1',
             'OUT\tSystem.String\tA1',
         ),
-    "Write-Output (1 + [char]65); Write-Output (1 + 'A')":
-        (
-            'OUT\tSystem.Int32\t66',
-            'THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
-        ),
+    "Write-Output (1 + [char]65); Write-Output (1 + 'A')": (
+        'OUT\tSystem.Int32\t66',
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+    ),
     'Write-Output (([char]65) * 3)':
-        ('THROW\tNotADefinedOperationForType\tSystem.Management.Automation.RuntimeException',),
+        ('ERROR\tNotADefinedOperationForType\tSystem.Management.Automation.RuntimeException',),
     "Write-Output ('A' * 3)":
         ('OUT\tSystem.String\tAAA',),
     "Write-Output (([char]65).ToString()); Write-Output (('A').ToString())":
@@ -1003,7 +982,7 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Double\t1E+32',
         ),
     '$t = 0xFFFFFFFFFFFFFFFFF; Write-Output (,$t); Write-Output $t':
-        ('THROW\tParseException\tSystem.Management.Automation.MethodInvocationException',),
+        ('THROW\tParseException',),
     '$t = 007; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t7',
@@ -1105,8 +1084,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('OUT\t\t<null>',),
     '$t = $null * 1; Write-Output (,$t)':
         ('OUT\t\t<null>',),
-    '$t = 1_0; Write-Output (,$t); Write-Output $t':
-        ('THROW\tCommandNotFoundException\tSystem.Management.Automation.CommandNotFoundException',),
+    '$t = 1_0; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tCommandNotFoundException\tSystem.Management.Automation.CommandNotFoundException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = 2147483647 + 1; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Double\t2147483648',
@@ -1122,8 +1104,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Double\t9.22337203685478E+18',
             'OUT\tSystem.Double\t9.22337203685478E+18',
         ),
-    '$t = [decimal]::MaxValue + 1; Write-Output (,$t); Write-Output $t':
-        ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
+    '$t = [decimal]::MaxValue + 1; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tRuntimeException\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = 100000000000000d * 100000000000000d; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Decimal\t10000000000000000000000000000',
@@ -1144,8 +1129,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t2760',
             'OUT\tSystem.Int32\t2760',
         ),
-    "$t = 16 + 'file'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = 16 + 'file'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = 5 + '5'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t10',
@@ -1212,15 +1200,21 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
         ('OUT\tSystem.String\ta-b',),
     '$OFS = \'-\'; Write-Output "$(1, 2)"':
         ('OUT\tSystem.String\t1-2',),
-    '$t = ([char]65).ToUpper(); Write-Output (,$t); Write-Output $t':
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = ([char]65).ToUpper(); Write-Output (,$t); Write-Output $t': (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = ('A').ToUpper(); Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.String\tA',
             'OUT\tSystem.String\tA',
         ),
-    '$t = ([char]65).Substring(0); Write-Output (,$t); Write-Output $t':
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = ([char]65).Substring(0); Write-Output (,$t); Write-Output $t': (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = ('A').Substring(0); Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.String\tA',
@@ -1305,8 +1299,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t-6',
             'OUT\tSystem.Int32\t-6',
         ),
-    "$t = -bnot 'abc'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = -bnot 'abc'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = -bnot [char]65; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t-66',
@@ -1327,8 +1324,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.UInt32\t1294967295',
             'OUT\tSystem.UInt32\t1294967295',
         ),
-    "$t = 'ab' * 0xFFFFFFFF; Write-Output (,$t); Write-Output $t":
-        ('THROW\tSystem.ArgumentOutOfRangeException\tSystem.ArgumentOutOfRangeException',),
+    "$t = 'ab' * 0xFFFFFFFF; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tSystem.ArgumentOutOfRangeException\tSystem.ArgumentOutOfRangeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     'Write-Output "abc".Length':
         ('OUT\tSystem.Int32\t3',),
     "Write-Output 'abc'.Length":
@@ -1389,10 +1389,16 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Byte\t5',
             'OUT\tSystem.Byte\t5',
         ),
-    '$t = [byte]300; Write-Output (,$t); Write-Output $t':
-        ('THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',),
-    '$t = [byte]-1; Write-Output (,$t); Write-Output $t':
-        ('THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',),
+    '$t = [byte]300; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    '$t = [byte]-1; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = [sbyte]-5; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.SByte\t-5',
@@ -1423,8 +1429,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.UInt64\t18446744073709551615',
             'OUT\tSystem.UInt64\t18446744073709551615',
         ),
-    '$t = [int]2147483648; Write-Output (,$t); Write-Output $t':
-        ('THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',),
+    '$t = [int]2147483648; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = [int]1.5; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t2',
@@ -1485,10 +1494,16 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Char\t\uffff',
             'OUT\tSystem.Char\t\uffff',
         ),
-    '$t = [char]65536; Write-Output (,$t); Write-Output $t':
-        ('THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',),
-    '$t = [char]-1; Write-Output (,$t); Write-Output $t':
-        ('THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',),
+    '$t = [char]65536; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    '$t = [char]-1; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = [int][char]65; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t65',
@@ -1549,26 +1564,41 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t5',
             'OUT\tSystem.Int32\t5',
         ),
-    "$t = [int]'abc'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [int]'abc'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [int]'1e3'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t1000',
             'OUT\tSystem.Int32\t1000',
         ),
-    "$t = [byte]'1e3'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
-    "$t = [int]'1_0'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
-    "$t = [int]'0b1010'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [byte]'1e3'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    "$t = [int]'1_0'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    "$t = [int]'0b1010'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [int]''; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t0',
             'OUT\tSystem.Int32\t0',
         ),
-    "$t = [int]'   '; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [int]'   '; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [int]'007'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t7',
@@ -1589,10 +1619,16 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t1000',
             'OUT\tSystem.Int32\t1000',
         ),
-    "$t = [int]'1kb'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
-    "$t = [int]'0o17'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [int]'1kb'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    "$t = [int]'0o17'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = [int]"`t`r5`n"; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t5',
@@ -1613,8 +1649,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t2',
             'OUT\tSystem.Int32\t2',
         ),
-    "$t = [byte]'-1'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [byte]'-1'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [byte]'0x80'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Byte\t128',
@@ -1635,17 +1674,26 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t-1',
             'OUT\tSystem.Int32\t-1',
         ),
-    "$t = [byte]'0x100'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = [byte]'0x100'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [char]'A'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Char\tA',
             'OUT\tSystem.Char\tA',
         ),
-    "$t = [char]'AB'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastParseTargetInvocation\tSystem.Management.Automation.RuntimeException',),
-    "$t = [char]''; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastParseTargetInvocation\tSystem.Management.Automation.RuntimeException',),
+    "$t = [char]'AB'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastParseTargetInvocation\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    "$t = [char]''; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastParseTargetInvocation\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [bool]'0'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Boolean\tTrue',
@@ -1716,19 +1764,31 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t-2147483648',
             'OUT\tSystem.Int32\t-2147483648',
         ),
-    "$t = [Convert]::ToInt32('0x10'); Write-Output (,$t); Write-Output $t":
-        ('THROW\tFormatException\tSystem.Management.Automation.MethodInvocationException',),
-    "$t = [Convert]::ToInt32('1_0'); Write-Output (,$t); Write-Output $t":
-        ('THROW\tFormatException\tSystem.Management.Automation.MethodInvocationException',),
-    "$t = [Convert]::ToInt32('7.5'); Write-Output (,$t); Write-Output $t":
-        ('THROW\tFormatException\tSystem.Management.Automation.MethodInvocationException',),
+    "$t = [Convert]::ToInt32('0x10'); Write-Output (,$t); Write-Output $t": (
+        'ERROR\tFormatException\tSystem.Management.Automation.MethodInvocationException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    "$t = [Convert]::ToInt32('1_0'); Write-Output (,$t); Write-Output $t": (
+        'ERROR\tFormatException\tSystem.Management.Automation.MethodInvocationException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    "$t = [Convert]::ToInt32('7.5'); Write-Output (,$t); Write-Output $t": (
+        'ERROR\tFormatException\tSystem.Management.Automation.MethodInvocationException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [Convert]::ToInt32(' 5 '); Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t5',
             'OUT\tSystem.Int32\t5',
         ),
-    "$t = [Convert]::ToInt32('-10', 16); Write-Output (,$t); Write-Output $t":
-        ('THROW\tArgumentException\tSystem.Management.Automation.MethodInvocationException',),
+    "$t = [Convert]::ToInt32('-10', 16); Write-Output (,$t); Write-Output $t": (
+        'ERROR\tArgumentException\tSystem.Management.Automation.MethodInvocationException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [Convert]::ToInt32('017', 8); Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t15',
@@ -1784,16 +1844,18 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Byte\t0',
             'OUT\tSystem.Byte\t0',
         ),
-    "$a = New-Object byte[] '0b10'; $t = $a.Count; Write-Output (,$t); Write-Output $t":
-        (
-            'THROW\tConstructorInvokedThrowException,Microsoft.PowerShell.Commands.NewObjectCommand'
-            '\tSystem.Management.Automation.MethodException',
-        ),
-    "$a = New-Object byte[] '0o10'; $t = $a.Count; Write-Output (,$t); Write-Output $t":
-        (
-            'THROW\tConstructorInvokedThrowException,Microsoft.PowerShell.Commands.NewObjectCommand'
-            '\tSystem.Management.Automation.MethodException',
-        ),
+    "$a = New-Object byte[] '0b10'; $t = $a.Count; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tConstructorInvokedThrowException,Microsoft.PowerShell.Commands.NewObjectCommand'
+        '\tSystem.Management.Automation.MethodException',
+        'OUT\tSystem.Int32\t0',
+        'OUT\tSystem.Int32\t0',
+    ),
+    "$a = New-Object byte[] '0o10'; $t = $a.Count; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tConstructorInvokedThrowException,Microsoft.PowerShell.Commands.NewObjectCommand'
+        '\tSystem.Management.Automation.MethodException',
+        'OUT\tSystem.Int32\t0',
+        'OUT\tSystem.Int32\t0',
+    ),
     'function f { ,$args }; $t = f 1 2; Write-Output (,$t); Write-Output $t.Count':
         (
             'OUT\tSystem.Object[]\t1 2',
@@ -1899,10 +1961,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t2',
             'OUT\tSystem.Int32\t2',
         ),
-    "function f { $s = 'abc'; $s++; $s }; $t = f; Write-Output (,$t); Write-Output $t":
-        (
-            'THROW\tOperatorRequiresNumber\tSystem.Management.Automation.RuntimeException',
-        ),
+    "function f { $s = 'abc'; $s++; $s }; $t = f; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tOperatorRequiresNumber\tSystem.Management.Automation.RuntimeException',
+        'OUT\tSystem.String\tabc',
+        'OUT\tSystem.String\tabc',
+    ),
     'function g { ,(1, 2) }; $t = @(g); Write-Output $t.Count; Write-Output (,$t[0])':
         (
             'OUT\tSystem.Int32\t1',
@@ -1933,18 +1996,21 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Boolean\tFalse',
             'OUT\tSystem.Boolean\tFalse',
         ),
-    "$t = '1_0' -band 15; Write-Output (,$t); Write-Output $t":
-        (
-            'THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
-        ),
-    '$t = [byte]400; Write-Output (,$t); Write-Output $t':
-        (
-            'THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
-        ),
-    '$t = [byte](200 * 2); Write-Output (,$t); Write-Output $t':
-        (
-            'THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
-        ),
+    "$t = '1_0' -band 15; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    '$t = [byte]400; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    '$t = [byte](200 * 2); Write-Output (,$t); Write-Output $t': (
+        'ERROR\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     'function f { $null; 1; $null }; $t = f; Write-Output $t.Count; Write-Output (,$t)':
         (
             'OUT\tSystem.Int32\t3',
@@ -2080,8 +2146,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int64\t3',
             'OUT\tSystem.Int64\t3',
         ),
-    "$t = 1 + '1e400'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = 1 + '1e400'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = [decimal]::MaxValue % 1.5d; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Decimal\t0',
@@ -2132,8 +2201,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Boolean\tTrue',
             'OUT\tSystem.Boolean\tTrue',
         ),
-    '$t = $null -band [uint32]1; Write-Output (,$t); Write-Output $t':
-        ('THROW\tSystem.InvalidCastException\tSystem.InvalidCastException',),
+    '$t = $null -band [uint32]1; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tSystem.InvalidCastException\tSystem.InvalidCastException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = $true * 1.5d; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Decimal\t1.5',
@@ -2149,8 +2221,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tabab',
             'OUT\tSystem.String\tabab',
         ),
-    '$v = [single]1.5; $t = $v -shl 1; Write-Output (,$t); Write-Output $t':
-        ('THROW\tSystem.InvalidCastException\tSystem.InvalidCastException',),
+    '$v = [single]1.5; $t = $v -shl 1; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tSystem.InvalidCastException\tSystem.InvalidCastException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$v = [single]1.5; $t = $v + 1; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Double\t2.5',
@@ -2161,8 +2236,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Double\t2.5',
             'OUT\tSystem.Double\t2.5',
         ),
-    '$v = $null; $t = $v -band [uint32]1; Write-Output (,$t); Write-Output $t':
-        ('THROW\tSystem.InvalidCastException\tSystem.InvalidCastException',),
+    '$v = $null; $t = $v -band [uint32]1; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tSystem.InvalidCastException\tSystem.InvalidCastException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$l = [byte]1; $r = 4; $t = $l -shl $r; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Byte\t16',
@@ -2233,8 +2311,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t0',
             'OUT\tSystem.Int32\t0',
         ),
-    '$t = $true * 2; Write-Output (,$t); Write-Output $t':
-        ('THROW\tNotADefinedOperationForType\tSystem.Management.Automation.RuntimeException',),
+    '$t = $true * 2; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tNotADefinedOperationForType\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = 2 * $true; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t2',
@@ -2280,17 +2361,26 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Object[]\t1 2 5',
             'OUT\tSystem.Int32\t3',
         ),
-    '$t = 5 + @(1, 2); Write-Output (,$t); Write-Output $t.Count':
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = 5 + @(1, 2); Write-Output (,$t); Write-Output $t.Count': (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\tSystem.Int32\t0',
+    ),
     '$t = @(1, 2) * 2; Write-Output (,$t); Write-Output $t.Count':
         (
             'OUT\tSystem.Object[]\t1 2 1 2',
             'OUT\tSystem.Int32\t4',
         ),
-    '$t = 2 * @(1, 2); Write-Output (,$t); Write-Output $t.Count':
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
-    '$t = @(1, 2) -band 1; Write-Output (,$t); Write-Output $t.Count':
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = 2 * @(1, 2); Write-Output (,$t); Write-Output $t.Count': (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\tSystem.Int32\t0',
+    ),
+    '$t = @(1, 2) -band 1; Write-Output (,$t); Write-Output $t.Count': (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\tSystem.Int32\t0',
+    ),
     '$t = @() + 1; Write-Output (,$t); Write-Output $t.Count':
         (
             'OUT\tSystem.Object[]\t1',
@@ -2311,8 +2401,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Object[]\t1 2 a',
             'OUT\tSystem.Int32\t3',
         ),
-    '$t = @(1, 2) - 1; Write-Output (,$t); Write-Output $t.Count':
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = @(1, 2) - 1; Write-Output (,$t); Write-Output $t.Count': (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\tSystem.Int32\t0',
+    ),
     '$t = @(1, 2) * 0; Write-Output (,$t); Write-Output $t.Count':
         (
             'OUT\tSystem.Object[]\t',
@@ -2623,8 +2716,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Int32\t0',
             'OUT\tSystem.Int32\t0',
         ),
-    "$t = - 'abc'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = - 'abc'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = - '5'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Int32\t-5',
@@ -2680,8 +2776,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Boolean\tTrue',
             'OUT\tSystem.Boolean\tTrue',
         ),
-    '$t = @() * [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t.Count':
-        ('THROW\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',),
+    '$t = @() * [uint64]18446744073709551615; Write-Output (,$t); Write-Output $t.Count': (
+        'ERROR\tInvalidCastIConvertible\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\tSystem.Int32\t0',
+    ),
     '$t = @() * 5000; Write-Output (,$t); Write-Output $t.Count':
         (
             'OUT\tSystem.Object[]\t',
@@ -2802,8 +2901,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Double\t-1.84467440737096E+19',
             'OUT\tSystem.Double\t-1.84467440737096E+19',
         ),
-    '$t = - @(); Write-Output (,$t); Write-Output $t':
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
+    '$t = - @(); Write-Output (,$t); Write-Output $t': (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = - '1e3'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Double\t-1000',
@@ -3144,10 +3246,16 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Boolean\tTrue',
             'OUT\tSystem.Boolean\tTrue',
         ),
-    "$t = 1 -lt 'abc'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
-    "$t = 1 -gt 'abc'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',),
+    "$t = 1 -lt 'abc'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    "$t = 1 -gt 'abc'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tInvalidCastFromStringToInteger\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = 1 -eq 'abc'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Boolean\tFalse',
@@ -3198,8 +3306,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Decimal\t79228162514264337593543950335',
             'OUT\tSystem.Decimal\t79228162514264337593543950335',
         ),
-    '$t = 79228162514264337593543950335d + 1d; Write-Output (,$t); Write-Output $t':
-        ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
+    '$t = 79228162514264337593543950335d + 1d; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tRuntimeException\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = 79228162514264337593543950335d * 1d; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Decimal\t79228162514264337593543950335',
@@ -3210,8 +3321,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Decimal\t79228162514264337593543950335',
             'OUT\tSystem.Decimal\t79228162514264337593543950335',
         ),
-    '$t = 79228162514264337593543950335d - -1d; Write-Output (,$t); Write-Output $t':
-        ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
+    '$t = 79228162514264337593543950335d - -1d; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tRuntimeException\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = 1.2345678901234567890123456789d + 0d; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Decimal\t1.2345678901234567890123456789',
@@ -3227,8 +3341,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Decimal\t0.3333333333333333333333333333',
             'OUT\tSystem.Decimal\t0.3333333333333333333333333333',
         ),
-    '$t = 1d / 0d; Write-Output (,$t); Write-Output $t':
-        ('THROW\tRuntimeException\tSystem.Management.Automation.RuntimeException',),
+    '$t = 1d / 0d; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tRuntimeException\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = [string]1.50d; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.String\t1.50',
@@ -3329,21 +3446,36 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.String\tx1',
             'OUT\tSystem.String\tx1',
         ),
-    "$t = [char]48 * '1'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
-    "$t = $true * '1'; Write-Output (,$t); Write-Output $t":
-        ('THROW\tMethodNotFound\tSystem.Management.Automation.RuntimeException',),
-    '$t = [char]48 * 2; Write-Output (,$t); Write-Output $t':
-        ('THROW\tNotADefinedOperationForType\tSystem.Management.Automation.RuntimeException',),
+    "$t = [char]48 * '1'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    "$t = $true * '1'; Write-Output (,$t); Write-Output $t": (
+        'ERROR\tMethodNotFound\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    '$t = [char]48 * 2; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tNotADefinedOperationForType\tSystem.Management.Automation.RuntimeException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = 2 * [char]48; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Int32\t96',
             'OUT\tSystem.Int32\t96',
         ),
-    '$t = $true - 1.0d; Write-Output (,$t); Write-Output $t':
-        ('THROW\tSystem.InvalidOperationException\tSystem.InvalidOperationException',),
-    '$t = $true + 1.0d; Write-Output (,$t); Write-Output $t':
-        ('THROW\tSystem.InvalidOperationException\tSystem.InvalidOperationException',),
+    '$t = $true - 1.0d; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tSystem.InvalidOperationException\tSystem.InvalidOperationException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
+    '$t = $true + 1.0d; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tSystem.InvalidOperationException\tSystem.InvalidOperationException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     '$t = 1.0d - $true; Write-Output (,$t); Write-Output $t':
         (
             'OUT\tSystem.Decimal\t0',
@@ -3359,8 +3491,11 @@ TYPE_TRANSCRIPTS: dict[str, tuple[str, ...]] = {
             'OUT\tSystem.Double\t-0.5',
             'OUT\tSystem.Double\t-0.5',
         ),
-    '$t = $true / 1.0d; Write-Output (,$t); Write-Output $t':
-        ('THROW\tSystem.InvalidOperationException\tSystem.InvalidOperationException',),
+    '$t = $true / 1.0d; Write-Output (,$t); Write-Output $t': (
+        'ERROR\tSystem.InvalidOperationException\tSystem.InvalidOperationException',
+        'OUT\t\t<null>',
+        'OUT\t\t<null>',
+    ),
     "$t = [char]48 -eq '0'; Write-Output (,$t); Write-Output $t":
         (
             'OUT\tSystem.Boolean\tTrue',

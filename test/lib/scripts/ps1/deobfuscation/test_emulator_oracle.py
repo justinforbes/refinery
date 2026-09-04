@@ -22,8 +22,9 @@ population itself.
 Two populations, because refusing to answer and answering wrongly are different things and the
 deobfuscator only survives one of them. `_measured_rows` is what 5.1 computed a value for, and a
 divergence there is a wrong constant folded into the emitted script. `_thrown_rows` is what 5.1
-refused, where the only safe answer is to refuse as well and any value at all is a fold of an
-expression that in fact halts the script.
+produced no value for, where the only safe answer is to refuse as well: any value at all folds a
+constant into a script that has none there, whether 5.1 stepped over the erroring statement and left
+`$t` unset or the error stopped the run outright.
 
 Both ledgers hold the *values* rather than prose, and are compared whole. An entry states what 5.1
 printed and what the interpreter answered instead, so a failure can be read without leaving this
@@ -132,7 +133,8 @@ TYPES_OUTSIDE_THE_CURRENCY: dict[str, int] = {
 #: line and its elements' on the rest — and the population is the rows whose witnesses agree.
 COLLECTION_ROWS: int = 6
 
-#: How many measured rows 5.1 answered by throwing. The population `ANSWERED_THROWS` is drawn from.
+#: How many measured rows 5.1 produced no value for, by stepping over the erroring statement or by
+#: stopping the run. The population `ANSWERED_THROWS` is drawn from.
 THROWING_ROWS: int = 47
 
 #: Where the interpreter computes a value 5.1 did not. Each entry is a constant the deobfuscator
@@ -228,8 +230,8 @@ DIVERGENCES: dict[str, _Divergence] = {
     '$null + $true'                      : _Divergence(True, 1),
 }
 
-#: Where 5.1 threw and the interpreter answered anyway, with the value it answered. Each entry is an
-#: expression that stops the script being folded into a constant that lets it run on.
+#: Where 5.1 produced no value and the interpreter answered anyway, with the value it answered. Each
+#: entry is an expression the host has none for, folded into a constant the script could never hold.
 ANSWERED_THROWS: dict[str, _Value] = {
     # A conversion whose source does not fit its target throws. The interpreter answers the
     # oversized number for an integer width and the code point Python allows for a Char, each a
@@ -280,10 +282,16 @@ def _rows() -> dict[str, tuple[str, ...]]:
 
 
 def _valued_rows() -> dict[str, tuple[str, ...]]:
+    """
+    Every measured row whose expression produced a value: its first transcript line is that value on
+    the output stream. A row whose expression errored leads with `ERROR` where 5.1 stepped over the
+    statement and left `$t` unset, or with `THROW` where the error ended the run before `$t` was
+    written twice — both are the absence of a value and belong to `_thrown_rows`.
+    """
     return {
         expression: transcript
         for expression, transcript in _rows().items()
-        if not transcript[0].startswith('THROW\t')
+        if transcript[0].startswith('OUT\t')
     }
 
 
@@ -327,10 +335,15 @@ def _types_outside_the_currency() -> dict[str, int]:
 
 @functools.lru_cache(maxsize=1)
 def _thrown_rows() -> tuple[str, ...]:
+    """
+    Every measured row whose expression produced no value: its first transcript line is the error the
+    expression raised rather than a value on the output stream, whether 5.1 stepped over the statement
+    or the error ended the run. The interpreter's only safe answer is to refuse each one alike.
+    """
     return tuple(
         expression
         for expression, transcript in _rows().items()
-        if transcript[0].startswith('THROW\t')
+        if not transcript[0].startswith('OUT\t')
     )
 
 
@@ -432,9 +445,10 @@ class TestPs1InterpreterComputesWhatWindowsPowerShellComputed(unittest.TestCase)
 
 class TestPs1InterpreterRefusesWhatWindowsPowerShellRefused(unittest.TestCase):
     """
-    An expression a 5.1 host answers by throwing has no value, so an interpreter that produces one
-    has folded away a script that in fact stops. Refusing to answer is the safe outcome and the only
-    correct one here, which is why these rows are held apart from the ones that measure a value.
+    An expression a 5.1 host errors on has no value, so an interpreter that produces one has folded a
+    constant the script never held — 5.1 either steps over the statement and leaves `$t` unset or
+    stops the run. Refusing to answer is the safe outcome and the only correct one here, which is why
+    these rows are held apart from the ones that measure a value.
     """
 
     maxDiff = None

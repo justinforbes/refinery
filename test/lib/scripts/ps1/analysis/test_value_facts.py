@@ -172,7 +172,12 @@ def _printed(line: str) -> tuple[str, str]:
 
 
 def _throws(transcript: tuple[str, ...]) -> bool:
-    return transcript[0].startswith('THROW\t')
+    """
+    Whether a host produced no value for the row: its first line is the error the expression raised
+    rather than a value on the output stream, whether 5.1 stepped over the erroring statement and
+    left `$t` unset or the error stopped the run.
+    """
+    return not transcript[0].startswith('OUT\t')
 
 
 def _measured(expression: str) -> tuple[str, str]:
