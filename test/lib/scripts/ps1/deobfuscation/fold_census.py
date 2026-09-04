@@ -1513,8 +1513,6 @@ FOLDS: dict[str, str] = {
         "'boom'",
     "try { zzqq0 =5 } catch {}; Write-Host 'after'":
         "Write-Host 'after'",
-    'try { zzqfoo =5 } catch {}; $v = Get-Variable Error; Write-Host $v.Value.Count':
-        '$v = Get-Variable Error\nWrite-Host $v.Value.Count',
     "try { [void]$undefzz; Write-Host 'quiet' } catch { Write-Host 'caught' }":
         "try {\n  Write-Host 'quiet'\n} catch {\n  Write-Host 'caught'\n}",
     'function f { $input; $input | ForEach-Object { Write-Host "seen:$_" } }; 1, 2 | f':

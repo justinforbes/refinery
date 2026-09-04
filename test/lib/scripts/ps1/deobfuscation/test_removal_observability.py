@@ -507,8 +507,12 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
     much about `$Error` itself, naming `refinery.lib.scripts.ps1.deobfuscation.removal.Ps1RemovalPlan`
     as where the general answer belongs. Every other statement remover in the package asks its own
     absence question, and whether any of them is asked too early is unmeasured. Scheduling the drop
-    after `finalize` was measured to fix both rows at no cost to the sample, and was not taken
-    because the family question outranks the one member.
+    after `finalize` was measured to fix the two-string row below at no cost to the sample, and was
+    not taken because the family question outranks the one member.
+
+    A read spelled through the cmdlet that names the variable — `$v = Get-Variable Error` — is a
+    separate recall gap and is closed: `reads_the_error_record` now reads the name a command
+    addresses as a string, so a spelling that stores the result first is a read all the same.
     """
 
     def test_a_noise_bareword_is_kept_where_the_script_reads_the_error_list(self):
@@ -594,13 +598,21 @@ class TestPs1ANoiseBarewordIsKeptWhereTheRecordItLeavesIsRead(TestPs1):
             $Error.Count
         """)
 
-    @unittest.expectedFailure
     def test_a_noise_bareword_is_kept_where_the_record_is_read_through_get_variable(self):
         self._assertKept("""
             try {
               zzqq0 =5
             } catch {}
             $v = Get-Variable Error
+            Write-Host $v.Value.Count
+        """)
+
+    def test_a_noise_bareword_is_kept_where_the_record_is_read_through_the_variable_drive(self):
+        self._assertKept("""
+            try {
+              zzqq0 =5
+            } catch {}
+            $v = Get-Item Variable:Error
             Write-Host $v.Value.Count
         """)
 

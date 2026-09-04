@@ -104,6 +104,7 @@ from refinery.lib.scripts.analysis.reaching import ReachabilityQuery
 from refinery.lib.scripts.ps1.analysis.blocks import Ps1BlockModel, Ps1BlockReach
 from refinery.lib.scripts.ps1.analysis.faults import a_stop_may_be_in_force
 from refinery.lib.scripts.ps1.analysis.model import is_write_occurrence
+from refinery.lib.scripts.ps1.analysis.naming import Ps1NameRole, named_references
 from refinery.lib.scripts.ps1.analysis.world import (
     WorldRole,
     assigns_an_alias_name,
@@ -854,14 +855,14 @@ class Ps1CommandModel:
         by code no scan here ever sees; that residual belongs to the caller, and
         `refinery.lib.scripts.ps1.deobfuscation.deadcode._is_injected_noise_bareword` states it.
 
-        Reading the record through `Get-Variable` reaches neither half where nothing resolves the
-        cmdlet away: the name arrives as a bareword argument carrying no sigil, and matching it
-        would mean matching the word. `(Get-Variable Error).Value` is resolved to `$Error` by an
-        earlier pass and is caught by the node walk as an ordinary read; a spelling that stores the
-        result first is not, and that is a measured wrong answer carried in
-        `test.lib.scripts.ps1.test_oracle.BEHAVIOUR_DEFECTS`. Reading a variable through the cmdlet
-        that names it is the question `introspected_names` answers for the alias drive, and it is
-        that fact this would extend, not this scan.
+        Reading the record through a cmdlet that names it — `Get-Variable Error`, `Get-Item
+        Variable:Error` — is caught through
+        `refinery.lib.scripts.ps1.analysis.naming.named_references`, which reports the name a command
+        reads as a string the same way a `Ps1Variable` reports one read as a sigil, so a spelling
+        that stores the result first is read as a read all the same. A name that is computed or a
+        wildcard names no one variable this can list and is not caught here; that residual is the
+        payload no walk decodes, which
+        `refinery.lib.scripts.ps1.deobfuscation.deadcode._is_injected_noise_bareword` states.
 
         Memoized for as long as the tree is unchanged, like every other whole-tree answer here.
         """
@@ -879,6 +880,13 @@ class Ps1CommandModel:
             elif isinstance(node, (Ps1StringLiteral, Ps1HereString)):
                 value = node.value
                 if '$' in value and _ERROR_RECORD_SPELLED_OUT.search(value):
+                    return True
+            elif isinstance(node, Ps1CommandInvocation):
+                if any(
+                    reference.role is Ps1NameRole.READS
+                    and reference.key in _ERROR_RECORD_VARIABLES
+                    for reference in named_references(node)
+                ):
                     return True
         return False
 

@@ -173,15 +173,6 @@ BEHAVIOUR_DIVERGENCES: dict[str, str] = {
 #: asks whether a store survived in the tree and what the reads below it can still print. That is
 #: not evidence for what is written here, because this reaches its verdict by running both scripts.
 BEHAVIOUR_DEFECTS: dict[str, str] = {
-    'try { zzqfoo =5 } catch {}; $v = Get-Variable Error; Write-Host $v.Value.Count':
-        'The noise bareword is dropped although the script reads back the record its raise left, '
-        'so the snippet writes `1` and its output writes `0`. '
-        '`Ps1CommandModel.reads_the_error_record` looks for the sigil spelling, and this read '
-        'arrives as a bareword argument to the cmdlet that names the variable. Written '
-        '`(Get-Variable Error).Value` the read is resolved to `$Error` before the drop is taken and '
-        'the construct is kept; stored in a variable first, nothing resolves it. Its host-free '
-        'witness is the `expectedFailure` of the same shape in '
-        '`test.lib.scripts.ps1.deobfuscation.test_removal_observability`.',
     "Set-Variable global:y 'b'; Write-Host $global:y":
         'The store is dropped, so `b` becomes nothing: a command that writes a variable is not '
         'read as the store the following read needs.',
