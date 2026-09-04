@@ -2187,3 +2187,93 @@ class TestAnObjectPropertyFlagVariantIsStillRemoved(TestBase):
             console.log('done');
             """)
         self.assertEqual("console.log('done');", deobfuscate_source(source))
+
+
+#: A program whose only side effect between two observations runs inside a `toString` or `valueOf`
+#: the conversion of a binary operand fires, mapped to the behavior Node gives it. The first two
+#: rows drop the converting store outright; the third is the family's plainest witness, a global
+#: written during the conversion and read after it; the last three keep the store alive through a
+#: later use of its value, and the substitution moves the conversion past the read it was ordered
+#: before.
+A_CONVERSION_WITH_AN_EFFECT_THE_SCAN_CANNOT_SEE = {
+    'X = 5;\n'
+    "var o = { toString: function () { delete globalThis.X; return ''; } };\n"
+    "var s = '' + o;\nX;\nconsole.log('end');\n": ('', 'ReferenceError'),
+
+    'X = 5;\n'
+    'var o = { valueOf: function () { delete globalThis.X; return 1; } };\n'
+    "var n = o + 1;\nX;\nconsole.log('end');\n": ('', 'ReferenceError'),
+
+    "var o = { toString: function () { globalThis.Q = 1; return ''; } };\n"
+    "var s = '' + o;\nconsole.log(typeof globalThis.Q);\n": ('number\n', None),
+
+    'X = 5;\n'
+    "var o = { toString: function () { delete globalThis.X; return 'o'; } };\n"
+    "var s = '' + o;\nX;\nconsole.log(s);\n": ('', 'ReferenceError'),
+
+    'X = 5;\n'
+    "var o = { toString: function () { delete globalThis.X; return 'o'; } };\n"
+    'var s = `${o}`;\nX;\nconsole.log(s);\n': ('', 'ReferenceError'),
+
+    'X = 5;\n'
+    'var o = { valueOf: function () { delete globalThis.X; return 7; } };\n'
+    'var s = o < 8;\nX;\nconsole.log(s);\n': ('', 'ReferenceError'),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAConversionWithAnEffectIsNeitherDroppedNorMoved(TestBase):
+    """
+    Evaluating `'' + o` runs `o`'s own `toString`, and `o + 1` its `valueOf`, so a binary expression
+    over a non-primitive operand runs program code the way a call does. The effect scan —
+    `side_effect_free` and the model form over it — recurses into a binary expression's operands and
+    asks nothing about the conversion itself, so an object whose converter carries a side effect is
+    judged by its spelling: a plain variable read and a literal, both free. On that answer the sweep
+    drops a dead store whose right-hand side converts (`var s = '' + o` goes, and `delete
+    globalThis.X` inside the converter goes with it), and the inliner substitutes a single-use store
+    forward past another statement (`console.log(s)` becomes `console.log('' + o)`, running the
+    converter after the `X;` it was ordered before). Both rewrites need the same missing fact: a
+    conversion of an operand the analysis cannot prove primitive may run arbitrary code, so it is
+    droppable and movable only under the proof the call leaf already demands.
+
+    A converting right-hand side that is kept for its effect is not enough to close the family: the
+    third row's store is dropped by the same verdict, with no `delete` involved at all — a global
+    written during the conversion simply never comes to exist.
+    """
+
+    @unittest.expectedFailure
+    def test_each_program_still_observes_its_conversions_effect(self):
+        rows = A_CONVERSION_WITH_AN_EFFECT_THE_SCAN_CANNOT_SEE
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
+        )
+
+
+def _a_chain_of_local_increments(n: int) -> str:
+    lines = ['var v0 = 1;']
+    for i in range(1, n):
+        lines.append(F'var v{i} = v{i - 1} + 1;')
+    lines.append('console.log(1);')
+    return '\n'.join(lines) + '\n'
+
+
+class TestADeepChainOfLocalsOverflowsTheRewriter(TestBase):
+    """
+    Inlining a chain of single-use locals substitutes each value into the next initializer, so the
+    chain folds into one binary expression whose nesting depth is the chain's length. Every visitor
+    in the pipeline walks the tree by recursing per node, and a tree four hundred operands deep
+    exceeds the interpreter's recursion limit inside
+    `refinery.lib.scripts.js.deobfuscation.simplify.JsSimplifications`, so the run dies in a
+    `RecursionError` where a shorter chain folds to its final print. The same chain written through
+    implicit globals reduces at n = 1000, because the sweep deletes those stores without ever
+    building the nested expression; the depth is made by the inliner, not by the input. The fix is
+    an iterative walk, or folding during substitution so the intermediate tower never exists.
+    """
+
+    def test_a_chain_of_three_hundred_locals_folds_to_its_print(self):
+        self.assertEqual('console.log(1);', deobfuscate_source(_a_chain_of_local_increments(300)))
+
+    @unittest.expectedFailure
+    def test_a_chain_of_four_hundred_locals_is_deobfuscated(self):
+        self.assertEqual('console.log(1);', deobfuscate_source(_a_chain_of_local_increments(400)))
