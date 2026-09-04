@@ -69,11 +69,12 @@ class TestPs1AStopPreferenceMakesTheRaiseEndTheScript(_Ps1FaultEscalation):
     runs, neither in the raise's own block nor in any block enclosing it. Deleting the raise starts
     running all of it, so the raise and the assignment that arms it both survive.
 
-    The deobfuscator reads no preference variable when it decides a removal. It deletes the raise
-    and keeps the assignment, turning a script that stopped there into one that runs on.
+    The fault model reads the same `Stop` preference on the forward path that weighs deleting the
+    raise as on the transpose that weighs deleting a `trap`, so a raise the preference makes
+    terminating is observed and kept. `TestPs1APreferenceThatResumesLeavesTheRaiseRemovable` is the
+    control: with any resuming preference the identical raise still goes.
     """
 
-    @unittest.expectedFailure
     def test_a_raising_cast_under_a_stop_preference_is_kept(self):
         self._assertKept(F"""
             $ErrorActionPreference = 'Stop'
@@ -81,7 +82,6 @@ class TestPs1AStopPreferenceMakesTheRaiseEndTheScript(_Ps1FaultEscalation):
             {_FOLLOWER}
         """)
 
-    @unittest.expectedFailure
     def test_a_raising_cast_in_a_branch_under_a_stop_preference_is_kept(self):
         self._assertKept(F"""
             $ErrorActionPreference = 'Stop'
@@ -793,6 +793,28 @@ class TestPs1ACommandToldToStopMakesItsErrorEndTheScript(_Ps1FaultEscalation):
             Get-Item nope -ErrorAction Continue
             {_FOLLOWER}
         """)
+
+
+class TestPs1ADiscardedCommandToldToStopIsKeptWithNoHandler(_Ps1FaultEscalation):
+    """
+    `-ErrorAction Stop` ends the script whether or not a handler is written over the command, so a
+    discarded stopping command with no `trap` and no `catch` anywhere is still kept: deleting it
+    starts running everything after the command that the terminating error stopped. This is the
+    forward reading of the termination `TestPs1ACommandToldToStopMakesItsErrorEndTheScript` reads on
+    the transpose, and the same resuming action is the control that the discard otherwise goes.
+    """
+
+    def test_a_discarded_command_told_to_stop_with_no_handler_is_kept(self):
+        self._assertKept(F"""
+            $Null = {_STOPPING_RAISE}
+            {_FOLLOWER}
+        """)
+
+    def test_a_discarded_command_told_to_continue_with_no_handler_is_removed(self):
+        self._assertDeobfuscatesTo(F"""
+            $Null = Get-Item nope -ErrorAction Continue
+            {_FOLLOWER}
+        """, _FOLLOWER)
 
 
 class TestPs1AnExitIsNoRaiseAnyTrapDisposesOf(_Ps1FaultEscalation):

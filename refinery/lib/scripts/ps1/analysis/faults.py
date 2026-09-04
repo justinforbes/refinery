@@ -521,12 +521,26 @@ class Ps1FaultReach:
         something may call is refused wherever the script holds a handler that acts — and granted
         where it holds none, since a `catch` that is not written cannot be the one guarding the
         call.
+
+        **A terminating error that escapes the script scope ends the run**, so deleting its raise
+        would start the tail that never ran. `_reading_is_observed` reads a raise escaping to the
+        script owner as unobserved — right for the statement-terminating errors 5.1 reports and steps
+        over, wrong for the terminating ones. So when the error gets past the body unhandled and
+        `_terminates` names the raise fatal, it is observed. This is the forward reading of the same
+        termination the transpose `_removal_matters` already weighs.
         """
         located = self._control_flow.locate(node)
         if located is None:
             return True
         graph, start = located
-        return self._reading_is_observed(graph, self._routing(graph, start))
+        routing = self._routing(graph, start)
+        if self._reading_is_observed(graph, routing):
+            return True
+        return (
+            _escapes(routing)
+            and not _handled_in_the_body(routing)
+            and self._terminates(node)
+        )
 
     def _reading_is_observed(self, graph: ControlFlowGraph, routing: Ps1FaultRouting) -> bool:
         """
@@ -629,9 +643,7 @@ class Ps1FaultReach:
         raisers = self._raisers(graph, start)
         if not raisers:
             return False
-        if self._stops_on_every_error():
-            return True
-        if any(self._ends_the_script(raiser) for raiser in raisers):
+        if any(self._terminates(raiser) for raiser in raisers):
             return True
         element = start.element
         routing = self._routing(graph, start)
@@ -699,6 +711,16 @@ class Ps1FaultReach:
         if remembered is None:
             remembered = self._ending[id(element)] = ends_the_script(element)
         return remembered
+
+    def _terminates(self, element: Node) -> bool:
+        """
+        Whether an error raised at *element* ends the run rather than being reported and stepped
+        over: the script writes `Stop` to `$ErrorActionPreference` anywhere, or the raise is one of
+        the terminating shapes `_ends_the_script` names. The one predicate the position question and
+        the transpose both read, so a raise the trap-removal side reads as script-ending is read the
+        same way on the path that weighs deleting the raise itself.
+        """
+        return self._stops_on_every_error() or self._ends_the_script(element)
 
     @property
     def _script(self) -> Node | None:
