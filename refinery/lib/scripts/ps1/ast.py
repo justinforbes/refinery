@@ -29,6 +29,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1AccessKind,
     Ps1ArrayLiteral,
     Ps1AssignmentExpression,
+    Ps1BinaryExpression,
     Ps1CastExpression,
     Ps1Code,
     Ps1CommandArgument,
@@ -655,6 +656,12 @@ def is_reference_cast(expr: Node | None) -> bool:
 #: lets a caller read the matched construct's statement list off it.
 STATEMENT_LIST_EXPRESSIONS = (Ps1SubExpression,)
 
+#: The arithmetic operators whose right operand a zero makes fail: division and remainder both raise
+#: a statement-terminating error when it is zero. Read as a shape — the operand's value is not
+#: consulted — so every division is a source and a division that never divides by zero costs only a
+#: missed simplification.
+_DIVIDING_OPERATORS = frozenset({'/', '%'})
+
 
 def is_soft_error_source(node: Node) -> bool:
     """
@@ -669,7 +676,8 @@ def is_soft_error_source(node: Node) -> bool:
 
     The roster is extended shape by shape, as a measured row needs one. Today:
 
-    - a cast or conversion `[T]x`, whose conversion may fail.
+    - a cast or conversion `[T]x`, whose conversion may fail;
+    - a division or remainder `x / y`, `x % y`, whose divisor may be zero.
 
     The walk stops at a `STATEMENT_LIST_EXPRESSIONS` construct and at a nested script block, because a
     soft source inside one becomes that construct's own node in the finer control-flow graph: claiming
@@ -677,6 +685,8 @@ def is_soft_error_source(node: Node) -> bool:
     """
     def raises(element: Node) -> bool:
         if isinstance(element, Ps1CastExpression):
+            return True
+        if isinstance(element, Ps1BinaryExpression) and element.operator in _DIVIDING_OPERATORS:
             return True
         for child in element.children():
             if isinstance(child, (Ps1ScriptBlock, *STATEMENT_LIST_EXPRESSIONS)):

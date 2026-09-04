@@ -1448,7 +1448,7 @@ FOLDS: dict[str, str] = {
     "trap { continue }; 1/0; Write-Host 'after'":
         "1 / 0\nWrite-Host 'after'",
     "trap { continue }; $x = \"$(1/0)$(Set-Alias zzq Write-Output)\"; zzq 'hi'":
-        "$Null = \"$(1 / 0)$(Set-Alias zzq Write-Output)\"\nWrite-Output 'hi'",
+        "trap {\n  continue\n}\n$Null = \"$(1 / 0)$(Set-Alias zzq Write-Output)\"\nzzq 'hi'",
     "throw 'e'; Write-Host 'after'":
         "throw 'e'",
     "trap { continue }; iex 'throw 1'; Write-Host 'after'":

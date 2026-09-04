@@ -430,9 +430,10 @@ class TestPs1ResolvedCommandNames(TestBase):
 class TestPs1SoftErrorSource(TestBase):
     """
     The syntactic roster of statement-terminating (soft) error sources, a may-predicate over the shape
-    of one statement. It answers True wherever a cast could fail, reads no value, and stops at the
-    boundary the finer control-flow graph descends into — a `$( )` — so the statement that *contains*
-    a subexpression does not claim a source the subexpression's own node already carries.
+    of one statement. It answers True wherever a cast could fail or a division could be by zero, reads
+    no value, and stops at the boundary the finer control-flow graph descends into — a `$( )` — so the
+    statement that *contains* a subexpression does not claim a source the subexpression's own node
+    already carries.
     """
 
     @staticmethod
@@ -457,19 +458,32 @@ class TestPs1SoftErrorSource(TestBase):
             with self.subTest(source):
                 self.assertTrue(is_soft_error_source(self._statement(source)))
 
-    def test_a_statement_with_no_cast_is_not_a_source(self):
+    def test_a_division_or_remainder_is_a_source_wherever_it_sits(self):
+        for source in (
+            "1/0",
+            "$x = 1 / $y",
+            "$x = 10 % 3",
+            "Write-Host (1 / $n)",
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_soft_error_source(self._statement(source)))
+
+    def test_a_statement_with_no_soft_source_is_not_one(self):
         for source in (
             "$x = 5",
             "$x = 'a'",
             "Write-Host 'x'",
             "$x + 1",
             "$x = $y",
+            "$x = 1 + 2",
+            "$x = 6 * 7",
+            "$x = 1 -shr 2",
         ):
             with self.subTest(source):
                 self.assertFalse(is_soft_error_source(self._statement(source)))
 
-    def test_the_predicate_reads_shape_not_value_so_a_safe_cast_is_still_a_source(self):
-        for source in ("[int]5", "[string]$x", "[int]$x"):
+    def test_the_predicate_reads_shape_not_value_so_a_safe_source_still_counts(self):
+        for source in ("[int]5", "[string]$x", "[int]$x", "10 / 2", "9 % 3"):
             with self.subTest(source):
                 self.assertTrue(is_soft_error_source(self._statement(source)))
 

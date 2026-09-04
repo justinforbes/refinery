@@ -461,6 +461,10 @@ class TestPs1AResumingTrapOverASoftErrorInASubexpressionIsKept(TestBase):
         self.assertTrue(self._trap_removal_is_observed(
             "trap { continue }; $x = $('a'; [int]'b')", fine=True))
 
+    def test_a_division_by_zero_inside_a_subexpression_keeps_the_trap(self):
+        self.assertTrue(self._trap_removal_is_observed(
+            "trap { continue }; $x = $(1/0; 'in'); Write-Host $x", fine=True))
+
     def test_a_soft_error_at_script_scope_whose_step_over_reconverges_lets_the_trap_go(self):
         self.assertFalse(self._trap_removal_is_observed(
             "trap { continue }; [int]'a'; Write-Host 'after'", fine=True))

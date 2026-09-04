@@ -449,7 +449,6 @@ CONTRIBUTION: dict[str, Contribution] = {
             "if ($true) { 'yes' } else { 'no' }",
             "switch ('b') { 'a' { 'first' } 'b' { 'second' } }",
             'trap [E] { 1 }',
-            'trap { continue }; $x = "$(1/0)$(Set-Alias zzq Write-Output)"; zzq \'hi\'',
             "trap { continue }; iex 'throw 1'; Write-Host 'after'",
             "trap { continue }; if ($true) { throw 'e'; Write-Host 'tail' }; Write-Host 'next'",
             'try { 1 } catch [A], [B] { 2 } catch { 3 }',

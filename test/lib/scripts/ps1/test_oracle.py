@@ -282,11 +282,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The handler is removed. The table binds `-ErrorAction Stop` into every command that '
         'takes one, so no action is written at the call site and no preference is assigned; '
         'neither gate is looking at an index expression.',
-    "trap { continue }; $x = \"$(1/0)$(Set-Alias zzq Write-Output)\"; zzq 'hi'":
-        'The handler is removed, and the tool reads the `Set-Alias` beside the failing division as '
-        'having run, so the call below is resolved to `Write-Output` and the output prints `hi`. '
-        '5.1 abandons the whole assignment at the division and resumes with the name still unbound, '
-        'so it prints nothing.',
     "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' "
     "}; Wrap; Write-Host 'after'":
         'The handler is removed. What reaches it is the *call*, whose subtree carries no `throw`, '
