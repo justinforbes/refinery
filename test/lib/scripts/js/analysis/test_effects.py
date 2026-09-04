@@ -1135,10 +1135,11 @@ class TestEffectModel(TestBase):
     def test_side_effect_free_default_clears_allocation_holding_an_unresolved_read(self):
         """
         The default read effect is the getter half alone, which a name no binding resolves does not
-        trip, so a discarded allocation holding one is cleared. The store-removal sweep and the
-        discarded-test fold have moved off this default onto *reads_may_throw* with a
-        definite-assignment vouch; the default remains for the passes that delete an argument or an
-        operand, which is what keeps their pins failing rather than this one.
+        trip, so a discarded allocation holding one is cleared. Every context that drops a value with
+        nothing left evaluating the read asks instead for *reads_may_throw* with a definite-assignment
+        vouch; a context that relocates the read into a still-evaluated position keeps the throw there
+        and asks it only of the sub-expression it truly drops. The default remains the leaf for a read
+        the caller does keep.
         """
         for source, kind in [('x = [zzz];', JsArrayExpression), ('x = ({p: zzz});', JsObjectExpression)]:
             ast, effects = self._effects(source)

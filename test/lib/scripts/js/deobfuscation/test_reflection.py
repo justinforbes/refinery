@@ -227,8 +227,14 @@ class TestReflectionInlining(TestJsDeobfuscator):
         )
         self.assertEqual(source, self._reflect(source))
 
-    def test_indirect_eval_identifier_prefix_outside_with_still_inlined(self):
-        self.assertEqual('f();', self._reflect("(e, eval)('f()');"))
+    def test_indirect_eval_established_identifier_prefix_outside_with_still_inlined(self):
+        self.assertEqual(
+            'var e = 1;\nf();',
+            self._reflect("var e = 1; (e, eval)('f()');"))
+
+    def test_indirect_eval_unbound_identifier_prefix_is_not_dropped(self):
+        source = "(e, eval)('f()');"
+        self.assertEqual(source, self._reflect(source))
 
     def test_settimeout_string(self):
         """

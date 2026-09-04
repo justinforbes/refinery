@@ -2179,3 +2179,105 @@ class TestNodePrintsTheSameAboutAReadOfANameNothingBinds(TestJsDeobfuscator):
             {source: behavior(self._deobfuscate(source)) for source in rows},
             {source: behavior(source) for source in rows},
         )
+
+
+#: A program whose one failure is a read of a name nothing binds, standing where a discarding
+#: context other than the store-removal sweep folds the expression around it, mapped to the text the
+#: deobfuscation writes for it. The dead-branch fold takes the truthy `if` but keeps `[zzz]` as a
+#: bare expression, the object fold inlines `o.q` to its value but keeps the declaration whose
+#: construction reads the unaccessed `zzz`, and the IIFE inliner declines to substitute a may-throw
+#: argument bound to a parameter its body drops. The last two rows are the controls a named-wrapper
+#: inline and an array-index fold already kept. Every row throws where it threw, so the read survives
+#: each context the way the sweep keeps it.
+A_KEPT_READ_A_DISCARDING_CONTEXT_FOLDS_AROUND: dict[str, str] = {
+    'if ([zzz]) console.log(1);\n': '[zzz];\nconsole.log(1);',
+    'var o = { p: zzz, q: 1 };\nconsole.log(o.q);\n':
+        'var o = { p: zzz, q: 1 };\nconsole.log(1);',
+    'console.log(function (a, b) { return a; }(7, zzz));\n':
+        'console.log(function(a, b) {\n  return a;\n}(7, zzz));',
+    'function w(a, b) {\n  return a;\n}\nconsole.log(w(7, zzz));\n':
+        'function w(a, b) {\n  return a;\n}\nconsole.log(w(7, zzz));',
+    'var r = [1, zzz][0];\nconsole.log(r);\n': 'var r = [1, zzz][0];\nconsole.log(r);',
+}
+
+#: A wrapper reading its parameter under `typeof` handed a name nothing binds, mapped to the text the
+#: deobfuscation writes for it. `typeof` is the one operand position where reading a free name does
+#: not throw, so substituting the call-site argument into it would erase the `ReferenceError` the
+#: call raised even though the argument is used once and in order; the IIFE inliner refuses the
+#: position and the call stands.
+A_KEPT_READ_UNDER_TYPEOF_STILL_THROWS: dict[str, str] = {
+    'try {\n'
+    '  console.log(function (a) { return typeof a; }(u));\n'
+    '} catch (e) {\n'
+    "  console.log('caught');\n"
+    '}\n':
+        'try {\n'
+        '  console.log(function(a) {\n'
+        '    return typeof a;\n'
+        '  }(u));\n'
+        '} catch (e) {\n'
+        "  console.log('caught');\n"
+        '}',
+}
+
+#: The control: the same wrapper handed an established name, mapped to the text the deobfuscation
+#: writes for it. The argument does not throw, so the inline proceeds and `typeof 1` folds to its
+#: answer where the throwing argument's would have stood.
+A_TYPEOF_OF_AN_ESTABLISHED_ARGUMENT_FOLDS: dict[str, str] = {
+    'var u = 1;\n'
+    'try {\n'
+    '  console.log(function (a) { return typeof a; }(u));\n'
+    '} catch (e) {\n'
+    "  console.log('caught');\n"
+    '}\n':
+        'try {\n'
+        "  console.log('number');\n"
+        '} catch (e) {\n'
+        "  console.log('caught');\n"
+        '}',
+}
+
+
+class TestAReadOfANameNothingBindsSurvivesEveryDiscardingContext(TestJsDeobfuscator):
+    """
+    Every pass that drops or reorders an expression asks the throw half of the read contract with the
+    establishment answer `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel` gives,
+    so a read of a name no completed write establishes survives the dead-branch fold, the object fold,
+    and the IIFE inliner the way the store-removal sweep already keeps it. The IIFE inliner further
+    refuses to move a may-throw argument into a `typeof` operand, the one position that would mute the
+    throw the ordering rules keep.
+    """
+
+    def test_the_read_survives_where_a_context_folds_around_it(self):
+        rows = A_KEPT_READ_A_DISCARDING_CONTEXT_FOLDS_AROUND
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_a_may_throw_argument_is_not_moved_under_typeof(self):
+        rows = A_KEPT_READ_UNDER_TYPEOF_STILL_THROWS
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+    def test_an_established_argument_under_typeof_still_folds(self):
+        rows = A_TYPEOF_OF_AN_ESTABLISHED_ARGUMENT_FOLDS
+        self.assertEqual({source: self._deobfuscate(source) for source in rows}, rows)
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestNodePrintsTheSameAcrossEveryDiscardingContext(TestJsDeobfuscator):
+
+    def test_each_discarded_reading_program_still_refuses_to_run(self):
+        rows = A_KEPT_READ_A_DISCARDING_CONTEXT_FOLDS_AROUND
+        self.assertEqual(
+            {source: behavior(source) for source in rows},
+            {source: ('', 'ReferenceError') for source in rows},
+        )
+
+    def test_each_program_behaves_as_it_did_before(self):
+        rows = {
+            **A_KEPT_READ_A_DISCARDING_CONTEXT_FOLDS_AROUND,
+            **A_KEPT_READ_UNDER_TYPEOF_STILL_THROWS,
+            **A_TYPEOF_OF_AN_ESTABLISHED_ARGUMENT_FOLDS,
+        }
+        self.assertEqual(
+            {source: behavior(self._deobfuscate(source)) for source in rows},
+            {source: behavior(source) for source in rows},
+        )

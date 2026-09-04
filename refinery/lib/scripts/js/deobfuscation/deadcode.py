@@ -180,12 +180,17 @@ class JsDeadCodeElimination(BodyProcessingTransformer):
         Whether the discarded test can be dropped. The model-aware effect check is authoritative when a
         model is available: it certifies a proven-pure call the model-free check would keep, and rejects
         a read through a `with` body's dynamic scope the model-free check would wrongly call pure (that
-        read may fire the `with` object's getter or throw). The structural check is only a fallback for a
-        pass constructed without a model.
+        read may fire the `with` object's getter or throw). Dropping the test discards its whole
+        value, so the throw a read of a name nothing binds would raise is kept unless the shared
+        establishment proof vouches a creating write for it. The structural check is only a fallback
+        for a pass constructed without a model.
         """
         effects = self.effects
         if effects is not None:
-            return effects.is_side_effect_free(test)
+            assert self._root is not None
+            established = model_cache(self, self._root).assignment.read_established
+            return effects.is_side_effect_free(
+                test, reads_may_throw=True, read_established=established)
         return side_effect_free(test)
 
     @staticmethod

@@ -1008,14 +1008,17 @@ class EffectModel:
 
         With *reads_may_throw* the read leaf is rejected not only when it fires a `with` object's getter
         but also when it may throw a `ReferenceError`, which is the throw half of the *read_effect*
-        contract that `read_has_dynamic_effect` supplies only the getter half of. A caller discarding an
-        allocation to answer its type or truthiness asks for it, so the throw that reading the allocation
-        would have raised is kept where the value is dropped; so do the two whole-expression removal
-        contexts — the store-removal sweep and the discarded-test fold — so neither takes an
-        unestablished read with the expression it drops. Every other pass that deletes an expression
-        is still on the default and still drops such a read
-        (`test_unfixed_defects.TestAReadMovedUnderTypeofKeepsItsThrow` names one of them). With
-        *read_established* a caller passes its establishment proof — in every consumer the query of
+        contract that `read_has_dynamic_effect` supplies only the getter half of. A caller asks for
+        it of an expression whose value it drops with nothing left evaluating the read — an
+        allocation discarded to answer its type or truthiness, the store-removal sweep, the
+        discarded-test and dead-branch folds, the string-array dispatcher's dropped trailing
+        arguments, and the reflective inliner's dropped comma-sequence prefix — so the throw that
+        reading it would have raised is not muted. A pass that relocates the read into a position
+        still evaluated — the object fold moving a property value to its use, an inliner
+        substituting an argument into a body — keeps the throw at that position and asks this only
+        of the sub-expression it truly drops (an unaccessed property, an unused parameter, a
+        `typeof` operand). With *read_established* a caller passes its establishment proof — in
+        every consumer the query of
         one shared `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel` — and a
         may-throw read the proof vouches a completed creating write for is free again, which is what
         lets a sweep still drop `X = 5; y = X;` whole rather than keep the read of `X` a kept store
@@ -1025,7 +1028,7 @@ class EffectModel:
         """
         read_effect = self.model.read_has_dynamic_effect
         if reads_may_throw or read_established is not None:
-            read_effect = self._throwing_read_effect(read_established)
+            read_effect = self.throwing_read_effect(read_established)
         return side_effect_free(
             node,
             defunct,
@@ -1037,13 +1040,15 @@ class EffectModel:
             self.is_pure_call_discarded,
         )
 
-    def _throwing_read_effect(
+    def throwing_read_effect(
         self, read_established: Callable[[JsIdentifier], bool] | None,
     ) -> Callable[[Node], bool]:
         """
         The read leaf for a caller that keeps the throw half of the contract: rejects a read that
         fires a `with` object's getter or may throw a `ReferenceError`, except one *read_established*
-        vouches a creating write has certainly completed for.
+        vouches a creating write has certainly completed for. `is_side_effect_free` composes it for
+        its own callers; a pass that reaches the module-level `side_effect_free` directly passes it
+        as that function's *read_effect*, so every discarding context asks one read contract.
         """
         if read_established is None:
             return self._read_effectful_or_throwing

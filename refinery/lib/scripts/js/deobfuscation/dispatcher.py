@@ -689,9 +689,14 @@ class JsDispatcherUnwrapper(ScopeProcessingTransformer):
             return False
         if carries_the_payload and flag == info.init_flag:
             return False
-        effects = model_cache(self, self._root).effects
+        cache = model_cache(self, self._root)
         return all(
-            effects.is_side_effect_free(argument, discarded=True)
+            cache.effects.is_side_effect_free(
+                argument,
+                discarded=True,
+                reads_may_throw=True,
+                read_established=cache.assignment.read_established,
+            )
             for argument in call.arguments[3:]
         )
 

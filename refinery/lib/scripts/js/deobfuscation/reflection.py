@@ -901,12 +901,19 @@ class JsReflectionInlining(ScriptLevelTransformer):
 
     def _dynamic_read_effect(self, root: JsScript) -> Callable[[Node], bool]:
         """
-        A predicate reporting whether reading a node crosses a `with` body's dynamic scope, resolved
-        against *root*'s current model. Threaded into the reflective-inlining safety checks so a read
-        that may fire a `with` object's getter or throw is never dropped as if it were pure. Resolved
-        lazily through the shared cache, so a script with no reflective site builds no model.
+        A predicate reporting whether reading a node fires a `with` object's getter or may throw a
+        `ReferenceError` a creating write has not certainly completed for, resolved against *root*'s
+        current model. Threaded into the reflective-inlining safety checks so a read that may fire a
+        getter or throw is never dropped as if it were pure — the same throwing read leaf every
+        other discarding context asks
+        (`refinery.lib.scripts.js.analysis.effects.EffectModel.throwing_read_effect` over the shared
+        establishment proof). Resolved lazily through the shared cache, so a script with no
+        reflective site builds no model.
         """
-        return lambda node: model_cache(self, root).model.read_has_dynamic_effect(node)
+        def read_effect(node: Node) -> bool:
+            cache = model_cache(self, root)
+            return cache.effects.throwing_read_effect(cache.assignment.read_established)(node)
+        return read_effect
 
     def _alias_member_name(self, root: JsScript) -> Callable[[Expression | None], str | None]:
         """

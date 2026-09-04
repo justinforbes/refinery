@@ -44,7 +44,9 @@ class _WrapperInfo(NamedTuple):
     of these would evaluate the argument once per read, splitting one value into distinct copies.
     *deferred* holds the parameters read inside a function nested in the return expression, where a
     substituted argument would no longer evaluate at the call but on each later run of that body;
-    only a literal argument reads the same there.
+    only a literal argument reads the same there. *unused* holds the parameters the return
+    expression never reads, whose argument the inline drops: a dropped argument that may throw a
+    `ReferenceError` would mute the throw the call raised, so its inline is refused.
     """
     node: JsFunctionDeclaration
     name: str
@@ -52,6 +54,7 @@ class _WrapperInfo(NamedTuple):
     return_expression: Node
     multi_use: frozenset[str]
     deferred: frozenset[str]
+    unused: frozenset[str]
 
 
 def _detect_wrapper(node: JsFunctionDeclaration) -> _WrapperInfo | None:
@@ -91,7 +94,8 @@ def _detect_wrapper(node: JsFunctionDeclaration) -> _WrapperInfo | None:
     )
     multi_use = frozenset(name for name in param_names if uses[name] > 1)
     deferred = frozenset(param_names) & names_used_under_a_nested_scope(expr)
-    return _WrapperInfo(node, node.id.name, param_names, expr, multi_use, deferred)
+    unused = frozenset(name for name in param_names if uses[name] == 0)
+    return _WrapperInfo(node, node.id.name, param_names, expr, multi_use, deferred, unused)
 
 
 def _collect_wrappers(root: Node) -> dict[str, _WrapperInfo]:
@@ -161,6 +165,16 @@ class JsCallWrapperInliner(ScriptLevelTransformer):
             if not arguments_substitutable(ast_node.arguments, info.param_names):
                 continue
             if not all(effects.is_side_effect_free(a) for a in ast_node.arguments):
+                continue
+            if any(
+                name in info.unused
+                and not effects.is_side_effect_free(
+                    argument,
+                    reads_may_throw=True,
+                    read_established=cache.assignment.read_established,
+                )
+                for name, argument in zip(info.param_names, ast_node.arguments)
+            ):
                 continue
             if not all(
                 is_simple_expression(argument)

@@ -1029,50 +1029,6 @@ class TestAReadOfALexicalBindingBeforeItsDeclarationThrows(TestBase):
         )
 
 
-#: A program handing a name nothing binds to a wrapper whose body reads the parameter under
-#: `typeof`, mapped to what Node prints for it. At the call site the argument is read as a value
-#: and throws; substituted into the `typeof` operand, the same spelling stands in the one position
-#: a `ReferenceError` does not reach, so the inlined program prints `undefined` where the original
-#: is caught. The second row is the control: a declared name prints the same under both.
-A_THROWING_READ_TYPEOF_WOULD_MUTE = {
-    'try {'
-    ' console.log(function (a) { return typeof a; }(u));'
-    " } catch (e) { console.log('caught'); }": 'caught\n',
-    'var u = 1;'
-    ' try {'
-    ' console.log(function (a) { return typeof a; }(u));'
-    " } catch (e) { console.log('caught'); }": 'number\n',
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAReadMovedUnderTypeofKeepsItsThrow(TestBase):
-    """
-    `typeof` is the one operand position where reading a name nothing binds does not throw, so
-    substituting a call-site argument into it erases the `ReferenceError` the call site raised.
-    The admission — `refinery.lib.scripts.js.deobfuscation.helpers.is_safe_iife_inline` — counts
-    a bare identifier argument as side-effect-free wherever the body uses it, asking no
-    establishment question of the read. The removal contexts now ask that question of every
-    may-throw read (`refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel`), but
-    classifying this read correctly is not enough for the admission: an argument moved into a
-    `typeof` operand mutes the throw even when the gate orders it kept, so the admission
-    additionally has to refuse the position, not only classify the read.
-    """
-
-    @unittest.expectedFailure
-    def test_an_argument_read_under_typeof_still_throws(self):
-        """
-        Node prints `caught` for the first program of `A_THROWING_READ_TYPEOF_WOULD_MUTE` and
-        `number` for its control. The deobfuscation substitutes the argument into the operand and
-        the first program comes back printing `undefined`.
-        """
-        rows = A_THROWING_READ_TYPEOF_WOULD_MUTE
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            each_program_still_prints(rows),
-        )
-
-
 #: Programs asking how many own properties an object literal spelling `__proto__` has, mapped to
 #: what Node prints for each. The three spellings answer differently: the shorthand gives the object
 #: a property of that name, the two written with a colon set its prototype and give it none, and a
@@ -2244,49 +2200,6 @@ class TestAConversionWithAnEffectIsNeitherDroppedNorMoved(TestBase):
     @unittest.expectedFailure
     def test_each_program_still_observes_its_conversions_effect(self):
         rows = A_CONVERSION_WITH_AN_EFFECT_THE_SCAN_CANNOT_SEE
-        self.assertEqual(
-            {source: before_and_after(source) for source in rows},
-            {source: (answer, answer) for source, answer in rows.items()},
-        )
-
-
-#: A program whose only failure is a read of a name nothing binds, standing where a pass other than
-#: the store-removal sweep discards the expression around it, mapped to the behavior Node gives it.
-#: The last two rows are the controls: the same read handed to a named wrapper and the same read
-#: under an index fold are both kept today.
-A_DISCARDED_READ_THE_OTHER_CONTEXTS_STILL_DROP = {
-    'if ([zzz]) console.log(1);\n': ('', 'ReferenceError'),
-    'var o = { p: zzz, q: 1 };\nconsole.log(o.q);\n': ('', 'ReferenceError'),
-    'console.log(function (a, b) { return a; }(7, zzz));\n': ('', 'ReferenceError'),
-    'function w(a, b) {\n  return a;\n}\nconsole.log(w(7, zzz));\n': ('', 'ReferenceError'),
-    'var r = [1, zzz][0];\nconsole.log(r);\n': ('', 'ReferenceError'),
-}
-
-
-@unittest.skipIf(node_executable() is None, 'node.js is not available')
-class TestAReadOfANameNothingBindsSurvivesEveryDiscardingContext(TestBase):
-    """
-    The store-removal sweep and the discarded-test fold ask the throw half of the read contract with
-    a definite-assignment vouch, so a read of a name nothing binds survives them. Every other pass
-    that deletes an expression still calls `EffectModel.is_side_effect_free` on the default, whose
-    read leaf is the getter half alone, and each drops the read with the expression: dead-branch
-    elimination discards the truthy allocation `[zzz]` with the read inside it, the object fold
-    inlines `o.q` and discards the literal holding the read of `p`'s value, and the inline-call
-    admission counts a bare identifier argument as free wherever the body ignores it
-    (`TestAReadMovedUnderTypeofKeepsItsThrow` is the same admission muting the throw by position).
-    The wrapper inliner, the string-array dispatcher, and the reflection inliner sit on the same
-    default. The fix for each context is the one the sweep took: pass *reads_may_throw* with the
-    model's *read_established* — the establishment answer is already shared, so no context needs a
-    weaker one.
-
-    The last two rows pass today and are the controls: a call of a *named* wrapper keeps its
-    argument, and the array-index fold refuses an element that may throw, so a run that started
-    refusing every discard would be an unexpected success here.
-    """
-
-    @unittest.expectedFailure
-    def test_a_read_discarded_by_the_remaining_contexts_still_throws(self):
-        rows = A_DISCARDED_READ_THE_OTHER_CONTEXTS_STILL_DROP
         self.assertEqual(
             {source: before_and_after(source) for source in rows},
             {source: (answer, answer) for source, answer in rows.items()},

@@ -8,7 +8,7 @@ an expression using only parameters) are inlined at the call site.
 """
 from __future__ import annotations
 
-from typing import Iterator
+from typing import Callable, Iterator
 
 from refinery.lib.scripts import (
     Node,
@@ -226,7 +226,7 @@ class JsObjectFold(ScopeProcessingTransformer):
             ):
                 continue
             changed, can_remove = self._inline_references(
-                model, cache.effects, binding, prop_map, self
+                model, cache.effects, binding, prop_map, self, cache.assignment.read_established
             )
             if changed:
                 if can_remove:
@@ -391,6 +391,7 @@ class JsObjectFold(ScopeProcessingTransformer):
         binding: Binding,
         prop_map: dict[str, Node],
         transformer: Transformer,
+        read_established: Callable[[JsIdentifier], bool],
     ) -> tuple[bool, bool]:
         """
         Replace each `obj['key']` access through *binding* with the corresponding property value. For
@@ -422,11 +423,18 @@ class JsObjectFold(ScopeProcessingTransformer):
         not folded: folding through it (`globalThis.o.x` to the property value) holds only under the script
         execution model, where a top-level `var` becomes a global property, not when the global is
         module-scoped.
+
+        A property no access reads is dropped with the declaration when it is removed, so a value
+        whose read may throw a `ReferenceError` no completed write establishes keeps the
+        declaration: building the object read that value, and dropping the declaration would mute
+        the throw. A read the *read_established* proof vouches for, and every value accessed at
+        least once (relocated to its use, its read preserved there), places no such constraint.
         """
         changed = False
         can_remove = not binding.dynamic_refs
         consistent: dict[tuple[int, int], bool] = {}
         free_external: dict[int, list[tuple[JsIdentifier, Binding | None]]] = {}
+        accessed_keys: set[str] = set()
         for ref in list(model.references(binding)):
             if not isinstance(ref, JsIdentifier):
                 can_remove = False
@@ -447,6 +455,7 @@ class JsObjectFold(ScopeProcessingTransformer):
                 changed = True
                 continue
             value = prop_map[key]
+            accessed_keys.add(key)
             parent = member.parent
             call = parent if isinstance(parent, JsCallExpression) and parent.callee is member else None
             if call is not None and isinstance(value, JsFunctionExpression):
@@ -479,4 +488,11 @@ class JsObjectFold(ScopeProcessingTransformer):
                 continue
             _replace_in_parent(member, _clone_node(value))
             changed = True
+        if can_remove and any(
+            key not in accessed_keys
+            and not effects.is_side_effect_free(
+                value, reads_may_throw=True, read_established=read_established)
+            for key, value in prop_map.items()
+        ):
+            can_remove = False
         return changed, can_remove
