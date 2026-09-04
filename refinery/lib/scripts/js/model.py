@@ -225,19 +225,21 @@ class JsSpreadElement(Expression):
 
 
 @dataclass(repr=False, eq=False)
-class JsFunctionExpression(Expression):
+class JsFunctionExpression(Expression, spelling='source_text'):
     id: JsIdentifier | None = None
     params: list[Expression] = field(default_factory=list)
     body: JsBlockStatement | None = None
     generator: bool = False
     is_async: bool = False
+    source_text: str | None = None
 
 
 @dataclass(repr=False, eq=False)
-class JsArrowFunctionExpression(Expression):
+class JsArrowFunctionExpression(Expression, spelling='source_text'):
     params: list[Expression] = field(default_factory=list)
     body: Expression | JsBlockStatement | None = None
     is_async: bool = False
+    source_text: str | None = None
 
 
 @dataclass(repr=False, eq=False)
@@ -531,12 +533,13 @@ class JsDebuggerStatement(Statement):
 
 
 @dataclass(repr=False, eq=False)
-class JsFunctionDeclaration(Statement):
+class JsFunctionDeclaration(Statement, spelling='source_text'):
     id: JsIdentifier | None = None
     params: list[Expression] = field(default_factory=list)
     body: JsBlockStatement | None = None
     generator: bool = False
     is_async: bool = False
+    source_text: str | None = None
 
 
 @dataclass(repr=False, eq=False)

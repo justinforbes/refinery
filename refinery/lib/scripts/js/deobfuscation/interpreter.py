@@ -197,10 +197,12 @@ def _to_array_length(value: Value) -> int:
 def _to_primitive(value: Value) -> Value:
     """
     Replicate the ECMA-262 ToPrimitive abstract operation with the default hint, as used by `+`.
-    Arrays and plain objects have no useful `valueOf`, so they coerce to their string form; all other
-    values are already primitive.
+    Arrays, plain objects and functions have no useful `valueOf`, so they coerce to their string
+    form; all other values are already primitive.
     """
-    if isinstance(value, (list, dict)):
+    if isinstance(value, (
+        list, dict, JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression,
+    )):
         return to_string(value)
     return value
 

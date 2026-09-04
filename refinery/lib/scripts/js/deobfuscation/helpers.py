@@ -550,6 +550,18 @@ def to_number(value: Value) -> float:
     return float('nan')
 
 
+def function_source(func: _FuncDecl | _FuncExpr | _Arrow) -> str:
+    """
+    The text `Function.prototype.toString` answers for *func*. A function the parser read carries the
+    source it was written with; one a transform built carries none, and is written back the way the
+    synthesizer would write it, which is what running that program would then read for it.
+    """
+    if func.source_text is not None:
+        return func.source_text
+    from refinery.lib.scripts.js.synth import JsSynthesizer
+    return JsSynthesizer().convert(func)
+
+
 def to_string(value: Value) -> str:
     if isinstance(value, str):
         return value
@@ -563,6 +575,8 @@ def to_string(value: Value) -> str:
         return js_number_to_string(value)
     if isinstance(value, list):
         return ','.join(_array_element_string(v) for v in value)
+    if isinstance(value, (JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression)):
+        return function_source(value)
     return '[object Object]'
 
 
