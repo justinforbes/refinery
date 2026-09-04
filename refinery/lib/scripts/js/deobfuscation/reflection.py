@@ -912,7 +912,7 @@ class JsReflectionInlining(ScriptLevelTransformer):
         """
         def read_effect(node: Node) -> bool:
             cache = model_cache(self, root)
-            return cache.effects.throwing_read_effect(cache.assignment.read_established)(node)
+            return cache.effects.read_throws(node, cache.assignment.read_established)
         return read_effect
 
     def _alias_member_name(self, root: JsScript) -> Callable[[Expression | None], str | None]:

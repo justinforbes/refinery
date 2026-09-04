@@ -1608,7 +1608,7 @@ def is_safe_iife_inline(
     call_pure: Callable[..., bool] | None = None,
     read_effect: Callable[[Node], bool] | None = None,
     call_established: Callable[..., bool] | None = None,
-    read_may_throw: Callable[[Node], bool] | None = None,
+    arg_may_throw: Callable[[Node], bool] | None = None,
 ) -> bool:
     """
     Verify that substituting IIFE arguments into the body expression preserves evaluation semantics.
@@ -1642,15 +1642,19 @@ def is_safe_iife_inline(
     a bare name through a `with` body's dynamic scope counts as effectful — the read may fire the `with`
     object's getter or throw — so it too must not be dropped or reordered.
 
-    A bare name that binds nothing throws a `ReferenceError` when read as a value, but not when it
-    fills a position the call's own body never reads it as one. Substituting such an argument is
-    refused at exactly those two positions, which *read_may_throw* (a
-    `refinery.lib.scripts.js.analysis.model.SemanticModel.read_may_throw` the establishment proof
-    excuses) identifies: an argument bound to a parameter the body never reads is dropped, and one
-    moved into a `typeof` or `delete` operand — where an unresolvable reference yields a value
-    rather than throwing (`_param_read_tolerates_unresolvable`) — is muted. An argument the body
-    reads once or more as a value keeps its throw at each read, so only these two losses are
-    refused; the ordering rules that govern a getter or a call are the read leaf's, not this one's.
+    An argument whose evaluation may throw a `ReferenceError` no completed write establishes throws
+    it when read as a value, but not when it fills a position the call's own body never reads it as
+    one. Substituting such an argument is refused at exactly those two positions, which
+    *arg_may_throw* (an `refinery.lib.scripts.js.analysis.effects.EffectModel.is_side_effect_free`
+    with *reads_may_throw*, over the whole argument so a throw nested in an operator is seen too)
+    identifies: an argument bound to a parameter the body never reads is dropped, and a bare
+    identifier moved into a `typeof` or `delete` operand — where an unresolvable reference yields
+    a value rather than throwing (`_param_read_tolerates_unresolvable`) — is muted.
+
+    This refuses only those two total losses; it does not order a may-throw read against the body's
+    other effects, so a used argument whose read is reordered past a body operation's side effect is
+    a separate, unpinned defect
+    (`test_unfixed_defects.TestARelocatedMayThrowReadIsReorderedPastAnEffect`).
 
     Identity stability under duplication is the *may*-allocate direction and must not be merged with
     `EffectModel._fresh_kind`, which is *must*-allocate: a fresh literal is the thing this refuses to
@@ -1670,14 +1674,16 @@ def is_safe_iife_inline(
     for i, arg in enumerate(call_args):
         if param_names[i] in deferred and not is_literal(arg):
             return False
-    if read_may_throw is not None:
+    if arg_may_throw is not None:
         for i, arg in enumerate(call_args):
-            stripped = strip_parens(arg)
-            if not isinstance(stripped, JsIdentifier) or not read_may_throw(stripped):
-                continue
-            if use_counts[param_names[i]] == 0:
+            if use_counts[param_names[i]] == 0 and arg_may_throw(arg):
                 return False
-            if _param_read_tolerates_unresolvable(expr, param_names[i]):
+            stripped = strip_parens(arg)
+            if (
+                isinstance(stripped, JsIdentifier)
+                and arg_may_throw(stripped)
+                and _param_read_tolerates_unresolvable(expr, param_names[i])
+            ):
                 return False
     effectful_indices = [
         i for i, arg in enumerate(call_args)
@@ -1896,12 +1902,12 @@ def _effect_oracles(
     The purity, dynamic-read, establishment, and may-throw oracles `is_safe_iife_inline` sharpens
     its side-effect reading with, answering from *transformer*'s shared analysis cache over the
     script holding *node* — or four `None` when *node* stands in no script, leaving the purely
-    syntactic reading. The may-throw oracle reports an argument reading a name no completed write
-    establishes, whose throw the inliner keeps by refusing to drop the argument or move it under a
-    `typeof`. Each oracle reads the cache at the moment it is invoked rather than binding a model
-    here: the models are built only when an argument actually needs one, and a caller that mutates
-    the tree between inline attempts pays for a rebuild only where an oracle is consulted after the
-    mutation.
+    syntactic reading. The may-throw oracle reports an argument whose evaluation may throw a
+    `ReferenceError` no completed write establishes, whose throw the inliner keeps by refusing to
+    drop the argument or move a bare one under a `typeof`. Each oracle reads the cache at the moment
+    it is invoked rather than binding a model here: the models are built only when an argument
+    actually needs one, and a caller that mutates the tree between inline attempts pays for a
+    rebuild only where an oracle is consulted after the mutation.
     """
     root = tree_root(node)
     if not isinstance(root, JsScript):
@@ -1916,15 +1922,12 @@ def _effect_oracles(
     def call_established(call: JsCallExpression | JsNewExpression) -> bool:
         return model_cache(transformer, root).call_established(call)
 
-    def read_may_throw(read: Node) -> bool:
+    def arg_may_throw(node: Node) -> bool:
         cache = model_cache(transformer, root)
-        return (
-            isinstance(read, JsIdentifier)
-            and cache.model.read_may_throw(read)
-            and not cache.assignment.read_established(read)
-        )
+        return not cache.effects.is_side_effect_free(
+            node, reads_may_throw=True, read_established=cache.assignment.read_established)
 
-    return call_pure, read_effect, call_established, read_may_throw
+    return call_pure, read_effect, call_established, arg_may_throw
 
 
 def try_inline_trivial_function(
@@ -1958,9 +1961,9 @@ def try_inline_trivial_function(
         return None
     if not is_closed_expression(expr, set(param_names)):
         return None
-    call_pure, read_effect, call_established, read_may_throw = _effect_oracles(transformer, func)
+    call_pure, read_effect, call_established, arg_may_throw = _effect_oracles(transformer, func)
     if not is_safe_iife_inline(
-        expr, param_names, call_args, call_pure, read_effect, call_established, read_may_throw,
+        expr, param_names, call_args, call_pure, read_effect, call_established, arg_may_throw,
     ):
         return None
     return substitute_params(expr, func.params, call_args, transformer=transformer)

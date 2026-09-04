@@ -1052,15 +1052,22 @@ class EffectModel:
         """
         if read_established is None:
             return self._read_effectful_or_throwing
+        return lambda node: self.read_throws(node, read_established)
 
-        def read_effect(node: Node) -> bool:
-            if self.model.read_has_dynamic_effect(node):
-                return True
-            if not isinstance(node, JsIdentifier) or not self.model.read_may_throw(node):
-                return False
-            return not read_established(node)
-
-        return read_effect
+    def read_throws(
+        self, node: Node, read_established: Callable[[JsIdentifier], bool],
+    ) -> bool:
+        """
+        Whether reading *node* fires a `with` object's getter or may throw a `ReferenceError` no
+        write *read_established* vouches a completed creating write for. The predicate
+        `throwing_read_effect` composes, exposed directly so a caller that queries one node at a
+        time (the reflective inliner) allocates no closure per read.
+        """
+        if self.model.read_has_dynamic_effect(node):
+            return True
+        if not isinstance(node, JsIdentifier) or not self.model.read_may_throw(node):
+            return False
+        return not read_established(node)
 
     def _read_effectful_or_throwing(self, node: Node) -> bool:
         """

@@ -428,7 +428,10 @@ class JsObjectFold(ScopeProcessingTransformer):
         whose read may throw a `ReferenceError` no completed write establishes keeps the
         declaration: building the object read that value, and dropping the declaration would mute
         the throw. A read the *read_established* proof vouches for, and every value accessed at
-        least once (relocated to its use, its read preserved there), places no such constraint.
+        least once (relocated to its use, its read still performed there), places no such
+        constraint. Relocating that read does move it past any statement between the literal and the
+        use, so a throw it carries is reordered past those statements' effects — a separate,
+        unpinned defect (`test_unfixed_defects.TestARelocatedMayThrowReadIsReorderedPastAnEffect`).
         """
         changed = False
         can_remove = not binding.dynamic_refs

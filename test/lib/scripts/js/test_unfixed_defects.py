@@ -2206,6 +2206,54 @@ class TestAConversionWithAnEffectIsNeitherDroppedNorMoved(TestBase):
         )
 
 
+#: Two programs whose read of a name nothing binds a pass relocates into a still-evaluated position,
+#: mapped to the behavior Node gives each. The relocation keeps the read — the throw is not muted —
+#: but moves it past an effect that ran before it: the IIFE inliner substitutes the argument `zzz`
+#: into `b() + a` so the wrapper's own call runs before the throw, and the object fold moves the read
+#: of `zzz` from the literal's construction to the later `o.q`, past the `console.log(1)` between. In
+#: each the deobfuscation runs the intervening effect the original never reached.
+A_RELOCATED_MAY_THROW_READ_KEEPS_ITS_ORDER = {
+    'try {\n'
+    '  console.log(function (a, b) { return b() + a; }(zzz, function () {\n'
+    '    console.log(1);\n'
+    '    return 2;\n'
+    '  }));\n'
+    "} catch (e) { console.log('caught'); }\n": ('caught\n', None),
+    'var o = { q: zzz };\n'
+    'console.log(1);\n'
+    'console.log(o.q);\n': ('', 'ReferenceError'),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestARelocatedMayThrowReadIsReorderedPastAnEffect(TestBase):
+    """
+    A pass that relocates a read of a name nothing binds keeps the throw the read raises, but not its
+    order against effects between the read's old and new positions. `is_safe_iife_inline` substitutes
+    an argument the body reads once into the body without ordering that read against the body's own
+    operations — its ordering discipline runs off the getter-half read leaf, which a bare-name
+    `ReferenceError` does not trip — so a wrapper whose body calls another argument before reading this
+    one runs that call before the throw. `JsObjectFold` moves a property value from the object literal
+    to each access site, past whatever statements stand between, so the construction-time throw lands
+    after them instead of before.
+
+    Both keep the throw, so neither is a mute; the defect is the reordered effect. A correct
+    implementation keeps the read where it stood relative to every observable effect, so each program
+    behaves as it did. Closing it needs the ordering discipline to count a may-throw read (the IIFE
+    path) and the fold to refuse relocating one past an intervening effect (the object-fold path) —
+    neither a contained change to the drop-point guards that keep the read at all, which
+    `test_unused.TestAReadOfANameNothingBindsSurvivesEveryDiscardingContext` pins.
+    """
+
+    @unittest.expectedFailure
+    def test_a_relocated_may_throw_read_keeps_its_order(self):
+        rows = A_RELOCATED_MAY_THROW_READ_KEEPS_ITS_ORDER
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            {source: (behavior, behavior) for source, behavior in rows.items()},
+        )
+
+
 def _a_chain_of_local_increments(n: int) -> str:
     lines = ['var v0 = 1;']
     for i in range(1, n):
