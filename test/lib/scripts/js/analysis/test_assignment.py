@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 from test import TestBase
 
 from refinery.lib.scripts.js.analysis.assignment import build_definite_assignment
@@ -17,10 +19,16 @@ class TestDefiniteAssignment(TestBase):
     """
 
     @staticmethod
-    def _vouched(source: str, *, module_scope: bool = False) -> bool:
+    def _vouched(
+        source: str,
+        *,
+        module_scope: bool = False,
+        host_entrypoint: Callable[[str], bool] | None = None,
+    ) -> bool:
         ast = JsParser(source).parse()
         model = build_semantic_model(ast)
-        assignment = build_definite_assignment(model, module_scope=module_scope)
+        assignment = build_definite_assignment(
+            model, module_scope=module_scope, host_entrypoint=host_entrypoint)
         for node in ast.walk():
             if (
                 isinstance(node, JsCallExpression)
@@ -48,8 +56,45 @@ class TestDefiniteAssignment(TestBase):
         """
         self.assertTrue(self._vouched('X += 1;\nprobe(X);'))
 
+    def test_an_increment_vouches(self):
+        """
+        `X++` reads `X` before writing it, in strict code as much as in sloppy, so a normal
+        completion proves the name already existed.
+        """
+        self.assertTrue(self._vouched('X++;\nprobe(X);'))
+
+    def test_a_member_spelled_increment_through_this_realms_global_vouches(self):
+        """
+        Reading a missing property answers `undefined` rather than throwing, and storing the result
+        creates it.
+        """
+        self.assertTrue(self._vouched('globalThis.X++;\nprobe(X);'))
+
+    def test_a_member_spelled_increment_through_another_realm_does_not_vouch(self):
+        self.assertFalse(self._vouched('top.X++;\nprobe(X);'))
+
     def test_a_member_spelled_write_through_this_realms_global_vouches(self):
         self.assertTrue(self._vouched('globalThis.X = 1;\nprobe(X);'))
+
+    def test_a_destructuring_target_vouches(self):
+        """
+        A destructuring assignment that completes normally has assigned every target the pattern
+        holds, a defaulted or nested one included; a default's own expression runs conditionally
+        and is not a target.
+        """
+        for source in [
+            '[X] = [1];\nprobe(X);',
+            '({ p: X } = { p: 1 });\nprobe(X);',
+            '[X = 2] = [];\nprobe(X);',
+            '[...X] = [1, 2];\nprobe(X);',
+            '({ p: [X] } = { p: [1] });\nprobe(X);',
+        ]:
+            with self.subTest(source=source):
+                self.assertTrue(self._vouched(source))
+
+    def test_a_strict_destructuring_target_does_not_vouch(self):
+        self.assertFalse(self._vouched(
+            "function s() { 'use strict'; [X] = [1]; }\ns();\nprobe(X);"))
 
     def test_a_ternary_writing_in_both_arms_vouches(self):
         self.assertTrue(self._vouched('c ? (X = 1) : (X = 2);\nprobe(X);'))
@@ -60,6 +105,22 @@ class TestDefiniteAssignment(TestBase):
         is never taken and may carry the write vacuously.
         """
         self.assertTrue(self._vouched('try { X = 1; } catch (e) {}\nprobe(X);'))
+
+    def test_a_literal_store_beside_a_pattern_declarator_inside_a_try_does_not_vouch(self):
+        """
+        Destructuring `null` throws where the initializers alone say nothing can, and it throws
+        before the second declarator runs, so the raising edge out of the `try` is taken with `X`
+        never written.
+        """
+        self.assertFalse(self._vouched(
+            'try { var {a} = null, b = (X = 1); } catch (e) {}\nprobe(X);'))
+
+    def test_a_destructuring_store_inside_a_try_does_not_vouch(self):
+        """
+        Destructuring a non-iterable throws with no target assigned, so the raising edge out of the
+        `try` may be taken with `X` never written, however literal the right-hand side is.
+        """
+        self.assertFalse(self._vouched('try { [X] = 1; } catch (e) {}\nprobe(X);'))
 
     def test_a_throwable_store_inside_a_try_does_not_vouch(self):
         """
@@ -88,14 +149,67 @@ class TestDefiniteAssignment(TestBase):
         """
         self.assertFalse(self._vouched('async function a() { X = 1; }\na();\nprobe(X);'))
 
+    def test_a_summary_forgets_a_write_the_path_through_an_empty_finally_skips(self):
+        """
+        `w()` returns through the empty `finally` whenever `c` is falsy, having written nothing. The
+        graph joins that path and the unwinding one to the exit as a single pair of nodes and
+        records the pair as raise-taken, so a summary that dropped every raise-taken predecessor met
+        over the `return` alone and claimed the write.
+        """
+        self.assertFalse(self._vouched(
+            'function w() {\n'
+            '  if (c) {\n'
+            '    X = 1;\n'
+            '    return;\n'
+            '  }\n'
+            '  try { g(); } finally {}\n'
+            '}\n'
+            'w();\n'
+            'probe(X);'))
+
+    def test_a_summary_keeps_a_write_every_returning_path_performs(self):
+        """
+        The control for the entry above: the tail is a `throw`, which completes on no run at all, so
+        the one path that returns is the one that wrote.
+        """
+        self.assertTrue(self._vouched(
+            'function w() {\n'
+            '  if (c) {\n'
+            '    X = 1;\n'
+            '    return;\n'
+            '  }\n'
+            '  throw 1;\n'
+            '}\n'
+            'w();\n'
+            'probe(X);'))
+
     def test_a_fact_at_every_direct_call_site_enters_the_body(self):
         self.assertTrue(self._vouched('X = 1;\nfunction f() { probe(X); }\nf();'))
+
+    def test_a_fact_at_a_parenthesized_call_site_enters_the_body(self):
+        self.assertTrue(self._vouched('X = 1;\nfunction f() { probe(X); }\n(f)();'))
+
+    def test_a_fact_at_a_tagging_call_site_enters_the_body(self):
+        """
+        A tagged template invokes its tag exactly as a call does, so the meet over `f`'s sites sees
+        every invocation here too.
+        """
+        self.assertTrue(self._vouched('X = 1;\nfunction f() { probe(X); }\nf`t`;'))
 
     def test_a_fact_at_an_iifes_call_site_enters_the_body(self):
         self.assertTrue(self._vouched('X = 1;\n(function () { probe(X); })();'))
 
     def test_a_call_site_before_the_write_gives_the_body_no_fact(self):
         self.assertFalse(self._vouched('function f() { probe(X); }\nf();\nX = 1;'))
+
+    def test_a_host_entrypoint_gets_no_entry_fact(self):
+        """
+        A function the analyst declared a host calls by name has a call site outside the file, so
+        the meet over its spelled sites does not bound what its body may assume.
+        """
+        source = 'X = 1;\nfunction f() { probe(X); }\nf();'
+        self.assertTrue(self._vouched(source))
+        self.assertFalse(self._vouched(source, host_entrypoint=lambda name: name == 'f'))
 
     def test_a_function_a_second_name_reaches_gets_no_entry_fact(self):
         """
@@ -147,6 +261,29 @@ class TestDefiniteAssignment(TestBase):
 
     def test_a_computed_delete_through_the_global_unvouches_everything(self):
         self.assertFalse(self._vouched('X = 1;\ndelete globalThis[k];\nprobe(X);'))
+
+    def test_a_computed_delete_on_a_base_the_scan_cannot_read_unvouches_everything(self):
+        """
+        The base need not be spelled as the global object to be it, so a computed delete on a name
+        nothing pins fails closed.
+        """
+        self.assertFalse(self._vouched('X = 1;\ndelete someObj[k];\nprobe(X);'))
+
+    def test_a_computed_delete_on_an_object_the_file_allocates_forgets_nothing(self):
+        self.assertTrue(self._vouched('var o = {};\nX = 1;\ndelete o[k];\nprobe(X);'))
+
+    def test_a_named_delete_on_an_object_the_file_allocates_forgets_nothing(self):
+        self.assertTrue(self._vouched('var o = {};\nX = 1;\ndelete o.X;\nprobe(X);'))
+
+    def test_a_name_carried_into_a_body_this_file_does_not_read_is_never_vouched_for(self):
+        """
+        Handing the global object to a call this file cannot read through carries every global into
+        a body that may `delete` the property or freeze the object, neither of which the file
+        spells.
+        """
+        for hand_over in ['host(globalThis);', "Reflect.deleteProperty(globalThis, 'X');"]:
+            with self.subTest(hand_over=hand_over):
+                self.assertFalse(self._vouched(F'X = 1;\n{hand_over}\nprobe(X);'))
 
     def test_a_reflection_reachable_name_is_never_vouched_for(self):
         self.assertFalse(self._vouched('X = 1;\neval(c);\nprobe(X);'))

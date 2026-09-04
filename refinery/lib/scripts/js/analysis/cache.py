@@ -22,7 +22,7 @@ from refinery.lib.scripts.js.analysis.liveness import LivenessModel, build_liven
 from refinery.lib.scripts.js.analysis.model import SemanticModel, build_semantic_model
 from refinery.lib.scripts.js.analysis.reaching import ReachingModel, build_reaching
 from refinery.lib.scripts.js.model import JsCallExpression, JsNewExpression, JsScript
-from refinery.lib.scripts.js.options import module_execution
+from refinery.lib.scripts.js.options import is_host_entrypoint, module_execution
 from refinery.lib.scripts.modelcache import ModelCacheBase
 
 
@@ -99,12 +99,16 @@ class ModelCache(ModelCacheBase):
     def assignment(self) -> DefiniteAssignmentModel:
         """
         The `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel` for this root,
-        built under the execution model the run's options select. It is the one establishment
-        answer for implicit-global reads: every consumer in a run reads this slot, so no tree is
-        ever judged under two establishment answers at once.
+        built under the execution model and the host entrypoints the run's options select. It is the
+        one establishment answer for implicit-global reads: every consumer in a run reads this slot,
+        so no tree is ever judged under two establishment answers at once.
         """
         return self._lazy('_assignment', lambda: build_definite_assignment(
-            self.model, self.control_flow, module_scope=module_execution(self.options)))
+            self.model,
+            self.control_flow,
+            module_scope=module_execution(self.options),
+            host_entrypoint=lambda name: is_host_entrypoint(self.options, name),
+        ))
 
     def call_established(self, call: JsCallExpression | JsNewExpression) -> bool:
         """

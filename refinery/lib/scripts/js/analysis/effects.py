@@ -714,7 +714,9 @@ class _SideEffectScan:
             return all(self.free(e, discarded) for e in node.expressions)
         if isinstance(node, JsCallExpression):
             if self.defunct and isinstance(node.callee, JsIdentifier) and node.callee.name in self.defunct:
-                return all(self.free(arg) for arg in node.arguments)
+                # The callee is read before it is called, and a name being removed is one a read of
+                # may not resolve, so the read leaf decides it exactly as any other operand's does.
+                return self.free(node.callee) and all(self.free(arg) for arg in node.arguments)
         if (
             isinstance(node, (JsCallExpression, JsNewExpression))
             and self._call_is_pure(node, discarded)
@@ -1008,15 +1010,21 @@ class EffectModel:
         but also when it may throw a `ReferenceError`, which is the throw half of the *read_effect*
         contract that `read_has_dynamic_effect` supplies only the getter half of. A caller discarding an
         allocation to answer its type or truthiness asks for it, so the throw that reading the allocation
-        would have raised is kept where the value is dropped; so does every removal context, so a
-        discarded expression cannot take an unestablished read with it. With *read_established* such a
-        caller passes its establishment proof — in every consumer the query of one shared
-        `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel` — and a may-throw read the
-        proof vouches a completed creating write for is free again, which is what lets a sweep still
-        drop `X = 5; y = X;` whole rather than keep the read of `X` a kept store establishes.
+        would have raised is kept where the value is dropped; so do the two whole-expression removal
+        contexts — the store-removal sweep and the discarded-test fold — so neither takes an
+        unestablished read with the expression it drops. Every other pass that deletes an expression
+        is still on the default and still drops such a read
+        (`test_unfixed_defects.TestAReadMovedUnderTypeofKeepsItsThrow` names one of them). With
+        *read_established* a caller passes its establishment proof — in every consumer the query of
+        one shared `refinery.lib.scripts.js.analysis.assignment.DefiniteAssignmentModel` — and a
+        may-throw read the proof vouches a completed creating write for is free again, which is what
+        lets a sweep still drop `X = 5; y = X;` whole rather than keep the read of `X` a kept store
+        establishes. A proof is only ever offered against the throw it excuses, so supplying one
+        asks for that half of the contract as much as *reads_may_throw* does, and neither is quietly
+        ignored for want of the other.
         """
         read_effect = self.model.read_has_dynamic_effect
-        if reads_may_throw:
+        if reads_may_throw or read_established is not None:
             read_effect = self._throwing_read_effect(read_established)
         return side_effect_free(
             node,

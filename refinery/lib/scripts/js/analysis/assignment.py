@@ -19,9 +19,13 @@ object creates the property in either mode; `top` and `frames` name another docu
 never qualify.
 
 Facts are monotone: a name is tracked only while nothing the analysis cannot see can unbind it. A
-binding a reflection surface can reach is not tracked, and neither is one any `delete` in the program
-addresses — through its bare name, through a global-object member, or possibly through a computed key
-no scan can read, which untracks everything. What remains can only ever gain its property, so there
+binding a reflection surface can reach is not tracked; neither is one carried into a body this file
+does not read, which is what handing the global object to a call does
+(`refinery.lib.scripts.js.analysis.model.Binding.reachable_through_a_handed_object`), because such a
+body may `delete` the property or freeze the object it hangs on and the file spells neither; and
+neither is one any `delete` in the program addresses — through its bare name, through a member of
+that name on any base, or possibly through a computed key on a global-object spelling no scan can
+read, which untracks everything. What remains can only ever gain its property, so there
 are no kill sets, and a fact held at a call site still holds whenever a body invoked there runs —
 including a getter, an iterator, or an async continuation the text spells no call for.
 
@@ -33,6 +37,8 @@ expression, takes the meet of the facts at those sites as its entry fact. Both s
 to a least fixpoint, so no fact ever rests on itself.
 """
 from __future__ import annotations
+
+from typing import Callable
 
 from refinery.lib.scripts import Node, Statement
 from refinery.lib.scripts.js.analysis.cfg import (
@@ -48,11 +54,15 @@ from refinery.lib.scripts.js.analysis.model import (
     Binding,
     BindingKind,
     SemanticModel,
-    may_be_global_object_base,
+    enclosing_operator,
+    is_invocation_target,
+    member_property_name,
 )
 from refinery.lib.scripts.js.model import (
     JsArrayExpression,
+    JsArrayPattern,
     JsAssignmentExpression,
+    JsAssignmentPattern,
     JsBinaryExpression,
     JsBooleanLiteral,
     JsCallExpression,
@@ -67,16 +77,22 @@ from refinery.lib.scripts.js.model import (
     JsNullLiteral,
     JsNumericLiteral,
     JsObjectExpression,
+    JsObjectPattern,
     JsParenthesizedExpression,
     JsProperty,
+    JsRestElement,
     JsSequenceExpression,
     JsSpreadElement,
     JsStringLiteral,
     JsTaggedTemplateExpression,
     JsTemplateLiteral,
+    JsThrowStatement,
     JsUnaryExpression,
+    JsUpdateExpression,
     JsVariableDeclaration,
+    is_generator_function,
     strip_parens,
+    wraps_return,
 )
 from refinery.lib.scripts.js.strict import strict_mode_at
 
@@ -88,13 +104,26 @@ _LOGICAL_ASSIGNMENT = frozenset({
     '??=',
 })
 
+#: The statements whose control-flow node evaluates a head of its own rather than its children: a
+#: declaration evaluates its initializers and a `for-in`/`for-of` head its subject, while the target
+#: each writes is written once per iteration and by no evaluation of the head.
+_OWN_HEAD_NODES = (
+    JsVariableDeclaration,
+    JsForInStatement,
+    JsForOfStatement,
+)
+
 
 class DefiniteAssignmentModel:
     """
-    Build over a `SemanticModel` and its `ControlFlowModel`; query with `definitely_assigned_at`.
+    Build over a `refinery.lib.scripts.js.analysis.model.SemanticModel` and its
+    `refinery.lib.scripts.analysis.cfg.ControlFlowModel`; query with `definitely_assigned_at`.
     *module_scope* is the run's execution model: under the module reading every region is strict and
     a top-level `this` does not denote the global object, so no bare write and no `this` member
     write establishes anything.
+    *host_entrypoint* names the top-level functions the analyst declared a host invokes by name;
+    such a function has a call site outside the file, so the meet over its spelled call sites does
+    not bound its entry facts and it gets none.
     """
 
     def __init__(
@@ -103,10 +132,12 @@ class DefiniteAssignmentModel:
         control_flow: ControlFlowModel | None = None,
         *,
         module_scope: bool = False,
+        host_entrypoint: Callable[[str], bool] | None = None,
     ):
         self.model = model
         self._flow = control_flow if control_flow is not None else build_control_flow_model(model.root)
         self._module = module_scope
+        self._host_entrypoint = host_entrypoint
         self._tracked: dict[int, Binding] = {}
         self._by_name: dict[str, Binding] = {}
         for binding in model.root_scope.bindings.values():
@@ -114,11 +145,14 @@ class DefiniteAssignmentModel:
                 continue
             if not binding.writes:
                 continue
+            if binding.reachable_through_a_handed_object:
+                continue
             if model.reflection_can_reach(binding):
                 continue
             self._tracked[id(binding)] = binding
             self._by_name[binding.name] = binding
         self._in_facts: dict[int, frozenset[Binding]] = {}
+        self._parts: dict[int, list[Node]] = {}
         self._effects: dict[int, tuple[frozenset[Binding], bool]] = {}
         self._summaries: dict[int, frozenset[Binding]] = {}
         if self._tracked:
@@ -139,11 +173,32 @@ class DefiniteAssignmentModel:
         _, node = located
         return binding in self._in_facts.get(id(node), frozenset())
 
+    def read_established(self, node: JsIdentifier) -> bool:
+        """
+        Whether a write creating the name *node* spells has certainly completed before the read is
+        evaluated, so it cannot be the read that raises a `ReferenceError`.
+
+        The one composition every consumer of this model shares, and it lives here because the
+        binding a reference resolves to must come from the same semantic model the facts were built
+        over: a caller resolving against a model built after a rewrite would hand over a binding
+        this one has never seen, and every answer would silently be `False`.
+        """
+        return self.definitely_assigned_at(self.model.resolve(node), node)
+
     def _untrack_deleted(self):
         """
         Remove from tracking every binding a `delete` in the program could unbind, wherever that
         delete stands — a called function, a getter a member read fires, an iterator a spread drives.
         Untracking is what makes the remaining facts monotone without enumerating who runs the code.
+
+        A member delete is keyed on the property name it spells rather than on whether the base is a
+        spelling of the global object, because the base need not be one to *be* one: `globalThis
+        .window.X` and any name a call was handed the object under both delete the global the file
+        reads bare. Untracking a name because some object's property of that name is deleted only
+        forgets a fact; trusting a base the scan cannot read is what deletes a read. The one base
+        that does not untrack is one that provably cannot be the global object — a literal, an
+        allocation, or a name pinned to one — and a computed key on any other base untracks
+        everything, since the key it deletes is one no scan can read.
         """
         deleted: set[int] = set()
         for node in self.model.root.walk():
@@ -158,13 +213,11 @@ class DefiniteAssignmentModel:
                 self._tracked = {}
                 return
             if isinstance(target, JsMemberExpression):
-                base = target.object
-                if base is not None and not (
-                    may_be_global_object_base(base)
-                    or self.model.names_the_global_object(base)
-                ):
+                if self._cannot_be_the_global_object(target.object):
                     continue
                 name = self.model.global_alias_member_name(target, module_scope=self._module)
+                if name is None:
+                    name = member_property_name(target)
                 if name is not None:
                     named = self._by_name.get(name)
                     if named is not None:
@@ -180,20 +233,61 @@ class DefiniteAssignmentModel:
             }
             self._by_name = {binding.name: binding for binding in self._tracked.values()}
 
+    def _cannot_be_the_global_object(self, base: Node | None) -> bool:
+        """
+        Whether the base of a member delete provably does not denote the global object, so the
+        delete cannot unbind a name the file reads bare: a literal, an allocation, a function, or a
+        name pinned to one of those. Everything else — an unresolved name, a multi-valued binding,
+        any expression the scan cannot evaluate — may be the object under another spelling and
+        answers `False`.
+        """
+        value = strip_parens(base) if base is not None else None
+        if isinstance(value, JsIdentifier):
+            binding = self.model.resolve(value)
+            if binding is None or binding.dynamic_refs:
+                return False
+            pinned = self.model.singular_value(binding)
+            value = strip_parens(pinned) if pinned is not None else None
+        if isinstance(value, FUNCTION_NODES):
+            return True
+        return isinstance(value, (
+            JsArrayExpression,
+            JsObjectExpression,
+            JsStringLiteral,
+            JsNumericLiteral,
+            JsBooleanLiteral,
+            JsNullLiteral,
+            JsTemplateLiteral,
+        ))
+
     def _solve(self):
+        """
+        Grow the call summaries and entry facts to a least fixpoint, re-solving every graph under
+        the previous round's answers until neither moves.
+
+        Only the summary a call contributes changes between rounds, so the parts each node
+        evaluates and whether it can throw are settled once, before the first round: both are read
+        off the tree alone, and the tree does not move while a model is being built.
+        """
         graphs = list(self._flow.graphs.values())
+        elements = [
+            (graph, node) for graph in graphs for node in graph.nodes if node.element is not None
+        ]
+        for graph, node in elements:
+            assert node.element is not None
+            self._parts[id(node)] = self._evaluated_parts(graph, node.element)
+        cannot_throw = {
+            id(node): self._parts_cannot_throw(node.element, self._parts[id(node)])
+            for graph, node in elements
+        }
         summaries: dict[int, frozenset[Binding]] = {}
         entries: dict[int, frozenset[Binding]] = {}
         while True:
             self._summaries = summaries
-            self._effects = {}
-            for graph in graphs:
-                for node in graph.nodes:
-                    if node.element is not None:
-                        self._effects[id(node)] = (
-                            self._parts_gen(graph, node.element),
-                            self._parts_cannot_throw(graph, node.element),
-                        )
+            self._effects = {
+                id(node): (self._parts_gen(self._parts[id(node)]), cannot_throw[id(node)])
+                for _, node in elements
+            }
             facts: dict[int, frozenset[Binding]] = {}
             for graph in graphs:
                 self._solve_graph(graph, entries.get(id(graph.owner), frozenset()), facts)
@@ -253,15 +347,36 @@ class DefiniteAssignmentModel:
     def _exit_summary(
         self, graph: ControlFlowGraph, facts: dict[int, frozenset[Binding]],
     ) -> frozenset[Binding]:
+        """
+        What a call of this body's owner adds to the facts of a caller whose call completed
+        normally: the meet over every predecessor of the exit a normal completion may leave through,
+        minus the entry fact the caller already held.
+
+        A predecessor is dropped from the meet only where no normal completion reaches the exit from
+        it, which is a statement that never completes at all rather than an edge kind. An edge kind
+        is recorded per *pair* of nodes and two edges between one pair collapse to a single entry
+        (`refinery.lib.scripts.analysis.cfg.CfgBuilder.kind_edge`), so an empty `finally` — whose
+        entry both falls through to whatever follows the statement and carries the unwinding edge
+        outward — reads as raise-taken while the normal path runs through it. Dropping it took the
+        meet over the other predecessors alone and claimed a write the normal path never performed.
+        """
         met: frozenset[Binding] | None = None
         for pred in graph.exit.predecessors:
-            if graph.raise_taken(pred, graph.exit):
+            if not self._completes_normally(pred) and graph.raise_taken(pred, graph.exit):
                 continue
-            gen, _ = self._effects.get(id(pred), (frozenset(), False))
-            out = facts.get(id(pred), frozenset()) | gen
+            out = self._edge_out(graph, pred, graph.exit, facts)
             met = out if met is None else met & out
         entry = facts.get(id(graph.entry), frozenset())
         return frozenset() if met is None else frozenset(met - entry)
+
+    @staticmethod
+    def _completes_normally(node: CfgNode) -> bool:
+        """
+        Whether the statement *node* stands for may complete normally at all. A `throw` never does,
+        so the edge it draws to the exit stands for the one run it has and carries no fact about a
+        normal return; every other node reaches the exit on some run that completed.
+        """
+        return not isinstance(node.element, JsThrowStatement)
 
     def _entry_fact(
         self, graph: ControlFlowGraph, facts: dict[int, frozenset[Binding]],
@@ -269,7 +384,7 @@ class DefiniteAssignmentModel:
         owner = graph.owner
         if not isinstance(owner, FUNCTION_NODES):
             return frozenset()
-        if getattr(owner, 'generator', False):
+        if is_generator_function(owner):
             return frozenset()
         binding = self.model.invocation_binding(owner)
         if binding is None:
@@ -279,9 +394,11 @@ class DefiniteAssignmentModel:
             return self._fact_at(immediate, facts)
         if binding.dynamic_refs or not self.model.binding_pinned_to(binding, owner):
             return frozenset()
+        if self._host_entrypoint is not None and self._host_entrypoint(binding.name):
+            return frozenset()
         met: frozenset[Binding] | None = None
         for read in binding.reads:
-            if not self._is_direct_callee(read):
+            if not is_invocation_target(read):
                 return frozenset()
             met_here = self._fact_at(read, facts)
             met = met_here if met is None else met & met_here
@@ -295,32 +412,15 @@ class DefiniteAssignmentModel:
 
     @staticmethod
     def _immediate_call_of(function: Node) -> JsCallExpression | None:
-        cursor: Node = function
-        parent = cursor.parent
-        while isinstance(parent, JsParenthesizedExpression):
-            cursor = parent
-            parent = parent.parent
-        if (
-            isinstance(parent, JsCallExpression)
-            and parent.callee is not None
-            and strip_parens(parent.callee) is function
-            and not parent.optional
-        ):
-            return parent
+        """
+        The call that invokes *function* where it is written as that call's own callee, so its
+        every invocation is the one site — an immediately-invoked function expression. `None` for
+        any other position, a tagged template among them, whose call node the fact is not read off.
+        """
+        governor = enclosing_operator(function)
+        if isinstance(governor, JsCallExpression) and is_invocation_target(function):
+            return governor
         return None
-
-    @staticmethod
-    def _is_direct_callee(read: Node) -> bool:
-        parent = read.parent
-        while isinstance(parent, JsParenthesizedExpression):
-            read = parent
-            parent = parent.parent
-        return (
-            isinstance(parent, JsCallExpression)
-            and parent.callee is not None
-            and strip_parens(parent.callee) is read
-            and not parent.optional
-        )
 
     def _evaluated_parts(self, graph: ControlFlowGraph, element: Node) -> list[Node]:
         """
@@ -329,11 +429,10 @@ class DefiniteAssignmentModel:
         initializers, a `for-in`/`for-of` head's subject, and otherwise every child that is neither a
         function body nor a statement owned by another node.
         """
-        if not isinstance(element, (
-            JsVariableDeclaration,
-            JsForInStatement,
-            JsForOfStatement,
-        )) and not self._is_statement(element):
+        if (
+            not isinstance(element, _OWN_HEAD_NODES)
+            and not self._is_statement(element)
+        ):
             return [element]
         if isinstance(element, JsVariableDeclaration):
             inits: list[Node] = []
@@ -358,16 +457,31 @@ class DefiniteAssignmentModel:
     def _is_statement(element: Node) -> bool:
         return isinstance(element, Statement)
 
-    def _parts_gen(self, graph: ControlFlowGraph, element: Node) -> frozenset[Binding]:
+    def _parts_gen(self, parts: list[Node]) -> frozenset[Binding]:
         gens: set[Binding] = set()
-        for part in self._evaluated_parts(graph, element):
+        for part in parts:
             gens |= self._gens(part)
         return frozenset(gens)
 
-    def _parts_cannot_throw(self, graph: ControlFlowGraph, element: Node) -> bool:
-        if not isinstance(element, (JsExpressionStatement, JsVariableDeclaration)):
+    def _parts_cannot_throw(self, element: Node | None, parts: list[Node]) -> bool:
+        """
+        Whether the statement *element* provably throws on no run at all, so that its raising edge
+        is never taken and may carry its gens vacuously.
+
+        A declaration is more than the initializers `_evaluated_parts` reports: each declarator
+        binds its target once its initializer is evaluated, and binding a pattern destructures,
+        which is what `var {a} = null, b = (X = 1);` throws at — after `null` was read and before
+        the second declarator ran. So a declarator naming anything but a plain identifier answers
+        `False` here, while the gen it contributes on the *normal* edge stays what it was.
+        """
+        if isinstance(element, JsVariableDeclaration):
+            if not all(
+                isinstance(declarator.id, JsIdentifier) for declarator in element.declarations
+            ):
+                return False
+        elif not isinstance(element, JsExpressionStatement):
             return False
-        return all(self._cannot_throw(part) for part in self._evaluated_parts(graph, element))
+        return all(self._cannot_throw(part) for part in parts)
 
     def _cannot_throw(self, node: Node | None) -> bool:
         """
@@ -394,6 +508,8 @@ class DefiniteAssignmentModel:
         if isinstance(node, JsAssignmentExpression):
             if node.operator != '=':
                 return False
+            if not isinstance(strip_parens(node.left), JsIdentifier):
+                return False
             if not self._target_gen(node):
                 return False
             return self._cannot_throw(node.right)
@@ -408,6 +524,8 @@ class DefiniteAssignmentModel:
             if node.operator in _LOGICAL_ASSIGNMENT:
                 return self._target_gen(node)
             return self._gens(node.right) | self._target_gen(node)
+        if isinstance(node, JsUpdateExpression):
+            return self._gens(node.argument) | self._update_gen(node)
         if isinstance(node, JsLogicalExpression):
             return self._gens(node.left)
         if isinstance(node, JsConditionalExpression):
@@ -468,6 +586,25 @@ class DefiniteAssignmentModel:
             return self._gens(node.tag) | self._gens(node.quasi)
         return frozenset()
 
+    def _update_gen(self, update: JsUpdateExpression) -> frozenset[Binding]:
+        """
+        The binding an increment or decrement leaves written when the expression completes normally.
+
+        Neither spelling is mode-dependent the way a bare store is. `X++` reads `X` before it writes
+        it, so a run that got past the read had the name already, in strict code as much as in
+        sloppy; and a member update through this realm's global object reads `undefined` off a
+        missing property and stores the result, which creates it.
+        """
+        target = strip_parens(update.argument)
+        if isinstance(target, JsIdentifier):
+            binding = self.model.resolve(target)
+            if binding is None or id(binding) not in self._tracked:
+                return frozenset()
+            return frozenset({binding})
+        if isinstance(target, JsMemberExpression):
+            return self._member_target_gen(target)
+        return frozenset()
+
     def _target_gen(self, assignment: JsAssignmentExpression) -> frozenset[Binding]:
         target = strip_parens(assignment.left)
         if isinstance(target, JsIdentifier):
@@ -476,23 +613,75 @@ class DefiniteAssignmentModel:
                 return frozenset()
             if assignment.operator != '=':
                 return frozenset({binding})
-            if self._module or strict_mode_at(target):
-                return frozenset()
-            return frozenset({binding})
+            return self._bare_target_gen(target, binding)
         if isinstance(target, JsMemberExpression):
             if assignment.operator in _LOGICAL_ASSIGNMENT:
                 return frozenset()
-            base = strip_parens(target.object) if target.object is not None else None
-            if isinstance(base, JsIdentifier) and base.name in _OTHER_REALM_ALIASES:
-                return frozenset()
-            name = self.model.global_alias_member_name(target, module_scope=self._module)
-            if name is None:
-                return frozenset()
-            binding = self._by_name.get(name)
-            if binding is None:
-                return frozenset()
-            return frozenset({binding})
+            return self._member_target_gen(target)
+        if isinstance(target, (JsArrayPattern, JsObjectPattern)):
+            return self._pattern_target_gen(target)
         return frozenset()
+
+    def _bare_target_gen(self, target: JsIdentifier, binding: Binding) -> frozenset[Binding]:
+        if self._module or strict_mode_at(target):
+            return frozenset()
+        return frozenset({binding})
+
+    def _pattern_target_gen(self, pattern: Node | None) -> frozenset[Binding]:
+        """
+        The tracked bindings a destructuring assignment writes when it completes normally, which is
+        every target the pattern holds however deep: an iteration or a property read that throws
+        does so before the statement completes, and a default only replaces the value assigned, so a
+        normal completion has assigned them all. A default's own expression runs conditionally and
+        contributes nothing here; it is not a target. A nested pattern is read in both the pattern
+        and the expression spelling, because the parser converts only the positions the grammar
+        forces and leaves a pattern in an object property's value written as the expression it
+        lexed.
+        """
+        target = strip_parens(pattern) if pattern is not None else None
+        if isinstance(target, JsIdentifier):
+            binding = self.model.resolve(target)
+            if binding is None or id(binding) not in self._tracked:
+                return frozenset()
+            return self._bare_target_gen(target, binding)
+        if isinstance(target, JsMemberExpression):
+            return self._member_target_gen(target)
+        if isinstance(target, JsAssignmentPattern):
+            return self._pattern_target_gen(target.left)
+        if isinstance(target, (JsRestElement, JsSpreadElement)):
+            return self._pattern_target_gen(target.argument)
+        if isinstance(target, (JsArrayPattern, JsArrayExpression)):
+            result: frozenset[Binding] = frozenset()
+            for element in target.elements:
+                if element is not None:
+                    result = result | self._pattern_target_gen(element)
+            return result
+        if isinstance(target, (JsObjectPattern, JsObjectExpression)):
+            result = frozenset()
+            for prop in target.properties:
+                if isinstance(prop, JsProperty):
+                    result = result | self._pattern_target_gen(prop.value)
+                elif isinstance(prop, (JsRestElement, JsSpreadElement)):
+                    result = result | self._pattern_target_gen(prop.argument)
+            return result
+        return frozenset()
+
+    def _member_target_gen(self, target: JsMemberExpression) -> frozenset[Binding]:
+        """
+        The tracked binding a member write to *target* creates the property of, which is one only
+        where the base names *this* realm's global object: `top` and `frames` name another
+        document's and create nothing a bare name in this file reads.
+        """
+        base = strip_parens(target.object) if target.object is not None else None
+        if isinstance(base, JsIdentifier) and base.name in _OTHER_REALM_ALIASES:
+            return frozenset()
+        name = self.model.global_alias_member_name(target, module_scope=self._module)
+        if name is None:
+            return frozenset()
+        binding = self._by_name.get(name)
+        if binding is None:
+            return frozenset()
+        return frozenset({binding})
 
     @staticmethod
     def _chain_short_circuits(callee: Node | None) -> bool:
@@ -521,7 +710,7 @@ class DefiniteAssignmentModel:
             function = self.model.singular_value(binding)
         if function is None or not isinstance(function, FUNCTION_NODES):
             return frozenset()
-        if getattr(function, 'generator', False) or getattr(function, 'is_async', False):
+        if wraps_return(function):
             return frozenset()
         return self._summaries.get(id(function), frozenset())
 
@@ -531,8 +720,14 @@ def build_definite_assignment(
     control_flow: ControlFlowModel | None = None,
     *,
     module_scope: bool = False,
+    host_entrypoint: Callable[[str], bool] | None = None,
 ) -> DefiniteAssignmentModel:
     """
     Build the `DefiniteAssignmentModel` for *model*'s script.
     """
-    return DefiniteAssignmentModel(model, control_flow, module_scope=module_scope)
+    return DefiniteAssignmentModel(
+        model,
+        control_flow,
+        module_scope=module_scope,
+        host_entrypoint=host_entrypoint,
+    )

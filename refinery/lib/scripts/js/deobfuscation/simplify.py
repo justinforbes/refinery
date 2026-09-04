@@ -130,12 +130,16 @@ class JsSimplifications(Transformer):
     def __init__(self):
         super().__init__()
         self._cache: ModelCache | None = None
-        self._defassign: DefiniteAssignmentModel | None = None
 
     @property
     def model(self) -> SemanticModel:
         assert self._cache is not None
         return self._cache.model
+
+    @property
+    def assignment(self) -> DefiniteAssignmentModel:
+        assert self._cache is not None
+        return self._cache.assignment
 
     @property
     def effects(self) -> EffectModel:
@@ -208,7 +212,6 @@ class JsSimplifications(Transformer):
         granted to withdrawn — which is the direction a held model may be stale in.
         """
         self._cache = model_cache(self, node)
-        self._defassign = self._cache.assignment
         with self._cache.pinned():
             self.generic_visit(node)
         return None
@@ -240,8 +243,7 @@ class JsSimplifications(Transformer):
         binding = self.model.lookup(name, self.model.scope_of(member))
         if binding is None:
             return name in GUARANTEED_GLOBALS
-        assert self._defassign is not None
-        return self._defassign.definitely_assigned_at(binding, member)
+        return self.assignment.definitely_assigned_at(binding, member)
 
     def _names_a_global(self, member: JsMemberExpression) -> str | None:
         """
@@ -612,8 +614,7 @@ class JsSimplifications(Transformer):
         return JsSequenceExpression(expressions=[test, kept])
 
     def _read_established(self, node: JsIdentifier) -> bool:
-        assert self._defassign is not None
-        return self._defassign.definitely_assigned_at(self.model.resolve(node), node)
+        return self.assignment.read_established(node)
 
     def visit_JsConditionalExpression(self, node: JsConditionalExpression):
         self.generic_visit(node)
@@ -633,7 +634,11 @@ class JsSimplifications(Transformer):
             if i == len(node.expressions) - 1
             or not is_simple_expression(e)
             or self.model.read_has_dynamic_effect(e)
-            or (isinstance(e, JsIdentifier) and self.model.read_may_throw(e))
+            or (
+                isinstance(e, JsIdentifier)
+                and self.model.read_may_throw(e)
+                and not self._read_established(e)
+            )
         ]
         if len(filtered) == len(node.expressions):
             return None

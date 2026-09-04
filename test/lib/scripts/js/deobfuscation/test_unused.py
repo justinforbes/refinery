@@ -2075,6 +2075,8 @@ A_KEPT_READ_OF_A_NAME_NOTHING_BINDS: dict[str, str] = {
         'function f() {\n  var v = zzz;\n}\nf();\nconsole.log(1);',
     'y = a;\nconsole.log(1);\n': 'a;\nconsole.log(1);',
     'var o = { p: g };\nconsole.log(1);\n': 'var o = { p: g };\nconsole.log(1);',
+    'y = N();\nN = function () {};\nconsole.log(1);\n':
+        'N();\nN = function() {};\nconsole.log(1);',
 }
 
 #: The same read standing inside a `try`, mapped to the text the deobfuscation writes for it. The
@@ -2124,6 +2126,8 @@ AN_ESTABLISHED_STORE_STILL_REDUCES: dict[str, str] = {
     'function f() {\n  var x = 1;\n  return 7;\n}\nconsole.log(f());\n': 'console.log(7);',
     'try {\n  var x = 1;\n} catch (e) {\n  console.log(2);\n}\nconsole.log(3);\n':
         'try {} catch (e) {\n  console.log(2);\n}\nconsole.log(3);',
+    'N = function () {};\ny = N();\nconsole.log(1);\n': 'console.log(1);',
+    'function N() {}\ny = N();\nconsole.log(1);\n': 'console.log(1);',
 }
 
 

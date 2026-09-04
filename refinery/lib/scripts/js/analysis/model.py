@@ -1385,7 +1385,7 @@ def may_be_global_object_base(node: Node | None) -> bool:
     return is_global_object_base(base)
 
 
-def _member_property_name(member: JsMemberExpression) -> str | None:
+def member_property_name(member: JsMemberExpression) -> str | None:
     """
     The statically known property name a member access designates: the property identifier of a dot
     access (`o.g`) or the value of a string-literal computed access (`o['g']`). A non-literal computed
@@ -1751,7 +1751,7 @@ def _timer_callee_name(callee: Node | None) -> str | None:
     if isinstance(callee, JsIdentifier):
         return callee.name if callee.name in STRING_EVAL_NAMES else None
     if isinstance(callee, JsMemberExpression) and _is_a_named_global_object_base(callee.object):
-        name = _member_property_name(callee)
+        name = member_property_name(callee)
         return name if name in STRING_EVAL_NAMES else None
     return None
 
@@ -2057,7 +2057,7 @@ class SemanticModel:
         target = strip_parens(parent.left)
         if not isinstance(target, JsMemberExpression) or not isinstance(target.object, JsIdentifier):
             return None
-        key = _member_property_name(target)
+        key = member_property_name(target)
         if key is None:
             return None
         binding = self.resolve(target.object)
@@ -2073,7 +2073,7 @@ class SemanticModel:
                 node, access = access, access.parent
             if not isinstance(access, JsMemberExpression) or access.object is not node:
                 return None
-            name = _member_property_name(access)
+            name = member_property_name(access)
             if name is not None and name != key:
                 continue
             if _is_member_assignment_target(access):
@@ -2699,7 +2699,7 @@ class SemanticModel:
             return None
         if module_scope and isinstance(base, JsThisExpression):
             return None
-        name = _member_property_name(member)
+        name = member_property_name(member)
         if name is None:
             return None
         if crosses_dynamic_scope(self._node_scope.get(id(member))):
@@ -3145,7 +3145,7 @@ class SemanticModel:
         callee = strip_parens(parent.callee)
         if not isinstance(callee, JsMemberExpression):
             return None
-        if _member_property_name(callee) not in ('apply', 'call'):
+        if member_property_name(callee) not in ('apply', 'call'):
             return None
         if not parent.arguments or strip_parens(parent.arguments[0]) is not node:
             return None

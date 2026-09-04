@@ -434,6 +434,11 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         assert self._reaching is not None
         return self._reaching
 
+    @property
+    def assignment(self) -> DefiniteAssignmentModel:
+        assert self._defassign is not None
+        return self._defassign
+
     def _remove_dead_stores(self, root: JsScript):
         """
         Drop writes whose stored value the flow-sensitive liveness proves dead while the binding is
@@ -565,12 +570,14 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
         unobservable once the result is thrown away.
         """
         return self.effects.is_side_effect_free(
-            node, defunct, member_safe=self._member_read_ok, call_established=self._call_established,
-            discarded=True, reads_may_throw=True, read_established=self._read_established)
-
-    def _read_established(self, node: JsIdentifier) -> bool:
-        assert self._defassign is not None
-        return self._defassign.definitely_assigned_at(self.model.resolve(node), node)
+            node,
+            defunct,
+            member_safe=self._member_read_ok,
+            call_established=self._call_established,
+            discarded=True,
+            reads_may_throw=True,
+            read_established=self.assignment.read_established,
+        )
 
     def _call_established(self, call: JsCallExpression | JsNewExpression) -> bool:
         """
@@ -825,12 +832,11 @@ class JsUnusedCodeRemoval(BodyProcessingTransformer):
             defunct_now = defunct | {binding.name for binding in assumed_dead}
             for stmt in pending:
                 expr = stmt.expression
-                if isinstance(expr, JsAssignmentExpression) and expr.right is not None:
+                assert isinstance(expr, JsAssignmentExpression)
+                if expr.right is not None:
                     verdict = self._is_removable(expr.right, defunct_now)
                     removable[id(stmt)] = verdict
                     rhs_verdicts[id(expr.right)] = verdict and owning_list(stmt) is not None
-                else:
-                    removable[id(stmt)] = True
             grown = set(live)
             for binding in candidates - live:
                 for read in binding.reads:

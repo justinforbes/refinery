@@ -6,6 +6,8 @@ import unittest
 from test.lib.scripts.js.analysis.differential import behavior, node_executable
 from test.lib.scripts.js.deobfuscation import TestJsDeobfuscator
 
+from refinery.lib.scripts.js.deobfuscation.simplify import JsSimplifications
+from refinery.lib.scripts.js.options import DeobfuscationOptions
 from refinery.units.scripting.js import js
 
 _ASTRAL = chr(0x1F600)
@@ -901,6 +903,102 @@ class TestGlobalAliasStripping(TestJsDeobfuscator):
             with self.subTest(spelling=spelling):
                 self.assertEqual(source, self._simplify(source))
 
+    def test_implicit_global_alias_member_not_stripped_where_a_computed_delete_hides_its_base(self):
+        """
+        `someObj` is a name nothing pins, so it may hold the global object and the delete may unbind
+        `X` with a key no scan reads; the collapse fails closed. The control allocates the base in
+        the file, which provably is not the global object, so the same delete forgets nothing.
+        """
+        source = inspect.cleandoc(
+            """
+            X = 5;
+            delete someObj[k];
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(source, self._simplify(source))
+        control = inspect.cleandoc(
+            """
+            var o = {};
+            X = 5;
+            delete o[k];
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                var o = {};
+                X = 5;
+                delete o[k];
+                y = X;
+                """
+            ),
+            self._simplify(control),
+        )
+
+    def test_implicit_global_alias_member_stripped_after_a_destructuring_write(self):
+        """
+        A destructuring assignment that completes normally has assigned every target it holds, so
+        the later read collapses exactly as it does behind a plain store.
+        """
+        source = inspect.cleandoc(
+            """
+            [X] = [5];
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(
+            inspect.cleandoc(
+                """
+                [X] = [5];
+                y = X;
+                """
+            ),
+            self._simplify(source),
+        )
+
+    def test_implicit_global_alias_member_not_stripped_inside_a_host_entrypoint(self):
+        """
+        With `f` declared a host entrypoint, the host calls it from outside the file, so the guarded
+        in-file call does not bound when the body runs and the member read must keep answering
+        `undefined` there.
+        """
+        source = inspect.cleandoc(
+            """
+            var c = 0;
+            function f() {
+              return globalThis.X;
+            }
+            if (c) {
+              X = 1;
+              console.log(f());
+            }
+            """
+        )
+        self.assertEqual(
+            source,
+            self._run_transformer(
+                source, JsSimplifications, options=DeobfuscationOptions(entrypoints=('f',))),
+        )
+
+    def test_implicit_global_alias_member_not_stripped_where_the_global_object_is_handed_out(self):
+        """
+        The body `d` runs deletes the property the read would find, and the file names that body
+        only through the object it hands over, so the write vouches for nothing after the call.
+        """
+        source = inspect.cleandoc(
+            """
+            function d(o) {
+              delete o.X;
+            }
+            X = 5;
+            d(globalThis);
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(source, self._simplify(source))
+
     def test_implicit_global_alias_member_not_stripped_where_the_write_is_strict(self):
         """
         In strict code an assignment to an undeclared name throws instead of creating the property,
@@ -949,6 +1047,30 @@ class TestGlobalAliasStripping(TestJsDeobfuscator):
         source = inspect.cleandoc(
             """
             cond && (X = 5);
+            y = globalThis.X;
+            """
+        )
+        self.assertEqual(source, self._simplify(source))
+
+    def test_implicit_global_alias_member_not_stripped_after_a_write_an_empty_finally_returns_past(
+        self
+    ):
+        """
+        `w()` returns without writing whenever `cond` is falsy, so the read may find no property and
+        the member spelling is what keeps it answering `undefined` instead of throwing.
+        """
+        source = inspect.cleandoc(
+            """
+            function w() {
+              if (cond) {
+                X = 5;
+                return;
+              }
+              try {
+                g();
+              } finally {}
+            }
+            w();
             y = globalThis.X;
             """
         )
