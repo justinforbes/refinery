@@ -644,6 +644,49 @@ def is_reference_cast(expr: Node | None) -> bool:
     )
 
 
+#: The value-producing constructs whose operand is a statement list PowerShell runs in sequence, so a
+#: statement-terminating error inside one is reported and stepped over to the next statement *within*
+#: the construct rather than ending it. A subexpression `$( )` is the seed. An array expression `@( )`
+#: has the same shape and joins this tuple when a measured row needs it. A pipeline is deliberately
+#: absent: its stages stream rather than run in sequence, and a soft error ends the whole pipeline and
+#: resumes after it, so it is not a statement list. Both the finer control-flow graph (which descends
+#: into one) and `is_soft_error_source` (which stops at one) read this single language-shape fact.
+#: Left unannotated so an `isinstance` against it narrows to the construct's own type, which is what
+#: lets a caller read the matched construct's statement list off it.
+STATEMENT_LIST_EXPRESSIONS = (Ps1SubExpression,)
+
+
+def is_soft_error_source(node: Node) -> bool:
+    """
+    Whether evaluating `node` can raise a *statement-terminating* (soft) error — one PowerShell
+    reports and steps over to the next statement, as opposed to a terminating error that ends the
+    script (those are named where `ends_the_script` classifies them) or no error at all.
+
+    A may-predicate and a pure shape: it reads syntax, never a value, so it answers True wherever the
+    shape *can* fail and accepts that some instances of the shape never do — a cast that always
+    succeeds is still a source here. That is a missed simplification, never an unsound removal, and is
+    the same conservative direction the fault reader takes everywhere else.
+
+    The roster is extended shape by shape, as a measured row needs one. Today:
+
+    - a cast or conversion `[T]x`, whose conversion may fail.
+
+    The walk stops at a `STATEMENT_LIST_EXPRESSIONS` construct and at a nested script block, because a
+    soft source inside one becomes that construct's own node in the finer control-flow graph: claiming
+    it here would double-count a raiser the descent already isolated.
+    """
+    def raises(element: Node) -> bool:
+        if isinstance(element, Ps1CastExpression):
+            return True
+        for child in element.children():
+            if isinstance(child, (Ps1ScriptBlock, *STATEMENT_LIST_EXPRESSIONS)):
+                continue
+            if raises(child):
+                return True
+        return False
+    return raises(node)
+
+
 def unwrap_assignment_target(target: Node | None) -> Node | None:
     """
     Peel type-constraint casts and parentheses from an assignment target, so `[Type]$x` and `($x)`

@@ -45,7 +45,11 @@ from refinery.lib.scripts.analysis.cfg import (
     ControlFlowModel,
     build_control_flow,
 )
-from refinery.lib.scripts.ps1.ast import get_named_blocks, string_value
+from refinery.lib.scripts.ps1.ast import (
+    STATEMENT_LIST_EXPRESSIONS,
+    get_named_blocks,
+    string_value,
+)
 from refinery.lib.scripts.ps1.model import (
     Ps1BreakStatement,
     Ps1CatchClause,
@@ -60,7 +64,6 @@ from refinery.lib.scripts.ps1.model import (
     Ps1ReturnStatement,
     Ps1Script,
     Ps1ScriptBlock,
-    Ps1SubExpression,
     Ps1SwitchStatement,
     Ps1ThrowStatement,
     Ps1TrapStatement,
@@ -205,19 +208,11 @@ class _TrapBody:
     rethrows: bool = False
 
 
-#: The value-producing constructs whose operand is a statement list PowerShell runs in sequence, so a
-#: statement-terminating error inside one is reported and stepped over to the next statement *within*
-#: the construct. A subexpression `$( )` is the seed. An array expression `@( )` has the same shape
-#: and joins this tuple when a measured row needs it. A pipeline is deliberately absent: its stages
-#: stream rather than run in sequence, and a soft error ends the whole pipeline and resumes after it,
-#: so threading its elements would fabricate a step-over the language never performs.
-_DESCENDED_EXPRESSIONS = (Ps1SubExpression,)
-
-
 def _descended_bodies(statement: Node) -> list[list[Node]]:
     """
-    The statement lists of the `_DESCENDED_EXPRESSIONS` written in *statement*'s expression tree, in
-    source order — the sub-statement granularity the fault reader needs and no coarser consumer wants.
+    The statement lists of the `STATEMENT_LIST_EXPRESSIONS` written in *statement*'s expression tree,
+    in source order — the sub-statement granularity the fault reader needs and no coarser consumer
+    wants.
 
     Only the outermost such construct on each path is collected: one nested inside another is reached
     when the outer body's statements are built, each of which passes back through `statement` and this
@@ -230,7 +225,7 @@ def _descended_bodies(statement: Node) -> list[list[Node]]:
         for child in node.children():
             if isinstance(child, Ps1ScriptBlock):
                 continue
-            if isinstance(child, _DESCENDED_EXPRESSIONS):
+            if isinstance(child, STATEMENT_LIST_EXPRESSIONS):
                 bodies.append(list(child.body))
                 continue
             collect(child)

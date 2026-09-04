@@ -10,6 +10,7 @@ from refinery.lib.scripts.ps1.ast import (
     implicit_get_retry,
     in_evaluation_order,
     is_reference_cast,
+    is_soft_error_source,
     resolved_command_names,
     standalone_command_statement,
 )
@@ -424,3 +425,59 @@ class TestPs1ResolvedCommandNames(TestBase):
         for source in ('& $f', '. $f'):
             with self.subTest(source):
                 self.assertEqual(self._names(source), ())
+
+
+class TestPs1SoftErrorSource(TestBase):
+    """
+    The syntactic roster of statement-terminating (soft) error sources, a may-predicate over the shape
+    of one statement. It answers True wherever a cast could fail, reads no value, and stops at the
+    boundary the finer control-flow graph descends into — a `$( )` — so the statement that *contains*
+    a subexpression does not claim a source the subexpression's own node already carries.
+    """
+
+    @staticmethod
+    def _statement(source: str) -> Node:
+        return Ps1Parser(source).parse().body[0]
+
+    @staticmethod
+    def _inner_of_subexpression(source: str) -> Node:
+        for node in Ps1Parser(source).parse().walk():
+            if isinstance(node, Ps1SubExpression):
+                return node.body[0]
+        raise AssertionError(F'no subexpression in {source!r}')
+
+    def test_a_cast_is_a_source_wherever_it_sits_in_the_statement(self):
+        for source in (
+            "[int]'a'",
+            "$x = [int]'a'",
+            "[int]$x = 'a'",
+            "Write-Host ([int]'a')",
+            "$x = [int]'a' + 1",
+        ):
+            with self.subTest(source):
+                self.assertTrue(is_soft_error_source(self._statement(source)))
+
+    def test_a_statement_with_no_cast_is_not_a_source(self):
+        for source in (
+            "$x = 5",
+            "$x = 'a'",
+            "Write-Host 'x'",
+            "$x + 1",
+            "$x = $y",
+        ):
+            with self.subTest(source):
+                self.assertFalse(is_soft_error_source(self._statement(source)))
+
+    def test_the_predicate_reads_shape_not_value_so_a_safe_cast_is_still_a_source(self):
+        for source in ("[int]5", "[string]$x", "[int]$x"):
+            with self.subTest(source):
+                self.assertTrue(is_soft_error_source(self._statement(source)))
+
+    def test_a_statement_does_not_claim_a_cast_inside_a_subexpression(self):
+        self.assertFalse(is_soft_error_source(self._statement("$x = $([int]'a')")))
+
+    def test_the_subexpressions_own_inner_statement_is_the_source(self):
+        self.assertTrue(is_soft_error_source(self._inner_of_subexpression("$x = $([int]'a')")))
+
+    def test_a_statement_does_not_claim_a_cast_inside_a_nested_script_block(self):
+        self.assertFalse(is_soft_error_source(self._statement("& { [int]'a' }")))
