@@ -1451,8 +1451,6 @@ FOLDS: dict[str, str] = {
         "$Null = \"$(1 / 0)$(Set-Alias zzq Write-Output)\"\nWrite-Output 'hi'",
     "throw 'e'; Write-Host 'after'":
         "throw 'e'",
-    "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
-        "$x = $([int]'a'\n'in')\nWrite-Host $x",
     "trap { continue }; iex 'throw 1'; Write-Host 'after'":
         'throw 1',
     "trap { continue }; $s = { throw 'x' }; [int]'a'; Write-Host 'after'":

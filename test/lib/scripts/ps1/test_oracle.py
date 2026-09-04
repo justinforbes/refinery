@@ -267,11 +267,6 @@ BEHAVIOUR_DEFECTS: dict[str, str] = {
         'The same defect reached through the other construct that resolves into the statements '
         'one of its blocks holds. A `switch` on a constant is folded to the arm that matches, '
         'and the arm body lands where the handler resumes.',
-    "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x":
-        'The handler removed where the raise stands inside `$( )`. With it, 5.1 abandons the whole '
-        'assignment when the cast fails and `$x` holds nothing; without it the cast is stepped over '
-        'inside the sub-expression, so `in` reaches `$x` and the output prints it where the snippet '
-        'prints an empty line.',
     "trap { continue }; iex 'throw 1'; Write-Host 'after'":
         'The handler is removed, and the removal is self-inflicting: a command that runs a string '
         'is read as raising nothing, so the `trap` goes in one round, and a later round then '

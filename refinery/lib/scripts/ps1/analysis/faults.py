@@ -23,16 +23,22 @@ rather than guessing, and a caller reads it as *unknown* wherever a caller might
 """
 from __future__ import annotations
 
-from typing import Iterator, NamedTuple
+from typing import Callable, Iterator, NamedTuple
 
 from refinery.lib.scripts import Node, tree_root
-from refinery.lib.scripts.analysis.cfg import CfgNode, ControlFlowGraph, ControlFlowModel
+from refinery.lib.scripts.analysis.cfg import (
+    CfgEdge,
+    CfgNode,
+    ControlFlowGraph,
+    ControlFlowModel,
+)
 from refinery.lib.scripts.ps1.ast import (
     argument_text,
     assignment_target_variables,
     binding_key,
     binds_parameter,
     bound_argument_value,
+    is_soft_error_source,
     resolve_command_name,
     string_value,
 )
@@ -436,6 +442,28 @@ def _escapes(routing: Ps1FaultRouting) -> bool:
     return not routing.handlers or routing.leaves_the_body
 
 
+def _normal_successors(graph: ControlFlowGraph, node: CfgNode) -> frozenset[CfgNode]:
+    """
+    The nodes control reaches from *node* along a plain fall-through edge — where a soft error at
+    *node* steps over to, which is the same node its value flows to when it does not fail.
+    """
+    return frozenset(
+        successor for successor in node.successors
+        if graph.edge_kind(node, successor) == CfgEdge.NORMAL
+    )
+
+
+def _resumption_slot(graph: ControlFlowGraph, node: CfgNode) -> CfgNode | None:
+    """
+    The slot a resuming handler carries *node*'s error to — the `CfgEdge.RESUMPTION_FORWARD`
+    successor — or `None` where nothing resumes this node.
+    """
+    for successor in node.successors:
+        if graph.edge_kind(node, successor) & CfgEdge.RESUMPTION_FORWARD:
+            return successor
+    return None
+
+
 class Ps1FaultReach:
     """
     The fault routing of one script, read off its control-flow graphs.
@@ -447,8 +475,14 @@ class Ps1FaultReach:
     discarded whenever the tree moves.
     """
 
-    def __init__(self, control_flow: ControlFlowModel):
+    def __init__(
+        self,
+        control_flow: ControlFlowModel,
+        control_flow_fine: Callable[[], ControlFlowModel] | None = None,
+    ):
         self._control_flow = control_flow
+        self._control_flow_fine = control_flow_fine
+        self._fine: ControlFlowModel | None = None
         self._forward: dict[int, Ps1FaultRouting] = {}
         self._backward: dict[int, bool] = {}
         self._handled: set[int] | None = None
@@ -651,10 +685,58 @@ class Ps1FaultReach:
             return True
         if any(handler_acts(handler) for handler in routing.handlers):
             return True
+        if isinstance(element, Ps1TrapStatement) and self._soft_step_over_is_observed(element):
+            return True
         fallback = graph.fallback_of(start)
         if fallback is None:
             return True
         return self._observed_from(graph, fallback)
+
+    def _fine_model(self) -> ControlFlowModel | None:
+        """
+        The finer control-flow graph the trap-removal transpose reads, built once on first demand
+        and only where the coarse verdict has already reached the soft-error case that needs it. A
+        reader built without one — a test that hands the coarse model alone — has none and reads no
+        step-over, which only ever keeps a trap the coarse graph already judged.
+        """
+        if self._control_flow_fine is None:
+            return None
+        if self._fine is None:
+            self._fine = self._control_flow_fine()
+        return self._fine
+
+    def _soft_step_over_is_observed(self, handler: Node) -> bool:
+        """
+        Whether removing a resuming `trap` changes what runs because it catches a
+        statement-terminating error whose local step-over differs from where the trap resumes.
+
+        A failed cast inside `$( )` steps over to the next statement *within* the subexpression, and
+        the subexpression then yields that value; the trap instead resumes past the whole statement
+        the `$( )` sits in. Where those two land differently the trap is load-bearing, and the coarse
+        graph cannot tell them apart because the whole statement is one node there. Read on the finer
+        graph, the raiser has both edges: a `NORMAL` one to its local step-over and a
+        `RESUMPTION_FORWARD` one to the slot the trap resumes at. Existential over the soft raisers
+        the handler catches, because one redirected raiser is enough to keep the trap; equal
+        successors share all downstream behaviour, so this only ever keeps a trap — never removes a
+        load-bearing one — which is the sound direction for a may-analysis.
+        """
+        fine = self._fine_model()
+        if fine is None:
+            return False
+        located = fine.locate(handler)
+        if located is None or located[1].element is not handler:
+            return False
+        graph, start = located
+        for raiser in self._exceptional_closure(graph, start, forward=False):
+            element = raiser.element
+            if element is None or not is_soft_error_source(element):
+                continue
+            local = _normal_successors(graph, raiser)
+            slot = _resumption_slot(graph, raiser)
+            resumed = _normal_successors(graph, slot) if slot is not None else frozenset()
+            if local != resumed:
+                return True
+        return False
 
     def _observed_from(self, graph: ControlFlowGraph, arrival: CfgNode) -> bool:
         """
@@ -849,8 +931,13 @@ class Ps1FaultReach:
                 stack.append(node)
 
 
-def build_fault_reach(control_flow: ControlFlowModel) -> Ps1FaultReach:
+def build_fault_reach(
+    control_flow: ControlFlowModel,
+    control_flow_fine: Callable[[], ControlFlowModel] | None = None,
+) -> Ps1FaultReach:
     """
-    The `Ps1FaultReach` over one script's control-flow graphs.
+    The `Ps1FaultReach` over one script's control-flow graphs. *control_flow_fine* is the thunk the
+    trap-removal transpose reads the sub-statement step-over off, absent where a caller wants only
+    the coarse reading.
     """
-    return Ps1FaultReach(control_flow)
+    return Ps1FaultReach(control_flow, control_flow_fine)

@@ -434,7 +434,6 @@ CONTRIBUTION: dict[str, Contribution] = {
             "function Raise { throw 'e' }; function Wrap { trap { continue }; Raise; Write-Host 'in' }; Wrap; Write-Host 'after'",
             "function f { try { 'tail' } catch {} }; Write-Host (f)",
             "throw 'e'; Write-Host 'after'",
-            "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x",
             "trap { continue }; 1/0; Write-Host 'after'",
             "trap { continue }; [int]'a'; Write-Host 'after'",
             "trap { continue }; switch (1) { 1 { throw 'e'; Write-Host 'tail' } }; Write-Host 'next'",

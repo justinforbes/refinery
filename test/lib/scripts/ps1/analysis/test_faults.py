@@ -36,6 +36,16 @@ def _model(source: str) -> tuple[Ps1Script, Ps1FaultReach]:
     return tree, build_fault_reach(build_control_flow_model(tree))
 
 
+def _model_fine(source: str) -> tuple[Ps1Script, Ps1FaultReach]:
+    """
+    A reader whose trap-removal transpose is handed the finer control-flow graph, the way the
+    analysis cache hands it one, so the sub-statement step-over inside a `$( )` is a path it reads.
+    """
+    tree = _parse(source)
+    coarse = build_control_flow_model(tree)
+    return tree, build_fault_reach(coarse, lambda: build_control_flow_model(tree, descend=True))
+
+
 #: The subexpression that `TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression` is measured
 #: over, and whose shape `TestPs1TheBracketFixturesHoldTheShapeTheirPinsAssume` keeps.
 _TRAP_IN_A_SUBEXPRESSION = "$x = $(trap { 'h' }; 'a')"
@@ -425,6 +435,43 @@ class TestPs1RemovingATrapIsJudgedByWhereItsErrorsWouldGoInstead(TestBase):
             acting.body[0].try_block.body[0]))
         self.assertFalse(swallowing_reach.removing_a_handler_is_observed(
             swallowing.body[0].try_block.body[0]))
+
+
+class TestPs1AResumingTrapOverASoftErrorInASubexpressionIsKept(TestBase):
+    """
+    A statement-terminating error inside `$( )` steps over to the next statement within the bracket,
+    and the subexpression then yields that value; a resuming `trap` around the whole statement
+    instead resumes past it. Where those two land differently the trap changes what runs and cannot
+    be removed. The coarse graph cannot tell them apart, because the whole assignment is one node
+    there; the finer graph the transpose reads separates the local step-over from the resume point.
+    """
+
+    def _trap_removal_is_observed(self, source: str, *, fine: bool) -> bool:
+        tree, reach = _model_fine(source) if fine else _model(source)
+        trap = tree.body[0]
+        if not isinstance(trap, Ps1TrapStatement):
+            self.fail('the source does not open with a trap')
+        return reach.removing_a_handler_is_observed(trap)
+
+    def test_a_soft_error_inside_a_subexpression_keeps_the_trap_that_resumes_past_it(self):
+        self.assertTrue(self._trap_removal_is_observed(
+            "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x", fine=True))
+
+    def test_a_soft_error_that_is_the_last_statement_of_the_subexpression_keeps_the_trap(self):
+        self.assertTrue(self._trap_removal_is_observed(
+            "trap { continue }; $x = $('a'; [int]'b')", fine=True))
+
+    def test_a_soft_error_at_script_scope_whose_step_over_reconverges_lets_the_trap_go(self):
+        self.assertFalse(self._trap_removal_is_observed(
+            "trap { continue }; [int]'a'; Write-Host 'after'", fine=True))
+
+    def test_a_subexpression_that_raises_no_soft_error_lets_the_trap_go(self):
+        self.assertFalse(self._trap_removal_is_observed(
+            "trap { continue }; $x = $('a'; 'b')", fine=True))
+
+    def test_the_coarse_graph_alone_reads_the_step_over_case_as_a_removable_trap(self):
+        self.assertFalse(self._trap_removal_is_observed(
+            "trap { continue }; $x = $([int]'a'; 'in'); Write-Host $x", fine=False))
 
 
 class TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression(TestBase):
