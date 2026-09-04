@@ -2250,6 +2250,49 @@ class TestAConversionWithAnEffectIsNeitherDroppedNorMoved(TestBase):
         )
 
 
+#: A program whose only failure is a read of a name nothing binds, standing where a pass other than
+#: the store-removal sweep discards the expression around it, mapped to the behavior Node gives it.
+#: The last two rows are the controls: the same read handed to a named wrapper and the same read
+#: under an index fold are both kept today.
+A_DISCARDED_READ_THE_OTHER_CONTEXTS_STILL_DROP = {
+    'if ([zzz]) console.log(1);\n': ('', 'ReferenceError'),
+    'var o = { p: zzz, q: 1 };\nconsole.log(o.q);\n': ('', 'ReferenceError'),
+    'console.log(function (a, b) { return a; }(7, zzz));\n': ('', 'ReferenceError'),
+    'function w(a, b) {\n  return a;\n}\nconsole.log(w(7, zzz));\n': ('', 'ReferenceError'),
+    'var r = [1, zzz][0];\nconsole.log(r);\n': ('', 'ReferenceError'),
+}
+
+
+@unittest.skipIf(node_executable() is None, 'node.js is not available')
+class TestAReadOfANameNothingBindsSurvivesEveryDiscardingContext(TestBase):
+    """
+    The store-removal sweep and the discarded-test fold ask the throw half of the read contract with
+    a definite-assignment vouch, so a read of a name nothing binds survives them. Every other pass
+    that deletes an expression still calls `EffectModel.is_side_effect_free` on the default, whose
+    read leaf is the getter half alone, and each drops the read with the expression: dead-branch
+    elimination discards the truthy allocation `[zzz]` with the read inside it, the object fold
+    inlines `o.q` and discards the literal holding the read of `p`'s value, and the inline-call
+    admission counts a bare identifier argument as free wherever the body ignores it
+    (`TestAReadMovedUnderTypeofKeepsItsThrow` is the same admission muting the throw by position).
+    The wrapper inliner, the string-array dispatcher, and the reflection inliner sit on the same
+    default. The fix for each context is the one the sweep took: pass *reads_may_throw* with the
+    model's *read_established* — the establishment answer is already shared, so no context needs a
+    weaker one.
+
+    The last two rows pass today and are the controls: a call of a *named* wrapper keeps its
+    argument, and the array-index fold refuses an element that may throw, so a run that started
+    refusing every discard would be an unexpected success here.
+    """
+
+    @unittest.expectedFailure
+    def test_a_read_discarded_by_the_remaining_contexts_still_throws(self):
+        rows = A_DISCARDED_READ_THE_OTHER_CONTEXTS_STILL_DROP
+        self.assertEqual(
+            {source: before_and_after(source) for source in rows},
+            {source: (answer, answer) for source, answer in rows.items()},
+        )
+
+
 def _a_chain_of_local_increments(n: int) -> str:
     lines = ['var v0 = 1;']
     for i in range(1, n):
@@ -2264,8 +2307,10 @@ class TestADeepChainOfLocalsOverflowsTheRewriter(TestBase):
     chain folds into one binary expression whose nesting depth is the chain's length. Every visitor
     in the pipeline walks the tree by recursing per node, and a tree four hundred operands deep
     exceeds the interpreter's recursion limit inside
-    `refinery.lib.scripts.js.deobfuscation.simplify.JsSimplifications`, so the run dies in a
-    `RecursionError` where a shorter chain folds to its final print. The same chain written through
+    `refinery.lib.scripts.js.deobfuscation.simplify.JsSimplifications`, so the library run raises a
+    `RecursionError` where a shorter chain folds to its final print. The `refinery.js` unit raises
+    the interpreter's limit and catches the error, so a unit run does not die — it returns the
+    input undeobfuscated, which is what the overflow costs there. The same chain written through
     implicit globals reduces at n = 1000, because the sweep deletes those stores without ever
     building the nested expression; the depth is made by the inliner, not by the input. The fix is
     an iterative walk, or folding during substitution so the intermediate tower never exists.
