@@ -1127,15 +1127,20 @@ class JsParser:
 
     def _parse_class_member(self) -> JsMethodDefinition | JsPropertyDefinition | JsStaticBlock:
         offset = self._current.offset
+        value_offset = offset
         is_static = False
         if self._at(JsTokenKind.IDENTIFIER) and self._current.value == 'static':
             saved_pos = self._current
             self._advance()
+            # A leading `static` is a ClassElement prefix, outside the MethodDefinition whose text
+            # Function.prototype.toString answers, so the span starts after it — even where the
+            # `static` is itself the method name, which `static() {}` stringifies without.
+            value_offset = self._current.offset
             if self._at(JsTokenKind.LBRACE):
                 return self._parse_static_block(offset)
             if self._at(JsTokenKind.LPAREN):
                 key = JsIdentifier(name='static', offset=saved_pos.offset)
-                return self._finish_class_member(key, False, False, offset)
+                return self._finish_class_member(key, False, False, offset, value_offset)
             if self._at_class_field_terminator():
                 key = JsIdentifier(name='static', offset=saved_pos.offset)
                 return self._finish_class_field(key, False, False, offset)
@@ -1154,7 +1159,7 @@ class JsParser:
             self._advance()
             if self._at(JsTokenKind.LPAREN):
                 key = JsIdentifier(name=saved.value, offset=saved.offset)
-                return self._finish_class_member(key, is_static, False, offset)
+                return self._finish_class_member(key, is_static, False, offset, value_offset)
             if self._at_class_field_terminator():
                 key = JsIdentifier(name=saved.value, offset=saved.offset)
                 return self._finish_class_field(key, is_static, False, offset)
@@ -1164,7 +1169,7 @@ class JsParser:
             self._advance()
             if self._at(JsTokenKind.LPAREN):
                 key = JsIdentifier(name='async', offset=saved.offset)
-                return self._finish_class_member(key, is_static, False, offset)
+                return self._finish_class_member(key, is_static, False, offset, value_offset)
             if self._preceded_by_newline or self._at_class_field_terminator():
                 key = JsIdentifier(name='async', offset=saved.offset)
                 return self._finish_class_field(key, is_static, False, offset)
@@ -1177,7 +1182,8 @@ class JsParser:
         if kind == JsMethodKind.METHOD and not is_generator and not self._at(JsTokenKind.LPAREN):
             return self._finish_class_field(key, is_static, computed, offset)
 
-        return self._finish_class_member(key, is_static, is_generator, offset, kind, computed, is_async=is_async)
+        return self._finish_class_member(
+            key, is_static, is_generator, offset, value_offset, kind, computed, is_async=is_async)
 
     def _at_class_field_terminator(self) -> bool:
         """
@@ -1218,6 +1224,7 @@ class JsParser:
         is_static: bool,
         is_generator: bool,
         offset: int,
+        value_offset: int,
         kind: JsMethodKind = JsMethodKind.METHOD,
         computed: bool = False,
         is_async: bool = False,
@@ -1233,7 +1240,7 @@ class JsParser:
             is_async=is_async,
             offset=func_offset,
         )
-        self._record_source(value, offset)
+        self._record_source(value, value_offset)
         if isinstance(key, JsIdentifier) and key.name == 'constructor' and kind == JsMethodKind.METHOD:
             kind = JsMethodKind.CONSTRUCTOR
         return JsMethodDefinition(

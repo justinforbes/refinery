@@ -80,6 +80,12 @@ class TestInterpreterValueSemantics(TestJsDeobfuscator):
     def test_strict_not_equal_distinct_objects_is_true(self):
         self.assertEqual('var x = true;', self._fold('({}) !== ({})'))
 
+    def test_loose_equal_distinct_objects_is_false(self):
+        self.assertEqual('var x = false;', self._fold('({}) == ({})'))
+
+    def test_loose_equal_distinct_arrays_is_false(self):
+        self.assertEqual('var x = false;', self._fold('[1] == [1]'))
+
     def test_strict_equal_same_array_reference_is_true(self):
         source = inspect.cleandoc(
             """

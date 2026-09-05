@@ -194,15 +194,22 @@ def _to_array_length(value: Value) -> int:
     return length
 
 
+#: The value-domain types that model a JavaScript object: an array, a plain object, and a function.
+#: They share the two behaviours the primitives do not — a ToPrimitive that runs a (here
+#: interceptable) conversion, and an equality by reference rather than by value. `_to_primitive` and
+#: `_loose_equal` name the set once here rather than each enumerating it and drifting apart.
+_OBJECT_VALUE_TYPES = (
+    list, dict, JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression,
+)
+
+
 def _to_primitive(value: Value) -> Value:
     """
     Replicate the ECMA-262 ToPrimitive abstract operation with the default hint, as used by `+`.
     Arrays, plain objects and functions have no useful `valueOf`, so they coerce to their string
     form; all other values are already primitive.
     """
-    if isinstance(value, (
-        list, dict, JsFunctionDeclaration, JsFunctionExpression, JsArrowFunctionExpression,
-    )):
+    if isinstance(value, _OBJECT_VALUE_TYPES):
         return to_string(value)
     return value
 
@@ -2435,7 +2442,8 @@ class JsInterpreter:
     def _loose_equal(a: Value, b: Value) -> bool:
         """
         Replicate the ECMA-262 abstract-equality (`==`) algorithm. `null` and `undefined` are equal to
-        each other and to nothing else; booleans and objects coerce to numbers/primitives; a number
+        each other and to nothing else; a boolean coerces to a number; two objects compare by
+        reference, while an object compared with a primitive coerces to a primitive first; a number
         compared with a string compares by numeric value.
         """
         a_nullish = a is None or a is JS_NULL
@@ -2446,9 +2454,13 @@ class JsInterpreter:
             a = 1 if a else 0
         if isinstance(b, bool):
             b = 1 if b else 0
-        if isinstance(a, (list, dict)):
+        a_object = isinstance(a, _OBJECT_VALUE_TYPES)
+        b_object = isinstance(b, _OBJECT_VALUE_TYPES)
+        if a_object and b_object:
+            return js_strict_equal(a, b)
+        if a_object:
             a = _to_primitive(a)
-        if isinstance(b, (list, dict)):
+        elif b_object:
             b = _to_primitive(b)
         if isinstance(a, str) and isinstance(b, str):
             return a == b
