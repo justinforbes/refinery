@@ -52,6 +52,7 @@ from refinery.lib.scripts.ps1.model import (
     Ps1StringLiteral,
     Ps1SubExpression,
     Ps1TypeExpression,
+    Ps1UnaryExpression,
     Ps1Variable,
 )
 
@@ -657,11 +658,18 @@ def is_reference_cast(expr: Node | None) -> bool:
 #: lets a caller read the matched construct's statement list off it.
 STATEMENT_LIST_EXPRESSIONS = (Ps1SubExpression, Ps1ArrayExpression)
 
-#: The arithmetic operators whose right operand a zero makes fail: division and remainder both raise
-#: a statement-terminating error when it is zero. Read as a shape — the operand's value is not
-#: consulted — so every division is a source and a division that never divides by zero costs only a
-#: missed simplification.
-_DIVIDING_OPERATORS = frozenset({'/', '%'})
+#: The binary operators whose operands may raise a statement-terminating error: division and
+#: remainder by a zero, and arithmetic or bitwise operators over a pairing 5.1 defines no operation
+#: for or over a string that does not convert to a number. Read as a shape — the operands' values are
+#: not consulted — so every one of these is a source and one that never fails costs a missed
+#: simplification, not a wrong answer.
+_FALLIBLE_BINARY_OPERATORS = frozenset({
+    '/', '%', '*', '+', '-', '-band', '-bor', '-bxor', '-shl', '-shr',
+})
+
+#: The unary operators with the same reach: bitwise complement of an operand that does not convert to
+#: a number raises a statement-terminating error.
+_FALLIBLE_UNARY_OPERATORS = frozenset({'-bnot'})
 
 
 def is_soft_error_source(node: Node) -> bool:
@@ -674,29 +682,35 @@ def is_soft_error_source(node: Node) -> bool:
     answers True wherever that shape *can* fail and accepts that some instances never do — a cast that
     always succeeds is still a source here, a missed simplification rather than a wrong answer.
 
-    **Completeness is the other axis, and here the roster is deliberately partial.** A soft-error
-    shape it does not list reads as no source at all, so the one place this feeds — the trap-removal
-    transpose — will judge a trap that shape makes load-bearing removable. That is a genuine unsound
-    removal, not a missed simplification, and it is the standing cost of building the list shape by
-    shape rather than deriving it. Each shape is added as a measured row demands it; the list closes
-    the gap one shape at a time, and a known-missing shape is tracked as an expected failure. Today:
+    **Completeness is the other axis, and here the roster is a hand-built list.** A soft-error shape
+    it does not name reads as no source at all, so the one place this feeds — the trap-removal
+    transpose — would judge a trap that shape makes load-bearing removable, a genuine unsound removal
+    rather than a missed simplification. So the list carries every shape `ends_the_script`'s docstring
+    names as the soft complement of the terminating tier, and grows by a shape whenever a new one is
+    found to reach it. Today:
 
     - a cast or conversion `[T]x`, whose conversion may fail;
-    - a division or remainder `x / y`, `x % y`, whose divisor may be zero.
+    - a division or remainder `x / y`, `x % y`, whose divisor may be zero, and any other arithmetic or
+      bitwise operator (`* + -`, `-band -bor -bxor -shl -shr`, unary `-bnot`), which 5.1 leaves
+      undefined for some type pairings and which fail over a string that does not convert to a number;
+    - a method call `x.m(...)`, which may not resolve, may be handed an argument out of range, or may
+      itself throw;
+    - a command invocation, which may not resolve or may report an error.
 
-    Not yet listed, and therefore missed: a throwing method call, a bitwise operator on an operand
-    that does not convert, an out-of-range index, an unresolved command, arithmetic 5.1 defines for
-    no operand pairing — every shape `ends_the_script`'s complement names but this has not yet earned
-    a row for.
+    Deliberately *not* sources: a property access `x.m` and an index `x[i]`, which under the default
+    (non-strict) semantics yield `$null` rather than raising — only strict mode makes them fault, and
+    that arming is read elsewhere. A comparison or a logical operator does not raise either.
 
     The walk stops at a `STATEMENT_LIST_EXPRESSIONS` construct and at a nested script block, because a
     soft source inside one becomes that construct's own node in the finer control-flow graph: claiming
     it here would double-count a raiser the descent already isolated.
     """
     def raises(element: Node) -> bool:
-        if isinstance(element, Ps1CastExpression):
+        if isinstance(element, (Ps1CastExpression, Ps1InvokeMember, Ps1CommandInvocation)):
             return True
-        if isinstance(element, Ps1BinaryExpression) and element.operator in _DIVIDING_OPERATORS:
+        if isinstance(element, Ps1BinaryExpression) and element.operator in _FALLIBLE_BINARY_OPERATORS:
+            return True
+        if isinstance(element, Ps1UnaryExpression) and element.operator in _FALLIBLE_UNARY_OPERATORS:
             return True
         for child in element.children():
             if isinstance(child, (Ps1ScriptBlock, *STATEMENT_LIST_EXPRESSIONS)):

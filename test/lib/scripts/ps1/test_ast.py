@@ -430,10 +430,10 @@ class TestPs1ResolvedCommandNames(TestBase):
 class TestPs1SoftErrorSource(TestBase):
     """
     The syntactic roster of statement-terminating (soft) error sources, a may-predicate over the shape
-    of one statement. It answers True wherever a cast could fail or a division could be by zero, reads
-    no value, and stops at the boundary the finer control-flow graph descends into — a `$( )` — so the
-    statement that *contains* a subexpression does not claim a source the subexpression's own node
-    already carries.
+    of one statement. It answers True wherever a cast, an arithmetic or bitwise operator, a method
+    call or a command could fail, reads no value, and stops at the boundary the finer control-flow
+    graph descends into — a `$( )` — so the statement that *contains* a subexpression does not claim a
+    source the subexpression's own node already carries.
     """
 
     @staticmethod
@@ -458,11 +458,18 @@ class TestPs1SoftErrorSource(TestBase):
             with self.subTest(source):
                 self.assertTrue(is_soft_error_source(self._statement(source)))
 
-    def test_a_division_or_remainder_is_a_source_wherever_it_sits(self):
+    def test_an_arithmetic_bitwise_method_or_command_shape_is_a_source(self):
         for source in (
             "1/0",
             "$x = 1 / $y",
             "$x = 10 % 3",
+            "$x = $a * $b",
+            "$x = $a + $b",
+            "$x = $a - 1",
+            "$x = 'abc' -band 1",
+            "$x = -bnot $y",
+            "$x = $s.Substring(1)",
+            "Get-Thing 'arg'",
             "Write-Host (1 / $n)",
         ):
             with self.subTest(source):
@@ -472,18 +479,17 @@ class TestPs1SoftErrorSource(TestBase):
         for source in (
             "$x = 5",
             "$x = 'a'",
-            "Write-Host 'x'",
-            "$x + 1",
             "$x = $y",
-            "$x = 1 + 2",
-            "$x = 6 * 7",
-            "$x = 1 -shr 2",
+            "$x = $a -eq 5",
+            "$x = $a -and $b",
+            "$x = $y.Foo",
+            "$x = $y[0]",
         ):
             with self.subTest(source):
                 self.assertFalse(is_soft_error_source(self._statement(source)))
 
     def test_the_predicate_reads_shape_not_value_so_a_safe_source_still_counts(self):
-        for source in ("[int]5", "[string]$x", "[int]$x", "10 / 2", "9 % 3"):
+        for source in ("[int]5", "[string]$x", "[int]$x", "10 / 2", "9 % 3", "2 * 3"):
             with self.subTest(source):
                 self.assertTrue(is_soft_error_source(self._statement(source)))
 
@@ -494,4 +500,4 @@ class TestPs1SoftErrorSource(TestBase):
         self.assertTrue(is_soft_error_source(self._inner_of_subexpression("$x = $([int]'a')")))
 
     def test_a_statement_does_not_claim_a_cast_inside_a_nested_script_block(self):
-        self.assertFalse(is_soft_error_source(self._statement("& { [int]'a' }")))
+        self.assertFalse(is_soft_error_source(self._statement("$x = { [int]'a' }")))

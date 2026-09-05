@@ -475,16 +475,16 @@ class TestPs1AResumingTrapOverASoftErrorInABracketedStatementListIsKept(TestBase
         self.assertFalse(self._trap_removal_is_observed(
             "trap { continue }; $x = $('a'; 'b')"))
 
-    @unittest.expectedFailure
-    def test_a_soft_error_shape_the_roster_does_not_yet_list_is_missed(self):
-        """
-        The roster is extended shape by shape; a statement-terminating error it does not yet name —
-        here a method call that throws, an out-of-range `Substring` — is not seen as a soft source,
-        so the trap it makes load-bearing is wrongly judged removable. Tracks the known gap until the
-        roster covers the shape.
-        """
-        self.assertTrue(self._trap_removal_is_observed(
-            "trap { continue }; $x = $('A'.Substring(5); 'in'); Write-Host $x"))
+    def test_every_soft_error_shape_the_roster_lists_keeps_the_trap(self):
+        for source in (
+            "trap { continue }; $x = $('A'.Substring(5); 'in'); Write-Host $x",
+            "trap { continue }; $x = $('abc' -band 1; 'in'); Write-Host $x",
+            "trap { continue }; $x = $(([char]65) * 3; 'in'); Write-Host $x",
+            "trap { continue }; $x = $(-bnot 'abc'; 'in'); Write-Host $x",
+            "trap { continue }; $x = $(Get-Zqfrob; 'in'); Write-Host $x",
+        ):
+            with self.subTest(source):
+                self.assertTrue(self._trap_removal_is_observed(source))
 
 
 class TestPs1ATrapWrittenInASubexpressionGuardsThatSubexpression(TestBase):
